@@ -108,7 +108,14 @@ _TOOL_NAME = "report_pin_header_params"
 #: (`value_sources`).
 _TOP_LENGTH_KEYS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill_mm",
                     "body_length_mm", "body_width_mm", "body_height_mm", "pcb_thickness_mm",
-                    "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm")
+                    "body_offset_x_mm", "body_offset_y_mm", "pin_length_3d_mm",
+                    "lead_diameter_mm")
+#: Where the leads leave the body of a single through-hole part (`lead_exit`).
+#: "bottom": straight out of the underside (potted modules, transformers,
+#: relays, connectors), so every lead centre lies inside the body outline;
+#: "side": out of the flanks and bent down (DIP, TO-220), so the rows may lie
+#: outside the moulding; "unknown": the documents do not show it.
+LEAD_EXITS = ("bottom", "side", "unknown")
 _SIDE_LENGTH_KEYS = ("pitch_mm", "offset_mm", "pad_length_mm", "pad_width_mm",
                      "half_hole_diameter_mm", "through_hole_drill_mm",
                      "first_contact_from_edge_mm", "last_contact_from_edge_mm")
@@ -264,7 +271,18 @@ _EXTRACTION_TOOL = {
             "description": {"type": "string", "description": "Descrizione breve del componente"},
             "tags": {"type": "string", "description": "Tag separati da spazio"},
             "rows": {"type": "integer", "description": "Numero di righe della matrice di pin (es. 2 per un componente a doppia fila)"},
-            "cols": {"type": "integer", "description": "Numero di colonne della matrice (pin per riga)"},
+            "cols": {
+                "type": "integer",
+                "description": (
+                    "Numero di POSIZIONI per riga della griglia regolare a passo pitch_mm, "
+                    "comprese quelle vuote: non il numero di pin fisici. Due pin della "
+                    "stessa riga distanti un multiplo del passo sono tante colonne piu' "
+                    "in la' quanti sono i passi, e le posizioni fra loro contano anche se "
+                    "vuote (le vuote si escludono con populated_pins). Una griglia "
+                    "compressa ai soli pin fisici darebbe un footprint con i pin nel "
+                    "posto sbagliato."
+                ),
+            },
             "pitch_mm": {
                 "type": "number",
                 "description": (
@@ -296,6 +314,28 @@ _EXTRACTION_TOOL = {
                     "drawing_unit: sempre maggiore di zero e minore di pad_diameter_mm. "
                     "I pad SMD non hanno foro: per un componente SMD ometti questo "
                     "campo e descrivi i pad in package_geometry."
+                ),
+            },
+            "lead_diameter_mm": {
+                "type": "number",
+                "description": (
+                    "Diametro del TERMINALE (reoforo, pin) quotato nel disegno, "
+                    "nell'unita' di drawing_unit (es. \"Ø0.5\" accanto al pin nella "
+                    "vista laterale). NON e' il foro: il foro deve essere piu' largo "
+                    "del terminale, e il programma lo controlla. Ometti se non quotato."
+                ),
+            },
+            "lead_exit": {
+                "type": "string",
+                "enum": ["bottom", "side", "unknown"],
+                "description": (
+                    "Da quale faccia del corpo escono i terminali di un componente "
+                    "singolo a foro passante, guardando la vista laterale o la foto: "
+                    "\"bottom\" se escono dritti dal fondo (moduli incapsulati, "
+                    "trasformatori, rele', connettori: ogni pin sta dentro il contorno "
+                    "del corpo), \"side\" se escono dai fianchi e sono piegati verso "
+                    "il basso (DIP, TO-220: le file possono stare fuori dal corpo), "
+                    "\"unknown\" se non si vede. Non dedurlo dal nome del pezzo."
                 ),
             },
             "populated_pins": {
@@ -838,12 +878,19 @@ _SYSTEM_PROMPT = (
     "stesso numero per entrambi a meno che il disegno meccanico non lo confermi "
     "esplicitamente. Se il pinout mostra che solo alcune posizioni della matrice hanno "
     "un pin fisico, usa populated_pins per elencarle invece di generare una matrice "
-    "completa. Per ogni quota che compili dichiara in value_sources (e, per i lati "
+    "completa: rows x cols restano quelli della griglia INTERA a passo costante, "
+    "posizioni vuote comprese (due pin distanti un multiplo del passo sono tante "
+    "colonne piu' in la' quanti sono i passi, non adiacenti). Per ogni quota che compili dichiara in value_sources (e, per i lati "
     "castellated, nel value_sources del lato) se l'hai letta (\"read\"), ricavata "
     "solo da quote lette (\"derived\") o stimata (\"estimated\"). Se un valore "
     "necessario non e' presente nei documenti, stimalo dalle altre quote o dalle "
     "regole di progetto del tipo di contatto, dichiaralo \"estimated\" e scrivi in "
     "notes da cosa lo hai ricavato: un valore stimato non deve mai sembrare letto. "
+    "Per un componente singolo a foro passante riporta in lead_diameter_mm il diametro "
+    "del terminale se e' quotato (e' il pin, non il foro) e in lead_exit da quale faccia "
+    "escono i terminali (bottom: dritti dal fondo, side: dai fianchi e piegati, unknown): "
+    "il programma usa il primo per controllare il foro e il secondo per controllare che "
+    "i pin stiano nel corpo. "
     "Se il datasheet include un disegno meccanico con l'ingombro del corpo (es. sezione "
     "\"Outline Dimensions\"), compila anche i campi body_* e pin_length_3d_mm; se non "
     "c'e' alcun disegno meccanico dell'ingombro 3D, ometti tutti i campi body_* e "
@@ -912,6 +959,8 @@ DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 #: (a 30-50 component count, its silkscreen names, a 2.54 mm drill/pad
 #: "standard") and no per-value provenance (replaced 2026-09-26).
 SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
+    # 2026-10-10: lead_diameter_mm and lead_exit added to the default prompt.
+    "1b17e4a73222226e3547123f1e4c7b9ade87a100794ba89b0695ea3642885519",
     "c744e556d5e1eba95f41d69b5eb635c2ab8bcc0cf77f5c1d163b18ca3a41feea",
     "920e38029a2f7b6da293539e9a4ec3ea9b2d8465b51f45a49cea33a008671d57",
     "4d9766aa02d962df5d1da6a726280f44e9404247e23e59f1cc1443bbde17ec82",
@@ -992,6 +1041,10 @@ class ExtractedParams:
     text_color_hex: Optional[str] = None
     package_geometry: Optional[dict] = None
     value_sources: Optional[dict] = None
+    #: Lead diameter read from the drawing (mm), None when not given.
+    lead_diameter_mm: Optional[float] = None
+    #: One of LEAD_EXITS, None when the model did not say.
+    lead_exit: Optional[str] = None
 
     def values_to_review(self) -> list[str]:
         """@brief Return the keys of `value_sources` whose value was not read nor derived.
@@ -1174,12 +1227,67 @@ def _edge_strip_blocks(doc_paths, document_roles) -> list:
     return blocks
 
 
-def _file_to_content_block(path: Path) -> dict:
+def _enlarged_image_bytes(data: bytes, model: Optional[str]) -> bytes:
+    """The image enlarged to what the receiving model can resolve, when that helps.
+
+    A dimensioned drawing cropped from a datasheet is often a few hundred
+    pixels wide; a provider with a coarse visual token and an upsampling
+    floor (DeepSeek, measured in HANDOFF 144) then reads a dimension label
+    with about one token and the numbers come out different at every call
+    (TEL8WI, 2026-10-10: seven analyses, seven readings). The crop path
+    already enlarges for such providers (`photo_grounding.fit_to_model`);
+    this applies the same declared limits to the documents of the analysis.
+
+    @param data Encoded image bytes, already upright.
+    @param model Model identifier; its provider decides the limits. None
+        (caller without a model) sends the bytes unchanged.
+    @return The same bytes when the provider does not gain from enlargement,
+        the image already reaches its limits, decoding fails, or the enlarged
+        PNG would exceed MAX_FILE_BYTES; otherwise a lossless PNG enlarged
+        (bicubic) to the largest size within the provider's limits.
+    @note Enlarging adds no information: it makes the provider spend more
+        tokens on the same pixels. Never shrinks: shrinking is the provider's job.
+    """
+    if not model:
+        # Caller without a model: the historical bytes, no assumed provider.
+        return data
+    from .photo_grounding import model_image_limits
+    limits = model_image_limits(model)
+    if not limits.enlarges:
+        return data
+    try:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            if width < 1 or height < 1:
+                return data
+            scale = min(limits.long_side_px / max(width, height),
+                        math.sqrt(limits.max_pixels / (width * height)))
+            if scale <= 1.0:
+                return data
+            enlarged = image.convert("RGB").resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                resample=Image.BICUBIC)
+            out = BytesIO()
+            enlarged.save(out, format="PNG")
+            payload = out.getvalue()
+    except Exception:  # noqa: BLE001 - the original file is never worse than failing
+        return data
+    return payload if len(payload) <= MAX_FILE_BYTES else data
+
+
+def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     """Un file di documentazione come blocco di contenuto per OpenRouter.
 
     Le immagini viaggiano come ``image_url`` con una data-URL base64, i PDF
     come blocco ``file``: sono i due formati previsti dall'API
     OpenAI-compatible di OpenRouter.
+
+    @param path Document file (image or PDF).
+    @param model Receiving model identifier, or None: an image is enlarged to
+        that model's provider limits when the provider resolves more detail
+        from an enlarged image (`_enlarged_image_bytes`); a PDF is sent as is.
     """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
@@ -1197,6 +1305,9 @@ def _file_to_content_block(path: Path) -> dict:
     payload = path.read_bytes()
     if media_type.startswith("image/"):
         payload = _upright_image_bytes(payload)
+        enlarged = _enlarged_image_bytes(payload, model)
+        if enlarged is not payload:
+            payload, media_type = enlarged, "image/png"
     data_b64 = base64.b64encode(payload).decode("ascii")
     data_url = f"data:{media_type};base64,{data_b64}"
 
@@ -1996,7 +2107,7 @@ def extract_pin_header_params(
         if document_roles is not None:
             description += "\n" + _role_description(document_roles[path.name])
         content_blocks.append({"type": "text", "text": description})
-        content_blocks.append(_file_to_content_block(path))
+        content_blocks.append(_file_to_content_block(path, model or DEFAULT_MODEL))
     if component_family == CASTELLATED_FAMILY and document_roles is not None:
         # Il numero dei contatti lo riconosce l'AI in QUESTA chiamata (utente,
         # 28/09, punto 142): i bordi della foto ingranditi, non una correzione dopo.
@@ -3714,7 +3825,7 @@ _MATRIX_LENGTH_FIELDS = ("pitch_mm", "row_spacing_mm", "pad_diameter_mm", "drill
 _SIGNED_OPTIONAL_FIELDS = ("body_offset_x_mm", "body_offset_y_mm")
 #: Optional physical lengths in mm: only finite values > 0 are meaningful.
 _POSITIVE_OPTIONAL_FIELDS = ("body_length_mm", "body_width_mm", "body_height_mm",
-                             "pin_length_3d_mm", "pcb_thickness_mm")
+                             "pin_length_3d_mm", "pcb_thickness_mm", "lead_diameter_mm")
 
 
 def _required_matrix_value(data: dict, key: str):
@@ -3745,22 +3856,35 @@ def _required_matrix_value(data: dict, key: str):
     return value
 
 
-def _validated_populated_pins(raw, max_pin: Optional[int], notes: list) -> Optional[list]:
+def _validated_populated_pins(raw, max_pin: Optional[int], notes: list,
+                              mapped: Optional[Sequence[int]] = None) -> Optional[list]:
     """Optional populated_pins: keep the valid, in-range pin numbers once each.
 
-    Invalid entries (booleans, fractions, non-numbers, out of 1..max_pin) are
+    Invalid entries (booleans, fractions, non-numbers, out of range) are
     dropped and reported in `notes`, like repeated numbers; the valid ones are
     kept, as for any partial response. None when nothing valid remains.
+
+    @param max_pin Highest number of the automatic column-by-column numbering
+        (rows x cols); None when the grid is unknown.
+    @param mapped Pin numbers of an explicit, validated pin_map. With a map the
+        numbering is a convention of the drawing (a DIP numbered in a U, empty
+        positions), so a number is in range when the map places it, whatever
+        rows x cols is: 1..max_pin only applies to the automatic numbering.
     """
     if raw is None or (isinstance(raw, (list, tuple)) and not raw):
         return None
     if not isinstance(raw, (list, tuple)):
         notes.append(tx("populated_pins scartato: valore non valido ({value!r}).", value=raw))
         return None
+    allowed = set(mapped) if mapped else None
     kept, rejected, repeated = [], [], []
     for item in raw:
         number = _optional_number(item, positive=True, integer=True)
-        if number is None or (max_pin is not None and number > max_pin):
+        if number is None:
+            rejected.append(item)
+        elif allowed is not None and number not in allowed:
+            rejected.append(item)
+        elif allowed is None and max_pin is not None and number > max_pin:
             rejected.append(item)
         elif number in kept:
             repeated.append(number)
@@ -3919,8 +4043,6 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         matrix = _footprint_matrix(data, notes)
 
     rows, cols = matrix["rows"], matrix["cols"]
-    max_pin = rows * cols if layout == "matrix" and rows and cols else None
-    populated = _validated_populated_pins(data.get("populated_pins"), max_pin, notes)
 
     pin_map = None
     # La specchiatura di pin_map e' gia' stata fatta (_canonicalize_answer):
@@ -3932,6 +4054,15 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         except ExtractionError as exc:
             notes.append(tx("ATTENZIONE pin_map scartata ({exc}): numerazione automatica colonna "
                             "per colonna, da verificare sul pinout.", exc=exc))
+
+    # The map decides which numbers exist (a DIP numbered in a U keeps pin 16
+    # on a 2x3 grid of populated positions); only the automatic numbering is
+    # bounded by rows x cols. TEL8WI case, 2026-10-10: filtering against
+    # rows x cols left a single pad in the footprint.
+    max_pin = rows * cols if layout == "matrix" and rows and cols else None
+    populated = _validated_populated_pins(
+        data.get("populated_pins"), max_pin, notes,
+        mapped=[entry["pin"] for entry in pin_map] if pin_map else None)
 
     body_length = _opt_float("body_length_mm")
     confidence = data.get("confidence", "low")
@@ -3974,6 +4105,8 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,
+        lead_diameter_mm=_opt_float("lead_diameter_mm"),
+        lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
     )
     params.value_sources = _value_sources(data, params, sides, notes)
     if layout == "castellated":
@@ -3981,10 +4114,73 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         _apply_measured_lands(data, params, notes)
         _apply_measured_holes(data, params, notes)
         _downgrade_sizes_wider_than_the_pitch(params, notes)
+    else:
+        _lift_drill_above_the_lead(params, notes)
     notes.extend(_review_notes(sides, params.value_sources))
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
     return params
+
+
+def _validated_lead_exit(raw, notes: list) -> Optional[str]:
+    """Optional lead_exit: one of LEAD_EXITS, else None with a note ("unknown" is None too)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in LEAD_EXITS:
+        value = raw.strip().lower()
+        return None if value == "unknown" else value
+    notes.append(tx("lead_exit scartato: valore non valido ({value!r}).", value=raw))
+    return None
+
+
+#: Clearance, in mm, between a lead and the hole it goes through when the
+#: hole has to be estimated from the lead: the usual 0.2-0.3 mm of the
+#: project rules for through-hole parts (middle of the range, declared).
+LEAD_TO_HOLE_CLEARANCE_MM = 0.25
+#: Annular copper, in mm, added to an estimated hole for an estimated pad.
+HOLE_TO_PAD_ANNULUS_MM = 0.8
+
+
+def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
+    """A hole not wider than the lead is not a measurement: it becomes an estimate that fits.
+
+    Structural, not a threshold: a lead cannot pass through a hole of its
+    own diameter or smaller, whatever the part. When the drawing quotes the
+    lead (`lead_diameter_mm`) and the matrix drill is not larger (TEL8 run of
+    2026-10-10, 11:38: lead Ø0.5 and drill 0.5 «estimated»), the drill
+    becomes lead + LEAD_TO_HOLE_CLEARANCE_MM, marked «estimated» in
+    `value_sources` whatever the model declared -- a «read» hole smaller
+    than the lead was read wrong, and the note says so. A pad that no longer
+    clears the lifted drill is lifted too (drill + HOLE_TO_PAD_ANNULUS_MM)
+    and marked «estimated». Nothing happens without a lead diameter.
+
+    @param params Result under construction; drill, pad and sources updated.
+    @param notes Notes of the result.
+    """
+    lead, drill = params.lead_diameter_mm, params.drill_mm
+    if not (isinstance(lead, (int, float)) and isinstance(drill, (int, float))):
+        return
+    if drill > lead:
+        return
+    sources = dict(params.value_sources or {})
+    lifted = round(lead + LEAD_TO_HOLE_CLEARANCE_MM, 3)
+    notes.append(tx(
+        "ATTENZIONE foro {drill:.2f} mm non maggiore del terminale {lead:.2f} mm "
+        "(provenienza dichiarata: {source}): un terminale non passa in un foro del suo "
+        "diametro. Foro portato a {lifted:.2f} mm (terminale + {clearance:.2f} mm), valore "
+        "STIMATO da verificare.", drill=drill, lead=lead,
+        source=sources.get("drill_mm", UNDECLARED_SOURCE), lifted=lifted,
+        clearance=LEAD_TO_HOLE_CLEARANCE_MM))
+    params.drill_mm = lifted
+    sources["drill_mm"] = "estimated"
+    pad = params.pad_diameter_mm
+    if isinstance(pad, (int, float)) and pad <= lifted:
+        params.pad_diameter_mm = round(lifted + HOLE_TO_PAD_ANNULUS_MM, 3)
+        sources["pad_diameter_mm"] = "estimated"
+        notes.append(tx("Piazzola {pad:.2f} mm non piu' larga del foro corretto: portata a "
+                        "{new:.2f} mm, valore STIMATO da verificare.",
+                        pad=pad, new=params.pad_diameter_mm))
+    params.value_sources = sources
 
 
 def _drop_unread_row_spacing(params: "ExtractedParams", notes: list) -> None:

@@ -62,6 +62,39 @@ def test_valid_populated_pins_leave_no_note():
     assert params.populated_pins == [1, 2, 8] and "populated_pins" not in params.notes
 
 
+# -- 2026-10-10: with an explicit pin_map the numbering is the drawing's -------
+
+def _u_numbered_dip():
+    """Bottom-view DIP numbered in a U, 2x3 grid of populated positions only."""
+    return [{"pin": 1, "row": 0, "col": 0}, {"pin": 7, "row": 0, "col": 1},
+            {"pin": 8, "row": 0, "col": 2}, {"pin": 9, "row": 1, "col": 2},
+            {"pin": 10, "row": 1, "col": 1}, {"pin": 16, "row": 1, "col": 0}]
+
+
+def test_populated_pins_named_by_the_pin_map_are_kept_beyond_rows_times_cols():
+    """TEL8WI case: pins 7..16 on a 2x3 grid exist because the map places them."""
+    params = _params_from_tool_arguments(matrix(
+        rows=2, cols=3, pin_map=_u_numbered_dip(), populated_pins=[1, 7, 8, 9, 10, 16]))
+    assert params.populated_pins == [1, 7, 8, 9, 10, 16]
+    assert "populated_pins" not in params.notes
+    assert sorted(entry["pin"] for entry in params.pin_map) == [1, 7, 8, 9, 10, 16]
+
+
+def test_populated_pins_absent_from_the_pin_map_are_dropped_with_a_note():
+    """Negative: a number the map does not place is not a pin, even if <= rows*cols."""
+    params = _params_from_tool_arguments(matrix(
+        rows=2, cols=3, pin_map=_u_numbered_dip(), populated_pins=[1, 2, 16]))
+    assert params.populated_pins == [1, 16]
+    assert "populated_pins" in params.notes and "[2]" in params.notes
+
+
+def test_populated_pins_without_a_map_stay_bounded_by_the_grid():
+    """Negative: the automatic numbering still ends at rows*cols (here 6)."""
+    params = _params_from_tool_arguments(matrix(rows=2, cols=3, populated_pins=[1, 6, 16]))
+    assert params.populated_pins == [1, 6]
+    assert "[16]" in params.notes
+
+
 @pytest.mark.parametrize("pin_map", [
     "zzz",
     [{"pin": 1, "row": 0}],                                   # missing col
@@ -356,3 +389,47 @@ def test_other_provider_errors_are_not_retried(offline, monkeypatch):
     with pytest.raises(ExtractionError, match="troncata"):
         ext.extract_pin_header_params([offline])
     assert call.call_count == 1
+
+
+# -- 2026-10-10: lead diameter and lead exit --------------------------------------
+
+def test_a_drill_not_wider_than_the_lead_is_lifted_and_marked_estimated():
+    """TEL8 11:38 run: lead Ø0.5 and drill 0.5 «estimated» -> 0.75, pad kept when it clears."""
+    params = _params_from_tool_arguments(matrix(
+        drill_mm=0.5, pad_diameter_mm=1.5, lead_diameter_mm=0.5,
+        value_sources={"drill_mm": "estimated"}))
+    assert params.drill_mm == 0.75 and params.pad_diameter_mm == 1.5
+    assert params.value_sources["drill_mm"] == "estimated"
+    assert "non maggiore del terminale" in params.notes
+
+
+def test_a_read_drill_smaller_than_the_lead_is_not_a_measurement_either():
+    """Negative of «a measure is never touched»: an impossible measure is not one."""
+    params = _params_from_tool_arguments(matrix(
+        drill_mm=0.4, pad_diameter_mm=0.7, lead_diameter_mm=0.5,
+        value_sources={"drill_mm": "read", "pad_diameter_mm": "read"}))
+    assert params.drill_mm == 0.75 and params.pad_diameter_mm == 1.55
+    assert params.value_sources["drill_mm"] == "estimated"
+    assert params.value_sources["pad_diameter_mm"] == "estimated"
+
+
+def test_a_drill_wider_than_the_lead_is_left_alone():
+    params = _params_from_tool_arguments(matrix(drill_mm=1.0, lead_diameter_mm=0.5,
+                                                value_sources={"drill_mm": "read"}))
+    assert params.drill_mm == 1.0 and params.value_sources["drill_mm"] == "read"
+    assert "terminale" not in params.notes
+
+
+def test_lead_exit_is_kept_only_when_it_is_one_of_the_known_values():
+    assert _params_from_tool_arguments(matrix(lead_exit="bottom")).lead_exit == "bottom"
+    assert _params_from_tool_arguments(matrix(lead_exit="unknown")).lead_exit is None
+    bad = _params_from_tool_arguments(matrix(lead_exit="top"))
+    assert bad.lead_exit is None and "lead_exit scartato" in bad.notes
+
+
+def test_lead_diameter_follows_the_drawing_unit():
+    params = _params_from_tool_arguments(matrix(drawing_unit="inch", rows=2, cols=4, pitch_mm=0.1,
+                                                row_spacing_mm=0.3, pad_diameter_mm=0.06,
+                                                drill_mm=0.03, lead_diameter_mm=0.02))
+    assert params.lead_diameter_mm == pytest.approx(0.508)
+    assert params.drill_mm == pytest.approx(0.762)

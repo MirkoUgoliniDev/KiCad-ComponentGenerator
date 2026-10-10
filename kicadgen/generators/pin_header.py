@@ -123,13 +123,19 @@ class PinHeaderParams:
                     raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
                                         number=number))
         if self.populated_pins is not None:
-            max_pin = self.rows * self.cols
-            for p in self.populated_pins:
-                if p < 1 or p > max_pin:
-                    raise ValueError(
-                        tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
-                           pin=p, max_pin=max_pin)
-                    )
+            # Senza mappa i numeri sono quelli automatici colonna per colonna,
+            # quindi stanno in 1..righe*colonne. Con una mappa esplicita la
+            # numerazione e' una convenzione del disegno (DIP numerato a U con
+            # posizioni vuote: pin 16 su una griglia 2x3) e il solo criterio
+            # e' che la mappa dia una posizione al pin.
+            if not self.pin_map:
+                max_pin = self.rows * self.cols
+                for p in self.populated_pins:
+                    if p < 1 or p > max_pin:
+                        raise ValueError(
+                            tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
+                               pin=p, max_pin=max_pin)
+                        )
             # Con una mappa esplicita un pin popolato senza posizione verrebbe
             # scartato in silenzio (pin_positions itera solo la mappa): il
             # footprint perderebbe un pin del pinout sorgente.

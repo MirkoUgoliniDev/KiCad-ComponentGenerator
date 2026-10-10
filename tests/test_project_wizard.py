@@ -140,7 +140,8 @@ def test_preview_mounting_edits_sync_and_preserve_physical_board(window, monkeyp
     window.spin_preview_header_drill.setValue(.95)
     host = window._preview_params()
     assert all(p.pad_width_mm == 1.8 and p.drill_mm == .95 for p in host.pins)
-    assert window._mounting_state() == {'mode': 'headers', 'pad_diameter': 1.8, 'drill': .95}
+    assert window._mounting_state() == {'mode': 'headers', 'pad_diameter': 1.8, 'drill': .95,
+                                        'pad_overrides': {}}
     assert physical == before
     assert window._model_revision == revision
     window.spin_header_drill.setValue(.8)

@@ -12,7 +12,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QLineEdit, QListWidget,
-                             QListWidgetItem, QVBoxLayout)
+                             QListWidgetItem, QVBoxLayout, QGroupBox, QRadioButton,
+                             QButtonGroup, QHBoxLayout, QPushButton, QStackedWidget,
+                             QWidget)
 
 #: What makes a folder of the library root a project: the analysis creates the
 #: documents folder, the log or the review bundle, the generation creates
@@ -214,3 +216,154 @@ class OpenProjectDialog(QDialog):
         """@brief Name of the chosen project, or "" when nothing is chosen."""
         item = self.list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
+
+
+class ProjectKindDialog(QDialog):
+    """@brief Two-stage choice: project class first, then its mounting subtype.
+
+    @note Nothing is preselected: the user has to pick both the class and the
+        subtype before «Next» enables, so a hurried OK cannot choose a type.
+    """
+
+    OPTIONS = {
+        "module": (("aggregate_tht", "project_kind.board_tht"),
+                   ("aggregate_castellated", "project_kind.board_castellated")),
+        "single": (("single_tht", "project_kind.single_tht"),
+                   ("single_smd", "project_kind.single_smd")),
+    }
+    RADIO_STYLE = (
+        "QRadioButton { spacing: 9px; padding: 6px 3px; }"
+        "QRadioButton::indicator { width: 16px; height: 16px; "
+        "border: 1px solid #6c7086; border-radius: 8px; background: #313244; }"
+        "QRadioButton::indicator:checked { border: 2px solid #89b4fa; "
+        "background: #89b4fa; }"
+    )
+
+    def __init__(self, tr=None, selected="", parent=None):
+        super().__init__(parent)
+        self._tr = tr or (lambda text: text)
+        self.setWindowTitle(self._tr("project_kind.title"))
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self._selected_key = selected if selected in {
+            key for options in self.OPTIONS.values() for key, _ in options
+        } else ""
+        self._kind = ("single" if self._selected_key.startswith("single_") else
+                      "module" if self._selected_key else "")
+        self._refinement_buttons = {}
+
+        layout = QVBoxLayout(self)
+        self.pages = QStackedWidget(self)
+        layout.addWidget(self.pages)
+        self._build_kind_page()
+        self._build_refinement_page()
+
+        buttons = QHBoxLayout()
+        self.back_button = QPushButton(self._tr("project_kind.back"), self)
+        self.cancel_button = QPushButton(self._tr("project_kind.cancel"), self)
+        self.next_button = QPushButton(self._tr("project_kind.next"), self)
+        self.confirm_button = QPushButton(self._tr("project_kind.confirm"), self)
+        self.back_button.clicked.connect(self._back)
+        self.cancel_button.clicked.connect(self.reject)
+        self.next_button.clicked.connect(self._advance)
+        self.confirm_button.clicked.connect(self.accept)
+        buttons.addWidget(self.back_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.next_button)
+        buttons.addWidget(self.confirm_button)
+        layout.addLayout(buttons)
+        self.back_button.hide()
+        self.confirm_button.hide()
+        self.next_button.setEnabled(bool(self._kind))
+
+        if self._selected_key:
+            self._kind_buttons[self._kind].setChecked(True)
+            self._refinement_buttons[self._selected_key].setChecked(True)
+
+    def _radio(self, key, label_key, group, layout):
+        button = QRadioButton(self._tr(label_key), group.parent())
+        button.setStyleSheet(self.RADIO_STYLE)
+        button.setProperty("project_type_key", key)
+        button.setProperty("i18n_skip", True)
+        group.addButton(button)
+        layout.addWidget(button)
+        button.toggled.connect(self._on_kind_toggled)
+        return button
+
+    def _build_kind_page(self):
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        intro = QLabel(self._tr("project_kind.intro"), page)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        group_box = QGroupBox(self._tr("project_kind.kind_title"), page)
+        group_layout = QVBoxLayout(group_box)
+        self._kind_buttons = {}
+        self._kind_group = QButtonGroup(group_box)
+        self._kind_group.setExclusive(True)
+        for kind, label in (("single", "project_kind.single"),
+                            ("module", "project_kind.module")):
+            button = self._radio(kind, label, self._kind_group, group_layout)
+            self._kind_buttons[kind] = button
+        layout.addWidget(group_box)
+        layout.addStretch(1)
+        self.pages.addWidget(page)
+
+    def _build_refinement_page(self):
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        self.refinement_intro = QLabel(page)
+        self.refinement_intro.setWordWrap(True)
+        layout.addWidget(self.refinement_intro)
+        self._refinement_boxes = {}
+        for kind, title in (("single", "project_kind.single_title"),
+                            ("module", "project_kind.board_title")):
+            box = QGroupBox(self._tr(title), page)
+            box_layout = QVBoxLayout(box)
+            group = QButtonGroup(box)
+            group.setExclusive(True)
+            for key, label in self.OPTIONS[kind]:
+                button = self._radio(key, label, group, box_layout)
+                self._refinement_buttons[key] = button
+            self._refinement_boxes[kind] = box
+            layout.addWidget(box)
+        layout.addStretch(1)
+        self.pages.addWidget(page)
+
+    def _on_kind_toggled(self, checked=False):
+        if self.pages.currentIndex() == 0:
+            self._kind = next((key for key, button in self._kind_buttons.items()
+                               if button.isChecked()), "")
+            self.next_button.setEnabled(bool(self._kind))
+
+    def _advance(self):
+        self._kind = next((key for key, button in self._kind_buttons.items()
+                           if button.isChecked()), "")
+        if not self._kind:
+            return
+        for kind, box in self._refinement_boxes.items():
+            box.setVisible(kind == self._kind)
+        self.refinement_intro.setText(self._tr("project_kind.refine"))
+        choices = self.OPTIONS[self._kind]
+        if not any(self._refinement_buttons[key].isChecked() for key, _ in choices):
+            self._refinement_buttons[choices[0][0]].setChecked(True)
+        self.pages.setCurrentIndex(1)
+        self.back_button.show()
+        self.next_button.hide()
+        self.confirm_button.show()
+
+    def _back(self):
+        self.pages.setCurrentIndex(0)
+        self.back_button.hide()
+        self.confirm_button.hide()
+        self.next_button.show()
+        self.next_button.setEnabled(bool(self._kind))
+
+    def selected_type(self) -> str:
+        """@brief Return the accepted built-in component profile key.
+
+        @return Profile key such as "single_tht", or "" when nothing was chosen.
+        """
+        return next((key for key, _ in self.OPTIONS.get(self._kind, ())
+                     if self._refinement_buttons[key].isChecked()), "")

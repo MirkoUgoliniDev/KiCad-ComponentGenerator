@@ -277,6 +277,20 @@ def test_populated_pins_missing_from_the_pin_map_are_refused():
     assert [p.number for p in build_pin_header(params).pads] == ["1", "2"]
 
 
+# -- 2026-10-10: pin numbers of a map are not bounded by rows x cols ----------------
+
+def test_mapped_pin_numbers_beyond_rows_times_cols_are_valid():
+    """TEL8WI on its populated 2x3 grid: pin 16 exists where the map puts it."""
+    pin_map = {1: (0, 0), 7: (0, 1), 8: (0, 2), 9: (1, 2), 10: (1, 1), 16: (1, 0)}
+    params = PinHeaderParams(rows=2, cols=3, pitch=2.54, row_spacing=10.16,
+                             pin_map=pin_map, populated_pins=set(pin_map))
+    params.validate()
+    assert sorted(int(p.number) for p in build_pin_header(params).pads) == [1, 7, 8, 9, 10, 16]
+    unmapped = PinHeaderParams(rows=2, cols=3, populated_pins={1, 16})
+    with pytest.raises(ValueError, match="16"):
+        unmapped.validate()                      # automatic numbering: 1..6 only
+
+
 # -- G8: opposite through-holes measured on the axis they face -------------------
 
 def test_left_right_holes_are_measured_across_the_length_not_the_width():

@@ -235,7 +235,7 @@ class _Cad3DRunWorker(QThread):
     phase = pyqtSignal(str, str, int, int)
 
     def __init__(self, params, project_dir: Path, body: Body3DParams | None,
-                 fillets: list, face_texts: list):
+                 fillets: list, face_texts: list, single_component: bool = False):
         """@brief Snapshot the inputs of one 3D run.
 
         @param params Component parameters (pin matrix, package or castellated module).
@@ -250,6 +250,7 @@ class _Cad3DRunWorker(QThread):
         self.body = body
         self.fillets = fillets
         self.face_texts = face_texts
+        self.single_component = bool(single_component)
         #: Canale di rinuncia condiviso col processo FreeCAD figlio. Vive sul
         #: worker e non sulla finestra: e' la corsa a poter essere fermata, e
         #: una corsa successiva deve nascere con un canale pulito.
@@ -364,6 +365,15 @@ class _Cad3DRunWorker(QThread):
             `kicad`, e `_cad_progress` passa a `freecad` quando il solido
             comincia davvero.
         """
+        if self.single_component and not isinstance(self.params, PackageGeometry):
+            generator = _patch_point("generate_single_tht_3d_model")
+            return generator(
+                self.params, self.body, self.project_dir,
+                fillets=self.fillets, face_texts=self.face_texts,
+                progress=self._cad_progress,
+                **self._cancel_kwargs(generator),
+                **_photo_scale_kwargs(generator, self.photo_scale_px_per_mm),
+            )
         generator = _patch_point("_generate_3d")
         with measuring_listener(partial(_announce_freecad_measuring, self)), archive_progress_listener(self._archive_progress):
             return generator(
@@ -401,6 +411,7 @@ class GenerateWorker(_Cad3DRunWorker):
         self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, project_dir: Path,
         body: Body3DParams | None = None,
         fillets: list | None = None, face_texts: list | None = None,
+        single_component: bool = False,
     ):
         """@brief Snapshot one footprint (and optional 3D) generation.
 
@@ -410,7 +421,7 @@ class GenerateWorker(_Cad3DRunWorker):
         @param fillets Edge fillet annotations; None means none.
         @param face_texts Face text annotations; None means none.
         """
-        super().__init__(params, project_dir, body, fillets or [], face_texts or [])
+        super().__init__(params, project_dir, body, fillets or [], face_texts or [], single_component)
         # Only the host footprint may differ: self.params remains the physical
         # module passed to FreeCAD, matching and all 3D regenerations.
         self.footprint_params = None
@@ -451,7 +462,8 @@ class GenerateWorker(_Cad3DRunWorker):
                 # che la correzione vuole attribuita a KiCad, per poi tornare
                 # indietro. Da `freecad` ci passa `_cad_progress`, quando il
                 # solido comincia davvero.
-                self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
+                if not self.single_component and not isinstance(self.params, PackageGeometry):
+                    self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
                 self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
                 result = self._generate_model()
                 for warning in result.get('warnings', []):
@@ -501,8 +513,9 @@ class Cad3DWorker(_Cad3DRunWorker):
     error = pyqtSignal(str)
 
     def __init__(
-        self, params: PinHeaderParams | CastellatedModuleParams, body: Body3DParams,
+        self, params: PinHeaderParams | CastellatedModuleParams | PackageGeometry, body: Body3DParams,
         project_dir: Path, fillets: list, face_texts: list,
+        single_component: bool = False,
     ):
         """@brief Snapshot one 3D regeneration.
 
@@ -512,7 +525,7 @@ class Cad3DWorker(_Cad3DRunWorker):
         @param fillets Edge fillet annotations, kept as given.
         @param face_texts Face text annotations, kept as given.
         """
-        super().__init__(params, project_dir, body, fillets, face_texts)
+        super().__init__(params, project_dir, body, fillets, face_texts, single_component)
 
     def run(self) -> None:
         """@brief QThread override: regenerate the 3D model and emit done, warning or error."""
@@ -520,7 +533,8 @@ class Cad3DWorker(_Cad3DRunWorker):
             # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
             # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
             # `freecad` quando il solido comincia davvero.
-            self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
+            if not self.single_component and not isinstance(self.params, PackageGeometry):
+                self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
             result = self._generate_model()
             for note in result.get("notes", []):
                 self.progress.emit(note)

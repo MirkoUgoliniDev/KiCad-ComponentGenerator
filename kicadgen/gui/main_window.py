@@ -39,7 +39,8 @@ from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
-    generate_castellated_3d_model,
+    generate_castellated_3d_model, generate_single_package_3d_model,
+    generate_single_tht_3d_model,
 )
 from ..generators.castellated_module import (
     EDGE_LABELS, EDGES as CASTELLATED_EDGES, CastellatedModuleParams,
@@ -173,7 +174,7 @@ EXTRACT_REENABLE_DELAY_MS = 300
 CONTENT_MARGIN_PX = 10
 #: Opzioni di Configurazione -> Opzioni di generazione che seguono il progetto.
 PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory",
-                   "show_pins_3d")
+                   "show_pins_3d", "pin_numbers_3d")
 #: Ogni quanto, in millisecondi, si controlla se il progetto e' cambiato. Una
 #: scelta: abbastanza spesso da non perdere nulla chiudendo di colpo, abbastanza
 #: di rado da non scrivere a ogni tasto. Un file si scrive solo se lo stato e'
@@ -187,6 +188,10 @@ PROJECT_AUTOSAVE_MS = 2000
 #: tabella. E' un attributo dichiarato della tipologia scelta, non il nome del
 #: pezzo: vale per qualunque componente di quella famiglia.
 _SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
+_BODY_OVERRIDE_UNSET = object()
+_PROJECT_KIND_BOARD = "board_module"
+_PROJECT_KIND_SINGLE = "single_component"
+_PROJECT_KINDS = {_PROJECT_KIND_BOARD, _PROJECT_KIND_SINGLE}
 
 #: Tipo di contatto di un lato castellated, nel caso in cui il generatore
 #: installato non esponga ancora le proprie costanti. I valori sono quelli
@@ -501,6 +506,8 @@ def _generation_target(params):
         definizione) cosi' una sostituzione -- prove, strumenti -- riguarda
         introspezione e chiamata insieme.
     """
+    if isinstance(params, PackageGeometry):
+        return generate_single_package_3d_model
     return (generate_castellated_3d_model
             if isinstance(params, CastellatedModuleParams) else generate_3d_model)
 
@@ -898,6 +905,7 @@ class MainWindow(QMainWindow):
         #: True quando la corsa automatica in atto ha chiesto anche il modello
         #: 3D. Falso = generazione di solo footprint, che e' un esito completo.
         self._automatic_3d_expected = True
+        self._automatic_3d_deferred_reason = ""
         self._automatic_generation_errors = []
         self._startup_dependencies_checked = False
         #: Messaggi del log della sessione, in ordine (vedi `_log_plain_text`).
@@ -1185,6 +1193,14 @@ class MainWindow(QMainWindow):
             non e' una scheda con corpi montati sopra, per costruzione, e
             questo vale per qualunque pezzo di quella famiglia.
         """
+        # The project wizard's explicit choice takes precedence over a stale
+        # component profile. Old projects can carry a profile from the prior
+        # workflow even after being reopened as a single component.
+        project_kind = getattr(self, "project_kind", None)
+        if project_kind == _PROJECT_KIND_SINGLE:
+            return False
+        if project_kind == _PROJECT_KIND_BOARD:
+            return True
         if self._is_castellated() or self._selected_family() == "aggregate_tht":
             return True
         if self._selected_family() in _SINGLE_COMPONENT_FAMILIES:
@@ -1329,6 +1345,18 @@ class MainWindow(QMainWindow):
         row = self.profile_store.get_type(self._profile_key())
         return row['family'] if row else ''
 
+    @staticmethod
+    def _project_kind_for_family(family: str) -> str | None:
+        if family in _SINGLE_COMPONENT_FAMILIES:
+            return _PROJECT_KIND_SINGLE
+        if family in {"aggregate_tht", "aggregate_castellated"}:
+            return _PROJECT_KIND_BOARD
+        return None
+
+    def _is_single_component_project(self) -> bool:
+        return (getattr(self, "project_kind", None) == _PROJECT_KIND_SINGLE
+                or self._selected_family() in _SINGLE_COMPONENT_FAMILIES)
+
     # ── Modello LLM ─────────────────────────────────────────────────
 
     def _default_model(self) -> str:
@@ -1462,7 +1490,8 @@ class MainWindow(QMainWindow):
             guardare la fotografia e' un modello remoto, e il contrario. La
             riga che resta e' quella su cui si puo' davvero intervenire.
         """
-        detector = self.combo_photo_detector.currentData()
+        single = self._is_single_component_project()
+        detector = "ai" if single else self.combo_photo_detector.currentData()
         local = detector in ("yolo", "yolo_only", "yolo_smd") and not (
             detector == "yolo_smd" and is_frozen())
         smd = detector == "yolo_smd" and not is_frozen()
@@ -1484,9 +1513,10 @@ class MainWindow(QMainWindow):
             if hasattr(self, "btn_component_review") and not self._background_work_running():
                 self._refresh_reopen_review_button()
         if hasattr(self, "_models_form"):
-            self._models_form.setRowVisible(self._row_yolo_model, local)
-            self._models_form.setRowVisible(self._row_smd_model, smd)
-            self._models_form.setRowVisible(self._row_yolo_params, local)
+            self._models_form.setRowVisible(self._row_photo_detector, not single)
+            self._models_form.setRowVisible(self._row_yolo_model, local and not single)
+            self._models_form.setRowVisible(self._row_smd_model, smd and not single)
+            self._models_form.setRowVisible(self._row_yolo_params, local and not single)
             # Il modello di visione serve nei due percorsi fotografici, ma di
             # norma coincide con «Modello AI». Mostra la riga solo quando e'
             # stato scelto un override diverso, evitando di ripetere lo stesso
@@ -1495,7 +1525,7 @@ class MainWindow(QMainWindow):
                 self._vlm_model and self._vlm_model != self._effective_model())
             self._models_form.setRowVisible(
                 self._row_vlm_model,
-                detector in ("yolo", "vlm") and vision_override)
+                not single and detector in ("yolo", "vlm") and vision_override)
             self._models_form.setRowVisible(self._row_ai_model, detector != "yolo_only")
             # Anche il credito (utente, 2026-09-25): il pretest non spende nulla.
             if hasattr(self, "_row_ai_account"):
@@ -2443,6 +2473,37 @@ class MainWindow(QMainWindow):
             self._on_component_type_changed
         )
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
+        self.group_single_tht_pads = QGroupBox("Piazzole del componente THT")
+        single_tht_layout = QHBoxLayout(self.group_single_tht_pads)
+        single_tht_layout.setContentsMargins(10, 6, 10, 6)
+        self.spin_single_tht_pad = QDoubleSpinBox()
+        self.spin_single_tht_drill = QDoubleSpinBox()
+        for spin in (self.spin_single_tht_pad, self.spin_single_tht_drill):
+            spin.setRange(0.01, MAX_LENGTH_MM)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" mm")
+            spin.setKeyboardTracking(False)
+        self.spin_single_tht_pad.setAccessibleName("Diametro piazzola componente THT")
+        self.spin_single_tht_drill.setAccessibleName("Diametro foro componente THT")
+        self.spin_single_tht_pad.valueChanged.connect(
+            lambda value: self._set_single_tht_footprint_value("field_pad", value))
+        self.spin_single_tht_drill.valueChanged.connect(
+            lambda value: self._set_single_tht_footprint_value("field_drill", value))
+        single_tht_layout.addWidget(QLabel("Pad Ø:"))
+        single_tht_layout.addWidget(self.spin_single_tht_pad)
+        single_tht_layout.addWidget(QLabel("Foro Ø:"))
+        single_tht_layout.addWidget(self.spin_single_tht_drill)
+        single_tht_layout.addStretch(1)
+        self.btn_regenerate_single_tht = QPushButton("Rigenera footprint")
+        self.btn_regenerate_single_tht.setToolTip(
+            "Usa le dimensioni dei pad indicate qui e rigenera il footprint 2D.")
+        self.btn_regenerate_single_tht.clicked.connect(
+            lambda: self._generate(footprint_only=True))
+        single_tht_layout.addWidget(self.btn_regenerate_single_tht)
+        self.group_single_tht_pads.hide()
+        self._sync_single_tht_pad_controls()
+        analysis_layout.addWidget(self.group_single_tht_pads)
         # Solo modello 3D: gli strip non cambiano ne' l'analisi ne' il
         # footprint (utente, 2026-09-26). Spenti di default.
         self.chk_header_pins = QCheckBox("Mostra gli header nel modello 3D")
@@ -2576,6 +2637,7 @@ class MainWindow(QMainWindow):
         # Prima riga del riquadro (utente, 2026-09-25): la scelta del
         # rilevatore decide quali delle righe sotto servono.
         models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
+        self._row_photo_detector = models_form.rowCount() - 1
         models_form.addRow("Modello AI:", model_row)
         self._row_ai_model = models_form.rowCount() - 1
         self.label_yolo_model = QLabel()
@@ -2941,9 +3003,15 @@ class MainWindow(QMainWindow):
         self._switch_project("", self._general_project_state)
 
     def _refresh_ai_tools_summary(self) -> None:
-        """@brief Keep active detector and provider visible while settings are closed."""
-        self.group_ai_tools.summary.setText(
-            f"{self.combo_photo_detector.currentText()} · {self.combo_model.currentText()}")
+        """@brief Riassume solo gli strumenti pertinenti al tipo di progetto."""
+        model = self.combo_model.currentText()
+        if self._is_single_component_project():
+            summary = self.i18n.tr(
+                "ui:Componente singolo: analisi AI dei documenti · {model}",
+                model=model)
+        else:
+            summary = f"{self.combo_photo_detector.currentText()} · {model}"
+        self.group_ai_tools.summary.setText(summary)
 
     def _mounting_state(self) -> dict:
         """@brief Serialize the host mounting independently from the physical board."""
@@ -3082,6 +3150,11 @@ class MainWindow(QMainWindow):
         key = self.combo_component_type.currentData() or ""
         row = self.profile_store.get_type(key)
         component_type = component_types.ComponentType(key, row['label'], row['instructions']) if row else None
+        # The type chosen here is as explicit as the wizard's choice: a type
+        # whose family decides nothing («(non specificata)», a custom family)
+        # leaves the kind unknown, so `_photo_inventory_family` answers None
+        # and the paid photo call stays declared (test contract of 2026-10-02).
+        self.project_kind = self._project_kind_for_family(row['family'] if row else "")
         # La tipologia sblocca (o blocca) l'analisi: vedi _extract_block_reason.
         if hasattr(self, "btn_extract_ai") and not self._background_work_running():
             self._apply_component_name_gate()
@@ -3105,6 +3178,9 @@ class MainWindow(QMainWindow):
             self._save_config_safely()
         self._refresh_model_combo()
         self._refresh_type_effect()
+        if hasattr(self, "combo_photo_detector"):
+            self._refresh_photo_detector_controls()
+            self._refresh_ai_tools_summary()
         if component_type is not None:
             self._append_log(tx("Tipologia componente: {label}.",
                                 label=self.i18n.component_type(key, component_type.label)))
@@ -3118,6 +3194,8 @@ class MainWindow(QMainWindow):
         """
         if getattr(self, "chk_header_pins", None) is None:
             return
+        if getattr(self, "group_single_tht_pads", None) is not None:
+            self.group_single_tht_pads.setVisible(self._selected_family() == "single_tht")
         # Senza tipologia la disposizione rimasta dalla scelta precedente non
         # dice nulla su che cosa si sta analizzando.
         board = self._photo_inventory_family() if self._selected_family() else None
@@ -3131,6 +3209,23 @@ class MainWindow(QMainWindow):
         if getattr(self, "_ai_form", None) is not None:
             self._ai_form.setRowVisible(self._row_pcb_thickness, board is True)
         self._refresh_pcb_thickness_row()
+
+    def _sync_single_tht_pad_controls(self) -> None:
+        """Mirror extracted/current THT land sizes without firing edit handlers."""
+        if not hasattr(self, "spin_single_tht_pad"):
+            return
+        for spin, field in ((self.spin_single_tht_pad, self.field_pad),
+                            (self.spin_single_tht_drill, self.field_drill)):
+            blocked = spin.blockSignals(True)
+            spin.setValue(field.value())
+            spin.blockSignals(blocked)
+
+    def _set_single_tht_footprint_value(self, field_name: str, value: float) -> None:
+        """Apply a reviewed THT pad/drill value to the shared footprint parameters."""
+        getattr(self, field_name).setValue(value)
+        self._draw_preview()
+        self._invalidate_generated_mesh()
+        self._save_project_config()
 
     def _on_header_pins_toggled(self, checked: bool) -> None:
         """@brief Record the pins choice for the project; the solid on screen is stale.
@@ -3151,8 +3246,20 @@ class MainWindow(QMainWindow):
         checkbox.setChecked(self._show_pins_3d())
         checkbox.blockSignals(blocked)
         checkbox.setVisible(bool(self._selected_family()) and self._photo_inventory_family() is True)
-        checkbox.setEnabled(self.package_geometry is None
-                            and not bool(self.btn_regen_3d.property("workflow_busy")))
+        checkbox.setEnabled(not bool(self.btn_regen_3d.property("workflow_busy")))
+        busy = bool(self.btn_regen_3d.property("workflow_busy"))
+        single = bool(self._selected_family()) and self._photo_inventory_family() is not True
+        bar = getattr(self, "top_text_bar_3d", None)
+        if bar is not None:
+            bar.setVisible(single)
+            self.field_top_text_3d.setEnabled(not busy)
+        numbers = getattr(self, "chk_pin_numbers_3d", None)
+        if numbers is not None:
+            blocked = numbers.blockSignals(True)
+            numbers.setChecked(self._pin_numbers_3d())
+            numbers.blockSignals(blocked)
+            numbers.setVisible(self._selected_family() == "single_tht")
+            numbers.setEnabled(not busy)
 
     def _refresh_pcb_thickness_row(self) -> None:
         """@brief Show the PCB thickness in use and where it comes from.
@@ -3906,7 +4013,14 @@ class MainWindow(QMainWindow):
             return
 
         self._show_extract_preparing()
-        photo_detector, yolo_model_path = self._photo_detector_options()
+        # Single packages are analyzed from their own documents. Board-photo
+        # inventory and its detector models do not participate in this path.
+        chosen_detector, yolo_model_path = self._photo_detector_options()
+        photo_detector = chosen_detector
+        if self._is_single_component_project():
+            # The chosen detector is kept apart so the log below can still
+            # tell the user that it will not run (test contract of 2026-10-02).
+            photo_detector, yolo_model_path = "ai", None
         if photo_detector == "yolo_smd" and is_frozen():
             self.group_ai_tools.setExpanded(True)
             QMessageBox.warning(
@@ -3968,7 +4082,8 @@ class MainWindow(QMainWindow):
         # lasciare i tab spenti e la modale ferma.
         try:
             self._start_extract_worker(doc_paths, document_roles, profile,
-                                       photo_detector, yolo_model_path)
+                                       photo_detector, yolo_model_path,
+                                       chosen_detector=chosen_detector)
         except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
             self._on_extract_finished()
             self._on_extract_error(str(exc))
@@ -4024,13 +4139,17 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _start_extract_worker(self, doc_paths, document_roles, profile,
-                              photo_detector, yolo_model_path) -> None:
+                              photo_detector, yolo_model_path,
+                              chosen_detector: str | None = None) -> None:
         """@brief Configure and start the full extraction worker.
 
         @param doc_paths Selected document/photo paths.
         @param document_roles Role of each selected document.
         @param profile AI profile snapshot (prompts and model).
-        @param photo_detector Photo detector selected in the settings.
+        @param photo_detector Photo detector this run will use.
+        @param chosen_detector Detector chosen in the settings when it differs
+            from `photo_detector` (a single component forces "ai"): the log
+            then says that the chosen detector will not run.
         @param yolo_model_path Optional YOLO weights path.
         @throws Exception Anything raised by the worker set-up or start; the
             caller restores the idle UI state.
@@ -4081,7 +4200,8 @@ class MainWindow(QMainWindow):
                 "La tipologia aveva un modello suo ({models}): ignorato, il modello e' unico "
                 "e si sceglie nel tab «Modello» delle impostazioni LLM.",
                 models=", ".join(sorted(set(ignored.values())))))
-        if photo_detector in ('yolo', 'vlm', 'yolo_smd') and self._photo_inventory_family() is False:
+        if ((chosen_detector or photo_detector) in ('yolo', 'vlm', 'yolo_smd')
+                and self._photo_inventory_family() is False):
             # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
             # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
             # revisione dei corpi rilevati non si apre e nessun corpo entra
@@ -5802,6 +5922,8 @@ class MainWindow(QMainWindow):
         @note Never fatal: an unreadable archive or library is logged and the
             review opens as before.
         """
+        if self._is_single_component_project():
+            return
         rows = self._photo_rows
         if not rows:
             return
@@ -6363,6 +6485,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widgets[name] = widget_value(widget)
         return {
+            "project_kind": getattr(self, "project_kind", None),
             "widgets": widgets,
             "package_geometry": ({**asdict(self.package_geometry),
                                   "name": self._component_name()}
@@ -6378,6 +6501,9 @@ class MainWindow(QMainWindow):
             "annotations": {"convention": ANNOTATION_CONVENTION,
                             "fillets": [asdict(a) for a in self.fillet_annotations],
                             "texts": [asdict(a) for a in self.face_text_annotations]},
+            # '' is a choice (no writing); a missing key is a project saved
+            # before the field existed and gets the component name.
+            "top_text": self._top_text_3d(),
             "pinout": deepcopy(self.pinout or []),
             "pin_map": (None if not getattr(self, "pin_map", None) else
                         [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
@@ -6391,6 +6517,7 @@ class MainWindow(QMainWindow):
             "options": {"include_nc_pins": self._include_nc_pins(),
                         "silk_pin_labels": self._silk_pin_labels(),
                         "show_pins_3d": self._show_pins_3d(),
+                        "pin_numbers_3d": self._pin_numbers_3d(),
                         "pause_after_inventory": self._inventory_pause_enabled()},
         }
 
@@ -6426,6 +6553,10 @@ class MainWindow(QMainWindow):
                 # campo) e' il predefinito, non quello del progetto aperto prima
                 # (verifica avversariale B3, 2026-10-02).
                 widget.clear()
+        saved_kind = state.get("project_kind")
+        family_kind = self._project_kind_for_family(self._selected_family())
+        self.project_kind = (saved_kind if isinstance(saved_kind, str)
+                             and saved_kind in _PROJECT_KINDS else family_kind)
         # Parametri YOLO del progetto; assenti (progetti precedenti) = predefiniti.
         raw_yolo = state.get("yolo_settings")
         if raw_yolo is None:
@@ -6512,6 +6643,7 @@ class MainWindow(QMainWindow):
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
         self._project_options = {key: options[key] for key in PROJECT_OPTIONS
                                  if isinstance(options.get(key), bool)}
+        self._restore_top_text(state.get("top_text"))
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
         self._restore_mounting_state(state.get("host_mounting"))
@@ -6558,6 +6690,27 @@ class MainWindow(QMainWindow):
             self._restore_saved_photo()
         finally:
             self._restoring_project = False
+        # La selezione della tipologia e il prompt sono ripristinati da widget
+        # separati; i segnali del combo possono essere bloccati durante il
+        # ripristino. Risincronizzare il blocco generato evita, per esempio,
+        # che un progetto THT singolo invii ancora istruzioni castellated.
+        selected_key = self.combo_component_type.currentData() or ""
+        selected_row = self.profile_store.get_type(selected_key)
+        selected_type = (component_types.ComponentType(
+            selected_key, selected_row["label"], selected_row["instructions"])
+            if selected_row else None)
+        old_prompt = self.field_component_prompt.toPlainText()
+        restored_prompt = component_types.apply_block(old_prompt, selected_type)
+        prompt_was_normalized = restored_prompt != old_prompt
+        self.field_component_prompt.setPlainText(restored_prompt)
+        # Ripristinare i widget non emette sempre il segnale del tipo
+        # componente. Aggiornare esplicitamente i gruppi dipendenti evita di
+        # lasciare nel progetto singolo i controlli di montaggio della board
+        # aperta prima (anteprima footprint, analisi e toolbar 3D).
+        self._refresh_type_effect()
+        if hasattr(self, "combo_photo_detector"):
+            self._refresh_photo_detector_controls()
+            self._refresh_ai_tools_summary()
         # Le schede di anteprima seguono cio' che il progetto aperto contiene.
         self._refresh_output_actions()
         # Il simbolo applicato fa parte degli artefatti del componente. Nei
@@ -6588,6 +6741,8 @@ class MainWindow(QMainWindow):
             self._enter_3d_tab()
         # Lo stato appena applicato e' quello salvato: non va riscritto.
         self._last_saved_project_state = self._project_state_text()
+        if prompt_was_normalized:
+            self._save_project_config(force=True)
         # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
         # cartella del progetto appena aperto, non piu' la foto del precedente.
         if hasattr(self, "btn_component_review") and not self._background_work_running():
@@ -6606,6 +6761,7 @@ class MainWindow(QMainWindow):
             PCB estratto): un progetto riaperto riparte dai suoi campi.
         """
         self._extraction_started_stamp = None
+        self.project_kind = None
         self._declared_row_spacing = None
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
@@ -6801,6 +6957,13 @@ class MainWindow(QMainWindow):
         if self._project_change_blocked():
             return
         from .project_dialogs import ProjectNameDialog
+        from .project_dialogs import ProjectKindDialog
+        kind_dialog = ProjectKindDialog(
+            tr=lambda key: self.i18n.tr("ui:" + key, default=key),
+            selected="", parent=self)
+        if kind_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_type = kind_dialog.selected_type()
         dialog = ProjectNameDialog(self._library_root(), "Nuovo progetto",
                                    tr=self.i18n.text, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -6822,7 +6985,8 @@ class MainWindow(QMainWindow):
             return
         # Un progetto nuovo parte dalle impostazioni generali, non da quelle
         # del progetto aperto prima (decisione dell'utente del 2026-09-24).
-        self._switch_project(name, self._general_project_state)
+        initial_state = self._state_for_project_type(self._general_project_state, selected_type)
+        self._switch_project(name, initial_state)
         self._save_project_config(force=True)
         self._append_log(tx("Nuovo progetto: {project_dir}", project_dir=self._project_dir()))
 
@@ -6862,15 +7026,52 @@ class MainWindow(QMainWindow):
             # Ne' applicato ne' sovrascritto: resta com'e' finche' qualcuno lo guarda.
             self._project_config_refused = folder
             self._append_log(tx("ATTENZIONE impostazioni del progetto non applicate: {exc}", exc=exc))
+        config_loaded = isinstance(saved, dict)
+        saved_kind = saved.get("project_kind") if config_loaded else None
+        needs_kind = not isinstance(saved_kind, str) or saved_kind not in _PROJECT_KINDS
+        kind_migrated = needs_kind and self._project_config_refused is None
+        if needs_kind:
+            from .project_dialogs import ProjectKindDialog
+            current_type = ""
+            if isinstance(saved, dict):
+                widget_values = saved.get("widgets")
+                raw_type = widget_values.get("combo_component_type") if isinstance(widget_values, dict) else None
+                if isinstance(raw_type, dict) and isinstance(raw_type.get("data"), str):
+                    current_type = raw_type["data"]
+            if not current_type:
+                current_type = self._profile_key()
+            kind_dialog = ProjectKindDialog(
+                tr=lambda key: self.i18n.tr("ui:" + key, default=key),
+                selected=current_type, parent=self)
+            if kind_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            base_state = saved if isinstance(saved, dict) else self._general_project_state
+            saved = self._state_for_project_type(base_state, kind_dialog.selected_type())
         # Senza file (progetto nato prima di project_config.json) valgono le
         # impostazioni generali, non quelle del progetto aperto prima.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
-        if saved is None and self._project_config_refused is None:
+        if (not config_loaded or kind_migrated) and self._project_config_refused is None:
             # Progetto nato prima di project_config.json: il file nasce subito,
             # non alla prima modifica, cosi' ogni progetto aperto ha il suo.
             self._save_project_config(force=True)
         self._append_log(tx("Progetto aperto: {folder}", folder=self._project_dir())
-                         + ("" if saved is None else tx(" (impostazioni del progetto applicate).")))
+                         + (tx(" (impostazioni del progetto applicate).") if config_loaded else ""))
+
+    def _state_for_project_type(self, state: dict, type_key: str) -> dict:
+        """Return a project-state copy with the selected workflow/profile persisted."""
+        result = deepcopy(state)
+        row = self.profile_store.get_type(type_key)
+        if row is None:
+            raise ValueError(tx("Tipo componente non disponibile: {type_key}", type_key=type_key))
+        widgets = result.get("widgets")
+        widgets = dict(widgets) if isinstance(widgets, dict) else {}
+        widgets["combo_component_type"] = {
+            "data": type_key,
+            "text": self.i18n.component_type(type_key, row["label"]),
+        }
+        result["widgets"] = widgets
+        result["project_kind"] = self._project_kind_for_family(row["family"])
+        return result
 
     def _rename_project(self) -> None:
         """@brief «Rinomina progetto…»: nome nuovo, mai quello di un altro progetto.
@@ -7373,13 +7574,23 @@ class MainWindow(QMainWindow):
 
     def _apply_extracted_result(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
-        if self._auto_after_extraction:
+        validated_package_geometry = None
+        if self._selected_family() == "single_smd":
+            if not params.package_geometry:
+                raise ValueError(tx(
+                    "Componente SMD: manca la geometria esplicita delle piazzole. "
+                    "Completa il datasheet e ripeti l'analisi."))
             try:
-                self._validate_automatic_input(params)
-            except (ValueError, TypeError) as exc:
-                self._auto_generation_params = None
-                self._automatic_generation_blocked(str(exc))
-                return
+                geometry_data = dict(params.package_geometry)
+                geometry_data.setdefault("name", params.name or self._component_name())
+                validated_package_geometry = package_from_mapping(geometry_data)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(tx(
+                    "Geometria SMD non valida: correggi i dati del datasheet prima di generare.")) from exc
+        # Apply the extraction before validating automatic generation. If a
+        # pad conflicts with its pitch, the user must see and correct the
+        # extracted THT pad/drill values instead of losing the result.
+        if self._auto_after_extraction:
             # A new acquisition must not silently reuse previous pin maps or annotations.
             self.pinout, self.pin_map = [], None
             self.fillet_annotations.clear()
@@ -7433,12 +7644,13 @@ class MainWindow(QMainWindow):
         if params.tags:
             self.field_tags.setText(params.tags)
 
-        self.package_geometry = None
+        self.package_geometry = validated_package_geometry
         if params.package_geometry:
             try:
-                geometry_data = dict(params.package_geometry)
-                geometry_data.setdefault("name", params.name or self._component_name())
-                self.package_geometry = package_from_mapping(geometry_data)
+                if self.package_geometry is None:
+                    geometry_data = dict(params.package_geometry)
+                    geometry_data.setdefault("name", params.name or self._component_name())
+                    self.package_geometry = package_from_mapping(geometry_data)
                 self._append_log(
                     f"Geometria package acquisita: {self.package_geometry.family}, "
                     f"{len(self.package_geometry.pins)} pad espliciti."
@@ -7469,6 +7681,7 @@ class MainWindow(QMainWindow):
                                   (self.field_drill, params.drill_mm)):
                 if value is not None:
                     widget.setValue(value)
+            self._sync_single_tht_pad_controls()
             self.field_populated_pins.setText(
                 ",".join(str(p) for p in sorted(params.populated_pins))
                 if params.populated_pins else ""
@@ -7527,6 +7740,10 @@ class MainWindow(QMainWindow):
         )
         if self._auto_after_extraction:
             self._auto_generation_params = params
+            # Persist the exact extraction before generation can be blocked:
+            # the user must be able to correct its geometry and resume without
+            # losing pin numbering or the values just reviewed.
+            self._save_project_config()
             self._on_ai_progress(tx("Estrazione completata. Confidenza: {confidence}. {value}{fillet_note}",
                                     confidence=params.confidence,
                                     value=params.notes or '',
@@ -8403,6 +8620,69 @@ class MainWindow(QMainWindow):
         """
         return self._project_option('show_pins_3d', False) is True
 
+    def _restore_top_text(self, saved) -> None:
+        """@brief Put the saved top-face writing in its field; a project without one gets the name.
+
+        @param saved The `top_text` of the project state: a string (possibly
+            empty, meaning «no writing») or None when the project predates
+            the field (prefilled with the component name, the assumption
+            declared on 2026-10-10).
+        """
+        field = getattr(self, "field_top_text_3d", None)
+        if field is None:
+            return
+        text = saved if isinstance(saved, str) else self._component_name()
+        blocked = field.blockSignals(True)
+        field.setText(text)
+        field.blockSignals(blocked)
+
+    def _pin_numbers_3d(self) -> bool:
+        """@brief Tell whether a single THT part prints its pin numbers on the bottom face.
+
+        @return True unless the project turned them off: the user asked for
+            them (2026-10-10, «i numeri di pin sotto il device, come nel
+            castellated»), so a new project prints them. A project saved
+            with the option off keeps it off.
+        """
+        return self._project_option('pin_numbers_3d', True) is not False
+
+    def _top_text_3d(self) -> str:
+        """@brief The writing printed on the top face of a single component, '' for none."""
+        field = getattr(self, "field_top_text_3d", None)
+        return field.text().strip() if field is not None else ""
+
+    def _face_texts_for_3d(self) -> list:
+        """@brief Face texts handed to FreeCAD: the saved annotations plus the top-face writing.
+
+        @return FaceTextAnnotation list. The top-face writing comes from the
+            field in the 3D tab, sized so that its estimated width stays
+            within 80% of the body length (glyph width taken as 0.65 of the
+            size, the same estimate as the pin labels), at most 2 mm; it is
+            printed only on a single component, which has a real body, and
+            never on a board module.
+        """
+        texts = list(self.face_text_annotations)
+        text = self._top_text_3d()
+        if text and self._photo_inventory_family() is not True and self.group_3d.isChecked():
+            length = self.field_body_length.value()
+            size = min(2.0, max(0.3, 0.8 * length / (0.65 * len(text))))
+            texts.append(FaceTextAnnotation(face="top", text=text, size_mm=round(size, 3)))
+        return texts
+
+    def _on_pin_numbers_3d_toggled(self, checked: bool) -> None:
+        """@brief Record the pin-numbers choice for the project; the solid on screen is stale.
+
+        @param checked New state of the checkbox.
+        """
+        self._set_project_option("pin_numbers_3d", checked)
+        self._save_config_safely()
+        self._invalidate_generated_mesh()
+
+    def _on_top_text_edited(self) -> None:
+        """@brief The top-face writing changed: keep it with the project, the solid is stale."""
+        self._invalidate_generated_mesh()
+        self._save_project_config()
+
     def _silk_pin_labels(self) -> bool:
         """@brief Tell whether pin names are engraved on the 3D silkscreen."""
         return self._project_option('silk_pin_labels', False) is True
@@ -9206,6 +9486,24 @@ class MainWindow(QMainWindow):
         """
         if not self.group_3d.isChecked():
             return None
+        if self.package_geometry is not None:
+            package = self.package_geometry
+            # A package STEP must reflect document dimensions. Do not silently
+            # substitute the board workflow's default 10x10x5 mm values.
+            if not all(value is not None for value in (
+                    package.body_length_mm, package.body_width_mm, package.body_height_mm)):
+                return None
+            length = package.body_length_mm
+            width = package.body_width_mm
+            height = package.body_height_mm
+            return Body3DParams(
+                length_mm=length, width_mm=width, height_mm=height,
+                offset_x_mm=-length / 2, offset_y_mm=-width / 2,
+                pin_diameter_mm=max(0.3, min(self.field_drill.value() * 0.65, 0.8)),
+                pin_length_mm=self.field_pin_length_3d.value(),
+                color_hex=self.field_body_color.text().strip(),
+                pin_color_hex=self.field_pin_color.text().strip(),
+            )
         if self._is_castellated():
             # Il PCB del modulo e' centrato sull'origine come il footprint:
             # ingombro e offset si ricavano da li', non dai campi a mano.
@@ -9240,6 +9538,8 @@ class MainWindow(QMainWindow):
                               else self._extracted_pcb_thickness),
             components=self._components_from_table(),
             populated_board=self._selected_family() == "aggregate_tht",
+            pin_numbers_3d=(self._selected_family() == "single_tht"
+                            and self._pin_numbers_3d()),
             **self._pins_3d_kwargs(),
         )
 
@@ -9255,7 +9555,16 @@ class MainWindow(QMainWindow):
         return {"show_pins_3d": self._show_pins_3d()}
 
     def _automatic_generation_blocked(self, message):
-        text = self.i18n.tr("generation.blocked", reason=message)
+        if self._selected_family() == "single_tht":
+            text = message + "\n\n" + self.i18n.text(
+                "Correggi i valori nella sezione Piazzole del componente THT, poi usa "
+                "«Rigenera footprint»."
+            )
+        else:
+            text = self.i18n.tr("generation.blocked", reason=message)
+        if self._project_has_footprint():
+            text += "\n\n" + self.i18n.text(
+                "I file già presenti non sono stati modificati.")
         self._on_ai_progress(tx("Generazione automatica non avviata: ") + message)
         QMessageBox.warning(
             self, self.i18n.text('Generazione automatica non avviata'), text)
@@ -9266,16 +9575,16 @@ class MainWindow(QMainWindow):
                 or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)):
             raise ValueError(tx("Il nome del componente non è un nome di file valido."))
 
-    def _validate_automatic_input(self, params):
+    def _validate_automatic_input(self, params, *, require_body_dimensions=True):
         self._validate_output_name(params.name or self._component_name())
+        if self._selected_family() == "single_smd" and not params.package_geometry:
+            raise ValueError(tx(
+                "Componente SMD: manca la geometria esplicita delle piazzole. "
+                "Completa il datasheet e ripeti l'analisi."))
         if params.package_geometry:
-            # Pad espliciti: il generatore 3D non li supporta, e le quote del
-            # corpo e della griglia qui sotto non li descrivono. Si scrive solo
-            # il footprint (vedi `_generate`), come faceva la modalita' manuale
-            # tolta il 2026-09-26. Si controlla con lo stesso parser che
-            # l'applicazione usera': una geometria che li' verrebbe scartata
-            # lascerebbe `_generate` sui campi a griglia, cioe' un footprint
-            # che non e' quello del componente.
+            # Explicit package pads use the same validated geometry for both
+            # the footprint and the direct FreeCAD path. Never fall back to
+            # the board's pin matrix if the package payload is malformed.
             try:
                 geometry_data = dict(params.package_geometry)
                 geometry_data.setdefault("name", params.name or self._component_name())
@@ -9284,19 +9593,20 @@ class MainWindow(QMainWindow):
                 raise ValueError(
                     tx("Geometria a pad espliciti non valida: nessun file generato.")) from exc
             return
-        required_dimensions = ('body_length_mm', 'body_width_mm')
-        if not params.is_castellated():
-            required_dimensions += ('body_height_mm',)
-        for field in required_dimensions:
-            value = getattr(params, field)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                raise ValueError(tx("Manca una dimensione valida del corpo 3D: {field}.", field=field))
-        dimensions = (('body_length_mm', self.field_cast_body_length if params.is_castellated() else self.field_body_length),
-                      ('body_width_mm', self.field_cast_body_width if params.is_castellated() else self.field_body_width))
-        if not params.is_castellated():
-            dimensions += (('body_height_mm', self.field_body_height),)
-        for field, widget in dimensions:
-            self._require_in_range(field, getattr(params, field), widget)
+        if require_body_dimensions:
+            required_dimensions = ('body_length_mm', 'body_width_mm')
+            if not params.is_castellated():
+                required_dimensions += ('body_height_mm',)
+            for field in required_dimensions:
+                value = getattr(params, field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(tx("Manca una dimensione valida del corpo 3D: {field}.", field=field))
+            dimensions = (('body_length_mm', self.field_cast_body_length if params.is_castellated() else self.field_body_length),
+                          ('body_width_mm', self.field_cast_body_width if params.is_castellated() else self.field_body_width))
+            if not params.is_castellated():
+                dimensions += (('body_height_mm', self.field_body_height),)
+            for field, widget in dimensions:
+                self._require_in_range(field, getattr(params, field), widget)
         if params.is_castellated():
             if not params.castellated_sides:
                 raise ValueError(tx("Non sono stati estratti i contatti del modulo castellated."))
@@ -9340,6 +9650,49 @@ class MainWindow(QMainWindow):
                 self._require_extent(params.cols, params.pitch_mm, 'cols')
             if params.rows > 1:
                 self._require_extent(params.rows, params.row_spacing_mm, 'rows')
+            self._require_leads_inside_a_bottom_exit_body(params)
+
+    @staticmethod
+    def _require_leads_inside_a_bottom_exit_body(params) -> None:
+        """@brief Leads that leave the underside of the body must all lie inside its outline.
+
+        @param params Extracted parameters of a through-hole pin grid.
+        @throws ValueError When `lead_exit` is "bottom" and the pins that exist
+            span more than the body on an axis, or (with the body offset of
+            that axis known) a pin centre falls outside the body.
+        @note Structural, not a threshold: a lead coming straight out of the
+            underside is inside the moulding by construction, so a grid wider
+            than the body is a reading error (the TEL8 runs of 2026-10-10 put
+            15.24 mm, the distance between pins 1 and 7, in row_spacing_mm of
+            a 13.7 mm wide body). With "side" (DIP) or unknown exit the rows
+            may legitimately lie outside the body: only a warning then
+            (`_plausibility_warnings`). The user asked that the exit be read
+            from the documents, never inferred from a size or a name.
+        """
+        if getattr(params, "lead_exit", None) != "bottom":
+            return
+        from ..services.datasheet_extractor import _pin_field_positions
+        positions = _pin_field_positions(params)
+        if not positions:
+            return
+        for axis, index, extent, offset in (
+                ("X", 0, params.body_length_mm, params.body_offset_x_mm),
+                ("Y", 1, params.body_width_mm, params.body_offset_y_mm)):
+            if not isinstance(extent, (int, float)) or isinstance(extent, bool) or extent <= 0:
+                continue
+            low = min(p[index] for p in positions)
+            high = max(p[index] for p in positions)
+            outside = high - low > extent + 1e-6
+            if not outside and isinstance(offset, (int, float)) and not isinstance(offset, bool):
+                outside = low < offset - 1e-6 or high > offset + extent + 1e-6
+            if outside:
+                raise ValueError(tx(
+                    "I terminali escono dal fondo del corpo (lead_exit = bottom) ma lungo "
+                    "{axis} i pin occupano {span:.2f} mm contro un corpo di {extent:.2f} mm: "
+                    "con i reofori dal fondo ogni pin sta dentro il corpo, quindi una delle "
+                    "due quote e' letta male (spesso l'interasse fra le file scambiato con "
+                    "un'altra distanza). Correggi passo, interasse o quote del corpo e "
+                    "rigenera.", axis=axis, span=high - low, extent=extent))
 
     @staticmethod
     def _require_in_range(field, value, widget) -> None:
@@ -9384,12 +9737,22 @@ class MainWindow(QMainWindow):
             sulle quote si fanno solo se c'e' un corpo da controllare.
         """
         try:
-            self._validate_automatic_input(extracted)
+            self._validate_automatic_input(extracted, require_body_dimensions=False)
             if extracted.package_geometry:
-                self._generate(automatic=True)
+                self._generate(automatic=True, body_override=self._current_body_params())
                 return
-            body = self._current_body_params()
-            if body is None and self.group_3d.isChecked():
+            body_dimensions = (extracted.body_length_mm, extracted.body_width_mm)
+            if not extracted.is_castellated():
+                body_dimensions += (extracted.body_height_mm,)
+            body_dimensions_valid = all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value > 0 for value in body_dimensions
+            )
+            body = self._current_body_params() if body_dimensions_valid else None
+            if body is None and body_dimensions_valid and self.group_3d.isChecked():
+                # The 3D was asked for and the documents gave every quote, yet
+                # no body came out: a fault to report, not a deferral (the
+                # deferral is only for missing quotes, which `_generate` says).
                 raise ValueError(tx("I parametri del modello 3D non sono disponibili."))
             if body is not None:
                 # QSpinBox limits must not silently replace extracted dimensions.
@@ -9404,7 +9767,7 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError) as exc:
             self._automatic_generation_blocked(str(exc))
             return
-        self._generate(automatic=True)
+        self._generate(automatic=True, body_override=body)
 
     def _confirm_output_overwrite(self, params, project_dir, body):
         targets = [project_dir / f'{params.name}.pretty' / f'{params.name}.kicad_mod']
@@ -9496,9 +9859,12 @@ class MainWindow(QMainWindow):
         finally:
             dialog.deleteLater()
 
-    def _generate(self, automatic=False, footprint_only=False) -> None:
+    def _generate(self, automatic=False, footprint_only=False,
+                  body_override=_BODY_OVERRIDE_UNSET) -> None:
         if self._background_work_running() or self._automatic_generation_active:
             return
+        if automatic:
+            self._automatic_3d_deferred_reason = ""
         if footprint_only and not (self._acquisition_completed or self._project_has_footprint()):
             self._set_mounting_error(self.i18n.text("Analizza prima i documenti del componente."))
             return
@@ -9509,21 +9875,35 @@ class MainWindow(QMainWindow):
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
+            if self._selected_family() == "single_smd" and not isinstance(params, PackageGeometry):
+                raise ValueError(tx(
+                    "Componente SMD senza geometria esplicita valida: genera i pad dal datasheet prima di esportare."))
             if isinstance(params, CastellatedModuleParams) and self._missing_contact_style_message():
                 raise ValueError(self._missing_contact_style_message())
             params.validate()
             host_params = self._host_footprint_params(params)
             self._validate_output_name(params.name)
-            body = (None if footprint_only or isinstance(params, PackageGeometry)
-                    else self._current_body_params())
+            body = (None if footprint_only else
+                    body_override if body_override is not _BODY_OVERRIDE_UNSET else
+                    self._current_body_params())
             if body is not None:
                 body.validate()
             # Il corpo si pretende solo se il 3D e' stato chiesto. Un gruppo
             # «Modello 3D» spento e' una scelta, non un dato mancante: la
             # generazione automatica deve comunque scrivere il footprint.
             # Vedi `_current_body_params` e `_start_automatic_generation`.
+            required_body_fields = ("body_length_mm", "body_width_mm")
+            if not isinstance(params, CastellatedModuleParams):
+                required_body_fields += ("body_height_mm",)
+            extracted_body_complete = all(
+                isinstance(getattr(params, field, None), (int, float))
+                and not isinstance(getattr(params, field, None), bool)
+                and math.isfinite(getattr(params, field))
+                and getattr(params, field) > 0
+                for field in required_body_fields
+            )
             if (automatic and body is None and self.group_3d.isChecked()
-                    and not isinstance(params, PackageGeometry)):
+                    and not isinstance(params, PackageGeometry) and extracted_body_complete):
                 raise ValueError(tx('Mancano i parametri 3D.'))
         except ValueError as exc:
             self._append_log(tx("ERRORE: {exc}", exc=exc))
@@ -9547,8 +9927,6 @@ class MainWindow(QMainWindow):
                    family=params.family,
                    n_pins=len(params.pins))
             )
-            self._append_log(tx("Modello 3D non generato: il generatore 3D non supporta ancora la "
-                                "geometria a pad espliciti. Viene scritto solo il footprint."))
         elif isinstance(params, CastellatedModuleParams):
             self._append_log(
                 tx("Generazione {name}: modulo castellated {body_length}x{body_width}mm, ",
@@ -9577,13 +9955,43 @@ class MainWindow(QMainWindow):
         if body is None and (self.fillet_annotations or self.face_text_annotations):
             self._append_log(
                 tx("ATTENZIONE: annotazioni 3D presenti ma il modello 3D non viene generato "
-                   "(FreeCAD non disponibile): verranno ignorate.")
+                   "(quote del corpo mancanti o 3D disattivato): verranno ignorate.")
             )
+        if body is None and self.group_3d.isChecked() and not footprint_only:
+            required_labels = [("body_length_mm", "lunghezza"), ("body_width_mm", "larghezza")]
+            if not getattr(params, "is_castellated", lambda: False)():
+                required_labels.append(("body_height_mm", "altezza"))
+            # `params` is the footprint object (PinHeaderParams has no body_*
+            # attributes): the quotes come from the extraction, when there is
+            # one, otherwise from the body fields of the GUI. Reading them off
+            # `params` listed all three as missing even when only the height
+            # was (TEL8 run of 2026-10-10, 11:56).
+            extracted = getattr(self, "_last_extracted", None)
+            fields = {"body_length_mm": self.field_body_length,
+                      "body_width_mm": self.field_body_width,
+                      "body_height_mm": self.field_body_height}
+            missing = []
+            for field, label in required_labels:
+                if extracted is not None:
+                    value = getattr(extracted, field, None)
+                else:
+                    value = fields[field].value()
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value <= 0):
+                    missing.append(label)
+            if missing:
+                if automatic:
+                    self._automatic_3d_deferred_reason = ", ".join(missing)
+                self._append_log(tx(
+                    "Modello 3D rinviato: mancano le quote documentate del corpo ({fields}). "
+                    "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
+                    "l'analisi per completare il 3D.", fields=", ".join(missing)))
 
         self._last_params = params
         self._worker = GenerateWorker(
             params, project_dir, body,
-            fillets=list(self.fillet_annotations), face_texts=list(self.face_text_annotations),
+            fillets=list(self.fillet_annotations), face_texts=self._face_texts_for_3d(),
+            single_component=self._is_single_component_project(),
         )
         self._worker.footprint_params = host_params
         self._worker._model_revision = self._model_revision
@@ -9613,7 +10021,7 @@ class MainWindow(QMainWindow):
             self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
-            self._show_generation_steps(params, body)
+            self._show_generation_steps(params, body, self._is_single_component_project())
         if automatic:
             self._automatic_generation_active = True
             self._automatic_footprint_done = self._automatic_3d_done = False
@@ -9631,14 +10039,14 @@ class MainWindow(QMainWindow):
             self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
                                         'Preparazione della generazione…', abortable=True)
-            self._show_generation_steps(params, body)
+            self._show_generation_steps(params, body, self._is_single_component_project())
         try:
             self._worker.start()
         except Exception as exc:
             self._on_error(str(exc))
             self._on_generation_finished()
 
-    def _show_generation_steps(self, params, body) -> None:
+    def _show_generation_steps(self, params, body, single_component=False) -> None:
         """@brief Put the three generation steps on the modal, with the missing ones explained.
 
         @param params Footprint parameters about to be generated.
@@ -9647,14 +10055,32 @@ class MainWindow(QMainWindow):
             the modal says why instead of letting them silently not happen.
         """
         unavailable = {}
+        if single_component or isinstance(params, PackageGeometry):
+            steps = ("Footprint KiCadGen", "Corpo e terminali FreeCAD")
+            step_of = {"footprint": 0, "freecad": 1}
+            if body is None:
+                unavailable = {1: "modello 3D non richiesto"}
+        else:
+            steps = GENERATION_STEPS
+            step_of = dict(GENERATION_STEP_OF)
         if body is None:
-            reason = ("il generatore 3D non supporta i pad espliciti"
-                      if isinstance(params, PackageGeometry)
-                      else "FreeCAD non installato" if self._freecad_available is False
+            required_body_fields = ("body_length_mm", "body_width_mm")
+            if not getattr(params, "is_castellated", lambda: False)():
+                required_body_fields += ("body_height_mm",)
+            missing_body_dimensions = any(
+                getattr(params, field, None) is None
+                for field in required_body_fields
+            )
+            reason = ("FreeCAD non installato" if self._freecad_available is False
+                      else "quote 3D mancanti: completa il datasheet"
+                      if self.group_3d.isChecked() and missing_body_dimensions
                       else "modello 3D non richiesto")
-            unavailable = {1: reason, 2: reason, 3: reason}
-        self.analysis_overlay.set_steps(GENERATION_STEPS, unavailable)
-        self._generation_step_of = dict(GENERATION_STEP_OF)
+            if single_component or isinstance(params, PackageGeometry):
+                unavailable = {1: reason}
+            if not single_component and not isinstance(params, PackageGeometry):
+                unavailable = {1: reason, 2: reason, 3: reason}
+        self.analysis_overlay.set_steps(steps, unavailable)
+        self._generation_step_of = step_of
 
     def _on_generation_finished(self):
         """@brief Riporta la finestra in quiete alla fine della generazione.
@@ -9715,11 +10141,16 @@ class MainWindow(QMainWindow):
                                     "dell’utilizzo."))
             self._hold_completed_overlay("Completato: footprint e modello 3D generati.")
         else:
-            # Consuntivo fedele: il modello 3D non e' stato chiesto, quindi non
-            # va ne' promesso ne' lamentato.
-            self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
-                                    "prima dell’utilizzo."))
-            self._hold_completed_overlay("Completato: footprint generato.")
+            if getattr(self, "_automatic_3d_deferred_reason", ""):
+                message = tx("Footprint generato; modello 3D rinviato: mancano le quote del corpo ({fields}).",
+                             fields=self._automatic_3d_deferred_reason)
+                self._on_ai_progress(message)
+                self._hold_completed_overlay("Footprint generato; modello 3D da completare.")
+            else:
+                # Consuntivo fedele: il modello 3D non e' stato chiesto.
+                self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
+                                        "prima dell’utilizzo."))
+                self._hold_completed_overlay("Completato: footprint generato.")
 
     def _on_generated(self, path: str) -> None:
         if self._automatic_generation_active:
@@ -10254,6 +10685,30 @@ class MainWindow(QMainWindow):
         self.chk_header_pins_3d.setToolTip(self.chk_header_pins.toolTip())
         self.chk_header_pins_3d.toggled.connect(self.chk_header_pins.setChecked)
         toolbar.addWidget(self.chk_header_pins_3d)
+        # Componente singolo (utente, 2026-10-10): scritta sulla faccia
+        # superiore e numeri dei pin sulla faccia inferiore, accanto ai
+        # reofori. Serigrafia del solido, non geometria: basta rigenerare il 3D.
+        self.top_text_bar_3d = QWidget()
+        top_text_layout = QHBoxLayout(self.top_text_bar_3d)
+        top_text_layout.setContentsMargins(0, 0, 0, 0)
+        top_text_layout.addWidget(QLabel("Scritta sopra:"))
+        self.field_top_text_3d = QLineEdit()
+        self.field_top_text_3d.setPlaceholderText("nessuna scritta")
+        self.field_top_text_3d.setToolTip(
+            "Testo stampato al centro della faccia superiore del componente, come una "
+            "serigrafia. Vuoto: nessuna scritta. Si salva con il progetto; rigenera il 3D "
+            "per vederla.")
+        self.field_top_text_3d.setMaximumWidth(220)
+        self.field_top_text_3d.editingFinished.connect(self._on_top_text_edited)
+        top_text_layout.addWidget(self.field_top_text_3d)
+        toolbar.addWidget(self.top_text_bar_3d)
+        self.chk_pin_numbers_3d = QCheckBox("Numeri dei pin sotto")
+        self.chk_pin_numbers_3d.setToolTip(
+            "Stampa il numero di ogni pin sulla faccia inferiore del componente, accanto al "
+            "reoforo, leggibile guardando da sotto. Non cambia il footprint: basta rigenerare "
+            "il 3D.")
+        self.chk_pin_numbers_3d.toggled.connect(self._on_pin_numbers_3d_toggled)
+        toolbar.addWidget(self.chk_pin_numbers_3d)
         self._sync_header_pins_3d()
         toolbar.addWidget(self.btn_regen_3d)
 
@@ -10456,15 +10911,13 @@ class MainWindow(QMainWindow):
             corso (FreeCAD)...». The progress modal is open meanwhile anyway.
         """
         button = self.btn_regen_3d
-        unsupported = self.package_geometry is not None
-        button.setEnabled(not busy and not unsupported)
+        unsupported = False
+        button.setEnabled(not busy)
         button.setProperty("workflow_busy", bool(busy))
         self._sync_header_pins_3d()
         button.setProperty(
             "workflow_title_source",
             "Generazione in corso (FreeCAD)..." if busy
-            else "Il generatore 3D non supporta ancora la geometria a pad espliciti."
-            if unsupported
             else button.property("workflow_idle_title_source"))
         button.setIcon(self._asset_icon(
             "wf-loading.svg" if busy else button.property("workflow_icon")))
@@ -10666,10 +11119,9 @@ class MainWindow(QMainWindow):
         """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
         if self._background_work_running() or self._automatic_generation_active:
             return
-
-        if self.package_geometry is not None:
+        if self._selected_family() == "single_smd" and self.package_geometry is None:
             self._set_3d_status(self.i18n.text(
-                "Il generatore 3D non supporta ancora la geometria a pad espliciti."),
+                "Componente SMD senza geometria esplicita valida: genera i pad dal datasheet prima di esportare."),
                 STATUS_WARNING)
             return
 
@@ -10681,6 +11133,7 @@ class MainWindow(QMainWindow):
 
         try:
             params = (
+                self.package_geometry if self.package_geometry is not None else
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
@@ -10707,7 +11160,8 @@ class MainWindow(QMainWindow):
 
         self._cad3d_worker = Cad3DWorker(
             params, body, self._project_dir(),
-            list(self.fillet_annotations), list(self.face_text_annotations),
+            list(self.fillet_annotations), self._face_texts_for_3d(),
+            single_component=self._is_single_component_project(),
         )
         self._cad3d_worker._model_revision = self._model_revision
         self._cad3d_worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
@@ -10737,9 +11191,13 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…', abortable=True)
         # Il footprint non si riscrive: restano i due passi del 3D.
-        self.analysis_overlay.set_steps(GENERATION_STEPS[1:])
-        self._generation_step_of = {tool: index - 1 for tool, index in GENERATION_STEP_OF.items()
-                                    if index > 0}
+        if self._is_single_component_project():
+            self.analysis_overlay.set_steps(("Corpo e terminali FreeCAD",))
+            self._generation_step_of = {"freecad": 0}
+        else:
+            self.analysis_overlay.set_steps(GENERATION_STEPS[1:])
+            self._generation_step_of = {tool: index - 1 for tool, index in GENERATION_STEP_OF.items()
+                                        if index > 0}
         self._cad3d_worker.start()
 
     def _on_regen_3d_progress(self, message: str) -> None:
@@ -12258,9 +12716,14 @@ class MainWindow(QMainWindow):
                 self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
         if self.package_geometry is not None:
             self.preview_3d.clear_preview()
-            self._set_3d_status(self.i18n.text(
-                "Il generatore 3D non supporta ancora la geometria a pad espliciti."),
-                STATUS_WARNING)
+            package = self.package_geometry
+            if not all(value is not None for value in (
+                    package.body_length_mm, package.body_width_mm, package.body_height_mm)):
+                self._set_3d_status(self.i18n.text(
+                    "Completa le quote documentate di lunghezza, larghezza e altezza del corpo "
+                    "per generare il modello 3D."), STATUS_WARNING)
+            else:
+                self._set_3d_status(*self._no_3d_status())
             return
         if self._is_castellated():
             # Per i moduli non esiste un'approssimazione parametrica da
