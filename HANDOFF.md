@@ -1,5 +1,15 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-10 - Pubblicazione: palette grafica del simbolo
+
+- Utente (18:00 circa): «committa tutto, pusha e mergia in main». Include la
+  palette di elementi grafici (catalogo da KiCad, parti di rele' separate,
+  pannello verticale a destra con gruppi collassabili, icone generate),
+  fili, aggancio dei pin ai terminali, esportazione degli elementi nel
+  .kicad_sym, tema di anteprima «Colori come KiCad». Esclusi
+  rows_none_rev.pkl, tmp/, work/; database profili incluso (nessuna chiave).
+- Suite simbolo/palette/traduzioni/documentazione: verdi (75 + 14).
+
 ## 2026-10-10 - Pubblicazione: revisione avversariale, prompt dedicato, controllo pad
 
 - Utente (17:00 circa): «intanto committa, pusha e mergia il lavoro fatto fin
@@ -12,7 +22,7 @@
 - Commit ADVANCED: cc912c9. Suite completa prima delle ultime tre modifiche (blocco pad espliciti,
   didascalia, numeri sui package): 7097 passati; suite mirate dopo: verdi.
 
-## 2026-10-10 - Palette di elementi grafici nel simbolo (IN CORSO)
+## 2026-10-10 - Palette di elementi grafici nel simbolo (FATTA, NON COMMITTATA)
 
 - Utente: «la palette con elementi grafici presi da KiCad, proviamo». Intento
   confermato: nell'editor del simbolo una barra con elementi standard
@@ -24,8 +34,95 @@
   esportazione come linee/archi/cerchi nel .kicad_sym; salvataggio nel
   progetto. Proposta automatica dei gruppi (bobina 2-3 ecc.) con conferma:
   fase successiva, non in questo giro.
-- Prima di scrivere: lettura dell'architettura dell'editor (symbol_tab,
-  symbol_editor, generators/symbol, export) e del lettore di .kicad_sym.
+- Implementato. `generators/symbol_glyphs.py`: parser s-expression,
+  `load_library_glyph` (primitive di ogni unita', contorno del corpo tolto e
+  tenuto come `body_hint`, pin come `Terminal` con la semantica di KiCad:
+  estremo esterno + angolo verso il corpo), `kicad_symbols_dir()` da
+  kicad-cli, catalogo `KICAD_GLYPHS` (rele' SPST-NO/NC/SPDT/DPDT, R, C, C
+  polarizzato, L, D, LED, SW SPST/SPDT, trasformatore da Device) con ripiego
+  `_builtin_glyphs` (forme IEC a mano), `instance_from_glyph` (record
+  autonomo con primitive NON trasformate: niente deriva), `placed_primitives`/
+  `placed_terminals`, `arc_points`, `snap_to_terminal` (TERMINAL_SNAP_MM 1.27),
+  `validate_instances`, `serialize_graphics`, `symbol_graphics(rows)` (la
+  lista sta in ogni riga come `symbol_body`). `generators/symbol.py`:
+  `serialize_symbol/export_symbol(graphics=)` nell'unita' `_0_1` dopo il
+  rettangolo. Editor (`symbol_tab.py`): combo + pulsante «Inserisci elemento
+  grafico» (tool-draw.svg), modo posizionamento nella vista (clic sinistro
+  piazza, Esc/destro annulla), disegno con tag ('graphic', i) e terminali
+  verdi, trascinamento su griglia, menu contestuale ruota/specchia/elimina/
+  adatta corpo, tasti R e Canc, `place_pin` aggancia ai terminali
+  (posizione + angolo), tutto nella cronologia annulla/ripeti e nelle righe
+  applicate -> progetto -> `_save_applied_electrical_symbol(graphics=)`.
+  i18n: 27 stringhe. Test: tests/test_symbol_glyphs.py (8) e
+  tests/test_symbol_palette_gui.py (6); suite simbolo/documentazione/
+  traduzioni: 116 passati. Non fatto: proposta automatica dei gruppi dal
+  pinout (fase successiva, con conferma).
+- Utente: «preferirei una palette grafica stilizzata». Fatto: striscia di
+  icone (`self.palette`, QToolBar sotto la barra principale) con un'azione
+  spuntabile per elemento; l'icona e' disegnata dalle primitive stesse
+  (`glyph_icon`, nessun file asset), terminali come puntini verdi. Un clic
+  sull'icona sceglie l'elemento (combo nascosto come unica fonte) e arma il
+  posizionamento; il piazzamento o l'annullamento rilascia l'icona.
+  Verificata la resa delle 13 icone in un'immagine. Test aggiunto (7 nel
+  file della palette); suite simbolo/traduzioni: 76 passati.
+- Utente: «bobina e contatti inseribili separatamente». Fatto:
+  `relay_part_glyphs()` (bobina, collegamento tratteggiato, contatto in
+  scambio, NA, NC) con la geometria di `Relay_SPDT` di KiCad divisa e
+  ricentrata, terminali sulla griglia, sempre in testa al catalogo (con o
+  senza KiCad); i rele' interi restano. 3 etichette i18n, test sulle parti;
+  icone verificate in immagine.
+- Utente: «palette con gruppi collassabili, verticale a sinistra». In corso:
+  catalogo esteso (passivi, semiconduttori, interruttori, elettromeccanici,
+  trasformatori) con campo `group` sui glifi; pannello verticale a sinistra
+  della tela (`PalettePanel`: sezioni con intestazione apribile e griglia di
+  icone), al posto della striscia orizzontale; combo nascosto resta la fonte
+  della scelta; tratteggio guida sui terminali liberi gia' fatto.
+- FATTO: `GROUPS` e campo `group` sui glifi, `grouped_catalogue()`; catalogo
+  a 41 elementi (parti di rele', rele' interi, 12 passivi, 9 semiconduttori
+  con BJT/MOSFET da Transistor_BJT/FET, 5 interruttori, 4 elettromeccanici,
+  2 trasformatori), tutti letti dalle librerie di KiCad 10 (nessuno
+  mancante). `PalettePanel` in symbol_tab: pannello largo 150 px a sinistra
+  della tela, QScrollArea, intestazioni QToolButton con freccia che aprono/
+  chiudono i gruppi (stato conservato alla ricostruzione), griglia 3 colonne
+  di icone 36 px; `palette_actions()`, `release()`, `set_group_open()`,
+  `group_is_open()`. 30 etichette i18n. Test aggiornati (82 passati su
+  simbolo/documentazione/traduzioni). Resa verificata fuori schermo: il
+  contenuto dello scroll aveva larghezza 320 (titoli lunghi) e spingeva le
+  colonne fuori vista; ora contenuto e intestazioni con politica Ignored,
+  griglia allineata a sinistra, sfondo scuro esplicito su viewport,
+  contenuto e corpi dei gruppi (i tratti chiari sparivano su fondo chiaro).
+- Utente: «mi serve la possibilita' di collegare con dei fili». In corso:
+  strumento «Filo» nella toolbar del simbolo; modo cablaggio nella vista
+  (clic = punto, doppio clic/destro = chiudi, Esc = annulla), aggancio ai
+  punti interni dei pin (estremo verso il corpo), ai terminali degli
+  elementi (estremo interno) e alla griglia; anteprima del segmento che
+  segue il cursore; il filo e' un'istanza grafica `key="wire"` con una sola
+  polilinea (si sposta/elimina come gli altri, va nel .kicad_sym).
+- FATTO: vista con `wiring`, segnali `wire_point`/`wire_finished`, doppio
+  clic/Invio/destro chiudono, Esc annulla; tab: pulsante «Filo»
+  (wf-contact.svg, spuntabile), `start_wire`, `add_wire_point` (aggancio
+  entro TERMINAL_SNAP_MM agli estremi interni di pin e terminali, altrimenti
+  griglia), `finish_wire`, anteprima tratteggiata con segmento che segue il
+  cursore; istanza `key="wire"`. Palette spostata a DESTRA della tela
+  (utente). 4 stringhe i18n; 3 test nuovi (85 passati su simbolo/
+  documentazione/traduzioni).
+- Utente: «il filo lo vorrei nella palette». Fatto: gruppo «Collegamenti» in
+  testa al pannello con lo strumento Filo (icona generata, azione spuntabile
+  sincronizzata con il pulsante della toolbar via `set_tool_checked`);
+  `PalettePanel._add_section(..., tool=True)`, segnale `tool_chosen`. Test
+  aggiunto (66 passati su palette/glifi/tab/traduzioni/documentazione).
+- Utente: colore di sfondo del corpo come in KiCad, con disegni interni
+  scuri. Chiarito: in KiCad il giallo viene dal TEMA, non dal simbolo (il
+  file dice solo «fill background», che gia' esportiamo). In corso:
+  interruttore «Colori come KiCad» nel tab Simbolo: tema di anteprima
+  (tela chiara, corpo #FFFFC2, bordo/linee/pin #840000, nomi #008484,
+  griglia chiara) senza toccare il file esportato; colore esplicito nel
+  simbolo NON fatto (sceglie di non seguire il tema dello schema).
+- FATTO: `CANVAS_THEMES` ('dark' = app, 'kicad' = schema KiCad), la vista
+  e `_draw`/`_draw_graphics` leggono i colori dal tema; pulsante
+  spuntabile «Colori come KiCad» (tab-kicad.svg), `set_kicad_colors`,
+  proprieta' `theme`; file esportato invariato (test lo verifica). Resa
+  controllata in immagine. 1 stringa i18n; 14 test della palette verdi.
 
 ## 2026-10-10 - Seconda lettura dedicata delle posizioni dei pad (FATTA, NON COMMITTATA)
 

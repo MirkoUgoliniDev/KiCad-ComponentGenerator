@@ -190,8 +190,12 @@ def _num(value: float) -> str:
 
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
-                     footprint: str = '', reference: str = 'U', body=None) -> str:
-    """@brief Return a KiCad 6+ symbol library with a single, single-unit symbol."""
+                     footprint: str = '', reference: str = 'U', body=None, graphics=None) -> str:
+    """@brief Return a KiCad 6+ symbol library with a single, single-unit symbol.
+
+    @param graphics Placed glyph records (`symbol_glyphs.instance_from_glyph`)
+        drawn inside the body, after the body rectangle; None or [] for none.
+    """
     name = _text(name, 'Symbol name', required=True)
     if ':' in name:
         raise ValueError('Symbol name must not contain a library separator (:).')
@@ -212,8 +216,11 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         lines.append(f'    (property {_quote(key)} {_quote(value)} (id {ident}) (at 0 {_num(y)} 0) {effect})')
     lines.extend((f'    (symbol {_quote(name + "_0_1")}',
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
-                  '        (stroke (width 0.254) (type default)) (fill (type background)))',
-                  '    )', f'    (symbol {_quote(name + "_1_1")}'))
+                  '        (stroke (width 0.254) (type default)) (fill (type background)))'))
+    if graphics:
+        from .symbol_glyphs import serialize_graphics, validate_instances
+        lines.extend(serialize_graphics(validate_instances(graphics)))
+    lines.extend(('    )', f'    (symbol {_quote(name + "_1_1")}'))
     for item in layout.pins:
         pin = item.pin
         lines.extend((f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) (length {_num(layout.pin_length)})',
@@ -224,9 +231,13 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
-                  footprint: str = '', reference: str = 'U', body=None) -> Path:
-    """@brief Validate before touching disk and atomically replace an explicitly chosen file."""
-    text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body)
+                  footprint: str = '', reference: str = 'U', body=None, graphics=None) -> Path:
+    """@brief Validate before touching disk and atomically replace an explicitly chosen file.
+
+    @param graphics Placed glyph records, see `serialize_symbol`.
+    """
+    text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body,
+                            graphics=graphics)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', suffix='.tmp', dir=target.parent)
