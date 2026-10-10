@@ -433,3 +433,22 @@ def test_lead_diameter_follows_the_drawing_unit():
                                                 drill_mm=0.03, lead_diameter_mm=0.02))
     assert params.lead_diameter_mm == pytest.approx(0.508)
     assert params.drill_mm == pytest.approx(0.762)
+
+
+# -- 2026-10-10 14:14: positions of pins that do not exist are not read -----------
+
+def test_pin_map_entries_for_absent_pins_are_dropped_and_said():
+    """A 16-entry zig-zag map on a part with six pins: only the six stay, and the note says it."""
+    zigzag = [{"pin": 2 * c + r + 1, "row": r, "col": c} for c in range(8) for r in range(2)]
+    params = _params_from_tool_arguments(matrix(
+        rows=2, cols=8, pin_map=zigzag, populated_pins=[1, 7, 8, 9, 10, 16]))
+    assert sorted(e["pin"] for e in params.pin_map) == [1, 7, 8, 9, 10, 16]
+    assert "pin_map: scartate le posizioni dei pin 2, 3, 4, 5, 6, 11, 12, 13, 14, 15" in params.notes
+    assert params.populated_pins == [1, 7, 8, 9, 10, 16]
+
+
+def test_a_full_pin_map_without_populated_pins_is_kept_whole():
+    """Negative: with every position populated there is nothing invented."""
+    zigzag = [{"pin": 2 * c + r + 1, "row": r, "col": c} for c in range(4) for r in range(2)]
+    params = _params_from_tool_arguments(matrix(rows=2, cols=4, pin_map=zigzag))
+    assert len(params.pin_map) == 8 and "scartate le posizioni" not in params.notes
