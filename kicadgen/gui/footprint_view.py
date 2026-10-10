@@ -20,12 +20,21 @@ class FootprintView(QGraphicsView):
         self._grid = None
 
     def set_grid(self, step, origin=(0.0, 0.0), visible=True):
-        """Set an unbounded, scene anchored reference grid in scene units."""
+        """@brief Set an unbounded, scene-anchored reference grid in scene units.
+
+        @param step Grid pitch in scene units (mm).
+        @param origin Scene point the grid passes through (the first pad).
+        @param visible False hides the grid without forgetting it.
+        """
         self._grid = (float(step), tuple(map(float, origin)), bool(visible))
         self.viewport().update()
 
     def drawBackground(self, painter, rect):
-        """Draw grid lines across the visible viewport, like the symbol editor."""
+        """@brief Qt override: draw grid lines across the visible viewport, like the symbol editor.
+
+        @param painter Painter in scene coordinates.
+        @param rect Exposed scene rectangle.
+        """
         super().drawBackground(painter, rect)
         if not self._grid or not self._grid[2]:
             return

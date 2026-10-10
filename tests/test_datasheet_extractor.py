@@ -620,3 +620,52 @@ def test_an_openrouter_run_checks_only_openrouter(tmp_path, monkeypatch):
     """@brief Negative: no DeepSeek model, no DeepSeek balance read (single path, no duplicate branch)."""
     checked = _preflight(tmp_path, monkeypatch, model="vendor/model", vision_model="vendor/vision")
     assert checked == ["openrouter-key", "openrouter"]
+
+
+# -- 2026-10-10: a small drawing is enlarged for a provider that resolves more --
+
+def _small_drawing(tmp_path, name="quote.png"):
+    from PIL import Image
+    path = tmp_path / name
+    Image.new("RGB", (624, 480), "white").save(path, format="PNG")
+    return path
+
+
+def _decoded_size(block):
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    header, data = block["image_url"]["url"].split(",", 1)
+    with Image.open(BytesIO(base64.b64decode(data))) as image:
+        return header, image.size
+
+
+def test_small_drawing_is_enlarged_to_the_limits_of_an_enlarging_provider(tmp_path):
+    """DeepSeek (enlarges=True): the drawing is sent at the provider's long side."""
+    from kicadgen.services.photo_grounding import DEEPSEEK_IMAGE_LIMITS
+    path = _small_drawing(tmp_path)
+    header, (width, height) = _decoded_size(
+        _file_to_content_block(path, "deepseek-api/deepseek-flash"))
+    assert header == "data:image/png;base64"
+    assert width > 624 and height > 480
+    assert max(width, height) <= DEEPSEEK_IMAGE_LIMITS.long_side_px
+    assert width * height <= DEEPSEEK_IMAGE_LIMITS.max_pixels
+    assert abs(width / height - 624 / 480) < 0.01       # proportions kept
+
+
+def test_drawing_is_sent_byte_for_byte_to_a_provider_that_does_not_enlarge(tmp_path):
+    """Negative: OpenRouter identifiers keep the historical behaviour, and no model too."""
+    import base64
+    path = _small_drawing(tmp_path)
+    for model in ("anthropic/claude-sonnet-4", None):
+        url = _file_to_content_block(path, model)["image_url"]["url"]
+        assert base64.b64decode(url.split(",", 1)[1]) == path.read_bytes()
+
+
+def test_drawing_already_at_the_limits_is_not_enlarged(tmp_path):
+    import base64
+    from PIL import Image
+    path = tmp_path / "big.png"
+    Image.new("RGB", (2048, 700), "white").save(path, format="PNG")
+    url = _file_to_content_block(path, "deepseek-api/deepseek-flash")["image_url"]["url"]
+    assert base64.b64decode(url.split(",", 1)[1]) == path.read_bytes()

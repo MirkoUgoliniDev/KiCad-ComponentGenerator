@@ -350,9 +350,14 @@ def _build_face_text_solids(shape, texts, bounds, font_file):
         thickness = t["thickness_mm"]
         sink = min(thickness * 0.3, 0.02)
 
-        wires = Part.makeWireString(t["text"], font_file, t["size_mm"], 0.0)
-        text_face = Part.makeCompound([Part.Face(w) for w in wires])
-        solid = text_face.extrude(FreeCAD.Vector(0, 0, thickness + sink))
+        # Same glyph builder as the silk labels: a space has no wire and a
+        # glyph with a hole (0, 8, A) needs the bullseye face maker; building
+        # Part.Face per glyph failed on both ("no wires in list", 2026-10-10).
+        solid = _text_solid(t["text"], t["size_mm"], thickness + sink, font_file)
+        if solid is None:
+            _warn("scritta '{text}' non costruibile con il font {font}", text=t["text"],
+                  font=font_file)
+            continue
 
         # Centra il blocco di testo sull'origine XY, con la base a Z=0.
         text_bbox = solid.BoundBox
@@ -374,7 +379,12 @@ def _build_face_text_solids(shape, texts, bounds, font_file):
                                 x_axis[2], y_axis[2], z_axis[2], 0,
                                 0, 0, 0, 1)
         target = FreeCAD.Placement(matrix)
-        target.Base = center - normal * sink
+        anchor = center
+        if t.get("x_mm") is not None and t.get("y_mm") is not None and abs(normal.z) > 0.9:
+            # Label tied to a point of the top/bottom face (a pin number next
+            # to its lead): same plane as the face, given XY.
+            anchor = FreeCAD.Vector(float(t["x_mm"]), float(t["y_mm"]), center.z)
+        target.Base = anchor - normal * sink
         solid.Placement = target.multiply(solid.Placement)
 
         solids.append((solid, t.get("color_hex", "#ffffff")))
@@ -604,6 +614,12 @@ def _flip_y(data):
             through["y"] = -float(through["y"])
     for box in data.get("extra_boxes", []):
         box["y"] = -(box["y"] + box["width_mm"])
+    # Anchored face texts (pin numbers beside the leads) are positions in the
+    # footprint system like the pins: same reflection, or the label would
+    # land on the far side of the body (seen on the TEL8 try, 2026-10-10).
+    for t in data.get("face_texts", []) or []:
+        if isinstance(t.get("y_mm"), (int, float)) and not isinstance(t.get("y_mm"), bool):
+            t["y_mm"] = -float(t["y_mm"])
     data["pins"] = [[n, x, -y] for n, x, y in data.get("pins", [])]
     return data
 
@@ -1134,10 +1150,20 @@ def main():
 
     # Solidi aggiuntivi generici (box con colore proprio).
     for i, box in enumerate(data.get("extra_boxes", [])):
-        add(box.get("name", f"Extra{i}"), Part.makeBox(
+        extra_shape = Part.makeBox(
             box["length_mm"], box["width_mm"], box["height_mm"],
             FreeCAD.Vector(box["x"], box["y"], box.get("z", 0)),
-        ), box.get("color_hex", "#1a1a1a"))
+        )
+        rotation = float(box.get("rotation_deg", 0.0))
+        if rotation:
+            centre = FreeCAD.Vector(
+                box["x"] + box["length_mm"] / 2,
+                box["y"] + box["width_mm"] / 2,
+                box.get("z", 0) + box["height_mm"] / 2,
+            )
+            extra_shape.rotate(centre, FreeCAD.Vector(0, 0, 1), -rotation)
+        add(box.get("name", f"Extra{i}"), extra_shape,
+            box.get("color_hex", "#1a1a1a"))
 
     pin_radius = pin_diameter / 2.0
     # Spenti su richiesta (Body3DParams.show_pins_3d): restano i fori.

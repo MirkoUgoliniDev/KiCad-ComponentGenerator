@@ -53,6 +53,11 @@ class Body3DParams:
     # il solido non ha i pin ma i fori restano: e' il modulo come si compra,
     # senza strip saldati. Il footprint non cambia.
     show_pins_3d: bool = True
+    # Numeri dei pin stampati sulla faccia inferiore accanto a ogni reoforo
+    # di un componente singolo THT (utente, 2026-10-10: «come nel
+    # castellated», dove le sigle stanno accanto ai contatti). Serigrafia,
+    # non geometria: spenta per contratto, la accende chi la vuole.
+    pin_numbers_3d: bool = False
 
     def validate(self) -> None:
         """@brief Validate dimensions, colors and pin extrusion constraints.

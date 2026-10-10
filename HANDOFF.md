@@ -1,5 +1,176 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-10 - Pubblicazione: pin popolati, documenti ingranditi, scritte 3D, lead_*
+
+- Utente autorizza commit di tutto, push, merge in main e ritorno su ADVANCED.
+  Include il lavoro non committato trovato nel checkout (percorso componente
+  singolo, wizard tipo progetto, storico export KiCad, griglia footprint) e
+  tutte le correzioni della sezione seguente. Esclusi rows_none_rev.pkl, tmp/,
+  work/. Inclusi docs/MFG_TEL-8-2411WI/ (come gli altri docs/ di componenti) e
+  data/analysis_profiles.sqlite3 (controllo segreti: nessuna chiave).
+- Suite: 689 passati sulle 24 suite toccate + 12/12 localizzazione da sola.
+
+## 2026-10-10 - Verifica TEL 8-2411WI: pin popolati con mappa esplicita (NON COMMITTATO)
+
+- Richiesta utente: «verifica il codice, il risultato e' deludente» sul progetto
+  `generated/TEL 87-2411WI` (foto + quote.png, DeepSeek flash, profilo THT singolo).
+- Catena di cause letta dal log `analisi-ai.log` (7 analisi, 11:10-11:43):
+  1. 11:10: il PDF con l'API diretta DeepSeek viene rifiutato (comportamento noto).
+  2. 11:16: risposta scartata (modulo «castellated» senza lati): validazione corretta.
+  3. 11:19: footprint 2x8 generato; il 3D fallisce con «expected str, bytes or
+     os.PathLike object, not list». `workers.py` e' stato salvato alle 11:19:49,
+     il giro delle 11:38 con la stessa configurazione riesce: il difetto stava nel
+     codice non committato del percorso «componente singolo» in lavorazione.
+  4. 11:25 e 11:36: pad 2.5 mm a passo 2.54 bloccati (giusto: valore «letto»).
+  5. 11:43: il modello risponde con una matrice 2x3, passo 15.24 e pin_map
+     {1,7,8,9,10,16}; `populated_pins` viene filtrato contro 1..righe*colonne=6
+     e restano solo [1]: footprint con UN pad, simbolo non salvato, corpo fuori
+     origine. Il programma ha generato in silenzio un risultato privo di senso.
+- Difetto di codice (classe, non caso): con una `pin_map` esplicita i numeri di
+  pin sono una convenzione libera (DIP numerati a U, posizioni vuote), quindi
+  l'intervallo 1..righe*colonne non e' il criterio: il criterio e' «numero
+  presente nella mappa». Stessa regola nell'estrattore
+  (`_validated_populated_pins`) e in `PinHeaderParams.validate()`.
+- Esito: correzione applicata in `datasheet_extractor._validated_populated_pins`
+  (parametro `mapped`, mappa validata prima dei pin popolati) e in
+  `PinHeaderParams.validate()`. Test nuovi in `test_fixD_extractor.py` (3) e
+  `test_fixG_generators.py` (1); suite mirata estrattore/generatori/documenti:
+  512 passati, 1 saltato. `test_documentation.py` FALLISCE gia' prima di queste
+  modifiche sul codice non committato altrui: `generate_single_package_3d_model`,
+  `generate_single_tht_3d_model`, `FootprintView.set_grid/drawBackground`,
+  `ProjectKindDialog`, modulo `kicad_export_history.py` senza `@brief`.
+- Correzione fatta: estrattore valida la mappa PRIMA dei pin popolati e
+  accetta i numeri della mappa; generatore controlla l'intervallo solo senza
+  mappa. Test positivo (numero > righe*colonne presente nella mappa, tenuto) e
+  negativo (numero assente dalla mappa, scartato con nota).
+- NON corretto, solo segnalato: la qualita' delle letture di deepseek-flash
+  (sette risposte diverse: row_spacing 15.24 invece di 10.16, drill 0.5 uguale
+  al diametro del pin, matrice 2x3 al posto di 2x8). Il programma non ha un
+  campo «diametro del terminale» da confrontare con il foro: eventuale
+  estensione dello schema, da autorizzare.
+- Seconda tornata (11:51): il modello risponde 2x4, passo 2.54, interasse 15.24
+  (le sue stesse note dicono 10.16), pin 1 in colonna 3: footprint sbagliato con
+  tutti i pad. Causa fisica trovata: `quote.png` e' 624x480 px e
+  `_file_to_content_block` lo invia cosi' com'e'; DeepSeek vede le immagini
+  sotto 768 px al minimo (191 token, HANDOFF 144), una quota come «10.16 (0.400)»
+  occupa circa un token. Il meccanismo di ingrandimento esiste gia' per i
+  ritagli foto (`photo_grounding.fit_to_model`, limiti per fornitore) ma non
+  era applicato ai documenti dell'estrazione.
+- Correzione in corso: `_file_to_content_block(path, model=None)` ingrandisce
+  le immagini (non i PDF) fino ai limiti del fornitore quando `enlarges` e'
+  vero, ricodificando in PNG senza perdita; byte invariati per i fornitori che
+  non ne traggono vantaggio o se l'ingrandimento supera MAX_FILE_BYTES. Test
+  positivo (DeepSeek: lato lungo ai limiti) e negativo (OpenRouter: byte
+  identici). Messaggio «FreeCAD non disponibile» corretto: il 3D saltava per
+  quote del corpo mancanti, non per FreeCAD.
+- Esito seconda tornata: app riavviata dall'utente, analisi 11:56 con il
+  disegno ingrandito: colonne e numerazione corrette (2x8, pin 1 in colonna 7),
+  foro 0.8 corretto; resta sbagliato l'interasse (15.24 invece di 10.16, che il
+  modello stesso scrive nelle note) e il corpo non e' passato al 3D (quote
+  dichiarate stimate). L'utente giudica «molto meglio».
+- RICHIESTE NUOVE dell'utente (12:00 circa), NON ancora autorizzate nel
+  dettaglio, in attesa di conferma dell'intento: (a) una scritta sulla faccia
+  superiore del componente singolo; (b) i numeri dei pin sulla faccia
+  inferiore accanto a ogni reoforo, «come nel castellated» (li' sono
+  `silk_texts` sulla faccia superiore del modulo, da `silk_labels` e
+  `show_silk_labels_3d`). Stato del codice: `FaceTextAnnotation` esiste e
+  FreeCAD la stampa (`_build_face_text_solids`), ma nessun widget la crea: le
+  scritte arrivano solo da `project_config.json`; i fillet solo dall'AI. Il
+  messaggio di log «tab Modello 3D, tabella annotazioni» e' obsoleto.
+- Utente: «ok procedi» senza scegliere il testo. ASSUNZIONE dichiarata: campo
+  di testo libero «Scritta sulla faccia superiore» nel tab Modello 3D,
+  precompilato con il nome del componente; vuoto = nessuna scritta. Casella
+  «Numeri dei pin sulla faccia inferiore» accanto all'interruttore dei pin.
+  Entrambi salvati nel progetto (annotations.texts e opzione di progetto).
+  Lavoro in corso: GUI main_window, step_generator (percorso THT singolo),
+  freecad_build_body (testi sulla faccia inferiore, specchiati per la lettura
+  da sotto), i18n, test.
+- FATTO (NON COMMITTATO): `FaceTextAnnotation` con ancora opzionale
+  `x_mm/y_mm` (entrambe o nessuna); `Body3DParams.pin_numbers_3d`;
+  `step_generator.pin_number_face_texts` (numero accanto a ogni reoforo, verso
+  il centro del corpo lungo l'asse con meno coordinate distinte, grandezza max
+  1 mm ridotta per stare fra reoforo e centro, agganciata dentro il contorno;
+  larghezza glifo stimata 0.65 della grandezza, dichiarata) usata da
+  `generate_single_tht_3d_model`; script FreeCAD: ancora sulle facce
+  top/bottom, `_flip_y` riflette anche `y_mm` (prima le etichette finivano
+  fuori dal corpo), scritte costruite con `_text_solid` (prima «no wires in
+  list» per spazi e glifi con fori). GUI: nel tab Modello 3D «Scritta sopra:»
+  (campo, salvato in `state["top_text"]`, '' = nessuna, assente = nome del
+  componente) e casella «Numeri dei pin sotto» (opzione di progetto
+  `pin_numbers_3d`, visibile solo per `single_tht`); `_face_texts_for_3d`
+  passa la scritta solo ai componenti singoli, grandezza max 2 mm limitata
+  all'80% della lunghezza del corpo. Sei stringhe nuove in i18n (4 lingue).
+  Test: `tests/test_single_tht_face_texts.py` (12). Prova reale FreeCAD 1.1.4
+  sulla griglia TEL8: scritta a z=8 sulla faccia superiore, sei numeri a z=0
+  dentro il corpo accanto ai pin. L'app va RIAVVIATA per vedere i controlli.
+- Suite: `test_untranslated_texts` fallisce gia' a HEAD (10 stringhe altrui
+  senza traduzione, 13 con il lavoro non committato altrui: nessuna mia);
+  `test_project_wizard::test_preview_mounting_edits_sync_and_preserve_physical_board`
+  fallisce gia' a HEAD (`pad_overrides` nello stato del montaggio);
+  `test_pipeline_pauses::test_the_log_says_the_detector_will_not_run_instead_of_promising_a_photo_call`
+  passa a HEAD e fallisce con il lavoro non committato altrui (hunk in
+  `_extract_with_ai_prepared`: per un progetto a componente singolo il
+  rilevatore viene forzato a «ai», quindi il ramo «NON passa dall'inventario»
+  non viene piu' percorso): il contratto del test o il messaggio vanno
+  riallineati da chi porta avanti quel lavoro.
+- Suite mirata finale (15 file): 494 passati, 1 fallito (quello sopra).
+- Utente (12:30 circa): «finisci tutti i fix». In corso, nell'ordine:
+  (1) docstring @brief alle funzioni/classi non documentate del lavoro non
+  committato; (2) traduzioni delle 13 stringhe mancanti; (3) test del wizard
+  riallineato al contratto (`pad_overrides` nello stato del montaggio);
+  (4) percorso componente singolo: il messaggio «NON passa dall'inventario»
+  torna a comparire quando l'utente aveva scelto un rilevatore fotografico;
+  (5) schema AI: `lead_exit` (bottom/side/unknown) e `lead_diameter_mm`; con
+  reofori dal fondo i pin devono stare nel corpo (blocco della generazione
+  automatica, non solo avviso); foro stimato non piu' piccolo del terminale;
+  (6) incongruenza fra avviso sull'ingombro e 3D rinviato per quote stimate.
+- FATTO (NON COMMITTATO), i sei punti sopra: (1) @brief aggiunti
+  (`kicad_export_history`, `FootprintView.set_grid/drawBackground`,
+  `ProjectKindDialog`, `generate_single_package_3d_model`); (2) 13 modelli tx e
+  27 stringhe UI tradotti in 4 lingue; (3) test del wizard allineato a
+  `pad_overrides`; (4) `_extract_with_ai_prepared` tiene il rilevatore scelto
+  (`chosen_detector`) per il messaggio «NON passa dall'inventario», e il cambio
+  tipologia aggiorna sempre `project_kind` (tipologia «(non specificata)» ->
+  None); (5) schema AI: `lead_diameter_mm` (convertito con drawing_unit, in
+  value_sources) e `lead_exit` (bottom/side/unknown, `LEAD_EXITS`);
+  `_lift_drill_above_the_lead` porta un foro <= terminale a terminale + 0.25 mm
+  marcandolo stimato (anche se «letto»: misura impossibile), piazzola a foro +
+  0.8 se non lo supera piu'; GUI `_require_leads_inside_a_bottom_exit_body`
+  blocca la generazione automatica quando lead_exit = bottom e i pin escono dal
+  corpo (span > corpo, o posizione fuori con offset noto); prompt di sistema
+  aggiornato (digest precedente 1b17e4a7... in SUPERSEDED) con lead_* e con la
+  regola «cols = posizioni della griglia intera, vuote comprese» (senza numeri
+  d'esempio: test no-sample-data); descrizione di `cols` nello schema idem;
+  (6) `_generate` elenca le quote del corpo mancanti leggendole da
+  `_last_extracted`, non da PinHeaderParams (che non le ha: elencava sempre
+  tutte e tre).
+- Run utente 12:41 (dopo riavvio, con il fix dei pin popolati): il modello
+  risponde 2x3 a passo 2.54 con i 6 pin tutti presenti ma pin 1 ADIACENTE al 7
+  (nel disegno distano 15.24 = 6 passi): nessun pin omesso, il TEL 8 ha 6 pin
+  fisici; la griglia compressa e' la lettura del modello, da qui la regola
+  «cols = posizioni» nel prompt. Foro 0.5 = terminale: da ora sollevato a 0.75
+  se il modello riporta lead_diameter_mm. Numeri sotto il 3D non visibili
+  perche' l'opzione `pin_numbers_3d` del progetto e' False: va spuntata la
+  casella «Numeri dei pin sotto» nel tab Modello 3D e rigenerato il 3D. Le
+  modifiche (5)-(6) richiedono un altro riavvio dell'app.
+- Utente 12:50: «meglio ma mancano i pin sotto» (i numeri). Il progetto ha
+  `pin_numbers_3d: False` salvato dal primo avvio con la casella spenta: il
+  3D delle 12:48 ha la scritta sopra (Serigrafia0) ma nessun numero. Deciso:
+  opzione accesa per default (`_pin_numbers_3d` -> True salvo scelta salvata),
+  perche' l'utente l'ha chiesta; questo progetto va acceso a mano con la
+  casella «Numeri dei pin sotto» nel tab Modello 3D e rigenerato.
+- Ripristinato il blocco di `_start_automatic_generation` quando il 3D e'
+  richiesto, le quote ci sono tutte e il corpo non si costruisce (contratto di
+  `test_board_pipeline`): il rinvio resta solo per quote mancanti.
+  `_state_for_project_type` usa tx. Suite finale delle 24 suite toccate: 689
+  passati; `test_message_localization.py` da solo: 12 su 12 (il processo muore
+  all'uscita senza riepilogo, HANDOFF 113). Nessun commit.
+- Trovato nel checkout, non documentato qui: modifiche non committate a
+  `step_generator.py` (`generate_single_tht_3d_model`,
+  `generate_single_package_3d_model`), `workers.py` (`single_component`),
+  `freecad_build_body.py` (rotazione extra box), `main_window.py`,
+  `project_dialogs.py`, `i18n.py`, database profili. Non toccate.
+
 ## 2026-10-09 - Audit avversario con tre agenti (NON COMMITTATO)
 
 - Richiesta utente: revisione con agenti esperti, fix, report finale e spegnimento

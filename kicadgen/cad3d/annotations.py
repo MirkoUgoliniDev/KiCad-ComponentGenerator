@@ -23,6 +23,7 @@ stessa logica di FACE_NAMES/EDGE_NAMES qui sotto.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from ..core.validation import positive_number
@@ -87,9 +88,26 @@ class FaceTextAnnotation:
     size_mm: float = 2.0
     thickness_mm: float = 0.06  # spessore dello strato di vernice
     color_hex: str = "#ffffff"
+    #: Centre of the text on the face, in footprint mm (both or neither).
+    #: None: the text sits at the centre of the face. Used for the pin
+    #: numbers printed next to each lead on the bottom face (2026-10-10):
+    #: a label is tied to its pin, not to the face.
+    x_mm: float | None = None
+    y_mm: float | None = None
 
     def validate(self) -> None:
-        """@brief Validate the object against its supported contract."""
+        """@brief Validate the object against its supported contract.
+
+        @throws ValueError When the face or text is unusable, a size is not
+            positive, the colour is malformed, or only one of x_mm/y_mm is
+            given or either is not a finite number.
+        """
+        anchors = (self.x_mm, self.y_mm)
+        if any(a is not None for a in anchors):
+            if any(a is None or isinstance(a, bool) or not isinstance(a, (int, float))
+                   or not math.isfinite(float(a)) for a in anchors):
+                raise ValueError(tx("Posizione della scritta non valida: servono x_mm e y_mm "
+                                    "finiti, oppure nessuno dei due."))
         if self.face not in FACE_NAMES:
             raise ValueError(tx("Faccia non valida: {face!r} (ammesse: {FACE_NAMES})",
                                 face=self.face,

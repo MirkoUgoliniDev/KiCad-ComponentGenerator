@@ -1,4 +1,8 @@
-"""Persistent local history of artifacts installed or exported to KiCad."""
+"""@brief Persistent local history of artifacts installed or exported to KiCad.
+
+One JSON list per user, newest first, capped at MAX_RECORDS; writes are
+atomic so a crash never leaves a half-written history.
+"""
 from __future__ import annotations
 
 import json
@@ -16,12 +20,19 @@ MAX_RECORDS = 500
 
 
 def history_path() -> Path:
-    """Return the per-user KiCad export history path."""
+    """@brief Return the per-user KiCad export history path.
+
+    @return Path of the JSON history inside the user data directory.
+    """
     return user_data_dir() / HISTORY_FILENAME
 
 
 def load_history(path: Path | None = None) -> list[dict]:
-    """Load newest-first export records, returning an empty list on bad data."""
+    """@brief Load newest-first export records, returning an empty list on bad data.
+
+    @param path History file to read; None means `history_path()`.
+    @return Up to MAX_RECORDS dict records; [] when the file is missing or malformed.
+    """
     target = path or history_path()
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -34,7 +45,15 @@ def load_history(path: Path | None = None) -> list[dict]:
 
 def record_export(*, component: str, kind: str, source: str,
                   destination: str, path: Path | None = None) -> bool:
-    """Atomically add a successful KiCad export/install event to local history."""
+    """@brief Atomically add a successful KiCad export/install event to local history.
+
+    @param component Component name as installed.
+    @param kind What was delivered (preview, project library, global library).
+    @param source Folder the files came from.
+    @param destination Folder or table that received them.
+    @param path History file to update; None means `history_path()`.
+    @return True when the record was written, False when the write failed.
+    """
     target = path or history_path()
     record = {
         "component": str(component),

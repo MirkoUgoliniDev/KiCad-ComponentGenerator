@@ -27,6 +27,8 @@ from ..generators.castellated_module import (
     continuous_pad, pad_positions, style_has_through_hole,
 )
 from ..generators.pin_header import PinHeaderParams, pin_positions
+from ..core.package_geometry import PackageGeometry
+from .annotations import FaceTextAnnotation
 from .body_params import Body3DParams
 from .header_reuse import HeaderModelReuse, REUSE_PROGRESS
 from .measurement_uncertainty import (
@@ -1009,6 +1011,175 @@ def generate_3d_model(
     )
 
 
+def generate_single_package_3d_model(
+    package: PackageGeometry,
+    body: Body3DParams,
+    output_dir: Path,
+    freecadcmd_path: Optional[str] = None,
+    fillets: Optional[list] = None,
+    face_texts: Optional[list] = None,
+    font_file: str = DEFAULT_FONT_FILE,
+    progress=None,
+    model_progress=None,
+    cancel=None,
+    photo_scale_px_per_mm=None,
+) -> dict:
+    """@brief Build a generic single-part solid directly from its package geometry.
+
+    @param package Explicit pad geometry of the part (THT and/or SMD pins).
+    @param body Colours and fallback dimensions when the package gives none.
+    @param output_dir Project directory receiving the `.3dshapes` folder.
+    @return The `_run_freecad` result with a generic-model note appended.
+
+    This path intentionally makes no KiCad library, archive, or model-match
+    calls. Through-hole leads are cylindrical approximations; SMD terminals
+    are thin boxes sized from their land geometry until source documents give
+    more precise terminal dimensions.
+    """
+    pins = package.pins_seen_from_top()
+    length = package.body_length_mm or body.length_mm
+    width = package.body_width_mm or body.width_mm
+    height = package.body_height_mm or body.height_mm
+    centered = replace(body, length_mm=length, width_mm=width, height_mm=height,
+                       offset_x_mm=-length / 2, offset_y_mm=-width / 2,
+                       components=[], populated_board=False, show_pins_3d=True)
+    leads = []
+    terminals = []
+    for pin in pins:
+        if pin.pad_type == "thru_hole":
+            diameter = min(float(pin.drill_mm) * 0.65, 0.8)
+            leads.append([str(pin.number), pin.x_mm, pin.y_mm])
+        elif pin.pad_type == "smd":
+            terminals.append({
+                "name": f"Terminal_{pin.number}",
+                "x": pin.x_mm - pin.pad_length_mm / 2,
+                "y": pin.y_mm - pin.pad_width_mm / 2,
+                "z": -0.04,
+                "length_mm": pin.pad_length_mm,
+                "width_mm": pin.pad_width_mm,
+                "height_mm": 0.04,
+                "rotation_deg": pin.rotation_deg,
+                "color_hex": body.pin_color_hex,
+            })
+    if leads:
+        centered = replace(centered, pin_diameter_mm=diameter)
+    if progress:
+        progress(tx("Modello 3D generico del componente: nessuna ricerca nelle librerie KiCad."))
+    result = _run_freecad(
+        package.name or "Package", leads, centered, output_dir,
+        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=face_texts,
+        font_file=font_file, extra_boxes=terminals, progress=progress, cancel=cancel,
+    )
+    result.setdefault("notes", []).append(tx(
+        "Corpo package generico. Terminali THT cilindrici e terminali SMD ricavati dai pad: "
+        "verificare quote e forma sui documenti del componente."))
+    return result
+
+
+#: Glyph width of the FreeCAD font as a fraction of the font size: an
+#: ESTIMATE used only to keep a label clear of its pin and inside the body
+#: (Arial digits are about 0.55 of the size; 0.65 leaves a margin). A label
+#: is silkscreen, so a few tenths of a millimetre either way change nothing.
+GLYPH_WIDTH_FRACTION = 0.65
+#: Gap, in mm, between the edge of a lead and its printed number.
+PIN_LABEL_GAP_MM = 0.25
+#: Largest font size, in mm, of a pin number on the bottom face.
+PIN_LABEL_MAX_SIZE_MM = 1.0
+
+
+def pin_number_face_texts(pin_params: PinHeaderParams, body: Body3DParams) -> list:
+    """@brief Pin numbers printed on the bottom face of a single THT part, one per lead.
+
+    @param pin_params Validated pin grid of the part (positions, pitch, numbering).
+    @param body Body dimensions and offset; the pin diameter is the lead's.
+    @return FaceTextAnnotation list on face «bottom», one per populated pin,
+        centred beside the lead; empty when the grid has no pins.
+    @note Placement rule, the same for every part: the label moves from the
+        lead towards the centre of the body along the axis with fewer
+        distinct lead coordinates (Y for a DIP-style module and for a single
+        row, X for a single column), so it never sits between two
+        neighbouring leads. Font size: the largest of PIN_LABEL_MAX_SIZE_MM that
+        keeps the longest number, at GLYPH_WIDTH_FRACTION, within the free
+        space between the lead and the body centre on that axis. The label is
+        then clamped inside the body outline. Numbers only, no names: the
+        names are the symbol's job and would not fit beside a lead.
+    """
+    pins = list(pin_positions(pin_params))
+    if not pins:
+        return []
+    cx = body.offset_x_mm + body.length_mm / 2
+    cy = body.offset_y_mm + body.width_mm / 2
+    xs = sorted({round(x, 6) for _, x, _ in pins})
+    ys = sorted({round(y, 6) for _, _, y in pins})
+    along_y = len(ys) <= len(xs)   # rows apart on Y: label between the rows
+    lead_r = body.pin_diameter_mm / 2
+    longest = max(len(str(pin)) for pin, _, _ in pins)
+    labels = []
+    for pin, x, y in pins:
+        text = str(pin)
+        if along_y:
+            direction = 1.0 if y <= cy else -1.0
+            room = abs(cy - y) - lead_r - PIN_LABEL_GAP_MM
+        else:
+            direction = 1.0 if x <= cx else -1.0
+            room = abs(cx - x) - lead_r - PIN_LABEL_GAP_MM
+        # Extent of the label along the direction of travel: its height when
+        # moving along Y, its width when moving along X.
+        extent_per_mm = 1.0 if along_y else GLYPH_WIDTH_FRACTION * longest
+        size = min(PIN_LABEL_MAX_SIZE_MM, max(0.3, room / extent_per_mm))
+        half_w = GLYPH_WIDTH_FRACTION * longest * size / 2
+        half_h = size / 2
+        if along_y:
+            ax, ay = x, y + direction * (lead_r + PIN_LABEL_GAP_MM + half_h)
+        else:
+            ax, ay = x + direction * (lead_r + PIN_LABEL_GAP_MM + half_w), y
+        ax = min(max(ax, body.offset_x_mm + half_w), body.offset_x_mm + body.length_mm - half_w)
+        ay = min(max(ay, body.offset_y_mm + half_h), body.offset_y_mm + body.width_mm - half_h)
+        labels.append(FaceTextAnnotation(face="bottom", text=text, size_mm=round(size, 3),
+                                         x_mm=round(ax, 3), y_mm=round(ay, 3)))
+    return labels
+
+
+def generate_single_tht_3d_model(
+    pin_params: PinHeaderParams,
+    body: Body3DParams,
+    output_dir: Path,
+    freecadcmd_path: Optional[str] = None,
+    fillets: Optional[list] = None,
+    face_texts: Optional[list] = None,
+    font_file: str = DEFAULT_FONT_FILE,
+    progress=None,
+    model_progress=None,
+    cancel=None,
+    photo_scale_px_per_mm=None,
+) -> dict:
+    """@brief Build a simple single THT component directly, without library matching.
+
+    @param pin_params Pin grid of the part; validated here.
+    @param body Body dimensions, colours and the `pin_numbers_3d` choice.
+    @param output_dir Project directory receiving the `.3dshapes` folder.
+    @param face_texts Texts on the faces (the top-face writing from the GUI);
+        the pin numbers of `pin_number_face_texts` are appended when
+        `body.pin_numbers_3d` is set.
+    @return The `_run_freecad` result with a generic-model note appended.
+    """
+    pin_params.validate()
+    pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
+    texts = list(face_texts or [])
+    if body.pin_numbers_3d:
+        texts.extend(pin_number_face_texts(pin_params, body))
+    if progress:
+        progress(tx("Modello 3D THT generico del componente: nessuna ricerca nelle librerie KiCad."))
+    result = _run_freecad(
+        pin_params.name, pins, body, output_dir,
+        freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=texts,
+        font_file=font_file, progress=progress, cancel=cancel,
+    )
+    result.setdefault("notes", []).append(tx(
+        "Modello THT generico: verificare posizione e dimensioni dei reofori sui documenti del componente."))
+    return result
+
+
 def _generate_populated_tht(params, body, pins, output_dir, **options):
     """Build a populated PCB using matrix pin coordinates and centred photo boxes.
 
@@ -1274,6 +1445,7 @@ def _run_freecad(
             {
                 "face": t.face, "text": t.text, "size_mm": t.size_mm,
                 "thickness_mm": t.thickness_mm, "color_hex": t.color_hex,
+                "x_mm": t.x_mm, "y_mm": t.y_mm,
             }
             for t in face_texts
         ],
