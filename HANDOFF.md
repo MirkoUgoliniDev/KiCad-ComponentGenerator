@@ -5,7 +5,7 @@
 - Utente: «ora mi pare corretto», autorizza commit, push, merge in main e
   ritorno su ADVANCED. Esclusi rows_none_rev.pkl, tmp/, work/. Il database dei
   profili e' incluso (controllo segreti: nessuna chiave).
-- Contenuto: seconda chiamata dedicata alla numerazione dei pin con confronto
+- Commit ADVANCED: 37cfcf0. Contenuto: seconda chiamata dedicata alla numerazione dei pin con confronto
   e blocco, pin_map limitata ai pin presenti, numeri sotto accesi per default.
 
 ## 2026-10-10 - Seconda chiamata dedicata alla numerazione dei pin (FATTA, NON COMMITTATA)
