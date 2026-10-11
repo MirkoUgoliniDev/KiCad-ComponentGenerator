@@ -1,5 +1,20 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 11/10 mattina - ripresa nel pomeriggio dell'11/10
+
+- Tutto committato e pubblicato (`bde5837` + handoff `1837d59` su
+  `ADVANCED`, merge `4c5ff3c` su `main`). Albero pulito a parte gli
+  artefatti locali rows_none_rev.pkl, tmp/, work/.
+- PRIMO PASSO alla ripresa: rilanciare la suite completa in due meta'
+  (oggi girati solo i file toccati). POI chiedere all'utente, UNA domanda
+  alla volta: (1) campi obbligatori che inibiscono l'installazione: lista
+  proposta designatore + descrizione + parole chiave + datasheet, filtri
+  facoltativi; vuoto = errore; pulsanti di installazione disabilitati con
+  tooltip, niente «Installare comunque?»; «Applica ai file» e verifica
+  isolata attivi; riquadro metadati che si apre da solo quando blocca.
+  (2) «Regole KLC» poco chiaro: etichetta o messaggio? (3) etichetta
+  visibile accanto all'icona «Applica ai file».
+
 ## 2026-10-11 - COMMIT `bde5837` su `ADVANCED`, mergiato in `main`
 
 - Contiene TUTTO il lavoro del 10/10 sera (metadati, KLC, formato simbolo
