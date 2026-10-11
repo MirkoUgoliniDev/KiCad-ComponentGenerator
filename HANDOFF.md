@@ -1,5 +1,27 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-11 - COMMIT `bde5837` su `ADVANCED`, mergiato in `main`
+
+- Contiene TUTTO il lavoro del 10/10 sera (metadati, KLC, formato simbolo
+  KiCad 10, foro nel pad) e dell'11/10 (riquadro collassabile con titolo
+  sul bordo, scheda «Esportazioni», didascalia a capo, ritorno a
+  «Progetto» quando si spengono le anteprime). L'utente ha provato l'app
+  (VE12H-K) e chiesto lui commit, push e merge («intanto committa pusha
+  e mergia in main e ritorna qui»).
+- Suite: NON rieseguita per intero oggi. Ieri sera completa verde
+  (3305 + 3959, localizzazione 14 da sola); oggi solo i file toccati
+  (component_metadata_gui 24, kicad_tab_gate, automatic_generation,
+  contact_style_gui, project_tab_buttons, open_project_tabs,
+  single_tht_face_texts, identity, shortcuts, documentation,
+  message_localization 14 da sola): tutti verdi. Alla ripresa rilanciare
+  la suite completa in due meta' prima di altre modifiche.
+- Aperto, in attesa dell'utente: (1) campi obbligatori che inibiscono
+  l'installazione (proposta fatta, lista da confermare); (2) «Regole
+  KLC» poco chiaro (etichetta o messaggio); (3) etichetta visibile su
+  «Applica ai file» (proposta, non autorizzata).
+- Fuori dal commit, artefatti locali non tracciati: rows_none_rev.pkl,
+  tmp/, work/.
+
 ## 2026-10-11 - Didascalia «VISTA DALL'ALTO» a capo (FATTO, NON COMMITTATO) e campi obbligatori (PROPOSTO)
 
 - Fatto: QGraphicsTextItem con setTextWidth(max(larghezza disegno,
@@ -88,7 +110,7 @@
 
 ## FINE SESSIONE 10/10 sera - per chi riprende l'11/10
 
-- Branch `ADVANCED`, ultimo commit pubblicato e mergiato in main: `744604b`
+- Branch `ADVANCED`, ultimo commit pubblicato e mergiato in main: `744604b` (superato: vedi `bde5837` in testa)
   (fili ancorati). TUTTO il lavoro «Metadati / KLC / foro nel pad» (sezione
   sotto) e' NON committato: 12 file modificati + 5 nuovi (klc_checks.py e
   4 file di test). Suite completa verde (3305 + 3959, localizzazione 14).
