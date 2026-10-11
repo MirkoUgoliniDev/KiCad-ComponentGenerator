@@ -671,6 +671,8 @@ class CastellatedModuleParams:
     name: str = "CastellatedModule"
     description: str = ""
     tags: str = "castellated module SMD"
+    #: Datasheet URL or path for the footprint's "Datasheet" property; "" when unknown.
+    datasheet: str = ""
     body_length: float = 42.8
     body_width: float = 15.2
     sides: List[CastellatedSide] = field(default_factory=list)
@@ -2363,6 +2365,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
             "generato con kicadgen_tool"
         ),
         tags=params.tags,
+        datasheet=params.datasheet,
         attr="smd" if has_edge_pads else "through_hole",
     )
 

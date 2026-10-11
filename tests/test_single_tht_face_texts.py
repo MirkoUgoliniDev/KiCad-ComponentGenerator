@@ -422,15 +422,25 @@ def test_a_package_body_carries_the_pin_numbers_choice(window):
 
 
 def test_the_footprint_preview_says_it_is_the_top_view(window):
-    """User, 2026-10-10: the drawing must state which side it shows."""
-    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+    """User, 2026-10-10: the drawing must state which side it shows.
+    User, 2026-10-11: wrapped to the drawing width, not one long line."""
+    from PyQt6.QtWidgets import QGraphicsTextItem
+
+    def is_caption(item):
+        return isinstance(item, QGraphicsTextItem) and "VISTA DALL'ALTO" in item.toPlainText()
+
     _select_single_tht(window)
     window._draw_preview()
-    captions = [item.text() for item in window.preview_scene.items()
-                if isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text()]
+    captions = [item for item in window.preview_scene.items() if is_caption(item)]
     assert len(captions) == 1
-    top = min(item.sceneBoundingRect().top() for item in window.preview_scene.items()
-              if not (isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text()))
-    caption = next(item for item in window.preview_scene.items()
-                   if isinstance(item, QGraphicsSimpleTextItem) and "VISTA DALL'ALTO" in item.text())
+    caption = captions[0]
+    others = [item for item in window.preview_scene.items() if not is_caption(item)]
+    top = min(item.sceneBoundingRect().top() for item in others)
     assert caption.sceneBoundingRect().bottom() <= top, "above everything else"
+    drawing_width = max(item.sceneBoundingRect().right() for item in others) - min(
+        item.sceneBoundingRect().left() for item in others)
+    limit = max(drawing_width, window.VIEW_CAPTION_MIN_WIDTH_PX)
+    assert caption.sceneBoundingRect().width() <= limit + 1.0, "wrapped, not one long line"
+    assert caption.document().lineCount() >= 1
+    assert caption.boundingRect().height() > caption.document().firstBlock().layout().lineAt(0).height() * 1.5, (
+        "the long sentence takes more than one line at the drawing width")

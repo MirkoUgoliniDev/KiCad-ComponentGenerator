@@ -55,6 +55,8 @@ class PinHeaderParams:
     name: str = "PinHeader"
     description: str = ""
     tags: str = "pin header THT"
+    #: Datasheet URL or path for the footprint's "Datasheet" property; "" when unknown.
+    datasheet: str = ""
     rows: int = 2
     cols: int = 4
     pitch: float = 2.54
@@ -294,6 +296,7 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
             f"distanza righe {row_spacing}mm, generato con kicadgen_tool"
         ),
         tags=params.tags,
+        datasheet=params.datasheet,
         attr="through_hole",
     )
 

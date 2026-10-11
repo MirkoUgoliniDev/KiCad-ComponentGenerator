@@ -378,7 +378,7 @@ def test_inventory_relaunch_does_not_pair_ambiguous_sides(window):
 
 
 def test_the_style_is_reached_from_the_3d_tab(window):
-    assert window.tabs.count() == 5, "la tabella lati non esiste piu'; include il simbolo elettrico"
+    assert window.tabs.count() == 6, "la tabella lati non esiste piu'; include il simbolo elettrico e le esportazioni"
     assert window.contact_style_bar_3d.isHidden(), "senza modulo castellated non serve"
     castellated(window)
     assert not window.contact_style_bar_3d.isHidden()

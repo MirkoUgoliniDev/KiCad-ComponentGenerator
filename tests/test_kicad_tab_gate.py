@@ -51,3 +51,23 @@ def test_leaving_a_completed_project_moves_off_the_kicad_tab(window, tmp_path): 
     assert window.tabs.currentIndex() == KICAD
     window.field_name.setText("VUOTO")
     assert window.tabs.currentIndex() == 0 and not window.tabs.isTabEnabled(KICAD)
+
+
+# ── «Esportazioni» (user, 2026-10-11): the history table in a tab of its own ──
+
+def test_the_export_history_lives_in_its_own_always_enabled_tab(window, monkeypatch):  # noqa: F811
+    """@brief Positive: the table is in «Esportazioni», enabled without a project
+    and showing every record. Negative: the KiCad tab no longer holds it."""
+    exports = gui.TAB_EXPORTS
+    assert exports == window.tabs.count() - 1
+    assert window.tabs.tabText(exports) == window.i18n.tr("tab.exports.name")
+    assert window.tabs.widget(exports).isAncestorOf(window.kicad_export_table)
+    assert not window.tabs.widget(KICAD).isAncestorOf(window.kicad_export_table)
+    window.field_name.setText("")
+    window._refresh_output_actions()
+    assert window.tabs.isTabEnabled(exports) and not window.tabs.isTabEnabled(KICAD)
+    records = [{"component": f"C{i}", "kind": "project", "destination": f"d{i}",
+                "timestamp": "2026-10-11T10:00:00"} for i in range(15)]
+    monkeypatch.setattr(gui, "load_kicad_export_history", lambda: records)
+    window._refresh_kicad_export_history()
+    assert window.kicad_export_table.rowCount() == 15

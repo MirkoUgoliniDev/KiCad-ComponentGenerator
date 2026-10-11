@@ -220,11 +220,16 @@ class Footprint:
     """@brief Complete KiCad footprint that renders and saves as a .kicad_mod file.
 
     Footprint KiCad completo, esportabile come file .kicad_mod.
+
+    @param datasheet Datasheet URL or path; "" when unknown. It fills the
+        hidden "Datasheet" property, as `description` fills "Description".
     """
 
     name: str
     description: str = ""
     tags: str = ""
+    #: Datasheet URL or path, written to the "Datasheet" property; "" when unknown.
+    datasheet: str = ""
     attr: Optional[str] = None  # "through_hole" | "smd" | None
     reference_at: Point = (0.0, -2.0)
     value_at: Point = (0.0, 2.0)
@@ -267,8 +272,10 @@ class Footprint:
 
         root.add(self._property_node("Reference", "REF**", self.reference_at, "F.SilkS"))
         root.add(self._property_node("Value", self.name, self.value_at, "F.Fab"))
-        root.add(self._property_node("Datasheet", "", (0, 0), "F.Fab", hide=True))
-        root.add(self._property_node("Description", "", (0, 0), "F.Fab", hide=True))
+        # The hidden properties repeat descr/datasheet: KiCad's footprint
+        # editor edits the properties, so an empty one looks like missing data.
+        root.add(self._property_node("Datasheet", self.datasheet, (0, 0), "F.Fab", hide=True))
+        root.add(self._property_node("Description", self.description, (0, 0), "F.Fab", hide=True))
 
         if self.attr:
             root.add(sx("attr", Symbol(self.attr)))
