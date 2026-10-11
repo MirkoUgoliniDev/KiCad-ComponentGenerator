@@ -1,5 +1,289 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-11 - COMMIT `bde5837` su `ADVANCED`, mergiato in `main`
+
+- Contiene TUTTO il lavoro del 10/10 sera (metadati, KLC, formato simbolo
+  KiCad 10, foro nel pad) e dell'11/10 (riquadro collassabile con titolo
+  sul bordo, scheda «Esportazioni», didascalia a capo, ritorno a
+  «Progetto» quando si spengono le anteprime). L'utente ha provato l'app
+  (VE12H-K) e chiesto lui commit, push e merge («intanto committa pusha
+  e mergia in main e ritorna qui»).
+- Suite: NON rieseguita per intero oggi. Ieri sera completa verde
+  (3305 + 3959, localizzazione 14 da sola); oggi solo i file toccati
+  (component_metadata_gui 24, kicad_tab_gate, automatic_generation,
+  contact_style_gui, project_tab_buttons, open_project_tabs,
+  single_tht_face_texts, identity, shortcuts, documentation,
+  message_localization 14 da sola): tutti verdi. Alla ripresa rilanciare
+  la suite completa in due meta' prima di altre modifiche.
+- Aperto, in attesa dell'utente: (1) campi obbligatori che inibiscono
+  l'installazione (proposta fatta, lista da confermare); (2) «Regole
+  KLC» poco chiaro (etichetta o messaggio); (3) etichetta visibile su
+  «Applica ai file» (proposta, non autorizzata).
+- Fuori dal commit, artefatti locali non tracciati: rows_none_rev.pkl,
+  tmp/, work/.
+
+## 2026-10-11 - Didascalia «VISTA DALL'ALTO» a capo (FATTO, NON COMMITTATO) e campi obbligatori (PROPOSTO)
+
+- Fatto: QGraphicsTextItem con setTextWidth(max(larghezza disegno,
+  VIEW_CAPTION_MIN_WIDTH_PX = 360)); test aggiornato (29 verdi).
+- Difetto trovato e corretto dalla scheda «Esportazioni»: aprendo un
+  progetto vuoto dall'anteprima, Qt cadeva su «Esportazioni» (prima
+  scheda abilitata) invece che su «Progetto»; ora
+  `_set_acquisition_tabs_enabled` torna esplicitamente a TAB_PROJECT
+  quando spegne la scheda corrente (test_open_project_tabs verde, 78 in
+  totale con gate, automatic_generation, face_texts, documentation).
+
+- Utente (screenshot anteprima footprint): «qui vai a capo»: la didascalia
+  su una riga sola e' piu' larga del disegno e lo rimpicciolisce.
+  Interpretazione: `_add_view_caption` passa a QGraphicsTextItem con
+  setTextWidth = larghezza del disegno, con un pavimento di 360 px perche'
+  un pezzo piccolo non spezzi il testo in dieci righe (euristica dichiarata
+  nel codice). Stessa stringa i18n. Test in test_single_tht_face_texts
+  aggiornato (QGraphicsTextItem/toPlainText) + asserzione sulla larghezza.
+- Utente: «se ci sono campi obbligatori allora deve essere inibita
+  l'esportazione finche' non tutti i campi sono compilati». Proposta
+  fatta, NON ancora confermata: obbligatori designatore, descrizione,
+  parole chiave, datasheet (filtri facoltativi); vuoto = errore ⛔;
+  con errori i pulsanti di installazione disabilitati con tooltip e senza
+  «Installare comunque?»; «Applica ai file» e la verifica isolata restano
+  attivi; il riquadro metadati si apre da solo quando blocca.
+- Ancora in coda: «Regole KLC» poco chiaro (etichetta o messaggio).
+
+## 2026-10-11 - Scheda «Esportazioni» (FATTO, NON COMMITTATO, da provare nell'app)
+
+- Fatto: `TAB_EXPORTS = 5`, `_build_exports_tab` (intro + tabella a tutta
+  altezza, senza il tetto di 12 righe), icona assets/tab-exports.svg,
+  chiavi i18n `tab.exports.name` + «Scheda Esportazioni» + intro (4 lingue),
+  Ctrl+6, setTabText nel cambio lingua; la scheda e' sempre abilitata (lo
+  storico e' del computer, non del progetto). Test: tab-count 5 -> 6 in
+  test_automatic_generation (2) e test_contact_style_gui; nuovo test in
+  test_kicad_tab_gate (posizione, tabella nella nuova scheda e non in KiCad,
+  abilitata senza progetto, 15 righe). Verdi: gate, automatic_generation,
+  contact_style_gui, component_metadata_gui, documentation,
+  project_tab_buttons (137), message_localization da solo (14),
+  identity + shortcuts (8). DB profili riseminato (ProfileStore).
+
+- Utente (11/10, screenshot della tabella «Componenti esportati in KiCad»):
+  «questo lo metterei in un nuovo tab»; proposta accettata («ok per ora va
+  bene»): sesta scheda «Esportazioni» dopo «KiCad», con la stessa tabella a
+  tutta altezza; nessun passo nuovo nella barra del workflow; la scheda
+  KiCad conserva file pronti, metadati, verifica, installazione, cartella.
+- Piano: `TAB_EXPORTS = 5`, icona `tab-exports.svg` in TAB_ICONS, chiave
+  i18n `tab.exports.name` (4 lingue; e' una stringa NUOVA: riseminare il DB
+  dei profili aprendo ProfileStore una volta), `_build_exports_tab`,
+  setTabText in `_on_language_changed`, scorciatoia Ctrl+6 se esiste lo
+  schema per le altre; il tetto di 12 righe della tabella salta (scheda
+  intera). Test: tab_count 6, testo e tabella nella scheda, retranslate.
+- Resta in coda, NON autorizzato: il punto «Regole KLC» poco chiaro
+  (etichetta o messaggio: domanda posta, risposta non ancora data).
+
+## 2026-10-11 - Riquadro «Metadati del componente» collassabile (FATTO, NON COMMITTATO)
+
+- Prima versione (QToolButton dentro la cornice) BOCCIATA dall'utente:
+  «uniforma i titoli dei blocchi, va posizionato li'» (sul bordo come gli
+  altri). Rifatta: nuovo `kicadgen/gui/collapsible_group.py`
+  (`CollapsibleGroupBox`: titolo sul bordo con freccia ▸/▾, clic sul
+  titolo = toggle via SC_GroupBoxLabel, `setTitle` sovrascritto cosi' la
+  ritraduzione i18n conserva la freccia; `i18n_title_source` fissato alla
+  stringa nuda). `group_metadata` e' questa classe, `metadata_body` =
+  `group.body`. Tooltip nuovo nel catalogo (4 lingue), DB riseminato.
+  Test: 24 in test_component_metadata_gui + documentation, localizzazione
+  14 da sola. Da provare nell'app.
+- Domanda dell'utente sull'icona con la spunta a destra dei filtri: e'
+  «Applica ai file» (testo solo nel tooltip). Proposto di mostrargli
+  l'etichetta accanto all'icona: NON ancora autorizzato.
+
+- Utente (11/10, dopo aver provato l'app con VE12H-K, screenshot della
+  scheda KiCad): «rendi collassabile e collassata di default questa
+  sezione». Riguarda SOLO il riquadro «Metadati del componente».
+- Interpretazione: stesso schema di «Mostra percorsi completi» (QToolButton
+  con freccia, `_toggle_kicad_file_paths`): il gruppo perde il titolo,
+  in testa un pulsante-freccia con il testo «Metadati del componente»
+  (stringa i18n gia' esistente: nessuna nuova stringa, niente riseminatura
+  del DB) e sotto un widget `metadata_body` con il form, nascosto
+  all'avvio. I campi, i segnali e l'elenco KLC restano identici;
+  `group_metadata` continua a essere il QGroupBox abilitato con il
+  footprint. Non si apre da solo quando compaiono avvisi KLC (non
+  richiesto): se serve, chiedere.
+- Dubbio da verificare: un test di test_component_metadata_gui.py che
+  controlli la visibilita' dei campi potrebbe dover aprire il riquadro.
+
+## FINE SESSIONE 10/10 sera - per chi riprende l'11/10
+
+- Branch `ADVANCED`, ultimo commit pubblicato e mergiato in main: `744604b` (superato: vedi `bde5837` in testa)
+  (fili ancorati). TUTTO il lavoro «Metadati / KLC / foro nel pad» (sezione
+  sotto) e' NON committato: 12 file modificati + 5 nuovi (klc_checks.py e
+  4 file di test). Suite completa verde (3305 + 3959, localizzazione 14).
+- L'utente NON ha ancora provato l'app con le modifiche (ha chiesto di
+  fermarsi e riprendere domani). PRIMO PASSO domani: fargli riavviare l'app,
+  aprire VE12H-K, scheda KiCad -> «Metadati del componente», compilare,
+  «Applica ai file», controllare l'elenco KLC; poi modifica di un pad THT
+  con il campo «Foro». Se va bene: commit (con data/analysis_profiles.sqlite3
+  dopo il controllo segreti), push, merge in main, ritorno su ADVANCED,
+  hash nell'handoff.
+- Decisioni dell'utente di stasera: niente spostamento/nascondimento dei
+  nomi dei pin («voglio conformarmi a KiCad»); maschera dei metadati nella
+  scheda KiCad (sua proposta); designatore scritto a mano (il programma
+  propone sempre «U»: nessun dato sulla funzione del pezzo, limite
+  dichiarato e detto all'utente).
+- Trappole: i test GUI del riquadro richiedono un footprint esistente
+  (il gruppo e' un gate); test_message_localization va eseguito DA SOLO;
+  dopo ogni stringa i18n riseminare il DB (ProfileStore una volta);
+  gli heredoc bash con apostrofi/backslash falliscono nello strumento:
+  scrivere gli script di patch su file con Write e lanciarli.
+- Possibili seguiti NON autorizzati: scostamento dei nomi dei pin come
+  opzione; prompt delle posizioni dei pad nel selettore del profilo;
+  descrizione del footprint package senza la nota generica quando l'utente
+  ne scrive una (oggi la sua sostituisce il testo generico: fatto).
+
+## 2026-10-10 sera - Metadati del componente (scheda KiCad), regole KLC, foro nel pad (FATTO, NON COMMITTATO)
+
+- Utente: «si possono inserire metadati nel componente? voglio un componente
+  completamente aderente alle regole di KiCad»; «facciamo una maschera per
+  inserire/editare questi metadati»; «non e' il caso di inserirla alla fine
+  nel tab KiCad?» (si'); «poi qui [Modifica pad N dei pad espliciti] devi
+  aggiungere il diametro del foro»; «ok fai un lavoro professionale».
+  Decisione scartata dall'utente: spostare/nascondere i nomi dei pin
+  («voglio conformarmi a KiCad»: nomi dentro il corpo, offset 0.508).
+- STATO OGGI: simbolo scritto nel formato KiCad 6 (20211014) con Reference,
+  Value, Footprint nascosto, Datasheet vuoto; footprint (formato 20260206,
+  KiCad 10 installato in C:/Program Files/KiCad/10.0) con descr/tags/attr
+  ma Datasheet e Description vuoti. La scheda Progetto ha gia'
+  field_description e field_tags (descr/tags del footprint).
+- PIANO. Agente G (generatori/core/servizi, MAI i18n.py ne' main_window):
+  (1) symbol.py: formato KiCad 10 (version 20251024, generator "kicadgen",
+  exclude_from_sim/in_bom/on_board/in_pos_files, property senza (id),
+  (hide yes), pin come la libreria Relay.kicad_sym); `SymbolMetadata`
+  (reference, description, keywords, datasheet, fp_filters) -> property
+  Reference/Value/Footprint/Datasheet/Description/ki_keywords/ki_fp_filters;
+  (2) core/footprint.py: campo `datasheet`, property Datasheet e Description
+  riempite; i tre generatori (package, pin_header, castellated) passano
+  datasheet; (3) nuovo services/klc_checks.py: regole KLC verificabili dai
+  dati (designatore, descrizione, parole chiave, datasheet URL, filtri,
+  nome senza caratteri vietati, griglia/lunghezza pin, testi 1.27, bordo
+  0.254 fill background, pin duplicati/sovrapposti, footprint: nome, attr,
+  courtyard/fab se presenti) con Finding(code, severity, message tx());
+  (4) test, inclusa rilettura con kicad-cli (skip se assente).
+  Agente H (GUI + i18n + test GUI): riquadro «Metadati del componente» nella
+  scheda KiCad fra «File pronti» e «Verifica» (designatore proposto dalla
+  tipologia, descrizione e parole chiave SPECCHIATE con field_description/
+  field_tags, datasheet, filtri footprint proposti da `<footprint>*`),
+  stato nel progetto, «Applica ai file» (riesporta simbolo se gia' esportato
+  + footprint_only), elenco KLC vivo; campo «Foro:» in _edit_package_pad
+  solo per pad con drill_mm (validate() rifiuta foro >= lato minore).
+  Interfacce concordate: symbol.serialize_symbol/export_symbol(..., metadata=
+  SymbolMetadata|None); Footprint(datasheet=''); generatori con `datasheet`;
+  klc_checks.check_metadata(meta: dict, footprint_name) / check_symbol_text
+  (text) / check_footprint_text(text) -> list[Finding].
+- G FATTO (generatori): symbol.py formato 20251024 (exclude_from_sim,
+  in_pos_files, duplicate_pin_numbers_are_jumpers, property senza id,
+  (hide yes), embedded_fonts no), `SymbolMetadata`, validazione
+  (designatore solo lettere, testi su una riga, datasheet senza spazi);
+  Footprint.datasheet + property Datasheet/Description riempite;
+  PinHeaderParams/CastellatedModuleParams.datasheet, build_package(datasheet=);
+  services/klc_checks.py (Finding, check_metadata/check_symbol_text/
+  check_footprint_text/check_all, parser riusato da symbol_glyphs, corpo =
+  rettangolo piu' grande); test_klc_checks (49), test_symbol_kicad10_format
+  (27, due con kicad-cli 10 reale: sym/fp export svg esito 0). Digest
+  fissati di test_contact_style/test_fixG_generators: `_uuidless` azzera
+  SOLO il valore della property Description (test che lo dimostra).
+  klc_checks usa messages.tx (i18n.py importa Qt).
+- H FATTO (GUI): _build_metadata_group nella scheda KiCad (field_reference
+  con validatore lettere, field_meta_description/field_meta_keywords
+  SPECCHIATI sui TextValue field_description/field_tags con
+  _mirror_text_value, field_datasheet, field_fp_filters, btn_apply_metadata
+  -> _apply_metadata_to_files = salva + _generate(footprint_only) [il
+  simbolo viene riesportato da _on_generated con metadata=], klc_list con
+  ⛔/⚠, _confirm_klc_errors prima di _install_kicad_library (solo errori);
+  stato `metadata` {reference, datasheet, fp_filters} nel progetto
+  (_restore_metadata_state, progetto vecchio non sporco); «Foro:» in
+  _edit_package_pad solo con drill_mm. workers.GenerateWorker.datasheet.
+  LIMITE DICHIARATO dall'agente: proposed_reference restituisce sempre «U»
+  perche' nessun dato del progetto dice la FUNZIONE del pezzo (J/K/R non
+  deducibili da ingombro e piedini; regola «niente nomi»): l'utente lo
+  scrive. i18n +20 GUI +39 KLC (4 lingue, DB riseminato).
+  test_component_metadata_gui (18), test_package_pad_dialog (3).
+- COORDINATORE: build_package(description=) + GenerateWorker.description
+  (la descrizione del progetto arrivava solo a header/castellated), test
+  aggiunto. Revisore avversariale in sola lettura lanciato sull'intero
+  diff; suite completa in due meta' (.venv/claude-suite-A/B.log) +
+  test_message_localization da solo (.venv/claude-suite-L.log) in corso.
+- SUITE COMPLETA (due meta' + localizzazione da sola): 3301 + 3957 + 14
+  passati, 11 saltati, 2 xfail, 2 falliti -> entrambi i test di
+  installazione usavano un footprint finto SENZA pad: la nuova conferma
+  KLC chiedeva. Fixture _write_complete_kicad_output con attr + un pad: verdi.
+- REVISORE (sola lettura) 7 rilevazioni, IN CORREZIONE: (1 MEDIO) datasheet
+  con spazi (percorso Windows): footprint lo scrive, il simbolo rifiuta e
+  resta stantio con una sola riga di log -> spazi ammessi (solo caratteri
+  di controllo vietati), KLC: spazi = avviso; «Applica ai file» si ferma
+  sugli errori e se l'export del simbolo fallisce; (2 MEDIO) pin_overlap
+  conta i pin di TUTTE le unita' insieme e i pin impilati (S4.3) -> per
+  unita', pin nascosto con lo stesso nome non e' sovrapposizione; (3)
+  pin_names offset assente = predefinito 0.508, nessun avviso; (4) Applica
+  durante un worker loggava «in rigenerazione» a vuoto -> rifiuto esplicito
+  se c'e' lavoro in corso; (5) pin_length: avviso solo se < 2.54 o non
+  multiplo di 1.27 (S4.1); (6) footprint senza pad = avviso, non errore;
+  (7) restore del designatore filtra le stringhe non alfabetiche.
+  SANO: formato KiCad 10 verificato contro Relay.kicad_sym, escaping con
+  kicad-cli (export svg e upgrade), nessun parsing del simbolo in
+  kicad_library, specchiatura senza loop, restore/dirty, pad dialog indice
+  giusto, i18n 59+42 chiavi, test positivi/negativi reali.
+- REVISIONE CORRETTA (coordinatore, sera): (1) symbol._datasheet accetta
+  spazi (solo caratteri di controllo vietati); klc_checks: spazi = avviso
+  `datasheet_blanks`, controllo = errore `datasheet_format`;
+  _apply_metadata_to_files rifiuta con lavoro in corso (info) e con errori
+  KLC (avviso «Correggi prima gli errori…»), logga «in rigenerazione» solo
+  se _generate (ora -> bool) ha davvero avviato il worker, altrimenti
+  «salvati nel progetto; riscritti alla prossima generazione»;
+  (2) pin_overlap per unita' (_unit_pins) e pile legali S4.3 (_is_pin_stack:
+  stesso nome, al piu' uno visibile; `hide` KiCad 6 e `(hide yes)`);
+  (3) pin_names offset assente = 0.508: avviso solo se presente e diverso
+  (PIN_NAME_OFFSET_MM); (5) pin_length: avviso solo < 2.54 o non multiplo di
+  1.27 (PIN_LENGTH_STEP_MM); (6) footprint senza pad = avviso;
+  (7) _restore_metadata_state scarta un designatore non alfabetico.
+  i18n +3 (4 lingue, DB riseminato: 11824 righe). Test realineati/aggiunti
+  (klc: unita'/pile/offset/lunghezze/pad; GUI: Applica rifiutato con
+  lavoro in corso e con errori, percorso con spazi in entrambi i file,
+  restore «U1» scartato; formato: spazi accettati). 292 verdi sulle suite
+  toccate + localizzazione 14 da sola. Suite completa in due meta' RILANCIATA
+  (.venv/claude-suite-A2/B2.log).
+- SUITE COMPLETA dopo le correzioni: 3305 + 3959 passati, 11 saltati, 2 xfail,
+  19 sottotest, 0 falliti (+ localizzazione 14 da sola). App da riavviare.
+- NON committato finche' l'utente non prova.
+- AGENTE H, FATTO (10/10, NON committato), test: 21 nuovi
+  (test_component_metadata_gui.py 18, test_package_pad_dialog.py 3) +
+  regressione mirata 184+216+14 verdi (kicad_tab_gate, project_config/switch,
+  i18n, untranslated, documentation, open_project_tabs, project_tab_buttons,
+  project_wizard, package_project_gui, kicad_library, component_check,
+  klc_checks, symbol_*, package_*, message_localization da solo). Catalogo:
+  +20 voci della scheda KiCad e +39 voci dei messaggi tx() di klc_checks.py
+  (4 lingue, DB profili riseminato aprendo ProfileStore). Correzione al
+  piano: «Applica ai file» NON riesporta il simbolo da solo: lo fa gia'
+  `_on_generated` dopo il footprint (unica via di scrittura, con
+  `metadata=`), quindi la seconda chiamata era un doppione ed e' stata
+  tolta. Dettaglio del lavoro svolto:
+  file toccati main_window.py, i18n.py,
+  workers.py (UNA riga: `datasheet` del GenerateWorker passato a
+  build_package, perche' PackageGeometry non ha il campo e il worker e' il
+  solo punto che chiama build_package per i file), test nuovi
+  tests/test_component_metadata_gui.py e tests/test_package_pad_dialog.py.
+  Scelte: (a) descrizione/parole chiave della scheda KiCad sono VISTE di
+  field_description/field_tags (TextValue, nessun widget nel tab Progetto):
+  textChanged -> setText del TextValue, on_change -> setText del QLineEdit,
+  nessun ciclo perche' entrambi notificano solo se il testo cambia;
+  (b) designatore e filtri: campo vuoto = segue la proposta (placeholder),
+  valore effettivo in `_effective_reference`/`_effective_fp_filters`; la
+  proposta del designatore e' una tabella per FAMIGLIA DI TIPOLOGIA
+  (single_tht/single_smd/aggregate_tht/aggregate_castellated) e per famiglia
+  di package: tutte danno «U», perche' nessun dato del progetto dice la
+  FUNZIONE (un connettore e un rele' hanno lo stesso ingombro): dichiarato
+  nel docstring, non e' una regola per nome; (c) stato progetto chiave
+  `metadata` = {reference, datasheet, fp_filters}; assente nei progetti
+  vecchi = campi vuoti, non sporca (lo stato salvato si fotografa dopo
+  l'applicazione); (d) errori KLC: domanda di conferma in
+  `_install_kicad_library` (vale per progetto e globale); avvisi non
+  bloccano; (e) «Foro:» in _edit_package_pad solo con pin.drill_mm non None.
+
 ## 2026-10-10 - Fili ancorati e editor piu' CAD (FATTO, commit e575af2)
 
 - Utente: «i fili devono restare agganciati: spostando un elemento si porta

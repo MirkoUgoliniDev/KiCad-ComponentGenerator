@@ -110,12 +110,13 @@ from ..services.messages import tx
 
 #: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
 #: delle barre di icone.
-TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-symbol.svg", "tab-model3d.svg", "tab-kicad.svg")
+TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-symbol.svg", "tab-model3d.svg", "tab-kicad.svg",
+             "tab-exports.svg")
 
 #: Positions of the tabs in `MainWindow.tabs`. Footprint 2D and Genera were
 #: removed on 2026-09-26 with the «Utente avanzato» mode; their parameters
 #: live in `component_state` values, not in widgets.
-TAB_PROJECT, TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D, TAB_KICAD = range(5)
+TAB_PROJECT, TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D, TAB_KICAD, TAB_EXPORTS = range(6)
 
 #: I tre passi di una generazione, come li mostra la modale (utente,
 #: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
@@ -192,6 +193,45 @@ _BODY_OVERRIDE_UNSET = object()
 _PROJECT_KIND_BOARD = "board_module"
 _PROJECT_KIND_SINGLE = "single_component"
 _PROJECT_KINDS = {_PROJECT_KIND_BOARD, _PROJECT_KIND_SINGLE}
+
+#: Designator prefix proposed from the DECLARED data of a project: the family
+#: of its component type (`services/component_types.py`) and, for a single
+#: component, the package family (`core/package_geometry.PACKAGE_FAMILIES`).
+#: Every value is «U» on purpose: a board module is one device, and an IC
+#: package (DIP, SOIC, QFN...) is a device too. No family in the code names
+#: the FUNCTION of a part: a connector («J»), a relay («K») or a resistor
+#: («R») is not deducible from its envelope or lead count (a U.FL and a board
+#: jack can measure the same, a DIP relay and a DIP IC share the grid), so the
+#: prefix is proposed only where the data decide it and the field stays
+#: editable. Keyed by declared attributes, never by part names.
+REFERENCE_BY_TYPE_FAMILY = {
+    "aggregate_tht": "U", "aggregate_castellated": "U",
+    "single_tht": "U", "single_smd": "U",
+}
+REFERENCE_BY_PACKAGE_FAMILY = {
+    "dip": "U", "sip": "U", "soic": "U", "tssop": "U", "qfn": "U", "qfp": "U",
+    "module": "U", "castellated": "U",
+}
+#: KiCad's generic prefix when nothing above applies (KLC S6.1 example).
+DEFAULT_REFERENCE = "U"
+
+
+def proposed_reference(type_family: str, package_family: str | None = None) -> str:
+    """@brief Designator prefix proposed for a project from its declared families.
+
+    @param type_family Family of the chosen component type ('single_tht',
+        'single_smd', 'aggregate_tht', 'aggregate_castellated' or '').
+    @param package_family Family of the explicit package geometry, when the
+        project has one (`PackageGeometry.family`), else None.
+    @return Letters-only prefix; `DEFAULT_REFERENCE` when neither table
+        knows the input.
+    @note See `REFERENCE_BY_TYPE_FAMILY`: the tables are the only place the
+        proposal comes from, so a new family with a different prefix is one
+        table entry, not a new rule.
+    """
+    if package_family in REFERENCE_BY_PACKAGE_FAMILY:
+        return REFERENCE_BY_PACKAGE_FAMILY[package_family]
+    return REFERENCE_BY_TYPE_FAMILY.get(type_family or "", DEFAULT_REFERENCE)
 
 #: Tipo di contatto di un lato castellated, nel caso in cui il generatore
 #: installato non esponga ancora le proprie costanti. I valori sono quelli
@@ -1785,6 +1825,7 @@ class MainWindow(QMainWindow):
         ("Ctrl+3", "Scheda Simbolo elettrico", "_shortcut_tab_symbol"),
         ("Ctrl+4", "Scheda Modello 3D", "_shortcut_tab_model_3d"),
         ("Ctrl+5", "Scheda KiCad", "_shortcut_tab_kicad"),
+        ("Ctrl+6", "Scheda Esportazioni", "_shortcut_tab_exports"),
         ("F5", "Rigenera il modello 3D (FreeCAD, gratuito)", "_shortcut_regenerate_3d"),
         ("Ctrl+E", "Modifica componenti", "_shortcut_edit_components"),
         ("Ctrl+L", "Apri il log AI", "_shortcut_ai_log"),
@@ -1829,6 +1870,9 @@ class MainWindow(QMainWindow):
 
     def _shortcut_tab_kicad(self) -> None:
         self._shortcut_tab(TAB_KICAD)
+
+    def _shortcut_tab_exports(self) -> None:
+        self._shortcut_tab(TAB_EXPORTS)
 
     def _click_if_available(self, button) -> None:
         """Press a command only when the interface offers it (visible and enabled)."""
@@ -2084,6 +2128,7 @@ class MainWindow(QMainWindow):
         symbol_tab = self._build_symbol_tab()
         model_3d_tab = self._build_3d_tab()
         kicad_tab = self._build_kicad_tab()
+        exports_tab = self._build_exports_tab()
 
         language_row = QHBoxLayout()
         language_row.setSpacing(10)
@@ -2124,6 +2169,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(symbol_tab, self.i18n.tr("tab.symbol.name"))
         self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d.name"))
         self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad.name"))
+        self.tabs.addTab(exports_tab, self.i18n.tr("tab.exports.name"))
         # Icone a linea nello stile delle barre, al posto delle emoji a colori
         # che stavano nel titolo (utente, 2026-09-24: «stonata con il resto»).
         for index, asset in enumerate(TAB_ICONS):
@@ -2205,6 +2251,7 @@ class MainWindow(QMainWindow):
         self.symbol_tab.retranslate()
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
+        self.tabs.setTabText(TAB_EXPORTS, self.i18n.tr("tab.exports.name"))
         self.i18n.retranslate_widgets(self)
         self.project_wizard.retranslate()
         self._refresh_ai_tools_summary()
@@ -2279,8 +2326,16 @@ class MainWindow(QMainWindow):
         combo.blockSignals(blocked)
 
     def _set_acquisition_tabs_enabled(self, enabled: bool) -> None:
-        """Enable previews only after the first successful parameter acquisition."""
-        for index in (TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D):
+        """@brief Enable previews only after the first successful parameter acquisition.
+
+        @note When the current tab is one being switched off, go to «Progetto»
+            explicitly: Qt would otherwise land on the next enabled tab, which
+            since «Esportazioni» exists is the history, not the project.
+        """
+        indices = (TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D)
+        if not enabled and self.tabs.currentIndex() in indices:
+            self.tabs.setCurrentIndex(TAB_PROJECT)
+        for index in indices:
             self.tabs.setTabEnabled(index, enabled)
 
     def _refresh_preview_tabs(self, footprint_available: bool) -> None:
@@ -3567,6 +3622,9 @@ class MainWindow(QMainWindow):
                 action.setToolTip(rendered)
         # Verification must remain reachable when a footprint lacks its STEP.
         self._refresh_kicad_tab(footprint_available)
+        if hasattr(self, "group_metadata"):
+            self.group_metadata.setEnabled(footprint_available)
+            self._refresh_metadata_proposals()
         if hasattr(self, "tabs"):
             self._refresh_preview_tabs(footprint_available)
         if hasattr(self, "label_kicad_footprint"):
@@ -6505,6 +6563,7 @@ class MainWindow(QMainWindow):
                                   "name": self._component_name()}
                                  if self.package_geometry is not None else None),
             "host_mounting": self._mounting_state(),
+            "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
@@ -6663,6 +6722,8 @@ class MainWindow(QMainWindow):
         self._restore_mounting_state(state.get("host_mounting"))
         self._refresh_type_effect()
         self.package_geometry = package_geometry
+        # After the package: the designator proposal reads its family.
+        self._restore_metadata_state(state.get("metadata"))
         self._set_regen_busy(False)
         if skipped:
             self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
@@ -8615,6 +8676,7 @@ class MainWindow(QMainWindow):
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
             tags=self.field_tags.text().strip(),
+            datasheet=self._effective_datasheet(),
             body_length=self.field_cast_body_length.value(),
             body_width=self.field_cast_body_width.value(),
             # Default dei lati senza misura propria: il land pattern di
@@ -8861,6 +8923,7 @@ class MainWindow(QMainWindow):
         self.btn_export_symbol.setEnabled(self.symbol_tab.export_button.isEnabled())
         _align_form_labels(artifacts_form)
         outer.addWidget(artifacts_group)
+        outer.addWidget(self._build_metadata_group())
 
         review_group = QGroupBox("Verifica prima dell’installazione")
         review_layout = QVBoxLayout(review_group)
@@ -8906,28 +8969,6 @@ class MainWindow(QMainWindow):
             self._note_with_icons(install_note, self.btn_export, self.btn_install_global))
         outer.addWidget(install_group)
 
-        history_group = QGroupBox("Componenti esportati in KiCad")
-        history_layout = QVBoxLayout(history_group)
-        self.kicad_export_table = QTableWidget(0, 4)
-        self.kicad_export_table.setHorizontalHeaderLabels(
-            ["Componente", "Esportazione", "Destinazione", "Data"])
-        self.kicad_export_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.kicad_export_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.kicad_export_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.kicad_export_table.verticalHeader().setVisible(False)
-        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents)
-        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
-        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch)
-        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeMode.ResizeToContents)
-        self.kicad_export_table.setMaximumHeight(190)
-        history_layout.addWidget(self.kicad_export_table)
-        self._refresh_kicad_export_history()
-        outer.addWidget(history_group)
-
         # La riga in fondo sta in un riquadro come le altre (utente,
         # 2026-09-24). Lo stato resta TESTO: e' un esito da leggere subito, non
         # il nome di un comando da scoprire passando col mouse.
@@ -8947,6 +8988,331 @@ class MainWindow(QMainWindow):
         outer.addStretch()
         self._refresh_output_actions()
         return tab
+
+    def _build_exports_tab(self) -> QWidget:
+        """@brief Build «Esportazioni»: the persistent list of KiCad exports.
+
+        @return The tab widget, always enabled.
+        @note The history is global to the installation, not to the open
+            project (user, 2026-10-11: moved out of the KiCad tab into its
+            own tab, where the table takes the whole height).
+        """
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(14)
+        intro = QLabel(
+            "Storico delle installazioni nelle librerie di KiCad fatte da questo "
+            "computer: componente, tipo di esportazione, destinazione e data.")
+        intro.setWordWrap(True)
+        outer.addWidget(intro)
+        history_group = QGroupBox("Componenti esportati in KiCad")
+        history_layout = QVBoxLayout(history_group)
+        self.kicad_export_table = QTableWidget(0, 4)
+        self.kicad_export_table.setHorizontalHeaderLabels(
+            ["Componente", "Esportazione", "Destinazione", "Data"])
+        self.kicad_export_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.kicad_export_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.kicad_export_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.kicad_export_table.verticalHeader().setVisible(False)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch)
+        self.kicad_export_table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        history_layout.addWidget(self.kicad_export_table)
+        self._refresh_kicad_export_history()
+        outer.addWidget(history_group, 1)
+        return tab
+
+    # ── Metadati del componente (scheda KiCad) ──────────────────────
+
+    def _build_metadata_group(self) -> QGroupBox:
+        """@brief Build «Metadati del componente»: library metadata and the live KLC list.
+
+        @return The group box, enabled with the KiCad tab (footprint on disk).
+        @note Description and keywords are VIEWS of `field_description` and
+            `field_tags` (the footprint's descr/tags, data objects without a
+            widget of their own): the same text goes to the footprint and to
+            the symbol's Description/ki_keywords, so there is one value. The
+            designator and the footprint filters follow a proposal while
+            empty (shown as placeholder, see `_effective_reference` and
+            `_effective_fp_filters`); typing replaces the proposal.
+        """
+        from PyQt6.QtCore import QRegularExpression
+        from PyQt6.QtGui import QRegularExpressionValidator
+        from .collapsible_group import CollapsibleGroupBox
+        # Collapsed by default (user, 2026-10-11); the title sits on the
+        # frame like every other block of the tab and a click on it toggles.
+        group = CollapsibleGroupBox("Metadati del componente")
+        group.setToolTip(
+            "Designatore, descrizione, parole chiave, datasheet e filtri del "
+            "componente, con le regole KLC. Clic sul titolo per aprire o chiudere.")
+        self.metadata_body = group.body
+        form = QFormLayout(self.metadata_body)
+        form.setContentsMargins(0, 6, 0, 0)
+        self.field_reference = QLineEdit()
+        # Letters only: KiCad appends the number (KLC S6.1); the text is
+        # kept upper case because «u1» is not a prefix KiCad recognises.
+        self.field_reference.setValidator(
+            QRegularExpressionValidator(QRegularExpression("[A-Za-z]*"), self.field_reference))
+        self.field_reference.setMaxLength(8)
+        self.field_reference.setToolTip(
+            "Prefisso del riferimento nello schema (U, J, K...): solo lettere, "
+            "KiCad aggiunge il numero.")
+        self.field_reference.textChanged.connect(self._on_reference_edited)
+        form.addRow("Designatore di riferimento:", self.field_reference)
+        self.field_meta_description = QLineEdit()
+        self.field_meta_description.setToolTip(
+            "Una riga che descrive il componente: va nel footprint (descr) e nel "
+            "simbolo (Description).")
+        form.addRow("Descrizione:", self.field_meta_description)
+        self.field_meta_keywords = QLineEdit()
+        self.field_meta_keywords.setToolTip(
+            "Parole separate da spazi per la ricerca nel selettore: footprint (tags) "
+            "e simbolo (ki_keywords).")
+        form.addRow("Parole chiave:", self.field_meta_keywords)
+        self._mirror_text_value(self.field_meta_description, self.field_description)
+        self._mirror_text_value(self.field_meta_keywords, self.field_tags)
+        self.field_meta_description.textChanged.connect(lambda _text: self._refresh_klc_findings())
+        self.field_meta_keywords.textChanged.connect(lambda _text: self._refresh_klc_findings())
+        self.field_datasheet = QLineEdit()
+        self.field_datasheet.setToolTip(
+            "URL o percorso del documento, senza spazi: proprietà Datasheet di "
+            "simbolo e footprint.")
+        self.field_datasheet.textChanged.connect(lambda _text: self._refresh_klc_findings())
+        form.addRow("Datasheet (URL o file):", self.field_datasheet)
+        self.field_fp_filters = QLineEdit()
+        self.field_fp_filters.setToolTip(
+            "Schemi con * e ? che limitano i footprint proponibili per il simbolo "
+            "(ki_fp_filters).")
+        self.field_fp_filters.textChanged.connect(lambda _text: self._refresh_klc_findings())
+        form.addRow("Filtri footprint:", self.field_fp_filters)
+        self.btn_apply_metadata = self._workflow_tool_button(
+            "confirm-use.svg", "Applica ai file",
+            "Salva il progetto, rigenera il footprint e riesporta il simbolo se esiste già")
+        self.btn_apply_metadata.clicked.connect(self._apply_metadata_to_files)
+        apply_row = QWidget()
+        apply_layout = QHBoxLayout(apply_row)
+        apply_layout.setContentsMargins(0, 0, 0, 0)
+        apply_layout.addStretch()
+        apply_layout.addWidget(self.btn_apply_metadata)
+        form.addRow(apply_row)
+        self.klc_list = QListWidget()
+        # Findings are messages computed at run time, not catalogue sources.
+        self.klc_list.setProperty("i18n_skip", True)
+        self.klc_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.klc_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.klc_list.setMaximumHeight(120)
+        self.label_klc = QLabel("Regole KLC:")
+        self.label_klc.setToolTip(
+            "Osservazioni sulle convenzioni delle librerie KiCad: ⛔ errore, ⚠ avviso.")
+        form.addRow(self.label_klc, self.klc_list)
+        QWidget.setTabOrder(self.field_reference, self.field_meta_description)
+        QWidget.setTabOrder(self.field_meta_description, self.field_meta_keywords)
+        QWidget.setTabOrder(self.field_meta_keywords, self.field_datasheet)
+        QWidget.setTabOrder(self.field_datasheet, self.field_fp_filters)
+        QWidget.setTabOrder(self.field_fp_filters, self.btn_apply_metadata)
+        _align_form_labels(form)
+        self.group_metadata = group
+        group.setEnabled(False)
+        return group
+
+    @staticmethod
+    def _mirror_text_value(line_edit: QLineEdit, value) -> None:
+        """@brief Keep a QLineEdit and a `TextValue` equal in both directions.
+
+        @param line_edit Visible editor.
+        @param value `component_state.TextValue` holding the project datum.
+        @note No loop: `TextValue.setText` notifies only on an actual change
+            and the editor is written only when its text differs.
+        """
+        line_edit.setText(value.text())
+
+        def to_editor(text):
+            if line_edit.text() != text:
+                line_edit.setText(text)
+
+        value.on_change(to_editor)
+        line_edit.textChanged.connect(value.setText)
+
+    def _on_reference_edited(self, text: str) -> None:
+        """@brief Upper-case the designator prefix and refresh the KLC list."""
+        upper = text.upper()
+        if upper != text:
+            self.field_reference.setText(upper)
+            return
+        self._refresh_klc_findings()
+
+    def _effective_reference(self) -> str:
+        """@brief The designator prefix the files get: the field, or the proposal while empty."""
+        typed = self.field_reference.text().strip() if hasattr(self, "field_reference") else ""
+        if typed:
+            return typed
+        package = getattr(self, "package_geometry", None)
+        return proposed_reference(self._selected_family(),
+                                  package.family if package is not None else None)
+
+    def _effective_fp_filters(self) -> str:
+        """@brief The footprint filters the symbol gets: the field, or `<footprint>*` while empty."""
+        typed = self.field_fp_filters.text().strip() if hasattr(self, "field_fp_filters") else ""
+        if typed:
+            return typed
+        name = self._component_name()
+        return f"{name}*" if name else ""
+
+    def _effective_datasheet(self) -> str:
+        """@brief Datasheet URL or path for the Datasheet property; '' when not given."""
+        return self.field_datasheet.text().strip() if hasattr(self, "field_datasheet") else ""
+
+    def _metadata_dict(self) -> dict:
+        """@brief Library metadata as the KLC checks and the symbol exporter read them.
+
+        @return Keys reference, description, keywords, datasheet, fp_filters
+            (effective values: proposals already applied to empty fields).
+        """
+        return {"reference": self._effective_reference(),
+                "description": self.field_description.text().strip(),
+                "keywords": self.field_tags.text().strip(),
+                "datasheet": self._effective_datasheet(),
+                "fp_filters": self._effective_fp_filters()}
+
+    def _symbol_metadata(self):
+        """@brief `SymbolMetadata` for the symbol export, from the current fields."""
+        from ..generators.symbol import SymbolMetadata
+        return SymbolMetadata(**self._metadata_dict())
+
+    def _metadata_state(self) -> dict:
+        """@brief Metadata of the project file: what the user TYPED, not the proposals.
+
+        @return {reference, datasheet, fp_filters}; description and keywords
+            live in their own widgets (`field_description`, `field_tags`).
+        @note Empty text is saved as empty: the proposal is recomputed on
+            open, so a renamed project proposes its new footprint filter.
+        """
+        if not hasattr(self, "field_reference"):
+            return {"reference": "", "datasheet": "", "fp_filters": ""}
+        return {"reference": self.field_reference.text().strip(),
+                "datasheet": self.field_datasheet.text().strip(),
+                "fp_filters": self.field_fp_filters.text().strip()}
+
+    def _restore_metadata_state(self, state) -> None:
+        """@brief Put back the saved metadata; a missing key (older project) clears the fields.
+
+        @param state The `metadata` object of the project file, or None.
+        """
+        if not hasattr(self, "field_reference"):
+            return
+        values = state if isinstance(state, dict) else {}
+        for widget, key in ((self.field_reference, "reference"),
+                            (self.field_datasheet, "datasheet"),
+                            (self.field_fp_filters, "fp_filters")):
+            value = values.get(key, "")
+            if key == "reference" and isinstance(value, str) and not value.isalpha():
+                # setText bypasses the line edit's validator: a hand-edited
+                # project file must not put «U1» or «12» into the field.
+                value = ""
+            widget.setText(value if isinstance(value, str) else "")
+        self._refresh_metadata_proposals()
+
+    def _refresh_metadata_proposals(self) -> None:
+        """@brief Show the current proposals as placeholders and refresh the KLC list."""
+        if not hasattr(self, "field_reference"):
+            return
+        package = getattr(self, "package_geometry", None)
+        self.field_reference.setPlaceholderText(proposed_reference(
+            self._selected_family(), package.family if package is not None else None))
+        name = self._component_name()
+        self.field_fp_filters.setPlaceholderText(f"{name}*" if name else "")
+        self._refresh_klc_findings()
+
+    def _klc_findings(self) -> list:
+        """@brief Current KLC findings: metadata, footprint name and the files on disk.
+
+        @return `klc_checks.Finding` list, errors first; empty when nothing
+            is to report or no project is open.
+        """
+        from ..services import klc_checks
+        name = self._component_name()
+        if not name:
+            return []
+        project = self._project_dir()
+        symbol = project / f"{name}.kicad_sym"
+        footprint = project / f"{name}.pretty" / f"{name}.kicad_mod"
+        texts = []
+        for path in (symbol, footprint):
+            try:
+                texts.append(path.read_text(encoding="utf-8") if path.is_file() else None)
+            except OSError:
+                texts.append(None)
+        return klc_checks.check_all(self._metadata_dict(), name,
+                                    symbol_text=texts[0], footprint_text=texts[1])
+
+    def _refresh_klc_findings(self) -> None:
+        """@brief Rewrite the read-only KLC list from the current fields and files."""
+        if not hasattr(self, "klc_list"):
+            return
+        self.klc_list.clear()
+        findings = self._klc_findings()
+        if not findings:
+            self.klc_list.addItem(self.i18n.text("Nessuna osservazione."))
+            return
+        for finding in findings:
+            prefix = "⛔ " if finding.severity == "error" else "⚠ "
+            self.klc_list.addItem(prefix + finding.message)
+
+    def _confirm_klc_errors(self) -> bool:
+        """@brief Ask before installing a component whose KLC checks report ERRORS.
+
+        @return True to go on (no error, or the user confirmed).
+        @note Warnings never block: they are advice. Errors are what KiCad or
+            the conventions reject, so installing them is a choice to make
+            knowingly, not a default.
+        """
+        errors = [f for f in self._klc_findings() if f.severity == "error"]
+        if not errors:
+            return True
+        answer = QMessageBox.question(
+            self, self.i18n.text("Osservazioni KLC bloccanti"),
+            self.i18n.text("Il componente ha {count} errori KLC:\n{errors}\n\n"
+                           "Installare comunque?").format(
+                count=len(errors), errors="\n".join("⛔ " + f.message for f in errors)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _apply_metadata_to_files(self) -> None:
+        """@brief Write the metadata into the files: save the project and regenerate the footprint.
+
+        @note The symbol follows the footprint: `_on_generated` re-exports
+            the applied symbol beside the artifacts (with `_symbol_metadata`)
+            once the worker has written the .kicad_mod, so there is one write
+            path for the symbol and no stale copy between the two files.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
+            QMessageBox.information(self, self.i18n.text("Metadati del componente"),
+                                    self.i18n.text("Attendi la fine del lavoro in corso."))
+            return
+        errors = [f for f in self._klc_findings() if f.severity == "error"]
+        if errors:
+            # An error means KiCad or the KLC refuse the value (e.g. a
+            # designator with digits): writing it would only move the
+            # problem into the files. The list under the fields shows it.
+            QMessageBox.warning(self, self.i18n.text("Metadati del componente"), self.i18n.text(
+                "Correggi prima gli errori KLC elencati: i file non sono stati riscritti."))
+            return
+        self._save_project_config(force=True)
+        if not self._generate(footprint_only=True):
+            self._append_log(self.i18n.text(
+                "Metadati salvati nel progetto; i file verranno riscritti alla prossima generazione."))
+            self._refresh_klc_findings()
+            return
+        self._append_log(self.i18n.text(
+            "Metadati applicati: footprint e simbolo in rigenerazione."))
+        self._refresh_klc_findings()
 
     def _verify_component(self):
         from .component_check_dialog import ComponentCheckDialog
@@ -8985,8 +9351,9 @@ class MainWindow(QMainWindow):
         if table is None:
             return
         records = load_kicad_export_history()
-        table.setRowCount(min(len(records), 12))
-        for row, record in enumerate(records[:12]):
+        # The table has a tab of its own: every record kept on disk is shown.
+        table.setRowCount(len(records))
+        for row, record in enumerate(records):
             destination = record.get("destination", "")
             values = (record.get("component", ""), record.get("kind", ""),
                       Path(destination).name or destination,
@@ -9217,6 +9584,8 @@ class MainWindow(QMainWindow):
         """@brief Install with an explicit overwrite decision and final report."""
         artifacts = artifacts or self._current_kicad_artifacts()
         if artifacts is None:
+            return
+        if not self._confirm_klc_errors():
             return
         targets = (
             destination / "KiCadGen.pretty" / f"{artifacts.name}.kicad_mod",
@@ -9522,6 +9891,7 @@ class MainWindow(QMainWindow):
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
             tags=self.field_tags.text().strip(),
+            datasheet=self._effective_datasheet(),
             rows=self.field_rows.value(),
             cols=self.field_cols.value(),
             pitch=self.field_pitch.value(),
@@ -9949,14 +10319,23 @@ class MainWindow(QMainWindow):
             dialog.deleteLater()
 
     def _generate(self, automatic=False, footprint_only=False,
-                  body_override=_BODY_OVERRIDE_UNSET) -> None:
+                  body_override=_BODY_OVERRIDE_UNSET) -> bool:
+        """@brief Start the generation worker for the current parameters.
+
+        @param automatic True when called by the automatic pipeline.
+        @param footprint_only True rewrites the .kicad_mod only (pad edits, metadata).
+        @param body_override Body size decided by the user, or the sentinel.
+        @return True when the worker was started; False when nothing ran
+            (work already running, automatic pipeline active, no footprint
+            yet for a footprint-only rewrite, invalid parameters).
+        """
         if self._background_work_running() or self._automatic_generation_active:
-            return
+            return False
         if automatic:
             self._automatic_3d_deferred_reason = ""
         if footprint_only and not (self._acquisition_completed or self._project_has_footprint()):
             self._set_mounting_error(self.i18n.text("Analizza prima i documenti del componente."))
-            return
+            return False
 
         try:
             params = (
@@ -9999,15 +10378,15 @@ class MainWindow(QMainWindow):
             self._set_mounting_error(str(exc))
             if not footprint_only and self._correct_invalid_through_holes(locals().get("params")):
                 self._generate(automatic=automatic)
-                return
+                return False
             if automatic:
                 self._automatic_generation_blocked(str(exc))
-            return
+            return False
 
         project_dir = self._project_dir()
         if automatic and not self._confirm_output_overwrite(params, project_dir, body):
             self._on_ai_progress(tx("Generazione annullata: file esistenti conservati."))
-            return
+            return False
 
         if isinstance(params, PackageGeometry):
             self._append_log(
@@ -10083,6 +10462,10 @@ class MainWindow(QMainWindow):
             single_component=self._is_single_component_project(),
         )
         self._worker.footprint_params = host_params
+        # PackageGeometry carries no datasheet: the worker passes it to
+        # build_package itself (the other generators read it from params).
+        self._worker.datasheet = self._effective_datasheet()
+        self._worker.description = self.field_description.text().strip()
         self._worker._model_revision = self._model_revision
         self._worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._worker.done.connect(self._on_generated)
@@ -10134,6 +10517,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._on_error(str(exc))
             self._on_generation_finished()
+            return False
+        return True
 
     def _show_generation_steps(self, params, body, single_component=False) -> None:
         """@brief Put the three generation steps on the modal, with the missing ones explained.
@@ -10558,7 +10943,8 @@ class MainWindow(QMainWindow):
             target = Path(path) if path else (
                 self._project_dir() / f'{self._component_name()}.kicad_sym')
             return export_symbol(target, self._component_name(), pins,
-                                 footprint=self.symbol_tab.footprint(), body=body, graphics=graphics)
+                                 footprint=self.symbol_tab.footprint(), body=body, graphics=graphics,
+                                 metadata=self._symbol_metadata())
         except (OSError, ValueError, TypeError) as exc:
             if not quiet:
                 self.symbol_tab.set_status(str(exc))
@@ -12714,7 +13100,13 @@ class MainWindow(QMainWindow):
         self._generate(footprint_only=True)
 
     def _edit_package_pad(self, pad_index: int) -> None:
-        """Edit the selected package pad's shape and dimensions from its context click."""
+        """@brief Edit the selected package pad's shape, dimensions and, for a holed pad, its drill.
+
+        @param pad_index Index of the pad in `package_geometry.pins`.
+        @note Opened from the context click of the 2D preview. The edited
+            package is validated as a whole; a rejected value restores the
+            previous pad and tells why.
+        """
         package = self.package_geometry
         if package is None or not 0 <= pad_index < len(package.pins):
             return
@@ -12750,6 +13142,18 @@ class MainWindow(QMainWindow):
         height = size_control(pin.pad_width_mm)
         form.addRow(self.i18n.text("Larghezza:"), width)
         form.addRow(self.i18n.text("Altezza:"), height)
+        # Only a pad that HAS a hole gets the field: an SMD pad has none and
+        # offering one would invent a drill. `package.validate()` rejects a
+        # drill at or above the smaller pad side.
+        drill = None
+        if pin.drill_mm is not None:
+            drill = QDoubleSpinBox(dialog)
+            drill.setRange(0.05, 20.0)
+            drill.setDecimals(3)
+            drill.setSingleStep(0.05)
+            drill.setSuffix(" mm")
+            drill.setValue(float(pin.drill_mm))
+            form.addRow(self.i18n.text("Foro:"), drill)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel, parent=dialog)
         buttons.accepted.connect(dialog.accept)
@@ -12764,7 +13168,8 @@ class MainWindow(QMainWindow):
             selected_shape = "rect"
             pad_height = pad_width
         updated = replace(pin, shape=selected_shape,
-                          pad_length_mm=pad_width, pad_width_mm=pad_height)
+                          pad_length_mm=pad_width, pad_width_mm=pad_height,
+                          **({"drill_mm": drill.value()} if drill is not None else {}))
         old_pins = package.pins
         package.pins = list(package.pins)
         package.pins[pad_index] = updated
@@ -12804,6 +13209,9 @@ class MainWindow(QMainWindow):
         """
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
 
+    #: Narrowest wrap width of the view caption, in scene pixels (see `_add_view_caption`).
+    VIEW_CAPTION_MIN_WIDTH_PX = 360.0
+
     def _add_view_caption(self) -> None:
         """@brief Write above the drawing which side the footprint is seen from.
 
@@ -12813,14 +13221,20 @@ class MainWindow(QMainWindow):
             in the log, so a drawing compared with a bottom-view datasheet is
             not read as wrong.
         """
-        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        from PyQt6.QtWidgets import QGraphicsTextItem
         rect = self.preview_scene.itemsBoundingRect()
         if rect.isNull():
             return
-        caption = QGraphicsSimpleTextItem(self.i18n.text(
+        caption = QGraphicsTextItem(self.i18n.text(
             "VISTA DALL'ALTO (lato componenti): il footprint e' visto da sopra la scheda, "
             "come in KiCad; un disegno «BOTTOM VIEW» del datasheet appare specchiato."))
-        caption.setBrush(QBrush(QColor(YELLOW)))
+        caption.setDefaultTextColor(QColor(YELLOW))
+        # Wrapped to the drawing width (user, 2026-10-11: on one line the
+        # caption was wider than the drawing and shrank it in «fit»). The
+        # floor is a heuristic: below it a small part would split the text
+        # into many short lines; a caption wider than a tiny drawing is the
+        # lesser evil.
+        caption.setTextWidth(max(rect.width(), self.VIEW_CAPTION_MIN_WIDTH_PX))
         caption.setPos(rect.left(), rect.top() - caption.boundingRect().height() - 24)
         self.preview_scene.addItem(caption)
 

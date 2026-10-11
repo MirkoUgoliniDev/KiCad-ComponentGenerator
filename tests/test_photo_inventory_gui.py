@@ -314,9 +314,12 @@ def _write_complete_kicad_output(window):
     step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
     footprint.parent.mkdir(parents=True, exist_ok=True)
     step.parent.mkdir(parents=True, exist_ok=True)
+    # One pad and an attribute: a footprint without pads is a KLC ERROR and
+    # the installation would ask for a confirmation (2026-10-10).
     footprint.write_text(
         f'(footprint "{name}"\n\t(version 20260206)\n'
-        '\t(generator "test")\n\t(layer "F.Cu")\n)\n',
+        '\t(generator "test")\n\t(layer "F.Cu")\n\t(attr smd)\n'
+        '\t(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))\n)\n',
         encoding="utf-8",
     )
     # A complete STEP: the KiCad tab refuses one without the ISO trailer.

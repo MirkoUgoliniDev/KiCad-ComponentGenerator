@@ -49,12 +49,18 @@ def footprint_attr(pad_types) -> str | None:
     return None
 
 
-def build_package(geometry: PackageGeometry, name: str | None = None) -> Footprint:
+def build_package(geometry: PackageGeometry, name: str | None = None, *,
+                  datasheet: str = "", description: str = "") -> Footprint:
     """@brief Build the footprint of a package described by explicit pad coordinates.
 
     @param geometry Validated package model; pins are normalized to the top
         view by pins_seen_from_top().
     @param name Footprint name; defaults to geometry.name.
+    @param datasheet Datasheet URL or path for the "Datasheet" property; ""
+        when unknown.
+    @param description The project's own description for `descr` and the
+        "Description" property; "" keeps the generic family text. The note
+        about an estimated body centre is appended in both cases.
     @return Footprint whose pads keep the source numbers and relative
         positions; the footprint origin is the (possibly estimated) body
         centre, see PackageGeometry.body_frame_offset.
@@ -64,13 +70,13 @@ def build_package(geometry: PackageGeometry, name: str | None = None) -> Footpri
     geometry.validate()
     pins = geometry.pins_seen_from_top()
     footprint_name = name or geometry.name
-    description = f"{geometry.family} package generico"
+    description = description.strip() or f"{geometry.family} package generico"
     if geometry.origin != "body_center":
         # Fixed file language (see FOOTPRINT_TEXT_LANGUAGE): the estimate is
         # recorded in the library itself, not only in the session log.
         description += "; centro del corpo stimato dal campo dei pad"
-    fp = Footprint(name=footprint_name, description=description,
-                   tags=geometry.family, attr=footprint_attr(p.pad_type for p in pins))
+    fp = Footprint(name=footprint_name, description=description, tags=geometry.family,
+                   datasheet=datasheet, attr=footprint_attr(p.pad_type for p in pins))
 
     # Lists, not dicts keyed by number: several pads may share one number
     # (split thermal pad, several GND lands) and each needs its own keepout.

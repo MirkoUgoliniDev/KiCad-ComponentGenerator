@@ -428,6 +428,13 @@ class GenerateWorker(_Cad3DRunWorker):
         # Only the host footprint may differ: self.params remains the physical
         # module passed to FreeCAD, matching and all 3D regenerations.
         self.footprint_params = None
+        #: Datasheet URL or path for the footprint's Datasheet property. The
+        #: pin-header and castellated params carry their own; an explicit
+        #: PackageGeometry has no such field, so the window sets it here.
+        self.datasheet = ""
+        #: Project description for the footprint's `descr` and "Description";
+        #: "" keeps the generator's generic text (same reason as `datasheet`).
+        self.description = ""
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
@@ -439,7 +446,8 @@ class GenerateWorker(_Cad3DRunWorker):
             footprint = (
                 _patch_point("build_castellated_module")(host)
                 if isinstance(host, CastellatedModuleParams)
-                else _patch_point("build_package")(host)
+                else _patch_point("build_package")(host, datasheet=self.datasheet,
+                                                   description=self.description)
                 if isinstance(host, PackageGeometry)
                 else _patch_point("build_pin_header")(host)
             )

@@ -70,8 +70,27 @@ def dev_kit(style=CONTACT_THROUGH_HOLE, row_spacing=22.86, **changes):
     return params
 
 
+#: The hidden "Description" property of the footprint repeats `descr` since
+#: 2026-10-10 (component metadata, KiCad tab): before it was always "".
+#: The pinned digests below date from before that change, so the normaliser
+#: blanks that one value, as it drops the uuids; the property itself is
+#: verified in tests/test_symbol_kicad10_format.py and by
+#: test_the_description_property_is_the_only_text_the_normaliser_hides.
+_DESCRIPTION_PROPERTY = re.compile(r'\(property "Description" "[^"]*"')
+
+
 def _uuidless(fp):
-    return re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
+    text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
+    return _DESCRIPTION_PROPERTY.sub('(property "Description" ""', text, count=1)
+
+
+def test_the_description_property_is_the_only_text_the_normaliser_hides():
+    """@brief The digests must still see everything except uuids and that one value."""
+    fp = build_castellated_module(rs485())
+    rendered = fp.render()
+    assert rendered.count('(property "Description" "') == 1
+    assert f'(property "Description" "{fp.description}"' in rendered,         "the property carries descr: a regression here is caught before the digests hide it"
+    assert _DESCRIPTION_PROPERTY.sub("", rendered, count=1).count(fp.description) == 1,         "descr itself stays in the digest"
 
 
 def legacy_pin_one_marker(center, keepouts, direction, radius=0.25, layer="F.SilkS"):

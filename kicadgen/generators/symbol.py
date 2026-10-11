@@ -23,6 +23,11 @@ ELECTRICAL_TYPES = (
 TEXT_SIZE = 1.27
 PIN_NAME_OFFSET = 0.508
 PIN_GRID_MM = 2.54
+#: Symbol library file format written by `serialize_symbol`: the version
+#: KiCad 10 writes itself (see its bundled `Relay.kicad_sym`). Older KiCad
+#: releases cannot read it; KiCad 8/9 would need 20231120 or 20241209.
+SYMBOL_FORMAT_VERSION = 20251024
+SYMBOL_GENERATOR_VERSION = '10.0'
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,27 @@ class PositionedPin:
 
 
 @dataclass(frozen=True)
+class SymbolMetadata:
+    """@brief Library metadata of a symbol, the KiCad properties beside Reference/Value.
+
+    @param reference Designator prefix (letters only: U, K, J, RV...), as the
+        KiCad Library Conventions require for the Reference property.
+    @param description One-line description (property "Description").
+    @param keywords Space-separated keywords (property "ki_keywords").
+    @param datasheet URL or path of the datasheet (property "Datasheet").
+    @param fp_filters Space-separated footprint filter patterns, `*` and `?`
+        wildcards (property "ki_fp_filters").
+    @note Validation happens in `serialize_symbol`: every field is checked
+        there so a GUI can build the record freely and get one error.
+    """
+    reference: str = 'U'
+    description: str = ''
+    keywords: str = ''
+    datasheet: str = ''
+    fp_filters: str = ''
+
+
+@dataclass(frozen=True)
 class SymbolLayout:
     """@brief Describe the shared body and pin geometry used for preview and export."""
     width: float
@@ -65,6 +91,29 @@ def _text(value: str, field: str, *, required: bool = False) -> str:
     if required and not value:
         raise ValueError(f'{field}: must not be empty')
     return value
+
+
+def _reference_prefix(value: str) -> str:
+    """Validate a designator prefix: KLC S6.1, letters only, no digits or spaces."""
+    value = _text(value, 'Reference', required=True)
+    if not value.isalpha():
+        raise ValueError('Reference: use letters only (e.g. U, K, J, RV)')
+    return value
+
+
+def _single_line(value: str, field: str) -> str:
+    """Validate a property KiCad shows on one line; `_text` already rejects control characters."""
+    return _text(value, field)
+
+
+def _datasheet(value: str) -> str:
+    """Validate a datasheet reference: empty, or a URL/path on one line.
+
+    Blanks are accepted: KiCad stores a path here and Windows paths carry
+    them (review, 2026-10-10: refusing them left the symbol file stale
+    while the footprint took the value); `_text` rejects control characters.
+    """
+    return _text(value, 'Datasheet')
 
 
 def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
@@ -190,32 +239,64 @@ def _num(value: float) -> str:
 
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
-                     footprint: str = '', reference: str = 'U', body=None, graphics=None) -> str:
-    """@brief Return a KiCad 6+ symbol library with a single, single-unit symbol.
+                     footprint: str = '', reference: str = 'U', body=None, graphics=None,
+                     metadata: SymbolMetadata | None = None) -> str:
+    """@brief Return a KiCad 10 symbol library (format 20251024) with one single-unit symbol.
 
+    @param name Symbol name, also the Value property; no library separator.
+    @param pins Pins with identities and electrical roles; see `layout_symbol`.
+    @param footprint Footprint reference «Library:Name» (hidden property).
+    @param reference Designator prefix, letters only; ignored when `metadata`
+        is given (its `reference` wins).
+    @param body Optional explicit body size in mm, see `layout_symbol`.
     @param graphics Placed glyph records (`symbol_glyphs.instance_from_glyph`)
         and wires drawn inside the body, after the body rectangle; None or []
         for none. Wire points anchored to pins or element terminals are
         exported at their resolved position (`symbol_glyphs.pin_inner_ends`).
+    @param metadata Library metadata (description, keywords, datasheet,
+        footprint filters) written as hidden properties; the empty keyword
+        and filter properties are left out, as KiCad itself does.
+    @return The `.kicad_sym` text, newline-terminated.
+    @throws ValueError On an invalid name, reference, metadata or geometry.
+    @note Layout: one form per line with KiCad's 100 mil grid coordinates;
+        KiCad accepts any whitespace, so the file reads back like one saved
+        by the symbol editor. The body rectangle and the pin texts follow
+        the KLC defaults (stroke 0.254 mm, background fill, 1.27 mm fonts).
     """
     name = _text(name, 'Symbol name', required=True)
     if ':' in name:
         raise ValueError('Symbol name must not contain a library separator (:).')
     footprint = _text(footprint, 'Footprint')
-    reference = _text(reference, 'Reference', required=True)
+    if metadata is None:
+        metadata = SymbolMetadata(reference=reference)
+    elif not isinstance(metadata, SymbolMetadata):
+        raise ValueError('metadata: expected SymbolMetadata')
+    reference = _reference_prefix(metadata.reference)
+    description = _single_line(metadata.description, 'Description')
+    keywords = _single_line(metadata.keywords, 'Keywords')
+    datasheet = _datasheet(metadata.datasheet)
+    fp_filters = _single_line(metadata.fp_filters, 'Footprint filters')
     layout = layout_symbol(pins, body)
     w, h = layout.width / 2, layout.height / 2
     effects = '(effects (font (size 1.27 1.27)))'
-    lines = ['(kicad_symbol_lib (version 20211014) (generator kicadgen)',
+    lines = [f'(kicad_symbol_lib (version {SYMBOL_FORMAT_VERSION}) (generator "kicadgen") '
+             f'(generator_version {_quote(SYMBOL_GENERATOR_VERSION)})',
              f'  (symbol {_quote(name)}',
-             '    (pin_names (offset 0.508))', '    (in_bom yes) (on_board yes)']
-    for ident, (key, value, y, hidden) in enumerate((
-        ('Reference', reference, h + 5.08, False),
-        ('Value', name, h + 2.54, False),
-        ('Footprint', footprint, 0, True), ('Datasheet', '', 0, True),
-    )):
-        effect = '(effects (font (size 1.27 1.27)) hide)' if hidden else effects
-        lines.append(f'    (property {_quote(key)} {_quote(value)} (id {ident}) (at 0 {_num(y)} 0) {effect})')
+             '    (exclude_from_sim no) (in_bom yes) (on_board yes) (in_pos_files yes)',
+             '    (duplicate_pin_numbers_are_jumpers no)',
+             '    (pin_names (offset 0.508))']
+    properties = [('Reference', reference, h + 5.08, False),
+                  ('Value', name, h + 2.54, False),
+                  ('Footprint', footprint, 0, True),
+                  ('Datasheet', datasheet, 0, True),
+                  ('Description', description, 0, True)]
+    if keywords:
+        properties.append(('ki_keywords', keywords, 0, True))
+    if fp_filters:
+        properties.append(('ki_fp_filters', fp_filters, 0, True))
+    for key, value, y, hidden in properties:
+        flags = '(show_name no) (do_not_autoplace no)' + (' (hide yes)' if hidden else '')
+        lines.append(f'    (property {_quote(key)} {_quote(value)} (at 0 {_num(y)} 0) {flags} {effects})')
     lines.extend((f'    (symbol {_quote(name + "_0_1")}',
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
                   '        (stroke (width 0.254) (type default)) (fill (type background)))'))
@@ -228,18 +309,23 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         lines.extend((f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) (length {_num(layout.pin_length)})',
                       f'        (name {_quote(pin.name or "~")} {effects})',
                       f'        (number {_quote(pin.number)} {effects}))'))
-    lines.extend(('    )', '  )', ')', ''))
+    lines.extend(('    )', '    (embedded_fonts no)', '  )', ')', ''))
     return '\n'.join(lines)
 
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
-                  footprint: str = '', reference: str = 'U', body=None, graphics=None) -> Path:
+                  footprint: str = '', reference: str = 'U', body=None, graphics=None,
+                  metadata: SymbolMetadata | None = None) -> Path:
     """@brief Validate before touching disk and atomically replace an explicitly chosen file.
 
     @param graphics Placed glyph records, see `serialize_symbol`.
+    @param metadata Library metadata, see `serialize_symbol`.
+    @return The written path.
+    @throws ValueError When the symbol does not validate; the file is untouched.
+    @throws OSError When the temporary file cannot be written or moved in place.
     """
     text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body,
-                            graphics=graphics)
+                            graphics=graphics, metadata=metadata)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', suffix='.tmp', dir=target.parent)
