@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 12/10 notte (2) — revisione avversariale FATTA, suite completa verde
+## FINE SESSIONE 12/10 notte (2) — commit `4ff0e79` su `ADVANCED`, mergiato in `main`: revisione avversariale FATTA, suite completa verde
 
 - Suite completa in due meta' dopo tutte le correzioni della revisione:
   A5 4446 verdi, 9 saltati, 0 falliti; B5 2898 verdi, 2 saltati, 2 xfail,
