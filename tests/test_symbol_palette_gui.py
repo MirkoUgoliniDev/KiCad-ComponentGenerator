@@ -602,7 +602,8 @@ def test_rotate_and_mirror_are_refused_on_a_wire_and_kept_for_glyphs(qapp):
                     menu.close()
         QTimer.singleShot(0, capture)
         tab._graphic_context_menu(wire, tab.mapToGlobal(QPoint(10, 10)))
-        assert seen['texts'] == ['Elimina elemento']
+        # No turn or mirror for a wire; deletion, clipboard and placement stay.
+        assert seen['texts'] == ['Elimina elemento', 'Copia (Ctrl+C)', 'Duplica (Ctrl+D)', 'Proprietà elemento…']
         QTimer.singleShot(0, capture)
         tab._graphic_context_menu(0, tab.mapToGlobal(QPoint(10, 10)))
         assert 'Ruota di 90 gradi (antiorario)' in seen['texts'] and 'Specchia' in seen['texts']
@@ -726,5 +727,377 @@ def test_a_project_with_free_points_on_attachments_opens_anchored_and_clean(qapp
         assert points[1]['anchor'] == {'kind': 'terminal', 'element': coil['id'], 'index': 0, 'end': 'outer'}
         assert tab._edit_graphic(0, 'move', (2.54, 0.0))
         assert _resolved(tab, 1)[-1] == (2.54, 7.62)
+    finally:
+        tab.deleteLater()
+
+
+# ── Shape tools (user, 2026-10-12: «tracciare disegni, linee curve eccetera») ──
+
+def test_the_drawing_section_offers_the_five_shape_tools(qapp):
+    tab = _tab()
+    try:
+        assert 'drawing' in tab.palette._groups
+        keys = [key for key, _l, _k, _c in g.SHAPE_TOOLS]
+        assert all(key in tab.palette._tool_actions for key in keys)
+        assert all(action.data() not in keys for action in tab.palette_actions()), 'tools are not elements'
+        tab.palette._tool_actions['rectangle'].trigger()
+        assert tab.shape_tool() == 'rectangle' and tab.view.wiring
+        assert tab.palette._tool_actions['rectangle'].isChecked()
+        assert not tab.wire_button.defaultAction().isChecked(), 'one tool at a time'
+        tab.start_wire()
+        assert tab.shape_tool() is None and not tab.palette._tool_actions['rectangle'].isChecked()
+        tab.finish_wire(False)
+    finally:
+        tab.deleteLater()
+
+
+def test_fixed_count_shapes_close_at_their_last_click_and_land_on_the_grid(qapp):
+    tab = _tab()
+    try:
+        assert tab.start_shape('rectangle')
+        assert tab.add_shape_point(0.1, 0.2) and tab.add_shape_point(5.0, 2.6)
+        (rect,) = tab.graphics()
+        assert rect['source'] == 'shape' and rect['primitives'][0]['kind'] == 'rectangle'
+        assert (rect['x'], rect['y']) == (2.54, 1.27), 'snapped corners (0,0)-(5.08,2.54), centred'
+        assert tab.shape_tool() == 'rectangle' and tab.view.wiring, 'the tool stays armed'
+        assert tab._shape_points == [] and tab._selected_graphic == 0
+        # Clicks through the view signal reach the shape, Y up.
+        tab.start_shape('circle')
+        tab.view.wire_point.emit(QPointF(0, 0), False)
+        tab.view.wire_point.emit(QPointF(2.54 * SCENE_UNITS_PER_MM, 0), False)
+        assert tab.graphics()[1]['primitives'][0] == {'kind': 'circle', 'points': [[0.0, 0.0]], 'radius': 2.54,
+                                                      'fill': 'none', 'width': g.SHAPE_WIDTH_MM, 'style': 'default'}
+        tab.start_shape('arc')
+        for x, y in ((0, 0), (5.08, 0), (2.54, 2.54)):
+            tab.add_shape_point(x, y)
+        assert tab.graphics()[2]['primitives'][0]['kind'] == 'arc'
+        tab.start_shape('bezier')
+        for x, y in ((0, 0), (0, 2.54), (2.54, 2.54), (2.54, 0)):
+            tab.add_shape_point(x, y)
+        assert tab.graphics()[3]['primitives'][0]['kind'] == 'bezier'
+        assert any(isinstance(item, QGraphicsPathItem) and item.data(0) == ('graphic', 3)
+                   for item in tab.view.scene().items()), 'the bezier is drawn and tagged'
+        tab.undo()
+        assert len(tab.graphics()) == 3, 'each shape is one undo step'
+    finally:
+        tab.deleteLater()
+
+
+def test_a_line_is_closed_by_the_user_and_a_degenerate_shape_or_escape_adds_nothing(qapp):
+    tab = _tab()
+    try:
+        assert tab.start_shape('line')
+        assert tab.add_shape_point(0, 0) and not tab.add_shape_point(0.3, -0.2), 'same grid point twice'
+        assert tab.add_shape_point(2.54, 2.54) and tab.add_shape_point(5.08, 0)
+        assert len(tab.graphics()) == 0, 'the line waits for the user to close it'
+        tab.view.wire_finished.emit(True)
+        (line,) = tab.graphics()
+        assert line['primitives'][0]['kind'] == 'polyline' and len(line['primitives'][0]['points']) == 3
+        assert line['primitives'][0]['points'][0] == [-2.54, -1.27], 'relative to the centre of the bounds'
+        # Esc releases the tool and abandons the points.
+        tab.add_shape_point(0, 0)
+        tab.view.wire_finished.emit(False)
+        assert tab.shape_tool() is None and not tab.view.wiring and len(tab.graphics()) == 1
+        # A rectangle without area is refused and the tool stays armed.
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        assert tab.add_shape_point(0, 2.54) and len(tab.graphics()) == 1
+        assert 'non valida' in tab.status.text() and tab.shape_tool() == 'rectangle'
+        assert not tab.start_shape('triangle'), 'unknown tool'
+    finally:
+        tab.deleteLater()
+
+
+def test_a_shape_turns_about_itself_mirrors_and_takes_a_fill_and_a_width(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        assert tab._edit_graphic(0, 'rotate', 90) and tab.graphics()[0]['rotation'] == 90
+        (p,) = g.placed_primitives(tab.graphics()[0])
+        assert sorted(p.points) == [(1.27, 3.81), (3.81, -1.27)], 'turned about its own centre'
+        assert tab._edit_graphic(0, 'mirror') and tab.graphics()[0]['mirror'] is True
+        assert tab._edit_graphic(0, 'fill', 'background') and tab.graphics()[0]['primitives'][0]['fill'] == 'background'
+        assert tab._edit_graphic(0, 'width', 0.5) and tab.graphics()[0]['primitives'][0]['width'] == 0.5
+        assert not tab._edit_graphic(0, 'fill', 'striped') and not tab._edit_graphic(0, 'width', -1)
+        tab.undo()
+        assert tab.graphics()[0]['primitives'][0]['width'] == g.SHAPE_WIDTH_MM, 'the style change is one undo step'
+        # The context menu of a shape offers the fill modes and the width.
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtCore import QPoint, QTimer
+        seen = {}
+
+        def capture():
+            for menu in qapp.topLevelWidgets():
+                if isinstance(menu, QMenu) and menu.isVisible():
+                    seen['texts'] = [a.text() for a in menu.actions() if a.isEnabled() and not a.isSeparator()]
+                    menu.close()
+        QTimer.singleShot(0, capture)
+        tab._graphic_context_menu(0, tab.mapToGlobal(QPoint(10, 10)))
+        assert 'Riempimento' in seen['texts'] and 'Spessore del tratto…' in seen['texts']
+    finally:
+        tab.deleteLater()
+
+
+# ── Text, line style, handles, clipboard, selection, precision, pins (2026-10-12) ──
+
+def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exported(qapp):
+    tab = _tab()
+    try:
+        answers = []
+        tab._text_prompt = lambda *args: answers.pop(0) if answers else None
+        assert tab.start_shape('text')
+        assert tab.add_shape_point(2.6, 5.1) and tab.graphics() == [], 'cancelled: nothing inserted'
+        assert tab.shape_tool() == 'text', 'the tool stays armed'
+        answers.append(('   ', 1.27, 'center'))
+        tab.add_shape_point(2.6, 5.1)
+        assert tab.graphics() == [] and 'Testo non valido' in tab.status.text()
+        answers.append(('IN+', 1.27, 'left'))
+        tab.add_shape_point(2.6, 5.1)
+        (text,) = tab.graphics()
+        assert text['primitives'][0]['kind'] == 'text' and (text['x'], text['y']) == (2.54, 5.08)
+        assert any(isinstance(item, QGraphicsSimpleTextItem) and item.text() == 'IN+' and item.data(0) == ('graphic', 0)
+                   for item in tab.view.scene().items()), 'drawn and tagged like any element'
+        answers.append(('OUT', 2.54, 'right'))
+        assert tab.edit_text(0) and tab.graphics()[0]['primitives'][0] | {} == dict(
+            tab.graphics()[0]['primitives'][0], text='OUT', size=2.54, justify='right')
+        assert tab._edit_graphic(0, 'rotate', 90)
+        assert any(isinstance(item, QGraphicsSimpleTextItem) and item.text() == 'OUT' and item.rotation() == -90
+                   for item in tab.view.scene().items()), 'a turned text is drawn vertical'
+        assert not tab.edit_text(5) and not tab._edit_graphic(0, 'text', ('', 1.0))
+        from kicadgen.generators.symbol import serialize_symbol
+        from kicadgen.generators.symbol import symbol_inputs
+        pins, body = symbol_inputs(tab.draft_rows())
+        body_text = serialize_symbol('Board', pins, body=body, graphics=tab.graphics())
+        assert '(text "OUT" (at 2.54 5.08 90) (effects (font (size 2.54 2.54)) (justify right)))' in body_text
+        assert tab.palette._tool_actions['text'].data() == 'text'
+    finally:
+        tab.deleteLater()
+
+
+def test_the_line_style_is_set_from_the_menu_and_drawn(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        assert tab._edit_graphic(0, 'style', 'dash') and tab.graphics()[0]['primitives'][0]['style'] == 'dash'
+        assert not tab._edit_graphic(0, 'style', 'zigzag')
+        from PyQt6.QtWidgets import QGraphicsRectItem
+        assert any(isinstance(item, QGraphicsRectItem) and item.data(0) == ('graphic', 0)
+                   and item.pen().style() == Qt.PenStyle.DashLine for item in tab.view.scene().items())
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtCore import QPoint, QTimer
+        seen = {}
+
+        def capture():
+            for menu in qapp.topLevelWidgets():
+                if isinstance(menu, QMenu) and menu.isVisible():
+                    seen['texts'] = [a.text() for a in menu.actions() if a.isEnabled() and not a.isSeparator()]
+                    menu.close()
+        QTimer.singleShot(0, capture)
+        tab._graphic_context_menu(0, tab.mapToGlobal(QPoint(10, 10)))
+        assert 'Tipo di linea' in seen['texts'] and 'Proprietà elemento…' in seen['texts']
+        assert 'Modifica testo…' not in seen['texts']
+    finally:
+        tab.deleteLater()
+
+
+def test_shape_handles_are_drawn_for_the_selected_shape_and_dragged_on_the_drawing_grid(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        tab.view.wire_finished.emit(False)
+        handles = [item.data(0) for item in tab.view.scene().items()
+                   if item.data(0) and item.data(0)[0] == 'shape_point']
+        assert sorted(handles) == [('shape_point', 0, 0), ('shape_point', 0, 1)]
+        # A drag of the far corner, through the view's gesture signals: one undo step.
+        tab.view.gesture_started.emit(('shape_point', 0, 1), QPointF(5.08 * SCENE_UNITS_PER_MM, -2.54 * SCENE_UNITS_PER_MM))
+        tab.view.gesture_moved.emit(('shape_point', 0, 1), QPointF(7.5 * SCENE_UNITS_PER_MM, -5.2 * SCENE_UNITS_PER_MM))
+        tab.view.gesture_moved.emit(('shape_point', 0, 1), QPointF(7.7 * SCENE_UNITS_PER_MM, -5.0 * SCENE_UNITS_PER_MM))
+        tab.view.gesture_finished.emit(True)
+        assert g.shape_handles(tab.graphics()[0]) == [(0.0, 0.0), (7.62, 5.08)]
+        tab.undo()
+        assert g.shape_handles(tab.graphics()[0]) == [(0.0, 0.0), (5.08, 2.54)], 'one step'
+        # The drawing grid is finer than the pin grid; snapping can be turned off.
+        tab.set_drawing_grid(0.635)
+        assert tab.drawing_grid() == 0.635 and tab.grid_combo.currentData() == 0.635
+        assert tab.move_shape_point(0, 1, 7.0, 2.5) and g.shape_handles(tab.graphics()[0])[1] == (6.985, 2.54)
+        tab.set_snap(False)
+        assert tab.move_shape_point(0, 1, 7.03, 2.51) and g.shape_handles(tab.graphics()[0])[1] == (7.03, 2.51)
+        tab.set_drawing_grid(9.9)
+        assert tab.drawing_grid() == 0.635, 'unknown steps are ignored'
+        assert not tab.move_shape_point(0, 1, 0.0, 9.0), 'a rectangle without width is refused'
+        # Glyphs keep the pin grid whatever the drawing grid is.
+        tab.set_snap(True)
+        assert tab.place_glyph(_first_key(tab), 1.0, 1.0) and tab.graphics()[1]['x'] == 0.0
+    finally:
+        tab.deleteLater()
+
+
+def test_copy_paste_and_duplicate_make_detached_copies_one_step_away(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('circle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(2.54, 0)
+        assert tab.copy_selected() == 1 and tab.paste()
+        assert len(tab.graphics()) == 2 and tab.selected_graphics() == [1]
+        assert (tab.graphics()[1]['x'], tab.graphics()[1]['y']) == (2.54, -2.54)
+        assert tab.graphics()[1]['id'] != tab.graphics()[0]['id']
+        assert tab.paste() and (tab.graphics()[2]['x'], tab.graphics()[2]['y']) == (5.08, -5.08), 'each paste one step further'
+        assert tab.paste((-10.16, 0)) and tab.graphics()[3]['x'] == -5.08, 'from where the last paste landed'
+        assert tab.duplicate_selected() and len(tab.graphics()) == 5 and tab.selected_graphics() == [4]
+        tab.undo()
+        assert len(tab.graphics()) == 4, 'a duplicate is one undo step'
+        tab._select_graphic(None)
+        assert tab.copy_selected() == 0 and tab.paste(), 'the clipboard survives an empty copy'
+        # A wire copied from a pin end is pasted free: the copy is a drawing.
+        pin_end = g.pin_inner_ends(tab._symbol)['1']
+        tab.start_wire()
+        tab.add_wire_point(*pin_end)
+        tab.add_wire_point(pin_end[0] + 2.54, pin_end[1])
+        assert tab.finish_wire(True)
+        wire = len(tab.graphics()) - 1
+        assert 'anchor' in tab.graphics()[wire]['primitives'][0]['points'][0]
+        assert tab.copy_selected() == 1 and tab.paste()
+        assert 'anchor' not in tab.graphics()[-1]['primitives'][0]['points'][0]
+    finally:
+        tab.deleteLater()
+
+
+def test_several_elements_are_selected_together_and_moved_turned_deleted_as_a_group(qapp):
+    tab = _tab()
+    try:
+        for x in (0.0, 12.7):
+            tab.start_shape('rectangle')
+            tab.add_shape_point(x, 0)
+            tab.add_shape_point(x + 2.54, 5.08)
+        tab.view.wire_finished.emit(False)
+        tab._toggle_graphic(0)
+        assert tab.selected_graphics() == [0, 1]
+        tab._toggle_graphic(1)
+        assert tab.selected_graphics() == [0] and tab._selected_graphic == 0
+        tab.view.graphic_toggled.emit(1)
+        assert tab.selected_graphics() == [0, 1]
+        handles = [item for item in tab.view.scene().items() if item.data(0) and item.data(0)[0] == 'shape_point']
+        assert handles == [], 'no handles while several are selected'
+        assert tab._edit_selected_graphics('rotate', 90) and [r['rotation'] for r in tab.graphics()] == [90, 90]
+        # Dragging one selected element moves the whole group.
+        tab.view.gesture_started.emit(('graphic', 0), QPointF(0, 0))
+        tab.view.gesture_moved.emit(('graphic', 0), QPointF(0, -5.08 * SCENE_UNITS_PER_MM))
+        tab.view.gesture_finished.emit(True)
+        assert [r['y'] for r in tab.graphics()] == [7.62, 7.62] and tab.selected_graphics() == [0, 1]
+        assert tab._edit_selected_graphics('delete') and tab.graphics() == [] and tab.selected_graphics() == []
+        # A band without pins selects the elements wholly inside it (the
+        # pins sit at x = ±7.62: the shapes are drawn clear of them).
+        for x in (0.0, 12.7):
+            tab.start_shape('rectangle')
+            tab.add_shape_point(x, 0)
+            tab.add_shape_point(x + 2.54, 2.54)
+        tab.view.wire_finished.emit(False)
+        from PyQt6.QtCore import QRectF
+        tab._select_region(QRectF(-1 * SCENE_UNITS_PER_MM, -3 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM), False)
+        assert tab.selected_graphics() == [0]
+        tab._select_region(QRectF(12 * SCENE_UNITS_PER_MM, -3 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM), True)
+        assert tab.selected_graphics() == [0, 1]
+        tab._select_pins({'1'})
+        assert tab.selected_graphics() == [], 'selecting pins drops the elements'
+    finally:
+        tab.deleteLater()
+
+
+def test_element_properties_set_placement_and_size_as_one_edit(qapp, monkeypatch):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        assert tab.set_element_geometry(0, 5.1, -2.5, 90, True, width=2.54, height=5.08)
+        record = tab.graphics()[0]
+        assert (record['x'], record['y'], record['rotation'], record['mirror']) == (5.1, -2.5, 90, True), \
+            'typed coordinates are taken as they are'
+        assert tab.set_element_geometry(0, 5.08, -2.54)
+        record = tab.graphics()[0]
+        assert g.instance_bounds(dict(record, rotation=0, mirror=False)) == (3.81, -5.08, 6.35, 0.0)
+        assert not tab.set_element_geometry(0, 0, 0, 45) and not tab.set_element_geometry(0, 0, 0, width=0)
+        assert not tab.set_element_geometry(9, 0, 0)
+        tab.undo()
+        tab.undo()
+        assert tab.graphics()[0]['x'] == 2.54, 'each call is one undo step'
+        # The dialog: X and width typed, the rest kept.
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QDoubleSpinBox
+
+        def fake_exec(dialog):
+            boxes = dialog.findChildren(QDoubleSpinBox)
+            boxes[0].setValue(7.62)
+            boxes[2].setValue(10.16)
+            dialog.findChild(QDialogButtonBox).accepted.emit()
+            return QDialog.DialogCode.Accepted
+        monkeypatch.setattr(QDialog, 'exec', fake_exec)
+        tab._edit_element_properties(0)
+        record = tab.graphics()[0]
+        assert record['x'] == 7.62 and g.instance_bounds(record) == (2.54, 0.0, 12.7, 2.54)
+    finally:
+        tab.deleteLater()
+
+
+def test_a_line_back_onto_its_first_point_closes_a_polygon(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('line')
+        for x, y in ((0, 0), (2.54, 0), (2.54, 2.54)):
+            tab.add_shape_point(x, y)
+        assert tab.graphics() == []
+        tab.add_shape_point(0.1, -0.1)
+        (polygon,) = tab.graphics()
+        assert polygon['primitives'][0]['points'][0] == polygon['primitives'][0]['points'][-1]
+        assert len(polygon['primitives'][0]['points']) == 4
+        assert tab._edit_graphic(0, 'fill', 'background')
+        tab.start_shape('line')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(2.54, 0)
+        assert tab.add_shape_point(0, 0) and len(tab.graphics()) == 1, 'two points back to the start: no polygon yet'
+        tab.view.wire_finished.emit(False)
+    finally:
+        tab.deleteLater()
+
+
+def test_pin_length_text_size_and_visibility_are_edited_and_drawn(qapp, monkeypatch):
+    tab = _tab()
+    try:
+        assert tab.set_pin_properties('1', 5.08, 1.0, True)
+        row = next(r for r in tab.draft_rows() if r['pin'] == '1')
+        assert (row['symbol_pin_length'], row['symbol_pin_text_size'], row['symbol_pin_hidden']) == (5.08, 1.0, True)
+        pin = next(p for p in tab._symbol.pins if p.pin.number == '1')
+        assert pin.pin.hidden and g.pin_inner_ends(tab._symbol)['1'] == (round(pin.x + 5.08, 4), pin.y)
+        from PyQt6.QtWidgets import QGraphicsLineItem
+        assert any(isinstance(item, QGraphicsLineItem) and item.data(0) == ('pin', '1')
+                   and item.pen().style() == Qt.PenStyle.DotLine for item in tab.view.scene().items()), 'hidden: dotted'
+        assert tab.set_pin_properties('1', 2.54, 1.27, False)
+        row = next(r for r in tab.draft_rows() if r['pin'] == '1')
+        assert not any(key in row for key in ('symbol_pin_length', 'symbol_pin_text_size', 'symbol_pin_hidden')), \
+            'defaults are not stored'
+        assert not tab.set_pin_properties('1', 1.0) and not tab.set_pin_properties('9', 2.54)
+        # The dialog carries the three fields and applies them with the position.
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QCheckBox, QComboBox
+
+        def fake_exec(dialog):
+            dialog.findChild(QCheckBox).setChecked(True)
+            combos = dialog.findChildren(QComboBox)
+            combos[1].setCurrentIndex(combos[1].findData(7.62))
+            dialog.findChild(QDialogButtonBox).accepted.emit()
+            return QDialog.DialogCode.Accepted
+        monkeypatch.setattr(QDialog, 'exec', fake_exec)
+        tab._select_pins({'2'}, '2')
+        tab._edit_selected_pin()
+        row = next(r for r in tab.draft_rows() if r['pin'] == '2')
+        assert row['symbol_pin_hidden'] is True and row['symbol_pin_length'] == 7.62
+        from kicadgen.generators.symbol import serialize_symbol, symbol_inputs
+        pins, body = symbol_inputs(tab.draft_rows())
+        assert '(length 7.62) (hide yes)' in serialize_symbol('Board', pins, body=body)
     finally:
         tab.deleteLater()

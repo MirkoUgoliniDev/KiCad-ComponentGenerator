@@ -32,7 +32,13 @@ SYMBOL_GENERATOR_VERSION = '10.0'
 
 @dataclass(frozen=True)
 class SymbolPin:
-    """@brief Store a pin identity, electrical role and optional editor placement."""
+    """@brief Store a pin identity, electrical role and optional editor placement.
+
+    @note `length` (mm, None = the layout's 2.54) must be a multiple of
+        PIN_LENGTH_STEP_MM so the inner end of a grid-placed pin stays on a
+        50 mil grid; `hidden` writes `(hide yes)`; `text_size` (mm, None =
+        1.27) is the font size of the pin name and number.
+    """
     number: str
     name: str
     electrical_type: str = 'passive'
@@ -40,6 +46,26 @@ class SymbolPin:
     offset: float | None = None
     position: tuple[float, float] | None = None
     angle: int | None = None
+    length: float | None = None
+    hidden: bool = False
+    text_size: float | None = None
+
+
+#: Step of a custom pin length (50 mil) and its allowed range, mm.
+PIN_LENGTH_STEP_MM = 1.27
+PIN_LENGTH_MAX_MM = 12.7
+#: Allowed font size of a pin text, mm (KLC: 1.27).
+PIN_TEXT_SIZE_RANGE_MM = (0.5, 5.08)
+
+
+def pin_length_of(pin: SymbolPin, default: float = PIN_GRID_MM) -> float:
+    """@brief The length of a pin in mm: its own or the layout default."""
+    return float(pin.length) if pin.length is not None else float(default)
+
+
+def pin_text_size_of(pin: SymbolPin) -> float:
+    """@brief The font size of a pin's texts in mm: its own or TEXT_SIZE."""
+    return float(pin.text_size) if pin.text_size is not None else TEXT_SIZE
 
 
 @dataclass(frozen=True)
@@ -131,7 +157,21 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
         if pin.side not in ('left', 'right', 'top', 'bottom'):
             raise ValueError(f'Pin {number}: invalid side')
         electrical_type = pin.electrical_type if pin.electrical_type in ELECTRICAL_TYPES else 'passive'
-        result.append(replace(pin, number=number, name=name, electrical_type=electrical_type))
+        length = pin.length
+        if length is not None:
+            if isinstance(length, bool) or not isinstance(length, (int, float)) or not math.isfinite(length) \
+                    or length < PIN_LENGTH_STEP_MM - 1e-7 or length > PIN_LENGTH_MAX_MM + 1e-7 \
+                    or not math.isclose(length / PIN_LENGTH_STEP_MM, round(length / PIN_LENGTH_STEP_MM), abs_tol=1e-7):
+                raise ValueError(f'Pin {number}: length must be a multiple of 1.27 mm up to 12.7 mm')
+            length = round(float(length), 4)
+        text_size = pin.text_size
+        if text_size is not None:
+            if isinstance(text_size, bool) or not isinstance(text_size, (int, float)) or not math.isfinite(text_size) \
+                    or not PIN_TEXT_SIZE_RANGE_MM[0] - 1e-7 <= text_size <= PIN_TEXT_SIZE_RANGE_MM[1] + 1e-7:
+                raise ValueError(f'Pin {number}: text size must be between 0.5 and 5.08 mm')
+            text_size = round(float(text_size), 4)
+        result.append(replace(pin, number=number, name=name, electrical_type=electrical_type,
+                              length=length, hidden=bool(pin.hidden), text_size=text_size))
     if not result:
         raise ValueError('At least one pin is required')
     return tuple(result)
@@ -142,7 +182,9 @@ def symbol_inputs(rows):
     pins = [SymbolPin(str(row.get('pin', '')), str(row.get('name') or ''),
                       row.get('electrical_type', 'passive'),
                       row.get('symbol_side', 'left'), row.get('symbol_offset'),
-                      row.get('symbol_position'), row.get('symbol_angle')) for row in rows]
+                      row.get('symbol_position'), row.get('symbol_angle'),
+                      row.get('symbol_pin_length'), bool(row.get('symbol_pin_hidden', False)),
+                      row.get('symbol_pin_text_size')) for row in rows]
     bodies = [row['symbol_body'] for row in rows if 'symbol_body' in row]
     if bodies and any(body != bodies[0] for body in bodies):
         raise ValueError('Inconsistent symbol body dimensions')
@@ -217,12 +259,19 @@ def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
         if (pin.side, offset) in occupied:
             raise ValueError('Two pins cannot occupy the same position')
         occupied.add((pin.side, offset))
+        # The outer end sits one pin length outside the body edge: with a
+        # custom length it must still fall on the 100 mil grid (KLC S4.1),
+        # which a length of 3.81 mm on a 2.54 mm edge would break.
+        length = pin_length_of(pin, spacing)
         x, y, angle = {
-            'left': (-half_width - spacing, offset, 0),
-            'right': (half_width + spacing, offset, 180),
-            'top': (offset, half_height + spacing, 270),
-            'bottom': (offset, -half_height - spacing, 90),
+            'left': (-half_width - length, offset, 0),
+            'right': (half_width + length, offset, 180),
+            'top': (offset, half_height + length, 270),
+            'bottom': (offset, -half_height - length, 90),
         }[pin.side]
+        for value in (x, y):
+            if not math.isclose(value / spacing, round(value / spacing), abs_tol=1e-7):
+                raise ValueError('Pin connection must align to the grid')
         positioned.append(PositionedPin(pin, round(x, 4), round(y, 4), angle))
     points = [(p.x, p.y) for p in positioned]
     if len(points) != len(set(points)):
@@ -306,9 +355,13 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
     lines.extend(('    )', f'    (symbol {_quote(name + "_1_1")}'))
     for item in layout.pins:
         pin = item.pin
-        lines.extend((f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) (length {_num(layout.pin_length)})',
-                      f'        (name {_quote(pin.name or "~")} {effects})',
-                      f'        (number {_quote(pin.number)} {effects}))'))
+        size = _num(pin_text_size_of(pin))
+        pin_effects = f'(effects (font (size {size} {size})))'
+        hide = ' (hide yes)' if pin.hidden else ''
+        lines.extend((f'      (pin {pin.electrical_type} line (at {_num(item.x)} {_num(item.y)} {item.angle}) '
+                      f'(length {_num(pin_length_of(pin, layout.pin_length))}){hide}',
+                      f'        (name {_quote(pin.name or "~")} {pin_effects})',
+                      f'        (number {_quote(pin.number)} {pin_effects}))'))
     lines.extend(('    )', '    (embedded_fonts no)', '  )', ')', ''))
     return '\n'.join(lines)
 

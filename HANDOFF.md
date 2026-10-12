@@ -1,5 +1,181 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 12/10 — commit `0389777` su `ADVANCED`, mergiato in `main`
+
+- Strumenti di disegno (sezione precedente e la seguente) committati in
+  `0389777`, push e merge in `main` fatti su richiesta dell'utente
+  («committa, pusha, mergia in main, ritorna qui, poi spengo il pc»).
+- Suite completa: prima meta' 4431 verdi, seconda 2876 verdi (vedi sotto).
+- APERTO alla ripresa: (1) segnalazione «se carico il progetto da qui
+  non si aggiorna» (pulsante apri nella scheda Progetto), domanda posta
+  all'utente senza risposta: cosa resta vecchio sullo schermo?; (2) le
+  tre voci precedenti (campi obbligatori, «Regole KLC», etichetta
+  «Applica ai file»); (3) unità multiple / De Morgan, escluso e da
+  pianificare a parte.
+
+## 2026-10-12 — «fai tutto in modo preciso»: blocchi A-H (commit `0389777`)
+
+- Tutti gli otto blocchi del piano qui sotto sono implementati e
+  coperti da test; il punto 7 (unità multiple / De Morgan) resta ESCLUSO
+  come concordato. File: `kicadgen/generators/symbol_glyphs.py`
+  (primitiva `text` con text/size/angle/justify, campo `style` sullo
+  stroke, `primitive_record`/`primitive_from_record`, `shape_handles`,
+  `set_shape_point`, `instance_bounds`, `detached_copy`, `scale_shape`,
+  `set_text`, strumento `text` in SHAPE_TOOLS), `kicadgen/generators/
+  symbol.py` (SymbolPin.length/hidden/text_size, `pin_length_of`,
+  `pin_text_size_of`, righe `symbol_pin_length` / `symbol_pin_hidden` /
+  `symbol_pin_text_size`, scrittura `(length L) (hide yes)` e font per
+  pin), `kicadgen/gui/symbol_tab.py` (TextDialog, strumento «Testo»,
+  «Modifica testo…», sottomenu «Tipo di linea», maniglie `shape_point`
+  trascinabili, Ctrl+C/V/D con appunti della scheda, Ctrl+clic e nastro
+  sugli elementi, operazioni di gruppo, «Proprietà elemento…», combo
+  griglia 2.54/1.27/0.635/0.254 + aggancio, poligono chiuso, «Proprietà
+  pin…» con lunghezza/dimensione testi/nascosto, pin nascosti
+  punteggiati), `kicadgen/services/i18n.py` (29 chiavi nuove, 4 lingue).
+- Decisioni di progetto (motivate nel codice): angolo del testo in
+  decimi di grado nei file KiCad 6 riconosciuto se >= 360 (regola di
+  interoperabilità); un testo ruota con l'elemento ma non si specchia;
+  una lunghezza pin personalizzata deve essere multipla di 1.27 e, per
+  un pin posizionato dal lato, lasciare l'estremo esterno sulla griglia
+  2.54 (criterio fisico: KLC S4.1), mentre per un pin a posizione libera
+  l'estremo esterno resta fermo e il pin si allunga verso il corpo come
+  in KiCad; i valori di default (2.54, 1.27, visibile) NON vengono
+  scritti nelle righe; le coordinate digitate in «Proprietà elemento…»
+  sono prese così come sono per le forme (snap solo al trascinamento),
+  mentre glifi e fili restano sulla griglia pin; un nastro che contiene
+  pin seleziona i pin (come prima), altrimenti gli elementi interamente
+  contenuti; rotazione di gruppo = ogni elemento sul proprio centro
+  (una rotazione attorno al centro comune staccherebbe i terminali dai
+  pin); Ctrl+C senza selezione non svuota gli appunti; ogni incolla
+  avanza di un passo dall'ultimo incollato.
+- Contratti di test aggiornati (con motivo nel test): menu del filo =
+  Elimina + Copia + Duplica + Proprietà elemento (mai ruota/specchia);
+  menu del pin = 8 voci (aggiunta «Proprietà pin…»).
+- Verifica: test_symbol_*.py (8 file) + i18n + documentation +
+  localization + kicad_library + klc_checks = 296 verdi; resa offscreen
+  controllata a video (griglia, strumento testo, pin nascosto
+  punteggiato e lungo, maniglie del poligono). Suite completa in due
+  meta' LANCIATA (tools/run_test_halves.py first -> .venv/
+  claude-suite-A3.log, second -> B3.log): prima meta' 4431 passati + 9
+  saltati + 19 sottotest; seconda meta' 2876 passati + 2 saltati + 2
+  xfail + 3 falliti GIA' A HEAD, non legati a questo lavoro: due
+  asserzioni di tests/test_photo_inventory_gui.py chiedevano 5 schede,
+  ma la scheda «Esportazioni» (bde5837, suite mai rilanciata dopo) le
+  porta a 6. Contratto aggiornato a 6 con il motivo nel test: 77 verdi.
+- Difetto trovato e corretto durante i test: la finestra «Proprietà
+  elemento…» spostava una forma anche con coordinate invariate perché
+  le agganciava alla griglia; ora i valori digitati non vengono
+  agganciati.
+- Segnalazione aperta dell'utente (apertura progetto dalla scheda
+  «Progetto» «non si aggiorna»): NON diagnosticata, serve sapere cosa
+  non si aggiorna; domanda posta all'utente a fine turno.
+
+## PIANO (12/10) — «cosa manca nella palette? fai tutto in modo preciso»
+
+- Analisi consegnata all'utente (8 punti); risposta: «no, fai tutto in
+  modo preciso». Blocchi, nell'ordine di esecuzione, ciascuno con test:
+  A. Testo: primitiva `text` (punto, testo, dimensione mm, angolo,
+     giustificazione) letta/scritta nel `.kicad_sym` (`(text "..." (at x
+     y a) (effects (font (size s s)) (justify ...)))`), disegnata nel
+     canvas e nell'icona, strumento «Testo» nella sezione «Disegno» (clic
+     + finestra testo/dimensione), «Modifica testo…» nel menu.
+  B. Maniglie sulle forme selezionate: punti definenti trascinabili
+     (vertici, angoli, centro+raggio, 3 punti arco, 4 punti Bézier,
+     posizione testo) con aggancio alla griglia, annullabili.
+  C. Tipo di linea: campo `style` (default/solid/dash/dot/dash_dot/
+     dash_dot_dot) letto/scritto nello `stroke`, reso con gli stili Qt,
+     sottomenu «Tipo di linea».
+  D. Duplica (Ctrl+D), copia (Ctrl+C), incolla (Ctrl+V) degli elementi
+     grafici, appunti in memoria della scheda; i fili incollati perdono
+     le ancore (punti congelati).
+  E. Selezione multipla di elementi grafici: Ctrl+clic e rettangolo di
+     selezione; sposta/elimina/ruota/specchia/copia su tutti i selezionati.
+  F. Precisione: finestra «Proprietà elemento…» con X, Y, rotazione e
+     dimensioni; passo di griglia per il disegno (2.54/1.27/0.635/0.254)
+     e aggancio disattivabile. I PIN restano sulla griglia 2.54 (KLC).
+  G. Poligono chiuso: con la linea, un clic sul primo punto chiude il
+     poligono.
+  H. Proprietà pin: lunghezza, dimensione testi, pin nascosto, dal menu
+     del pin; scritte nel simbolo.
+- SEGNALATO dall'utente a meta' lavoro (screenshot della scheda
+  «Progetto», freccia sull'icona «apri progetto» della barra della
+  scheda): «se carico il progetto da qui, non si aggiorna». Da
+  diagnosticare dopo i blocchi: quale pulsante (icona cartella aperta
+  nella barra della scheda Progetto) e cosa non si aggiorna (la scheda
+  resta sul progetto precedente?). Riprodurre con un test offscreen.
+- ESCLUSO da questo giro, detto all'utente: unità multiple e stile
+  alternativo De Morgan (punto 7): non e' palette ma struttura del
+  generatore (pinout per unità, grafica per unità, KLC, esportazioni);
+  va pianificato a parte.
+- Vincoli: file toccati in sequenza da un solo agente (symbol_tab.py e
+  symbol_glyphs.py condivisi da tutti i blocchi); test della palette
+  esistente devono restare verdi (menu del filo = sola eliminazione).
+
+
+## 2026-10-12 — strumenti di disegno nella palette del simbolo (FATTO, NON COMMITTATO)
+
+- Esito: tutto il piano qui sotto e' implementato. File toccati:
+  `kicadgen/generators/symbol_glyphs.py` (primitiva `bezier` letta e
+  scritta, `bezier_points`, `primitive_outline`, `SHAPE_TOOLS`,
+  `shape_instance`, `is_shape`, `set_primitive_style`, `FILL_MODES`),
+  `kicadgen/gui/symbol_tab.py` (sezione «Disegno», `start_shape` /
+  `add_shape_point` / `finish_shape`, anteprima della forma sotto il
+  cursore, menu contestuale con «Riempimento» e «Spessore del tratto…»
+  per forme e glifi, NON per i fili: il test esistente vincola il menu
+  del filo alla sola eliminazione), `kicadgen/services/i18n.py` (17
+  chiavi nuove in 4 lingue), test in `tests/test_symbol_glyphs.py` e
+  `tests/test_symbol_palette_gui.py`.
+- Scelte di progetto: la forma viene salvata con origine nel centro del
+  suo ingombro e punti relativi, cosi' ruota e si specchia su se stessa;
+  lo strumento resta armato dopo ogni forma (come KiCad), Esc o un altro
+  strumento lo rilascia; una forma degenere (rettangolo senza area,
+  cerchio di raggio zero, arco con punto ripetuto) e' rifiutata con
+  messaggio e lo strumento resta armato; `finish_wire` instrada al
+  `finish_shape` quando c'e' uno strumento forma, perche' la vista
+  manda un solo segnale per filo e forme.
+- Verifica: test_symbol_*.py + i18n + documentation + localization +
+  kicad_library = 215 verdi; resa offscreen con una forma per tipo
+  controllata a video. Suite completa NON rilanciata.
+- Aperto: nessun commit fatto (l'utente non l'ha chiesto). Le voci
+  aperte precedenti (campi obbligatori, «Regole KLC», etichetta «Applica
+  ai file») restano in attesa.
+
+## PIANO (12/10) — strumenti di disegno nella palette del simbolo («aggiungi tutto»)
+
+- Richiesta (screenshot della palette): oltre a «Collegamenti» (solo
+  il filo) servono strumenti per «tracciare disegni, linee curve
+  eccetera». Proposta: sezione «Disegno» con Linea, Rettangolo,
+  Cerchio, Arco; Bézier lasciata fuori. Utente: «aggiungi tutto ok?»
+  => anche le Bézier in questo giro.
+- Piano (prima l'handoff, poi il codice):
+  1. `symbol_glyphs.py`: nuova primitiva `bezier` (4 punti: inizio,
+     controllo 1, controllo 2, fine), letta dal `.kicad_sym` (KiCad >= 7
+     scrive `(bezier (pts ...))`), scritta allo stesso modo, campionata
+     in punti (`bezier_points`) per il disegno, l'ingombro e la
+     rotazione/specchio come l'arco. `placed_primitives` ruota tutti e
+     quattro i punti.
+  2. `symbol_tab.py`: sezione «Disegno» nella palette dopo
+     «Collegamenti» con cinque strumenti (linea, rettangolo, cerchio,
+     arco, bézier). La vista riusa il meccanismo del filo (clic =
+     punto, Esc = annulla, tasto destro/doppio clic/Invio = chiudi per
+     la linea); le forme a punti fissi (rettangolo 2, cerchio 2, arco 3,
+     bézier 4) si chiudono da sole all'ultimo clic. Solo griglia, nessun
+     aggancio ai pin e nessun vincolo ortogonale: sono grafica, non
+     fili (`source: 'shape'`), quindi ruotano e si specchiano come gli
+     altri elementi. Anteprima della forma in corso sotto il cursore.
+  3. Proprietà dell'elemento selezionato: spessore del tratto e
+     riempimento (nessuno/contorno/sfondo), i tre valori di KiCad,
+     applicati a tutte le primitive dell'elemento.
+  4. i18n per le nuove etichette (it/en/fr/de) nel catalogo SQLite.
+  5. Test: parsing+scrittura bezier andata e ritorno, campionamento,
+     rotazione; GUI offscreen: ogni strumento produce l'elemento atteso
+     con i punti cliccati, Esc annulla, rotazione di una forma.
+- Dubbi/interpretazioni: le Bézier nel file simbolo richiedono KiCad 7
+  o successivo; il generatore scrive già il formato KiCad 10, quindi
+  nessun vincolo nuovo. L'arco è dato da inizio, fine e punto medio come
+  nel file KiCad (ordine dei clic: inizio, fine, punto intermedio).
+
+
 ## FINE SESSIONE 11/10 mattina - ripresa nel pomeriggio dell'11/10
 
 - Tutto committato e pubblicato (`bde5837` + handoff `1837d59` su
