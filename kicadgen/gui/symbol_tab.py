@@ -118,6 +118,11 @@ PEN_STYLES = {'default': Qt.PenStyle.SolidLine, 'solid': Qt.PenStyle.SolidLine, 
 JUSTIFY_LABELS = (('left', 'Sinistra'), ('center', 'Centro'), ('right', 'Destra'))
 
 #: Palette tooltip of every tool, by key (Italian source, translated by `tx`).
+#: Side of a handle square, scene pixels, and the margin (scene pixels)
+#: around the selected element inside which its handles are shown.
+HANDLE_SIZE_PX = 6
+HANDLE_HOVER_MARGIN = 12
+
 TOOL_HINTS = {
     'wire': 'Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere',
     'line': 'Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per chiudere, Esc per annullare',
@@ -659,6 +664,7 @@ class SymbolTab(QWidget):
         self._selected_pins = set()
         self._syncing_selection = False
         self._cursor_position = None
+        self._handle_groups = []
         self._body_locked = False
         self._recovery_path = None
         self._recoverable = None
@@ -1452,14 +1458,19 @@ class SymbolTab(QWidget):
         @return True when a shape was added; False when abandoned, when the
             points do not make the shape (see `shape_instance`), or when the
             geometry was refused.
-        @note The tool stays armed after a shape is inserted so several
-            shapes can be drawn in a row (as in KiCad); Esc or another tool
-            releases it.
+        @note A tool drawn by points stays armed after a shape is inserted
+            so several shapes can be drawn in a row (as in KiCad); Esc or
+            another tool releases it, and the status line says so. A tool
+            that inserts through a dialog (the text) is one-shot: it is
+            released after the insertion, because while it is armed every
+            click is a new element and the one just placed cannot be
+            dragged (user, 2026-10-12).
         """
         from ..generators.symbol_glyphs import shape_instance
         key, points = self._shape_tool, list(self._shape_points)
         self._shape_points = []
         self._wire_cursor_item = None
+        one_shot = False
         if not commit or key is None or self._symbol is None:
             self.view.wiring = False
             self._release_tools()
@@ -1473,6 +1484,7 @@ class SymbolTab(QWidget):
                 self._draw(self._symbol)
                 return False
             record = shape_instance(key, points, text=answer[0], size=answer[1], justify=answer[2])
+            one_shot = True
             if record is None:
                 self.set_status(self.tx('Testo non valido: serve una riga non vuota con dimensione maggiore di zero.'))
                 self.view.wiring = True
@@ -1490,8 +1502,15 @@ class SymbolTab(QWidget):
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
             self.view.wiring = True
             return False
-        self.view.wiring = True
-        self.set_status(self.tx('Forma inserita.') + ' ' + self.tx(TOOL_HINTS[key]))
+        if one_shot:
+            self.view.wiring = False
+            self._release_tools()
+            self.set_status(self.tx(
+                'Testo inserito: trascinalo dal corpo o dalla maniglia; «Modifica testo…» nel menu per cambiarlo.'))
+        else:
+            self.view.wiring = True
+            self.set_status(self.tx('Forma inserita.') + ' ' + self.tx(TOOL_HINTS[key]) + ' '
+                            + self.tx('Esc per lasciare lo strumento.'))
         self._select_graphic(len(graphics) - 1)
         return True
 
@@ -2350,6 +2369,7 @@ class SymbolTab(QWidget):
     def _update_readout(self, point=None):
         if point is not None:
             self._cursor_position = point
+            self._update_handle_visibility(point)
             item = self._wire_cursor_item
             if item is not None and self._shape_tool is not None and self._shape_points and self.view.wiring:
                 cursor = self._grid_point(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
@@ -2782,6 +2802,7 @@ class SymbolTab(QWidget):
         chosen = set(self.selected_graphics())
         for index, instance in enumerate(graphics):
             selected = index in chosen
+            element_handles = []
             theme = self.theme
             base_pen = QPen(QColor(theme['selected']) if selected else QColor(theme['graphic']), 2.2 if selected else 1.3)
             items = []
@@ -2792,9 +2813,7 @@ class SymbolTab(QWidget):
                 # Vertices of the selected wire: small squares to drag on
                 # the grid, onto a terminal/pin (anchors) or away (frees).
                 for position, (x, y) in enumerate(primitives[0].points):
-                    square = scene.addRect(x * scale - 3.5, -y * scale - 3.5, 7, 7,
-                                           QPen(QColor(theme['selected']), 1.0), QColor(theme['handle']))
-                    square.setZValue(12)
+                    square = self._add_handle(scene, x * scale, -y * scale, element_handles)
                     square.setData(0, ('vertex', index, position))
                     square.setCursor(Qt.CursorShape.CrossCursor)
                     square.setToolTip(self.tx('Vertice del filo: trascinalo; su un pin o un terminale si aggancia.'))
@@ -2802,9 +2821,7 @@ class SymbolTab(QWidget):
                 # Defining points of the selected shape (user, 2026-10-12):
                 # corners, centre and rim, arc and curve points, text anchor.
                 for position, (x, y) in enumerate(shape_handles(instance)):
-                    square = scene.addRect(x * scale - 3.5, -y * scale - 3.5, 7, 7,
-                                           QPen(QColor(theme['selected']), 1.0), QColor(theme['handle']))
-                    square.setZValue(12)
+                    square = self._add_handle(scene, x * scale, -y * scale, element_handles)
                     square.setData(0, ('shape_point', index, position))
                     square.setCursor(Qt.CursorShape.CrossCursor)
                     square.setToolTip(self.tx('Punto della forma: trascinalo sulla griglia del disegno.'))
@@ -2852,6 +2869,62 @@ class SymbolTab(QWidget):
                 item.setData(0, ('graphic', index))
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
                 item.setToolTip(hint)
+            if element_handles:
+                # The area that reveals the handles: the selected element and
+                # its handles, with a margin so the pointer finds a handle
+                # before touching it (user, 2026-10-12: discreet handles).
+                area = QRectF()
+                for item in items + element_handles:
+                    area = area.united(item.sceneBoundingRect())
+                self._handle_groups.append((element_handles, area.adjusted(
+                    -HANDLE_HOVER_MARGIN, -HANDLE_HOVER_MARGIN, HANDLE_HOVER_MARGIN, HANDLE_HOVER_MARGIN), None))
+                self._update_handle_visibility(self._cursor_position)
+
+    def _add_handle(self, scene, sx, sy, group):
+        """@brief A draggable handle square at a scene point, hidden until the pointer comes near.
+
+        @param scene Scene to draw in.
+        @param sx Scene X of the handle centre.
+        @param sy Scene Y of the handle centre.
+        @param group List collecting the handles that share one reveal area
+            (registered in `_handle_groups` by the caller).
+        @return The rect item; the caller sets its `data(0)` target.
+        @note Discreet by request (user, 2026-10-12): small, with a
+            translucent fill, and visible only while the pointer is inside
+            the group's area or a drag is in progress
+            (`_update_handle_visibility`).
+        """
+        theme = self.theme
+        fill = QColor(theme['handle'])
+        fill.setAlpha(150)
+        half = HANDLE_SIZE_PX / 2
+        square = scene.addRect(sx - half, sy - half, HANDLE_SIZE_PX, HANDLE_SIZE_PX,
+                               QPen(QColor(theme['selected']), 1.0), fill)
+        square.setZValue(12)
+        square.setCursor(Qt.CursorShape.CrossCursor)
+        square.setVisible(False)
+        group.append(square)
+        return square
+
+    def _update_handle_visibility(self, point):
+        """@brief Show the handles of the selected element while the pointer is in its area.
+
+        @param point Scene position of the pointer; None hides the handles.
+        @note Each group of `_handle_groups` has an outer area and, for the
+            body's handles, an inner one that does not count: the body covers
+            the whole symbol, so its handles show only near its outline.
+            During a drag the handles stay visible wherever the pointer is:
+            a handle hidden under the pointer that drags it would be absurd.
+        """
+        dragging = self.view.gesture is not None
+        for items, outer, inner in self._handle_groups:
+            visible = dragging or (point is not None and outer.contains(point)
+                                   and not (inner is not None and inner.contains(point)))
+            for item in items:
+                try:
+                    item.setVisible(visible)
+                except RuntimeError:  # scene already cleared
+                    pass
 
     def _draw_text_primitive(self, scene, scale, p, selected):
         """A text primitive as a scene item: font size `p.size` mm, turned by
@@ -2878,6 +2951,7 @@ class SymbolTab(QWidget):
         self._update_readout()
         scene = self.view.scene()
         scene.clear()
+        self._handle_groups = []
         self._text_bounds = []
         self.dimensions.setText('' if symbol is None else f'{symbol.width:.2f} \u00d7 {symbol.height:.2f} mm')
         if symbol is None:
@@ -2970,12 +3044,20 @@ class SymbolTab(QWidget):
         font.setPixelSize(12)
         small_font.setPixelSize(10)
         handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
+        body_handles = []
         for hx, hy in handles:
             x, y = hx * width / 2, hy * height / 2
-            item = tag(scene.addRect(x - 4, y - 4, 8, 8, pen, QColor(theme['handle'])), ('resize', hx, hy))
-            item.setZValue(10)
+            item = tag(self._add_handle(scene, x, y, body_handles), ('resize', hx, hy))
             item.setCursor(Qt.CursorShape.SizeHorCursor if not hy else Qt.CursorShape.SizeVerCursor if not hx else
                            Qt.CursorShape.SizeFDiagCursor if hx == hy else Qt.CursorShape.SizeBDiagCursor)
+        if body_handles:
+            # The body covers the whole symbol: its handles are revealed in a
+            # ring around the outline (same margin inside and outside), not
+            # anywhere over the body (user, 2026-10-12).
+            body = QRectF(-width / 2, -height / 2, width, height)
+            m = HANDLE_HOVER_MARGIN
+            self._handle_groups.append((body_handles, body.adjusted(-m, -m, m, m), body.adjusted(m, m, -m, -m)))
+            self._update_handle_visibility(self._cursor_position)
         if self._gesture_before is not None:
             scene.setSceneRect(self._gesture_scene_rect)
         else:

@@ -486,13 +486,52 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
 }
 
 
-def _align_form_labels(form: QFormLayout, width: int = 132) -> None:
-    """Keep fields aligned when several forms are shown in the same panel."""
+#: Label column shared by the forms of a panel, in pixels: the width every
+#: form gets so that their fields start on the same vertical line.
+FORM_LABEL_MINIMUM_WIDTH = 132
+#: Room between the end of the longest label and its field, in pixels.
+FORM_LABEL_PADDING = 6
+
+
+def _form_labels(form: QFormLayout) -> list[QLabel]:
+    """@brief The label widgets of a form, one per row that has one.
+    @param form Form layout to inspect.
+    @return Labels in row order; rows spanning both columns are skipped.
+    """
+    labels = []
     for row in range(form.rowCount()):
         label_item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
         label = label_item.widget() if label_item is not None else None
-        if label is not None:
-            label.setFixedWidth(width)
+        if isinstance(label, QLabel):
+            labels.append(label)
+    return labels
+
+
+def _align_form_labels(form: QFormLayout, width: int = FORM_LABEL_MINIMUM_WIDTH) -> int:
+    """@brief Give every label of a form the same column width, wide enough for all of them.
+
+    @param form Form layout whose labels are aligned.
+    @param width Minimum column width in pixels, shared with the other forms
+        of the panel so their fields line up.
+    @return The width applied.
+    @note The column is never narrower than the longest label plus
+        `FORM_LABEL_PADDING`: a fixed column cut «Designatore di riferimento:»
+        (user, 2026-10-12) and would cut any longer translation. The fields
+        take the remaining room. Label texts change with the language, so the
+        caller must align again after every retranslation
+        (`MainWindow._realign_form_labels`).
+    """
+    labels = _form_labels(form)
+    for label in labels:
+        # The application style sheet sets the font (theme.APP_QSS, 10 pt):
+        # measured before the style is applied, a label reports the smaller
+        # default font and the column comes out short (user, 2026-10-12).
+        label.ensurePolished()
+        needed = label.fontMetrics().horizontalAdvance(label.text()) + FORM_LABEL_PADDING
+        width = max(width, needed)
+    for label in labels:
+        label.setFixedWidth(width)
+    return width
 
 #: Marks preview grid lines so fit-to-content calculations can exclude them.
 _GRID_ITEM = 0
@@ -2223,8 +2262,23 @@ class MainWindow(QMainWindow):
         self._analysis_tabs_enabled = None
         # Apply the persisted language to all catalogued widgets on first render.
         self.i18n.retranslate_widgets(self)
+        self._realign_form_labels()
         if hasattr(self, "project_wizard"):
             self.project_wizard.retranslate()
+
+    def _align_form(self, form: QFormLayout) -> None:
+        """@brief Align a form's labels now and after every language change.
+        @param form Form layout built by the window; kept in `_aligned_forms`.
+        """
+        if not hasattr(self, "_aligned_forms"):
+            self._aligned_forms = []
+        self._aligned_forms.append(form)
+        _align_form_labels(form)
+
+    def _realign_form_labels(self) -> None:
+        """@brief Recompute the label columns: translated labels have other widths."""
+        for form in getattr(self, "_aligned_forms", ()):
+            _align_form_labels(form)
 
     def _refresh_language_texts(self) -> None:
         """@brief Nome dell'icona e della tendina della lingua, nella lingua in uso."""
@@ -2253,6 +2307,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.tabs.setTabText(TAB_EXPORTS, self.i18n.tr("tab.exports.name"))
         self.i18n.retranslate_widgets(self)
+        self._realign_form_labels()
         self.project_wizard.retranslate()
         self._refresh_ai_tools_summary()
         if hasattr(self, "workflow_bar"):
@@ -2479,7 +2534,7 @@ class MainWindow(QMainWindow):
         self.btn_project_info.setFixedSize(36, 32)
         path_row.addWidget(self.btn_project_info)
         folder_layout.addRow("Cartella componente:", path_row)
-        _align_form_labels(folder_layout)
+        self._align_form(folder_layout)
 
         self.project_info_dialog = QDialog(self)
         self.project_info_dialog.setWindowTitle("Informazioni sulla cartella componente")
@@ -2652,7 +2707,7 @@ class MainWindow(QMainWindow):
         ai_form.addRow(self.label_pcb_thickness, pcb_row)
         self._ai_form = ai_form
         self._row_pcb_thickness = ai_form.rowCount() - 1
-        _align_form_labels(ai_form)
+        self._align_form(ai_form)
         models_form = QFormLayout()
 
         self.combo_model = QComboBox()
@@ -2789,7 +2844,7 @@ class MainWindow(QMainWindow):
                        self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setProperty("i18n_skip", True)
         self._refresh_photo_detector_controls()
-        _align_form_labels(models_form)
+        self._align_form(models_form)
 
         analysis_layout.addLayout(ai_form)
         analysis_layout.addWidget(self.group_mounting)
@@ -8921,7 +8976,7 @@ class MainWindow(QMainWindow):
         artifacts_form.addRow(self.file_paths_detail)
         self.symbol_tab.export_enabled_changed.connect(self.btn_export_symbol.setEnabled)
         self.btn_export_symbol.setEnabled(self.symbol_tab.export_button.isEnabled())
-        _align_form_labels(artifacts_form)
+        self._align_form(artifacts_form)
         outer.addWidget(artifacts_group)
         outer.addWidget(self._build_metadata_group())
 
@@ -9052,6 +9107,8 @@ class MainWindow(QMainWindow):
             "Designatore, descrizione, parole chiave, datasheet e filtri del "
             "componente, con le regole KLC. Clic sul titolo per aprire o chiudere.")
         self.metadata_body = group.body
+        self._metadata_help_buttons: dict[str, QToolButton] = {}
+        self._metadata_help_dialog = None
         form = QFormLayout(self.metadata_body)
         form.setContentsMargins(0, 6, 0, 0)
         self.field_reference = QLineEdit()
@@ -9064,17 +9121,17 @@ class MainWindow(QMainWindow):
             "Prefisso del riferimento nello schema (U, J, K...): solo lettere, "
             "KiCad aggiunge il numero.")
         self.field_reference.textChanged.connect(self._on_reference_edited)
-        form.addRow("Designatore di riferimento:", self.field_reference)
+        form.addRow("Designatore di riferimento:", self._metadata_field_row(self.field_reference, "reference"))
         self.field_meta_description = QLineEdit()
         self.field_meta_description.setToolTip(
             "Una riga che descrive il componente: va nel footprint (descr) e nel "
             "simbolo (Description).")
-        form.addRow("Descrizione:", self.field_meta_description)
+        form.addRow("Descrizione:", self._metadata_field_row(self.field_meta_description, "description"))
         self.field_meta_keywords = QLineEdit()
         self.field_meta_keywords.setToolTip(
             "Parole separate da spazi per la ricerca nel selettore: footprint (tags) "
             "e simbolo (ki_keywords).")
-        form.addRow("Parole chiave:", self.field_meta_keywords)
+        form.addRow("Parole chiave:", self._metadata_field_row(self.field_meta_keywords, "keywords"))
         self._mirror_text_value(self.field_meta_description, self.field_description)
         self._mirror_text_value(self.field_meta_keywords, self.field_tags)
         self.field_meta_description.textChanged.connect(lambda _text: self._refresh_klc_findings())
@@ -9084,13 +9141,13 @@ class MainWindow(QMainWindow):
             "URL o percorso del documento, senza spazi: proprietà Datasheet di "
             "simbolo e footprint.")
         self.field_datasheet.textChanged.connect(lambda _text: self._refresh_klc_findings())
-        form.addRow("Datasheet (URL o file):", self.field_datasheet)
+        form.addRow("Datasheet (URL o file):", self._metadata_field_row(self.field_datasheet, "datasheet"))
         self.field_fp_filters = QLineEdit()
         self.field_fp_filters.setToolTip(
             "Schemi con * e ? che limitano i footprint proponibili per il simbolo "
             "(ki_fp_filters).")
         self.field_fp_filters.textChanged.connect(lambda _text: self._refresh_klc_findings())
-        form.addRow("Filtri footprint:", self.field_fp_filters)
+        form.addRow("Filtri footprint:", self._metadata_field_row(self.field_fp_filters, "fp_filters"))
         self.btn_apply_metadata = self._workflow_tool_button(
             "confirm-use.svg", "Applica ai file",
             "Salva il progetto, rigenera il footprint e riesporta il simbolo se esiste già")
@@ -9110,16 +9167,194 @@ class MainWindow(QMainWindow):
         self.label_klc = QLabel("Regole KLC:")
         self.label_klc.setToolTip(
             "Osservazioni sulle convenzioni delle librerie KiCad: ⛔ errore, ⚠ avviso.")
-        form.addRow(self.label_klc, self.klc_list)
+        form.addRow(self.label_klc, self._metadata_field_row(self.klc_list, "klc", top=True))
         QWidget.setTabOrder(self.field_reference, self.field_meta_description)
         QWidget.setTabOrder(self.field_meta_description, self.field_meta_keywords)
         QWidget.setTabOrder(self.field_meta_keywords, self.field_datasheet)
         QWidget.setTabOrder(self.field_datasheet, self.field_fp_filters)
         QWidget.setTabOrder(self.field_fp_filters, self.btn_apply_metadata)
-        _align_form_labels(form)
+        self._align_form(form)
         self.group_metadata = group
         group.setEnabled(False)
         return group
+
+    #: Help topics of «Metadati del componente», in row order: key -> source
+    #: of the dialog title. The texts live in `_metadata_help_content`.
+    METADATA_HELP_TITLES = {
+        "reference": "Designatore di riferimento",
+        "description": "Descrizione",
+        "keywords": "Parole chiave",
+        "datasheet": "Datasheet (URL o file)",
+        "fp_filters": "Filtri footprint",
+        "klc": "Regole KLC",
+    }
+
+    def _metadata_field_row(self, field: QWidget, key: str, top: bool = False) -> QWidget:
+        """@brief A metadata row: the field, then its help icon at the right end.
+
+        @param field Editor (or the KLC list) that takes the free width.
+        @param key Help topic, a key of `METADATA_HELP_TITLES`.
+        @param top True to keep the icon on the first line of a tall field.
+        @return The row widget to put in the form.
+        @note The icon opens a modal explanation (`_show_metadata_help`), like
+            the ⓘ of the component folder (user, 2026-10-12): the tooltip
+            alone was not enough to say what each property is for in KiCad.
+        """
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(field, 1)
+        button = self._icon_only_button("info.svg")
+        button.setProperty("metadata_help", key)
+        title = self.i18n.text("Aiuto: {field}").format(
+            field=self.i18n.text(self.METADATA_HELP_TITLES[key]))
+        self._apply_icon_tooltip(button, title, self.i18n.text(
+            "Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano."))
+        button.clicked.connect(lambda _checked=False, key=key: self._show_metadata_help(key))
+        alignment = Qt.AlignmentFlag.AlignTop if top else Qt.AlignmentFlag.AlignVCenter
+        layout.addWidget(button, 0, alignment)
+        self._metadata_help_buttons[key] = button
+        return row
+
+    def _metadata_help_content(self, key: str) -> list[tuple[str, str]]:
+        """@brief The explanation of a metadata field, as (section title, text) pairs.
+
+        @param key A key of `METADATA_HELP_TITLES`.
+        @return Translated sections in reading order; empty for an unknown key.
+        @note The KLC statements must agree with `services.klc_checks`: an
+            «error» there blocks the installation (after a confirmation), a
+            «warning» is advice. Keep both in step when a rule changes.
+        """
+        where = self.i18n.text("Dove finisce")
+        what = self.i18n.text("Che cosa inserire")
+        rules = self.i18n.text("Regole KLC")
+        examples = self.i18n.text("Esempi")
+        content = {
+            "reference": [
+                (what, self.i18n.text(
+                    "Il prefisso del riferimento che il componente avrà nello schema: solo lettere, "
+                    "senza cifre, spazi o «?». KiCad aggiunge da sé il numero progressivo (U1, U2…). "
+                    "Vuoto, vale la proposta mostrata in grigio, scelta dalla tipologia del componente.")),
+                (where, self.i18n.text(
+                    "Proprietà «Reference» del simbolo. Il footprint eredita il riferimento dal simbolo "
+                    "quando lo schema viene annotato e portato sul PCB.")),
+                (rules, self.i18n.text(
+                    "KLC S6.1: prefisso di sole lettere. Un designatore vuoto o con altri caratteri è un "
+                    "errore ⛔ e blocca l’installazione finché non viene corretto.")),
+                (examples, self.i18n.text(
+                    "U circuiti integrati e moduli · J connettori · K relè · Q transistor · D diodi e LED · "
+                    "R resistori · C condensatori · L induttori · Y quarzi · SW interruttori.")),
+            ],
+            "description": [
+                (what, self.i18n.text(
+                    "Una sola riga che dice che cosa è il componente: funzione, package o modulo, "
+                    "dimensioni principali. È il testo che si legge nel selettore di KiCad accanto al nome, "
+                    "quindi va scritto per chi cerca il componente, non per chi lo ha generato.")),
+                (where, self.i18n.text(
+                    "Proprietà «Description» del simbolo e campo «descr» del footprint: lo stesso testo "
+                    "in entrambi, così simbolo e footprint restano riconoscibili come coppia.")),
+                (rules, self.i18n.text(
+                    "Le convenzioni KiCad la richiedono: vuota è un avviso ⚠ (non blocca). Su più righe o "
+                    "con caratteri di controllo è un errore ⛔.")),
+                (examples, self.i18n.text(
+                    "«Modulo ESP32-S3-WROOM-1U, 2x22 contatti castellated, 63.30 x 25.40 mm» · "
+                    "«Regolatore LDO 3.3 V 1 A, SOT-223».")),
+            ],
+            "keywords": [
+                (what, self.i18n.text(
+                    "Parole separate da spazi con cui il componente si trova cercando nel selettore: "
+                    "famiglia, funzione, package, produttore. Non ripetere il nome del componente, che "
+                    "viene già cercato; meglio pochi termini precisi che un elenco lungo.")),
+                (where, self.i18n.text(
+                    "Proprietà «ki_keywords» del simbolo e campo «tags» del footprint.")),
+                (rules, self.i18n.text(
+                    "Vuote è un avviso ⚠: la ricerca funziona peggio ma l’installazione procede. "
+                    "Con caratteri di controllo è un errore ⛔.")),
+                (examples, self.i18n.text(
+                    "«ESP32-S3 wifi bluetooth modulo castellated» · «ldo regolatore 3.3V sot-223».")),
+            ],
+            "datasheet": [
+                (what, self.i18n.text(
+                    "L’indirizzo del documento tecnico del componente: un URL (preferito, lo apre chiunque "
+                    "riceva la libreria) oppure il percorso di un file. Senza spazi: KiCad lo tratta come un "
+                    "collegamento.")),
+                (where, self.i18n.text(
+                    "Proprietà «Datasheet» del simbolo e del footprint. In KiCad si apre dal menu del "
+                    "componente con «Mostra datasheet».")),
+                (rules, self.i18n.text(
+                    "Vuoto o con spazi è un avviso ⚠: si installa lo stesso. Con caratteri di controllo "
+                    "è un errore ⛔.")),
+                (examples, self.i18n.text(
+                    "«https://www.espressif.com/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf» · "
+                    "«docs/ESP32-S3-DEVKIT.pdf».")),
+            ],
+            "fp_filters": [
+                (what, self.i18n.text(
+                    "Schemi, separati da spazi, che dicono quali footprint sono adatti al simbolo: "
+                    "«*» vale qualunque sequenza, «?» un solo carattere. Lo strumento di assegnazione "
+                    "dei footprint propone solo quelli che corrispondono. Vuoto, vale la proposta in grigio "
+                    "ricavata dal nome del footprint generato.")),
+                (where, self.i18n.text(
+                    "Proprietà «ki_fp_filters» del simbolo. Il footprint non ne ha bisogno.")),
+                (rules, self.i18n.text(
+                    "Nessuna regola bloccante: un filtro sbagliato fa solo sparire il footprint dalle "
+                    "proposte, non impedisce di assegnarlo a mano.")),
+                (examples, self.i18n.text(
+                    "«ESP32-S3-DEVKIT-NXRX*» · «SOT-223*» · «*QFN*48*».")),
+            ],
+            "klc": [
+                (what, self.i18n.text(
+                    "Le KiCad Library Conventions (KLC) sono le regole con cui vengono scritte le librerie "
+                    "ufficiali di KiCad. Qui vengono controllate quelle sui metadati e sul footprint, "
+                    "mentre scrivi: la lista si aggiorna da sola.")),
+                (where, self.i18n.text(
+                    "⛔ errore: ciò che KiCad o le convenzioni rifiutano; l’installazione chiede conferma "
+                    "prima di procedere. ⚠ avviso: un consiglio, l’installazione procede.")),
+                (rules, self.i18n.text(
+                    "Designatore vuoto o non alfabetico, testi su più righe: errori. Descrizione, parole "
+                    "chiave o datasheet vuoti: avvisi. Il riferimento completo è kicad.org, sezione "
+                    "«Library Conventions».")),
+                (examples, self.i18n.text(
+                    "«Nessuna osservazione.» vuol dire che i controlli eseguiti qui sono passati, non che "
+                    "il componente sia verificato in KiCad: per quello c’è «Verifica prima "
+                    "dell’installazione».")),
+            ],
+        }
+        return content.get(key, [])
+
+    def _show_metadata_help(self, key: str) -> None:
+        """@brief Open the modal explanation of one metadata field.
+
+        @param key A key of `METADATA_HELP_TITLES`.
+        @note One dialog at a time, kept in `_metadata_help_dialog` so tests
+            can reach it; it is modal and closes with «Chiudi» or Esc.
+        """
+        from html import escape
+        dialog = QDialog(self)
+        dialog.setProperty("i18n_skip", True)
+        dialog.setWindowTitle(self.i18n.text("Aiuto: {field}").format(
+            field=self.i18n.text(self.METADATA_HELP_TITLES[key])))
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        parts = [f"<p><b>{escape(title)}</b><br>{escape(body)}</p>"
+                 for title, body in self._metadata_help_content(key)]
+        note = QLabel("".join(parts))
+        note.setProperty("i18n_skip", True)
+        note.setTextFormat(Qt.TextFormat.RichText)
+        note.setWordWrap(True)
+        note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(note)
+        close = QPushButton(self.i18n.text("Chiudi"))
+        close.setProperty("i18n_skip", True)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, alignment=Qt.AlignmentFlag.AlignRight)
+        dialog.resize(560, 320)
+        self._metadata_help_dialog = dialog
+        dialog.exec()
+        if self._metadata_help_dialog is dialog:
+            self._metadata_help_dialog = None
+        dialog.deleteLater()
 
     @staticmethod
     def _mirror_text_value(line_edit: QLineEdit, value) -> None:
