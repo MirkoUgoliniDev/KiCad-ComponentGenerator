@@ -27,6 +27,7 @@ them at the last resolved position every time a draft is committed.
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -384,6 +385,56 @@ def _drop_body_outline(primitives: list[Primitive]) -> tuple[list[Primitive], Op
     return rest, (round(right - left, 4), round(top - bottom, 4))
 
 
+@lru_cache(maxsize=32)
+def _library_text(path: str, mtime_ns: int, size: int) -> str:
+    """@brief The text of a symbol library, read once per (path, mtime, size).
+
+    @note The catalogue asks several glyphs of the same library in a row;
+        without this every glyph re-read its 1-2 MB file. The key carries
+        the file's stamp so a library replaced while the program runs is
+        read again instead of served stale.
+    """
+    return Path(path).read_text(encoding="utf-8")
+
+
+def symbol_block(text: str, symbol_name: str) -> Optional[str]:
+    """@brief The `(symbol "name" ...)` form of one symbol, cut out of a library's text.
+
+    @param text Whole `.kicad_sym` text.
+    @param symbol_name Exact symbol name (a derived unit «name_1_1» is not it).
+    @return The balanced s-expression of that symbol, or None when absent
+        or unbalanced.
+    @note Parsing a whole KiCad library (2 MB, tens of thousands of forms)
+        to pick one symbol took ~0.5 s each and the catalogue did it 36
+        times: the window took 18 s to appear (user, 2026-10-12). Only the
+        wanted block is parsed now. The scan is string-aware: parentheses
+        inside quoted strings (and escaped quotes in them) do not count.
+    """
+    start = None
+    for match in re.finditer(r'\(symbol\s+"' + re.escape(symbol_name) + r'"(?=[\s)])', text):
+        start = match.start()
+        break
+    if start is None:
+        return None
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            if i >= n:
+                return None
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    return None
+
+
 def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: str = "",
                        group: str = "") -> Optional[Glyph]:
     """@brief Read one symbol of a KiCad library as a glyph.
@@ -398,16 +449,20 @@ def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: st
         is missing or unreadable.
     """
     try:
-        text = Path(library).read_text(encoding="utf-8")
-        forms = parse_sexpr(text)
+        stat = Path(library).stat()
+        text = _library_text(str(library), stat.st_mtime_ns, stat.st_size)
+        # A symbol library and nothing else: the first form must be the
+        # library root (checked on the text, the whole file is not parsed).
+        if not re.match(r"\s*\(kicad_symbol_lib\b", text):
+            return None
+        block = symbol_block(text, symbol_name)
+        if block is None:
+            return None
+        forms = parse_sexpr(block)
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    root = forms[0] if forms and isinstance(forms[0], list) else None
-    if not root or root[0] != "kicad_symbol_lib":
-        return None
-    symbol = next((item for item in _children(root, "symbol")
-                   if len(item) > 1 and item[1] == symbol_name), None)
-    if symbol is None:
+    symbol = forms[0] if forms and isinstance(forms[0], list) else None
+    if not symbol or symbol[0] != "symbol" or len(symbol) < 2 or symbol[1] != symbol_name:
         return None
     primitives: list[Primitive] = []
     terminals: list[Terminal] = []

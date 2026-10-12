@@ -22,7 +22,7 @@ import time
 import webbrowser
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize
+from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
                          QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
@@ -93,7 +93,35 @@ from .model_dialog import pick_model
 from ..services.openrouter import PHOTO_CAPABILITIES
 from .pinout_dialog import PinoutDialog
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform, ai_only_excluded
-from .preview_3d_vtk import Preview3DVtk
+from .preview_3d_pending import Preview3DPending
+
+#: The VTK viewer class, imported on first use by `_preview_3d_class`: its
+#: libraries (pyvistaqt, pyvista, VTK, matplotlib) cost about six seconds of
+#: the start-up and are not needed until a model is shown (user, 2026-10-12).
+#: Tests install a stub here before building the window; the window then
+#: builds the viewer at once, as before.
+Preview3DVtk = None
+
+
+def _preview_3d_class():
+    """@brief The 3D viewer class, importing its module the first time.
+
+    @return `Preview3DVtk`: the real class, or the stub a test installed.
+    @throws ImportError, OSError When the viewer's libraries cannot load.
+    @note Set once: later calls return the cached class without importing.
+    """
+    global Preview3DVtk
+    if Preview3DVtk is None:
+        from .preview_3d_vtk import Preview3DVtk as viewer_class
+        Preview3DVtk = viewer_class
+    return Preview3DVtk
+
+
+class _ModulePreloader(QObject):
+    """@brief Signals of a background import: delivered on the GUI thread (queued)."""
+    loaded = pyqtSignal()
+    failed = pyqtSignal(str)
+
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from .theme import BASE, BLUE, RED, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
@@ -11499,18 +11527,14 @@ class MainWindow(QMainWindow):
         # avrebbe aperto finestre a se' stanti.
         self._apply_project_action_mirror_visibility()
 
-        self.preview_3d = Preview3DVtk()
-        if hasattr(self.preview_3d, 'component_requested'):
-            self.preview_3d.component_requested.connect(
-                lambda row: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
-        if hasattr(self.preview_3d, 'component_menu_requested'):
-            self.preview_3d.component_menu_requested.connect(self._show_component_menu)
-        if hasattr(self.preview_3d, 'component_clicked'):
-            self.preview_3d.component_clicked.connect(self._on_format_painter_click)
-        if hasattr(self.preview_3d, 'mesh_prepared'):
-            self.preview_3d.mesh_prepared.connect(self._on_mesh_prepared)
-            self.preview_3d.mesh_prepare_failed.connect(self._on_mesh_prepare_failed)
-        self.preview_3d.show_pin_numbers = self.chk_pin_numbers.isChecked()
+        # The viewer is built now only when its class is already at hand (a
+        # test stub, or the module imported earlier); otherwise the tab
+        # starts with a placeholder and the viewer arrives with
+        # `_ensure_preview_3d` (first entry in the tab, or the preload).
+        self._preview_3d_layout = outer
+        self._preview_3d_preloader = None
+        self.preview_3d = Preview3DVtk() if Preview3DVtk is not None else Preview3DPending()
+        self._wire_preview_3d()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
         # Le viste standard si scelgono dal cubo dentro l'anteprima, che ha
@@ -11683,6 +11707,113 @@ class MainWindow(QMainWindow):
         widget.setToolTip(rendered)
         widget.setProperty("i18n_tooltip_source", source)
         widget.setProperty("i18n_tooltip_rendered", rendered)
+
+    def _wire_preview_3d(self) -> None:
+        """@brief Connect the viewer's optional signals and copy the pin-number switch.
+
+        @note Every signal is optional: the placeholder and the test stubs
+            have none, older viewers only some.
+        """
+        viewer = self.preview_3d
+        if hasattr(viewer, 'component_requested'):
+            viewer.component_requested.connect(
+                lambda row: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
+        if hasattr(viewer, 'component_menu_requested'):
+            viewer.component_menu_requested.connect(self._show_component_menu)
+        if hasattr(viewer, 'component_clicked'):
+            viewer.component_clicked.connect(self._on_format_painter_click)
+        if hasattr(viewer, 'mesh_prepared'):
+            viewer.mesh_prepared.connect(self._on_mesh_prepared)
+            viewer.mesh_prepare_failed.connect(self._on_mesh_prepare_failed)
+        viewer.show_pin_numbers = self.chk_pin_numbers.isChecked()
+
+    def preview_3d_loaded(self) -> bool:
+        """@brief True when the real viewer (or a test stub) is in the 3D tab, not the placeholder."""
+        return not isinstance(self.preview_3d, Preview3DPending)
+
+    def _ensure_preview_3d(self) -> bool:
+        """@brief Put the real viewer in the 3D tab if the placeholder is still there.
+
+        @return True when a viewer is in place (already, or built now); False
+            when its libraries cannot be imported: the placeholder stays, the
+            3D status line says so and the log has the reason.
+        @note Synchronous: the import takes seconds the first time, which is
+            why `schedule_preview_3d_preload` tries to do it beforehand.
+        """
+        if self.preview_3d_loaded():
+            return True
+        try:
+            viewer_class = _preview_3d_class()
+        except (ImportError, OSError) as exc:  # a broken VTK/pyvista install
+            self._append_log(tx("Visualizzatore 3D non disponibile: {exc}", exc=exc))
+            self._set_3d_status(self.i18n.text("Visualizzatore 3D non disponibile: vedi il log."), STATUS_ERROR)
+            return False
+        self._install_preview_3d(viewer_class())
+        return True
+
+    def _install_preview_3d(self, viewer) -> None:
+        """@brief Replace the placeholder with a viewer, in the same place of the 3D tab.
+
+        @param viewer The viewer widget, just built.
+        @note The viewer is not asked to draw here: the 3D tab redraws from
+            the window's state on every entry (`_enter_3d_tab`), and when the
+            tab is not shown there is nothing to draw yet. Cube labels and
+            tooltips are applied now because they are set once per language.
+        """
+        pending = self.preview_3d
+        layout = self._preview_3d_layout
+        index = layout.indexOf(pending)
+        layout.removeWidget(pending)
+        pending.hide()
+        pending.setParent(None)
+        pending.deleteLater()
+        self.preview_3d = viewer
+        self._wire_preview_3d()
+        viewer.setMinimumHeight(120)
+        layout.insertWidget(index, viewer, 1)
+        self._apply_view_cube_labels()
+        if pending.show_pin_numbers != viewer.show_pin_numbers:
+            viewer.set_pin_numbers(pending.show_pin_numbers)
+
+    def schedule_preview_3d_preload(self, delay_ms: int = 1500) -> None:
+        """@brief Import the viewer's libraries in the background shortly after the window appears.
+
+        @param delay_ms Pause before starting, so the window paints and
+            settles first.
+        @note Called by `main()` only: tests never start this thread. The
+            thread does the import alone (no widget is touched off the GUI
+            thread); the widget is built on the GUI thread when `loaded`
+            arrives. If the user enters the 3D tab meanwhile, the import
+            there waits on the module lock until the thread is done: one
+            import, never two. A daemon thread never delays the exit.
+        """
+        QTimer.singleShot(delay_ms, self._start_preview_3d_preload)
+
+    def _start_preview_3d_preload(self) -> None:
+        """@brief Start the background import, unless the viewer is already there."""
+        import threading
+        if self.preview_3d_loaded() or self._preview_3d_preloader is not None:
+            return
+        preloader = _ModulePreloader(self)
+        preloader.loaded.connect(self._on_preview_3d_preloaded)
+        preloader.failed.connect(lambda reason: self._append_log(
+            tx("Precaricamento del visualizzatore 3D fallito: {exc}", exc=reason)))
+        self._preview_3d_preloader = preloader
+
+        def run():
+            import importlib
+            try:
+                importlib.import_module("kicadgen.gui.preview_3d_vtk")
+            except Exception as exc:  # noqa: BLE001 - reported on the GUI thread
+                preloader.failed.emit(str(exc))
+                return
+            preloader.loaded.emit()
+
+        threading.Thread(target=run, name="preview-3d-preload", daemon=True).start()
+
+    def _on_preview_3d_preloaded(self) -> None:
+        """@brief Slot of the preload: the module is in `sys.modules`, build the widget now."""
+        self._ensure_preview_3d()
 
     def _apply_view_cube_labels(self) -> None:
         """@brief Write the translated face names on the navigation cube."""
@@ -13631,6 +13762,8 @@ class MainWindow(QMainWindow):
             approximation (or an empty view with a hint), which is cheap and
             stays synchronous.
         """
+        if not self._ensure_preview_3d():
+            return
         path = self._last_mesh_path
         if not (path and Path(path).is_file()):
             self._draw_preview_3d()
@@ -13794,9 +13927,17 @@ class MainWindow(QMainWindow):
             self._loading_cursor_set = False
 
 
-def main() -> None:
-    """@brief Start the Qt application, show the main window and run the event loop until exit."""
-    app = QApplication(sys.argv)
+def main(splash=None) -> None:
+    """@brief Start the Qt application, show the main window and run the event loop until exit.
+
+    @param splash Optional QSplashScreen shown by the launcher while this
+        module was imported; closed as soon as the window is on screen.
+    @note The QApplication may already exist (the launcher creates it for
+        the splash); one is created here otherwise. After the window shows,
+        the 3D viewer's libraries are imported in the background so the
+        first entry in the 3D tab does not pay for them.
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
     # Icona del programma: finestra e barra delle applicazioni (anche da sorgente).
     app.setWindowIcon(QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))))
     app.setStyleSheet(APP_QSS)
@@ -13814,6 +13955,9 @@ def main() -> None:
         QMessageBox.critical(None, title, template.format(error=exc))
         sys.exit(1)
     window.show()
+    if splash is not None:
+        splash.finish(window)
+    window.schedule_preview_3d_preload()
     QTimer.singleShot(0, window._warn_missing_external_applications)
     # Solo l'applicazione vera legge il saldo: i test e le finestre costruite
     # altrove non toccano la rete.

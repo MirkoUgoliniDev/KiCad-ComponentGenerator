@@ -1,5 +1,103 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 12/10 notte — commit `92767db` su `ADVANCED`, mergiato in `main`
+
+- Committato su richiesta dell'utente a suite ANCORA IN CORSO: prima meta'
+  a ~50% (.venv/claude-suite-A4.log) al momento del commit, seconda meta'
+  non ancora lanciata. Chi riprende: leggere il log A4, lanciare `second`
+  -> .venv/claude-suite-B4.log, e riallineare qui l'esito.
+- Verificato con fotogrammi dello schermo: un solo avvio, splash da 0,8 s
+  a 4 s, Home page a 5 s. Il «secondo avvio» visto dall'utente erano le
+  prove reali lanciate dall'assistente sul suo desktop.
+- APERTO: immagine splash (rimandata dall'utente); pulsante apri progetto
+  «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica ai file»;
+  unita' multiple.
+
+## 2026-10-12 notte — splash screen e visualizzatore 3D pigro (commit `92767db`)
+
+Piano, nell'ordine di esecuzione, ciascun blocco con test:
+A. `main_window.py`: `Preview3DVtk` diventa un attributo di modulo
+   inizialmente None; `_preview_3d_class()` lo importa alla prima richiesta.
+   Nel costruttore, se la classe e' gia' disponibile (test con lo stub, o
+   modulo gia' importato) il visualizzatore nasce subito come oggi;
+   altrimenti al suo posto va `Preview3DPending`, un QWidget leggero con la
+   stessa API usata dalla finestra (clear_preview, render_mesh,
+   render_params, set_pin_numbers, set_pin_functions, show_pin_numbers,
+   fit_view) che non disegna nulla: la finestra conserva gia' lo stato
+   (`_last_mesh_path`, parametri, pinout) e lo ridisegna con
+   `_draw_preview_3d()` quando il visualizzatore vero arriva.
+   `_install_preview_3d()` costruisce il vero, collega i segnali, lo
+   sostituisce nel layout (stesso genitore: i test controllano
+   `preview_3d.parentWidget()`), applica etichette del cubo e numeri pin,
+   ridisegna. Innesco: ingresso nella scheda 3D (`_enter_3d_tab`) oppure
+   precaricamento.
+B. Precaricamento: `schedule_preview_3d_preload(delay_ms)` chiamato SOLO da
+   `main()` (i test non avviano thread): un `threading.Thread` daemon
+   importa il modulo `kicadgen.gui.preview_3d_vtk` (import puro, nessun
+   widget) e un segnale Qt riporta sul thread GUI dove si costruisce il
+   widget. Se l'utente apre la scheda 3D mentre il thread importa, l'import
+   nel thread GUI aspetta il lock del modulo: corretto, nessuna doppia
+   importazione. Thread daemon: non blocca la chiusura.
+C. `main.py`: dopo .env e crash report, crea QApplication e un
+   QSplashScreen (icona app-icon.svg + «Avvio in corso…» nella lingua del
+   config letta senza importare la GUI), poi importa main_window e chiama
+   `run_gui(splash)`; `main_window.main()` accetta `QApplication.instance()`
+   gia' esistente e chiude lo splash con `splash.finish(window)` dopo
+   `window.show()`. `--check-runtime` aggiunge `kicadgen.gui.preview_3d_vtk`
+   ai moduli, cosi' il test di fumo prova ancora l'import del 3D.
+D. Suite: test dedicati (tests/test_preview_3d_lazy.py) + rilancio dei
+   test GUI che usano preview_3d; poi suite completa in due meta'.
+
+Stato: A, B, C FATTI, NON COMMITTATI (preview_3d_pending.py nuovo;
+main_window: `Preview3DVtk = None`, `_preview_3d_class`, `_ModulePreloader`,
+`_wire_preview_3d`, `preview_3d_loaded`, `_ensure_preview_3d`,
+`_install_preview_3d`, `schedule_preview_3d_preload`; main.py:
+`startup_language`, `create_splash`, `_QT_APPLICATION` tenuto vivo —
+difetto trovato dalla prova reale: il QApplication locale moriva con la
+funzione; `main()` accetta `splash`). Test: test_preview_3d_lazy 7 verdi,
+test_launcher 10 verdi, 3D tab/i18n/documentazione verdi; test GUI ampi
+lanciati in sottofondo (.venv/claude-test-run-lazy3).
+Prova reale (QT_QPA_PLATFORM=windows, config vero): splash a 1,2 s,
+modulo finestra importato a 1,55 s (era 8,2 s), precaricamento 3D
+completato ~3 s dopo lo show. MA la finestra compare a 20 s: profilo
+cProfile -> `MainWindow()` 33 s, di cui 32 s in
+`symbol_glyphs.catalogue()` -> `load_library_glyph` x36 ->
+`parse_sexpr` (parser carattere per carattere, 71 milioni di `isspace`)
+che legge INTERE librerie KiCad (Device.kicad_sym ecc.) per estrarre un
+simbolo ciascuna. E' questo il vero avvio lento. Da fare (E): parser a
+token con `re` (10-50x), estrazione del solo blocco `(symbol "Nome"` con
+scansione bilanciata delle parentesi, cache su disco dei glifi letti per
+(file, mtime, size) nella cartella dati; test di equivalenza con il
+parser attuale su un file reale. Fino ad allora il guadagno dello splash
+e' solo percepito.
+E FATTO, NON COMMITTATO: la misura fuori dal profiler diceva 0,4 s per
+parsare Device.kicad_sym; il costo vero era la RIPETIZIONE (ogni glifo
+rileggeva e riparsava tutta la sua libreria: 36 parse per 6 file,
+~18 s). Correzione in symbol_glyphs.py: `_library_text` (lru_cache per
+path+mtime+size, un solo read per file), `symbol_block` (ritaglio del
+blocco `(symbol "Nome"` con scansione bilanciata delle parentesi che
+ignora le stringhe e gli escape), `load_library_glyph` parsa solo il
+blocco e controlla sul testo che il file sia una `kicad_symbol_lib`.
+`parse_sexpr` invariato (klc_checks e test lo usano). Catalogo: 41 glifi
+in 0,15 s. Test nuovi in test_symbol_glyphs: ritaglio esatto (prefissi,
+unita', parentesi dentro stringhe, sbilanciato -> None, file non
+libreria -> None), un read per file e rilettura se cambia lo stamp,
+equivalenza blocco == parse intero su tutte le 36 voci delle librerie
+installate. Glyphs+KLC+documentazione 113 verdi.
+Splash da file: `SPLASH_IMAGE` = kicadgen/gui/assets/splash.png (16:9,
+senza testo), `splash_pixmap(resource_path, ratio)` lo scala a
+`SPLASH_WIDTH`=800 logici con devicePixelRatio, ripiego disegnato
+(icona + nome) se manca o illeggibile; nome e messaggio dipinti sopra.
+Test nel lanciatore (artwork, ripiego, file corrotto). L'utente ha
+rimandato l'immagine generata («per il momento lasciamo stare»).
+Prova reale dopo tutto: splash 1,2 s, finestra a 3,1 s (era 20 s),
+visualizzatore 3D sostituito in sottofondo a ~5 s.
+Suite completa in due meta' LANCIATA: prima meta' -> .venv/claude-suite-A4.log.
+- Utente (12/10 notte): vuole uno splash «wow» con un'immagine generata da
+  Gemini; consigliata immagine statica (non video), file
+  kicadgen/gui/assets/splash.png, `create_splash` lo usera' se presente
+  con ripiego su quello disegnato. Prompt consegnato in chat.
+
 ## FINE SESSIONE 12/10 sera — commit `c6c8993` su `ADVANCED`, mergiato in `main`
 
 - Committato su richiesta dell'utente («committa tutto, pusha e mergia in
