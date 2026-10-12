@@ -278,7 +278,11 @@ def main():
     install_crash_reports()
     # The splash goes up before the window module is imported: that import is
     # the slow part of the start-up, and the click must answer at once.
-    splash = create_splash(startup_language())
+    try:
+        splash = create_splash(startup_language())
+    except Exception as exc:  # noqa: BLE001 - a splash is a courtesy, never a blocker
+        print(f"KiCadGen: splash non mostrato: {exc}", file=sys.stderr)
+        splash = None
     from kicadgen.gui.main_window import main as run_gui
     return run_gui(splash)
 

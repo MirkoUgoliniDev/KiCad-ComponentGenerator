@@ -30,6 +30,13 @@ class Preview3DPending(QWidget):
         @param parent Optional Qt parent.
         """
         super().__init__(parent)
+        # The VTK viewer that will take this place is a native window; a
+        # native child makes every ancestor native, and when that happens
+        # to a window already on screen Qt re-creates the ancestors' windows:
+        # the main window blinked off and on at the swap (user, 2026-10-12).
+        # Native from the start, the placeholder makes the ancestor chain
+        # native before the window is shown, so the swap re-creates nothing.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         #: Mirrors `Preview3DVtk.show_pin_numbers`; copied to the real viewer.
         self.show_pin_numbers = False
         layout = QVBoxLayout(self)

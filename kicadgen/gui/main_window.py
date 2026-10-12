@@ -103,6 +103,11 @@ from .preview_3d_pending import Preview3DPending
 Preview3DVtk = None
 
 
+#: Milliseconds the splash stays after `window.show()`: covers the first
+#: paint and the desktop's window-open animation (Windows 11: ~200 ms).
+SPLASH_HANDOVER_MS = 300
+
+
 def _preview_3d_class():
     """@brief The 3D viewer class, importing its module the first time.
 
@@ -1064,6 +1069,22 @@ class MainWindow(QMainWindow):
                     value.on_change(lambda _value: self._invalidate_generated_mesh())
         self._init_project_settings()
         self._refresh_start_page()
+        self._prepare_native_preview_3d_slot()
+
+    def _prepare_native_preview_3d_slot(self) -> None:
+        """@brief Create the native windows of the 3D pane's ancestor chain before the window shows.
+
+        @note The VTK viewer is a native window. When it is inserted into a
+            window already on screen, Qt makes every ancestor native and
+            re-creates their windows: the whole main window blinked off and
+            on at the swap (user, 2026-10-12, seen frame by frame). The
+            placeholder asks for a native window (`WA_NativeWindow`), but a
+            widget in a hidden tab is not created until shown; `winId()`
+            creates it now, hidden, with its ancestors, so the later swap
+            finds the chain native and re-creates nothing.
+        """
+        if not self.preview_3d_loaded():
+            self.preview_3d.winId()
 
     # ── Menu ────────────────────────────────────────────────────────
 
@@ -1340,6 +1361,22 @@ class MainWindow(QMainWindow):
             return
         self._centred_once = True
         self._centre_on_screen()
+
+    def centre_before_show(self) -> None:
+        """@brief Centre the window on its screen before it is shown, so it appears in place.
+
+        @note Centring in `showEvent` moved an already mapped window: the
+            desktop's open animation played the window at its first
+            position and then at the centre, which looked like a window
+            closing and reopening (user, 2026-10-12, seen frame by frame).
+            The frame geometry is known before the show on this platform
+            (measured: same frame before and after), so the launcher
+            centres first; `showEvent` then finds nothing to do. Should the
+            frame not be known yet on some platform, `showEvent` still
+            centres as before.
+        """
+        self._centre_on_screen()
+        self._centred_once = True
 
     def _centre_on_screen(self) -> None:
         """Place the window frame in the middle of its screen's available area."""
@@ -11782,10 +11819,11 @@ class MainWindow(QMainWindow):
             settles first.
         @note Called by `main()` only: tests never start this thread. The
             thread does the import alone (no widget is touched off the GUI
-            thread); the widget is built on the GUI thread when `loaded`
-            arrives. If the user enters the 3D tab meanwhile, the import
-            there waits on the module lock until the thread is done: one
-            import, never two. A daemon thread never delays the exit.
+            thread); the widget is built on the GUI thread at the first
+            entry in the 3D tab (`_on_preview_3d_preloaded` explains why
+            not earlier). If the user enters the 3D tab meanwhile, the
+            import there waits on the module lock until the thread is done:
+            one import, never two. A daemon thread never delays the exit.
         """
         QTimer.singleShot(delay_ms, self._start_preview_3d_preload)
 
@@ -11812,8 +11850,17 @@ class MainWindow(QMainWindow):
         threading.Thread(target=run, name="preview-3d-preload", daemon=True).start()
 
     def _on_preview_3d_preloaded(self) -> None:
-        """@brief Slot of the preload: the module is in `sys.modules`, build the widget now."""
-        self._ensure_preview_3d()
+        """@brief Slot of the preload: the module is in `sys.modules`; the widget waits for the tab.
+
+        @note The widget is NOT built here on purpose. Building the VTK
+            viewer inside a window already on screen made the window blink
+            for one frame (user, 2026-10-12; the native handles do not
+            change, it is the compositor's first frame of the new OpenGL
+            child). Built on the first entry in the 3D tab instead, that
+            frame coincides with the tab's own repaint and the construction
+            costs a fraction of a second, the import being done.
+        """
+        self._append_log(tx("Visualizzatore 3D pronto in sottofondo."))
 
     def _apply_view_cube_labels(self) -> None:
         """@brief Write the translated face names on the navigation cube."""
@@ -13954,9 +14001,13 @@ def main(splash=None) -> None:
             language, DEFAULT_TRANSLATIONS["startup.profile_database_error"]["en"])
         QMessageBox.critical(None, title, template.format(error=exc))
         sys.exit(1)
+    window.centre_before_show()
     window.show()
     if splash is not None:
-        splash.finish(window)
+        # A moment after show: the window has then painted its first frame
+        # and the desktop's open animation is over, so the splash goes away
+        # without a frame of desktop between the two (user, 2026-10-12).
+        QTimer.singleShot(SPLASH_HANDOVER_MS, lambda: splash.finish(window))
     window.schedule_preview_3d_preload()
     QTimer.singleShot(0, window._warn_missing_external_applications)
     # Solo l'applicazione vera legge il saldo: i test e le finestre costruite

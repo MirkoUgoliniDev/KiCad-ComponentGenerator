@@ -41,3 +41,29 @@ def test_a_window_larger_than_the_area_keeps_its_title_bar_on_screen(window, mon
     monkeypatch.setattr(window, "move", lambda x, y: moved.append((x, y)))
     window._centre_on_screen()
     assert moved == [(area.left(), area.top())]
+
+
+def test_centring_before_the_show_leaves_nothing_to_move_at_the_show(window):
+    """Centred while hidden, the window appears in place: moving a window
+    already on screen played as a close-and-reopen in the desktop's open
+    animation (user, 2026-10-12)."""
+    window._centred_once = False
+    window.move(0, 0)
+    window.centre_before_show()
+    assert window._centred_once is True
+    offset, _ = _centre_offset(window)
+    assert abs(offset.x()) <= 1 and abs(offset.y()) <= 1, "centred while still hidden"
+    frame_before = window.frameGeometry()
+    moves = []
+    original = window.move
+
+    def spying_move(*args):
+        moves.append(args)
+        return original(*args)
+    window.move = spying_move
+    window.show()
+    QApplication.processEvents()
+    assert moves == [], "showEvent found the window already centred"
+    # The offscreen platform learns its frame margins only at the show (the
+    # frame grows by a few pixels); what must not change is the position.
+    assert window.frameGeometry().topLeft() == frame_before.topLeft()

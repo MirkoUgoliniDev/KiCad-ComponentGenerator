@@ -208,13 +208,17 @@ def _run_launcher(monkeypatch, tmp_path, dotenv_text):
     import kicadgen.app_paths as app_paths
     monkeypatch.setattr(app_paths, "env_files", lambda: [env_file])
     fake_gui = types.ModuleType("kicadgen.gui.main_window")
-    fake_gui.main = lambda: 0
+    # Since 2026-10-12 the launcher hands the GUI entry its splash screen.
+    fake_gui.main = lambda splash=None: 0
     monkeypatch.setitem(sys.modules, "kicadgen.gui.main_window", fake_gui)
     spec = importlib.util.spec_from_file_location(
         "launcher_under_test", Path(__file__).resolve().parents[1] / "main.py")
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
     monkeypatch.setattr(launcher, "_project_python", lambda root: None)
+    # No Qt here: this test is about the environment, the splash has its own
+    # tests in test_launcher.py.
+    monkeypatch.setattr(launcher, "create_splash", lambda language: None)
     # main() installs the application's crash hooks; registered here so the
     # test restores them (the test harness keeps its own hook, HANDOFF 131).
     import threading

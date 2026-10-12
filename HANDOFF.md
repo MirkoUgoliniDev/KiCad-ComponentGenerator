@@ -1,11 +1,53 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 12/10 notte — commit `92767db` su `ADVANCED`, mergiato in `main`
+## FINE SESSIONE 12/10 notte — commit `92767db` + correzioni `ba6b169` su `ADVANCED`, mergiati in `main`
 
-- Committato su richiesta dell'utente a suite ANCORA IN CORSO: prima meta'
-  a ~50% (.venv/claude-suite-A4.log) al momento del commit, seconda meta'
-  non ancora lanciata. Chi riprende: leggere il log A4, lanciare `second`
-  -> .venv/claude-suite-B4.log, e riallineare qui l'esito.
+- Suite completa sulla base di `92767db`: A4 4435 verdi/9 saltati/5 falliti
+  (corretti in `ba6b169`), B4 2892 verdi/2 saltati/2 xfail. Dopo `ba6b169` rilanciati
+  i file toccati (centratura, 3D pigro, lanciatore, localizzazione, i18n,
+  documentazione): verdi.
+
+- Committato su richiesta dell'utente a suite ANCORA IN CORSO. Esito della
+  prima meta' (A4) arrivato dopo il commit: 4435 verdi, 9 saltati, 5
+  falliti, tutti dovuti a
+  questo lavoro e CORRETTI, NON ANCORA COMMITTATI: (1) quattro template
+  `tx` nuovi senza voce nelle 4 lingue (test_message_localization) ->
+  aggiunti in i18n.py; (2) test_openrouter_key_sources sostituiva
+  `main_window.main` con una lambda senza argomenti, ma il lanciatore ora
+  le passa lo splash -> helper aggiornato (`lambda splash=None`) e
+  `create_splash` neutralizzato nel test; in piu' `main()` avvolge
+  `create_splash` in try/except: lo splash non deve mai impedire l'avvio.
+  Rilancio mirato: 65 verdi. Seconda meta' (B4): 2892 verdi, 2 saltati,
+  2 xfail, 0 falliti.
+- Segnalazione dell'utente dopo il commit: «si carica dopo lo splash, poi
+  si chiude una frazione di secondo e si riapre». Riprodotto con
+  campionamento dello schermo: un fotogramma di finestra «sbiancata» ~0,3 s
+  dopo la comparsa, nel momento in cui il precaricamento inseriva il
+  widget VTK nella finestra gia' visibile. Gli handle nativi NON cambiano
+  (misurato prima/dopo): non e' una ricreazione Qt ma il primo fotogramma
+  del compositor con il nuovo figlio OpenGL; WA_NativeWindow sul
+  segnaposto, winId() anticipato, AA_DontCreateNativeWidgetSiblings,
+  setUpdatesEnabled(False), costruzione con genitore: nessuno lo evita.
+  Decisione: il precaricamento IMPORTA soltanto; il widget si costruisce
+  alla prima entrata nella scheda 3D (costa ~0,3 s a import fatto e il
+  fotogramma coincide con il ridisegno della scheda). Test aggiornati.
+  Trappola: le animazioni di apertura/chiusura di Windows 11 producono
+  fotogrammi semitrasparenti che un rilevatore a pixel scambia per
+  lampeggi: vanno ignorati i primi/ultimi 300 ms. Inoltre
+  `splash.finish(window)` ora e' rinviato di `SPLASH_HANDOVER_MS`=300 ms
+  perche' lo splash spariva prima che la finestra fosse dipinta.
+  SECONDA CAUSA, quella decisiva (fotogramma con DUE copie della finestra
+  sfalsate di pochi px): la centratura in `showEvent` spostava una
+  finestra gia' mappata e l'animazione di apertura di Windows mostrava
+  lo spostamento come chiusura+riapertura. Misurato: la geometria della
+  cornice e' identica prima e dopo lo show, quindi `main()` chiama
+  `window.centre_before_show()` PRIMA di `show()`; `showEvent` resta come
+  ripiego e non trova nulla da spostare. Test in test_main_window_centre
+  (nessun `move` allo show, posizione invariata; sulla piattaforma
+  offscreen la cornice cresce di 4 px allo show, si confronta solo la
+  posizione). Dopo le tre correzioni: tre lanci reali campionati, l'unico
+  fotogramma «anomalo» e' l'animazione di apertura con lo splash ancora
+  sotto. Verifica finale a occhio dell'utente richiesta.
 - Verificato con fotogrammi dello schermo: un solo avvio, splash da 0,8 s
   a 4 s, Home page a 5 s. Il «secondo avvio» visto dall'utente erano le
   prove reali lanciate dall'assistente sul suo desktop.
