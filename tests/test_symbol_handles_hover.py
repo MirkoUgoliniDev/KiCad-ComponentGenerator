@@ -33,11 +33,13 @@ def test_handles_appear_inside_the_element_area_and_vanish_outside(qapp):
         tab._update_readout(inside)
         assert all(h.isVisible() for h in handles), 'shown inside the element area'
         # Just beyond the corner but within the margin: still shown, so the
-        # pointer finds the handle before touching it.
-        near = QPointF(5.08 * SCENE_UNITS_PER_MM + st.HANDLE_HOVER_MARGIN - 1, 0)
+        # pointer finds the handle before touching it. The margin is screen
+        # pixels: in scene units it is divided by the view scale.
+        m = st.HANDLE_HOVER_MARGIN / tab.view.transform().m11()
+        near = QPointF(5.08 * SCENE_UNITS_PER_MM + m - 1, 0)
         tab._update_readout(near)
         assert all(h.isVisible() for h in handles)
-        beyond = QPointF(5.08 * SCENE_UNITS_PER_MM + st.HANDLE_HOVER_MARGIN + st.HANDLE_SIZE_PX + 2, 0)
+        beyond = QPointF(5.08 * SCENE_UNITS_PER_MM + m + 2, 0)
         tab._update_readout(beyond)
         assert not any(h.isVisible() for h in handles)
     finally:
@@ -70,13 +72,86 @@ def test_body_handles_show_only_in_a_ring_around_the_outline(qapp):
         body = [item for item in tab.view.scene().items() if item.data(0) and item.data(0)[0] == 'resize']
         assert len(body) == 8
         width = tab._symbol.width * SCENE_UNITS_PER_MM
+        m = st.HANDLE_HOVER_MARGIN / tab.view.transform().m11()  # screen pixels -> scene units
         tab._update_readout(QPointF(0, 0))
         assert not any(h.isVisible() for h in body), 'the middle of the body does not reveal them'
-        tab._update_readout(QPointF(width / 2 - 2, 0))
+        tab._update_readout(QPointF(width / 2 - m / 2, 0))
         assert all(h.isVisible() for h in body), 'near the outline, inside'
-        tab._update_readout(QPointF(width / 2 + st.HANDLE_HOVER_MARGIN - 1, 0))
+        tab._update_readout(QPointF(width / 2 + m - 1, 0))
         assert all(h.isVisible() for h in body), 'near the outline, outside'
-        tab._update_readout(QPointF(width / 2 + st.HANDLE_HOVER_MARGIN + 5, 0))
+        tab._update_readout(QPointF(width / 2 + m + 2, 0))
         assert not any(h.isVisible() for h in body), 'beyond the margin'
+    finally:
+        tab.deleteLater()
+
+
+def test_a_press_without_a_prior_move_still_grabs_a_hidden_handle(qapp):
+    """Touch and automation press without hovering: the press reveals first."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    tab = st.SymbolTab()
+    try:
+        tab.resize(1200, 750)
+        tab.set_data('Board', [{'pin': str(n), 'name': f'P{n}'} for n in range(1, 5)])
+        tab.show()
+        QApplication.processEvents()
+        view = tab.view
+        w, h = tab._symbol.width, tab._symbol.height
+        corner = view.mapFromScene(QPointF(w * 5, h * 5))
+        assert not any(i.isVisible() for i in view.scene().items() if i.data(0) and i.data(0)[0] == 'resize')
+        QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=corner)
+        assert view.gesture is not None and view.gesture[0] == 'resize'
+        QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=corner)
+        tab.close()
+    finally:
+        tab.deleteLater()
+
+
+def test_leaving_the_view_hides_the_handles_and_a_gesture_reveals_only_its_owner(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        tab._select_graphic(0)
+        shape = _handles(tab)
+        body = [i for i in tab.view.scene().items() if i.data(0) and i.data(0)[0] == 'resize']
+        tab._update_readout(QPointF(2.5 * SCENE_UNITS_PER_MM, -1.2 * SCENE_UNITS_PER_MM))
+        assert all(h.isVisible() for h in shape)
+        tab.view.pointer_left.emit()
+        assert not any(h.isVisible() for h in shape), 'the pointer left the drawing'
+        # A pin drag owns no handle group: nothing is revealed by it.
+        tab.view.gesture = ('pin', '1')
+        tab._update_readout(QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM))
+        assert not any(h.isVisible() for h in shape + body)
+        # A body resize reveals the body handles only.
+        tab.view.gesture = ('resize', 1, 1)
+        tab._update_readout(QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM))
+        assert all(h.isVisible() for h in body) and not any(h.isVisible() for h in shape)
+        tab.view.gesture = None
+    finally:
+        tab.deleteLater()
+
+
+def test_the_reveal_margin_and_the_squares_are_screen_pixels_at_any_zoom(qapp):
+    tab = _tab()
+    try:
+        tab.start_shape('rectangle')
+        tab.add_shape_point(0, 0)
+        tab.add_shape_point(5.08, 2.54)
+        tab._select_graphic(0)
+        handles = _handles(tab)
+        from PyQt6.QtWidgets import QGraphicsItem
+        assert all(h.flags() & QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations for h in handles)
+        tab.view.auto_fit = False
+        tab.view.resetTransform()
+        tab.view.scale(0.25, 0.25)
+        # 12 screen pixels at scale 0.25 are 48 scene units: a pointer 40
+        # units past the corner is inside the margin, 60 units is not.
+        tab._update_readout(QPointF(5.08 * SCENE_UNITS_PER_MM + 40, 0))
+        assert all(h.isVisible() for h in handles)
+        tab._update_readout(QPointF(5.08 * SCENE_UNITS_PER_MM + 60, 0))
+        assert not any(h.isVisible() for h in handles)
     finally:
         tab.deleteLater()

@@ -2331,19 +2331,28 @@ class MainWindow(QMainWindow):
         if hasattr(self, "project_wizard"):
             self.project_wizard.retranslate()
 
-    def _align_form(self, form: QFormLayout) -> None:
-        """@brief Align a form's labels now and after every language change.
+    def _align_form(self, form: QFormLayout, panel: str) -> None:
+        """@brief Align a form's labels now and after every language change, with its panel's forms.
+
         @param form Form layout built by the window; kept in `_aligned_forms`.
+        @param panel Key of the tab the form is shown in: every form of a
+            panel gets the same label column (the widest label among them),
+            so their fields line up (review, 2026-10-12: a fixed 132 px
+            aligned them but cut long labels; measured columns alone made
+            adjacent group boxes differ by up to 60 px).
         """
         if not hasattr(self, "_aligned_forms"):
             self._aligned_forms = []
-        self._aligned_forms.append(form)
-        _align_form_labels(form)
+        self._aligned_forms.append((panel, form))
+        self._realign_form_labels()
 
     def _realign_form_labels(self) -> None:
-        """@brief Recompute the label columns: translated labels have other widths."""
-        for form in getattr(self, "_aligned_forms", ()):
-            _align_form_labels(form)
+        """@brief Recompute the label columns, per panel: translated labels have other widths."""
+        widths: dict = {}
+        for panel, form in getattr(self, "_aligned_forms", ()):
+            widths[panel] = max(widths.get(panel, FORM_LABEL_MINIMUM_WIDTH), _align_form_labels(form))
+        for panel, form in getattr(self, "_aligned_forms", ()):
+            _align_form_labels(form, widths[panel])
 
     def _refresh_language_texts(self) -> None:
         """@brief Nome dell'icona e della tendina della lingua, nella lingua in uso."""
@@ -2373,6 +2382,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_EXPORTS, self.i18n.tr("tab.exports.name"))
         self.i18n.retranslate_widgets(self)
         self._realign_form_labels()
+        self._refresh_metadata_help_tooltips()
         self.project_wizard.retranslate()
         self._refresh_ai_tools_summary()
         if hasattr(self, "workflow_bar"):
@@ -2599,7 +2609,7 @@ class MainWindow(QMainWindow):
         self.btn_project_info.setFixedSize(36, 32)
         path_row.addWidget(self.btn_project_info)
         folder_layout.addRow("Cartella componente:", path_row)
-        self._align_form(folder_layout)
+        self._align_form(folder_layout, "project")
 
         self.project_info_dialog = QDialog(self)
         self.project_info_dialog.setWindowTitle("Informazioni sulla cartella componente")
@@ -2772,7 +2782,7 @@ class MainWindow(QMainWindow):
         ai_form.addRow(self.label_pcb_thickness, pcb_row)
         self._ai_form = ai_form
         self._row_pcb_thickness = ai_form.rowCount() - 1
-        self._align_form(ai_form)
+        self._align_form(ai_form, "project")
         models_form = QFormLayout()
 
         self.combo_model = QComboBox()
@@ -2909,7 +2919,7 @@ class MainWindow(QMainWindow):
                        self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setProperty("i18n_skip", True)
         self._refresh_photo_detector_controls()
-        self._align_form(models_form)
+        self._align_form(models_form, "project")
 
         analysis_layout.addLayout(ai_form)
         analysis_layout.addWidget(self.group_mounting)
@@ -9041,7 +9051,7 @@ class MainWindow(QMainWindow):
         artifacts_form.addRow(self.file_paths_detail)
         self.symbol_tab.export_enabled_changed.connect(self.btn_export_symbol.setEnabled)
         self.btn_export_symbol.setEnabled(self.symbol_tab.export_button.isEnabled())
-        self._align_form(artifacts_form)
+        self._align_form(artifacts_form, "kicad")
         outer.addWidget(artifacts_group)
         outer.addWidget(self._build_metadata_group())
 
@@ -9238,7 +9248,7 @@ class MainWindow(QMainWindow):
         QWidget.setTabOrder(self.field_meta_keywords, self.field_datasheet)
         QWidget.setTabOrder(self.field_datasheet, self.field_fp_filters)
         QWidget.setTabOrder(self.field_fp_filters, self.btn_apply_metadata)
-        self._align_form(form)
+        self._align_form(form, "kicad")
         self.group_metadata = group
         group.setEnabled(False)
         return group
@@ -9272,15 +9282,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(field, 1)
         button = self._icon_only_button("info.svg")
         button.setProperty("metadata_help", key)
-        title = self.i18n.text("Aiuto: {field}").format(
-            field=self.i18n.text(self.METADATA_HELP_TITLES[key]))
-        self._apply_icon_tooltip(button, title, self.i18n.text(
-            "Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano."))
         button.clicked.connect(lambda _checked=False, key=key: self._show_metadata_help(key))
         alignment = Qt.AlignmentFlag.AlignTop if top else Qt.AlignmentFlag.AlignVCenter
         layout.addWidget(button, 0, alignment)
         self._metadata_help_buttons[key] = button
+        self._refresh_metadata_help_tooltips()
         return row
+
+    def _refresh_metadata_help_tooltips(self) -> None:
+        """@brief Tooltip and accessible name of every metadata help icon, in the current language.
+
+        @note Icon-only buttons opt out of the generic retranslation (their
+            tooltip is composed), so this runs at build time and on every
+            language change (review, 2026-10-12: they stayed Italian).
+        """
+        for key, button in self._metadata_help_buttons.items():
+            title = self.i18n.text("Aiuto: {field}").format(
+                field=self.i18n.text(self.METADATA_HELP_TITLES[key]))
+            self._apply_icon_tooltip(button, title, self.i18n.text(
+                "Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano."))
 
     def _metadata_help_content(self, key: str) -> list[tuple[str, str]]:
         """@brief The explanation of a metadata field, as (section title, text) pairs.
@@ -9306,7 +9326,7 @@ class MainWindow(QMainWindow):
                     "quando lo schema viene annotato e portato sul PCB.")),
                 (rules, self.i18n.text(
                     "KLC S6.1: prefisso di sole lettere. Un designatore vuoto o con altri caratteri è un "
-                    "errore ⛔ e blocca l’installazione finché non viene corretto.")),
+                    "errore ⛔: «Applica ai file» lo rifiuta e l’installazione chiede conferma.")),
                 (examples, self.i18n.text(
                     "U circuiti integrati e moduli · J connettori · K relè · Q transistor · D diodi e LED · "
                     "R resistori · C condensatori · L induttori · Y quarzi · SW interruttori.")),
@@ -9363,8 +9383,9 @@ class MainWindow(QMainWindow):
                 (where, self.i18n.text(
                     "Proprietà «ki_fp_filters» del simbolo. Il footprint non ne ha bisogno.")),
                 (rules, self.i18n.text(
-                    "Nessuna regola bloccante: un filtro sbagliato fa solo sparire il footprint dalle "
-                    "proposte, non impedisce di assegnarlo a mano.")),
+                    "Un filtro con separatori di percorso («/» o «\\») o con più di un «:» è un errore ⛔: "
+                    "«Applica ai file» lo rifiuta e l’installazione chiede conferma. Un filtro che non "
+                    "corrisponde a nulla fa solo sparire il footprint dalle proposte.")),
                 (examples, self.i18n.text(
                     "«ESP32-S3-DEVKIT-NXRX*» · «SOT-223*» · «*QFN*48*».")),
             ],
@@ -9377,9 +9398,10 @@ class MainWindow(QMainWindow):
                     "⛔ errore: ciò che KiCad o le convenzioni rifiutano; l’installazione chiede conferma "
                     "prima di procedere. ⚠ avviso: un consiglio, l’installazione procede.")),
                 (rules, self.i18n.text(
-                    "Designatore vuoto o non alfabetico, testi su più righe: errori. Descrizione, parole "
-                    "chiave o datasheet vuoti: avvisi. Il riferimento completo è kicad.org, sezione "
-                    "«Library Conventions».")),
+                    "Designatore vuoto o non alfabetico, testi su più righe, filtri con separatori, nome "
+                    "del footprint vuoto o con caratteri vietati: errori. Descrizione, parole chiave o "
+                    "datasheet vuoti, spazi nel nome del footprint: avvisi. Il riferimento completo è "
+                    "kicad.org, sezione «Library Conventions».")),
                 (examples, self.i18n.text(
                     "«Nessuna osservazione.» vuol dire che i controlli eseguiti qui sono passati, non che "
                     "il componente sia verificato in KiCad: per quello c’è «Verifica prima "
@@ -11570,6 +11592,9 @@ class MainWindow(QMainWindow):
         # `_ensure_preview_3d` (first entry in the tab, or the preload).
         self._preview_3d_layout = outer
         self._preview_3d_preloader = None
+        #: Reason of a failed import of the viewer's libraries; set once, after
+        #: which no entry in the 3D tab tries again (review, 2026-10-12).
+        self._preview_3d_import_error = None
         self.preview_3d = Preview3DVtk() if Preview3DVtk is not None else Preview3DPending()
         self._wire_preview_3d()
         self.preview_3d.setMinimumHeight(120)
@@ -11779,14 +11804,29 @@ class MainWindow(QMainWindow):
         """
         if self.preview_3d_loaded():
             return True
+        if self._preview_3d_import_error is not None:
+            self._set_3d_status(self.i18n.text("Visualizzatore 3D non disponibile: vedi il log."), STATUS_ERROR)
+            return False
         try:
             viewer_class = _preview_3d_class()
-        except (ImportError, OSError) as exc:  # a broken VTK/pyvista install
-            self._append_log(tx("Visualizzatore 3D non disponibile: {exc}", exc=exc))
-            self._set_3d_status(self.i18n.text("Visualizzatore 3D non disponibile: vedi il log."), STATUS_ERROR)
+        except Exception as exc:  # noqa: BLE001 - a broken VTK/pyvista raises anything at import
+            self._note_preview_3d_import_error(str(exc))
             return False
         self._install_preview_3d(viewer_class())
         return True
+
+    def _note_preview_3d_import_error(self, reason: str) -> None:
+        """@brief Record that the viewer's libraries cannot be imported: logged once, never retried.
+
+        @param reason The exception text.
+        @note Retrying on every entry in the 3D tab paid the partial import
+            again each time and appended a log line each time; the status
+            line keeps saying so instead (review, 2026-10-12).
+        """
+        if self._preview_3d_import_error is None:
+            self._preview_3d_import_error = reason
+            self._append_log(tx("Visualizzatore 3D non disponibile: {exc}", exc=reason))
+        self._set_3d_status(self.i18n.text("Visualizzatore 3D non disponibile: vedi il log."), STATUS_ERROR)
 
     def _install_preview_3d(self, viewer) -> None:
         """@brief Replace the placeholder with a viewer, in the same place of the 3D tab.
@@ -11811,6 +11851,9 @@ class MainWindow(QMainWindow):
         self._apply_view_cube_labels()
         if pending.show_pin_numbers != viewer.show_pin_numbers:
             viewer.set_pin_numbers(pending.show_pin_numbers)
+        painter = getattr(self, "btn_format_painter_3d", None)
+        if painter is not None and hasattr(viewer, "format_painter_active"):
+            viewer.format_painter_active = bool(painter.isChecked())
 
     def schedule_preview_3d_preload(self, delay_ms: int = 1500) -> None:
         """@brief Import the viewer's libraries in the background shortly after the window appears.
@@ -11830,12 +11873,12 @@ class MainWindow(QMainWindow):
     def _start_preview_3d_preload(self) -> None:
         """@brief Start the background import, unless the viewer is already there."""
         import threading
-        if self.preview_3d_loaded() or self._preview_3d_preloader is not None:
+        if (self.preview_3d_loaded() or self._preview_3d_preloader is not None
+                or self._preview_3d_import_error is not None):
             return
         preloader = _ModulePreloader(self)
         preloader.loaded.connect(self._on_preview_3d_preloaded)
-        preloader.failed.connect(lambda reason: self._append_log(
-            tx("Precaricamento del visualizzatore 3D fallito: {exc}", exc=reason)))
+        preloader.failed.connect(self._note_preview_3d_import_error)
         self._preview_3d_preloader = preloader
 
         def run():
@@ -11843,9 +11886,19 @@ class MainWindow(QMainWindow):
             try:
                 importlib.import_module("kicadgen.gui.preview_3d_vtk")
             except Exception as exc:  # noqa: BLE001 - reported on the GUI thread
-                preloader.failed.emit(str(exc))
-                return
-            preloader.loaded.emit()
+                outcome = ("failed", str(exc))
+            else:
+                outcome = ("loaded", None)
+            # The window (parent of the preloader) may be gone by now: the
+            # user closed it during the import. A dead receiver is nothing
+            # to report, not a crash (review, 2026-10-12).
+            try:
+                if outcome[0] == "loaded":
+                    preloader.loaded.emit()
+                else:
+                    preloader.failed.emit(outcome[1])
+            except RuntimeError:
+                pass
 
         threading.Thread(target=run, name="preview-3d-preload", daemon=True).start()
 
@@ -13999,17 +14052,24 @@ def main(splash=None) -> None:
             language, DEFAULT_TRANSLATIONS["ui:Database profili non disponibile"]["en"])
         template = DEFAULT_TRANSLATIONS["startup.profile_database_error"].get(
             language, DEFAULT_TRANSLATIONS["startup.profile_database_error"]["en"])
+        if splash is not None:
+            splash.close()
         QMessageBox.critical(None, title, template.format(error=exc))
         sys.exit(1)
     window.centre_before_show()
     window.show()
-    if splash is not None:
+
+    def hand_over():
         # A moment after show: the window has then painted its first frame
         # and the desktop's open animation is over, so the splash goes away
         # without a frame of desktop between the two (user, 2026-10-12).
-        QTimer.singleShot(SPLASH_HANDOVER_MS, lambda: splash.finish(window))
+        # The dependency warning (a modal box) comes after the splash, not
+        # over it.
+        if splash is not None:
+            splash.finish(window)
+        window._warn_missing_external_applications()
+    QTimer.singleShot(SPLASH_HANDOVER_MS if splash is not None else 0, hand_over)
     window.schedule_preview_3d_preload()
-    QTimer.singleShot(0, window._warn_missing_external_applications)
     # Solo l'applicazione vera legge il saldo: i test e le finestre costruite
     # altrove non toccano la rete.
     window.ai_account.balance_enabled = True

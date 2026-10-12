@@ -389,6 +389,11 @@ def _drop_body_outline(primitives: list[Primitive]) -> tuple[list[Primitive], Op
 def _library_text(path: str, mtime_ns: int, size: int) -> str:
     """@brief The text of a symbol library, read once per (path, mtime, size).
 
+    @param path Library file path, as a string (hashable cache key).
+    @param mtime_ns Modification time of the file, nanoseconds (part of the key).
+    @param size Size of the file in bytes (part of the key).
+    @return The file text (UTF-8).
+    @throws OSError, UnicodeDecodeError As `Path.read_text` does.
     @note The catalogue asks several glyphs of the same library in a row;
         without this every glyph re-read its 1-2 MB file. The key carries
         the file's stamp so a library replaced while the program runs is
@@ -397,42 +402,72 @@ def _library_text(path: str, mtime_ns: int, size: int) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def symbol_block(text: str, symbol_name: str) -> Optional[str]:
-    """@brief The `(symbol "name" ...)` form of one symbol, cut out of a library's text.
+#: Tokens of a KiCad library that matter for nesting: a `(symbol "name"`
+#: opener (name captured, in its escaped file spelling), any other quoted
+#: string (escapes included, so its parentheses do not count), a parenthesis.
+_NESTING_TOKENS = re.compile(r'\(symbol\s+"((?:[^"\\]|\\.)*)"|"(?:[^"\\]|\\.)*"|[()]')
+
+
+def _unescape(name: str) -> str:
+    """The name as KiCad shows it: `\\"` -> `"`, `\\\\` -> `\\`."""
+    return re.sub(r"\\(.)", r"\1", name)
+
+
+@lru_cache(maxsize=32)
+def top_level_symbol_spans(text: str) -> dict:
+    """@brief Where every top-level symbol of a library sits in its text.
 
     @param text Whole `.kicad_sym` text.
-    @param symbol_name Exact symbol name (a derived unit «name_1_1» is not it).
-    @return The balanced s-expression of that symbol, or None when absent
-        or unbalanced.
+    @return {symbol name: (start, end)} of each `(symbol "name" ...)` form
+        that is a direct child of the library root, `text[start:end]` being
+        the balanced form. The first of two same-named top-level forms wins.
+    @note One regex pass (C speed: ~50 ms for a 2.6 MB library) replaces
+        both the whole-file parse (seconds) and a per-symbol scan. Units
+        (`(symbol "X_1_1"` nested in X) are at depth 2 and never indexed,
+        so a unit's name never matches, and a top-level symbol named like
+        an earlier symbol's unit is found (review, 2026-10-12). Scanning
+        stops at the first unbalanced closing parenthesis; the symbols
+        found before a truncation are still served. Cached on the text
+        (`catalogue()` clears it: the texts would otherwise stay alive).
+    """
+    spans: dict = {}
+    depth = 0
+    open_name = None
+    open_start = 0
+    for match in _NESTING_TOKENS.finditer(text):
+        token = match.group()
+        if token[0] == "(":
+            depth += 1
+            if match.group(1) is not None and depth == 2 and open_name is None:
+                open_name, open_start = _unescape(match.group(1)), match.start()
+        elif token == ")":
+            depth -= 1
+            if depth < 0:
+                break
+            if depth == 1 and open_name is not None:
+                spans.setdefault(open_name, (open_start, match.end()))
+                open_name = None
+    return spans
+
+
+def symbol_block(text: str, symbol_name: str) -> Optional[str]:
+    """@brief The `(symbol "name" ...)` form of one top-level symbol, cut out of a library's text.
+
+    @param text Whole `.kicad_sym` text.
+    @param symbol_name Exact symbol name, as KiCad shows it.
+    @return The balanced s-expression of that symbol, or None when the
+        library has no top-level symbol of that name (a unit nested in
+        another symbol is not one, even when asked by its own name).
     @note Parsing a whole KiCad library (2 MB, tens of thousands of forms)
         to pick one symbol took ~0.5 s each and the catalogue did it 36
         times: the window took 18 s to appear (user, 2026-10-12). Only the
-        wanted block is parsed now. The scan is string-aware: parentheses
-        inside quoted strings (and escaped quotes in them) do not count.
+        wanted block is parsed now; see `top_level_symbol_spans`.
     """
-    start = None
-    for match in re.finditer(r'\(symbol\s+"' + re.escape(symbol_name) + r'"(?=[\s)])', text):
-        start = match.start()
-        break
-    if start is None:
+    span = top_level_symbol_spans(text).get(symbol_name)
+    if span is None:
         return None
-    depth, i, n = 0, start, len(text)
-    while i < n:
-        c = text[i]
-        if c == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            if i >= n:
-                return None
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return text[start:i + 1]
-        i += 1
-    return None
+    start, end = span
+    return text[start:end]
 
 
 def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: str = "",
@@ -587,6 +622,10 @@ def catalogue() -> tuple[Glyph, ...]:
             if glyph is not None:
                 glyphs.append(glyph)
     base = tuple(glyphs) if glyphs else _builtin_glyphs()
+    # The library texts (several MB) served their purpose: the catalogue
+    # itself is cached, so they would only stay alive as dead weight.
+    _library_text.cache_clear()
+    top_level_symbol_spans.cache_clear()
     return relay_part_glyphs() + base
 
 

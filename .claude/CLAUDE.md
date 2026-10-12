@@ -244,15 +244,17 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 6630 passed,
-8 skipped, 2 expected failures and 19 subtests (2026-10-02 late evening, after the adversarial
+is 7344 passed,
+11 skipped and 2 expected failures (2026-10-12 night, after the adversarial review of the
+start-up, lazy 3D viewer, glyph catalogue and symbol-editor work; before that, 2026-10-02 late
+evening: 6630 passed, 8 skipped, 2 expected failures and 19 subtests after the adversarial
 review of the SMD/KiCad/GUI/hole-rule work and the one-retry on unreadable document answers;
 earlier the same evening, branch `ADVANCED`: local
 SMD network as default detector, AI only for unresolved bodies, network package and pose
 driving provisional KiCad models; single AI model in a «Modello» tab with DeepSeek/OpenRouter
 source; models in models/yolo and models/smd), run in two halves (HANDOFF point 113:
 the single-process run can die at random with a native Qt/VTK crash). The last packaging integration was merge
-commit `692ca95` on `main`. Keep these values aligned with HANDOFF.md.
+commit `692ca95` on `main`; the latest merge of `ADVANCED` into `main` is recorded in HANDOFF.md. Keep these values aligned with HANDOFF.md.
 
 Eseguire la suite dalla radice del repository:
 

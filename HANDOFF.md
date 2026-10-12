@@ -1,5 +1,87 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 12/10 notte (2) — revisione avversariale FATTA, suite completa verde
+
+- Suite completa in due meta' dopo tutte le correzioni della revisione:
+  A5 4446 verdi, 9 saltati, 0 falliti; B5 2898 verdi, 2 saltati, 2 xfail,
+  0 falliti (totale 7344 verdi, 11 saltati, 2 xfail). Blocco GUI/editor/
+  lanciatore prima della suite: 484 verdi. Commit: vedi riga sotto.
+- Dopo tutte le correzioni, due avvii reali campionati: l'unico fotogramma
+  anomalo e' l'animazione di apertura di Windows con lo splash sotto.
+- APERTO (invariato): immagine splash (rimandata); pulsante apri progetto
+  «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica ai file»;
+  unita' multiple.
+
+## 2026-10-12 notte — revisione avversariale del lavoro di oggi (`2fc58a3..419083f`), correzioni FATTE
+
+Richiesta dell'utente: «lancia agenti esperti in modo avversariale per
+verificare che non ci siano problemi, prenditi il tempo che serve».
+Quattro revisori in sola lettura, ambiti disgiunti, integrazione centrale:
+1. Avvio: main.py (splash, lingua, QApplication tenuto vivo), main_window
+   (Preview3DVtk pigro, preload in thread, _ensure/_install, centratura
+   prima dello show, handover splash), preview_3d_pending.py, test.
+2. Catalogo glifi: symbol_glyphs.symbol_block / _library_text /
+   load_library_glyph e i test (equivalenza, casi limite di scansione).
+3. Editor simboli e scheda KiCad: maniglie a comparsa, strumento testo a
+   colpo singolo, icone di aiuto metadati, colonna etichette misurata.
+4. Qualita' dei test e dei contratti cambiati oggi, piu' coerenza di
+   handoff e CLAUDE.md con il codice.
+Esito dei quattro rapporti (tutti verificati o riprodotti prima di
+accettarli) e correzioni FATTE, nell'ordine:
+- Glifi: FATTO. (a) il test di equivalenza riparsava le librerie intere
+  36 volte (21 s): ora una volta per libreria, su TUTTI i simboli di primo
+  livello (2,2 s); (b) `symbol_block` prendeva la prima occorrenza testuale
+  anche se annidata (unita' con lo stesso nome di un simbolo successivo):
+  ora `top_level_symbol_spans` indicizza in un solo passaggio regex i soli
+  figli diretti della radice, nomi con virgolette in grafia escapata,
+  troncamento dopo il blocco tollerato (documentato); (c) cache dei testi e
+  dell'indice svuotate alla fine di `catalogue()`; (d) docstring
+  `_library_text` completata; (e) try/finally nel test. Catalogo a freddo
+  0,39 s (era 0,15 s con la ricerca per nome, 18 s prima di oggi).
+- Avvio: (1) emit del thread di precaricamento dopo la distruzione della
+  finestra -> RuntimeError -> rapporto di crash spurio: emit protetti;
+  (2) `_ensure_preview_3d` catturava solo ImportError/OSError, un VTK rotto
+  con altra eccezione uccideva il programma al clic sulla scheda 3D: ora
+  Exception; (3) fallimento dell'import ritentato a ogni ingresso con una
+  riga di log ogni volta: ora ricordato (`_preview_3d_import_error`) e
+  loggato una volta, anche dal precaricamento; (4) il foglio di stile
+  rimpiccioliva il testo dello splash a meta' avvio: stylesheet proprio
+  dello splash; (5) avviso dipendenze mancanti e finestra critica del DB
+  profili ordinati rispetto allo splash; (6) `format_painter_active`
+  copiato al momento dell'installazione del visualizzatore.
+- Editor/KiCad: (1) maniglie nascoste non colpibili senza un movimento
+  precedente (tocco, automazione): `mousePressEvent` emette prima
+  `pointer_changed`, test di test_symbol_tab riportato al contratto
+  originale piu' un test negativo; (2) dimensioni e margini delle maniglie
+  erano unita' di scena, non pixel: ora `ItemIgnoresTransformations` e
+  margine diviso per la scala della vista al momento del controllo; (3)
+  `leaveEvent` nasconde le maniglie, un gesto rivela solo il gruppo che
+  possiede il bersaglio trascinato; (4) except RuntimeError morto rimosso;
+  (5) tooltip delle icone di aiuto non ritradotti al cambio lingua:
+  `_refresh_metadata_help_tooltips`; (6) testi di aiuto errati rispetto a
+  klc_checks: «Filtri footprint: nessuna regola bloccante» (falso: formato
+  con separatori o piu' di un ':' e' errore), «blocca l'installazione»
+  (l'installazione chiede conferma, «Applica ai file» rifiuta), riepilogo
+  KLC senza le regole sul nome del footprint; (7) colonne etichette
+  diverse fra moduli dello stesso pannello: allineamento per pannello
+  (larghezza massima fra i moduli del pannello).
+- Test: (1) test «il modulo non importa il visualizzatore» non poteva
+  fallire (`or` sempre vero): ora in sottoprocesso; (2) `or True` nel test
+  del lanciatore: ora confronto di sys.modules; (3) ritraduzione etichette
+  guidata da `_on_language_changed`; (4) icone di aiuto: clic su due voci
+  diverse con titolo verificato; (5) test di `main(splash)` con falsi:
+  ordine centra -> show -> precarica, finish rinviato; (6) caso positivo
+  del ridisegno della mesh dopo l'installazione; (7) test etichette con
+  APP_QSS applicato; (8) 5 chiavi duplicate preesistenti in i18n.py
+  (`ui:Pad Ø:`, `ui:Foro Ø:`, `ui:Lato`, `ui:Sinistra`, `ui:Destra`)
+  rimosse (vinceva la seconda copia: tenuta quella) + test ast anti-
+  duplicati; (9) handoff: `_metadata_help_button` mai esistito,
+  test_launcher 11 non 10, paragrafi del piano superati annotati;
+  CLAUDE.md baseline da riallineare al commit.
+Respinti/rimandati: stile delle virgolette inglesi nel catalogo
+(incoerenza preesistente, non oggi); «Modello di visione:» non tradotto
+(preesistente, fuori ambito).
+
 ## FINE SESSIONE 12/10 notte — commit `92767db` + correzioni `ba6b169` su `ADVANCED`, mergiati in `main`
 
 - Suite completa sulla base di `92767db`: A4 4435 verdi/9 saltati/5 falliti
@@ -70,10 +152,12 @@ A. `main_window.py`: `Preview3DVtk` diventa un attributo di modulo
    `_draw_preview_3d()` quando il visualizzatore vero arriva.
    `_install_preview_3d()` costruisce il vero, collega i segnali, lo
    sostituisce nel layout (stesso genitore: i test controllano
-   `preview_3d.parentWidget()`), applica etichette del cubo e numeri pin,
-   ridisegna. Innesco: ingresso nella scheda 3D (`_enter_3d_tab`) oppure
-   precaricamento.
-B. Precaricamento: `schedule_preview_3d_preload(delay_ms)` chiamato SOLO da
+   `preview_3d.parentWidget()`), applica etichette del cubo e numeri pin;
+   [CORRETTO 12/10 notte: NON ridisegna, ridisegna l'ingresso nella scheda]
+   Innesco: ingresso nella scheda 3D (`_enter_3d_tab`); [SUPERATO: non piu'
+   dal precaricamento, vedi sezione sopra].
+B. [SUPERATO 12/10 notte: il precaricamento importa soltanto, il widget
+   nasce alla prima entrata nella scheda 3D, per il lampeggio] Precaricamento: `schedule_preview_3d_preload(delay_ms)` chiamato SOLO da
    `main()` (i test non avviano thread): un `threading.Thread` daemon
    importa il modulo `kicadgen.gui.preview_3d_vtk` (import puro, nessun
    widget) e un segnale Qt riporta sul thread GUI dove si costruisce il
@@ -97,7 +181,7 @@ main_window: `Preview3DVtk = None`, `_preview_3d_class`, `_ModulePreloader`,
 `startup_language`, `create_splash`, `_QT_APPLICATION` tenuto vivo —
 difetto trovato dalla prova reale: il QApplication locale moriva con la
 funzione; `main()` accetta `splash`). Test: test_preview_3d_lazy 7 verdi,
-test_launcher 10 verdi, 3D tab/i18n/documentazione verdi; test GUI ampi
+test_launcher 11 verdi, 3D tab/i18n/documentazione verdi; test GUI ampi
 lanciati in sottofondo (.venv/claude-test-run-lazy3).
 Prova reale (QT_QPA_PLATFORM=windows, config vero): splash a 1,2 s,
 modulo finestra importato a 1,55 s (era 8,2 s), precaricamento 3D
@@ -188,8 +272,9 @@ Suite completa in due meta' LANCIATA: prima meta' -> .venv/claude-suite-A4.log.
   sono errori ⛔ bloccanti e quali avvisi ⚠), «Esempi», pulsante «Chiudi».
   Testi come sorgenti italiane dentro `self.i18n.text(...)` cosi' il
   raccoglitore di test_i18n li vede; voci nelle 4 lingue in i18n.py.
-  Metodi: `_metadata_help_button(key)`, `_show_metadata_help(key)`,
-  `_metadata_help_content()`; riferimento `self._metadata_help_dialog` per i
+  Metodi (come realizzati; nel piano era scritto `_metadata_help_button`,
+  mai esistito): `_metadata_field_row(field, key)`, `_show_metadata_help(key)`,
+  `_metadata_help_content(key)`; riferimento `self._metadata_help_dialog` per i
   test. Test nuovo tests/test_metadata_help.py: un pulsante per riga, modale,
   contenuto del campo giusto, chiusura. Guida HTML: nessuna sezione sui
   metadati oggi; NON aggiunta (non richiesta). FATTO, NON COMMITTATO:

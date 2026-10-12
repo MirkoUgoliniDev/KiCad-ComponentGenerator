@@ -151,10 +151,9 @@ def test_mouse_drag_pin_resize_and_escape(qapp):
     w, h = tab._symbol.width, tab._symbol.height
     start = view.mapFromScene(QPointF(w * 5, h * 5))
     end = view.mapFromScene(QPointF(w * 5 + 50.8, h * 5 + 50.8))
-    # Contract since 2026-10-12: the body handles are hidden until the
-    # pointer comes near the outline, so the pointer arrives first, as a
-    # real hand does; a press out of nowhere would find nothing to grab.
-    QTest.mouseMove(view.viewport(), start)
+    # The body handles are hidden until the pointer comes near; a press
+    # with no prior move (touch, automation) must still grab one, because
+    # the press itself reveals them (review, 2026-10-12).
     QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, pos=start)
     assert view.gesture[0] == 'resize'
     QTest.mouseMove(view.viewport(), end)

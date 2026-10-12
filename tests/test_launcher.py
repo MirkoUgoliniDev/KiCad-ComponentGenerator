@@ -118,8 +118,11 @@ def test_startup_language_reads_the_config_without_the_gui(launcher, tmp_path, m
     config.write_text("{not json", encoding="utf-8")
     assert launcher.startup_language() == "it", "unreadable: the default, no exception"
     config.write_text(json.dumps({"language": ""}), encoding="utf-8")
+    before = set(sys.modules)
     assert launcher.startup_language() == "it", "empty: the default"
-    assert "kicadgen.gui.app_config" not in sys.modules or True  # the read must not need it
+    heavy = {name for name in set(sys.modules) - before
+             if name.startswith(("kicadgen.gui", "kicadgen.services", "cv2", "numpy", "PIL"))}
+    assert not heavy, f"the splash language read must not import the GUI or the services: {sorted(heavy)}"
     assert launcher.SPLASH_MESSAGES.keys() == {"it", "en", "fr", "de"}
 
 

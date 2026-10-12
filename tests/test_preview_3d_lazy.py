@@ -7,6 +7,8 @@ first entry into the tab, or until the background preload, builds the real
 viewer in the same place. Tests that install a stub class before building
 the window keep the old synchronous path (`Preview3DVtk is not None`).
 """
+from pathlib import Path
+
 import pytest
 from PyQt6.QtCore import QEventLoop, QTimer
 from PyQt6.QtWidgets import QWidget
@@ -46,8 +48,20 @@ def pending(monkeypatch):
 
 
 def test_the_window_module_does_not_import_the_viewer():
+    """In a fresh interpreter (this session may have imported the viewer
+    elsewhere): importing the window module must leave the viewer module
+    out of sys.modules and the class attribute None (review, 2026-10-12:
+    the former in-process assertion could not fail)."""
+    import os
+    import subprocess
     import sys
-    assert gui.Preview3DVtk is None or "kicadgen.gui.preview_3d_vtk" in sys.modules
+    code = ("import sys; import kicadgen.gui.main_window as m; "
+            "assert 'kicadgen.gui.preview_3d_vtk' not in sys.modules, 'viewer imported eagerly'; "
+            "assert m.Preview3DVtk is None, 'viewer class bound eagerly'; print('lazy')")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                            cwd=str(Path(__file__).resolve().parents[1]), timeout=120)
+    assert result.returncode == 0 and "lazy" in result.stdout, result.stderr[-2000:]
     # The class attribute is still there for the fixtures to replace.
     assert hasattr(gui, "Preview3DVtk")
 
@@ -81,25 +95,79 @@ def test_ensuring_the_viewer_replaces_the_placeholder_in_place(pending, window):
     assert window._ensure_preview_3d() is True and FakeViewer.built == 1, 'never built twice'
 
 
-def test_entering_the_3d_tab_builds_the_viewer_then_draws(pending, window):
+def test_entering_the_3d_tab_builds_the_viewer_then_draws(pending, window, tmp_path, monkeypatch):
     assert FakeViewer.built == 0
-    window._enter_3d_tab()
+    # A mesh generated while the placeholder was in place: the placeholder
+    # drew nothing, the window kept the path, the tab entry shows it.
+    mesh = tmp_path / "board.preview.json"
+    mesh.write_text("{}", encoding="utf-8")
+    window.preview_3d.render_mesh(str(mesh))
+    window._last_mesh_path = str(mesh)
+    # The deferred render only serves the tab on screen. The tab gate moves
+    # a project-less window off the 3D page (its own tests elsewhere): it is
+    # silenced here so the tab change reaches `_enter_3d_tab` as in the app.
+    monkeypatch.setattr(window, "_refresh_output_actions", lambda: True)
+    window.tabs.setTabEnabled(gui.TAB_MODEL_3D, True)
+    window.tabs.setCurrentWidget(window.model_3d_page)
+    assert window.tabs.currentWidget() is window.model_3d_page
     viewer = window.preview_3d
     assert isinstance(viewer, FakeViewer)
-    assert any(call[0] in ('clear', 'params', 'mesh') for call in viewer.calls), \
-        'the tab entry drew from the window state'
+    # The render of an existing mesh is deferred by one event round, so the
+    # loading indicator paints first (`_enter_3d_tab`).
+    from PyQt6.QtWidgets import QApplication
+    for _ in range(20):
+        if ('mesh', str(mesh)) in viewer.calls:
+            break
+        QApplication.processEvents()
+    assert ('mesh', str(mesh)) in viewer.calls, 'the mesh sent to the placeholder is drawn now'
 
 
 def test_an_import_failure_keeps_the_placeholder_and_says_so(pending, window, monkeypatch):
     def broken():
         raise ImportError("DLL load failed: vtk")
-    monkeypatch.setattr(gui, "_preview_3d_class", broken)
+    attempts = []
+
+    def counted():
+        attempts.append(1)
+        return broken()
+    monkeypatch.setattr(gui, "_preview_3d_class", counted)
+    logged = []
+    monkeypatch.setattr(window, "_append_log", lambda text: logged.append(text))
     assert window._ensure_preview_3d() is False
     assert isinstance(window.preview_3d, Preview3DPending)
     assert window.label_3d_status.property("status_level") == gui.STATUS_ERROR
     assert "non disponibile" in window.label_3d_status.text()
     window._enter_3d_tab()  # must not raise, must not draw
+    window._enter_3d_tab()
     assert isinstance(window.preview_3d, Preview3DPending)
+    assert len(attempts) == 1, 'a failed import is not retried on every tab entry'
+    assert sum("DLL load failed" in text for text in logged) == 1, 'logged once'
+    assert window.label_3d_status.property("status_level") == gui.STATUS_ERROR, 'the status keeps saying so'
+
+
+def test_a_broken_viewer_raising_any_exception_keeps_the_program_alive(pending, window, monkeypatch):
+    """A pyvista/VTK mismatch raises AttributeError or RuntimeError at import,
+    not ImportError: that too must stay inside the 3D tab."""
+    def broken():
+        raise AttributeError("module 'vtkmodules' has no attribute 'vtkRenderingOpenGL2'")
+    monkeypatch.setattr(gui, "_preview_3d_class", broken)
+    assert window._ensure_preview_3d() is False
+    assert isinstance(window.preview_3d, Preview3DPending)
+
+
+def test_a_failed_preload_is_remembered_and_the_tab_does_not_import_again(pending, window, monkeypatch):
+    import importlib
+    monkeypatch.setattr(importlib, "import_module", lambda name: (_ for _ in ()).throw(ImportError("no vtk")))
+    attempts = []
+    monkeypatch.setattr(gui, "_preview_3d_class", lambda: attempts.append(1) or FakeViewer)
+    window._start_preview_3d_preload()
+    loop = QEventLoop()
+    window._preview_3d_preloader.failed.connect(loop.quit)
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+    assert window._preview_3d_import_error == "no vtk"
+    window._enter_3d_tab()
+    assert attempts == [] and isinstance(window.preview_3d, Preview3DPending)
 
 
 def test_the_preload_imports_off_thread_then_builds_on_the_gui_thread(pending, window, monkeypatch):
@@ -117,6 +185,7 @@ def test_the_preload_imports_off_thread_then_builds_on_the_gui_thread(pending, w
     window._preview_3d_preloader.loaded.connect(loop.quit)
     QTimer.singleShot(5000, loop.quit)
     loop.exec()
+    assert 'name' in seen, 'the preload never reported within 5 s'
     assert seen['name'] == "kicadgen.gui.preview_3d_vtk"
     assert seen['thread'] == "preview-3d-preload", 'the import ran off the GUI thread'
     # The widget is not built by the preload: built inside a window on
@@ -132,3 +201,44 @@ def test_a_stub_installed_before_the_window_keeps_the_synchronous_path(window):
     """The regular fixture: the viewer (a stub) is there from the start."""
     assert window.preview_3d_loaded()
     assert not isinstance(window.preview_3d, Preview3DPending)
+
+
+def test_main_centres_shows_then_preloads_and_hands_the_splash_over(qapp, monkeypatch):
+    """The entry point's order is the fix of the blink (review, 2026-10-12)."""
+    calls = []
+
+    class Account:
+        balance_enabled = False
+
+        def refresh_balance(self):
+            calls.append("balance")
+
+    class FakeWindow:
+        def __init__(self):
+            self.ai_account = Account()
+
+        def centre_before_show(self): calls.append("centre")
+        def show(self): calls.append("show")
+        def schedule_preview_3d_preload(self): calls.append("preload")
+        def _warn_missing_external_applications(self): calls.append("warn")
+        def _sync_balance_provider(self): calls.append("sync")
+
+    class FakeSplash:
+        def finish(self, window): calls.append(("finish", type(window).__name__))
+
+    scheduled = []
+    monkeypatch.setattr(gui, "MainWindow", FakeWindow)
+    monkeypatch.setattr(gui.QTimer, "singleShot", staticmethod(lambda ms, fn: scheduled.append((ms, fn))))
+    monkeypatch.setattr(gui.QApplication, "exec", lambda self: 0)
+    monkeypatch.setattr(gui.sys, "exit", lambda code: calls.append(("exit", code)))
+    sheet = qapp.styleSheet()
+    try:
+        gui.main(FakeSplash())
+    finally:
+        qapp.setStyleSheet(sheet)
+    assert calls[:3] == ["centre", "show", "preload"], 'centred while hidden, shown, then the preload'
+    assert ("exit", 0) in calls
+    assert len(scheduled) == 1 and scheduled[0][0] == gui.SPLASH_HANDOVER_MS
+    scheduled[0][1]()
+    assert ("finish", "FakeWindow") in calls and "warn" in calls
+    assert calls.index(("finish", "FakeWindow")) < calls.index("warn"), 'the splash goes before the warning'

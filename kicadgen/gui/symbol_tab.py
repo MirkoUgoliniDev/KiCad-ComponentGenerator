@@ -118,8 +118,10 @@ PEN_STYLES = {'default': Qt.PenStyle.SolidLine, 'solid': Qt.PenStyle.SolidLine, 
 JUSTIFY_LABELS = (('left', 'Sinistra'), ('center', 'Centro'), ('right', 'Destra'))
 
 #: Palette tooltip of every tool, by key (Italian source, translated by `tx`).
-#: Side of a handle square, scene pixels, and the margin (scene pixels)
-#: around the selected element inside which its handles are shown.
+#: Side of a handle square and the margin around the selected element
+#: inside which its handles are shown, both in SCREEN pixels at any zoom:
+#: the squares ignore the view transform and the margin is divided by the
+#: view scale when the pointer is tested (review, 2026-10-12).
 HANDLE_SIZE_PX = 6
 HANDLE_HOVER_MARGIN = 12
 
@@ -357,6 +359,8 @@ class _SymbolView(QGraphicsView):
     graphic_toggled = pyqtSignal(int)
     region_selected = pyqtSignal(object, bool)
     pointer_changed = pyqtSignal(object)
+    #: The pointer left the viewport: hover-revealed handles go away.
+    pointer_left = pyqtSignal()
     camera_changed = pyqtSignal()
     gesture_started = pyqtSignal(object, object)
     pin_context_requested = pyqtSignal(str, object)
@@ -406,6 +410,10 @@ class _SymbolView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
+        # Hidden handles are not hit-tested: a press whose pointer arrived
+        # without a move (touch, automation, coalesced events) must first
+        # reveal them like a move would (review, 2026-10-12).
+        self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self.wiring and event.button() == Qt.MouseButton.LeftButton:
             self.wire_point.emit(self.mapToScene(event.pos()),
                                  bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
@@ -495,6 +503,10 @@ class _SymbolView(QGraphicsView):
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
         self._pan_last = point
+
+    def leaveEvent(self, event):
+        self.pointer_left.emit()
+        super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
         self.pointer_changed.emit(self.mapToScene(event.pos()))
@@ -665,6 +677,7 @@ class SymbolTab(QWidget):
         self._syncing_selection = False
         self._cursor_position = None
         self._handle_groups = []
+        self._pointer_inside = True
         self._body_locked = False
         self._recovery_path = None
         self._recoverable = None
@@ -751,6 +764,7 @@ class SymbolTab(QWidget):
         self.view.graphic_toggled.connect(self._toggle_graphic)
         self.view.region_selected.connect(self._select_region)
         self.view.pointer_changed.connect(self._update_readout)
+        self.view.pointer_left.connect(self._on_pointer_left)
         self.view.camera_changed.connect(self._update_readout)
         self.view.gesture_started.connect(self._begin_gesture)
         self.view.pin_context_requested.connect(self._pin_context_menu)
@@ -2366,9 +2380,15 @@ class SymbolTab(QWidget):
             path.lineTo(x * scale, -y * scale)
         return path
 
+    def _on_pointer_left(self):
+        """The pointer left the drawing: nothing is hovered until it comes back."""
+        self._pointer_inside = False
+        self._update_handle_visibility(None)
+
     def _update_readout(self, point=None):
         if point is not None:
             self._cursor_position = point
+            self._pointer_inside = True
             self._update_handle_visibility(point)
             item = self._wire_cursor_item
             if item is not None and self._shape_tool is not None and self._shape_points and self.view.wiring:
@@ -2871,13 +2891,14 @@ class SymbolTab(QWidget):
                 item.setToolTip(hint)
             if element_handles:
                 # The area that reveals the handles: the selected element and
-                # its handles, with a margin so the pointer finds a handle
-                # before touching it (user, 2026-10-12: discreet handles).
+                # its handle points; the margin (screen pixels) is added when
+                # the pointer is tested (user, 2026-10-12: discreet handles).
                 area = QRectF()
-                for item in items + element_handles:
+                for item in items:
                     area = area.united(item.sceneBoundingRect())
-                self._handle_groups.append((element_handles, area.adjusted(
-                    -HANDLE_HOVER_MARGIN, -HANDLE_HOVER_MARGIN, HANDLE_HOVER_MARGIN, HANDLE_HOVER_MARGIN), None))
+                for handle in element_handles:
+                    area = area.united(QRectF(handle.pos(), handle.pos()))
+                self._handle_groups.append((element_handles, area, False, ('graphic', index)))
                 self._update_handle_visibility(self._cursor_position)
 
     def _add_handle(self, scene, sx, sy, group):
@@ -2894,12 +2915,17 @@ class SymbolTab(QWidget):
             the group's area or a drag is in progress
             (`_update_handle_visibility`).
         """
+        from PyQt6.QtWidgets import QGraphicsItem
         theme = self.theme
         fill = QColor(theme['handle'])
         fill.setAlpha(150)
         half = HANDLE_SIZE_PX / 2
-        square = scene.addRect(sx - half, sy - half, HANDLE_SIZE_PX, HANDLE_SIZE_PX,
+        square = scene.addRect(-half, -half, HANDLE_SIZE_PX, HANDLE_SIZE_PX,
                                QPen(QColor(theme['selected']), 1.0), fill)
+        square.setPos(sx, sy)
+        # Constant screen size at any zoom (the rect is in device pixels
+        # about the item position).
+        square.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         square.setZValue(12)
         square.setCursor(Qt.CursorShape.CrossCursor)
         square.setVisible(False)
@@ -2910,21 +2936,35 @@ class SymbolTab(QWidget):
         """@brief Show the handles of the selected element while the pointer is in its area.
 
         @param point Scene position of the pointer; None hides the handles.
-        @note Each group of `_handle_groups` has an outer area and, for the
-            body's handles, an inner one that does not count: the body covers
-            the whole symbol, so its handles show only near its outline.
-            During a drag the handles stay visible wherever the pointer is:
-            a handle hidden under the pointer that drags it would be absurd.
+        @note Each group of `_handle_groups` is (items, base rect, ring, owner):
+            the reveal area is the base rect grown by `HANDLE_HOVER_MARGIN`
+            screen pixels (divided by the view scale, so the margin is the
+            same on screen at any zoom); with `ring` the rect shrunk by the
+            same margin does not count: the body covers the whole symbol, so
+            its handles show only near its outline. While a gesture drags a
+            target of the group, its handles stay visible wherever the
+            pointer is (a handle hidden under the pointer that drags it
+            would be absurd); the other groups follow the pointer rule.
         """
-        dragging = self.view.gesture is not None
-        for items, outer, inner in self._handle_groups:
-            visible = dragging or (point is not None and outer.contains(point)
-                                   and not (inner is not None and inner.contains(point)))
+        if not self._pointer_inside:
+            point = None
+        scale = self.view.transform().m11() or 1.0
+        m = HANDLE_HOVER_MARGIN / abs(scale)
+        gesture = self.view.gesture
+        dragged = None
+        if gesture is not None:
+            dragged = ('body',) if gesture[0] == 'resize' else \
+                ('graphic', gesture[1]) if gesture[0] in ('graphic', 'shape_point', 'vertex') else None
+        for items, base, ring, owner in self._handle_groups:
+            if dragged is not None and owner == dragged:
+                visible = True
+            elif point is None:
+                visible = False
+            else:
+                outer = base.adjusted(-m, -m, m, m)
+                visible = outer.contains(point) and not (ring and base.adjusted(m, m, -m, -m).contains(point))
             for item in items:
-                try:
-                    item.setVisible(visible)
-                except RuntimeError:  # scene already cleared
-                    pass
+                item.setVisible(visible)
 
     def _draw_text_primitive(self, scene, scale, p, selected):
         """A text primitive as a scene item: font size `p.size` mm, turned by
@@ -3055,8 +3095,7 @@ class SymbolTab(QWidget):
             # ring around the outline (same margin inside and outside), not
             # anywhere over the body (user, 2026-10-12).
             body = QRectF(-width / 2, -height / 2, width, height)
-            m = HANDLE_HOVER_MARGIN
-            self._handle_groups.append((body_handles, body.adjusted(-m, -m, m, m), body.adjusted(m, m, -m, -m)))
+            self._handle_groups.append((body_handles, body, True, ('body',)))
             self._update_handle_visibility(self._cursor_position)
         if self._gesture_before is not None:
             scene.setSceneRect(self._gesture_scene_rect)
