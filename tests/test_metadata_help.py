@@ -64,6 +64,32 @@ def test_every_topic_has_the_four_sections_and_matches_the_klc_severity(window):
     # the installation goes on.
     rules = {key: dict((t, b) for t, b in window._metadata_help_content(key))["Regole KLC"]
              for key in ("reference", "description", "keywords", "datasheet")}
-    assert "⛔" in rules["reference"] and "blocca" in rules["reference"]
+    assert "⛔" in rules["reference"] and "rifiuta" in rules["reference"]
+    assert "⛔" in dict(window._metadata_help_content("fp_filters"))["Regole KLC"], \
+        "fp_filters has a format error rule too (klc_checks fp_filters_format)"
     for key in ("description", "keywords", "datasheet"):
         assert "avviso ⚠" in rules[key], key
+
+
+def test_each_icon_opens_the_help_of_its_own_field(window):
+    """Click wiring: two icons, two titles (a late-binding lambda would open
+    the same topic for every icon)."""
+    window.tabs.widget(gui.MainWindow.KICAD_TAB_INDEX).setEnabled(True)
+    window.group_metadata.setEnabled(True)
+    titles = []
+
+    def grab():
+        titles.append(window._metadata_help_dialog.windowTitle())
+        window._metadata_help_dialog.accept()
+    for key in ("reference", "fp_filters"):
+        QTimer.singleShot(0, grab)
+        window._metadata_help_buttons[key].click()
+    assert titles == ["Aiuto: Designatore di riferimento", "Aiuto: Filtri footprint"]
+
+
+def test_the_help_icons_follow_the_language(window):
+    button = window._metadata_help_buttons["datasheet"]
+    assert "Datasheet (URL o file)" in button.toolTip()
+    window._on_language_changed(window.language_combo.findData("en"))
+    assert "Datasheet (URL or file)" in button.toolTip() and "Help:" in button.toolTip()
+    assert "Help:" in button.accessibleName()

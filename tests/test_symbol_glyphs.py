@@ -57,10 +57,25 @@ def test_symbol_block_cuts_exactly_one_balanced_symbol(tmp_path):
     assert block is not None and block.startswith('(symbol "Relay_X"') and block.endswith(")")
     (form,) = g.parse_sexpr(block)
     assert form[1] == "Relay_X" and [u[1] for u in g._children(form, "symbol")] == ["Relay_X_0_1", "Relay_X_1_1"]
-    # A longer name sharing the prefix is not the symbol, and a unit is not either.
-    assert g.symbol_block(text, "Relay_X_1_1").startswith('(symbol "Relay_X_1_1"')
+    # A longer name sharing the prefix is not the symbol, and a unit is not
+    # either: only forms at depth 1 qualify (review, 2026-10-12).
+    assert g.symbol_block(text, "Relay_X_1_1") is None
     assert g.symbol_block(text, "Relay") is None
     assert g.symbol_block(text, "Missing") is None
+    # A top-level symbol named like an earlier symbol's unit is found past
+    # that unit, not confused with it.
+    clash = ('(kicad_symbol_lib (symbol "A" (property "Value" "v") (symbol "A_1_1" (pin)))'
+             ' (symbol "A_1_1" (property "Value" "w") (symbol "A_1_1_1_1")))')
+    assert g.symbol_block(clash, "A_1_1") == '(symbol "A_1_1" (property "Value" "w") (symbol "A_1_1_1_1"))'
+    # A name with a quote is matched in its escaped file spelling.
+    quoted = '(kicad_symbol_lib (symbol "A\\"B" (property "Value" "q")))'
+    assert g.symbol_block(quoted, 'A"B') == '(symbol "A\\"B" (property "Value" "q"))'
+    # A library truncated after a symbol still serves the intact symbols.
+    assert g.symbol_block('(kicad_symbol_lib (symbol "A" (pin)) (((', "A") == '(symbol "A" (pin))'
+    assert g.symbol_block('(kicad_symbol_lib (symbol "A" (pin)) ) ) (symbol "B")', "B") is None, \
+        "past an unbalanced close nothing is indexed"
+    spans = g.top_level_symbol_spans(clash)
+    assert list(spans) == ["A", "A_1_1"] and all(clash[a:b].startswith("(symbol") for a, b in spans.values())
     # Parentheses and escaped quotes inside strings do not unbalance the scan.
     tricky = '(kicad_symbol_lib (symbol "A" (property "Datasheet" "x(y\\"z)" ) (symbol "A_1_1")) (symbol "B"))'
     assert g.symbol_block(tricky, "A") == '(symbol "A" (property "Datasheet" "x(y\\"z)" ) (symbol "A_1_1"))'
@@ -84,33 +99,38 @@ def test_each_library_file_is_read_once_for_all_its_glyphs(tmp_path, monkeypatch
         reads.append(self)
         return original(self, *args, **kwargs)
     monkeypatch.setattr(Path, "read_text", counting)
-    for _ in range(5):
-        assert g.load_library_glyph(library, "Relay_X") is not None
-    assert len(reads) == 1
-    # A changed file (new stamp) is read again, not served stale.
-    library.write_text(RELAY_FIXTURE.replace("Relay_X", "Relay_Y"), encoding="utf-8")
-    import os
-    os.utime(library, ns=(library.stat().st_atime_ns, library.stat().st_mtime_ns + 10_000_000))
-    assert g.load_library_glyph(library, "Relay_X") is None and len(reads) == 2
-    g._library_text.cache_clear()
+    try:
+        for _ in range(5):
+            assert g.load_library_glyph(library, "Relay_X") is not None
+        assert len(reads) == 1
+        # A changed file (new stamp) is read again, not served stale.
+        library.write_text(RELAY_FIXTURE.replace("Relay_X", "Relay_Y"), encoding="utf-8")
+        import os
+        os.utime(library, ns=(library.stat().st_atime_ns, library.stat().st_mtime_ns + 10_000_000))
+        assert g.load_library_glyph(library, "Relay_X") is None and len(reads) == 2
+    finally:
+        g._library_text.cache_clear()
 
 
 @pytest.mark.skipif(g.kicad_symbols_dir() is None, reason="KiCad not installed")
 def test_the_block_read_matches_a_full_parse_on_the_installed_libraries():
-    """Equivalence with the old whole-file parse, on every catalogue entry."""
+    """Equivalence with the old whole-file parse, on EVERY top-level symbol of
+    the catalogue's libraries (each library parsed once: the whole-file
+    parse is the slow path this change removed)."""
     folder = g.kicad_symbols_dir()
+    libraries = sorted({library for _k, _l, _g, library, _s in g.KICAD_GLYPHS})
     checked = 0
-    for key, label, group, library, symbol_name in g.KICAD_GLYPHS:
+    for library in libraries:
         path = folder / f"{library}.kicad_sym"
         if not path.is_file():
             continue
-        forms = g.parse_sexpr(path.read_text(encoding="utf-8"))
-        root = forms[0]
-        full = next((item for item in g._children(root, "symbol") if item[1] == symbol_name), None)
-        (fast,) = g.parse_sexpr(g.symbol_block(path.read_text(encoding="utf-8"), symbol_name))
-        assert fast == full, (library, symbol_name)
-        checked += 1
-    assert checked >= 1
+        text = path.read_text(encoding="utf-8")
+        root = g.parse_sexpr(text)[0]
+        for full in g._children(root, "symbol"):
+            (fast,) = g.parse_sexpr(g.symbol_block(text, full[1]))
+            assert fast == full, (library, full[1])
+            checked += 1
+    assert checked >= len(g.KICAD_GLYPHS)
 
 
 def test_placement_turns_and_mirrors_primitives_and_terminals_consistently():

@@ -403,3 +403,19 @@ def test_lossy_bundled_translations_are_repaired_without_overwriting_user_text(t
     assert store.translation("ui:Categoria sconosciuta", "fr") == "Catégorie inconnue"
     assert store.translation("ui:Classificazioni in conflitto", "de") == "Widersprüchliche Klassifizierungen"
     assert store.translation("ui:Categoria sconosciuta", "de") == "Meine Kategorie"
+
+
+def test_the_bundled_catalogue_literal_has_no_duplicate_keys():
+    """Python keeps the last of two equal keys silently: five entries were
+    defined twice (review, 2026-10-12). An ast pass sees what the dict hides."""
+    import ast
+    from collections import Counter
+    from pathlib import Path
+    import kicadgen.services.i18n as catalogue_module
+    source = Path(catalogue_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "DEFAULT_TRANSLATIONS" for t in n.targets))
+    keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+    duplicates = sorted(k for k, n in Counter(keys).items() if n > 1)
+    assert duplicates == [], duplicates

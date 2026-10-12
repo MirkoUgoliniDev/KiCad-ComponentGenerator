@@ -223,9 +223,10 @@ def create_splash(language):
     splash = QSplashScreen(pixmap)
     splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
     message = SPLASH_MESSAGES.get(language, SPLASH_MESSAGES["en"])
-    font = splash.font()
-    font.setPointSize(11)
-    splash.setFont(font)
+    # A widget style sheet outranks the application's (theme.APP_QSS sets
+    # 10 pt on every widget once the window module is loaded): the message
+    # would otherwise shrink while the splash is still on screen.
+    splash.setStyleSheet("QSplashScreen { font-size: 11pt; }")
     splash.showMessage("\n" + message + "\n", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
                        QColor("#a6adc8"))
     splash.show()
