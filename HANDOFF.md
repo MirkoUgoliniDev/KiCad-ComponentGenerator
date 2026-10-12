@@ -1,6 +1,11 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 12/10 notte — commit `92767db` su `ADVANCED`, mergiato in `main`
+## FINE SESSIONE 12/10 notte — commit `92767db` + correzioni `ba6b169` su `ADVANCED`, mergiati in `main`
+
+- Suite completa sulla base di `92767db`: A4 4435 verdi/9 saltati/5 falliti
+  (corretti in `ba6b169`), B4 2892 verdi/2 saltati/2 xfail. Dopo `ba6b169` rilanciati
+  i file toccati (centratura, 3D pigro, lanciatore, localizzazione, i18n,
+  documentazione): verdi.
 
 - Committato su richiesta dell'utente a suite ANCORA IN CORSO. Esito della
   prima meta' (A4) arrivato dopo il commit: 4435 verdi, 9 saltati, 5
