@@ -1,6 +1,19 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-12 sera — IN CORSO: etichette tagliate nei moduli, avvio lento, pulsante aiuto
+## FINE SESSIONE 12/10 sera — commit `c6c8993` su `ADVANCED`, mergiato in `main`
+
+- Committato su richiesta dell'utente («committa tutto, pusha e mergia in
+  main»): etichette misurate, icone di aiuto dei metadati, strumento testo
+  a colpo singolo, maniglie discrete su elementi e corpo. Suite completa
+  NON rieseguita stasera: solo i file toccati (editor simboli, i18n, GUI
+  inventario, scheda KiCad, documentazione) tutti verdi.
+- APERTO, approvato dall'utente e NON iniziato: splash screen in main.py,
+  import pigro del visualizzatore 3D, precaricamento in sottofondo (vedi la
+  voce «avvio lento» qui sotto). Poi le voci precedenti: pulsante apri
+  progetto «non si aggiorna», campi obbligatori, «Regole KLC», «Applica ai
+  file», unita' multiple.
+
+## 2026-10-12 sera — etichette tagliate nei moduli, avvio lento, pulsante aiuto (commit `c6c8993`)
 
 - Richiesta dell'utente (screenshot): in «Metadati del componente» l'etichetta
   «Designatore di riferimento:» e' tagliata; «stringi le input box e lascia un
