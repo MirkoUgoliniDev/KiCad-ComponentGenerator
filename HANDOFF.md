@@ -1,6 +1,19 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-12 notte — IN CORSO: splash screen e visualizzatore 3D pigro («ok, in modo preciso e professionale»)
+## FINE SESSIONE 12/10 notte — commit `92767db` su `ADVANCED`, mergiato in `main`
+
+- Committato su richiesta dell'utente a suite ANCORA IN CORSO: prima meta'
+  a ~50% (.venv/claude-suite-A4.log) al momento del commit, seconda meta'
+  non ancora lanciata. Chi riprende: leggere il log A4, lanciare `second`
+  -> .venv/claude-suite-B4.log, e riallineare qui l'esito.
+- Verificato con fotogrammi dello schermo: un solo avvio, splash da 0,8 s
+  a 4 s, Home page a 5 s. Il «secondo avvio» visto dall'utente erano le
+  prove reali lanciate dall'assistente sul suo desktop.
+- APERTO: immagine splash (rimandata dall'utente); pulsante apri progetto
+  «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica ai file»;
+  unita' multiple.
+
+## 2026-10-12 notte — splash screen e visualizzatore 3D pigro (commit `92767db`)
 
 Piano, nell'ordine di esecuzione, ciascun blocco con test:
 A. `main_window.py`: `Preview3DVtk` diventa un attributo di modulo
