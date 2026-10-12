@@ -1,6 +1,19 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-12 — «fai tutto in modo preciso»: blocchi A-H FATTI, NON COMMITTATI
+## FINE SESSIONE 12/10 — commit `0389777` su `ADVANCED`, mergiato in `main`
+
+- Strumenti di disegno (sezione precedente e la seguente) committati in
+  `0389777`, push e merge in `main` fatti su richiesta dell'utente
+  («committa, pusha, mergia in main, ritorna qui, poi spengo il pc»).
+- Suite completa: prima meta' 4431 verdi, seconda 2876 verdi (vedi sotto).
+- APERTO alla ripresa: (1) segnalazione «se carico il progetto da qui
+  non si aggiorna» (pulsante apri nella scheda Progetto), domanda posta
+  all'utente senza risposta: cosa resta vecchio sullo schermo?; (2) le
+  tre voci precedenti (campi obbligatori, «Regole KLC», etichetta
+  «Applica ai file»); (3) unità multiple / De Morgan, escluso e da
+  pianificare a parte.
+
+## 2026-10-12 — «fai tutto in modo preciso»: blocchi A-H (commit `0389777`)
 
 - Tutti gli otto blocchi del piano qui sotto sono implementati e
   coperti da test; il punto 7 (unità multiple / De Morgan) resta ESCLUSO
