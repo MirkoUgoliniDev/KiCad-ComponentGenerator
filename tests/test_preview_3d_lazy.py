@@ -116,14 +116,16 @@ def test_the_preload_imports_off_thread_then_builds_on_the_gui_thread(pending, w
     loop = QEventLoop()
     window._preview_3d_preloader.loaded.connect(loop.quit)
     QTimer.singleShot(5000, loop.quit)
-    if not window.preview_3d_loaded():
-        loop.exec()
+    loop.exec()
     assert seen['name'] == "kicadgen.gui.preview_3d_vtk"
     assert seen['thread'] == "preview-3d-preload", 'the import ran off the GUI thread'
-    assert isinstance(window.preview_3d, FakeViewer), 'built on the GUI thread after the signal'
-    # Entering the tab afterwards neither imports nor builds again.
+    # The widget is not built by the preload: built inside a window on
+    # screen it made the window blink for a frame (user, 2026-10-12). The
+    # import is done; the first entry in the tab builds it at once.
+    assert isinstance(window.preview_3d, Preview3DPending), 'preload imports, it does not build'
+    assert FakeViewer.built == 0
     window._enter_3d_tab()
-    assert FakeViewer.built == 1
+    assert isinstance(window.preview_3d, FakeViewer) and FakeViewer.built == 1
 
 
 def test_a_stub_installed_before_the_window_keeps_the_synchronous_path(window):
