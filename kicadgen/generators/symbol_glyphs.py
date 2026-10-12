@@ -103,17 +103,37 @@ TERMINAL_SNAP_MM = 1.27
 class Primitive:
     """@brief One drawing primitive of a glyph, in symbol millimetres (Y up).
 
-    @note `kind` is one of polyline, circle, arc, rectangle. `points`: the
-        polyline vertices, the circle centre, the arc start/mid/end, or the
-        rectangle's two corners. `radius` for a circle. `fill` as in KiCad:
-        none, outline or background. `width` is the stroke width in mm
-        (0 = KiCad default).
+    @note `kind` is one of polyline, circle, arc, rectangle, bezier. `points`:
+        the polyline vertices, the circle centre, the arc start/mid/end, the
+        rectangle's two corners, or the bezier's start, two control points
+        and end (KiCad 7+ `(bezier (pts ...))`). `radius` for a circle.
+        `fill` as in KiCad: none, outline or background. `width` is the
+        stroke width in mm (0 = KiCad default). `style` is the KiCad stroke
+        type (STROKE_STYLES). A `text` primitive (KiCad `(text ...)`) has one
+        point (its position), the `text` itself, its font `size` in mm,
+        its `angle` (0 or 90 degrees) and its horizontal `justify`
+        (TEXT_JUSTIFY); fill, width and style are unused for it.
     """
     kind: str
     points: tuple[tuple[float, float], ...]
     radius: float = 0.0
     fill: str = "none"
     width: float = 0.0
+    style: str = "default"
+    text: str = ""
+    size: float = 1.27
+    angle: int = 0
+    justify: str = "center"
+
+
+#: The KiCad stroke types, in the order the editor offers them.
+STROKE_STYLES = ("default", "solid", "dash", "dot", "dash_dot", "dash_dot_dot")
+
+#: Horizontal justifications of a symbol text, in the order the editor offers them.
+TEXT_JUSTIFY = ("left", "center", "right")
+
+#: Default font size of a symbol text, mm (the KLC size of every symbol text).
+TEXT_SIZE_MM = 1.27
 
 
 @dataclass(frozen=True)
@@ -232,12 +252,42 @@ def _width_of(form) -> float:
     return float(width[1]) if width and len(width) > 1 else 0.0
 
 
+def _style_of(form) -> str:
+    stroke = _child(form, "stroke")
+    kind = _child(stroke, "type") if stroke else None
+    value = str(kind[1]) if kind and len(kind) > 1 else "default"
+    return value if value in STROKE_STYLES else "default"
+
+
+def _text_primitive(form) -> Optional[Primitive]:
+    """The Primitive of a `(text "..." (at x y angle) (effects (font (size s s)) (justify j)))` form."""
+    if len(form) < 2 or not isinstance(form[1], str):
+        return None
+    at = _child(form, "at")
+    if not at or len(at) < 3:
+        return None
+    angle = float(at[3]) if len(at) > 3 else 0.0
+    # KiCad 6 library files stored the text angle in tenths of a degree
+    # (900 = 90°); later formats use degrees. A value of 360 or more can
+    # only be tenths: interoperability rule, not a geometric one.
+    if abs(angle) >= 360:
+        angle /= 10
+    effects = _child(form, "effects")
+    font = _child(effects, "font") if effects else None
+    size = _child(font, "size") if font else None
+    justify = _child(effects, "justify") if effects else None
+    horizontal = next((str(v) for v in (justify[1:] if justify else ()) if str(v) in TEXT_JUSTIFY), "center")
+    return Primitive("text", (_xy(at),), 0.0, "none", 0.0, "default", str(form[1]),
+                     float(size[1]) if size and len(size) > 1 else TEXT_SIZE_MM,
+                     int(round(angle)) % 360, horizontal)
+
+
 def primitives_of(unit_form) -> list[Primitive]:
     """@brief The drawing primitives of one `(symbol "Name_u_s" ...)` unit form.
 
     @param unit_form Parsed unit form.
-    @return Polylines, circles, arcs and rectangles in order; pins and texts
-        are not primitives and are skipped.
+    @return Polylines, circles, arcs, rectangles, beziers and texts in
+        order; pins are not primitives and are skipped.
     """
     result = []
     for item in unit_form:
@@ -248,23 +298,32 @@ def primitives_of(unit_form) -> list[Primitive]:
             pts = _child(item, "pts") or []
             points = tuple(_xy(p) for p in pts[1:] if isinstance(p, list) and p and p[0] == "xy")
             if len(points) >= 2:
-                result.append(Primitive("polyline", points, 0.0, _fill_of(item), _width_of(item)))
+                result.append(Primitive("polyline", points, 0.0, _fill_of(item), _width_of(item), _style_of(item)))
         elif kind == "circle":
             centre = _child(item, "center")
             radius = _child(item, "radius")
             if centre and radius:
                 result.append(Primitive("circle", (_xy(centre),), float(radius[1]),
-                                        _fill_of(item), _width_of(item)))
+                                        _fill_of(item), _width_of(item), _style_of(item)))
         elif kind == "arc":
             start, mid, end = _child(item, "start"), _child(item, "mid"), _child(item, "end")
             if start and mid and end:
                 result.append(Primitive("arc", (_xy(start), _xy(mid), _xy(end)), 0.0,
-                                        _fill_of(item), _width_of(item)))
+                                        _fill_of(item), _width_of(item), _style_of(item)))
         elif kind == "rectangle":
             start, end = _child(item, "start"), _child(item, "end")
             if start and end:
                 result.append(Primitive("rectangle", (_xy(start), _xy(end)), 0.0,
-                                        _fill_of(item), _width_of(item)))
+                                        _fill_of(item), _width_of(item), _style_of(item)))
+        elif kind == "bezier":
+            pts = _child(item, "pts") or []
+            points = tuple(_xy(p) for p in pts[1:] if isinstance(p, list) and p and p[0] == "xy")
+            if len(points) == 4:
+                result.append(Primitive("bezier", points, 0.0, _fill_of(item), _width_of(item), _style_of(item)))
+        elif kind == "text":
+            text = _text_primitive(item)
+            if text is not None:
+                result.append(text)
     return result
 
 
@@ -549,11 +608,38 @@ def instance_from_glyph(glyph: Glyph, x: float, y: float, rotation: int = 0, mir
         "id": new_instance_id(),
         "key": glyph.key, "label": glyph.label, "source": glyph.source,
         "x": float(x), "y": float(y), "rotation": int(rotation) % 360, "mirror": bool(mirror),
-        "primitives": [{"kind": p.kind, "points": [list(pt) for pt in p.points], "radius": p.radius,
-                        "fill": p.fill, "width": p.width} for p in glyph.primitives],
+        "primitives": [primitive_record(p) for p in glyph.primitives],
         "terminals": [{"x": t.x, "y": t.y, "angle": t.angle, "length": t.length,
                        "name": t.name, "number": t.number} for t in glyph.terminals],
     }
+
+
+def primitive_record(p: Primitive) -> dict:
+    """@brief The JSON-friendly dict of a primitive as stored in a placed record.
+
+    @return kind, points, radius, fill, width, style; plus text, size, angle
+        and justify for a text primitive.
+    """
+    record = {"kind": p.kind, "points": [list(pt) for pt in p.points], "radius": p.radius,
+              "fill": p.fill, "width": p.width, "style": p.style}
+    if p.kind == "text":
+        record.update({"text": p.text, "size": p.size, "angle": int(p.angle) % 360, "justify": p.justify})
+    return record
+
+
+def primitive_from_record(record: dict, points=None) -> Primitive:
+    """@brief The Primitive of a stored primitive dict (legacy dicts lack style and text fields).
+
+    @param record Primitive dict of a placed record.
+    @param points Points to use instead of the record's (already transformed).
+    """
+    kind = str(record.get("kind", "polyline"))
+    points = tuple(_point_xy(pt) for pt in record.get("points", [])) if points is None else tuple(points)
+    style = str(record.get("style", "default"))
+    return Primitive(kind, points, float(record.get("radius", 0.0)), str(record.get("fill", "none")),
+                     float(record.get("width", 0.0)), style if style in STROKE_STYLES else "default",
+                     str(record.get("text", "")), float(record.get("size", TEXT_SIZE_MM)),
+                     int(record.get("angle", 0)) % 360, str(record.get("justify", "center")))
 
 
 def _point_xy(point) -> tuple[float, float]:
@@ -616,8 +702,8 @@ def pin_inner_ends(layout) -> dict[str, tuple[float, float]]:
     result = {}
     for item in layout.pins:
         vx, vy = _DIRECTION[int(item.angle) % 360]
-        result[str(item.pin.number)] = (round(item.x + vx * layout.pin_length, 4),
-                                        round(item.y + vy * layout.pin_length, 4))
+        length = float(item.pin.length) if getattr(item.pin, "length", None) is not None else layout.pin_length
+        result[str(item.pin.number)] = (round(item.x + vx * length, 4), round(item.y + vy * length, 4))
     return result
 
 
@@ -801,8 +887,15 @@ def placed_primitives(instance: dict, graphics: Optional[Iterable[dict]] = None,
             points = tuple(resolve_wire_points(instance, graphics, pin_ends, by_id))
         else:
             points = tuple(_transform(_point_xy(pt), x, y, rotation, mirror) for pt in p.get("points", []))
-        result.append(Primitive(str(p.get("kind", "polyline")), points, float(p.get("radius", 0.0)),
-                                str(p.get("fill", "none")), float(p.get("width", 0.0))))
+        primitive = primitive_from_record(p, points)
+        if primitive.kind == "text":
+            # A symbol text is horizontal or vertical: the placement turns
+            # it with the element; a mirror only moves its anchor point
+            # (KiCad never mirrors glyphs of a text).
+            primitive = Primitive(primitive.kind, points, primitive.radius, primitive.fill, primitive.width,
+                                  primitive.style, primitive.text, primitive.size,
+                                  (primitive.angle + rotation) % 180, primitive.justify)
+        result.append(primitive)
     return result
 
 
@@ -956,6 +1049,372 @@ def arc_points(start, mid, end, segments: int = 16) -> list[tuple[float, float]]
              round(uy + radius * math.sin(a1 + sweep * i / segments), 4)) for i in range(segments + 1)]
 
 
+def bezier_points(start, control1, control2, end, segments: int = 16) -> list[tuple[float, float]]:
+    """@brief Sample a cubic Bézier curve as a polyline, for drawing on screen.
+
+    @param start Start point (x, y).
+    @param control1 First control point.
+    @param control2 Second control point.
+    @param end End point.
+    @param segments Number of segments.
+    @return `segments + 1` points from start to end (the KiCad `bezier` form
+        is the same cubic: start, two controls, end).
+    """
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = start, control1, control2, end
+    result = []
+    for i in range(segments + 1):
+        t = i / segments
+        u = 1.0 - t
+        b0, b1, b2, b3 = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+        result.append((round(b0 * x0 + b1 * x1 + b2 * x2 + b3 * x3, 4),
+                       round(b0 * y0 + b1 * y1 + b2 * y2 + b3 * y3, 4)))
+    return result
+
+
+def primitive_outline(p: Primitive, segments: int = 16) -> list[tuple[float, float]]:
+    """@brief The points a primitive is drawn through: the curve sampled for an arc or a bezier.
+
+    @param p Primitive in any frame.
+    @param segments Segments for a curve.
+    @return The polyline vertices, the sampled arc or bezier, the rectangle's
+        four corners (closed), or the circle's centre alone.
+    """
+    if p.kind == "arc" and len(p.points) == 3:
+        return arc_points(*p.points, segments=segments)
+    if p.kind == "bezier" and len(p.points) == 4:
+        return bezier_points(*p.points, segments=segments)
+    if p.kind == "rectangle" and len(p.points) == 2:
+        (x0, y0), (x1, y1) = p.points
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+    return [tuple(pt) for pt in p.points]
+
+
+# ── Free drawing tools (user, 2026-10-12: «tracciare disegni, linee curve») ──
+
+#: Marker in `source` of a record drawn with a shape tool (not a catalogue glyph).
+SHAPE_SOURCE = "shape"
+
+#: The shape tools of the palette: key, Italian label (translated by the GUI),
+#: primitive kind, and how many clicks close the shape (0: open-ended, the
+#: user closes the polyline). The click order is what the stored primitive
+#: expects, except the arc (start, end, then a point between them: the mid
+#: point is the third click because it is easier to aim once the ends are
+#: fixed) and the circle (centre, then a point on the rim).
+SHAPE_TOOLS = (
+    ("line", "Linea", "polyline", 0),
+    ("rectangle", "Rettangolo", "rectangle", 2),
+    ("circle", "Cerchio", "circle", 2),
+    ("arc", "Arco", "arc", 3),
+    ("bezier", "Bézier", "bezier", 4),
+    ("text", "Testo", "text", 1),
+)
+
+#: Stroke width, in mm, of a shape drawn in the editor (KiCad's symbol default).
+SHAPE_WIDTH_MM = 0.254
+
+#: The KiCad fill modes of a primitive, in the order the editor offers them.
+FILL_MODES = ("none", "outline", "background")
+
+
+def shape_tool(key: str) -> Optional[tuple[str, str, str, int]]:
+    """@brief The SHAPE_TOOLS entry of a tool key, None for an unknown key."""
+    return next((tool for tool in SHAPE_TOOLS if tool[0] == key), None)
+
+
+def shape_tool_glyphs() -> list[Glyph]:
+    """@brief One sample glyph per shape tool, for the palette icons (never placed as such)."""
+    sample = {
+        "line": Primitive("polyline", ((0, 0), (2.54, 2.54), (5.08, 1.27)), 0.0, "none", SHAPE_WIDTH_MM),
+        "rectangle": Primitive("rectangle", ((0, 0), (5.08, 3.81)), 0.0, "none", SHAPE_WIDTH_MM),
+        "circle": Primitive("circle", ((2.54, 2.54),), 2.54, "none", SHAPE_WIDTH_MM),
+        "arc": Primitive("arc", ((0, 0), (2.54, 2.54), (5.08, 0)), 0.0, "none", SHAPE_WIDTH_MM),
+        "bezier": Primitive("bezier", ((0, 0), (1.27, 5.08), (3.81, -2.54), (5.08, 2.54)), 0.0, "none", SHAPE_WIDTH_MM),
+        "text": Primitive("text", ((0, 0),), text="T", size=5.08),
+    }
+    return [Glyph(key, label, (sample[key],), (), "tool") for key, label, _kind, _count in SHAPE_TOOLS]
+
+
+def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: str = "none",
+                   text: str = "", size: float = TEXT_SIZE_MM, justify: str = "center") -> Optional[dict]:
+    """@brief The placed record of a shape drawn with a tool from the points clicked.
+
+    @param key Tool key (SHAPE_TOOLS).
+    @param clicks Clicked points, (x, y) in symbol mm, in the tool's click order.
+    @param width Stroke width in mm.
+    @param fill KiCad fill: none, outline or background.
+    @param text The text of a text tool (non-blank, single line).
+    @param size Font size of a text, mm (> 0).
+    @param justify Horizontal justification of a text (TEXT_JUSTIFY).
+    @return A record like `instance_from_glyph` whose origin is the centre of
+        the shape's bounds (so turning and mirroring act about the shape
+        itself) and whose points are relative to it; None when the clicks
+        do not make the shape (too few, a circle of zero radius, a
+        rectangle without area, an arc through a repeated point, a text
+        that is blank or not on one line or of non-positive size).
+    """
+    tool = shape_tool(key)
+    if tool is None:
+        return None
+    _key, label, kind, count = tool
+    points = [(round(float(x), 4), round(float(y), 4)) for x, y in clicks]
+    if count and len(points) != count or not count and len(points) < 2:
+        return None
+    radius = 0.0
+    if kind == "text":
+        text = str(text).strip()
+        if not text or "\n" in text or "\r" in text or isinstance(size, bool) \
+                or not isinstance(size, (int, float)) or not math.isfinite(size) or size <= 0 \
+                or justify not in TEXT_JUSTIFY:
+            return None
+        (ox, oy), = points
+        return {
+            "id": new_instance_id(), "key": f"shape:{key}", "label": label, "source": SHAPE_SOURCE,
+            "x": ox, "y": oy, "rotation": 0, "mirror": False,
+            "primitives": [primitive_record(Primitive("text", ((0.0, 0.0),), text=text,
+                                                      size=round(float(size), 4), justify=justify))],
+            "terminals": [],
+        }
+    if kind == "circle":
+        (cx, cy), (rx, ry) = points
+        radius = round(math.hypot(rx - cx, ry - cy), 4)
+        if radius <= 0:
+            return None
+        points = [(cx, cy)]
+        xs, ys = (cx - radius, cx + radius), (cy - radius, cy + radius)
+    else:
+        if kind == "rectangle" and (points[0][0] == points[1][0] or points[0][1] == points[1][1]):
+            return None
+        if kind == "arc":
+            if len(set(points)) < 3:
+                return None
+            start, end, mid = points
+            points = [start, mid, end]
+        xs, ys = [x for x, _y in points], [y for _x, y in points]
+    ox, oy = round((min(xs) + max(xs)) / 2, 4), round((min(ys) + max(ys)) / 2, 4)
+    return {
+        "id": new_instance_id(), "key": f"shape:{key}", "label": label, "source": SHAPE_SOURCE,
+        "x": ox, "y": oy, "rotation": 0, "mirror": False,
+        "primitives": [{"kind": kind, "points": [[round(x - ox, 4), round(y - oy, 4)] for x, y in points],
+                        "radius": radius, "fill": str(fill), "width": float(width), "style": "default"}],
+        "terminals": [],
+    }
+
+
+def is_shape(instance: dict) -> bool:
+    """@brief True when a placed record was drawn with a shape tool (`shape_instance`)."""
+    return isinstance(instance, dict) and instance.get("source") == SHAPE_SOURCE
+
+
+def shape_handles(instance: dict) -> list[tuple[float, float]]:
+    """@brief The draggable defining points of a shape, in symbol mm (absolute).
+
+    @param instance A shape record (`is_shape`); [] for any other record.
+    @return The polyline/arc/bezier points, the rectangle's two stored
+        corners, the circle's centre then a point on its rim (to the right
+        of the centre), or the text anchor. Index = `position` of
+        `set_shape_point`.
+    """
+    if not is_shape(instance):
+        return []
+    primitives = placed_primitives(instance)
+    if not primitives:
+        return []
+    p = primitives[0]
+    if p.kind == "circle":
+        (cx, cy), = p.points
+        return [(cx, cy), (round(cx + p.radius, 4), cy)]
+    return [tuple(pt) for pt in p.points]
+
+
+def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
+    """@brief Move one defining point of a shape to an absolute position.
+
+    @param instance Shape record, mutated in place.
+    @param position Index as in `shape_handles`.
+    @param x Absolute symbol X, mm.
+    @param y Absolute symbol Y, mm.
+    @return True when written; False for a non-shape, an unknown position,
+        or a change that would degenerate the shape (zero radius, a
+        rectangle without area, an arc through a repeated point).
+    @note The record's origin (its turning centre) is kept: only the point
+        moves, so a shape stretched far from its origin turns about the
+        old centre until it is redrawn.
+    """
+    if not is_shape(instance):
+        return False
+    primitives = instance.get("primitives") or []
+    if not primitives or not isinstance(primitives[0], dict):
+        return False
+    p = primitives[0]
+    kind = str(p.get("kind", ""))
+    points = p.get("points", [])
+    lx, ly = wire_local_point(instance, float(x), float(y))
+    if kind == "circle":
+        if position == 0:
+            instance["x"], instance["y"] = round(float(x), 4), round(float(y), 4)
+            return True
+        if position != 1:
+            return False
+        cx, cy = _point_xy(points[0])
+        radius = round(math.hypot(lx - cx, ly - cy), 4)
+        if radius <= 0:
+            return False
+        p["radius"] = radius
+        return True
+    if kind == "text":
+        if position != 0:
+            return False
+        instance["x"], instance["y"] = round(float(x), 4), round(float(y), 4)
+        return True
+    if not 0 <= position < len(points):
+        return False
+    candidate = [list(_point_xy(pt)) for pt in points]
+    candidate[position] = [lx, ly]
+    if kind == "rectangle" and (candidate[0][0] == candidate[1][0] or candidate[0][1] == candidate[1][1]):
+        return False
+    if kind == "arc" and len({tuple(pt) for pt in candidate}) < 3:
+        return False
+    points[position] = [lx, ly]
+    return True
+
+
+def instance_bounds(instance: dict, graphics: Optional[Iterable[dict]] = None,
+                    pin_ends: Optional[dict] = None) -> Optional[tuple[float, float, float, float]]:
+    """@brief The bounding box (min x, min y, max x, max y) of a placed record, symbol mm.
+
+    @note A text counts its anchor point only; a wire resolves its anchors
+        when `graphics` or `pin_ends` are given.
+    """
+    primitives = placed_primitives(instance, graphics=graphics, pin_ends=pin_ends)
+    bounds = _bounds(primitives)
+    if bounds is None:
+        return None
+    xs = [bounds[0], bounds[2]] + [t.x for t in placed_terminals(instance)]
+    ys = [bounds[1], bounds[3]] + [t.y for t in placed_terminals(instance)]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def detached_copy(instance: dict, graphics: Optional[Iterable[dict]] = None,
+                  pin_ends: Optional[dict] = None) -> dict:
+    """@brief A deep copy of a record with a fresh id and, for a wire, every anchor frozen.
+
+    @param instance Record to copy.
+    @param graphics Every record (to resolve the wire's anchors); None keeps fallbacks.
+    @param pin_ends `pin_inner_ends(layout)` for pin anchors.
+    @return The copy: pasting it never attaches to the elements the original
+        was anchored to (the copy is a new drawing, not the same connection).
+    """
+    import copy
+    result = copy.deepcopy(instance)
+    result["id"] = new_instance_id()
+    if is_wire(result) and result.get("primitives"):
+        resolved = resolve_wire_points(instance, graphics, pin_ends)
+        result["primitives"][0]["points"] = [list(wire_local_point(result, px, py)) for px, py in resolved]
+    return result
+
+
+def scale_shape(instance: dict, width: Optional[float] = None, height: Optional[float] = None,
+                radius: Optional[float] = None) -> bool:
+    """@brief Resize a shape about its origin to a given bounding width/height (or circle radius).
+
+    @param instance Shape record, mutated in place.
+    @param width New bounding width in the shape's own frame, mm (> 0); None keeps.
+    @param height New bounding height, mm (> 0); None keeps.
+    @param radius New radius of a circle, mm (> 0).
+    @return True when resized; False for a non-shape, a text, a circle
+        without `radius`, a zero-extent shape or an invalid value.
+    """
+    if not is_shape(instance):
+        return False
+    primitives = instance.get("primitives") or []
+    if not primitives or not isinstance(primitives[0], dict):
+        return False
+    p = primitives[0]
+    kind = str(p.get("kind", ""))
+    if kind == "text":
+        return False
+    if kind == "circle":
+        if radius is None or isinstance(radius, bool) or not isinstance(radius, (int, float)) \
+                or not math.isfinite(radius) or radius <= 0:
+            return False
+        p["radius"] = round(float(radius), 4)
+        return True
+    if width is None and height is None:
+        return False
+    for value in (width, height):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value) or value <= 0):
+            return False
+    points = [_point_xy(pt) for pt in p.get("points", [])]
+    if not points:
+        return False
+    xs, ys = [x for x, _y in points], [y for _x, y in points]
+    span_x, span_y = max(xs) - min(xs), max(ys) - min(ys)
+    fx = (width / span_x) if width is not None and span_x > 0 else 1.0
+    fy = (height / span_y) if height is not None and span_y > 0 else 1.0
+    if (width is not None and span_x <= 0) or (height is not None and span_y <= 0):
+        return False
+    p["points"] = [[round(x * fx, 4), round(y * fy, 4)] for x, y in points]
+    return True
+
+
+def set_primitive_style(instance: dict, width: Optional[float] = None, fill: Optional[str] = None,
+                        style: Optional[str] = None) -> bool:
+    """@brief Change the stroke width, the fill and/or the stroke type of every primitive of a record.
+
+    @param instance Placed record, mutated in place.
+    @param width New stroke width in mm (>= 0), None to keep.
+    @param fill New fill mode (FILL_MODES), None to keep.
+    @param style New stroke type (STROKE_STYLES), None to keep.
+    @return True when something was written; False for an invalid value or
+        a record without primitives.
+    """
+    primitives = instance.get("primitives") if isinstance(instance, dict) else None
+    if not isinstance(primitives, list) or not primitives:
+        return False
+    if width is not None and (isinstance(width, bool) or not isinstance(width, (int, float))
+                              or not math.isfinite(width) or width < 0):
+        return False
+    if fill is not None and fill not in FILL_MODES:
+        return False
+    if style is not None and style not in STROKE_STYLES:
+        return False
+    if width is None and fill is None and style is None:
+        return False
+    for primitive in primitives:
+        if not isinstance(primitive, dict):
+            continue
+        if width is not None:
+            primitive["width"] = round(float(width), 4)
+        if fill is not None:
+            primitive["fill"] = str(fill)
+        if style is not None:
+            primitive["style"] = str(style)
+    return True
+
+
+def set_text(instance: dict, text: str, size: float, justify: str = "center") -> bool:
+    """@brief Change the content, size and justification of a text element.
+
+    @param instance Placed record whose first primitive is a text, mutated in place.
+    @param text New text (non-blank, one line).
+    @param size Font size in mm (> 0).
+    @param justify Horizontal justification (TEXT_JUSTIFY).
+    @return True when written; False for a non-text record or an invalid value.
+    """
+    primitives = instance.get("primitives") if isinstance(instance, dict) else None
+    if not isinstance(primitives, list) or not primitives or not isinstance(primitives[0], dict) \
+            or primitives[0].get("kind") != "text":
+        return False
+    text = str(text).strip()
+    if not text or "\n" in text or "\r" in text or isinstance(size, bool) \
+            or not isinstance(size, (int, float)) or not math.isfinite(size) or size <= 0 \
+            or justify not in TEXT_JUSTIFY:
+        return False
+    primitives[0].update({"text": text, "size": round(float(size), 4), "justify": justify})
+    return True
+
+
 def snap_to_terminal(instances: Iterable[dict], x: float, y: float) -> Optional[Terminal]:
     """@brief The terminal within TERMINAL_SNAP_MM of a point, nearest first, or None."""
     best, best_distance = None, TERMINAL_SNAP_MM
@@ -1000,6 +1459,13 @@ def validate_instances(instances) -> list[dict]:
                 raise ValueError(tx("Elementi grafici del simbolo non validi."))
             for point in primitive.get("points", ()):
                 _validate_point(point)
+            if primitive.get("kind") == "text":
+                if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
+                        or len(primitive.get("points", ())) != 1:
+                    raise ValueError(tx("Elementi grafici del simbolo non validi."))
+                _finite_or_raise(primitive.get("size", TEXT_SIZE_MM))
+                if float(primitive.get("size", TEXT_SIZE_MM)) <= 0:
+                    raise ValueError(tx("Elementi grafici del simbolo non validi."))
         result.append(record)
     return result
 
@@ -1043,6 +1509,11 @@ def _num(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
 
 
+def _quote_text(value: str) -> str:
+    """A KiCad quoted string: backslashes and double quotes escaped."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
                        pin_ends: Optional[dict] = None) -> list[str]:
     """@brief The `.kicad_sym` lines of every placed glyph, for the symbol's graphic unit.
@@ -1052,16 +1523,21 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
     @param pin_ends `pin_inner_ends(layout)` so wire points anchored to pins
         are exported where the pins are; terminal anchors are resolved on
         the records themselves.
-    @return Lines of polyline/circle/arc/rectangle forms, KiCad 6+ syntax,
-        every wire with resolved coordinates.
+    @return Lines of polyline/circle/arc/rectangle/bezier/text forms, KiCad
+        6+ syntax (bezier: KiCad 7+), every wire with resolved coordinates.
     """
     instances = list(instances)
     lines = []
     for instance in instances:
         for p in placed_primitives(instance, graphics=instances, pin_ends=pin_ends):
-            stroke = f"(stroke (width {_num(p.width)}) (type default))"
+            stroke = f"(stroke (width {_num(p.width)}) (type {p.style if p.style in STROKE_STYLES else 'default'}))"
             fill = f"(fill (type {p.fill}))"
-            if p.kind == "polyline":
+            if p.kind == "text":
+                (tx_, ty_), = p.points
+                justify = "" if p.justify == "center" else f" (justify {p.justify})"
+                lines.append(f"{indent}(text {_quote_text(p.text)} (at {_num(tx_)} {_num(ty_)} {int(p.angle) % 360}) "
+                             f"(effects (font (size {_num(p.size)} {_num(p.size)})){justify}))")
+            elif p.kind == "polyline":
                 pts = " ".join(f"(xy {_num(x)} {_num(y)})" for x, y in p.points)
                 lines.append(f"{indent}(polyline (pts {pts}) {stroke} {fill})")
             elif p.kind == "circle":
@@ -1076,6 +1552,9 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
                 (x0, y0), (x1, y1) = p.points
                 lines.append(f"{indent}(rectangle (start {_num(x0)} {_num(y0)}) (end {_num(x1)} {_num(y1)}) "
                              f"{stroke} {fill})")
+            elif p.kind == "bezier":
+                pts = " ".join(f"(xy {_num(x)} {_num(y)})" for x, y in p.points)
+                lines.append(f"{indent}(bezier (pts {pts}) {stroke} {fill})")
     return lines
 
 

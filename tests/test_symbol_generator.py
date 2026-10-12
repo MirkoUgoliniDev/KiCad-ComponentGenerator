@@ -150,3 +150,27 @@ def test_free_pin_export_keeps_terminal_and_orientation(angle):
 def test_invalid_free_pin_is_rejected(position, angle):
     with pytest.raises(ValueError):
         layout_symbol([SymbolPin('1', 'A', position=position, angle=angle)])
+
+
+
+def test_pin_length_text_size_and_hidden_reach_the_symbol_and_stay_on_the_grid():
+    """Pin properties (user, 2026-10-12): a custom length is a multiple of 1.27 mm
+    whose outer end, for a side-placed pin, must still fall on the 2.54 mm grid."""
+    from kicadgen.generators import symbol as sym
+    text = sym.serialize_symbol('P', [sym.SymbolPin('1', 'A', length=5.08, hidden=True, text_size=1.0),
+                                      sym.SymbolPin('2', 'B', side='right')])
+    assert '(pin passive line (at -10.16 0 0) (length 5.08) (hide yes)' in text
+    assert '(name "A" (effects (font (size 1 1))))' in text
+    assert '(pin passive line (at 7.62 0 180) (length 2.54)\n' in text
+    with pytest.raises(ValueError):
+        sym.layout_symbol([sym.SymbolPin('1', 'A', length=3.81)])
+    assert sym.layout_symbol([sym.SymbolPin('1', 'A', position=(-7.62, 0), angle=0, length=3.81)]).pins[0].x == -7.62
+    for bad in ({'length': 1.0}, {'length': 15.24}, {'length': True}, {'text_size': 0.1}, {'text_size': 9.0}):
+        with pytest.raises(ValueError):
+            sym.layout_symbol([sym.SymbolPin('1', 'A', **bad)])
+    pins, _body = sym.symbol_inputs([{'pin': '1', 'name': 'A', 'symbol_pin_length': 5.08,
+                                      'symbol_pin_hidden': True, 'symbol_pin_text_size': 1.0}])
+    assert (pins[0].length, pins[0].hidden, pins[0].text_size) == (5.08, True, 1.0)
+    from kicadgen.generators import symbol_glyphs as g
+    layout = sym.layout_symbol(pins)
+    assert g.pin_inner_ends(layout)['1'] == (round(layout.pins[0].x + 5.08, 4), 0.0)

@@ -213,7 +213,7 @@ def test_generation_options_save_or_cancel(window, monkeypatch, accept):
     assert window._config["include_nc_pins"] is (not accept)
     assert len(saved) == int(accept)
     # Nessuna scelta di modalita': salvare non fa ricomparire tab di parametri.
-    assert window.tabs.count() == 5
+    assert window.tabs.count() == 6  # Progetto, Anteprima, Simbolo, 3D, KiCad, Esportazioni (bde5837)
 
 
 def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch):
@@ -274,7 +274,7 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
 
 def test_kicad_tab_is_visible(window):
     """@brief Keep the final review workflow available."""
-    assert window.tabs.count() == 5
+    assert window.tabs.count() == 6  # Progetto, Anteprima, Simbolo, 3D, KiCad, Esportazioni (bde5837)
     assert window.tabs.isTabVisible(gui.TAB_KICAD)
     assert window.tabs.tabText(gui.TAB_KICAD) == "KiCad"
     assert window.tabs.widget(gui.TAB_KICAD).isAncestorOf(window.btn_test_kicad)

@@ -401,3 +401,183 @@ def test_free_points_on_an_attachment_are_adopted_as_anchors_and_others_stay_fre
     assert g.adopt_coincident_anchors(graphics, pin_ends) == 0, "idempotent"
     moved = dict(element, x=1.0)
     assert g.resolve_wire_points(wire, [moved, wire], pin_ends)[2] == (-2.0, 0.0), "the adopted end follows"
+
+
+# ── Shape tools and beziers (user, 2026-10-12: «tracciare disegni, linee curve») ──
+
+BEZIER_FIXTURE = """(kicad_symbol_lib (version 20231120) (generator kicad_symbol_editor)
+  (symbol "Curve_X" (in_bom yes)
+    (symbol "Curve_X_0_1"
+      (bezier (pts (xy 0 0) (xy 1 2) (xy 3 -1) (xy 5.08 0)) (stroke (width 0.254) (type default)) (fill (type none)))
+      (bezier (pts (xy 0 0) (xy 1 2)) (stroke (width 0.254) (type default)) (fill (type none)))
+    )
+  )
+)
+"""
+
+
+def test_a_bezier_is_read_from_the_library_and_written_back_the_same_way():
+    (library,) = g.parse_sexpr(BEZIER_FIXTURE)
+    unit = g._child(g._child(library, "symbol"), "symbol")
+    primitives = g.primitives_of(unit)
+    assert [p.kind for p in primitives] == ["bezier"], "a bezier needs exactly four points"
+    assert primitives[0].points == ((0, 0), (1, 2), (3, -1), (5.08, 0)) and primitives[0].width == 0.254
+    glyph = g.Glyph("t", "t", (primitives[0],), (), "builtin")
+    text = serialize_symbol("Part", [SymbolPin("1", "A")], graphics=[g.instance_from_glyph(glyph, 1, 1)])
+    assert "(bezier (pts (xy 1 1) (xy 2 3) (xy 4 0) (xy 6.08 1)) (stroke (width 0.254) (type default)) (fill (type none))" in text
+
+
+def test_bezier_sampling_starts_and_ends_on_the_curve_ends_and_bulges_towards_the_controls():
+    points = g.bezier_points((0, 0), (0, 1), (1, 1), (1, 0), segments=4)
+    assert points[0] == (0, 0) and points[-1] == (1, 0) and len(points) == 5
+    assert points[2] == (0.5, 0.75), "the midpoint of a symmetric cubic"
+    assert g.primitive_outline(g.Primitive("bezier", ((0, 0), (0, 1), (1, 1), (1, 0))), 4) == points
+    assert g.primitive_outline(g.Primitive("rectangle", ((0, 0), (2, 1)))) == [(0, 0), (2, 0), (2, 1), (0, 1), (0, 0)]
+    assert g.primitive_outline(g.Primitive("polyline", ((0, 0), (2, 1)))) == [(0, 0), (2, 1)]
+
+
+def test_a_shape_is_centred_on_its_bounds_so_turning_acts_about_itself():
+    rect = g.shape_instance("rectangle", [(0, 0), (5.08, 2.54)])
+    assert rect["source"] == "shape" and g.is_shape(rect) and not g.is_wire(rect)
+    assert (rect["x"], rect["y"]) == (2.54, 1.27)
+    assert rect["primitives"][0]["points"] == [[-2.54, -1.27], [2.54, 1.27]]
+    rect["rotation"] = 90
+    (p,) = g.placed_primitives(rect)
+    assert sorted(p.points) == [(1.27, 3.81), (3.81, -1.27)], "turned about its own centre (2.54, 1.27)"
+    circle = g.shape_instance("circle", [(2.54, 2.54), (5.08, 2.54)])
+    assert circle["primitives"][0] == {"kind": "circle", "points": [[0.0, 0.0]], "radius": 2.54,
+                                       "fill": "none", "width": g.SHAPE_WIDTH_MM, "style": "default"}
+    arc = g.shape_instance("arc", [(0, 0), (5.08, 0), (2.54, 2.54)])
+    assert arc["primitives"][0]["kind"] == "arc" and arc["primitives"][0]["points"][1] == [0.0, 1.27], \
+        "clicked start, end, then the point between: stored start, mid, end"
+    bezier = g.shape_instance("bezier", [(0, 0), (0, 2.54), (2.54, 2.54), (2.54, 0)], fill="outline")
+    assert bezier["primitives"][0]["kind"] == "bezier" and bezier["primitives"][0]["fill"] == "outline"
+    line = g.shape_instance("line", [(0, 0), (2.54, 0), (2.54, 2.54)])
+    assert line["primitives"][0]["kind"] == "polyline" and len(line["primitives"][0]["points"]) == 3
+    unit = serialize_symbol("Part", [SymbolPin("1", "A")], graphics=[rect, circle, arc, bezier, line])
+    assert "(rectangle" in unit and "(circle" in unit and "(arc" in unit and "(bezier" in unit and "(polyline" in unit
+
+
+@pytest.mark.parametrize("key, clicks", [
+    ("rectangle", [(0, 0), (0, 2.54)]),          # no area
+    ("rectangle", [(0, 0)]),                     # too few
+    ("circle", [(1, 1), (1, 1)]),                # zero radius
+    ("arc", [(0, 0), (2.54, 0), (0, 0)]),        # repeated point
+    ("bezier", [(0, 0), (1, 1), (2, 2)]),        # too few
+    ("line", [(0, 0)]),                          # too few
+    ("unknown", [(0, 0), (1, 1)]),
+])
+def test_clicks_that_do_not_make_the_shape_give_nothing(key, clicks):
+    assert g.shape_instance(key, clicks) is None
+
+
+def test_the_style_of_an_element_is_changed_for_every_primitive_and_bad_values_refused():
+    glyph = g.Glyph("t", "t", (g.Primitive("polyline", ((0, 0), (2, 0))),
+                               g.Primitive("circle", ((1, 1),), 0.5)), (), "builtin")
+    record = g.instance_from_glyph(glyph, 0, 0)
+    assert g.set_primitive_style(record, width=0.5, fill="background")
+    assert all(p["width"] == 0.5 and p["fill"] == "background" for p in record["primitives"])
+    assert not g.set_primitive_style(record, fill="striped")
+    assert not g.set_primitive_style(record, width=-1) and not g.set_primitive_style(record, width=True)
+    assert not g.set_primitive_style(record) and not g.set_primitive_style({"primitives": []}, width=1)
+    assert all(p["width"] == 0.5 and p["fill"] == "background" for p in record["primitives"]), "unchanged"
+
+
+def test_every_shape_tool_has_a_palette_glyph_of_its_own_kind():
+    glyphs = {glyph.key: glyph for glyph in g.shape_tool_glyphs()}
+    assert set(glyphs) == {key for key, _l, _k, _c in g.SHAPE_TOOLS}
+    for key, _label, kind, _count in g.SHAPE_TOOLS:
+        assert glyphs[key].primitives[0].kind == kind and glyphs[key].terminals == ()
+
+
+# ── Texts, stroke styles, handles, clipboard copies (user, 2026-10-12: «fai tutto») ──
+
+TEXT_FIXTURE = """(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)
+  (symbol "Text_X" (in_bom yes)
+    (symbol "Text_X_0_1"
+      (text "IN+" (at 1.27 2.54 900) (effects (font (size 1.27 1.27)) (justify left)))
+      (text "~" (at 0 0 0) (effects (font (size 2 2))))
+      (polyline (pts (xy 0 0) (xy 2 0)) (stroke (width 0.254) (type dash)) (fill (type none)))
+      (polyline (pts (xy 0 1) (xy 2 1)) (stroke (width 0.254) (type zigzag)) (fill (type none)))
+    )
+  )
+)
+"""
+
+
+def test_texts_and_stroke_types_are_read_and_written_back():
+    (library,) = g.parse_sexpr(TEXT_FIXTURE)
+    unit = g._child(g._child(library, "symbol"), "symbol")
+    text, tilde, dashed, unknown = g.primitives_of(unit)
+    assert (text.kind, text.text, text.points, text.size, text.justify) == ("text", "IN+", ((1.27, 2.54),), 1.27, "left")
+    assert text.angle == 90, "a KiCad 6 angle in tenths of a degree is read as degrees"
+    assert (tilde.angle, tilde.justify, tilde.size) == (0, "center", 2.0)
+    assert dashed.style == "dash" and unknown.style == "default", "an unknown stroke type falls back"
+    glyph = g.Glyph("t", "t", (text, dashed), (), "builtin")
+    body = serialize_symbol("Part", [SymbolPin("1", "A")], graphics=[g.instance_from_glyph(glyph, 1, 1, rotation=90)])
+    assert '(text "IN+" (at -1.54 2.27 0) (effects (font (size 1.27 1.27)) (justify left)))' in body, \
+        "turned with the element: 90 + 90 = horizontal again, anchor turned about the origin"
+    assert "(stroke (width 0.254) (type dash))" in body
+    quoted = g.shape_instance("text", [(0, 0)], text='say "hi"')
+    assert '(text "say \\"hi\\""' in serialize_symbol("Part", [SymbolPin("1", "A")], graphics=[quoted])
+
+
+def test_a_text_record_is_validated_and_edited():
+    record = g.shape_instance("text", [(2.54, 1.27)], text="  CLK ", size=1.27, justify="right")
+    assert record["primitives"][0]["text"] == "CLK" and record["primitives"][0]["justify"] == "right"
+    assert (record["x"], record["y"]) == (2.54, 1.27) and record["primitives"][0]["points"] == [[0.0, 0.0]]
+    assert g.shape_instance("text", [(0, 0)], text="   ") is None
+    assert g.shape_instance("text", [(0, 0)], text="a\nb") is None
+    assert g.shape_instance("text", [(0, 0)], text="a", size=0) is None
+    assert g.shape_instance("text", [(0, 0)], text="a", justify="top") is None
+    assert g.set_text(record, "RST", 2.54, "center") and record["primitives"][0]["size"] == 2.54
+    assert not g.set_text(record, "", 1.0) and not g.set_text(record, "x", -1)
+    rect = g.shape_instance("rectangle", [(0, 0), (1, 1)])
+    assert not g.set_text(rect, "x", 1.0), "only a text element"
+    bad = dict(record, primitives=[dict(record["primitives"][0], text="  ")])
+    with pytest.raises(ValueError):
+        g.validate_instances([bad])
+    assert g.set_primitive_style(rect, style="dot") and rect["primitives"][0]["style"] == "dot"
+    assert not g.set_primitive_style(rect, style="zigzag")
+
+
+def test_shape_handles_move_one_point_and_refuse_a_degenerate_result():
+    rect = g.shape_instance("rectangle", [(0, 0), (5.08, 2.54)])
+    assert g.shape_handles(rect) == [(0.0, 0.0), (5.08, 2.54)]
+    assert g.set_shape_point(rect, 1, 7.62, 2.54) and g.shape_handles(rect) == [(0.0, 0.0), (7.62, 2.54)]
+    assert not g.set_shape_point(rect, 1, 0.0, 5.0), "a rectangle without width"
+    assert not g.set_shape_point(rect, 2, 1, 1) and g.shape_handles(rect) == [(0.0, 0.0), (7.62, 2.54)]
+    rect["rotation"] = 90
+    assert g.set_shape_point(rect, 1, 1.27, 6.35), "an absolute point is stored in the turned frame"
+    assert g.shape_handles(rect)[1] == (1.27, 6.35)
+    circle = g.shape_instance("circle", [(2.54, 2.54), (5.08, 2.54)])
+    assert g.shape_handles(circle) == [(2.54, 2.54), (5.08, 2.54)]
+    assert g.set_shape_point(circle, 1, 7.62, 2.54) and circle["primitives"][0]["radius"] == 5.08
+    assert g.set_shape_point(circle, 0, 0.0, 0.0) and (circle["x"], circle["y"]) == (0.0, 0.0)
+    assert not g.set_shape_point(circle, 1, 0.0, 0.0), "zero radius"
+    text = g.shape_instance("text", [(1, 1)], text="A")
+    assert g.shape_handles(text) == [(1.0, 1.0)] and g.set_shape_point(text, 0, 2.54, 0) and text["x"] == 2.54
+    glyph = g.instance_from_glyph(g.catalogue()[0], 0, 0)
+    assert g.shape_handles(glyph) == [] and not g.set_shape_point(glyph, 0, 1, 1), "glyphs have no handles"
+
+
+def test_bounds_scaling_and_detached_copies():
+    rect = g.shape_instance("rectangle", [(0, 0), (5.08, 2.54)])
+    assert g.instance_bounds(rect) == (0.0, 0.0, 5.08, 2.54)
+    assert g.scale_shape(rect, width=2.54) and g.instance_bounds(rect) == (1.27, 0.0, 3.81, 2.54), "about its origin"
+    assert not g.scale_shape(rect, width=0) and not g.scale_shape(rect, radius=1)
+    circle = g.shape_instance("circle", [(0, 0), (1, 0)])
+    assert g.scale_shape(circle, radius=2.54) and circle["primitives"][0]["radius"] == 2.54
+    assert not g.scale_shape(circle, width=1), "a circle takes a radius only"
+    assert not g.scale_shape(g.shape_instance("text", [(0, 0)], text="A"), width=1)
+    # A wire anchored to a glyph terminal is copied with its anchor frozen.
+    glyph = g.instance_from_glyph(g.relay_part_glyphs()[0], 0, 0)
+    end = g.terminal_end(g.placed_terminals(glyph)[0], "inner")
+    wire = {"id": "w", "key": g.WIRE_KEY, "label": "Filo", "source": "wire", "x": 0.0, "y": 0.0,
+            "rotation": 0, "mirror": False, "terminals": [],
+            "primitives": [{"kind": "polyline", "radius": 0.0, "fill": "none", "width": 0.254,
+                            "points": [[0, 0], {"x": 0, "y": 0, "anchor": {"kind": "terminal", "element": glyph["id"],
+                                                                                "index": 0, "end": "inner"}}]}]}
+    copy = g.detached_copy(wire, [glyph, wire], {})
+    assert copy["id"] != wire["id"] and copy["primitives"][0]["points"][1] == [end[0], end[1]]
+    assert "anchor" in wire["primitives"][0]["points"][1], "the original keeps its anchor"

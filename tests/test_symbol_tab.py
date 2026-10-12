@@ -260,9 +260,11 @@ def test_context_event_on_pin_opens_rotation_menu(qapp, monkeypatch):
     pin = tab._symbol.pins[0]
     point = tab.view.mapFromScene(QPointF(pin.x * 10, -pin.y * 10))
     def choose(menu, pos):
-        assert len(menu.actions()) == 6
-        assert [a.text() for a in menu.actions()[2:]] == ["+90\u00b0", "-90\u00b0", "180\u00b0", "-180\u00b0"]
-        assert all(not a.icon().isNull() and a.toolTip() for a in menu.actions()[2:])
+        # Title, separator, four turns, separator, \u00abPropriet\u00e0 pin\u2026\u00bb (2026-10-12).
+        assert len(menu.actions()) == 8
+        assert [a.text() for a in menu.actions()[2:6]] == ["+90\u00b0", "-90\u00b0", "180\u00b0", "-180\u00b0"]
+        assert all(not a.icon().isNull() and a.toolTip() for a in menu.actions()[2:6])
+        assert menu.actions()[7].text() == 'Propriet\u00e0 pin\u2026'
         menu.actions()[3].trigger()
     monkeypatch.setattr(QMenu, 'exec', choose)
     event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point,
