@@ -760,6 +760,7 @@ def test_fixed_count_shapes_close_at_their_last_click_and_land_on_the_grid(qapp)
         assert rect['source'] == 'shape' and rect['primitives'][0]['kind'] == 'rectangle'
         assert (rect['x'], rect['y']) == (2.54, 1.27), 'snapped corners (0,0)-(5.08,2.54), centred'
         assert tab.shape_tool() == 'rectangle' and tab.view.wiring, 'the tool stays armed'
+        assert 'Esc' in tab.status.text(), 'the status says how to leave the armed tool'
         assert tab._shape_points == [] and tab._selected_graphic == 0
         # Clicks through the view signal reach the shape, Y up.
         tab.start_shape('circle')
@@ -857,6 +858,20 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         tab.add_shape_point(2.6, 5.1)
         (text,) = tab.graphics()
         assert text['primitives'][0]['kind'] == 'text' and (text['x'], text['y']) == (2.54, 5.08)
+        # Contract changed 2026-10-12: a dialog tool is one-shot. Armed, the
+        # view took every click as a new text and the one just placed could
+        # not be dragged (user). Point-drawn tools still stay armed (see the
+        # rectangle test).
+        assert tab.shape_tool() is None and not tab.view.wiring, 'the text tool is released after an insertion'
+        assert tab.selected_graphics() == [0], 'the new text is selected, ready to drag'
+        tab._begin_gesture(('graphic', 0), QPointF(2.54 * SCENE_UNITS_PER_MM, -5.08 * SCENE_UNITS_PER_MM))
+        tab._move_gesture(('graphic', 0), QPointF(10.2 * SCENE_UNITS_PER_MM, -5.08 * SCENE_UNITS_PER_MM))
+        tab._end_gesture(True)
+        assert tab.graphics()[0]['x'] == 10.16, 'dragged right after the insertion'
+        tab._begin_gesture(('graphic', 0), QPointF(10.16 * SCENE_UNITS_PER_MM, -5.08 * SCENE_UNITS_PER_MM))
+        tab._move_gesture(('graphic', 0), QPointF(2.54 * SCENE_UNITS_PER_MM, -5.08 * SCENE_UNITS_PER_MM))
+        tab._end_gesture(True)
+        assert tab.graphics()[0]['x'] == 2.54
         assert any(isinstance(item, QGraphicsSimpleTextItem) and item.text() == 'IN+' and item.data(0) == ('graphic', 0)
                    for item in tab.view.scene().items()), 'drawn and tagged like any element'
         answers.append(('OUT', 2.54, 'right'))

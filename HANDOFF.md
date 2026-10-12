@@ -1,5 +1,130 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 12/10 sera — commit `c6c8993` su `ADVANCED`, mergiato in `main`
+
+- Committato su richiesta dell'utente («committa tutto, pusha e mergia in
+  main»): etichette misurate, icone di aiuto dei metadati, strumento testo
+  a colpo singolo, maniglie discrete su elementi e corpo. Suite completa
+  NON rieseguita stasera: solo i file toccati (editor simboli, i18n, GUI
+  inventario, scheda KiCad, documentazione) tutti verdi.
+- APERTO, approvato dall'utente e NON iniziato: splash screen in main.py,
+  import pigro del visualizzatore 3D, precaricamento in sottofondo (vedi la
+  voce «avvio lento» qui sotto). Poi le voci precedenti: pulsante apri
+  progetto «non si aggiorna», campi obbligatori, «Regole KLC», «Applica ai
+  file», unita' multiple.
+
+## 2026-10-12 sera — etichette tagliate nei moduli, avvio lento, pulsante aiuto (commit `c6c8993`)
+
+- Richiesta dell'utente (screenshot): in «Metadati del componente» l'etichetta
+  «Designatore di riferimento:» e' tagliata; «stringi le input box e lascia un
+  pelo di spazio in piu' per l'etichetta».
+- Diagnosi: `_align_form_labels` (main_window.py) fissa la colonna etichette a
+  132 px per ogni modulo. Qualunque etichetta piu' lunga viene tagliata, in
+  tutte le lingue (in francese anche «Fiche technique (URL ou fichier) :»).
+  Correzione GENERALE, non tarata sull'etichetta vista: la larghezza della
+  colonna = max(132, etichetta piu' larga del modulo + margine), ricalcolata
+  dopo ogni ritraduzione (avvio e cambio lingua), perche' i testi cambiano.
+  I campi si restringono di conseguenza. Test: positivo (etichetta lunga ->
+  colonna piu' larga del minimo), negativo (etichette corte -> resta 132),
+  ritraduzione (lingua con etichetta piu' lunga -> colonna si allarga).
+  FATTO, NON COMMITTATO: `FORM_LABEL_MINIMUM_WIDTH`/`FORM_LABEL_PADDING`,
+  `_form_labels`, `_align_form_labels` che misura e restituisce la larghezza,
+  `MainWindow._align_form` (registra il modulo) e `_realign_form_labels`
+  (chiamato dopo `retranslate_widgets` all'avvio e al cambio lingua); i 5
+  moduli allineati passano da `_align_form_labels(x)` a `self._align_form(x)`.
+  Test nuovo tests/test_form_label_alignment.py (3 verdi). Con i font veri di
+  Windows (Segoe UI 9): colonna 147 px, «Designatore di riferimento:» 141 px.
+  Trappola: con QT_QPA_PLATFORM=offscreen il font di ripiego e' largo 12 px a
+  carattere e la colonna misura 330 px; non e' un difetto, e' il font finto.
+- Richiesta dell'utente (12/10 sera, screenshot con il riquadro a fine riga
+  del designatore): «metti una icona nelle righe dei meta che apra una
+  modale come hai fatto in altri casi, professionale». Interpretazione: un
+  pulsante a icona `info.svg` a destra di ciascuna delle 5 righe di campo
+  (designatore, descrizione, parole chiave, datasheet, filtri footprint) e
+  della riga «Regole KLC», come `btn_project_info` nella scheda Progetto;
+  il clic apre un QDialog MODALE con titolo «Aiuto: <campo>» e sezioni
+  «Che cosa inserire», «Dove finisce» (proprieta' del simbolo / del
+  footprint), «Regole KLC» (coerenti con i messaggi di klc_checks.py: quali
+  sono errori ⛔ bloccanti e quali avvisi ⚠), «Esempi», pulsante «Chiudi».
+  Testi come sorgenti italiane dentro `self.i18n.text(...)` cosi' il
+  raccoglitore di test_i18n li vede; voci nelle 4 lingue in i18n.py.
+  Metodi: `_metadata_help_button(key)`, `_show_metadata_help(key)`,
+  `_metadata_help_content()`; riferimento `self._metadata_help_dialog` per i
+  test. Test nuovo tests/test_metadata_help.py: un pulsante per riga, modale,
+  contenuto del campo giusto, chiusura. Guida HTML: nessuna sezione sui
+  metadati oggi; NON aggiunta (non richiesta). FATTO, NON COMMITTATO:
+  `METADATA_HELP_TITLES`, `_metadata_field_row`, `_metadata_help_content`,
+  `_show_metadata_help` in main_window.py; 35 voci nuove in i18n.py (4
+  lingue); tests/test_metadata_help.py 3 verdi; test_i18n 20 verdi;
+  test_photo_inventory_gui 77 verdi; documentazione verde. Trappola: nei
+  test la pagina KiCad e' disabilitata senza progetto completato, quindi
+  `button.click()` non fa nulla: il test chiama lo slot e verifica il
+  collegamento con `receivers`. Finestra modale vista a video (font veri);
+  la riga con l'icona non si e' riusciti a catturare fuori dall'app
+  (corpo del gruppo collassato nel grab), da controllare nell'app.
+- Correzione della colonna etichette, seconda tornata: l'utente ha
+  riavviato e l'etichetta era ANCORA tagliata. Causa: le etichette venivano
+  misurate prima che `theme.APP_QSS` (font-size 10pt) fosse applicato, col
+  font di default a 9pt (141 px contro 157 px reali). Ora
+  `label.ensurePolished()` prima della misura: colonna 163 px. Riprovato
+  con il foglio di stile vero e font Windows.
+- Segnalazione dell'utente: il pulsante «KiCadGen» nella barra di VS Code
+  (.vscode/tasks.json, `python main.py`) «non apre subito». Misurato: import
+  di `kicadgen.gui.main_window` 8,2 s, di cui 6,5 s per `preview_3d_vtk`
+  (pyvistaqt/pyvista/VTK/matplotlib), importato in testa a main_window.py
+  riga 96 prima di qualunque finestra; nessuno splash. L'utente ha detto
+  «ok» (12/10 sera) a tre cose insieme: (1) import pigro del visualizzatore
+  3D, caricato alla prima apertura della scheda 3D; (2) precaricamento in
+  sottofondo pochi istanti dopo che la finestra e' comparsa, cosi' il primo
+  clic sulla scheda 3D non paga i 6 s; (3) splash screen con logo e «Avvio in
+  corso…» mostrato in main.py prima dell'import della finestra e chiuso
+  quando la finestra appare. Vincoli: i test sostituiscono
+  `gui.Preview3DVtk` con uno stub (tests/qt_fixtures.py), l'attributo del
+  modulo deve restare; `--check-runtime` deve continuare a importare il 3D.
+  IN CORSO.
+
+- Segnalazione dell'utente (12/10 sera, editor simboli): «ho inserito un
+  testo ma non me lo fa spostare». Riprodotto: il trascinamento via API
+  funziona; il problema e' che dopo l'inserimento lo strumento «Testo»
+  resta armato (`finish_shape`, scelta «come KiCad») e la vista in modo
+  `wiring` prende ogni clic sinistro come nuovo punto: niente trascina
+  finche' non si preme Esc, e nulla lo diceva. Correzione generale: uno
+  strumento che inserisce tramite finestra (oggi solo il testo) e' a colpo
+  singolo e si rilascia dopo l'inserimento; gli strumenti a punti restano
+  armati e lo stato dice «Esc per lasciare lo strumento». Test aggiornati
+  nel contratto (test_symbol_palette_gui: dopo l'inserimento del testo lo
+  strumento e' rilasciato, dopo un annullamento resta armato). FATTO, NON
+  COMMITTATO: `finish_shape` in symbol_tab.py (`one_shot` impostato nel
+  ramo che apre la finestra del testo), due stringhe nuove nel catalogo
+  (`Testo inserito: …`, `Esc per lasciare lo strumento.`); symbol palette
+  42 verdi, symbol_tab/glyphs/i18n/documentazione verdi (123 in tutto).
+- Richiesta dell'utente (12/10 sera, screenshot della maniglia del testo):
+  «un punto rettangolare più discreto, che scompaia quando non ci sono
+  sopra e appaia quando entro nell'area di competenza». Interpretazione:
+  le maniglie dell'elemento selezionato (punti della forma E vertici del
+  filo, stessa classe di oggetto) sono quadrati più piccoli (6 px) con
+  riempimento semitrasparente, nascosti finche' il puntatore non entra nel
+  rettangolo dell'elemento allargato di un margine (12 px di scena), e
+  sempre visibili durante un trascinamento. Codice: `_draw_graphics`
+  raccoglie `self._handle_items` e `self._handle_hover_rect`;
+  `_update_readout` (gia' collegato a `pointer_changed`) chiama
+  `_update_handle_visibility`. Test: puntatore lontano -> maniglie
+  nascoste; dentro l'area -> visibili; durante un gesto -> visibili.
+  FATTO, NON COMMITTATO: costanti `HANDLE_SIZE_PX`=6 e
+  `HANDLE_HOVER_MARGIN`=12 in symbol_tab.py, `_add_handle`,
+  `_update_handle_visibility`; tests/test_symbol_handles_hover.py 2 verdi,
+  palette 42 verdi, symbol_tab e documentazione verdi.
+  Estensione chiesta subito dopo (screenshot delle 8 maniglie del corpo):
+  stessa regola per le maniglie di ridimensionamento del corpo, con area
+  di competenza = corona attorno al bordo del corpo (rettangolo del corpo
+  allargato del margine meno lo stesso ristretto del margine), perche' il
+  corpo copre tutto il simbolo e un'area piena le mostrerebbe sempre.
+  Refactor: `_handle_groups` (items, outer, inner) al posto della lista
+  unica. FATTO, NON COMMITTATO: test nuovo nel file hover (3 verdi);
+  contratto aggiornato in test_symbol_tab (il puntatore si sposta sulla
+  maniglia prima di premere, perche' nascosta finche' non e' vicino);
+  symbol_tab 19 verdi, palette 42, documentazione verde. La vista ha gia'
+  `setMouseTracking(True)`: il puntatore e' seguito senza tasti premuti.
 ## FINE SESSIONE 12/10 — commit `0389777` su `ADVANCED`, mergiato in `main`
 
 - Strumenti di disegno (sezione precedente e la seguente) committati in
