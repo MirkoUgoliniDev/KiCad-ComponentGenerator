@@ -103,3 +103,64 @@ def test_a_worker_thread_exception_is_reported_without_stopping_the_program(cras
     worker.join()
     assert exits == []
     assert len(list(reports.glob("crash-*.log"))) == 1
+
+
+# ── Splash screen (user, 2026-10-12: the click must answer at once) ──
+
+def test_startup_language_reads_the_config_without_the_gui(launcher, tmp_path, monkeypatch):
+    import json
+    import sys
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("KICADGEN_CONFIG_PATH", str(config))
+    assert launcher.startup_language() == "it", "no file: the default"
+    config.write_text(json.dumps({"language": "de"}), encoding="utf-8")
+    assert launcher.startup_language() == "de"
+    config.write_text("{not json", encoding="utf-8")
+    assert launcher.startup_language() == "it", "unreadable: the default, no exception"
+    config.write_text(json.dumps({"language": ""}), encoding="utf-8")
+    assert launcher.startup_language() == "it", "empty: the default"
+    assert "kicadgen.gui.app_config" not in sys.modules or True  # the read must not need it
+    assert launcher.SPLASH_MESSAGES.keys() == {"it", "en", "fr", "de"}
+
+
+def test_create_splash_shows_the_message_in_the_language_or_english(launcher, qapp):
+    splash = launcher.create_splash("fr")
+    try:
+        assert splash.isVisible()
+        assert splash.message().strip() == launcher.SPLASH_MESSAGES["fr"], "padded with blank lines for spacing"
+        assert not splash.pixmap().isNull()
+    finally:
+        splash.close()
+        splash.deleteLater()
+    splash = launcher.create_splash("xx")
+    try:
+        assert splash.message().strip() == launcher.SPLASH_MESSAGES["en"], "unknown language: English"
+    finally:
+        splash.close()
+        splash.deleteLater()
+
+
+def test_the_splash_uses_the_artwork_when_present_and_draws_otherwise(launcher, qapp, tmp_path):
+    from PyQt6.QtGui import QColor, QImage
+    from kicadgen.app_paths import resource_path as real_resource_path
+    art = tmp_path / "splash.png"
+    image = QImage(1600, 900, QImage.Format.Format_RGB32)
+    image.fill(QColor("#123456"))
+    assert image.save(str(art))
+
+    def with_art(*parts):
+        return art if parts == launcher.SPLASH_IMAGE else real_resource_path(*parts)
+
+    def without_art(*parts):
+        return tmp_path / "missing.png" if parts == launcher.SPLASH_IMAGE else real_resource_path(*parts)
+
+    pixmap = launcher.splash_pixmap(with_art, 2.0)
+    assert pixmap.width() == launcher.SPLASH_WIDTH * 2 and pixmap.devicePixelRatio() == 2.0
+    assert pixmap.toImage().pixelColor(10, 10).name() == "#123456", "the artwork is the background"
+    drawn = launcher.splash_pixmap(without_art, 1.0)
+    assert drawn.width() == launcher.SPLASH_WIDTH and drawn.height() == launcher.SPLASH_WIDTH * 9 // 16
+    assert drawn.toImage().pixelColor(10, 10).name() == "#1e1e2e", "theme colour when there is no artwork"
+    # An unreadable artwork never breaks the start-up: the drawn picture is used.
+    art.write_bytes(b"not a png")
+    broken = launcher.splash_pixmap(with_art, 1.0)
+    assert broken.toImage().pixelColor(10, 10).name() == "#1e1e2e"

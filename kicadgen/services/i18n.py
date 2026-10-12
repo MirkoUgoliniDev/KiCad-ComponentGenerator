@@ -1133,6 +1133,9 @@ DEFAULT_TRANSLATIONS = {
     "ui:Apri la cartella 3dshapes con i file STEP generati.": {"en": "Open the 3dshapes folder with the generated STEP files.", "it": "Apri la cartella 3dshapes con i file STEP generati.", "fr": "Ouvrir le dossier 3dshapes avec les fichiers STEP générés.", "de": "Den Ordner 3dshapes mit den erzeugten STEP-Dateien öffnen."},
     "ui:Tipo contatto (tutti i lati)": {"en": "Contact type (all sides)", "it": "Tipo contatto (tutti i lati)", "fr": "Type de contact (tous les côtés)", "de": "Kontaktart (alle Seiten)"},
     "ui:Caricamento del modello 3D…": {"en": "Loading the 3D model…", "it": "Caricamento del modello 3D…", "fr": "Chargement du modèle 3D…", "de": "3D-Modell wird geladen …"},
+    # Visualizzatore 3D caricato in modo pigro (2026-10-12).
+    "ui:Visualizzatore 3D non ancora caricato.": {"it": "Visualizzatore 3D non ancora caricato.", "en": "3D viewer not loaded yet.", "fr": "Visionneuse 3D pas encore chargée.", "de": "3D-Ansicht noch nicht geladen."},
+    "ui:Visualizzatore 3D non disponibile: vedi il log.": {"it": "Visualizzatore 3D non disponibile: vedi il log.", "en": "3D viewer not available: see the log.", "fr": "Visionneuse 3D indisponible : voir le journal.", "de": "3D-Ansicht nicht verfügbar: siehe Protokoll."},
     "dim.body": {"en": "body {value:.2f} mm", "it": "corpo {value:.2f} mm", "fr": "corps {value:.2f} mm", "de": "Körper {value:.2f} mm"},
     "dim.total": {"en": "total {value:.2f} mm", "it": "totale {value:.2f} mm", "fr": "total {value:.2f} mm", "de": "gesamt {value:.2f} mm"},
     "dim.pitch": {"en": "pitch {value:.2f} mm", "it": "passo {value:.2f} mm", "fr": "pas {value:.2f} mm", "de": "Raster {value:.2f} mm"},

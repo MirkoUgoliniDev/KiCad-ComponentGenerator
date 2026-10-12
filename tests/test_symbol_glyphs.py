@@ -4,6 +4,7 @@ The KiCad library test runs only when KiCad is installed (its symbols folder
 is found); the parser and placement tests use text fixtures.
 """
 import pytest
+from pathlib import Path
 
 from kicadgen.generators import symbol_glyphs as g
 from kicadgen.generators.symbol import serialize_symbol, SymbolPin
@@ -47,6 +48,69 @@ def test_a_library_symbol_becomes_a_glyph_without_its_body_outline(tmp_path):
         (-5.08, 7.62, 270, "1"), (-5.08, -7.62, 90, "2")]
     assert g.load_library_glyph(library, "Missing") is None
     assert g.load_library_glyph(tmp_path / "none.kicad_sym", "Relay_X") is None
+
+
+def test_symbol_block_cuts_exactly_one_balanced_symbol(tmp_path):
+    """Only the wanted block is parsed now (user, 2026-10-12: 18 s to the window)."""
+    text = RELAY_FIXTURE
+    block = g.symbol_block(text, "Relay_X")
+    assert block is not None and block.startswith('(symbol "Relay_X"') and block.endswith(")")
+    (form,) = g.parse_sexpr(block)
+    assert form[1] == "Relay_X" and [u[1] for u in g._children(form, "symbol")] == ["Relay_X_0_1", "Relay_X_1_1"]
+    # A longer name sharing the prefix is not the symbol, and a unit is not either.
+    assert g.symbol_block(text, "Relay_X_1_1").startswith('(symbol "Relay_X_1_1"')
+    assert g.symbol_block(text, "Relay") is None
+    assert g.symbol_block(text, "Missing") is None
+    # Parentheses and escaped quotes inside strings do not unbalance the scan.
+    tricky = '(kicad_symbol_lib (symbol "A" (property "Datasheet" "x(y\\"z)" ) (symbol "A_1_1")) (symbol "B"))'
+    assert g.symbol_block(tricky, "A") == '(symbol "A" (property "Datasheet" "x(y\\"z)" ) (symbol "A_1_1"))'
+    assert g.symbol_block(tricky, "B") == '(symbol "B")'
+    assert g.symbol_block('(symbol "A" (open', "A") is None, "unbalanced: None, no exception"
+    # Not a symbol library: nothing, even if a block would match.
+    other = tmp_path / "other.kicad_sym"
+    other.write_text('(kicad_pcb (symbol "Relay_X"))', encoding="utf-8")
+    assert g.load_library_glyph(other, "Relay_X") is None
+
+
+def test_each_library_file_is_read_once_for_all_its_glyphs(tmp_path, monkeypatch):
+    """Structural: the catalogue asks many glyphs per file; the file is read once."""
+    library = tmp_path / "Relay.kicad_sym"
+    library.write_text(RELAY_FIXTURE, encoding="utf-8")
+    g._library_text.cache_clear()
+    reads = []
+    original = Path.read_text
+
+    def counting(self, *args, **kwargs):
+        reads.append(self)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", counting)
+    for _ in range(5):
+        assert g.load_library_glyph(library, "Relay_X") is not None
+    assert len(reads) == 1
+    # A changed file (new stamp) is read again, not served stale.
+    library.write_text(RELAY_FIXTURE.replace("Relay_X", "Relay_Y"), encoding="utf-8")
+    import os
+    os.utime(library, ns=(library.stat().st_atime_ns, library.stat().st_mtime_ns + 10_000_000))
+    assert g.load_library_glyph(library, "Relay_X") is None and len(reads) == 2
+    g._library_text.cache_clear()
+
+
+@pytest.mark.skipif(g.kicad_symbols_dir() is None, reason="KiCad not installed")
+def test_the_block_read_matches_a_full_parse_on_the_installed_libraries():
+    """Equivalence with the old whole-file parse, on every catalogue entry."""
+    folder = g.kicad_symbols_dir()
+    checked = 0
+    for key, label, group, library, symbol_name in g.KICAD_GLYPHS:
+        path = folder / f"{library}.kicad_sym"
+        if not path.is_file():
+            continue
+        forms = g.parse_sexpr(path.read_text(encoding="utf-8"))
+        root = forms[0]
+        full = next((item for item in g._children(root, "symbol") if item[1] == symbol_name), None)
+        (fast,) = g.parse_sexpr(g.symbol_block(path.read_text(encoding="utf-8"), symbol_name))
+        assert fast == full, (library, symbol_name)
+        checked += 1
+    assert checked >= 1
 
 
 def test_placement_turns_and_mirrors_primitives_and_terminals_consistently():
