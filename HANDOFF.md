@@ -181,7 +181,7 @@ vista trascina il gruppo (risale ai genitori dal figlio colpito) ed emette
 `pos()` del gruppo. test_package_preview_drills.py esclude i gruppi anche
 dal conteggio del rame.
 
-## FINE SESSIONE 13/10 (3) — branch `ADVANCED`, commit `COMMIT_HASH` (+ handoff), mergiato in `main`
+## FINE SESSIONE 13/10 (3) — branch `ADVANCED`, commit `2e50ad9` (+ handoff), mergiato in `main`
 
 Dopo `b99f835`: punto 193 FATTO e committato (sezione «193» in fondo al
 file): combo del footprint ospitante accorciata con Pad/Foro sulla stessa
