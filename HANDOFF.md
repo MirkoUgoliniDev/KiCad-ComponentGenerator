@@ -130,7 +130,94 @@ ai_account_menu): 273 verdi. Suite completa NON rilanciata. Il segfault
 della sonda a fine processo e' del suo thread EnumWindows durante lo
 smontaggio, non dell'applicazione.
 
-## FINE SESSIONE 13/10 — branch `ADVANCED`, commit `e9b9bf5` (+ questo handoff), mergiato in `main`
+## 2026-10-13 — FATTO (non committato): testi del footprint, tappa 1 («REF**» e valore spostabili nell'anteprima 2D)
+
+Richiesta: «nel footprint e' possibile scrivere qualcosa?»; consiglio
+dell'assistente (strada 3 in due tappe) accettato: «ok procedi». Diagnosi:
+l'anteprima 2D (`gui/footprint_view.py`) era in sola lettura e NON disegnava
+le due proprieta'; il file le scrive a posizioni fisse `(0,-2)`/`(0,2)`
+(`core/footprint.py`, `reference_at`/`value_at`, mai impostate dai tre
+generatori).
+Piano (stesso schema delle modifiche ai pad: scelta nel progetto, anteprima
+ridisegnata, .kicad_mod riscritto subito):
+- core/footprint.py: `TEXT_KEYS`, `DEFAULT_TEXT_POSITIONS`,
+  `validate_text_positions(raw)` (coppie finite entro ±500 mm, chiavi note,
+  il resto scartato in silenzio come i pad override), `Footprint.place_texts`.
+- gui/workers.py: `GenerateWorker.text_positions`, applicato al Footprint
+  prima di `save`.
+- gui/footprint_view.py: trascinamento del testo con il tasto sinistro
+  (ruolo dati `TEXT_KEY_ROLE`), segnali `text_moved(key, x, y)` in unita'
+  di scena e `text_context_requested(key)` con il tasto destro.
+- gui/main_window.py: `footprint_text_positions` nello stato
+  (`footprint_texts` in project_config.json, letto in `_apply_project_state`),
+  `_draw_footprint_texts(mm_to_px)` chiamato dai tre disegnatori prima della
+  didascalia, `_on_footprint_text_moved` (aggancio alla griglia
+  dell'anteprima se visibile, altrimenti 0,1 mm; salva; ridisegna;
+  `_generate(footprint_only=True)`), `_reset_footprint_text` dal menu
+  contestuale, worker con `text_positions`.
+- Test: tests/test_footprint_text_positions.py (modello: validazione
+  positiva/negativa e file; worker: file con la posizione; finestra:
+  disegno, spostamento con eventi del mouse sulla vista, stato salvato e
+  riletto, ripristino, worker che riceve le posizioni).
+Fuori tappa 1 (tappa 2, da fare dopo): testo libero `fp_text user`;
+annulla/ripeti nell'anteprima.
+Esito: fatto come da piano. tests/test_footprint_text_positions.py: 18
+test (modello, worker con file vero, finestra con eventi del mouse sulla
+vista, stato riletto, ripristino, salvataggio fallito, worker con copia
+delle posizioni). Contratto aggiornato in test_package_preview_drills.py:
+le etichette dei pin si contano escludendo i testi con `TEXT_KEY_ROLE`.
+Moduli anteprima/generazione/stato/documentazione: 330 verdi. Resa
+offscreen dell'anteprima: «REF**» alla posizione predefinita e poi
+spostato; con progetto senza nome il valore mostra il segnaposto «Value».
+Suite completa NON rilanciata. Trappola: il tasto sinistro sopra un testo
+ora trascina il testo invece di spostare la camera; sul resto della scena
+la camera si sposta come prima (test negativo incluso).
+Correzione dopo lo screenshot dell'utente («non si capisce il punto di
+ancoraggio»): ogni testo e' un QGraphicsItemGroup la cui posizione E'
+l'ancora KiCad (`at`, centro del testo), con una croce nel colore accento
+(BLUE, braccia 0,75 mm) sopra il testo — niente cerchi: i test
+dell'anteprima contano le ellissi come fori e «Ancoraggio: x mm, y mm» nel tooltip; la
+vista trascina il gruppo (risale ai genitori dal figlio colpito) ed emette
+`pos()` del gruppo. test_package_preview_drills.py esclude i gruppi anche
+dal conteggio del rame.
+
+## FINE SESSIONE 13/10 (2) — branch `ADVANCED`, commit `b99f835` (+ handoff), mergiato in `main`
+
+Dopo `e9b9bf5`: tappa 1 dei testi del footprint FATTA (sezione «testi del
+footprint, tappa 1» qui sotto): «REF**» e valore trascinabili
+nell'anteprima 2D con croce di ancoraggio, posizione in
+`footprint_texts` di project_config.json e nel .kicad_mod riscritto
+subito. tests/test_footprint_text_positions.py (18) + contratto di
+test_package_preview_drills.py aggiornato. Moduli anteprima/generazione/
+stato/documentazione: 134 verdi nell'ultimo giro. Suite completa NON
+rilanciata oggi.
+
+COSA RIMANE DA FARE (in ordine):
+1. RICHIESTO — tappa 2 dei testi del footprint (strada 3 accettata
+   dall'utente): strumento «Testo» nell'anteprima 2D. Contenuto, layer
+   (predefinito F.Fab; F.SilkS selezionabile), altezza predefinita 1 mm e
+   spessore 0,15 mm (minimi KLC), trascinamento con la stessa croce di
+   ancoraggio della tappa 1, rotazione a scatti di 90 gradi, cancellazione
+   dal menu contestuale. Persistenza: lista `footprint_user_texts` in
+   project_config.json (validata come `footprint_texts`), applicata dal
+   GenerateWorker come `FpText(kind="user", ...)` prima di `save`
+   (`core/footprint.py`: FpText ha `at`, `layer`, `size`=1.0,
+   `thickness`=0.15 ma NON `rotation`: aggiungerla e scriverla nel nodo
+   `at`).
+   Disegno nei tre disegnatori accanto a `_draw_footprint_texts`.
+   Annulla/ripeti nell'anteprima: non c'e' ancora uno storico come nella
+   scheda Simbolo; valutare uno storico semplice delle scelte (testi e
+   posizioni) o rimandare dichiarandolo.
+2. Suite completa in due meta' prima del prossimo merge «grosso» (ultima
+   completa: 7344 verdi, 12/10 notte) e riallineo dei numeri in testa a
+   CLAUDE.md e qui.
+3. Build MSI: verificare `KiCadGen.exe --splash it` (processo figlio dello
+   splash animato) parte senza console e in fretta (onedir).
+4. APERTO non autorizzato (invariato): immagine splash PNG; pulsante apri
+   progetto «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica
+   ai file»; unita' multiple.
+
+## FINE SESSIONE 13/10 — branch `ADVANCED`, commit `e9b9bf5` (+ handoff `77495ed`), mergiato in `main`
 
 Tre lavori FATTI oggi, tutti con sezione propria qui sotto (diagnosi, piano,
 esito), committati in `e9b9bf5`:

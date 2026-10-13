@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsSi
 from kicadgen.core.package_geometry import PackageGeometry, PinSpec
 from kicadgen.generators.host_mounting import header_footprint_params
 from kicadgen.generators.package import build_package
+from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
 from kicadgen.gui.theme import BASE, BLUE
 from tests.test_contact_style import dev_kit
 
@@ -15,11 +16,15 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
     window._draw_preview_package(host)
     items = window.preview_scene.items()
     copper = [item for item in items if item.toolTip()
-              and not isinstance(item, QGraphicsSimpleTextItem)]
+              and not isinstance(item, QGraphicsSimpleTextItem)
+              and item.data(TEXT_KEY_ROLE) is None]
     holes = [item for item in items if isinstance(item, QGraphicsEllipseItem)
              and item.brush().color().name() == BASE]
+    # Pin numbers only: the footprint's Reference/Value texts (draggable,
+    # with a tooltip of their own since 2026-10-13) are not pin labels.
     labels = [item for item in items if isinstance(item, QGraphicsSimpleTextItem)
-              and item.toolTip() and item.data(0) != 'pin-function']
+              and item.toolTip() and item.data(0) != 'pin-function'
+              and item.data(TEXT_KEY_ROLE) is None]
     assert len(copper) == len(holes) == len(labels) == 44
     assert {item.text() for item in labels} == {str(n) for n in range(1, 45)}
     annotations = [item for item in items if isinstance(item, QGraphicsSimpleTextItem)
