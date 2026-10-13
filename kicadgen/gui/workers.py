@@ -438,6 +438,9 @@ class GenerateWorker(_Cad3DRunWorker):
         #: Chosen positions of the Reference and Value texts, {key: (x, y)}
         #: mm (user, 2026-10-13); {} keeps the generator's defaults.
         self.text_positions = {}
+        #: User drawings of the footprint preview (validated records, see
+        #: core.footprint.validate_footprint_drawings); [] adds nothing.
+        self.drawings = []
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
@@ -455,6 +458,12 @@ class GenerateWorker(_Cad3DRunWorker):
                 else _patch_point("build_pin_header")(host)
             )
             footprint.place_texts(self.text_positions)
+            # Disegni dell'utente (palette dell'anteprima): record gia'
+            # validati, aggiunti dopo il generato cosi' non toccano la
+            # geometria calcolata (pad, courtyard, contorni).
+            from ..core.footprint import drawing_graphics
+            for item in drawing_graphics(self.drawings):
+                footprint.add_graphic(item)
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))

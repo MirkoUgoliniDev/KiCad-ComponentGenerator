@@ -3,10 +3,17 @@ import math
 
 from PyQt6.QtCore import Qt, QLineF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QGraphicsView
+from PyQt6.QtWidgets import QApplication, QGraphicsView
 
 #: Item data role carrying the key of a draggable text (Reference, Value).
 TEXT_KEY_ROLE = 0x544558
+
+#: Item data role carrying the index of a user drawing of the footprint.
+DRAWING_KEY_ROLE = 0x445257
+
+#: Item data role of a drawing handle: "<drawing index>:<point index>";
+#: point index -1 is the anchor that moves the WHOLE drawing.
+HANDLE_KEY_ROLE = 0x48444C
 
 
 class FootprintView(QGraphicsView):
@@ -21,6 +28,26 @@ class FootprintView(QGraphicsView):
     text_moved = pyqtSignal(str, float, float)
     #: Right click on a text: key.
     text_context_requested = pyqtSignal(str)
+    #: Draw mode: a left click landed at this scene point.
+    draw_clicked = pyqtSignal(float, float)
+    #: Draw mode: the user asked to close the shape (double click, Enter, right click).
+    draw_finish_requested = pyqtSignal()
+    #: Draw mode: the user cancelled the shape in progress (Esc).
+    draw_cancelled = pyqtSignal()
+    #: Right click on a user drawing (outside draw mode): its index.
+    drawing_context_requested = pyqtSignal(int)
+    #: Draw mode: the pointer is at this scene point (snap marker and ghost shape).
+    draw_hovered = pyqtSignal(float, float)
+    #: Draw mode: the pointer left the viewport.
+    draw_hover_left = pyqtSignal()
+    #: Outside draw mode: the pointer is over this drawing (-1: none).
+    drawing_hovered = pyqtSignal(int)
+    #: A handle was pressed: drawing index, point index (-1: whole drawing), scene point.
+    handle_pressed = pyqtSignal(int, int, float, float)
+    #: A handle is being dragged: drawing index, point index, scene point.
+    handle_dragged = pyqtSignal(int, int, float, float)
+    #: A handle was dropped: drawing index, point index, scene point.
+    handle_dropped = pyqtSignal(int, int, float, float)
 
     def __init__(self, scene):
         super().__init__(scene)
@@ -32,6 +59,34 @@ class FootprintView(QGraphicsView):
         self._grid = None
         #: (item, key, press scene point, item position at press) while a text is dragged.
         self._text_drag = None
+        #: True while a palette tool collects clicks: left clicks become
+        #: points instead of pans, and the keyboard closes or cancels.
+        self._draw_mode = False
+        #: Viewport point of the left press in draw mode, to tell a drag
+        #: (press here, release elsewhere) from a plain click.
+        self._draw_press = None
+        # Hover without a button pressed: the snap marker follows the pointer.
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        #: (drawing index, point index) of the handle being dragged, or None.
+        self._handle_drag = None
+        #: Drawing index last reported as hovered (-1: none).
+        self._hovered_drawing = -1
+
+    def set_draw_mode(self, active):
+        """@brief Enter or leave drawing mode; the cursor shows the change.
+
+        @param active True routes left clicks to `draw_clicked` and the
+            keyboard to finish/cancel; False restores panning and drags.
+        """
+        self._draw_mode = bool(active)
+        if self._draw_mode:
+            self._pan = None
+            self._text_drag = None
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self.setFocus()
+        else:
+            self.viewport().unsetCursor()
 
     def set_grid(self, step, origin=(0.0, 0.0), visible=True):
         """@brief Set an unbounded, scene-anchored reference grid in scene units.
@@ -42,6 +97,31 @@ class FootprintView(QGraphicsView):
         """
         self._grid = (float(step), tuple(map(float, origin)), bool(visible))
         self.viewport().update()
+
+    def grid_step(self):
+        """@brief The pitch of the visible grid in scene units, or None when hidden/unset."""
+        if self._grid and self._grid[2] and self._grid[0] > 0:
+            return self._grid[0]
+        return None
+
+    def snap_to_grid(self, x, y, fallback_step):
+        """@brief Snap a scene point to the nodes of the drawn grid.
+
+        @param x Scene x (px).
+        @param y Scene y (px).
+        @param fallback_step Step in scene units when the grid is hidden or unset.
+        @return The nearest node of the visible grid (same step AND same
+            origin as the lines on screen, user 2026-10-13: «il disegno deve
+            agganciarsi ai nodi della griglia»), else the nearest multiple
+            of `fallback_step` from the scene origin.
+        """
+        if self._grid and self._grid[2] and self._grid[0] > 0:
+            step, (ox, oy), _visible = self._grid
+        else:
+            step, ox, oy = float(fallback_step), 0.0, 0.0
+        if step <= 0:
+            return float(x), float(y)
+        return ox + round((x - ox) / step) * step, oy + round((y - oy) / step) * step
 
     def drawBackground(self, painter, rect):
         """@brief Qt override: draw grid lines across the visible viewport, like the symbol editor.
@@ -99,8 +179,49 @@ class FootprintView(QGraphicsView):
                 return item, str(key)
         return None, None
 
+    def _handle_at(self, pos):
+        """The (drawing, point) indices of the handle under a viewport point, or None."""
+        for item in self.scene().items(self.mapToScene(pos)):
+            key = item.data(HANDLE_KEY_ROLE)
+            if key is not None:
+                drawing, point = str(key).split(":")
+                return int(drawing), int(point)
+        return None
+
+    def _drawing_at(self, pos):
+        """The index of the drawing (or of the drawing a handle belongs to) under a point, else -1."""
+        handle = self._handle_at(pos)
+        if handle is not None:
+            return handle[0]
+        for item in self.scene().items(self.mapToScene(pos)):
+            index = item.data(DRAWING_KEY_ROLE)
+            if index is not None:
+                return int(index)
+        return -1
+
+    def _report_hover(self, index):
+        """Emit `drawing_hovered` only when the hovered drawing changes."""
+        if index != self._hovered_drawing:
+            self._hovered_drawing = index
+            self.drawing_hovered.emit(index)
+
     def mousePressEvent(self, event):
-        """@brief Begin a text drag on a text, else camera panning, on a left or middle press."""
+        """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
+
+        @note In draw mode a left press is a drawing point and a right press
+            asks to close the shape; panning stays on the middle button.
+        """
+        if self._draw_mode:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._draw_press = event.pos()
+                point = self.mapToScene(event.pos())
+                self.draw_clicked.emit(point.x(), point.y())
+                event.accept()
+                return
+            if event.button() == Qt.MouseButton.RightButton:
+                self.draw_finish_requested.emit()
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.RightButton:
             item, key = self._text_item_at(event.pos())
             if item is not None:
@@ -108,12 +229,33 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             for item in self.scene().items(self.mapToScene(event.pos())):
+                drawing_index = item.data(DRAWING_KEY_ROLE)
+                if drawing_index is not None:
+                    self.drawing_context_requested.emit(int(drawing_index))
+                    event.accept()
+                    return
+            for item in self.scene().items(self.mapToScene(event.pos())):
                 pad_index = item.data(0x504144)
                 if pad_index is not None:
                     self.pad_context_requested.emit(str(pad_index))
                     event.accept()
                     return
         if event.button() == Qt.MouseButton.LeftButton:
+            handle = self._handle_at(event.pos())
+            if handle is None:
+                # The body of a drawing moves the whole drawing, like an
+                # element of the symbol editor (user, 2026-10-13).
+                index = self._drawing_at(event.pos())
+                handle = (index, -1) if index >= 0 else None
+            if handle is not None:
+                # The window moves the point (or the whole drawing) on the
+                # grid and redraws the shape.
+                self._handle_drag = handle
+                self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+                point = self.mapToScene(event.pos())
+                self.handle_pressed.emit(*handle, point.x(), point.y())
+                event.accept()
+                return
             item, key = self._text_item_at(event.pos())
             if item is not None:
                 self._text_drag = (item, key, self.mapToScene(event.pos()), item.pos())
@@ -132,7 +274,13 @@ class FootprintView(QGraphicsView):
         """@brief Move the dragged text, or pan the camera, without changing footprint geometry."""
         if self._text_drag is not None:
             item, _key, start, origin = self._text_drag
-            item.setPos(origin + (self.mapToScene(event.pos()) - start))
+            try:
+                item.setPos(origin + (self.mapToScene(event.pos()) - start))
+            except RuntimeError:
+                # The scene was redrawn under the drag (crash report
+                # 2026-10-13 08:29): the item is gone, so is the drag.
+                self._text_drag = None
+                self.viewport().unsetCursor()
             event.accept()
             return
         if self._pan is not None:
@@ -140,17 +288,61 @@ class FootprintView(QGraphicsView):
             self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
             self._pan = event.pos()
             event.accept()
+        elif self._draw_mode:
+            point = self.mapToScene(event.pos())
+            self.draw_hovered.emit(point.x(), point.y())
+            event.accept()
+        elif self._handle_drag is not None:
+            point = self.mapToScene(event.pos())
+            self.handle_dragged.emit(*self._handle_drag, point.x(), point.y())
+            event.accept()
         else:
+            # Hovering a drawing reveals its handles (user, 2026-10-13: «come
+            # nell'altro tab»); leaving it hides them.
+            self._report_hover(self._drawing_at(event.pos()))
             super().mouseMoveEvent(event)
 
+    def leaveEvent(self, event):
+        """@brief Qt override: the snap marker and the hover handles go away with the pointer."""
+        if self._draw_mode:
+            self.draw_hover_left.emit()
+        if self._handle_drag is None:
+            self._report_hover(-1)
+        super().leaveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        """@brief Report the dropped text, or apply the final pan displacement; release the cursor."""
+        """@brief Report the dropped text, or apply the final pan displacement; release the cursor.
+
+        @note In draw mode a release away from its press is a DRAG: the
+            release point counts as the next drawing point, so a rectangle
+            or a circle can be drawn press-move-release as in a CAD, not
+            only click-click (user, 2026-10-13: «non funziona»). A release
+            at the press point is a plain click and adds nothing.
+        """
+        if self._handle_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            drawing, point_index = self._handle_drag
+            self._handle_drag = None
+            self.viewport().unsetCursor()
+            point = self.mapToScene(event.pos())
+            self.handle_dropped.emit(drawing, point_index, point.x(), point.y())
+            event.accept()
+            return
+        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            press, self._draw_press = self._draw_press, None
+            if press is not None and (event.pos() - press).manhattanLength()                     >= QApplication.startDragDistance():
+                point = self.mapToScene(event.pos())
+                self.draw_clicked.emit(point.x(), point.y())
+            event.accept()
+            return
         if self._text_drag is not None and event.button() == Qt.MouseButton.LeftButton:
             item, key, start, origin = self._text_drag
             self._text_drag = None
-            item.setPos(origin + (self.mapToScene(event.pos()) - start))
             self.viewport().unsetCursor()
-            self.text_moved.emit(key, item.pos().x(), item.pos().y())
+            try:
+                item.setPos(origin + (self.mapToScene(event.pos()) - start))
+                self.text_moved.emit(key, item.pos().x(), item.pos().y())
+            except RuntimeError:
+                pass  # redrawn under the drag: nothing to report
             event.accept()
             return
         if self._pan is not None and event.button() == self._pan_button:
@@ -162,9 +354,45 @@ class FootprintView(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        """@brief Qt override: in draw mode a left double click closes the shape.
+
+        @note A fast second click reaches Qt as press, release, DOUBLE CLICK:
+            the second press never arrives. The double click therefore first
+            counts as that missing point (fixed-count shapes close on it),
+            then as the finish request (which ends an open line; it is a
+            no-op when the point already closed the shape). The window
+            de-duplicates a repeated point, so a true double click on the
+            last vertex of a line does not add it twice.
+        """
+        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
+            point = self.mapToScene(event.pos())
+            self.draw_clicked.emit(point.x(), point.y())
+            self.draw_finish_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        """@brief Qt override: in draw mode Esc cancels and Enter closes the shape."""
+        if self._draw_mode:
+            if event.key() == Qt.Key.Key_Escape:
+                self.draw_cancelled.emit()
+                event.accept()
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.draw_finish_requested.emit()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def hideEvent(self, event):
         """@brief Discard an unfinished camera or text drag when the view is hidden."""
         self._pan = None
         self._text_drag = None
+        self._handle_drag = None
+        if self._draw_mode:
+            # The window disarms the tool and cleans its click markers.
+            self.draw_cancelled.emit()
         self.viewport().unsetCursor()
         super().hideEvent(event)

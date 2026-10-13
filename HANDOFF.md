@@ -181,6 +181,38 @@ vista trascina il gruppo (risale ai genitori dal figlio colpito) ed emette
 `pos()` del gruppo. test_package_preview_drills.py esclude i gruppi anche
 dal conteggio del rame.
 
+## FINE SESSIONE 13/10 (3) — branch `ADVANCED`, commit `COMMIT_HASH` (+ handoff), mergiato in `main`
+
+Dopo `b99f835`: punto 193 FATTO e committato (sezione «193» in fondo al
+file): combo del footprint ospitante accorciata con Pad/Foro sulla stessa
+riga; palette minima di disegno nell'anteprima footprint (linea,
+rettangolo, cerchio, arco, testo; layer F.SilkS/F.Fab/Cmts.User) con
+snap ai nodi della griglia visibile, marcatori e maniglie identici
+all'editor del simbolo, trascinamento di vertici e dell'intero disegno,
+annulla/ripeti (Ctrl+Z/Y), menu contestuale (duplica, layer, spessore,
+testo, elimina); record `footprint_drawings` nel progetto, validati al
+caricamento, scritti nel .kicad_mod (FpLine/FpRect/FpCircle/FpArc/FpText
+user). Corretti due difetti preesistenti di `b99f835` (stringhe senza
+catalogo; crash del drag di REF**/Valore durante il ridisegno).
+Verifica prima del commit: 110 verdi (test_footprint_drawings 44,
+text_positions, preview_review, pad_tooltips, i18n, documentation,
+package_preview_drills). SUITE COMPLETA NON rilanciata (ultima completa:
+7344 verdi, 12/10 notte): e' il primo punto da fare alla ripresa.
+Non tracciati lasciati fuori dal commit (non dell'assistente):
+`rows_none_rev.pkl`, `tmp/`, `work/`.
+
+COSA RIMANE DA FARE (in ordine):
+1. Suite completa in due meta' (HANDOFF 113) e riallineo dei numeri in
+   testa a CLAUDE.md e qui.
+2. APERTO segnalato, non autorizzato, anteprima footprint: selezione
+   multipla, copia/incolla fra progetti, riempimento di rect/cerchio,
+   readout X/Y in barra, fori di fissaggio e fiducial in palette.
+3. Build MSI: verificare `KiCadGen.exe --splash it` (processo figlio dello
+   splash animato) senza console e veloce (onedir).
+4. APERTO non autorizzato (invariato): immagine splash PNG; pulsante apri
+   progetto «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica
+   ai file»; unita' multiple.
+
 ## FINE SESSIONE 13/10 (2) — branch `ADVANCED`, commit `b99f835` (+ handoff), mergiato in `main`
 
 Dopo `e9b9bf5`: tappa 1 dei testi del footprint FATTA (sezione «testi del
@@ -11304,3 +11336,154 @@ pubblicato: si lavora su FIX.
    FATTO 191 (08/10 sera, NON committato): edge_lands.measure_edge_holes (HoleStyle): striscia di un passo dal bordo; colonne in TRE classi di colore (_colour_classes, Lloyd da semi farthest-point: maschera, rame, cio' che mostra il foro) e pixel alla classe piu' vicina; classe maschera = la piu' vicina al colore dell'interno della scheda (2-3 passi dentro); piazzole = corse di colonne che contengono il colore della classe in almeno un anello di righe, SOLO se contengono un punto del reticolo di count_edge_copper (o a mezzo passo) e di larghezza pari alla mediana (±finestra); per piazzola, profilo per riga della corsa non-rame racchiusa: segmento che tocca il bordo = apertura (corda c), segmenti staccati = foro chiuso (D): apertura+chiuso -> half_and_through; solo apertura con massimo sul bordo -> half_hole, con massimo dentro oltre la finestra -> half_and_through; solo chiuso -> through_hole; verdetto di lato = maggioranza fra le classi non-maschera con >= MIN_ROW_LANDS e >= meta'. photo_inventory scrive declared['_measured_holes'] (+ log «Fori sul bordo…»); datasheet_extractor._apply_measured_holes sostituisce lo stile dichiarato quando diverso, con nota e _contact_style_evidence; il foro misurato (barile visibile) NON viene adottato come drill, solo riportato; _canonicalize_answer scarta _measured_holes dalle risposte grezze. MISURE REALI: ESP32 top half_and_through 12/19 (foro 0.89, apertura 0.73), bottom through_hole 13/20 (foro 0.98: i pad sotto sono fori chiusi con linguetta al bordo -> coerente col contatore delle tacche: top «non contabile», bottom «liscio»); RS485 nessun verdetto (file < 5 o nessun reticolo) -> stile dichiarato. SCARTATO lungo la strada: due classi di colore (il barile si univa al rame), gate del foro a 2 pareti, corse definite sui soli anelli 1-4 (le U si spezzavano). Test: tests/test_edge_holes.py (8: tre stili sintetici, etichette, poche piazzole/bordo senza fila, adozione dello stile con nota, stile confermato, risposta grezza). i18n +6. 282 test verdi (holes/copper/lands/declared sides/inventory/extractor/i18n/doc).
 192. [x] FATTO (utente 08/10, screenshot: modulo dall'archivio con verso sbagliato (90° auto) e SOT-223 «da verificare» senza nulla preselezionato nel selettore). (a) _consult_consolidated_before_review: per i trovati, il verso del ritaglio verificato (model_match.accepted_orientation status matched) va in row['model_rotation_deg'], come fa attach_models nella generazione; senza ritaglio univoco il verso resta automatico. (b) ModelCandidatesDialog: con stato review_required e primo candidato dall'archivio (measurement_basis accepted_library) la riga viene evidenziata (non confermata): la scelta precedente e' a un clic. Test: test_pipeline_pauses (rotazione 270 trasferita per R1, assente per C1), test_model_candidates_dialog (+1 positivo/negativo).
    CORREZIONE 191 (utente 08/10, anteprima footprint «qui hai toppato»): il verdetto «through_hole» sul lato inferiore faceva disegnare SOLE CORONE ARRETRATE (CONTACT_THROUGH_HOLE del generatore = corona arretrata dal bordo), mentre le piazzole reali arrivano al bordo con il foro chiuso dietro. Vocabolario del footprint, non della foto: foro chiuso in una piazzola che TOCCA il bordo -> half_and_through (piazzola al bordo + foro, i pin hanno il loro foro); through_hole solo se la piazzola e' arretrata dal bordo (nessun rame nelle prime righe). Test aggiornati (+1 negativo con corona arretrata). NOTA: nella stessa corsa l'AI ha dichiarato 23 contatti senza riportare le quote del disegno -> la regola delle quote non e' scattata; il conteggio resta quello dell'AI (vedi 188: senza quote nessuna verifica).
+193. [x] FATTO, NON committato (utente 13/10, screenshot anteprima footprint + editor simbolo). Due richieste:
+   (a) «Footprint sulla scheda ospitante»: combo troppo larga; accorciarla (AdjustToContents)
+   e spostare i campi Pad Ø / Foro Ø a DESTRA della combo, stessa riga (conferma esplicita
+   dell'utente sullo screenshot col riquadro rosso); pulsante «Aggiorna solo il footprint»
+   resta in fondo alla riga. Il widget preview_header_dimensions conserva il suo show/hide.
+   (b) Palette MINIMA di disegno nell'anteprima footprint, a destra come nell'editor del
+   simbolo, con i SOLI strumenti: linea, rettangolo, cerchio, arco, testo (niente bezier,
+   niente elementi di libreria, niente pad/fori/fiducial: i pad numerati romperebbero
+   l'allineamento simbolo/footprint). Sopra gli strumenti un selettore layer: F.SilkS
+   (default, stampato), F.Fab (documentazione), Cmts.User (commenti). Decisioni:
+   - I disegni utente vivono SEPARATI dal generato (come header_pad_overrides): lista
+     self.footprint_drawings di record {kind, points mm assoluti, width, layer, text, size},
+     salvata nel progetto ("footprint_drawings") e validata al load (validate_footprint_drawings
+     in core/footprint.py, stesso stile di validate_text_positions: numeri finiti, limite
+     500 mm, layer ammesso, conteggi punti giusti, testo una riga non vuoto).
+   - Export: GenerateWorker.drawings; dopo place_texts i record diventano FpLine (segmenti),
+     FpRect, FpCircle, FpArc (classe NUOVA in core/footprint.py, fp_arc start/mid/end),
+     FpText kind "user". Ogni modifica salva il progetto e riscrive il .kicad_mod
+     (footprint_only), come i pad.
+   - Interazione: click strumento -> armi; click nella vista = punti snappati alla griglia
+     attiva; rettangolo/cerchio/arco/testo si chiudono al numero fisso di click, la linea
+     con doppio click/Invio/tasto destro; Esc annulla. Tasto destro su un disegno (fuori
+     modalita' disegno) -> menu Elimina / Modifica testo. NIENTE undo/redo in questa fase
+     (scelta dichiarata: minimo; cancellazione per elemento).
+   - Render nei TRE percorsi 2D (header, package, castellated) accanto a _draw_footprint_texts,
+     con colore per layer. i18n: nuove stringhe in DEFAULT_TRANSLATIONS nelle 4 lingue
+     (molte etichette degli strumenti esistono gia' dalla palette del simbolo).
+   Test previsti: validazione record (positivi/negativi), FpArc sexpr, conversione record->
+   grafica, roundtrip di persistenza, iniezione nell'export, GUI minima (arma strumento,
+   click, record creato, item in scena). Branch ADVANCED da 3ccc81f.
+   ESITO 193 (13/10): implementato come pianificato. Dettagli realizzati:
+   combo AdjustToContents + Pad/Foro nella stessa riga + stretch + pulsante aggiorna in fondo;
+   palette (_build_footprint_palette) con selettore layer e 5 strumenti (icone glyph_icon del
+   simbolo, TOOL_HINTS come tooltip); FootprintView.set_draw_mode con draw_clicked/
+   draw_finish_requested/draw_cancelled/drawing_context_requested (click sinistro = punto,
+   destro/doppio/Invio = chiudi, Esc = annulla, pan in modalita' disegno solo col tasto
+   centrale); snap al passo griglia visibile, altrimenti 0.1 mm; croci blu sui click in corso
+   (ruolo 0x44524D, ridisegnate da _draw_footprint_drawings); arco: click inizio-fine-intermedio,
+   salvato start/mid/end; testo via QInputDialog, altezza 1.0 mm; _arc_path campiona l'arco per
+   l'anteprima (il file conserva i tre punti esatti). core/footprint.py: FpArc, USER_DRAW_LAYERS/
+   KINDS/WIDTH/TEXT, validate_footprint_drawings, drawing_graphics. Worker: campo drawings,
+   aggiunto dopo place_texts. Render nei tre percorsi 2D con colori TEXT/YELLOW/SUBTEXT per
+   SilkS/Fab/Cmts. i18n: +9 voci nelle 4 lingue.
+   DIFETTI PREESISTENTI trovati (del lavoro committato b99f835, testi trascinabili) e corretti:
+   (1) 5 stringhe ui senza voce di catalogo (Ancoraggio, Posizione del testo non salvata,
+   Posizione predefinita, i due tooltip di Reference/Value): aggiunte nelle 4 lingue;
+   (2) test_preview_pad_tooltips e test_preview_review contavano i gruppi Reference/Value
+   (con tooltip) come pad/etichette: filtri aggiornati per escludere gli item con
+   TEXT_KEY_ROLE, contratto invariato (i testi di proprieta' non sono pad). Verificato con
+   git stash: tutti e 5 i fallimenti esistevano gia' senza le mie modifiche.
+   Test: tests/test_footprint_drawings.py (31: validazione pos/neg, conversione, fp_arc sexpr,
+   worker, record col layer scelto, menu elimina, roundtrip progetto, copia al worker, riga
+   della combo). Fetta larga GUI (-k preview/footprint/symbol/project_state/startup/start_page/
+   workflow/grid): 739 verdi. SUITE COMPLETA NON ancora eseguita (due meta', HANDOFF 113):
+   farla prima del commit. APERTO (segnalato, non autorizzato): undo/redo nell'anteprima
+   footprint; fori di fissaggio e fiducial in palette; spostamento/trascinamento dei disegni
+   esistenti (oggi solo elimina/modifica testo via tasto destro).
+   CORREZIONE 193 (utente 13/10, screenshot «non funziona»: cerchio armato, una croce, nessuna
+   forma). DUE cause reali, entrambe riprodotte con eventi veri prima della correzione:
+   (1) due click rapidi: Qt consegna press, release, DOPPIO CLICK (niente secondo press);
+   la vista trattava il doppio click solo come «chiudi» e il cerchio con un punto veniva
+   annullato in silenzio. Ora il doppio click in modalita' disegno vale prima come il punto
+   mancante e poi come richiesta di chiusura (no-op se la forma si e' gia' chiusa; il punto
+   ripetuto viene deduplicato). (2) griglia grossa (2.54): due click lenti nello stesso nodo
+   -> punto deduplicato o forma degenere, scartati IN SILENZIO. Ora un toast (Toast senza
+   icona, _draw_feedback_toast) dice «Punto coincidente...» o «Disegno scartato...» con il
+   perche'. i18n +4 voci nelle 4 lingue. Test: +3 in test_footprint_drawings (34 totali:
+   click reali via mousePressEvent, doppio click rapido, feedback non silenzioso).
+   SECONDA SEGNALAZIONE 193 (utente 13/10 18:15, «guarda i log»): dal diario del progetto
+   ESP32-S3-DEVKIT-NXRX e da project_config.json: il TESTO «ddd» (un click) e' salvato nello
+   stato (state.footprint_drawings), esportato nel .kicad_mod (fp_text user, F.SilkS) e
+   disegnato; nessun crash report pomeridiano; app avviata 18:14:55 dopo le correzioni delle
+   18:12. Quindi le forme a piu' click falliscono SENZA eccezioni. Ipotesi applicata: l'utente
+   disegna per TRASCINAMENTO (press-move-release); il rilascio non valeva come secondo punto.
+   Ora FootprintView.mouseReleaseEvent in modalita' disegno emette draw_clicked al rilascio
+   se distante dal press >= QApplication.startDragDistance() (click fermo = un punto solo).
+   Non confermato dall'utente: se ancora non va, chiedere la sequenza esatta di gesti.
+   Inoltre corretto il crash report delle 08:29 (preesistente, b99f835): trascinamento di
+   REF**/Valore mentre l'anteprima si ridisegna -> RuntimeError «wrapped C/C++ object
+   deleted» in mouseMoveEvent; ora il drag viene abbandonato (move e release guardati).
+   Test +2 (36 in test_footprint_drawings). Verdi: drawings, text_positions, preview_review,
+   documentation.
+   ESITO (utente 13/10 18:25, screenshot con cerchio e rettangolo disegnati): le forme ora
+   funzionano. Richiesta: «il disegno deve agganciarsi ai nodi della griglia». CAUSA: la
+   griglia disegnata e' ancorata al PRIMO PAD (set_grid origin), lo snap usava i multipli
+   dell'origine del footprint -> forme fuori dai nodi. FIX: FootprintView.snap_to_grid(x, y,
+   fallback) aggancia al nodo della griglia visibile (stesso passo E stessa origine delle
+   righe a schermo); griglia nascosta -> 0.1 mm dall'origine. _footprint_draw_step_mm tolto.
+   Test +1 (37 in test_footprint_drawings: origine fuori reticolo, griglia nascosta).
+   RICHIESTA (utente 13/10 18:30, screenshot editor simbolo): «fare vedere il punto di
+   aggancio» come nel simbolo. FATTO: FootprintView con mouse tracking, segnali draw_hovered
+   (x, y scena) e draw_hover_left (leaveEvent); la finestra tiene _fp_draw_hover (nodo
+   agganciato, mm) e _refresh_draw_markers disegna: punto BLU su ogni click fatto, punto
+   GIALLO sul nodo che il prossimo click prenderebbe, e il fantasma tratteggiato giallo della
+   forma (_ghost_path: linea, rettangolo, cerchio, arco con 2 click = segmento e con 3 = arco
+   via _arc_path; testo = solo il punto). Snap unificato in _snapped_draw_point. Test +1
+   (38 in test_footprint_drawings). Verdi: drawings, text_positions, preview_review,
+   documentation.
+   RICHIESTA (utente 13/10 18:40: «quando passo sopra il disegno devono apparire i punti di
+   ancoraggio, come nell'altro tab»). FATTO: FootprintView fuori dalla modalita' disegno
+   segnala drawing_hovered(indice | -1) al cambio del disegno sotto il puntatore (item con
+   DRAWING_KEY_ROLE o maniglia con HANDLE_KEY_ROLE "i:p"); la finestra disegna una maniglia
+   quadrata gialla per ogni punto salvato del record (_refresh_drawing_handles, ruolo
+   0x48474F), tooltip «Punto del disegno: trascinalo sulla griglia.». Press su una maniglia
+   -> handle_dragged (snap al nodo + fantasma tratteggiato della forma col punto spostato,
+   _ghost_path ora accetta tool e ordine salvato) -> handle_dropped: punto aggiornato nel
+   record, validato (forma degenere -> toast «Spostamento scartato.», record intatto), poi
+   _apply_footprint_drawings (salva, ridisegna, riscrive il .kicad_mod). Testo: la sola
+   ancora, quindi trascinarla sposta il testo. i18n +2. Test +2 (40 in
+   test_footprint_drawings). Verdi: drawings, text_positions, preview_review, pad_tooltips,
+   i18n, documentation (103).
+   RICHIESTA (utente 13/10 18:50: «se seleziono il punto di ancoraggio deve essere possibile
+   muovere l'elemento, come nel tab simbolo»). FATTO: maniglia tonda gialla al centro dei
+   limiti del disegno (chiave "i:-1"), e press sul CORPO del disegno (item con
+   DRAWING_KEY_ROLE) equivale all'ancora; la vista emette handle_pressed (nodo di presa),
+   handle_dragged e handle_dropped; la finestra calcola la traslazione fra nodo di presa e
+   nodo corrente (_whole_drag_delta), fantasma tratteggiato traslato, al rilascio tutti i
+   punti traslati (delta nullo = nessuna modifica). Il testo, con un punto solo, non ha
+   ancora extra: trascinare il suo punto lo sposta. I vertici restano per cambiare forma.
+   i18n +1. Test +1 e uno aggiornato (41 in test_footprint_drawings). Verdi: drawings,
+   text_positions, preview_review, i18n, documentation (98).
+   RICHIESTA (utente 13/10 19:00: «uniforma il colore del punto di ancoraggio a quello già
+   fatto»): marcatori e maniglie dell'anteprima footprint ora con lo STESSO aspetto
+   dell'editor del simbolo (CANVAS_THEMES dark): punti cliccati = dischi gialli 5 px, fantasma
+   = giallo tratteggiato 1.6, maniglie = quadrati 6 px bordo giallo e verde alfa 150, ancora
+   dell'elemento = stesso quadrato 8 px verde pieno; tutti ItemIgnoresTransformations
+   (grandezza costante a ogni zoom), cursore a croce. Helper di modulo _ghost_pen,
+   _screen_dot, _screen_handle in main_window. Test aggiornati (41). Verdi: drawings,
+   text_positions, preview_review, pad_tooltips, documentation (83).
+   REGOLA DELL'UTENTE (13/10, vincolante, salvata anche in memoria): «se hai fatto una cosa
+   bene in un punto fai lo stesso anche nell'altro, riciclando il possibile»: una funzione
+   gia' presente in una scheda va replicata per intero (gesti, marcatori, colori, tooltip,
+   snap, feedback) senza aspettare richieste una per una.
+   «PROCEDI» (utente 13/10 19:05, applicando la regola «stessa UX ovunque»): allineato il
+   resto di cio' che il simbolo aveva e l'anteprima no. (a) Annulla/Ripeti dei disegni:
+   pulsanti edit-undo/edit-redo accanto allo zoom (stesse icone e tooltip del simbolo),
+   Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z come QShortcut WidgetWithChildren sulla vista; pile
+   _fp_drawings_undo/_redo di snapshot, _apply_footprint_drawings(history=push|undo|redo);
+   ogni passo salva il progetto e riscrive il .kicad_mod; l'apertura di un progetto azzera
+   la storia. (b) Menu contestuale del disegno come quello dell'elemento del simbolo:
+   Duplica (Ctrl+D, copia spostata di un passo griglia a destra e in basso), sottomenu Layer
+   (i tre layer, spuntato l'attuale), Spessore del tratto… (getDouble 0.01-5 mm; solo forme),
+   Modifica testo… (solo testo), Elimina disegno. Tasti: Delete elimina e Ctrl+D duplica il
+   disegno sotto il puntatore. _set_drawing_field valida sempre il record (layer o spessore
+   non ammessi = rifiutati senza salvare). FootprintView.grid_step() per l'offset della
+   copia. i18n +2 («Layer», «Spessore del tratto in mm»). Test +3 (44 in
+   test_footprint_drawings; FakeMenu del test del menu con addMenu/addSeparator/azioni;
+   stato dei pulsanti letto con isEnabledTo(parent) perche' la scheda e' disabilitata prima
+   dell'acquisizione). RESTA FUORI rispetto al simbolo: selezione multipla, copia/incolla
+   fra progetti, proprietà di riempimento (fp_rect/fp_circle hanno fill ma la palette non lo
+   espone), readout X/Y in barra: segnalati, non autorizzati.
