@@ -181,7 +181,7 @@ vista trascina il gruppo (risale ai genitori dal figlio colpito) ed emette
 `pos()` del gruppo. test_package_preview_drills.py esclude i gruppi anche
 dal conteggio del rame.
 
-## FINE SESSIONE 13/10 (2) — branch `ADVANCED`, commit: vedi «docs: handoff» successivo, mergiato in `main`
+## FINE SESSIONE 13/10 (2) — branch `ADVANCED`, commit `b99f835` (+ handoff), mergiato in `main`
 
 Dopo `e9b9bf5`: tappa 1 dei testi del footprint FATTA (sezione «testi del
 footprint, tappa 1» qui sotto): «REF**» e valore trascinabili
