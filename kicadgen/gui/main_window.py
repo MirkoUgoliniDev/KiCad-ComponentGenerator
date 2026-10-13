@@ -23,8 +23,8 @@ import webbrowser
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize, pyqtSignal
-from PyQt6.QtGui import (QBrush, QColor, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
-                         QPolygonF, QShortcut, QTextCursor)
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen,
+                         QPixmap, QPolygonF, QShortcut, QTextCursor)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
@@ -129,7 +129,7 @@ class _ModulePreloader(QObject):
 
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
-from .theme import BASE, BLUE, RED, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .theme import BASE, BLUE, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .tooltips import install_tooltip_filter
 # Worker e aiutanti del contratto di chiamata: spostati in gui/workers.py
 # (HANDOFF 130, T6/G5) e ri-esportati qui, dove chiamanti e test li cercano.
@@ -923,6 +923,10 @@ class MainWindow(QMainWindow):
         self._analysis_pcb_thickness = None
         self.pin_map: dict | None = None
         self.header_pad_overrides: dict[str, dict] = {}
+        #: Chosen positions of the footprint's Reference and Value texts,
+        #: {key: (x, y)} mm in footprint coordinates (user, 2026-10-13);
+        #: a key left out keeps the generator's default.
+        self.footprint_text_positions: dict[str, tuple] = {}
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
         #: Revisione dell'analisi AI, gemella di `_model_revision` per i
@@ -6696,6 +6700,7 @@ class MainWindow(QMainWindow):
                                   "name": self._component_name()}
                                  if self.package_geometry is not None else None),
             "host_mounting": self._mounting_state(),
+            "footprint_texts": {key: list(value) for key, value in self.footprint_text_positions.items()},
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
@@ -6853,6 +6858,8 @@ class MainWindow(QMainWindow):
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
         self._restore_mounting_state(state.get("host_mounting"))
+        from ..core.footprint import validate_text_positions
+        self.footprint_text_positions = validate_text_positions(state.get("footprint_texts"))
         self._refresh_type_effect()
         self.package_geometry = package_geometry
         # After the package: the designator proposal reads its family.
@@ -10789,6 +10796,7 @@ class MainWindow(QMainWindow):
             single_component=self._is_single_component_project(),
         )
         self._worker.footprint_params = host_params
+        self._worker.text_positions = deepcopy(self.footprint_text_positions)
         # PackageGeometry carries no datasheet: the worker passes it to
         # build_package itself (the other generators read it from params).
         self._worker.datasheet = self._effective_datasheet()
@@ -11094,6 +11102,8 @@ class MainWindow(QMainWindow):
         from .footprint_view import FootprintView
         self.preview_view = FootprintView(self.preview_scene)
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
+        self.preview_view.text_moved.connect(self._on_footprint_text_moved)
+        self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
         self.preview_view.setMinimumHeight(500)
         # The footprint is drawn at a relatively high scene scale (20 px/mm).
         # Without these hints circles, square-pad corners and small pin labels
@@ -13118,6 +13128,7 @@ class MainWindow(QMainWindow):
             self._add_dim_v(-half_w, half_w, left - 40, self._dim_label("dim.body", p.body_width))
             self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
 
+        self._draw_footprint_texts(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -13372,6 +13383,7 @@ class MainWindow(QMainWindow):
         self._add_dim_h(left, right, max(bottom, labels_bottom) + 60, self._dim_label("dim.total", x1 - x0))
         self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
 
+        self._draw_footprint_texts(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -13476,6 +13488,7 @@ class MainWindow(QMainWindow):
                         origin=next(((pin.x_mm, pin.y_mm) for pin in pins if str(pin.number).strip()), (0., 0.)))
         self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
+        self._draw_footprint_texts(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -13575,6 +13588,130 @@ class MainWindow(QMainWindow):
         # The selected land is an edit to the generated host footprint, so
         # write the updated .kicad_mod immediately after persisting the choice.
         self._generate(footprint_only=True)
+
+    # ── Footprint texts (Reference, Value) ───────────────────────────
+
+    def _draw_footprint_texts(self, mm_to_px: float) -> None:
+        """@brief Draw «REF**» and the footprint name where the file puts them, draggable.
+
+        @param mm_to_px Scene scale of the drawer that calls this.
+        @note Called by the three 2D drawers after the geometry: the texts
+            are the footprint's own Reference (silkscreen) and Value
+            (fabrication layer) properties, at their chosen or default
+            position (`core.footprint.DEFAULT_TEXT_POSITIONS`). Each text is
+            a group whose position IS the KiCad anchor (`at`, the centre of
+            the text): a small cross marks it, because a centred text alone
+            does not show where it is anchored (user, 2026-10-13). The group
+            and its children carry the key in `TEXT_KEY_ROLE` for the drag.
+        """
+        from PyQt6.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
+        from ..core.footprint import DEFAULT_TEXT_POSITIONS, TEXT_KEYS
+        from .footprint_view import TEXT_KEY_ROLE
+        # An unnamed project still shows (and can drag) its Value text.
+        texts = {"Reference": "REF**", "Value": self._component_name() or "Value"}
+        colours = {"Reference": TEXT, "Value": SUBTEXT}
+        hints = {"Reference": self.i18n.text(
+                     "Riferimento (REF**) sulla serigrafia: trascinalo dove deve stare; tasto destro per la posizione predefinita."),
+                 "Value": self.i18n.text(
+                     "Valore sul layer di fabbricazione: trascinalo dove deve stare; tasto destro per la posizione predefinita.")}
+        font = QFont(self.font())
+        font.setPixelSize(max(1, int(round(1.0 * mm_to_px))))  # 1 mm text, KiCad's default size
+        # The anchor cross in the accent colour, wider than the glyphs are
+        # tall, so it reads through the text it is centred on.
+        arm = 0.75 * mm_to_px
+        for key in TEXT_KEYS:
+            x_mm, y_mm = self.footprint_text_positions.get(key, DEFAULT_TEXT_POSITIONS[key])
+            group = QGraphicsItemGroup()
+            self.preview_scene.addItem(group)
+            text = self.preview_scene.addSimpleText(texts[key], font)
+            text.setBrush(QBrush(QColor(colours[key])))
+            rect = text.boundingRect()
+            text.setPos(-rect.width() / 2, -rect.height() / 2)
+            group.addToGroup(text)
+            cross_pen = QPen(QColor(BLUE))
+            cross_pen.setCosmetic(True)
+            cross_pen.setWidthF(1.2)
+            # Lines only: the preview tests count ellipses and paths as pads
+            # and drills, and the anchor mark is neither.
+            for mark in (QGraphicsLineItem(-arm, 0, arm, 0), QGraphicsLineItem(0, -arm, 0, arm)):
+                mark.setPen(cross_pen)
+                group.addToGroup(mark)
+            group.setPos(x_mm * mm_to_px, y_mm * mm_to_px)
+            tooltip = hints[key] + "\n" + self.i18n.text("Ancoraggio: {x} mm, {y} mm").format(
+                x=f"{x_mm:g}", y=f"{y_mm:g}")
+            for item in (group, *group.childItems()):
+                item.setData(TEXT_KEY_ROLE, key)
+                item.setCursor(Qt.CursorShape.SizeAllCursor)
+                item.setToolTip(tooltip)
+            group.setZValue(50)
+
+    def _footprint_text_snap_mm(self) -> float:
+        """@brief The step a dropped text snaps to: the preview grid when shown, else 0.1 mm."""
+        if getattr(self, "chk_grid", None) is not None and self.chk_grid.isChecked():
+            return 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
+        return 0.1
+
+    def _set_footprint_text_position(self, key: str, position) -> bool:
+        """@brief Keep a text position (None: back to default), save, redraw and rewrite the footprint.
+
+        @param key One of `core.footprint.TEXT_KEYS`.
+        @param position (x, y) mm in footprint coordinates, or None for the default.
+        @return True when the choice was saved; False (and the previous
+            choice kept) when the project could not be written.
+        @note Same contract as a pad edit: the chosen text position is an
+            edit to the generated footprint, so the .kicad_mod is written
+            again right after the project file.
+        """
+        from ..core.footprint import TEXT_KEYS, validate_text_positions
+        if key not in TEXT_KEYS:
+            return False
+        updated = dict(self.footprint_text_positions)
+        if position is None:
+            if key not in updated:
+                return True
+            updated.pop(key)
+        else:
+            checked = validate_text_positions({key: list(position)})
+            if key not in checked:
+                return False
+            if updated.get(key) == checked[key]:
+                self._draw_preview()
+                return True
+            updated[key] = checked[key]
+        previous = self.footprint_text_positions
+        self.footprint_text_positions = updated
+        if not self._save_project_config(force=True):
+            self.footprint_text_positions = previous
+            self._draw_preview()
+            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
+                "Posizione del testo non salvata."))
+            return False
+        self._draw_preview()
+        self._generate(footprint_only=True)
+        return True
+
+    def _on_footprint_text_moved(self, key: str, x_scene: float, y_scene: float) -> None:
+        """@brief Slot of the view: a text was dropped at a scene point; snap it and keep it.
+
+        @param key Text key.
+        @param x_scene Drop centre, scene units (20 px/mm in every drawer).
+        @param y_scene Drop centre, scene units.
+        """
+        step = self._footprint_text_snap_mm()
+        x_mm, y_mm = (round(round(v / 20.0 / step) * step, 4) for v in (x_scene, y_scene))
+        self._set_footprint_text_position(key, (x_mm, y_mm))
+
+    def _footprint_text_context_menu(self, key: str) -> None:
+        """@brief Right click on a text: offer its default position."""
+        from ..core.footprint import TEXT_KEYS
+        if key not in TEXT_KEYS:
+            return
+        menu = QMenu(self)
+        reset = menu.addAction(self.i18n.text("Posizione predefinita"))
+        reset.setEnabled(key in self.footprint_text_positions)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is reset:
+            self._set_footprint_text_position(key, None)
 
     def _edit_package_pad(self, pad_index: int) -> None:
         """@brief Edit the selected package pad's shape, dimensions and, for a holed pad, its drill.

@@ -435,6 +435,9 @@ class GenerateWorker(_Cad3DRunWorker):
         #: Project description for the footprint's `descr` and "Description";
         #: "" keeps the generator's generic text (same reason as `datasheet`).
         self.description = ""
+        #: Chosen positions of the Reference and Value texts, {key: (x, y)}
+        #: mm (user, 2026-10-13); {} keeps the generator's defaults.
+        self.text_positions = {}
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
@@ -451,6 +454,7 @@ class GenerateWorker(_Cad3DRunWorker):
                 if isinstance(host, PackageGeometry)
                 else _patch_point("build_pin_header")(host)
             )
+            footprint.place_texts(self.text_positions)
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))

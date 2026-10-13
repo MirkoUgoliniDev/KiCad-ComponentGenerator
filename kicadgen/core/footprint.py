@@ -20,6 +20,7 @@ Esempio minimo:
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
@@ -215,6 +216,37 @@ class FpText:
         return node
 
 
+#: Visible footprint texts whose position the user may choose (the KiCad
+#: properties drawn on the board), in the order they are written.
+TEXT_KEYS = ("Reference", "Value")
+#: Where they go unless moved: the positions every footprint had before they
+#: became movable (user, 2026-10-13), so files without a choice do not change.
+DEFAULT_TEXT_POSITIONS = {"Reference": (0.0, -2.0), "Value": (0.0, 2.0)}
+#: Bound of a chosen coordinate, mm: nothing on a footprint is farther.
+TEXT_POSITION_LIMIT_MM = 500.0
+
+
+def validate_text_positions(raw) -> dict:
+    """@brief Keep the well-formed entries of a saved {key: [x, y]} mapping of text positions.
+
+    @param raw Whatever the project file holds under `footprint_texts`.
+    @return {key: (x, y)} for the keys of `TEXT_KEYS` whose value is a pair
+        of finite numbers within `TEXT_POSITION_LIMIT_MM`; anything else is
+        left out, like a malformed pad override.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    result = {}
+    for key, value in raw.items():
+        if key not in TEXT_KEYS or not isinstance(value, (list, tuple)) or len(value) != 2:
+            continue
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                   and abs(v) <= TEXT_POSITION_LIMIT_MM for v in value):
+            continue
+        result[key] = (round(float(value[0]), 4), round(float(value[1]), 4))
+    return result
+
+
 @dataclass
 class Footprint:
     """@brief Complete KiCad footprint that renders and saves as a .kicad_mod file.
@@ -236,6 +268,26 @@ class Footprint:
 
     pads: list = field(default_factory=list)
     graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
+
+    def place_texts(self, positions) -> "Footprint":
+        """@brief Put the Reference and Value texts where the user chose; the others keep their default.
+
+        @param positions {key: (x, y)} mm in footprint coordinates (y down),
+            keys of `TEXT_KEYS`; None or {} changes nothing.
+        @return self, for chaining.
+        @throws ValueError On an unknown key or a position that does not validate.
+        """
+        for key, value in (positions or {}).items():
+            if key not in TEXT_KEYS:
+                raise ValueError(f"footprint text: unknown key {key!r}")
+            checked = validate_text_positions({key: value})
+            if key not in checked:
+                raise ValueError(f"footprint text {key}: needs [x, y] in mm")
+            if key == "Reference":
+                self.reference_at = checked[key]
+            else:
+                self.value_at = checked[key]
+        return self
 
     def add_pad(self, pad: Pad) -> "Footprint":
         """@brief Append a pad and return self for chaining."""
