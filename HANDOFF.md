@@ -301,7 +301,7 @@ ESITO (13/10 sera, FATTO, NON committato, suite completa NON eseguita):
   symbol/project_state/startup/start_page/workflow/grid/i18n/
   documentation) 792 verdi + 2 corretti poi (47 verdi nel file). Resa
   offscreen controllata a occhio.
-## FINE SESSIONE 13/10 (4) — branch `ADVANCED`, commit `COMMIT_HASH` (+ handoff), mergiato in `main`
+## FINE SESSIONE 13/10 (4) — branch `ADVANCED`, commit `9e41f39` (+ handoff), mergiato in `main`
 
 Committato su richiesta dell'utente («committa tutto, pusha e mergia in main»):
 griglia fine puntinata (footprint e simbolo), correzioni di fluidita' del
