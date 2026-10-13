@@ -130,10 +130,10 @@ ai_account_menu): 273 verdi. Suite completa NON rilanciata. Il segfault
 della sonda a fine processo e' del suo thread EnumWindows durante lo
 smontaggio, non dell'applicazione.
 
-## FINE SESSIONE 13/10 — branch `ADVANCED`, commit: (riallineato nel commit «docs: handoff») , da mergiare in `main`
+## FINE SESSIONE 13/10 — branch `ADVANCED`, commit `e9b9bf5` (+ questo handoff), mergiato in `main`
 
 Tre lavori FATTI oggi, tutti con sezione propria qui sotto (diagnosi, piano,
-esito), nessuno ancora committato al momento della scrittura:
+esito), committati in `e9b9bf5`:
 1. Finestrelle che lampeggiavano all'avvio: widget orfani mostrati prima del
    montaggio (modulo modelli, palette della scheda Simbolo). Test di classe
    tests/test_no_stray_windows.py.
