@@ -11,7 +11,7 @@ import tempfile
 from .system_dependencies import find_kicad_cli
 from .kicad_library import (ComponentArtifacts, create_preview_project,
                             step_file_is_complete, _direct_child_ranges, _node_arguments)
-from ..generators.symbol import symbol_inputs, serialize_symbol
+from ..generators.symbol import symbol_inputs, serialize_symbol, symbol_property_positions
 
 
 @dataclass(frozen=True)
@@ -218,7 +218,8 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         try:
             pins, body = symbol_inputs(rows)
-            symbol = serialize_symbol(name, pins, footprint=f'KiCadGen:{name}', body=body)
+            symbol = serialize_symbol(name, pins, footprint=f'KiCadGen:{name}', body=body,
+                                      properties=symbol_property_positions(rows))
             ids = {str(p.number) for p in pins}
             if pad_ids is None:
                 add('SKIP', tx('Corrispondenza pin-pad'), tx('Footprint non leggibile.'))

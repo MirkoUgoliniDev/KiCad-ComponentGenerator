@@ -191,6 +191,63 @@ def symbol_inputs(rows):
     return pins, bodies[0] if bodies else None
 
 
+#: Visible symbol properties whose position the user may choose, in the
+#: order they are written. The others are hidden and sit at the origin.
+PROPERTY_KEYS = ('Reference', 'Value')
+#: Row key carrying the chosen property positions, mm, symbol coordinates
+#: (y up), as {"Value": [x, y], ...}; identical on every row like `symbol_body`.
+PROPERTIES_KEY = 'symbol_properties'
+
+
+def default_property_positions(layout: 'SymbolLayout') -> dict:
+    """@brief Where KiCad's visible properties go unless the user moved them.
+
+    @param layout The symbol geometry.
+    @return {'Reference': (0, h + 5.08), 'Value': (0, h + 2.54)}, mm,
+        above the body on the x axis: the positions every symbol had before
+        they became movable, so files without a choice do not change.
+    """
+    h = layout.height / 2
+    return {'Reference': (0.0, round(h + 5.08, 4)), 'Value': (0.0, round(h + 2.54, 4))}
+
+
+def _property_position(value, key: str) -> tuple:
+    """Validate one [x, y] of `symbol_properties`: two finite numbers, mm."""
+    if isinstance(value, (list, tuple)) and len(value) == 2 and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in value):
+        return (round(float(value[0]), 4), round(float(value[1]), 4))
+    raise ValueError(f'{PROPERTIES_KEY}: {key} needs [x, y] in mm')
+
+
+def symbol_property_positions(rows) -> dict:
+    """@brief The chosen positions of the visible properties carried by the rows.
+
+    @param rows Symbol rows of the project (every row holds the same mapping,
+        like `symbol_body`).
+    @return {key: (x, y)} for the keys present, mm, symbol coordinates; {}
+        when no row carries `symbol_properties` or it is empty.
+    @throws ValueError When rows disagree, the value is not a mapping, a key
+        is not one of `PROPERTY_KEYS` or a position is not [x, y] of finite
+        numbers.
+    """
+    carried = [row[PROPERTIES_KEY] for row in rows if isinstance(row, dict) and PROPERTIES_KEY in row]
+    if not carried:
+        return {}
+    if any(entry != carried[0] for entry in carried):
+        raise ValueError('Inconsistent symbol property positions')
+    mapping = carried[0]
+    if mapping is None:
+        return {}
+    if not isinstance(mapping, dict):
+        raise ValueError(f'{PROPERTIES_KEY}: expected a mapping')
+    result = {}
+    for key, value in mapping.items():
+        if key not in PROPERTY_KEYS:
+            raise ValueError(f'{PROPERTIES_KEY}: unknown property {key!r}')
+        result[key] = _property_position(value, key)
+    return result
+
+
 def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
     """@brief Shared geometry for editor and export; every terminal is on the 100 mil grid.
 
@@ -289,7 +346,7 @@ def _num(value: float) -> str:
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
                      footprint: str = '', reference: str = 'U', body=None, graphics=None,
-                     metadata: SymbolMetadata | None = None) -> str:
+                     metadata: SymbolMetadata | None = None, properties=None) -> str:
     """@brief Return a KiCad 10 symbol library (format 20251024) with one single-unit symbol.
 
     @param name Symbol name, also the Value property; no library separator.
@@ -305,6 +362,9 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
     @param metadata Library metadata (description, keywords, datasheet,
         footprint filters) written as hidden properties; the empty keyword
         and filter properties are left out, as KiCad itself does.
+    @param properties Chosen positions of the visible properties, {key: (x, y)}
+        mm in symbol coordinates (`symbol_property_positions`); a key left
+        out takes its `default_property_positions` place. None for none.
     @return The `.kicad_sym` text, newline-terminated.
     @throws ValueError On an invalid name, reference, metadata or geometry.
     @note Layout: one form per line with KiCad's 100 mil grid coordinates;
@@ -334,18 +394,22 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
              '    (exclude_from_sim no) (in_bom yes) (on_board yes) (in_pos_files yes)',
              '    (duplicate_pin_numbers_are_jumpers no)',
              '    (pin_names (offset 0.508))']
-    properties = [('Reference', reference, h + 5.08, False),
-                  ('Value', name, h + 2.54, False),
-                  ('Footprint', footprint, 0, True),
-                  ('Datasheet', datasheet, 0, True),
-                  ('Description', description, 0, True)]
+    positions = default_property_positions(layout)
+    for key, value in (properties or {}).items():
+        if key not in PROPERTY_KEYS:
+            raise ValueError(f'properties: unknown property {key!r}')
+        positions[key] = _property_position(value, key)
+    visible = [('Reference', reference), ('Value', name)]
+    hidden = [('Footprint', footprint), ('Datasheet', datasheet), ('Description', description)]
     if keywords:
-        properties.append(('ki_keywords', keywords, 0, True))
+        hidden.append(('ki_keywords', keywords))
     if fp_filters:
-        properties.append(('ki_fp_filters', fp_filters, 0, True))
-    for key, value, y, hidden in properties:
-        flags = '(show_name no) (do_not_autoplace no)' + (' (hide yes)' if hidden else '')
-        lines.append(f'    (property {_quote(key)} {_quote(value)} (at 0 {_num(y)} 0) {flags} {effects})')
+        hidden.append(('ki_fp_filters', fp_filters))
+    entries = [(key, value, positions[key], False) for key, value in visible]
+    entries += [(key, value, (0.0, 0.0), True) for key, value in hidden]
+    for key, value, (x, y), hide in entries:
+        flags = '(show_name no) (do_not_autoplace no)' + (' (hide yes)' if hide else '')
+        lines.append(f'    (property {_quote(key)} {_quote(value)} (at {_num(x)} {_num(y)} 0) {flags} {effects})')
     lines.extend((f'    (symbol {_quote(name + "_0_1")}',
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
                   '        (stroke (width 0.254) (type default)) (fill (type background)))'))
@@ -368,17 +432,18 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
                   footprint: str = '', reference: str = 'U', body=None, graphics=None,
-                  metadata: SymbolMetadata | None = None) -> Path:
+                  metadata: SymbolMetadata | None = None, properties=None) -> Path:
     """@brief Validate before touching disk and atomically replace an explicitly chosen file.
 
     @param graphics Placed glyph records, see `serialize_symbol`.
     @param metadata Library metadata, see `serialize_symbol`.
+    @param properties Chosen positions of the visible properties, see `serialize_symbol`.
     @return The written path.
     @throws ValueError When the symbol does not validate; the file is untouched.
     @throws OSError When the temporary file cannot be written or moved in place.
     """
     text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body,
-                            graphics=graphics, metadata=metadata)
+                            graphics=graphics, metadata=metadata, properties=properties)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', suffix='.tmp', dir=target.parent)

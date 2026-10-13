@@ -126,8 +126,8 @@ def test_startup_language_reads_the_config_without_the_gui(launcher, tmp_path, m
     assert launcher.SPLASH_MESSAGES.keys() == {"it", "en", "fr", "de"}
 
 
-def test_create_splash_shows_the_message_in_the_language_or_english(launcher, qapp):
-    splash = launcher.create_splash("fr")
+def test_create_splash_widget_shows_the_message_in_the_language_or_english(launcher, qapp):
+    splash = launcher.create_splash_widget("fr")
     try:
         assert splash.isVisible()
         assert splash.message().strip() == launcher.SPLASH_MESSAGES["fr"], "padded with blank lines for spacing"
@@ -135,7 +135,7 @@ def test_create_splash_shows_the_message_in_the_language_or_english(launcher, qa
     finally:
         splash.close()
         splash.deleteLater()
-    splash = launcher.create_splash("xx")
+    splash = launcher.create_splash_widget("xx")
     try:
         assert splash.message().strip() == launcher.SPLASH_MESSAGES["en"], "unknown language: English"
     finally:
