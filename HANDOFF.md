@@ -301,10 +301,10 @@ ESITO (13/10 sera, FATTO, NON committato, suite completa NON eseguita):
   symbol/project_state/startup/start_page/workflow/grid/i18n/
   documentation) 792 verdi + 2 corretti poi (47 verdi nel file). Resa
   offscreen controllata a occhio.
-## 2026-10-14 notte — FATTO: revisione avversariale completa in 4 cicli, commit LOCALE `COMMIT_HASH` su ADVANCED (NON pushato, NON mergiato)
+## 2026-10-14 notte — FATTO: revisione avversariale completa in 4 cicli, commit LOCALE `af3a92a` su ADVANCED (NON pushato, NON mergiato)
 
 REPORT FINALE (per l'utente e per chi riprende; il diario dei cicli e' sotto).
-STATO: branch ADVANCED, commit locale `COMMIT_HASH` sopra `bc01ca2` (= main `d55e163` +
+STATO: branch ADVANCED, commit locale `af3a92a` sopra `bc01ca2` (= main `d55e163` +
 database). NON pushato e NON mergiato in main, per scelta dichiarata: l'utente rivede prima.
 SUITE COMPLETA sul codice finale, in due meta': A 3559 verdi, 7 saltati, 19 sottotest;
 B 4136 verdi, 4 saltati, 2 xfail; 0 falliti. Le due ultime correzioni del ciclo 4 sono
