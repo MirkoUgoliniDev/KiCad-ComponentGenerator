@@ -1,5 +1,177 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-13 — FATTO (non committato): nome e riferimento del simbolo spostabili (utente: «fai tutti e tre i punti»)
+
+Richiesta: «questa scritta si puo' spostare?» (il nome sopra il corpo nella
+scheda Simbolo). Diagnosi: il nome e' la proprieta' KiCad «Value», disegnata
+dall'editor in un punto fisso (sopra i pin in alto, in pixel) e scritta dal
+generatore a (0, h+2.54); «Reference» a (0, h+5.08) e MAI mostrata
+nell'editor. L'utente ha scelto: (1) nome trascinabile nell'editor, (2)
+posizione scritta nel file, (3) anche il riferimento mostrato e spostabile.
+Piano:
+- generators/symbol.py: `PROPERTY_KEYS = ('Reference', 'Value')`;
+  `default_property_positions(layout)` -> {Reference: (0, h+5.08), Value:
+  (0, h+2.54)} (le posizioni di oggi, cosi' i file esistenti non cambiano);
+  `symbol_property_positions(rows)` legge `symbol_properties` dalle righe
+  (stesso schema di `symbol_body`: identico su ogni riga, dict con chiavi
+  fra PROPERTY_KEYS, valori [x, y] finiti), ValueError se incoerente o
+  malformato; `serialize_symbol(..., properties=None)` e `export_symbol`
+  scrivono `(at x y 0)` con la posizione scelta, altrimenti quella
+  predefinita.
+- gui/symbol_tab.py: i due testi disegnati alle posizioni del file (scala
+  mm -> scena), taggati ('property', chiave) e trascinabili con aggancio
+  alla griglia dei pin; gesto come i glifi (origine, delta, _accept_geometry,
+  storico di annulla/ripeti gia' in `_changed`); `set_reference(prefix)`
+  per il testo «U?» come nell'editor di KiCad; `reset_layout` toglie anche
+  `symbol_properties`. I testi delle proprieta' NON entrano in
+  `_text_bounds` (controllo sovrapposizione fra nomi dei pin).
+- gui/main_window.py: passa `properties` a export_symbol in
+  `_save_applied_electrical_symbol` e `_export_electrical_symbol`; aggiorna
+  il riferimento della scheda Simbolo quando cambia il campo
+  «Designatore di riferimento». services/component_check.py idem.
+- Test: generator (posizione scelta nel file, predefinita assente, righe
+  incoerenti/malformate rifiutate, chiave sconosciuta rifiutata); editor
+  (trascinamento di Value e Reference via i segnali del gesto -> righe con
+  symbol_properties sulla griglia, undo ripristina, reset toglie, il
+  riferimento disegnato «U?» segue set_reference); main_window (export con
+  la posizione).
+Dubbi: nessuno aperto. Posizione predefinita invariata rispetto ai file di
+oggi anche se con pin in alto la scritta si sovrappone: e' cio' che KiCad
+mostra, e ora si sposta.
+Esito: fatto come da piano. Nuovo tests/test_symbol_properties_move.py
+(20 test: generatore, editor via i segnali del gesto, undo/redo/reset,
+trascinamento annullato, chiave sconosciuta, esportazione end-to-end dalla
+finestra). Moduli simbolo/KLC/metadati/documentazione/finestre vaganti:
+305 verdi; component_check e bozza simbolo: 26 verdi. Resa offscreen della
+scheda prima/dopo il trascinamento: «U?» e nome alle posizioni del file,
+nome spostato dove rilasciato. Suite completa NON rilanciata. Nota: il nome
+NON sta piu' sopra i pin in alto per costruzione (prima era in pixel sopra
+il pin piu' lungo): sta dove KiCad lo mette, h+2.54; con pin in alto va
+spostato a mano, come in KiCad.
+
+## 2026-10-13 — FATTO (non committato): splash animato in un processo separato (utente: «direi 2»)
+
+Richiesta: «si puo' fare qualcosa di animato qui?» sullo splash. Vincolo
+spiegato all'utente: durante lo splash il thread grafico costruisce la
+finestra (~3 s), un timer Qt non ticchetta. Due strade proposte (a fasi
+deterministiche, oppure processo separato fluido); l'utente ha scelto il
+processo separato.
+Piano:
+- Nuovo modulo `kicadgen/splash.py` (importa PyQt6 solo dentro le funzioni,
+  nessun servizio): `splash_pixmap`, `SPLASH_*` spostati qui da main.py
+  (main.py li riesporta, i test del lanciatore non cambiano);
+  `run_splash(language)` = ingresso del processo figlio: finestra senza
+  cornice con l'immagine, anello che ruota attorno al chip (solo nello splash
+  disegnato: con un'artwork PNG la geometria non e' nota), puntini del
+  messaggio che ciclano, dissolvenza in ingresso; esce quando lo stdin si
+  chiude (anche se il padre muore: la pipe la chiude il sistema) o dopo
+  `SPLASH_MAX_SECONDS` di sicurezza. `ProcessSplash` = lato padre: avvia
+  `[sys.executable, (main.py,) "--splash", lingua]` con stdin PIPE,
+  stdout/stderr a DEVNULL, CREATE_NO_WINDOW; `finish(window)`/`close()`
+  chiudono la pipe, attendono 1 s, poi kill. Stessa interfaccia duck-typed
+  che `main_window.main` usa gia' (`finish`, `close`).
+- main.py: `--splash <lingua>` gestito in testa a `main()` (dopo il rilancio
+  nel .venv, cosi' il figlio e' gia' il Python giusto); `create_splash`
+  prova il processo e ripiega sullo splash in-process di prima
+  (`create_splash_widget`, codice invariato) se il processo non parte.
+- Eseguibile: build onedir (COLLECT), quindi `KiCadGen.exe --splash it` parte
+  in fretta; `console=False` gia'. Nessuna modifica a packaging/.
+- Test: `tests/test_splash_process.py` — figlio vero con
+  QT_QPA_PLATFORM=offscreen: vivo con la pipe aperta, esce entro 3 s alla
+  chiusura; `ProcessSplash` con Popen finto: finish chiude stdin, attende,
+  kill al timeout, nessuna eccezione se gia' morto; `create_splash` ripiega
+  sul widget se Popen fallisce; la lingua passata al figlio e' quella letta.
+  In test_launcher il test del widget chiama `create_splash_widget`.
+Esito: fatto come da piano. Verifiche: tests/test_splash_process.py (9,
+compreso il figlio reale offscreen), test_launcher, test_preview_3d_lazy,
+test_documentation: 32 verdi; avvio reale misurato con la sonda: splash a
+0,4 s dal lancio, finestra a 2,0 s, splash chiuso 0,3 s dopo; catture dello
+schermo durante l'avvio: anello che ruota e puntini che ciclano, nessuna
+altra finestra. Suite completa NON rilanciata. Pyflakes segnala
+SPLASH_IMAGE/SPLASH_WIDTH «importati ma non usati» in main.py: sono
+riesportazioni volute per i test del lanciatore (noqa gia' sulla riga).
+Trappola trovata con la sonda: se l'oggetto ProcessSplash viene perso
+(garbage collection) la pipe si chiude e lo splash sparisce subito —
+e' il comportamento voluto, ma chi tocca main() deve tenere il riferimento
+fino a `finish`. Da verificare alla prossima build MSI: `KiCadGen.exe
+--splash it` deve partire in fretta (onedir) senza console (console=False).
+L'immagine splash resta quella disegnata (PNG rimandato come prima).
+
+## 2026-10-13 — FATTO (non committato): finestrelle che lampeggiano all'avvio
+
+Segnalazione dell'utente: cliccando «KiCadGen» nella barra di VS Code (task
+«Avvia KiCadGen») compaiono piccole finestre che poi si chiudono. Riprodotto
+con una sonda (filtro eventi Qt su Show/Hide dei widget `isWindow()`, piu'
+EnumWindows): sono widget Qt SENZA genitore resi visibili prima di essere
+montati, quindi Windows li apre come finestre a se'. Due origini:
+1. `main_window.py` `_build_project_tab`: `models_form = QFormLayout()` senza
+   genitore; `_refresh_photo_detector_controls()` (riga ~2921) chiama
+   `setRowVisible(..., True)` PRIMA di `tools_layout.addLayout(models_form)`
+   (riga ~2931). Etichette, combo, campi, pulsanti e la riga «Credito AI»
+   appaiono per ~0.2 s come finestre.
+2. `symbol_tab.py` `PalettePanel._add_section`: `body = QWidget()` senza
+   genitore, `body.setVisible(header.isChecked())` prima di
+   `_content_layout.addWidget(body)`: un lampo per ogni gruppo aperto
+   (46x46 ... 134x178), due volte (costruzione + `retranslate`).
+Correzione FATTA (classe di problema, non il caso): montare prima,
+mostrare dopo. (1) `tools_layout.addLayout(models_form)` spostato prima di
+`_refresh_photo_detector_controls()`; (2) `body` della palette aggiunto al
+layout prima di `setVisible`. Test di classe `tests/test_no_stray_windows.py`:
+filtro eventi su QApplication, costruisce MainWindow (fixture esistente) e
+SymbolTab e fallisce se un widget che non sia la finestra principale riceve
+Show come finestra (`isWindow()`); negativo: il filtro rileva davvero un
+widget orfano mostrato. Lo splash (800x450, titolo «python») e' voluto.
+Verifiche: il test nuovo fallisce (2 su 4) sul codice precedente e passa sul
+nuovo; sonda sull'avvio reale: dopo la correzione compaiono solo splash e
+finestra principale; moduli collegati (no_stray_windows, symbol_tab,
+main_window_centre/close_guard, photo_inventory_gui, documentation,
+photo_detector_ui, reopen_detector_review, yolo_review_wiring,
+ai_account_menu): 273 verdi. Suite completa NON rilanciata. Il segfault
+della sonda a fine processo e' del suo thread EnumWindows durante lo
+smontaggio, non dell'applicazione.
+
+## FINE SESSIONE 13/10 — branch `ADVANCED`, commit: (riallineato nel commit «docs: handoff») , da mergiare in `main`
+
+Tre lavori FATTI oggi, tutti con sezione propria qui sotto (diagnosi, piano,
+esito), nessuno ancora committato al momento della scrittura:
+1. Finestrelle che lampeggiavano all'avvio: widget orfani mostrati prima del
+   montaggio (modulo modelli, palette della scheda Simbolo). Test di classe
+   tests/test_no_stray_windows.py.
+2. Splash animato in un processo separato (`kicadgen/splash.py`,
+   `main.py --splash <lingua>`, ripiego sullo splash fermo). Test
+   tests/test_splash_process.py, con il processo figlio reale offscreen.
+3. Nome («Value») e riferimento («Reference», «U?») del simbolo disegnati
+   dove li mette il file e trascinabili; posizione in `symbol_properties`
+   su ogni riga e in `(at x y 0)` del file. Test
+   tests/test_symbol_properties_move.py.
+Suite: NON rilanciata per intero oggi. Blocchi mirati verdi: simbolo/KLC/
+metadati/documentazione/finestre vaganti 305; splash/lanciatore/handover 32;
+component_check e bozza 26; detector/account/finestra 273. Ultima suite
+completa: 7344 verdi (12/10 notte, vedi sotto).
+APERTO — RICHIESTO dall'utente (13/10, «ok procedi, ma prima committa»):
+testi nel footprint, strada 3 in due tappe, consigliata dall'assistente e
+accettata. Tappa 1 (da fare subito dopo il commit/merge): «REF**» e valore
+del footprint trascinabili nell'anteprima 2D, posizione salvata nel progetto
+e scritta nel file (`core/footprint.py` righe ~273-274: `reference_at`,
+`value_at`), stesso meccanismo della scheda Simbolo (gesti, storico,
+righe). Tappa 2 (dopo): strumento «Testo» nell'anteprima: contenuto,
+layer (predefinito F.Fab, serigrafia selezionabile), altezza predefinita
+1 mm / spessore 0,15 mm (minimi KLC), trascinamento, rotazione a 90 gradi,
+cancellazione, salvato nel progetto e scritto come `fp_text user`. Oggi
+l'anteprima (`gui/footprint_view.py`) e' in sola lettura: navigazione,
+zoom, menu sui pad.
+APERTO — invariato da prima: immagine splash PNG (rimandata); pulsante apri
+progetto «non si aggiorna»; campi obbligatori; «Regole KLC»; «Applica ai
+file»; unita' multiple.
+Trappole: (a) il nome del simbolo non sta piu' sopra i pin in alto per
+costruzione (sta a h+2.54 come in KiCad: con pin in alto va spostato a
+mano); (b) l'oggetto ProcessSplash va tenuto vivo fino a `finish`, se viene
+perso la pipe si chiude e lo splash sparisce; (c) la sonda usata per
+l'avvio (scratchpad, non nel repo) va in segfault a fine processo per il
+suo thread EnumWindows: non e' un difetto dell'applicazione; (d) file
+non tracciati `rows_none_rev.pkl`, `tmp/`, `work/` nella radice: non
+dell'assistente, lasciati fuori dal commit.
+
 ## FINE SESSIONE 12/10 notte (2) — commit `4ff0e79` su `ADVANCED`, mergiato in `main`: revisione avversariale FATTA, suite completa verde
 
 - Suite completa in due meta' dopo tutte le correzioni della revisione:

@@ -2918,7 +2918,6 @@ class MainWindow(QMainWindow):
                        self.btn_yolo_settings,
                        self.label_vlm_model, self.field_vlm_model, self.btn_pick_vlm_model):
             widget.setProperty("i18n_skip", True)
-        self._refresh_photo_detector_controls()
         self._align_form(models_form, "project")
 
         analysis_layout.addLayout(ai_form)
@@ -2930,6 +2929,10 @@ class MainWindow(QMainWindow):
         tools_layout.setSpacing(12)
         tools_layout.addLayout(models_form)
         analysis_layout.addWidget(self.group_ai_tools)
+        # Only now that the form sits in a widget: `setRowVisible(..., True)`
+        # on the rows of an unparented layout showed every label and field as
+        # a top-level window for a moment at start-up (user, 2026-10-13).
+        self._refresh_photo_detector_controls()
 
         self.btn_extract_ai = QPushButton("Estrai parametri con AI")
         self.btn_extract_ai.setObjectName("primary")
@@ -9468,6 +9471,8 @@ class MainWindow(QMainWindow):
             self.field_reference.setText(upper)
             return
         self._refresh_klc_findings()
+        if hasattr(self, 'symbol_tab'):
+            self.symbol_tab.set_reference(self._effective_reference())
 
     def _effective_reference(self) -> str:
         """@brief The designator prefix the files get: the field, or the proposal while empty."""
@@ -11202,6 +11207,10 @@ class MainWindow(QMainWindow):
     def _refresh_symbol_tab(self, force=False):
         if not hasattr(self, 'symbol_tab'):
             return
+        # The Reference text of the editor («U?») follows the designator the
+        # files get (user, 2026-10-13: both visible properties are drawn
+        # where KiCad will draw them, and can be moved).
+        self.symbol_tab.set_reference(self._effective_reference())
         try:
             ids = self._symbol_pad_ids()
         except (ValueError, TypeError) as exc:
@@ -11260,13 +11269,15 @@ class MainWindow(QMainWindow):
             if mismatch:
                 raise ValueError(mismatch)
             pins, body = symbol_inputs(rows)
+            from ..generators.symbol import symbol_property_positions
             from ..generators.symbol_glyphs import symbol_graphics
             graphics = symbol_graphics(rows)
+            properties = symbol_property_positions(rows)
             target = Path(path) if path else (
                 self._project_dir() / f'{self._component_name()}.kicad_sym')
             return export_symbol(target, self._component_name(), pins,
                                  footprint=self.symbol_tab.footprint(), body=body, graphics=graphics,
-                                 metadata=self._symbol_metadata())
+                                 metadata=self._symbol_metadata(), properties=properties)
         except (OSError, ValueError, TypeError) as exc:
             if not quiet:
                 self.symbol_tab.set_status(str(exc))

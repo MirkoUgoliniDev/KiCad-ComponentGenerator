@@ -124,12 +124,13 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None):
     return 0
 
 
-#: Splash text per interface language (the launcher must not import the
-#: translation catalogue: the splash exists to appear before the heavy imports).
-SPLASH_MESSAGES = {"it": "Avvio in corso…", "en": "Starting…", "fr": "Démarrage…", "de": "Wird gestartet…"}
-#: The QApplication created for the splash. Kept here on purpose: a local
-#: reference dies with the function and Qt destroys the application with
-#: it, splash included (found by the real start-up check, 2026-10-12).
+# The splash lives in kicadgen.splash (stdlib-only at import time); the
+# names stay here for the launcher's tests and callers.
+from kicadgen.splash import (  # noqa: E402,F401 - re-exported
+    SPLASH_FLAG, SPLASH_IMAGE, SPLASH_MESSAGES, SPLASH_WIDTH, ProcessSplash, run_splash, splash_pixmap)
+#: The QApplication created for the in-process splash. Kept here on purpose:
+#: a local reference dies with the function and Qt destroys the application
+#: with it, splash included (found by the real start-up check, 2026-10-12).
 _QT_APPLICATION = None
 
 
@@ -154,55 +155,28 @@ def startup_language(default="it"):
         return default
 
 
-#: Logical size of the splash, pixels: the artwork (`SPLASH_IMAGE`) is
-#: scaled to this width; the drawn fallback is painted at this size.
-SPLASH_WIDTH = 800
-#: Optional artwork, 16:9, no text (the name and the message are painted
-#: over it): drop a PNG here to replace the drawn splash (user, 2026-10-12).
-SPLASH_IMAGE = ("kicadgen", "gui", "assets", "splash.png")
+def create_splash(language, start_process=ProcessSplash.start):
+    """@brief Show the start-up splash: the animated process, or the still in-process one.
 
-
-def splash_pixmap(resource_path, device_pixel_ratio=1.0):
-    """@brief The splash picture: the artwork when present, else icon and name on the theme colour.
-
-    @param resource_path Function mapping path parts to a Path (the
-        application's `kicadgen.app_paths.resource_path`).
-    @param device_pixel_ratio Screen scale; the pixmap is rendered at
-        `SPLASH_WIDTH` × ratio so it stays sharp on high-density screens.
-    @return A QPixmap with its device pixel ratio set. An unreadable
-        artwork falls back to the drawn picture: the splash never fails.
+    @param language Interface language code (see `SPLASH_MESSAGES`).
+    @param start_process Factory of the splash process (replaceable in tests).
+    @return A ProcessSplash, or the QSplashScreen of `create_splash_widget`
+        when the process cannot be started; the GUI closes either with
+        `finish(window)` once the main window is on screen.
+    @note The animation needs its own process (user, 2026-10-13): this
+        process's GUI thread is busy building the window for seconds, and a
+        splash it painted could not move. The still splash remains the
+        fallback so the click always answers at once.
     """
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
-    ratio = max(1.0, float(device_pixel_ratio))
-    width = int(SPLASH_WIDTH * ratio)
-    artwork = resource_path(*SPLASH_IMAGE)
-    pixmap = QPixmap(str(artwork)) if artwork.is_file() else QPixmap()
-    if not pixmap.isNull():
-        pixmap = pixmap.scaledToWidth(width, Qt.TransformationMode.SmoothTransformation)
-    else:
-        pixmap = QPixmap(width, int(width * 9 / 16))
-        pixmap.fill(QColor("#1e1e2e"))
-        painter = QPainter(pixmap)
-        side = int(180 * ratio)
-        icon = QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))).pixmap(side, side)
-        painter.drawPixmap((pixmap.width() - icon.width()) // 2, int(pixmap.height() * 0.22), icon)
-        painter.end()
-    painter = QPainter(pixmap)
-    font = QFont(painter.font())
-    font.setPixelSize(int(30 * ratio))
-    font.setBold(True)
-    painter.setFont(font)
-    painter.setPen(QColor("#cdd6f4"))
-    band = pixmap.rect().adjusted(0, int(pixmap.height() * 0.66), 0, -int(pixmap.height() * 0.2))
-    painter.drawText(band, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "KiCadGen")
-    painter.end()
-    pixmap.setDevicePixelRatio(ratio)
-    return pixmap
+    try:
+        return start_process(language)
+    except (OSError, ValueError) as exc:
+        print(f"KiCadGen: splash animato non avviato: {exc}", file=sys.stderr)
+        return create_splash_widget(language)
 
 
-def create_splash(language):
-    """@brief Show the start-up splash: artwork or icon, the name and «Starting…» in the given language.
+def create_splash_widget(language):
+    """@brief Show the still in-process splash: artwork or icon, the name and «Starting…».
 
     @param language Interface language code (see `SPLASH_MESSAGES`).
     @return The QSplashScreen, already shown and painted; the GUI closes it
@@ -255,6 +229,9 @@ def main():
             return 1
     if "--check-runtime" in sys.argv[1:]:
         return check_runtime()
+    if sys.argv[1:2] == [SPLASH_FLAG]:
+        # The splash process: paints until the parent closes the pipe.
+        return run_splash(sys.argv[2] if len(sys.argv) > 2 else "en")
     try:
         from dotenv import load_dotenv
         from kicadgen.app_paths import env_files

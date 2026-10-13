@@ -8,7 +8,9 @@ from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, 
 from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
-from ..generators.symbol import ELECTRICAL_TYPES, PIN_GRID_MM, symbol_inputs, layout_symbol
+from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
+                                 default_property_positions, symbol_inputs, layout_symbol,
+                                 symbol_property_positions)
 from .pinout_dialog import pin_sort_key
 from ..generators.symbol_edit import transform_selection
 
@@ -313,12 +315,15 @@ class PalettePanel(QWidget):
                     self._tool_actions[glyph.key] = action
                 else:
                     self._actions.append(action)
-            body.setVisible(header.isChecked())
             header.toggled.connect(lambda checked, b=body, h=header: (
                 b.setVisible(checked),
                 h.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)))
             self._content_layout.addWidget(header)
             self._content_layout.addWidget(body)
+            # Mounted first, shown after: an unparented body made visible is a
+            # top-level window, one flash per open group at start-up
+            # (user, 2026-10-13).
+            body.setVisible(header.isChecked())
             self._groups[key] = (header, body)
 
     def set_tool_checked(self, key, checked):
@@ -665,6 +670,9 @@ class SymbolTab(QWidget):
         self._original = []
         self._loading = False
         self._name = ''
+        #: Designator prefix drawn as «U?» (KiCad's symbol editor shows the
+        #: Reference property that way); see `set_reference`.
+        self._reference = 'U'
         self._footprint = ''
         self._source_key = None
         self._error = ''
@@ -1195,6 +1203,25 @@ class SymbolTab(QWidget):
             return symbol_graphics(self.draft_rows() if rows is None else rows)
         except ValueError:
             return []
+
+    @staticmethod
+    def _property_positions(rows, symbol):
+        """Positions of Reference and Value, mm: the rows' choice, else the file's defaults."""
+        positions = default_property_positions(symbol)
+        try:
+            positions.update(symbol_property_positions(rows))
+        except ValueError:
+            pass
+        return positions
+
+    @staticmethod
+    def _with_properties(rows, positions):
+        """Rows with `symbol_properties` set to the same mapping on every row (like `symbol_body`)."""
+        rows = deepcopy(rows)
+        mapping = {key: [round(x, 4), round(y, 4)] for key, (x, y) in positions.items()}
+        for row in rows:
+            row[PROPERTIES_KEY] = deepcopy(mapping)
+        return rows
 
     @staticmethod
     def _with_graphics(rows, graphics):
@@ -2188,6 +2215,19 @@ class SymbolTab(QWidget):
         """@brief Return the associated footprint library identifier."""
         return self._footprint
 
+    def set_reference(self, prefix):
+        """@brief Set the designator prefix drawn as the Reference text («U?»).
+
+        @param prefix Letters of the designator; blank falls back to «U».
+        @note Only the drawing changes: the prefix itself lives in the
+            project metadata and reaches the file through `SymbolMetadata`.
+        """
+        prefix = str(prefix or '').strip() or 'U'
+        if prefix != self._reference:
+            self._reference = prefix
+            if self._symbol is not None:
+                self._draw(self._symbol)
+
     def set_error(self, message):
         """@brief Record a blocking error and refresh editor action states."""
         self._error = str(message)
@@ -2288,6 +2328,7 @@ class SymbolTab(QWidget):
             row.pop('symbol_offset', None)
             row.pop('symbol_position', None)
             row.pop('symbol_angle', None)
+            row.pop(PROPERTIES_KEY, None)
             row['symbol_side'] = 'left' if index < (len(rows) + 1) // 2 else 'right'
         self._populate(rows)
 
@@ -2463,6 +2504,9 @@ class SymbolTab(QWidget):
             self._select_graphic(target[1])
         elif target[0] == 'shape_point':
             self._select_graphic(target[1])
+        elif target[0] == 'property':
+            self._gesture_property_origin = self._property_positions(
+                self._gesture_before, self._gesture_layout).get(target[1])
 
     def _editable_rows(self, rows, symbol):
         rows = deepcopy(rows)
@@ -2563,6 +2607,34 @@ class SymbolTab(QWidget):
         if terminal is not None:
             row['symbol_angle'] = angle
         return self._accept_geometry(rows)
+
+    def move_property(self, key, x, y):
+        """@brief Put a visible property (Reference or Value) at a point, snapped to the pin grid.
+
+        @param key One of `PROPERTY_KEYS`.
+        @param x Target x, mm in symbol coordinates.
+        @param y Target y, mm in symbol coordinates (y up).
+        @return True when the draft was updated (or already there), False on an unknown key.
+        @note The chosen position is written on every row (`symbol_properties`)
+            and reaches the file through `symbol_property_positions`; the
+            other property keeps its position, chosen or default.
+        """
+        if self._symbol is None or key not in PROPERTY_KEYS:
+            return False
+        source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
+        symbol = self._gesture_layout if self._gesture_before is not None else self._symbol
+        snapped = tuple(round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y))
+        try:
+            chosen = symbol_property_positions(source)
+        except ValueError:
+            chosen = {}
+        if chosen.get(key) == snapped:
+            self._draft = deepcopy(source)
+            self._changed()
+            return True
+        positions = self._property_positions(source, symbol)
+        positions[key] = snapped
+        return self._accept_geometry(self._with_properties(source, positions))
 
     def rotate_pin(self, number, degrees):
         """@brief Rotate a pin or selected group in grid-preserving quarter turns."""
@@ -2785,6 +2857,14 @@ class SymbolTab(QWidget):
             return
         if target[0] == 'shape_point':
             self.move_shape_point(target[1], target[2], point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
+            return
+        if target[0] == 'property':
+            origin = getattr(self, '_gesture_property_origin', None)
+            if origin is None:
+                return
+            delta = point - self._gesture_start
+            self.move_property(target[1], origin[0] + delta.x() / SCENE_UNITS_PER_MM,
+                               origin[1] - delta.y() / SCENE_UNITS_PER_MM)
             return
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
@@ -3049,12 +3129,21 @@ class SymbolTab(QWidget):
                 item.setPos(x - dx, y - bounds.height() / 2)
             if target:
                 tag(item, target)
-                self._text_bounds.append((target[1], item.sceneBoundingRect()))
+                if target[0] == 'pin':
+                    self._text_bounds.append((target[1], item.sceneBoundingRect()))
             return item
 
         from ..generators.symbol import pin_length_of, pin_text_size_of
-        longest = max((pin_length_of(p.pin, symbol.pin_length) for p in symbol.pins), default=symbol.pin_length)
-        label(self._name, 0, -height / 2 - longest * scale - 28, 'center')
+        # Reference and Value where the file puts them (user, 2026-10-13):
+        # the editor shows what KiCad will show, and both can be dragged.
+        positions = self._property_positions(self.draft_rows(), symbol)
+        texts = {'Reference': f'{self._reference}?', 'Value': self._name}
+        hints = {'Reference': self.tx('Riferimento (U?): trascinalo dove deve stare nello schema.'),
+                 'Value': self.tx('Nome del simbolo (Value): trascinalo dove deve stare nello schema.')}
+        for key in PROPERTY_KEYS:
+            px, py = positions[key]
+            item = label(texts[key], px * scale, -py * scale, 'center', target=('property', key))
+            item.setToolTip(hints[key])
         for placed in symbol.pins:
             pin = placed.pin
             x, y = placed.x * scale, -placed.y * scale
