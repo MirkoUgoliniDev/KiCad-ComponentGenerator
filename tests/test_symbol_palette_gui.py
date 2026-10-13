@@ -754,6 +754,10 @@ def test_the_drawing_section_offers_the_five_shape_tools(qapp):
 def test_fixed_count_shapes_close_at_their_last_click_and_land_on_the_grid(qapp):
     tab = _tab()
     try:
+        # Coarse drawing grid on purpose (the default is now 1/10 of the pin
+        # grid, see test_symbol_drawing_grid.py): these cases need two clicks
+        # on the same 2.54 mm node and corners snapped to it.
+        tab.set_drawing_grid(2.54)
         assert tab.start_shape('rectangle')
         assert tab.add_shape_point(0.1, 0.2) and tab.add_shape_point(5.0, 2.6)
         (rect,) = tab.graphics()
@@ -787,6 +791,10 @@ def test_fixed_count_shapes_close_at_their_last_click_and_land_on_the_grid(qapp)
 def test_a_line_is_closed_by_the_user_and_a_degenerate_shape_or_escape_adds_nothing(qapp):
     tab = _tab()
     try:
+        # Coarse drawing grid on purpose (the default is now 1/10 of the pin
+        # grid, see test_symbol_drawing_grid.py): these cases need two clicks
+        # on the same 2.54 mm node and corners snapped to it.
+        tab.set_drawing_grid(2.54)
         assert tab.start_shape('line')
         assert tab.add_shape_point(0, 0) and not tab.add_shape_point(0.3, -0.2), 'same grid point twice'
         assert tab.add_shape_point(2.54, 2.54) and tab.add_shape_point(5.08, 0)

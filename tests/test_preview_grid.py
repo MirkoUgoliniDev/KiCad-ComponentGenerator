@@ -101,5 +101,9 @@ def test_footprint_zoom_anchor_pan_and_fit(window):
     after = view.mapToScene(view.viewport().rect().center())
     assert after.x() < before.x()
     assert view._pan is None
+    # A redraw after the user's zoom/pan keeps the camera (user, 2026-10-13);
+    # «Adatta alla vista» forces the fit.
     window._fit_preview()
+    assert view.transform().m11() == pytest.approx(initial * 2)
+    window._fit_preview(force=True)
     assert view.transform().m11() == pytest.approx(initial)

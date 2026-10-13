@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 import math
 from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
-from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon
+from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon, QPolygonF
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
@@ -107,6 +107,17 @@ FILL_LABELS = (('none', 'Nessuno'), ('outline', 'Contorno'), ('background', 'Sfo
 #: Grid steps offered for the drawing tools, mm (100, 50, 25 and 10 mil).
 DRAWING_GRIDS_MM = (2.54, 1.27, 0.635, 0.254)
 
+#: Default step of the drawing grid, mm: one tenth of the pin grid (user,
+#: 2026-10-13: «una griglia puntinata a un decimo di quella attuale per
+#: ancorare gli elementi grafici»). Pins keep snapping to GRID_MM.
+DEFAULT_DRAWING_GRID_MM = GRID_MM / 10
+
+#: Smallest on-screen spacing, in viewport pixels, at which the dots of the
+#: drawing grid are painted. This is a legibility threshold, not geometry:
+#: below it the dots would merge into a smear that hides the drawing, so
+#: the canvas shows only the pin-grid lines. Snapping is unaffected.
+FINE_GRID_MIN_PX = 5.0
+
 #: The KiCad stroke types and their labels (Italian source, translated by `tx`).
 STYLE_LABELS = (('default', 'Predefinito'), ('solid', 'Continua'), ('dash', 'Tratteggiata'),
                 ('dot', 'Punteggiata'), ('dash_dot', 'Tratto-punto'), ('dash_dot_dot', 'Tratto-punto-punto'))
@@ -185,13 +196,13 @@ class TextDialog(QDialog):
 #: with dark drawings, as in KiCad).
 CANVAS_THEMES = {
     'dark': {
-        'canvas': '#181825', 'grid': '#36364b', 'body_fill': '#242438', 'outline': '#89b4fa',
+        'canvas': '#181825', 'grid': '#36364b', 'grid_dots': '#4d4d6b', 'body_fill': '#242438', 'outline': '#89b4fa',
         'graphic': '#cdd6f4', 'graphic_fill': '#242438', 'pin': '#89b4fa', 'pin_name': '#cdd6f4',
         'pin_number': '#cdd6f4', 'selected': '#f9e2af', 'terminal': '#a6e3a1', 'handle': '#a6e3a1',
         'wire': '#f9e2af',
     },
     'kicad': {
-        'canvas': '#ffffff', 'grid': '#d9d9d9', 'body_fill': '#ffffc2', 'outline': '#840000',
+        'canvas': '#ffffff', 'grid': '#d9d9d9', 'grid_dots': '#bdbdbd', 'body_fill': '#ffffc2', 'outline': '#840000',
         'graphic': '#840000', 'graphic_fill': '#ffffc2', 'pin': '#840000', 'pin_name': '#008484',
         'pin_number': '#840000', 'selected': '#0a7bd6', 'terminal': '#2e8b57', 'handle': '#2e8b57',
         'wire': '#0a7bd6',
@@ -402,6 +413,8 @@ class _SymbolView(QGraphicsView):
         self.setBackgroundBrush(QColor(self.theme['canvas']))
         self.auto_fit = True
         self.show_grid = True
+        #: Step of the dotted drawing grid, mm; equal to GRID_MM means no dots.
+        self.drawing_grid_mm = GRID_MM
         self.gesture = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -599,14 +612,57 @@ class _SymbolView(QGraphicsView):
         self.show_grid = bool(visible)
         self.viewport().update()
 
+    def set_drawing_grid(self, step_mm):
+        """@brief Set the step (mm) of the dotted drawing grid and repaint.
+
+        @param step_mm Drawing grid step in mm; when it equals GRID_MM the
+            dots coincide with the pin-grid crossings and none are drawn.
+        """
+        self.drawing_grid_mm = float(step_mm)
+        self.viewport().update()
+
+    def fine_grid_visible(self):
+        """@brief True when the dotted drawing grid is painted at the current zoom.
+
+        @return False when the grid is hidden, when the drawing step equals
+            the pin grid or when the dots would be closer than FINE_GRID_MIN_PX.
+        """
+        if not self.show_grid or math.isclose(self.drawing_grid_mm, GRID_MM, abs_tol=1e-9):
+            return False
+        return self.drawing_grid_mm * SCENE_UNITS_PER_MM * self.transform().m11() >= FINE_GRID_MIN_PX
+
     def drawBackground(self, painter, rect):
+        """@brief Paint the pin grid as lines and the drawing grid as dots.
+
+        @param painter Scene painter.
+        @param rect Exposed scene rectangle.
+        @note Both grids share the scene origin, so every pin-grid crossing
+            is also a node of the drawing grid; the dots are skipped when the
+            drawing step equals the pin grid or is too dense on screen
+            (`fine_grid_visible`).
+        """
         super().drawBackground(painter, rect)
         if not self.show_grid:
             return
+        painter.save()
+        if self.fine_grid_visible():
+            fine = self.drawing_grid_mm * SCENE_UNITS_PER_MM
+            dots = QPolygonF()
+            for column in range(math.floor(rect.left() / fine), math.ceil(rect.right() / fine) + 1):
+                for row in range(math.floor(rect.top() / fine), math.ceil(rect.bottom() / fine) + 1):
+                    dots.append(QPointF(column * fine, row * fine))
+            dot_pen = QPen(QColor(self.theme['grid_dots']), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            dot_pen.setCosmetic(True)
+            # Crisp dots: antialiasing would smear a 1.5 px point into a
+            # faint halo and lose the dot colour at the node itself.
+            antialiased = painter.testRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            painter.setPen(dot_pen)
+            painter.drawPoints(dots)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, antialiased)
         step = GRID_MM * SCENE_UNITS_PER_MM
         pen = QPen(QColor(self.theme['grid']))
         pen.setCosmetic(True)
-        painter.save()
         painter.setPen(pen)
         for index in range(math.floor(rect.left() / step), math.ceil(rect.right() / step) + 1):
             x = index * step
@@ -699,7 +755,7 @@ class SymbolTab(QWidget):
         #: Copied element records (`detached_copy`), pasted with Ctrl+V.
         self._clipboard = []
         #: Grid step of the drawing tools and shape handles, mm (pins keep GRID_MM).
-        self._grid_mm = GRID_MM
+        self._grid_mm = DEFAULT_DRAWING_GRID_MM
         #: False: shape points are not snapped (rounded to 0.01 mm).
         self._snap = True
         #: Canvas theme key: 'dark' (application) or 'kicad' (schematic colours).
@@ -768,6 +824,7 @@ class SymbolTab(QWidget):
             toolbar.addSeparator()
 
         self.view = _SymbolView()
+        self.view.set_drawing_grid(self._grid_mm)
         self.view.selection_toggled.connect(self._toggle_selection)
         self.view.graphic_toggled.connect(self._toggle_graphic)
         self.view.region_selected.connect(self._select_region)
@@ -870,7 +927,7 @@ class SymbolTab(QWidget):
         self.grid_combo = QComboBox()
         for step in DRAWING_GRIDS_MM:
             self.grid_combo.addItem(f'{step:g} mm', step)
-        self.grid_combo.setCurrentIndex(self.grid_combo.findData(GRID_MM))
+        self.grid_combo.setCurrentIndex(self.grid_combo.findData(DEFAULT_DRAWING_GRID_MM))
         self.grid_combo.setToolTip(self.tx('Passo della griglia del disegno (i pin restano sulla griglia da 2.54 mm)'))
         self.grid_combo.setProperty('i18n_skip', True)
         self.grid_combo.currentIndexChanged.connect(lambda _i: self.set_drawing_grid(self.grid_combo.currentData()))
@@ -1448,6 +1505,7 @@ class SymbolTab(QWidget):
         if step not in DRAWING_GRIDS_MM:
             return
         self._grid_mm = float(step)
+        self.view.set_drawing_grid(self._grid_mm)
         if self.grid_combo.currentData() != step:
             self.grid_combo.setCurrentIndex(self.grid_combo.findData(step))
 

@@ -71,8 +71,15 @@ def _pin_header():
 
 
 class _Footprint:
+    """Stand-in for core.footprint.Footprint with the calls the worker makes."""
     def __init__(self):
         self.saved = []
+        self.texts = []
+        self.graphics = []
+
+    def place_texts(self, positions):
+        # The worker places Reference/Value before saving (since b99f835).
+        self.texts.append(dict(positions))
 
     def save(self, path):
         self.saved.append(path)

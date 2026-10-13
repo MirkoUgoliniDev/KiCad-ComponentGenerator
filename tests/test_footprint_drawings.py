@@ -131,8 +131,18 @@ def preview(window, monkeypatch):
                         lambda force=False: saves.append(force) or real_save(force=force))
     monkeypatch.setattr(window, "_generate", lambda **kwargs: generations.append(kwargs) or True)
     monkeypatch.setattr(window, "_project_has_footprint", lambda: True)
+    # The .kicad_mod rewrite runs on the next event-loop turn (see
+    # test_the_rewrite_after_an_edit_is_deferred_and_coalesced): these tests
+    # check WHAT is rewritten, so the turn is run right away.
+    monkeypatch.setattr(window, "_schedule_footprint_rewrite",
+                        lambda: window._generate(footprint_only=True))
     window._draw_preview()
     return window, saves, generations
+
+
+def _main_grid_snap(window):
+    """Drawings snap to the main grid itself (divisor 1): coarse-grid cases."""
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
 
 
 def _drawing_items(window):
@@ -147,11 +157,12 @@ def test_an_armed_rectangle_closes_on_its_second_click_and_persists(preview):
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     window._toggle_footprint_draw_tool("rectangle")
     assert window._fp_draw_tool == "rectangle"
-    window._on_footprint_draw_clicked(1.2 * 20, 1.2 * 20)
-    window._on_footprint_draw_clicked(4.9 * 20, 2.8 * 20)
+    window._on_footprint_draw_clicked(1.23 * 20, 1.17 * 20)
+    window._on_footprint_draw_clicked(4.94 * 20, 2.81 * 20)
     assert window._fp_draw_tool is None, "the tool disarms itself when the shape closes"
+    # Drawings take the fine grid (1/10 of the 1 mm grid), not the pad grid.
     assert window.footprint_drawings == [{"kind": "rectangle", "layer": "F.SilkS",
-                                          "width": 0.12, "points": [[1.0, 1.0], [5.0, 3.0]]}]
+                                          "width": 0.12, "points": [[1.2, 1.2], [4.9, 2.8]]}]
     assert saves == [True] and generations == [{"footprint_only": True}]
     assert _drawing_items(window), "the preview draws the stored rectangle"
     assert window._project_state()["footprint_drawings"] == window.footprint_drawings
@@ -226,12 +237,15 @@ def test_the_context_menu_deletes_the_drawing(preview, monkeypatch):
         def setChecked(self, _value):
             pass
 
+        def setIconVisibleInMenu(self, _value):
+            pass
+
     class FakeMenu:
         def __init__(self, *_a, **_k):
             self.actions = []
 
-        def addAction(self, label):
-            self.actions.append(FakeAction(label))
+        def addAction(self, *args):
+            self.actions.append(FakeAction(args[-1]))      # (label) or (icon, label)
             return self.actions[-1]
 
         def addMenu(self, _label):
@@ -345,6 +359,7 @@ def test_a_coinciding_click_and_a_degenerate_shape_are_said_not_silent(preview, 
                         lambda title, body: shown.append(title))
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("inch"))
+    _main_grid_snap(window)
     window._toggle_footprint_draw_tool("circle")
     window._on_footprint_draw_clicked(0, 0)
     window._on_footprint_draw_clicked(0.9 * 20, 0.9 * 20)  # same 2.54 node
@@ -423,11 +438,20 @@ def test_clicks_snap_to_the_nodes_of_the_drawn_grid_not_to_the_origin(preview):
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("inch"))
     view.set_grid(2.54 * 20, (0.7 * 20, -0.3 * 20), True)   # origin off the mm lattice
+    _main_grid_snap(window)
     window._toggle_footprint_draw_tool("rectangle")
     window._on_footprint_draw_clicked(0.9 * 20, -0.1 * 20)
     window._on_footprint_draw_clicked((0.7 + 2.54 * 2 + 0.4) * 20, (-0.3 + 2.54 - 0.5) * 20)
     points = window.footprint_drawings[0]["points"]
     assert points == [[0.7, -0.3], [pytest.approx(5.78), pytest.approx(2.24)]]
+    # The fine grid keeps the same origin: its nodes are origin + k x 0.254.
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(10))
+    view.set_grid(2.54 * 20, (0.7 * 20, -0.3 * 20), True)   # the redraw reset it
+    window._toggle_footprint_draw_tool("circle")
+    window._on_footprint_draw_clicked(0.9 * 20, -0.1 * 20)
+    x, y = window._fp_draw_clicks[0]
+    assert (x, y) == (pytest.approx(0.954), pytest.approx(-0.046))
+    window._cancel_footprint_drawing()
     # Grid hidden: tenth of a millimetre from the origin.
     window.chk_grid.setChecked(False)
     view.set_grid(2.54 * 20, (0.7 * 20, -0.3 * 20), False)
@@ -453,6 +477,7 @@ def test_the_pointer_shows_the_snap_node_and_the_ghost_shape(preview):
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     view.set_grid(20.0, (0.0, 0.0), True)
+    _main_grid_snap(window)
     window._toggle_footprint_draw_tool("rectangle")
 
     def move_to(scene_x, scene_y):
@@ -507,6 +532,7 @@ def test_hovering_a_drawing_reveals_its_handles_and_a_drag_moves_the_point(previ
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     view.set_grid(20.0, (0.0, 0.0), True)
+    _main_grid_snap(window)
     window.footprint_drawings = validate_footprint_drawings([
         record("rectangle", ((0, 0), (4, 3)))])
     window._draw_preview()
@@ -522,7 +548,7 @@ def test_hovering_a_drawing_reveals_its_handles_and_a_drag_moves_the_point(previ
          QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)
 
     send(QEvent.Type.MouseMove, 4 * 20, 1.5 * 20)        # on the right edge
-    assert len(_handles(window)) == 3, "one handle per stored point, plus the centre anchor"
+    assert len(_handles(window)) == 2, "one handle per stored point, no extra centre anchor"
     send(QEvent.Type.MouseMove, 10 * 20, 10 * 20)        # away from it
     assert _handles(window) == []
     send(QEvent.Type.MouseMove, 4 * 20, 1.5 * 20)
@@ -552,20 +578,23 @@ def test_a_handle_drop_that_flattens_the_shape_is_refused(preview, monkeypatch):
     window._on_footprint_handle_dragged(0, 9, 0, 0)
 
 
-def test_the_anchor_or_the_body_moves_the_whole_drawing(preview):
-    """User, 2026-10-13: «se seleziono il punto di ancoraggio deve essere
-    possibile muovere l'elemento», like an element of the symbol editor."""
+def test_the_body_moves_the_whole_drawing_without_a_centre_anchor(preview):
+    """User, 2026-10-13: the element moves as in the symbol editor, by its
+    body; the solid centre anchor was too loud («più discreto») and is gone."""
     from PyQt6.QtCore import QEvent, QPointF, Qt
     from PyQt6.QtGui import QMouseEvent
-    from PyQt6.QtWidgets import QGraphicsEllipseItem
+    from PyQt6.QtWidgets import QGraphicsItem
     window, saves, generations = preview
     view = window.preview_view
     view.resize(800, 600)
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     view.set_grid(20.0, (0.0, 0.0), True)
+    _main_grid_snap(window)
+    # Away from REF** (y = -2 mm) and the value (y = 2 mm), which a press
+    # would take first.
     window.footprint_drawings = validate_footprint_drawings([
-        record("rectangle", ((0, 0), (4, 2)))])
+        record("rectangle", ((0, 4), (4, 6)))])
     window._draw_preview()
     saves.clear(), generations.clear()
 
@@ -577,36 +606,31 @@ def test_the_anchor_or_the_body_moves_the_whole_drawing(preview):
          QEvent.Type.MouseMove: view.mouseMoveEvent,
          QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)
 
-    send(QEvent.Type.MouseMove, 4 * 20, 1 * 20)           # hover the right edge
+    send(QEvent.Type.MouseMove, 4 * 20, 5 * 20)           # hover the right edge
     from kicadgen.gui.footprint_view import HANDLE_KEY_ROLE
-    anchors = [h for h in _handles(window) if str(h.data(HANDLE_KEY_ROLE)).endswith(":-1")]
-    vertices = [h for h in _handles(window) if not str(h.data(HANDLE_KEY_ROLE)).endswith(":-1")]
-    assert len(anchors) == 1 and anchors[0].pos() == QPointF(2 * 20, 1 * 20), \
-        "one anchor at the centre of the drawing"
-    # Same style as the symbol editor's handles: yellow outline, green fill
-    # (translucent on a vertex, solid on the anchor), constant screen size.
-    from PyQt6.QtWidgets import QGraphicsItem
-    for handle in anchors + vertices:
+    handles = _handles(window)
+    assert len(handles) == 2 and not any(str(h.data(HANDLE_KEY_ROLE)).endswith(":-1") for h in handles)
+    # Same style as the symbol editor's handles: yellow outline, translucent
+    # green fill, constant screen size.
+    for handle in handles:
         assert handle.pen().color().name() == "#f9e2af"
         assert handle.brush().color().name() == "#a6e3a1"
+        assert handle.brush().color().alpha() == 150
         assert handle.flags() & QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations
-    assert anchors[0].brush().color().alpha() == 255
-    assert all(v.brush().color().alpha() == 150 for v in vertices)
-    # Grab the anchor and drop it two nodes right, one down: everything moves.
-    send(QEvent.Type.MouseButtonPress, 2 * 20, 1 * 20, Qt.MouseButton.LeftButton)
-    send(QEvent.Type.MouseMove, 3 * 20, 1 * 20, Qt.MouseButton.LeftButton)
+    # The body shows the move cursor, as an element of the symbol editor.
+    assert all(item.cursor().shape() == Qt.CursorShape.SizeAllCursor for item in _drawing_items(window))
+    # Grab the body (the drawn edge) and drop it two nodes right, one down.
+    send(QEvent.Type.MouseButtonPress, 4 * 20, 5 * 20, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, 5 * 20, 5 * 20, Qt.MouseButton.LeftButton)
     assert window._fp_handle_drag == (0, -1, (1.0, 0.0))
-    send(QEvent.Type.MouseButtonRelease, 4.2 * 20, 2.1 * 20, Qt.MouseButton.LeftButton)
-    assert window.footprint_drawings[0]["points"] == [[2.0, 1.0], [6.0, 3.0]]
+    send(QEvent.Type.MouseButtonRelease, 6.2 * 20, 6.1 * 20, Qt.MouseButton.LeftButton)
+    assert window.footprint_drawings[0]["points"] == [[2.0, 5.0], [6.0, 7.0]]
     assert saves == [True] and generations == [{"footprint_only": True}]
-    # Grabbing the body (the drawn edge) moves it too; a drop on the grab node changes nothing.
-    send(QEvent.Type.MouseButtonPress, 6 * 20, 2 * 20, Qt.MouseButton.LeftButton)
-    send(QEvent.Type.MouseButtonRelease, 6 * 20, 2 * 20, Qt.MouseButton.LeftButton)
-    assert window.footprint_drawings[0]["points"] == [[2.0, 1.0], [6.0, 3.0]] and len(saves) == 1
-    send(QEvent.Type.MouseButtonPress, 6 * 20, 2 * 20, Qt.MouseButton.LeftButton)
-    send(QEvent.Type.MouseButtonRelease, 5 * 20, 2 * 20, Qt.MouseButton.LeftButton)
-    assert window.footprint_drawings[0]["points"] == [[1.0, 1.0], [5.0, 3.0]]
-    # A text has one point only: no extra anchor.
+    # A drop on the grab node changes nothing.
+    send(QEvent.Type.MouseButtonPress, 6 * 20, 6 * 20, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseButtonRelease, 6 * 20, 6 * 20, Qt.MouseButton.LeftButton)
+    assert window.footprint_drawings[0]["points"] == [[2.0, 5.0], [6.0, 7.0]] and len(saves) == 1
+    # A text has one point only: its handle is the only one.
     window.footprint_drawings = validate_footprint_drawings([record("text", ((1, 1),), text="X")])
     window._draw_preview()
     window._on_footprint_drawing_hovered(0)
@@ -684,3 +708,262 @@ def test_layer_and_width_change_through_the_menu_keep_the_record_valid(preview):
     state = deepcopy(window._project_state())
     window._apply_project_state(state)
     assert not window.btn_fp_undo.isEnabledTo(window.btn_fp_undo.parentWidget()),         "a project load starts a fresh history"
+
+
+# ── Fine drawing grid and grab fluidity (user, 2026-10-13) ────────────
+
+def _send(view, kind, scene_x, scene_y, button=None, offset=(0, 0)):
+    from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    button = Qt.MouseButton.NoButton if button is None else button
+    pos = view.mapFromScene(QPointF(scene_x, scene_y)) + QPoint(*offset)
+    event = QMouseEvent(kind, QPointF(pos), QPointF(view.viewport().mapToGlobal(pos)),
+                        button, button, Qt.KeyboardModifier.NoModifier)
+    {QEvent.Type.MouseButtonPress: view.mousePressEvent,
+     QEvent.Type.MouseMove: view.mouseMoveEvent,
+     QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)
+
+
+def _zoomed_out(window, scale):
+    view = window.preview_view
+    view.resize(800, 600)
+    view.resetTransform()
+    view.scale(scale, scale)
+    view.centerOn(0, 0)
+
+
+def test_a_handle_is_grabbed_a_few_screen_pixels_off_at_a_far_zoom(preview):
+    """Profiling 2026-10-13: the hit test ignored the view transform, so a
+    6 px handle was a 1 px target at «fit» zooms and a near miss panned the
+    camera. Positive: 3 px off still grabs. Negative: 12 px off does not."""
+    from PyQt6.QtCore import QEvent, Qt
+    window, _saves, _generations = preview
+    window.chk_grid.setChecked(False)
+    window.footprint_drawings = validate_footprint_drawings([record("rectangle", ((0, 0), (4, 3)))])
+    window._draw_preview()
+    _zoomed_out(window, 0.12)
+    view = window.preview_view
+    window._on_footprint_drawing_hovered(0)
+    _send(view, QEvent.Type.MouseButtonPress, 4 * 20, 3 * 20, Qt.MouseButton.LeftButton, offset=(3, 2))
+    assert view._handle_drag == (0, 1) and view._pan is None
+    view._handle_drag = None    # no drop: a drop would redraw and refit the view
+    _send(view, QEvent.Type.MouseButtonPress, 4 * 20, 3 * 20, Qt.MouseButton.LeftButton, offset=(12, 12))
+    assert view._handle_drag is None and view._pan is not None, "far away: the camera pans"
+    view._pan = None
+
+
+def test_handles_stay_while_the_pointer_is_near_the_drawing(preview):
+    """Like the symbol editor's reveal area: leaving the stroke by a few px
+    keeps the handles (no flicker), going well away hides them."""
+    from PyQt6.QtCore import QEvent
+    window, _saves, _generations = preview
+    window.chk_grid.setChecked(False)
+    window.footprint_drawings = validate_footprint_drawings([record("line", ((0, 0), (8, 0)))])
+    window._draw_preview()
+    _zoomed_out(window, 1.0)
+    view = window.preview_view
+    _send(view, QEvent.Type.MouseMove, 4 * 20, 0)
+    assert len(_handles(window)) == 2
+    _send(view, QEvent.Type.MouseMove, 4 * 20, 0, offset=(0, 9))       # off the stroke, near
+    assert len(_handles(window)) == 2 and view.hovered_drawing() == 0
+    _send(view, QEvent.Type.MouseMove, 4 * 20, 0, offset=(0, 60))      # well away
+    assert _handles(window) == [] and view.hovered_drawing() == -1
+
+
+def test_a_text_inside_a_rectangle_is_dragged_not_the_rectangle(preview):
+    """Reference/Value sit above the drawings: a press on them drags the text."""
+    from PyQt6.QtCore import QEvent, Qt
+    window, _saves, _generations = preview
+    window.chk_grid.setChecked(False)
+    window.footprint_drawings = validate_footprint_drawings([
+        record("rectangle", ((-20, -20), (20, 20)))])
+    window._draw_preview()
+    _zoomed_out(window, 1.0)
+    view = window.preview_view
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+    text = next(i for i in window.preview_scene.items()
+                if i.data(TEXT_KEY_ROLE) == "Value" and i.parentItem() is None)
+    _send(view, QEvent.Type.MouseButtonPress, text.pos().x(), text.pos().y(), Qt.MouseButton.LeftButton)
+    assert view._text_drag is not None and view._handle_drag is None
+    view._text_drag = None
+
+
+def test_the_fine_grid_dots_show_only_when_legible_and_pads_keep_the_main_grid(preview):
+    window, _saves, _generations = preview
+    window.chk_grid.setChecked(True)
+    window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
+    view = window.preview_view
+    view.set_grid(20.0, (0.0, 0.0), True)
+    from kicadgen.gui.footprint_view import DEFAULT_FINE_GRID_DIVISOR, FINE_GRID_MIN_SCREEN_PX
+    assert view.fine_divisor() == DEFAULT_FINE_GRID_DIVISOR == 10
+    assert window.combo_fine_grid.currentData() == 10
+    assert view.fine_step() == 2.0 and view.grid_step() == 20.0, "the main grid is unchanged"
+    # 2 scene px per fine step: legible from scale 2.5 (5 px) up.
+    _zoomed_out(window, FINE_GRID_MIN_SCREEN_PX / 2.0 + 0.5)
+    assert view.fine_dots_visible()
+    _zoomed_out(window, FINE_GRID_MIN_SCREEN_PX / 2.0 - 0.5)
+    assert not view.fine_dots_visible()
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
+    _zoomed_out(window, 40)
+    assert not view.fine_dots_visible(), "divisor 1: the drawing grid IS the main grid"
+    assert window._config["draw_grid_divisor"] == 1
+
+
+def test_the_rewrite_after_an_edit_is_deferred_and_coalesced(window, qapp, monkeypatch):
+    """The drop paints first; the .kicad_mod is rewritten on the next turn,
+    once for a burst of edits."""
+    generations = []
+    monkeypatch.setattr(window, "_generate", lambda **kwargs: generations.append(kwargs) or True)
+    monkeypatch.setattr(window, "_project_has_footprint", lambda: True)
+    window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window._apply_footprint_drawings(validate_footprint_drawings([record(), record("circle", ((0, 0), (1, 0)))]))
+    assert generations == [], "nothing rewritten before the event loop turns"
+    qapp.processEvents()
+    assert generations == [{"footprint_only": True}], "one rewrite for the burst"
+    # Negative: no footprint yet, nothing to rewrite.
+    monkeypatch.setattr(window, "_project_has_footprint", lambda: False)
+    window._apply_footprint_drawings([])
+    qapp.processEvents()
+    assert generations == [{"footprint_only": True}]
+
+
+def test_an_edit_keeps_the_camera_once_the_user_has_zoomed(preview):
+    """User, 2026-10-13: «quando ridimensiono un oggetto (il cerchio) non
+    mantiene lo zoom e lo cambia». Like the symbol editor's auto_fit: the
+    preview follows the footprint until the user zooms or pans; after that a
+    redraw (the drop, then the end of the .kicad_mod rewrite) keeps the
+    camera, and «Adatta alla vista» or another project brings the fit back."""
+    from PyQt6.QtCore import QPointF
+    window, _saves, _generations = preview
+    view = window.preview_view
+    view.resize(800, 600)
+    window.footprint_drawings = validate_footprint_drawings([record("circle", ((0, 0), (1, 0)))])
+    window._draw_preview()
+    fitted = view.transform().m11()
+    # Negative: never zoomed, a bigger circle refits the view.
+    assert view.auto_fit
+    window._apply_footprint_drawings(validate_footprint_drawings([record("circle", ((0, 0), (30, 0)))]))
+    assert view.transform().m11() != fitted, "auto-fit follows the footprint"
+    # Positive: after a zoom, the resize keeps scale and centre.
+    view.zoom(2.0)
+    assert not view.auto_fit
+    scale = view.transform().m11()
+    centre = view.mapToScene(view.viewport().rect().center())
+    window._on_footprint_handle_dropped(0, 1, 50 * 20, 0)          # rim moved: radius 50 mm
+    assert window.footprint_drawings[0]["points"][1] == [50.0, 0.0]
+    redraws = []
+    real_draw = window._draw_preview
+    window._cad_result_is_current = lambda: True
+    window._draw_preview_3d = lambda: None
+    window._draw_preview = lambda: redraws.append(1) or real_draw()
+    window._on_generated("x.kicad_mod")                             # the rewrite ends: redraw again
+    assert redraws, "the end of the rewrite really redraws the preview"
+    assert view.transform().m11() == scale
+    after = view.mapToScene(view.viewport().rect().center())
+    assert abs(after.x() - centre.x()) < 1 and abs(after.y() - centre.y()) < 1
+    # «Adatta alla vista»: fit again and follow the footprint again.
+    window._fit_preview(force=True)
+    assert view.auto_fit and view.transform().m11() != scale
+    # A pan counts as placing the camera too.
+    from PyQt6.QtCore import QEvent, Qt
+    _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.MiddleButton)
+    _send(view, QEvent.Type.MouseMove, -5000, -5000, Qt.MouseButton.MiddleButton, offset=(30, 0))
+    _send(view, QEvent.Type.MouseButtonRelease, -5000, -5000, Qt.MouseButton.MiddleButton, offset=(30, 0))
+    assert not view.auto_fit
+
+
+# ── KiCad layer colours and the layer menu (user, 2026-10-13) ─────────
+
+def test_drawings_generated_silk_and_selector_use_the_kicad_default_colours(preview):
+    """User: «a seconda del tipo dovrebbe avere un colore diverso», «i colori
+    predefiniti di KiCad». Every layer its own colour, the same table for the
+    user drawings, the generated silkscreen and the selector swatches."""
+    from PyQt6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem
+    from kicadgen.gui.main_window import KICAD_LAYER_COLORS
+    window, _saves, _generations = preview
+    assert KICAD_LAYER_COLORS == {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc"}
+    assert len(set(KICAD_LAYER_COLORS.values())) == 3, "one distinct colour per layer"
+    window.footprint_drawings = validate_footprint_drawings([
+        record("line", ((0, 0), (5, 0)), layer=layer) for layer in KICAD_LAYER_COLORS])
+    window._draw_preview()
+    by_index = {item.data(0x445257): item.pen().color().name() for item in _drawing_items(window)}
+    assert by_index == {0: "#f2eda1", 1: "#afafaf", 2: "#5994dc"}
+    # The generated silkscreen takes the same silkscreen colour.
+    generated = [i for i in window.preview_scene.items()
+                 if isinstance(i, (QGraphicsLineItem, QGraphicsRectItem)) and i.data(0x445257) is None
+                 and i.pen().color().name() == "#f2eda1"]
+    assert generated, "the generated silkscreen is drawn in the KiCad silkscreen colour"
+    # Each selector entry shows its colour.
+    combo = window.combo_fp_draw_layer
+    for row in range(combo.count()):
+        icon = combo.itemIcon(row)
+        assert not icon.isNull()
+        colour = icon.pixmap(12, 12).toImage().pixelColor(6, 6).name()
+        assert colour == KICAD_LAYER_COLORS[combo.itemData(row)]
+
+
+def test_the_ghost_of_a_shape_in_progress_takes_the_chosen_layer_colour(preview):
+    from PyQt6.QtWidgets import QGraphicsPathItem
+    window, _saves, _generations = preview
+    window.chk_grid.setChecked(False)
+    window.combo_fp_draw_layer.setCurrentIndex(window.combo_fp_draw_layer.findData("Cmts.User"))
+    window._toggle_footprint_draw_tool("rectangle")
+    window._on_footprint_draw_clicked(0, 0)
+    window._on_footprint_draw_hovered(3 * 20, 2 * 20)
+    ghosts = [i for i in window.preview_scene.items()
+              if isinstance(i, QGraphicsPathItem) and i.data(0x44524D) is not None]
+    assert ghosts and ghosts[0].pen().color().name() == "#5994dc"
+    window._cancel_footprint_drawing()
+
+
+def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview, monkeypatch):
+    """User: «aggiungere la possibilità di modificare il layer dal tasto
+    destro». The handles cover the stroke (and a text's handle covers the
+    text) while hovered: a right click on them must still open the menu.
+    Negative: a right click on empty background opens no drawing menu."""
+    from PyQt6.QtCore import QEvent, Qt
+    from kicadgen.gui import main_window as gui
+    window, saves, _generations = preview
+    menus, created = [], []
+
+    class Action:
+        def __init__(self, label):
+            self.label = label
+
+        def __getattr__(self, _name):
+            return lambda *_a, **_k: None
+
+    class Menu:
+        def __init__(self, *_a, **_k):
+            menus.append(self)
+
+        def addAction(self, *args):
+            created.append(Action(args[-1]))
+            return created[-1]
+
+        def addMenu(self, _label):
+            return Menu()
+
+        def addSeparator(self):
+            pass
+
+        def exec(self, *_a):
+            return next(a for a in created if a.label.startswith("Fabbricazione"))
+
+    monkeypatch.setattr(gui, "QMenu", Menu)
+    window.chk_grid.setChecked(False)
+    window.footprint_drawings = validate_footprint_drawings([
+        record("text", ((10, 10),), text="NOTE")])
+    window._draw_preview()
+    _zoomed_out(window, 1.0)
+    view = window.preview_view
+    _send(view, QEvent.Type.MouseMove, 10 * 20, 10 * 20)
+    assert len(_handles(window)) == 1, "hovered: the text shows its handle over itself"
+    saves.clear()
+    _send(view, QEvent.Type.MouseButtonPress, 10 * 20, 10 * 20, Qt.MouseButton.RightButton)
+    assert menus, "the right click on the handle opened the drawing menu"
+    assert window.footprint_drawings[0]["layer"] == "F.Fab" and saves == [True]
+    menus.clear()
+    _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.RightButton)
+    assert menus == [], "no drawing there: no drawing menu"
+    view._pan = None

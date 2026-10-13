@@ -98,6 +98,10 @@ def preview(window, monkeypatch):
     monkeypatch.setattr(window, "_save_project_config",
                         lambda force=False: saves.append(force) or real_save(force=force))
     monkeypatch.setattr(window, "_generate", lambda **kwargs: generations.append(kwargs) or True)
+    # The .kicad_mod rewrite runs on the next event-loop turn; these tests
+    # check what is rewritten, so the turn is run right away.
+    monkeypatch.setattr(window, "_schedule_footprint_rewrite",
+                        lambda: window._generate(footprint_only=True))
     window._draw_preview()
     assert _text_items(window), "the preview must draw the texts for these tests"
     return window, saves, generations
@@ -126,12 +130,17 @@ def test_a_drop_snaps_to_the_preview_grid_saves_redraws_and_rewrites(preview):
     window, saves, generations = preview
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
-    window._on_footprint_text_moved("Reference", 3.4 * 20, -4.6 * 20)
-    assert window.footprint_text_positions == {"Reference": (3.0, -5.0)}
+    # Texts are graphic elements: they take the drawing grid, 1/10 of the
+    # 1 mm grid by default; with divisor 1 they take the main grid.
+    window._on_footprint_text_moved("Reference", 3.43 * 20, -4.58 * 20)
+    assert window.footprint_text_positions == {"Reference": (3.4, -4.6)}
     assert saves == [True] and generations == [{"footprint_only": True}]
     anchor = _text_items(window)["Reference"].pos()
-    assert (anchor.x(), anchor.y()) == (60, -100)
-    assert window._project_state()["footprint_texts"] == {"Reference": [3.0, -5.0]}
+    assert (anchor.x(), anchor.y()) == (pytest.approx(68), pytest.approx(-92))
+    assert window._project_state()["footprint_texts"] == {"Reference": [3.4, -4.6]}
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
+    window._on_footprint_text_moved("Reference", 3.43 * 20, -4.58 * 20)
+    assert window.footprint_text_positions == {"Reference": (3.0, -5.0)}
 
 
 def test_without_the_grid_the_drop_snaps_to_a_tenth_of_a_millimetre(preview):

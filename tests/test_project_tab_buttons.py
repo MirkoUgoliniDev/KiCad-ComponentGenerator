@@ -651,6 +651,9 @@ def test_generate_worker_never_shows_freecad_during_the_kicad_matching(monkeypat
     from kicadgen.cad3d.body_params import Body3DParams
 
     class _Footprint:
+        def place_texts(self, positions):
+            pass    # the worker places Reference/Value before saving (since b99f835)
+
         def save(self, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text("(module)", encoding="utf-8")
