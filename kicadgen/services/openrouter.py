@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from http.client import IncompleteRead
 import math
+import numbers
 import os
 import re
 import threading
@@ -36,6 +37,7 @@ from typing import Any, Optional, Sequence
 from . import credentials
 from .messages import tx
 from ..app_paths import env_files, is_frozen, user_data_dir
+from ..core.validation import finite_number
 from ..fsutil import replace_file
 
 API_BASE = "https://openrouter.ai/api/v1"
@@ -495,10 +497,14 @@ def usage_totals() -> UsageTotals:
 
 
 def _usage_int(container: Any, key: str) -> int:
+    """A positive token count for the run totals, 0 when absent or unusable.
+
+    An integer too large for a float (``10**400``) is unusable, never an
+    OverflowError: `finite_number` rejects it (review D5).
+    """
     value = (container or {}).get(key) if isinstance(container, dict) else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0
-    return int(value) if math.isfinite(value) and value > 0 else 0
+    number = finite_number(value)
+    return int(number) if number is not None and number > 0 else 0
 
 
 def _cached_prompt_tokens(usage: dict) -> int:
@@ -544,12 +550,8 @@ def _token_count(usage: Any, key: str) -> Optional[int]:
     (audit 138, B5).
     """
     value = usage.get(key) if isinstance(usage, dict) else None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        if not math.isfinite(value) or value < 0 or value != int(value):
-            return None
-    except OverflowError:
+    number = finite_number(value)
+    if number is None or number < 0 or number != int(number):
         return None
     return int(value)
 
@@ -597,18 +599,24 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
     # malformed report, counted as missing exactly like project_costs does.
     if cost is not None and cost < 0:
         cost = None
+    # Every delta is computed BEFORE the lock: a value that cannot be read
+    # must never leave the totals half-updated (review D5). The helpers return
+    # 0 for anything unusable, so nothing below can raise.
+    usage_dict = usage if isinstance(usage, dict) else {}
+    prompt_delta = _usage_int(usage_dict, "prompt_tokens")
+    completion_delta = _usage_int(usage_dict, "completion_tokens")
+    cached_delta = _cached_prompt_tokens(usage_dict)
+    reasoning_delta = _usage_int(usage_dict.get("completion_tokens_details"), "reasoning_tokens")
     with _usage_lock:
         _usage_totals.calls += 1
         if cost is None:
             _usage_totals.calls_without_cost += 1
         else:
             _usage_totals.cost_usd += cost
-        if isinstance(usage, dict):
-            _usage_totals.prompt_tokens += _usage_int(usage, "prompt_tokens")
-            _usage_totals.completion_tokens += _usage_int(usage, "completion_tokens")
-            _usage_totals.cached_tokens += _cached_prompt_tokens(usage)
-            _usage_totals.reasoning_tokens += _usage_int(
-                usage.get("completion_tokens_details"), "reasoning_tokens")
+        _usage_totals.prompt_tokens += prompt_delta
+        _usage_totals.completion_tokens += completion_delta
+        _usage_totals.cached_tokens += cached_delta
+        _usage_totals.reasoning_tokens += reasoning_delta
     listener = _usage_listener
     if listener is not None:
         moment = sent_at or datetime.now(timezone.utc)
@@ -630,11 +638,8 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
 
 
 def _credit_number(value: Any) -> Optional[float]:
-    """Numero finito dalla risposta API, oppure None: i booleani non valgono."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
+    """A finite number from an API answer, or None (bools and overflowing ints excluded)."""
+    return finite_number(value)
 
 
 def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
@@ -1375,10 +1380,50 @@ def _truncation_error(detail: str) -> OpenRouterError:
            "automatico aggiuntivo.") + (" " + detail if not detail.startswith(" ") else detail))
 
 
+def _non_finite_constant(_name: str) -> None:
+    """`json.loads` hook: ``NaN``/``Infinity``/``-Infinity`` decode as null."""
+    return None
+
+
+def _finite_float(text: str) -> Optional[float]:
+    """`json.loads` hook: a float literal, or None when it overflows to infinity (``1e999``)."""
+    value = float(text)
+    return value if math.isfinite(value) else None
+
+
+def _finite_tree(value: Any) -> Any:
+    """A decoded JSON tree with every non-finite float replaced by None.
+
+    Used when the provider already delivers the arguments as an object (its
+    envelope was decoded by `json.load`, which accepts NaN). A tree without
+    any non-finite float is returned as the SAME object (callers rely on
+    the identity of an explicitly supplied object); otherwise a copy.
+    Any real non-integral scalar counts as a float, NumPy's included
+    (``numpy.float32`` is not a Python float); integers and booleans are
+    always finite and are kept as they are.
+    """
+    if (isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral)
+            and not math.isfinite(value)):
+        return None
+    if isinstance(value, dict):
+        items = {key: _finite_tree(item) for key, item in value.items()}
+        return value if all(items[key] is value[key] for key in value) else items
+    if isinstance(value, list):
+        items = [_finite_tree(item) for item in value]
+        return value if all(new is old for new, old in zip(items, value)) else items
+    return value
+
+
 def _decoded_arguments(arguments: Any, context: str) -> dict:
-    """Tool arguments as a dict, or ToolArgumentsError carrying what was sent."""
+    """Tool arguments as a dict, or ToolArgumentsError carrying what was sent.
+
+    Non-finite constants (``NaN``, ``Infinity``) are not JSON: they decode as
+    None, and so does a float literal that overflows (``1e999``), so each caller's validation rejects them only in the fields that
+    matter, and a valid answer stays storable with ``allow_nan=False``
+    instead of failing after it was paid for (review D1).
+    """
     if isinstance(arguments, dict):
-        return arguments
+        return _finite_tree(arguments)
     if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
         raise ToolArgumentsError(
             tx("Gli argomenti dello strumento sono assenti o vuoti.") + context, raw=arguments)
@@ -1387,7 +1432,8 @@ def _decoded_arguments(arguments: Any, context: str) -> dict:
             tx("Gli argomenti dello strumento non sono JSON valido (atteso oggetto).") + context,
             raw=repr(arguments))
     try:
-        decoded = json.loads(arguments)
+        decoded = json.loads(arguments, parse_constant=_non_finite_constant,
+                             parse_float=_finite_float)
     except ValueError as exc:
         raise ToolArgumentsError(
             tx("Gli argomenti dello strumento non sono JSON valido.") + context

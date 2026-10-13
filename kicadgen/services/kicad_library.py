@@ -969,29 +969,102 @@ def install_component_library(
     )
 
 
+#: Seconds `kicad-cli version` may take before the path folder is used
+#: instead. The command prints one line and exits; the bound only keeps a
+#: hung executable from blocking the caller, it is not a performance target.
+KICAD_CLI_VERSION_TIMEOUT_S = 10
+
+
+#: Outputs of ``kicad-cli version`` already obtained in this process, keyed
+#: by (absolute path, modification time ns, size) of the executable. The
+#: command is run from the GUI thread (global installation) and costs about
+#: 0.3 s, up to the timeout when the executable hangs; an executable whose
+#: file did not change prints the same version, a reinstalled one changes
+#: its key and is asked again.
+_KICAD_CLI_VERSION_CACHE: dict[tuple[str, int, int], str | None] = {}
+
+
+def _run_kicad_cli_version(executable: Path) -> str | None:
+    """@brief Stdout of ``kicad-cli version``, or None when it cannot be obtained.
+
+    @param executable Path of kicad-cli.
+    @return The command output; None when the file is missing, the command
+        fails or times out.
+    @note Cached per executable path and file identity for the process
+        lifetime (`_KICAD_CLI_VERSION_CACHE`), failures included: a hung
+        executable must not block the window again at every installation.
+    """
+    try:
+        stat = executable.stat()
+    except OSError:
+        return None
+    if not executable.is_file():
+        return None
+    key = (str(executable.resolve()), stat.st_mtime_ns, stat.st_size)
+    if key in _KICAD_CLI_VERSION_CACHE:
+        return _KICAD_CLI_VERSION_CACHE[key]
+    try:
+        proc = subprocess.run(
+            [str(executable), "version"], capture_output=True, text=True,
+            errors="replace", timeout=KICAD_CLI_VERSION_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        output = None
+    else:
+        output = proc.stdout if proc.returncode == 0 else None
+    _KICAD_CLI_VERSION_CACHE[key] = output
+    return output
+
+
+def kicad_settings_version(text: str | None) -> str | None:
+    """@brief Extract the ``<major>.<minor>`` settings folder name from ``kicad-cli version`` output.
+
+    @param text Output of the command (e.g. ``10.0.6`` or a nightly
+        ``10.99.0-123-g1234abcd``); None or empty when unavailable.
+    @return ``"10.0"``, ``"10.99"``... as KiCad names its settings folder;
+        None when the first non-blank line does not start with a version.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            match = re.match(r"v?(\d+)\.(\d+)", line)
+            return f"{int(match.group(1))}.{int(match.group(2))}" if match else None
+    return None
+
+
 def global_fp_lib_table_path(
         kicad_cli_path: str | os.PathLike[str],
         *, environ: dict[str, str] | None = None,
-        platform: str | None = None) -> Path:
+        platform: str | None = None,
+        version_runner=None) -> Path:
     """@brief Resolve the per-user global fp-lib-table for the installed KiCad.
 
     @details Mirrors KiCad's settings path: ``$KICAD_CONFIG_HOME/<version>``
     when that variable is set and not empty, otherwise the platform default
     (``%APPDATA%/kicad/<version>``, ``~/Library/Preferences/kicad/<version>``
     or ``$XDG_CONFIG_HOME/kicad/<version>``).
-    @param kicad_cli_path Path of kicad-cli; its ``<major>.<minor>`` folder
-        gives the settings version.
+    @param kicad_cli_path Path of kicad-cli. The settings version is the
+        ``<major>.<minor>`` printed by ``kicad-cli version`` (a nightly
+        ``10.99.x`` gives ``10.99``, which its install folder may not show);
+        when the command gives nothing usable, the ``<major>.<minor>`` folder
+        in the path is used, as before.
     @param environ Environment used instead of ``os.environ`` (tests).
     @param platform Platform used instead of ``sys.platform`` (tests).
+    @param version_runner Callable taking the executable Path and returning
+        the command's stdout or None; defaults to running ``kicad-cli
+        version`` (read-only). Injected by tests that have no KiCad.
     @return Path of the table; the file may not exist yet.
     @throws KiCadLibraryError ``version_unknown`` when no version is found.
     """
     executable = Path(kicad_cli_path)
-    version = next(
-        (part for part in reversed(executable.parts)
-         if re.fullmatch(r"\d+\.\d+", part)),
-        None,
-    )
+    runner = _run_kicad_cli_version if version_runner is None else version_runner
+    version = kicad_settings_version(runner(executable))
+    if version is None:
+        version = next(
+            (part for part in reversed(executable.parts)
+             if re.fullmatch(r"\d+\.\d+", part)),
+            None,
+        )
     if version is None:
         raise KiCadLibraryError(
             "Unable to determine the installed KiCad version.",

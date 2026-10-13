@@ -35,10 +35,11 @@ from .measurement_uncertainty import (
     ASSUMED_SCALE_PX_PER_MM, SCALE_KEY, SOURCE_ASSUMED, SOURCE_DECLARED, UNCERTAINTY_KEY,
     component_edge_uncertainty, side_uncertainty_mm,
 )
-from .process_log import ProcessCancelled, heartbeat_interval
+from .process_log import NO_WINDOW_FLAGS, ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
 from ..fsutil import replace_file
 from ..core.validation import is_finite_number
+from ..kicad_versions import newest_version_first
 from .lead_sides import local_lead_sides
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
@@ -59,7 +60,7 @@ CAD_ABORT_MESSAGE = tx("Generazione 3D interrotta su richiesta dell'utente.")
 
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 
-_CFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+_CFLAGS = NO_WINDOW_FLAGS
 
 
 def _safe_name(name: str, index: int) -> str:
@@ -454,8 +455,39 @@ def _timeout_error(exc) -> "Cad3DError":
                          timeout=getattr(exc, "timeout", FREECAD_SILENCE_TIMEOUT_S), tail=tail))
 
 
+_FOLDER_VERSION = re.compile(r"(\d+(?:\.\d+)*)\s*$")
+#: Leading version of a folder named after FreeCAD, whatever follows it:
+#: «FreeCAD 1.1-dev», «FreeCAD 1.1 RC», «FreeCAD_1.0.2-conda-Windows-x86_64».
+_FREECAD_FOLDER_VERSION = re.compile(r"^freecad[\s_-]*v?(\d+(?:\.\d+)*)", re.IGNORECASE)
+
+
+def freecad_folder_version(executable: str) -> str:
+    """@brief Version written in the installation folder of a freecadcmd path.
+
+    @param executable Path such as ``C:/Program Files/FreeCAD 1.1/bin/freecadcmd.exe``
+        (backslashes accepted).
+    @return The dotted number of the folder holding ``bin`` (``"1.1"``), or
+        ``""`` when the folder carries none (``FreeCAD``, ``/usr``): such an
+        installation is still usable but never preferred.
+    @note A folder named after FreeCAD gives the number right after the name,
+        and a suffix after it is ignored: «FreeCAD 1.1-dev» and «FreeCAD 1.1
+        RC» are version 1.1, not unversioned folders ranked below 0.19. Any
+        other folder gives the number at its end, as before.
+    """
+    folder = Path(str(executable).replace("\\", "/")).parent.parent.name
+    match = _FREECAD_FOLDER_VERSION.search(folder) or _FOLDER_VERSION.search(folder)
+    return match.group(1) if match else ""
+
+
 def find_freecadcmd() -> str:
     """@brief Locate freecadcmd via FREECAD_CMD_PATH or typical installation folders; raise Cad3DError if absent.
+
+    @return Path of the chosen freecadcmd.
+    @throws Cad3DError When no installation is found.
+    @note Among several installations the highest NUMERIC folder version
+        wins (``FreeCAD 1.10`` over ``FreeCAD 1.9`` over ``FreeCAD 0.21``):
+        a text sort ranked ``1.9`` above ``1.10``. Folders without a version
+        come last; ties are broken by the path text (`newest_version_first`).
 
     Cerca freecadcmd: variabile d'ambiente FREECAD_CMD_PATH, poi le
     installazioni tipiche di Windows sotto Program Files."""
@@ -470,8 +502,7 @@ def find_freecadcmd() -> str:
         candidates.extend(glob.glob(f"{base}/freecadcmd"))
 
     if candidates:
-        candidates.sort(reverse=True)  # preferisce la versione con path/nome piu' alto
-        return candidates[0]
+        return newest_version_first(candidates, freecad_folder_version)[0]
 
     raise Cad3DError(
         tx("freecadcmd non trovato. Installa FreeCAD, oppure imposta la variabile "
@@ -801,6 +832,68 @@ def attach_library_models(components, height_notes, notes, report, *,
                  if not rendered.get("model_path"))
 
 
+def reused_height_notes(height_notes, reused) -> list:
+    """@brief Height notes still relevant when the model choices come from a snapshot.
+
+    @param height_notes (payload, note) pairs from `component_payloads` of
+        THIS run (fresh payloads, without model paths).
+    @param reused Component payloads loaded from `HeaderModelReuse`, with the
+        model paths chosen by the run that saved them.
+    @return The notes `attach_library_models` would have kept: a body with no
+        library model in the snapshot keeps its "reduced estimated height"
+        note; one that received a model is imported at the model's height and
+        gets none.
+    @note Fresh and reused payloads are paired by `source_row` (the index in
+        the component list, stable because the snapshot is valid only for the
+        same components), falling back to the position in the list. A fresh
+        body with no counterpart keeps its note: a correction of an estimate
+        is never dropped for lack of evidence that it no longer applies.
+    """
+    by_row = {}
+    for index, component in enumerate(reused or []):
+        if isinstance(component, dict):
+            by_row.setdefault(component.get("source_row", index), component)
+    kept = []
+    for fresh, note in height_notes:
+        match = by_row.get(fresh.get("source_row"))
+        if not (isinstance(match, dict) and match.get("model_path")):
+            kept.append(note)
+    return kept
+
+
+def resolve_or_reuse_models(reuse, components, height_notes, notes, report, *,
+                            progress=None, model_progress=None, cancel=None) -> list:
+    """@brief Attach library models, or reuse the snapshot of a headers-only change.
+
+    @param reuse HeaderModelReuse of this generation.
+    @param components Fresh payloads from `component_payloads`.
+    @param height_notes (payload, note) pairs from `component_payloads`.
+    @param notes List receiving the height notes still relevant.
+    @param report Callback for model-resolution messages.
+    @param progress Optional progress callback; receives REUSE_PROGRESS on reuse.
+    @param model_progress Optional progress callback of the matching.
+    @param cancel Optional threading.Event that aborts the matching.
+    @return The payloads to build: the fresh ones, now resolved, or the reused ones.
+    @throws Cad3DError With CAD_ABORT_MESSAGE when the user cancels the matching.
+    @note Both paths produce the same notes: on reuse the model-resolution
+        messages saved with the snapshot are reported again, and the height
+        notes are filtered by the reused model paths (`reused_height_notes`),
+        so a headers-only regeneration never silently loses the
+        "estimated height reduced" correction.
+    """
+    previous = reuse.load()
+    if previous is None:
+        attach_library_models(components, height_notes, notes, report,
+                              model_progress=model_progress, cancel=cancel)
+        return components
+    if progress:
+        progress(REUSE_PROGRESS)
+    for message in reuse.notes:
+        report(message)
+    notes.extend(reused_height_notes(height_notes, previous))
+    return previous
+
+
 def generate_castellated_3d_model(
     params: CastellatedModuleParams,
     body: Body3DParams,
@@ -914,14 +1007,9 @@ def generate_castellated_3d_model(
             progress(message)
     reuse = HeaderModelReuse(output_dir, params, body,
         [fillets, face_texts, font_file, photo_scale_px_per_mm])
-    previous = reuse.load()
-    if previous is None:
-        attach_library_models(components, height_notes, placement_notes, report_model,
-                              model_progress=model_progress, cancel=cancel)
-    else:
-        components = previous
-        if progress:
-            progress(REUSE_PROGRESS)
+    components = resolve_or_reuse_models(
+        reuse, components, height_notes, placement_notes, report_model,
+        progress=progress, model_progress=model_progress, cancel=cancel)
 
     # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
     # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
@@ -959,7 +1047,7 @@ def generate_castellated_3d_model(
     # La provenienza della distanza dal bordo dei fori passanti non e' un
     # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
     result["notes"] = inset_notes + header_notes + placement_notes + result["notes"]
-    reuse.save(components, result)
+    reuse.save(components, result, notes=model_notes)
     return result
 
 
@@ -1030,6 +1118,12 @@ def generate_single_package_3d_model(
     @param body Colours and fallback dimensions when the package gives none.
     @param output_dir Project directory receiving the `.3dshapes` folder.
     @return The `_run_freecad` result with a generic-model note appended.
+    @note The body box turns with the package: `orientation_deg` (KiCad
+        convention, any angle) is applied to the body about the footprint
+        origin, exactly as `pins_seen_from_top` applies it to the pads and
+        the footprint applies it to the F.Fab outline. Pin-number labels are
+        placed in the body's own frame and turn with it. At 0 degrees the
+        FreeCAD payload is the previous one, field for field.
 
     This path intentionally makes no KiCad library, archive, or model-match
     calls. Through-hole leads are cylindrical approximations; SMD terminals
@@ -1072,19 +1166,49 @@ def generate_single_package_3d_model(
         centered = replace(centered, pin_diameter_mm=min(
             min(drills) * LEAD_OF_DRILL_FRACTION, LEAD_MAX_DIAMETER_MM))
     texts = list(face_texts or [])
+    turn = _normal_degrees(package.orientation_deg)
     if body.pin_numbers_3d and leads:
-        texts.extend(pin_number_labels([(n, x, y) for n, x, y in leads], centered))
+        # The labels lie on the body, which is described in its own frame
+        # and turned by FreeCAD: place them from the leads seen in that frame.
+        texts.extend(pin_number_labels(
+            [(n, *body_frame_point(x, y, turn)) for n, x, y in leads], centered))
     if progress:
         progress(tx("Modello 3D generico del componente: nessuna ricerca nelle librerie KiCad."))
     result = _run_freecad(
         package.name or "Package", leads, centered, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=texts,
         font_file=font_file, extra_boxes=terminals, progress=progress, cancel=cancel,
+        body_rotation_deg=turn,
     )
     result.setdefault("notes", []).append(tx(
         "Corpo package generico. Terminali THT cilindrici e terminali SMD ricavati dai pad: "
         "verificare quote e forma sui documenti del componente."))
     return result
+
+
+def _normal_degrees(angle) -> float:
+    """Map an angle to [0, 360) degrees, with exact 0 for every full turn and no -0."""
+    value = round(float(angle) % 360.0, 9)
+    return 0.0 if value in (0.0, 360.0) else value + 0.0
+
+
+def body_frame_point(x: float, y: float, turn_deg: float) -> tuple[float, float]:
+    """@brief Bring a footprint point into the frame of a body turned by `turn_deg`.
+
+    @param x Point X in footprint coordinates (Y down), mm.
+    @param y Point Y in footprint coordinates, mm.
+    @param turn_deg Body turn about the origin, KiCad convention (degrees
+        counter-clockwise on screen), any angle.
+    @return (x, y) in the body's axis-aligned frame, mm: the inverse of the
+        rotation `PackageGeometry.pins_seen_from_top` applies, so turning the
+        result by `turn_deg` gives the input back. 0 returns the input as is.
+    """
+    if not turn_deg:
+        return x, y
+    angle = math.radians(turn_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    # Inverse of (x cos + y sin, -x sin + y cos): rotate by -turn_deg.
+    return (round(x * cos_a - y * sin_a, 9) + 0.0, round(x * sin_a + y * cos_a, 9) + 0.0)
 
 
 #: Lead diameter of a generic through-hole part as a fraction of its hole:
@@ -1263,14 +1387,16 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     # una sola richiesta copre misura dei candidati e costruzione del solido.
     reuse = HeaderModelReuse(output_dir, params, body,
         [options.get('fillets'), options.get('face_texts'), options.get('font_file')])
-    previous = reuse.load()
-    if previous is None:
-        attach_library_models(components, height_notes, placement_notes, report,
-                              model_progress=model_progress, cancel=options.get("cancel"))
-    else:
-        components = previous
-        if progress:
-            progress(REUSE_PROGRESS)
+    # Only the model-resolution messages go into the snapshot: the thickness
+    # note above is recomputed on every run and must not be replayed twice.
+    model_notes = []
+
+    def report_model(message):
+        model_notes.append(message)
+        report(message)
+    components = resolve_or_reuse_models(
+        reuse, components, height_notes, placement_notes, report_model,
+        progress=progress, model_progress=model_progress, cancel=options.get("cancel"))
     overlap_warnings = find_overlapping_components(_rendered(components))
     from ..services.model_choices import save_candidate_report
     candidate_report = save_candidate_report(output_dir, components)
@@ -1294,7 +1420,7 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     result["notes"] = ([] if progress else notes) + placement_notes + list(result.get("notes", []))
     result["candidate_report_path"] = candidate_report
     _reconcile_model_imports(result, components, output_dir)
-    reuse.save(components, result)
+    reuse.save(components, result, notes=model_notes)
     return result
 
 
@@ -1423,8 +1549,18 @@ def _run_freecad(
     extra_payload: Optional[dict] = None,
     progress=None,
     cancel=None,
+    body_rotation_deg: float = 0.0,
 ) -> dict:
     """Costruisce il JSON e lancia freecadcmd; comune a tutti i generatori 3D.
+
+    `body_rotation_deg` turns the body box, its fillets and its face texts
+    about the footprint origin (Z axis), KiCad convention (degrees
+    counter-clockwise on screen, footprint Y down), any angle. The body and
+    its texts are described in the body's own axis-aligned frame; pins,
+    extra boxes and notches stay in the footprint frame. 0 (the default)
+    writes no field, so the payload and the solid are exactly the previous
+    ones. Edge contacts are classified on the axis-aligned board edges and
+    cannot be combined with a turned body (ValueError).
 
     `pins` sono i cilindri da aggiungere sotto il corpo (vuoto per i moduli
     castellated), `notches` i cilindri da SOTTRARRE al corpo per ricavare i
@@ -1456,6 +1592,11 @@ def _run_freecad(
     always a complete export of the latest run.
     """
     body.validate()
+    if not is_finite_number(body_rotation_deg):
+        raise ValueError(f"body_rotation_deg must be a finite number, got {body_rotation_deg!r}")
+    body_turn = _normal_degrees(body_rotation_deg)
+    if body_turn and edge_contacts:
+        raise ValueError("a turned body cannot carry edge contacts")
     fillets = fillets or []
     face_texts = face_texts or []
     for f in fillets:
@@ -1479,6 +1620,8 @@ def _run_freecad(
             "offset_x_mm": body.offset_x_mm,
             "offset_y_mm": body.offset_y_mm,
             "color_hex": body.color_hex,
+            # Only a real turn is written: a 0-degree payload stays the old one.
+            **({"rotation_deg": body_turn} if body_turn else {}),
         },
         "pins": pins,
         "notches": list(notches or []),

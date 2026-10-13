@@ -45,7 +45,7 @@ from functools import lru_cache
 from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
-from .process_log import CANCEL_POLL_INTERVAL_S, ProcessCancelled
+from .process_log import CANCEL_POLL_INTERVAL_S, NO_WINDOW_FLAGS, ProcessCancelled
 from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
@@ -1106,9 +1106,11 @@ def _measure_batch(freecad, paths, timeout, cancel):
         log_path = base / "freecad.out"
         outcome, stopped = "failed", None
         try:
+            # Same flags as the solid's child: no console window flashing
+            # for every measuring batch on Windows.
             with log_path.open("wb") as sink, subprocess.Popen(
                     command, stdout=sink, stderr=subprocess.STDOUT,
-                    env=environment) as process:
+                    env=environment, creationflags=NO_WINDOW_FLAGS) as process:
 
                 def kill_child():
                     """Unico punto in cui il figlio della misura viene ucciso."""

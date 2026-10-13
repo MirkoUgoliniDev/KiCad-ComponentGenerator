@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import hashlib
+import json
 import math
+import os
+import tempfile
+import time
 from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
 from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon, QPolygonF
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
@@ -16,6 +21,17 @@ from ..generators.symbol_edit import transform_selection
 
 SCENE_UNITS_PER_MM = 10.0
 GRID_MM = PIN_GRID_MM
+
+#: Superseded drafts kept per project beside the recovery file (one file per
+#: pinout change that could not carry a pending draft over). Disk-usage bound,
+#: not a semantic limit: beyond it the OLDEST snapshot is removed, so a
+#: project folder holds at most this many files of `_SNAPSHOT_MAX_BYTES` each.
+MAX_SUPERSEDED_DRAFTS = 5
+
+#: A superseded snapshot larger than this (bytes) is not read back: it holds
+#: two copies of the rows (old baseline and draft), twice the 2 MB bound the
+#: recovery file itself is read with (`symbol_draft.load_draft`).
+_SNAPSHOT_MAX_BYTES = 4_000_000
 
 _TYPE_LABELS = {
     'input': 'Ingresso', 'output': 'Uscita', 'bidirectional': 'Bidirezionale',
@@ -420,6 +436,10 @@ class _SymbolView(QGraphicsView):
         self.viewport().setMouseTracking(True)
 
     def mouseDoubleClickEvent(self, event):
+        """@brief Qt override: a left double click ends the wire being drawn.
+
+        @param event The mouse event; other double clicks reach the base class.
+        """
         if self.wiring and event.button() == Qt.MouseButton.LeftButton:
             self.wiring = False
             self.wire_finished.emit(True)
@@ -428,6 +448,12 @@ class _SymbolView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
+        """@brief Qt override: route a press to wiring, placement, selection, pan or a drag gesture.
+
+        @param event The mouse event; unhandled presses reach the base class.
+        @note The view grabs the mouse for rubber-band selection, pan and drags
+            until the matching release or `cancel_interaction`.
+        """
         # Hidden handles are not hit-tested: a press whose pointer arrived
         # without a move (touch, automation, coalesced events) must first
         # reveal them like a move would (review, 2026-10-12).
@@ -501,6 +527,10 @@ class _SymbolView(QGraphicsView):
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
+        """@brief Qt override: ask for the context menu of the pin or element under the pointer.
+
+        @param event The context-menu event; ignored on the background or during a drag.
+        """
         if self.gesture is not None:
             event.accept()
             return
@@ -523,10 +553,18 @@ class _SymbolView(QGraphicsView):
         self._pan_last = point
 
     def leaveEvent(self, event):
+        """@brief Qt override: report that the pointer left the view (hides the hover handles).
+
+        @param event The leave event.
+        """
         self.pointer_left.emit()
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
+        """@brief Qt override: update the pointer readout, rubber band, pan or the running drag.
+
+        @param event The mouse event.
+        """
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self._rubber_start is not None:
             self._rubber.setGeometry(QRect(self._rubber_start, event.pos()).normalized())
@@ -543,6 +581,10 @@ class _SymbolView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        """@brief Qt override: finish the rubber band, pan or drag at the actual drop point.
+
+        @param event The mouse event.
+        """
         if self._rubber_start is not None and event.button() == Qt.MouseButton.LeftButton:
             rect = QRect(self._rubber_start, event.pos()).normalized()
             self._rubber_start = None
@@ -569,6 +611,10 @@ class _SymbolView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
+        """@brief Qt override: Enter/Escape finish or cancel wiring, placement and drags.
+
+        @param event The key event; other keys reach the base class.
+        """
         if self.wiring and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.wiring = False
             self.wire_finished.emit(True)
@@ -605,6 +651,10 @@ class _SymbolView(QGraphicsView):
             self.gesture_finished.emit(False)
 
     def hideEvent(self, event):
+        """@brief Qt override: roll back an unfinished interaction before the view is hidden.
+
+        @param event The hide event.
+        """
         self.cancel_interaction()
         super().hideEvent(event)
 
@@ -690,17 +740,29 @@ class _SymbolView(QGraphicsView):
             self.camera_changed.emit()
 
     def wheelEvent(self, event):
+        """@brief Qt override: zoom about the pointer, never during a drag or pan.
+
+        @param event The wheel event; always accepted so the page does not scroll.
+        """
         delta = event.angleDelta().y()
         if delta and self.gesture is None and self._pan_last is None:
             self.zoom(1.2 ** max(-4, min(4, delta / 120)), event.position().toPoint())
         event.accept()
 
     def resizeEvent(self, event):
+        """@brief Qt override: refit the symbol after a resize while auto-fit is on.
+
+        @param event The resize event.
+        """
         super().resizeEvent(event)
         if self.auto_fit:
             self.fit()
 
     def showEvent(self, event):
+        """@brief Qt override: refit the symbol when the view is shown while auto-fit is on.
+
+        @param event The show event.
+        """
         super().showEvent(event)
         if self.auto_fit:
             self.fit()
@@ -745,6 +807,16 @@ class SymbolTab(QWidget):
         self._body_locked = False
         self._recovery_path = None
         self._recoverable = None
+        #: Draft `set_data` could not rebase (different pins), offered by «Recupera bozza».
+        self._stale_recoverable = None
+        #: Superseded snapshot file the offered draft comes from, retired on recovery.
+        self._recoverable_snapshot = None
+        #: Recovery file of the project the editor content belongs to: the
+        #: project identity (two projects may share a component name).
+        self._draft_owner = None
+        #: Draft carried over by `set_data`, confirmed or dropped by the next
+        #: `set_recovery_path`: {'old_baseline', 'draft', 'kept'}.
+        self._carry = None
         self._applying = False
         self._text_bounds = []
         self._symbol = None
@@ -1001,27 +1073,66 @@ class SymbolTab(QWidget):
             self._splitter.setSizes([self._table_width, max(260, self._splitter.width() - self._table_width)])
 
     def set_data(self, name, pinout, footprint='', pad_ids=None, force=False):
-        """@brief Load a changed project baseline while preserving drafts for unchanged inputs."""
+        """@brief Load a changed project baseline without ever losing an unapplied draft.
+
+        @param name Component name; a different name is another project. The
+            same name is NOT enough to be the same project: the identity is
+            the recovery file given by the next `set_recovery_path`.
+        @param pinout Pinout rows (`pin`, `name`, metadata). Pin numbers are
+            stripped of surrounding blanks here, once: «1 » and «1» are one pin.
+        @param footprint Footprint identifier «Library:Name».
+        @param pad_ids Actual footprint pad numbers (stripped too), or None.
+        @param force Reload even when the inputs did not change.
+        @note A pending draft of the same project is rebased onto the new
+            baseline when the pin identities are unchanged (each edited field
+            keeps the draft value, the others take the new values) unless the
+            new data changed one of the same fields differently. With
+            different pins, such a conflict, or a merge whose layout does not
+            validate while the draft's did, it is kept recoverable instead:
+            «Recupera bozza» brings back the edits of the pins that still exist.
+            The status tells the user which case happened. Nothing is written
+            here: the owner calls `set_recovery_path` right after, which
+            confirms the project and makes the outcome durable (rebased: the
+            recovery file bound to the new baseline; kept: a superseded
+            snapshot, `superseded_draft_paths`), or drops the carried draft
+            when the path is another project's.
+        """
         key = deepcopy((name, pinout, footprint, list(pad_ids) if pad_ids is not None else None))
         if not force and key == self._source_key:
             return
         self.view.cancel_interaction()
+        pending = self._pending_draft()
+        carry = self._carry
+        if pending is None and carry is not None and carry['kept']:
+            # A kept draft not yet confirmed by `set_recovery_path` has no
+            # file yet: it is still the pending draft of its project.
+            pending = (carry['old_baseline'], carry['draft'])
+        self._carry = None
         self._recovery_path = None
         self._recoverable = None
+        self._recoverable_snapshot = None
+        self._stale_recoverable = None
         self.recovery_button.defaultAction().setEnabled(False)
         self._source_key = key
         self._error = ''
         # The previous layout belongs to this project only when the name is
         # the same: another project's pins must not freeze this one's wires.
-        same_project = self._symbol is not None and str(name) == self._name
+        same_project = bool(self._baseline) and str(name) == self._name
+        if not same_project:
+            # Another component: whatever the editor held belongs elsewhere.
+            self._draft_owner = None
         self._name, self._footprint = str(name), str(footprint)
         self.footprint_label.setText(f"{self.tx('Footprint associato')}: {footprint}" if footprint else '')
         source = [deepcopy(row) for row in pinout if isinstance(row, dict)]
-        source_ids = [str(row.get('pin', '')).strip() for row in source]
+        # One normalisation of the identities at the entry point: every
+        # later comparison (pads, duplicates, selection) uses the stripped text.
+        for row in source:
+            row['pin'] = str(row.get('pin', '')).strip()
+        source_ids = [row['pin'] for row in source]
         if len(source_ids) != len(set(source_ids)):
             self._error = self.tx('Il pinout contiene numeri duplicati: verifica la corrispondenza.')
         if pad_ids is not None:
-            ids = list(dict.fromkeys(str(value) for value in pad_ids if str(value).strip()))
+            ids = list(dict.fromkeys(str(value).strip() for value in pad_ids if str(value).strip()))
             by_id = {str(row.get('pin', '')): row for row in source}
             extra = [row for row in source if str(row.get('pin', '')) not in ids]
             source = [by_id.get(value, {'pin': value, 'name': ''}) for value in ids] + extra
@@ -1036,18 +1147,23 @@ class SymbolTab(QWidget):
                 row.pop('electrical_type_evidence', None)
             row.setdefault('symbol_side', 'left' if index < (len(source) + 1) // 2 else 'right')
         # Legacy records (no `id`) get their stable id HERE, before the
-        # baseline is copied: baseline and draft must agree on the ids, or an
+        # baseline is copied, and the same id at every load
+        # (`_assign_legacy_ids`), so an upstream change is not a graphics
+        # conflict merely because random ids were drawn again: baseline and draft must agree on the ids, or an
         # untouched project would load dirty (Apply enabled, Export disabled)
         # and Cancel would regenerate the ids.
+        self._assign_legacy_ids(source)
         graphics = self._graphics(source)
         # Wires anchored to a pin the new pinout no longer has keep its last
         # position as a fixed point. Only the layout of the SAME project can
         # tell where that pin was; at the first load, or coming from another
         # project, nothing is frozen and the anchor falls back to its stored
-        # x/y, refreshed at every commit (`refresh_wire_anchors`).
+        # x/y, refreshed at every commit (`refresh_wire_anchors`). The layout
+        # is the APPLIED baseline's: the incoming rows derive from it, while
+        # an unapplied draft may have moved the pin elsewhere.
         if same_project and graphics:
-            from ..generators.symbol_glyphs import freeze_pin_anchors, pin_inner_ends
-            previous_ends = pin_inner_ends(self._symbol)
+            from ..generators.symbol_glyphs import freeze_pin_anchors
+            previous_ends = self._pin_ends_of(self._baseline)
             new_numbers = {str(row.get('pin', '')) for row in source}
             dropped = [number for number in previous_ends if number not in new_numbers]
             if dropped:
@@ -1058,13 +1174,8 @@ class SymbolTab(QWidget):
         # with a pin end or a terminal end was snapped there on purpose and
         # becomes anchored now, still before the baseline (not «modified»).
         if graphics:
-            from ..generators.symbol_glyphs import adopt_coincident_anchors, pin_inner_ends
-            try:
-                pins, body = symbol_inputs(source)
-                ends = pin_inner_ends(layout_symbol(pins, body)) if pins else {}
-            except ValueError:
-                ends = {}
-            if adopt_coincident_anchors(graphics, ends):
+            from ..generators.symbol_glyphs import adopt_coincident_anchors
+            if adopt_coincident_anchors(graphics, self._pin_ends_of(source)):
                 source = self._with_graphics(source, graphics)
         self._history = []
         self._history_index = -1
@@ -1073,7 +1184,275 @@ class SymbolTab(QWidget):
         self._baseline = deepcopy(source)
         self._original = deepcopy(source)
         self.title.setText(f"{self.tx('Simbolo elettrico')} · {self._name}" if name else self.tx('Simbolo elettrico'))
+        if pending is None:
+            self._populate(source)
+            return
+        old_baseline, draft = pending
+        if not same_project:
+            # Another component: its draft stays in its own recovery file,
+            # still bound to its own (unchanged) baseline.
+            self._populate(source)
+            return
+        rebased, conflicts = self._rebase_rows(old_baseline, draft, source)
+        same_pins = [str(r.get('pin', '')) for r in draft] == [str(r.get('pin', '')) for r in source]
+        # Each side may be valid alone and the merge not (two pins moved onto
+        # one point, one by the draft and one by the new data): that is a
+        # conflict too. A draft that was already invalid on its own (the user
+        # is mid-edit) is carried as it is: the merge did not break it.
+        broken = (same_pins and not conflicts and self._layout_fails(rebased)
+                  and not self._layout_fails(draft))
+        kept = not same_pins or conflicts or broken
+        self._carry = {'old_baseline': old_baseline, 'draft': draft, 'kept': kept}
+        if not kept:
+            self._populate(rebased)
+            if self._symbol is not None and not self._error:
+                self.set_status(self.tx('Pinout aggiornato: le modifiche non applicate sono state riportate sui nuovi dati.'))
+            return
+        # The new data is shown as it is and the draft (its edits winning,
+        # on the pins that still exist) waits for «Recupera bozza».
         self._populate(source)
+        if rebased != source:
+            self._stale_recoverable = rebased
+            self._recoverable = deepcopy(rebased)
+            self.recovery_button.defaultAction().setEnabled(True)
+        if broken:
+            self.set_status(self.tx('Pinout aggiornato: la bozza non applicata, riportata sui nuovi dati, darebbe '
+                                    'una disposizione non valida ed è conservata, usa Recupera bozza per riprenderla.'))
+        elif same_pins:
+            self.set_status(self.tx('Pinout aggiornato: la bozza non applicata modifica gli stessi dati ed è '
+                                    'conservata, usa Recupera bozza per riprenderla.'))
+        else:
+            self.set_status(self.tx('Pinout aggiornato con pin diversi: la bozza non applicata è conservata, '
+                                    'usa Recupera bozza per riprendere le modifiche dei pin rimasti.'))
+
+    def error_text(self, exc):
+        """@brief The message of a validation error in the interface language.
+
+        @param exc Any exception; a `SymbolError` of the generators is
+            translated through the catalogue, anything else shows `str(exc)`.
+        @return Text for the status line or a dialog.
+        """
+        localized = getattr(exc, 'localized', None)
+        if callable(localized):
+            try:
+                return str(localized(self.tx))
+            except Exception:  # noqa: BLE001 - never hide the error behind a translation fault
+                pass
+        return str(exc)
+
+    def _pending_draft(self):
+        """(applied baseline, draft rows) when the editor holds unapplied edits, else None."""
+        if getattr(self, '_draft', None) is None or self.table.rowCount() != len(self._draft):
+            return None
+        draft = self.draft_rows()
+        return (deepcopy(self._baseline), draft) if draft != self._baseline else None
+
+    @staticmethod
+    def superseded_draft_path(path, stamp):
+        """@brief The file of one superseded draft, beside the recovery file.
+
+        @param path The recovery file (`set_recovery_path`).
+        @param stamp Creation stamp, nanoseconds since the epoch, written with
+            20 digits so that the names sort by age.
+        @return `<stem>.superseded-<stamp><suffix>` in the same folder.
+        """
+        path = Path(path)
+        return path.with_name(f'{path.stem}.superseded-{int(stamp):020d}{path.suffix}')
+
+    @staticmethod
+    def superseded_draft_paths(path):
+        """@brief The superseded drafts kept beside a recovery file, newest first.
+
+        @param path The recovery file (`set_recovery_path`).
+        @return Existing snapshot files; [] when the folder cannot be read.
+        @note Each file is a normal recovery file bound to the baseline the
+            draft was made on (`symbol_draft.load_draft` reads it with that
+            baseline) and also carries those baseline rows (`old_baseline`),
+            so the draft can be carried onto any later baseline.
+        """
+        path = Path(path)
+        prefix = f'{path.stem}.superseded-'
+        try:
+            found = [p for p in path.parent.iterdir()
+                     if p.name.startswith(prefix) and p.name.endswith(path.suffix) and p.is_file()]
+        except OSError:
+            return []
+        return sorted(found, key=lambda p: p.name, reverse=True)
+
+    @staticmethod
+    def _read_snapshot(file):
+        """(old baseline rows, draft rows) of a superseded snapshot, None when unusable."""
+        from ..services.symbol_draft import fingerprint
+        try:
+            if file.stat().st_size > _SNAPSHOT_MAX_BYTES:
+                return None
+            data = json.loads(file.read_text(encoding='utf-8'))
+            old, rows = data.get('old_baseline'), data.get('rows')
+            if data.get('version') != 1:
+                return None
+            for value in (old, rows):
+                if not isinstance(value, list) or not all(isinstance(r, dict) for r in value):
+                    return None
+            if data.get('baseline') != fingerprint(old):
+                return None
+            if [str(r.get('pin')) for r in rows] != [str(r.get('pin')) for r in old]:
+                return None
+            return old, rows
+        except (OSError, ValueError, AttributeError, TypeError):
+            return None
+
+    def _write_snapshot(self, path, old_baseline, draft):
+        """Persist a superseded draft beside `path`; return its file, or None when not written.
+
+        An identical snapshot already on disk is reused instead of written
+        again; a different one is never overwritten (one file per stamp).
+        Beyond MAX_SUPERSEDED_DRAFTS the oldest files are removed, only after
+        the new one is in place.
+        """
+        from ..fsutil import replace_file
+        from ..services.symbol_draft import fingerprint
+        old_baseline, draft = json.loads(json.dumps([old_baseline, draft], ensure_ascii=False))
+        for existing in self.superseded_draft_paths(path):
+            if self._read_snapshot(existing) == (old_baseline, draft):
+                return existing
+        text = json.dumps({'version': 1, 'baseline': fingerprint(old_baseline), 'rows': draft,
+                           'old_baseline': old_baseline}, ensure_ascii=False)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = time.time_ns()
+            while self.superseded_draft_path(path, stamp).exists():
+                stamp += 1
+            target = self.superseded_draft_path(path, stamp)
+            fd, temp = tempfile.mkstemp(prefix='.symbol-recovery-', suffix='.tmp', dir=path.parent)
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                    stream.write(text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                replace_file(temp, target)
+            finally:
+                Path(temp).unlink(missing_ok=True)
+        except OSError:
+            self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
+            return None
+        for stale in self.superseded_draft_paths(path)[MAX_SUPERSEDED_DRAFTS:]:
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return target
+
+    def _offerable_snapshot(self, path):
+        """(rows, file) of the newest snapshot that still changes the applied baseline, else (None, None)."""
+        for file in self.superseded_draft_paths(path):
+            data = self._read_snapshot(file)
+            if data is None:
+                continue
+            rows = self._rebase_rows(data[0], data[1], self._baseline)[0]
+            if rows != self._baseline:
+                return rows, file
+        return None, None
+
+    @staticmethod
+    def _layout_fails(rows):
+        """True when `rows` carry pins whose symbol layout does not validate."""
+        try:
+            pins, body = symbol_inputs(rows)
+            if pins:
+                layout_symbol(pins, body)
+        except ValueError:
+            return True
+        return False
+
+    @staticmethod
+    def _assign_legacy_ids(rows):
+        """Give every graphics record without an id one derived from its position and content.
+
+        Legacy projects (saved before records had ids) otherwise draw new
+        random ids at every load, and a draft made on one load would differ
+        from the next load in `symbol_graphics` even when nothing changed.
+        Every row carries the same list, so every row gets the same ids.
+        """
+        for row in rows:
+            records = row.get('symbol_graphics') if isinstance(row, dict) else None
+            if not isinstance(records, list):
+                continue
+            for index, record in enumerate(records):
+                if isinstance(record, dict) and not (isinstance(record.get('id'), str) and record['id']):
+                    content = json.dumps([index, {k: v for k, v in record.items() if k != 'id'}],
+                                         sort_keys=True, ensure_ascii=False, default=str)
+                    record['id'] = 'legacy' + hashlib.sha256(content.encode('utf-8')).hexdigest()[:26]
+
+    @staticmethod
+    def _pin_ends_of(rows):
+        """Inner pin ends {number: (x, y)} of the layout of `rows`; {} when it does not validate."""
+        from ..generators.symbol_glyphs import pin_inner_ends
+        try:
+            pins, body = symbol_inputs(rows)
+            return pin_inner_ends(layout_symbol(pins, body)) if pins else {}
+        except ValueError:
+            return {}
+
+    @staticmethod
+    def _rebase_rows(old_baseline, draft, new_baseline):
+        """Carry the unapplied edits of `draft` (made on `old_baseline`) onto `new_baseline`.
+
+        Three-way per field: a field the draft changed keeps the draft
+        value, every other field takes the new baseline's. Per-pin fields
+        are matched by pin number; a pin only in the new baseline keeps its
+        new values and the edits of a pin that disappeared are dropped. The
+        fields shared by every row (body, graphics, property positions) are
+        merged once. Wires of the draft anchored to a dropped pin are frozen
+        where the draft's layout had that pin.
+
+        Returns (rows, conflicts): the draft value wins every field, and
+        `conflicts` is True when some field was ALSO changed by the new
+        baseline to a different value (the caller then must not apply the
+        result silently).
+        """
+        missing = object()
+        shared = ('symbol_body', 'symbol_graphics', PROPERTIES_KEY)
+        old_by = {str(row.get('pin', '')): row for row in old_baseline}
+        draft_by = {str(row.get('pin', '')): row for row in draft}
+        result = deepcopy(new_baseline)
+        conflicts = False
+        for row in result:
+            number = str(row.get('pin', ''))
+            before_row, after_row = old_by.get(number), draft_by.get(number)
+            if before_row is None or after_row is None:
+                continue
+            for key in set(before_row) | set(after_row):
+                before, after = before_row.get(key, missing), after_row.get(key, missing)
+                if key in shared or before == after:
+                    continue
+                incoming = row.get(key, missing)
+                conflicts = conflicts or (incoming != before and incoming != after)
+                if after is missing:
+                    row.pop(key, None)
+                else:
+                    row[key] = deepcopy(after)
+        first_before = old_baseline[0] if old_baseline else {}
+        first_after = draft[0] if draft else {}
+        first_incoming = result[0] if result else {}
+        for key in shared:
+            before, after = first_before.get(key, missing), first_after.get(key, missing)
+            if before == after:
+                continue
+            incoming = first_incoming.get(key, missing)
+            conflicts = conflicts or (incoming != before and incoming != after)
+            if key == 'symbol_graphics' and after is not missing:
+                from ..generators.symbol_glyphs import freeze_pin_anchors
+                after = deepcopy(after)
+                ends = SymbolTab._pin_ends_of(draft)
+                kept = {str(row.get('pin', '')) for row in result}
+                for number in [n for n in ends if n not in kept]:
+                    freeze_pin_anchors(after, number, ends)
+            for row in result:
+                if after is missing:
+                    row.pop(key, None)
+                else:
+                    row[key] = deepcopy(after)
+        return result, conflicts
 
     def _populate(self, rows):
         self._loading = True
@@ -1121,29 +1500,92 @@ class SymbolTab(QWidget):
             self._changed()
 
     def set_recovery_path(self, path):
-        """@brief Locate a recovery draft matching the current applied baseline."""
+        """@brief Bind the editor to the recovery file of the current project and offer what it holds.
+
+        @param path Recovery file of the project (`<project>/.symbol-draft.json`),
+            or None to stop checkpointing.
+        @note The path is the identity of the project: two projects may share
+            the component name in different library roots. The owner calls
+            this right after `set_data`, so a draft `set_data` carried over is
+            settled here. Same project: it becomes durable (rebased: the
+            recovery file is rewritten bound to the new baseline; kept: a
+            superseded snapshot is written and offered). Another project:
+            whatever the editor held beyond the applied data is dropped from
+            the editor (it stays in its own project's recovery file) and is
+            never written here. Without a carried draft, the recovery file
+            matching the applied baseline is offered, else the newest
+            superseded snapshot that still changes something.
+        """
         path = Path(path) if path else None
         if path == self._recovery_path:
             return
+        if path is None:
+            self._recovery_path = None
+            self._recoverable = None
+            self._recoverable_snapshot = None
+            self.recovery_button.defaultAction().setEnabled(False)
+            return
+        carry, self._carry = self._carry, None
+        if self._draft_owner is not None and path != self._draft_owner:
+            self._recovery_path = None
+            self._recoverable = None
+            self._stale_recoverable = None
+            carry = None
+            if self.has_pending_edits():
+                self._history = []
+                self._history_index = -1
+                self._populate(deepcopy(self._baseline))
         self._recovery_path = path
+        self._draft_owner = path
         self._recoverable = None
-        if path is not None:
-            from ..services.symbol_draft import load_draft
-            try:
-                self._recoverable = load_draft(path, self._baseline)
-            except OSError:
-                self.set_status(self.tx('Impossibile leggere la bozza di recupero.'))
+        self._recoverable_snapshot = None
+        if carry is not None:
+            if not carry['kept']:
+                # Bound to the NEW baseline now: a restart finds it.
+                self._checkpoint_draft()
+                return
+            snapshot = self._write_snapshot(path, carry['old_baseline'], carry['draft'])
+            if self._stale_recoverable is not None:
+                self._recoverable = deepcopy(self._stale_recoverable)
+                self._recoverable_snapshot = snapshot
+            self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
+            return
+        from ..services.symbol_draft import load_draft
+        try:
+            self._recoverable = load_draft(path, self._baseline)
+        except OSError:
+            self.set_status(self.tx('Impossibile leggere la bozza di recupero.'))
+        if self._recoverable is not None:
+            self.recovery_button.defaultAction().setEnabled(True)
+            self.set_status(self.tx('Bozza disponibile: usa Recupera bozza per riprenderla.'))
+            return
+        self._recoverable, self._recoverable_snapshot = self._offerable_snapshot(path)
         self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
         if self._recoverable is not None:
-            self.set_status(self.tx('Bozza disponibile: usa Recupera bozza per riprenderla.'))
+            self.set_status(self.tx('Bozza superata da un pinout successivo disponibile: usa Recupera bozza '
+                                    'per riprenderla sui dati attuali.'))
 
     def recover_draft(self):
-        """@brief Restore recovery rows as an editable, unapplied draft."""
+        """@brief Restore recovery rows as an editable, unapplied draft.
+
+        @note A superseded snapshot is removed only once the recovery file
+            holds the recovered draft, so a failed write never loses it.
+        """
         if self._recoverable is not None:
             rows = deepcopy(self._recoverable)
+            snapshot = self._recoverable_snapshot
             self._recoverable = None
+            self._recoverable_snapshot = None
+            self._stale_recoverable = None
             self.recovery_button.defaultAction().setEnabled(False)
             self._populate(rows)
+            if snapshot is not None and self._recovery_path is not None:
+                from ..services.symbol_draft import load_draft
+                try:
+                    if load_draft(self._recovery_path, self._baseline) == self.draft_rows():
+                        snapshot.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _checkpoint_draft(self):
         if self._recovery_path is None or self._applying or self._gesture_before is not None:
@@ -1153,6 +1595,8 @@ class SymbolTab(QWidget):
             if self.has_pending_edits():
                 save_draft(self._recovery_path, self._baseline, self.draft_rows())
                 self._recoverable = None
+                self._recoverable_snapshot = None
+                self._stale_recoverable = None
                 self.recovery_button.defaultAction().setEnabled(False)
             elif self._recoverable is None:
                 self._recovery_path.unlink(missing_ok=True)
@@ -2332,7 +2776,7 @@ class SymbolTab(QWidget):
         except ValueError as exc:
             valid = False
             symbol = None
-            self.status.setText(str(exc))
+            self.status.setText(self.error_text(exc))
         else:
             self.status.setText(self.tx('Nessun pin disponibile: carica o analizza un progetto.') if not rows else self.tx('Modifiche non applicate.') if dirty else self.tx('Simbolo pronto per la verifica e l’esportazione.'))
         if self._error:
@@ -2896,15 +3340,26 @@ class SymbolTab(QWidget):
             delta = point - self._gesture_start
             rows = self._free_rows(self._gesture_before, symbol)
             graphics = self._graphics(rows)
-            # A shape follows the drawing grid; a glyph or a wire the pin
-            # grid, so its terminals and anchors keep meeting the pins.
-            moved = round(origin[0] + delta.x() / SCENE_UNITS_PER_MM, 4), round(origin[1] - delta.y() / SCENE_UNITS_PER_MM, 4)
-            if 0 <= target[1] < len(graphics) and is_shape(graphics[target[1]]):
-                x, y = self._grid_point(*moved)
-            else:
-                x, y = (round(round(v / GRID_MM) * GRID_MM, 4) for v in moved)
-            dx, dy = round(x - origin[0], 4), round(y - origin[1], 4)
             origins = getattr(self, '_gesture_group_origins', None) or {target[1]: origin}
+            # Every member moves by the same delta. Shapes alone: the DELTA
+            # is snapped on the drawing grid, so an odd-sized shape keeps its
+            # corners on it. As soon as a glyph or a wire moves along, the
+            # reference member's resulting ABSOLUTE position is snapped on
+            # the pin grid (the leader, or the first glyph or wire when a
+            # shape leads): its terminals meet the pins again even when it
+            # had been left off the grid, and the others follow by the same
+            # delta.
+            raw = (delta.x() / SCENE_UNITS_PER_MM, -delta.y() / SCENE_UNITS_PER_MM)
+            members = [index for index in origins if 0 <= index < len(graphics)]
+            pinned = [index for index in members if not is_shape(graphics[index])]
+            if members and not pinned:
+                step = self._grid_mm if self._snap else 0.01
+                dx, dy = (round(round(v / step) * step, 4) for v in raw)
+            else:
+                reference = target[1] if target[1] in pinned else (pinned[0] if pinned else target[1])
+                rx, ry = origins.get(reference, origin)
+                dx, dy = (round(round((o + v) / GRID_MM) * GRID_MM - o, 4)
+                          for o, v in ((rx, raw[0]), (ry, raw[1])))
             for index, (ox, oy) in origins.items():
                 if 0 <= index < len(graphics):
                     graphics[index]['x'], graphics[index]['y'] = round(ox + dx, 4), round(oy + dy, 4)

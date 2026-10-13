@@ -18,6 +18,7 @@ separati per poter avere ciascuno il proprio colore in STEP e VRML.
 
 import json
 import math
+import numbers
 import os
 import sys
 import threading
@@ -2036,6 +2037,84 @@ _MARKED_KINDS = ("ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "capacitor_tantalum", 
 OBSERVED_LEAD_KINDS = ("ic", "ic_sot", "ic_soic", "ic_qfp", "generic")
 
 
+def _raw_side_total(sides):
+    """@brief Total of observed per-side lead counts, independent of any frame.
+
+    @param sides {side: count} as observed (image frame), or anything else.
+    @return The sum of the valid non-negative integer counts, or None when
+        there is none: a count does not depend on which side a lead is on.
+    """
+    if not isinstance(sides, dict):
+        return None
+    # Integral by abstract type, as lead_sides._integral: numpy integers from
+    # the photo pipeline count, booleans and floats do not.
+    total = sum(int(count) for count in sides.values()
+                if isinstance(count, numbers.Integral) and not isinstance(count, bool)
+                and count > 0)
+    return total or None
+
+
+def _recomputed_local_sides(sides, model_rotation):
+    """@brief Local lead sides of a payload that lacks them, as the payload writer computes them.
+
+    @param sides Observed {side: count} in the image frame (`pins_by_side`).
+    @param model_rotation `rotation_deg` of the payload after `_flip_y`
+        (model frame, the negated footprint angle), or anything else.
+    @return `lead_sides.local_lead_sides(sides, footprint angle)`, or None
+        when the angle is not a finite real number or that function returns None.
+    """
+    if (isinstance(model_rotation, bool) or not isinstance(model_rotation, numbers.Real)
+            or not math.isfinite(model_rotation)):
+        return None
+    try:
+        from kicadgen.cad3d.lead_sides import local_lead_sides
+    except ModuleNotFoundError:
+        from lead_sides import local_lead_sides
+    return local_lead_sides(sides, -float(model_rotation))
+
+
+def _local_sides_or_count(component, kind):
+    """@brief Per-side lead counts usable by a builder that draws in the LOCAL frame.
+
+    @param component Payload of one component.
+    @param kind Rendered kind, for the warning.
+    @return `lead_sides_local` (the observed sides already moved into the
+        builder's frame by `lead_sides.local_lead_sides`) when leads were
+        observed per side (`pins_by_side`) and their local sides are known,
+        else None. Without an observation nothing is drawn per side, as
+        before: the local sides only say WHERE observed leads go.
+    @note `pins_by_side` names IMAGE sides: passing it to a builder that
+        draws before the caller's rotation put the leads of a turned body on
+        the wrong sides (a QFN photographed at 90 degrees with leads on the
+        image top/bottom got them on its local top/bottom, i.e. image
+        left/right). A payload without the conversion (written before
+        `lead_sides_local` existed) gets it here, from the image sides and the
+        same `local_lead_sides` the payload writer uses: exact at any multiple
+        of 90 degrees, the nearest quarter turn otherwise. Only when that
+        function cannot map the sides either -- an angle exactly between two
+        quarter turns, or sides that are no clean observation -- the image
+        sides say nothing about the local ones: the caller falls back to the
+        total count, spread by the builder's own rule, and a warning says so.
+    @note The payload reaches this script after `freecad_build_body._flip_y`,
+        which negates `rotation_deg`; the writer converted the sides with the
+        footprint-frame angle, so the conversion here uses its negation.
+    """
+    raw = component.get("pins_by_side")
+    if not _raw_side_total(raw):
+        return None
+    local = component.get("lead_sides_local")
+    if isinstance(local, dict) and local:
+        return local
+    local = _recomputed_local_sides(raw, component.get("rotation_deg"))
+    if local:
+        return local
+    _warn("componente {get} ({kind}) semplificato: {exc}",
+          get=component.get("name"), kind=kind,
+          exc="observed lead sides not mappable to the body frame; "
+              "leads spread from the count only")
+    return None
+
+
 def _observed_marker(component):
     """@brief Local direction of an OBSERVED polarity/pin-1 mark, or None.
 
@@ -2187,7 +2266,9 @@ def build_component(component, z0):
                get=component.get('name'),
                kind=kind)
         pin_count = component.get("pin_count")
-        pins_by_side = component.get("pins_by_side")
+        pins_by_side = _local_sides_or_count(component, kind)
+        if pins_by_side is None and not pin_count:
+            pin_count = _raw_side_total(component.get("pins_by_side"))
         marker = _observed_marker(component) if kind in _MARKED_KINDS else None
         if kind in {"ic_soic", "ic_qfn"} and (pin_count or pins_by_side):
             return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,

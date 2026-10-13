@@ -301,6 +301,336 @@ ESITO (13/10 sera, FATTO, NON committato, suite completa NON eseguita):
   symbol/project_state/startup/start_page/workflow/grid/i18n/
   documentation) 792 verdi + 2 corretti poi (47 verdi nel file). Resa
   offscreen controllata a occhio.
+## 2026-10-14 notte — FATTO: revisione avversariale completa in 4 cicli, commit LOCALE `COMMIT_HASH` su ADVANCED (NON pushato, NON mergiato)
+
+REPORT FINALE (per l'utente e per chi riprende; il diario dei cicli e' sotto).
+STATO: branch ADVANCED, commit locale `COMMIT_HASH` sopra `bc01ca2` (= main `d55e163` +
+database). NON pushato e NON mergiato in main, per scelta dichiarata: l'utente rivede prima.
+SUITE COMPLETA sul codice finale, in due meta': A 3559 verdi, 7 saltati, 19 sottotest;
+B 4136 verdi, 4 saltati, 2 xfail; 0 falliti. Le due ultime correzioni del ciclo 4 sono
+arrivate durante la meta' B: rilanciati TUTTI i 156 file che caricano la finestra
+principale sul codice finale: 2995 verdi, 5 saltati, 0 falliti.
+METODO: ciclo 1 sei revisori in sola lettura per area (A anteprima footprint, B simbolo,
+C footprint/pacchettizzazione con kicad-cli 10 e DRC, D foto/AI senza chiamate a pagamento,
+E CAD 3D con FreeCAD 1.1 reale, F stato/config/avvio/i18n); ciclo 2 tre verificatori
+indipendenti hanno provato a smontare ogni difetto; correzioni su file disgiunti con test
+positivo e negativo; ciclo 3 tre revisori sulle SOLE correzioni (trovate regressioni,
+corrette); ciclo 4 revisore finale (trovato 1 difetto alto introdotto dalla correzione R8,
+corretto dal coordinatore). Totale: 38 file modificati + 7 file di test nuovi
+(+2622/-391 righe), circa 230 test nuovi.
+DIFETTI CORRETTI PIU' IMPORTANTI (dettaglio nelle voci dei cicli qui sotto):
+- Progetto modificato a mano (sides/components/annotazioni/pinout non liste, NaN): l'app si
+  chiudeva a ogni apertura. Ora valori scartati e annotati nel log; con stato non salvabile la
+  chiusura offre di abbandonare.
+- config.json con tipi sbagliati: crash all'avvio. Ora ritorno al predefinito per tipo, lettura
+  con BOM, copia `config.json.corrupt-<data>` se illeggibile.
+- Arco con punti allineati esportato rotto (KiCad raggio infinito): rifiutato; il limite e' il
+  centro rappresentabile da KiCad (KICAD_COORD_LIMIT_MM = 2147.483647, nm a 32 bit).
+- Modifiche dell'anteprima footprint perse (riscrittura del .kicad_mod scartata se un worker
+  era attivo): flag «footprint da riscrivere» con un solo tentativo, mai durante la pipeline
+  automatica, mai su un progetto senza .kicad_mod (salvo i pad, come prima).
+- Canc/Annulla durante il trascinamento di una maniglia modificavano un altro disegno.
+- Corpo 3D non ruotato nei package ruotati (footprint e STEP in disaccordo): ruotato a qualunque
+  angolo (FreeCAD reale a 0/30/45/-60/90/210 gradi). Piedini osservati sui lati sbagliati nel
+  ripiego SOIC/QFN ruotato; note di altezza stimata perse al riuso.
+- Bozza del simbolo non applicata persa in silenzio quando cambia il pinout: ora riportata sui
+  dati nuovi o conservata in istantanee `.superseded-<ns>.json` offerte con «Recupera bozza»,
+  identita' del progetto dal file di recupero (due progetti omonimi non si mescolano).
+- Glifi spostati fuori dalla griglia 2,54 da un trascinamento di gruppo guidato da una forma.
+- Serigrafia del pin header sopra pad allargati (DRC) e controllo delle distanze fra piazzole
+  ospitanti che ignorava override e forme.
+- Pipeline foto/AI: valori non finiti che facevano perdere risposte gia' pagate; campi opzionali
+  malformati che buttavano un'estrazione; risposte del lettore dei ritagli incomplete messe in
+  cache; contatore dell'uso con overflow; stringhe accettate come numeri.
+- Testi dei messaggi del simbolo in inglese; «Mostra/Nascondi percorsi completi» non tradotti;
+  campo «Area di lavoro» che chiudeva il progetto al primo tasto (ora solo Invio o Sfoglia, e
+  finche' il testo non e' confermato i file vanno nella cartella in uso).
+DECISIONI CHE SPETTANO ALL'UTENTE (non toccate):
+1. C-1: «REF**» a posizione fissa (0,-2) su F.SilkS cade sui pad dei SOIC e sul pallino del pin
+   1 (DRC). Il 13/10 l'utente aveva scelto che i file senza scelta non cambiassero: correggerlo
+   (posizione calcolata sopra l'ingombro) cambia i footprint esistenti.
+2. B7: i terminali di 14 glifi (R, C, L, diodi, LED, quarzo...) stanno a +-3,81 mm, fuori
+   griglia: un pin non vi si aggancia. Serve decidere come posizionare i glifi.
+3. `_reconcile_declared_package` prende la famiglia dal conteggio dell'inventario anche quando
+   il ritaglio ha adottato un conteggio completo diverso (riga SOT-23 con 4 piedini possibile).
+4. «FreeCAD 1.1-dev» e «FreeCAD 1.1» hanno pari versione: vince la -dev per ordine di percorso.
+LIMITI E RESIDUI DICHIARATI (bassi): bozza del simbolo: congelamento dei fili dei pin scomparsi
+deciso per nome; se l'utente modifica invece di «Recupera bozza» il file principale si
+sovrascrive (l'istantanea resta); istantanea offerta solo se il file principale non offre
+nulla; progetto spostato = altro progetto. Angoli dei testi KiCad non a quarti (180 = 18
+gradi) letti come gradi per compatibilita' con i file scritti prima. Gruppo con glifo gia'
+fuori griglia sposta le forme fuori dalla griglia del disegno. Scrubber dei crash: UNC dopo
+«[ : , <», nomi con apostrofo, nome con spazio a fine testo mascherato a meta'. Fallimento di
+`kicad-cli version` in cache per la sessione. NON VERIFICATO: un'estrazione fallita azzera il
+flag di riscrittura. Test instabile PREESISTENTE: test_package_preview_drills (ordine).
+CONTRATTI DEI TEST CAMBIATI (motivati): nome del simbolo con «"» ora rifiutato (KiCad non
+carica la libreria); angoli dei testi del simbolo in decimi (900); fixture del lettore dei
+ritagli portate a v5; ripiego dei piedini 3D a 45 gradi; pinout con pin senza nome tenuti.
+FILE NON TRACCIATI lasciati fuori (non dell'assistente): rows_none_rev.pkl, tmp/, work/.
+Il database data/analysis_profiles.sqlite3 NON e' cambiato in questo commit: la migrazione
+del percorso assoluto `legacy_backup` avverra' alla prossima apertura dell'app, poi va
+committato come al solito.
+PROSSIMI PASSI: l'utente prova l'app; se va bene, push di ADVANCED e merge in main; poi le
+quattro decisioni sopra, una alla volta.
+
+### Diario dei cicli (2026-10-13 notte / 14)
+
+
+Richiesta dell'utente (dopo il merge `d55e163` in main): «lancia agenti esperti in
+modalita' avversariale per controllare tutto; poi un report dettagliato
+nell'handoff; quando hai finito spegni il PC; fai diversi cicli di verifica e
+prenditi il tempo che serve; voglio un progetto funzionale e professionale».
+INTERPRETAZIONE (dichiarata all'utente): (1) ciclo 1, sei revisori in sola
+lettura su aree disgiunte, difetti con riproduzione; (2) ciclo 2, verifica
+avversariale di ogni difetto, restano i confermati; (3) correzioni dei
+confermati con test positivo e negativo, file disgiunti per agente, commit
+LOCALE su ADVANCED, NIENTE push/merge (l'utente rivede); (4) ciclo 3,
+revisione delle correzioni + suite completa in due meta'; (5) report qui;
+(6) spegnimento con 60 s di preavviso (`shutdown /s /t 60`, annullabile con
+`shutdown /a`).
+CICLO 1 — ESITI (in arrivo, da verificare nel ciclo 2):
+- E (CAD 3D), 6 difetti riprodotti con FreeCAD 1.1 reale (script in scratchpad/reviewE):
+  E1 ALTO step_generator ~1046 generate_single_package_3d_model: con orientation_deg != 0
+  pad e contorno F.Fab ruotano, il corpo STEP no (8x2 mm a 90 gradi: Fab verticale, corpo
+  orizzontale, terminali fuori dal corpo); E2 MEDIO freecad_parts ~2178 build_component:
+  ripiego ic_soic/ic_qfn usa pins_by_side del riferimento FOTO invece di local_lead_sides
+  (QFN ruotato 90: piedini sui lati sbagliati; a 45 gradi usa i lati grezzi che
+  local_lead_sides rifiuta); E3 MEDIO step_generator ~888/~1272: con HeaderModelReuse le
+  note «altezza stimata ridotta» spariscono; E4 BASSO process_log.run_logged: eccezione nel
+  callback di progresso -> figlio non ucciso, attesa illimitata; E5 BASSO
+  kicad_models._measure_batch Popen senza CREATE_NO_WINDOW; E6 BASSO find_freecadcmd ordina
+  le versioni come testo (1.9 > 1.10). Verificato corretto: assi/unita'/origine, segno delle
+  rotazioni, staging atomico, percorsi con spazi/unicode, watchdog, cache delle misure.
+- F (stato/config/avvio/i18n), riprodotti (scratchpad/reviewF): F1 ALTO
+  _apply_project_state ~6931/6939/6956/6971: «sides», «components», «annotations»
+  (fillets/texts), «pinout» non tipati in un project_config.json modificato a mano ->
+  TypeError -> crash report + os._exit(1) a ogni apertura; F2 MEDIO config.json con tipi
+  sbagliati (language lista, component_type intero, last_document_dir intero) -> crash
+  all'avvio ripetuto; F3 MEDIO config.json corrotto o con BOM -> predefiniti in silenzio e
+  file sovrascritto (lingua, recenti persi), nessuna copia; F4 MEDIO campo «Area di lavoro»
+  modificabile: il primo tasto chiude il progetto; F5 BASSO «Mostra/Nascondi percorsi
+  completi» senza catalogo; F6 BASSO test Doxygen non vede override Qt di classi private
+  (_SymbolView: 11 override senza @brief) e chiusure; F7 BASSO crash_report: nomi con
+  spazio di altri account, UNC; F8 BASSO stato non serializzabile blocca la chiusura;
+  F9 NON VERIFICATO write_project_config senza fsync, UpdateCheckWorker senza parent.
+- B (simbolo), riprodotti (scratchpad/reviewB, kicad-cli 10 usato in sola lettura):
+  B3 MEDIO-ALTO symbol_tab.set_data ~1003: bozza non applicata buttata via in silenzio
+  quando cambia pinout o insieme dei pad (_show_pinout_dialog, _on_generated); il file
+  di recupero ha l'impronta vecchia e non si recupera; B6 MEDIO ~1048: fili congelati
+  alla posizione della BOZZA non applicata quando un pin sparisce; B4 MEDIO
+  _move_gesture ~2904: trascinamento di gruppo guidato da una forma sposta i glifi fuori
+  dalla griglia 2,54 (a 0,254 col nuovo predefinito); B5 BASSO-MEDIO forma con lato
+  dispari di passi esce dalla griglia del disegno quando trascinata; B9 BASSO-MEDIO
+  ValueError di generators/symbol.py in inglese nella UI; B1 BASSO angolo dei testi del
+  simbolo in gradi, KiCad 10 usa decimi (nessun effetto visibile); B2 BASSO nomi con
+  " \ < rifiutati da KiCad ma accettati dalla API; B7 BASSO pin non agganciabile ai
+  terminali di 14 glifi (terminali a 3,81); B8 BASSO numero pin con spazi -> KeyError nel
+  trascinamento; B10 BASSO 11 override Qt senza @brief (come F6); README «KiCad 8 o
+  successivo» ma formato 20251024 (non verificato).
+- D (foto/AI, nessuna chiamata a pagamento), riprodotti (scratchpad/reviewD): D1 MEDIO
+  photo_global_inventory ~1872: NaN/inf in un campo ignorato della risposta -> json.dumps
+  (allow_nan=False) solleva DOPO la chiamata pagata, nulla in cache, righe valide perse,
+  la riesecuzione paga di nuovo; D2 MEDIO datasheet_extractor ~4947: edge_fillets/pinout
+  malformati passati grezzi -> «Estrazione fallita» e geometria/pinout validi persi;
+  D3 MEDIO photo_crop_reading.parse_observation ~803: risposte FRESCHE senza i campi v5
+  accettate con contacts_complete=True e messe in cache (la tolleranza doveva valere solo
+  per la cache vecchia, che la chiave di versione esclude); D4 BASSO-MEDIO stringhe
+  numeriche accettate come coordinate (photo_global_inventory ~564, _optional_number,
+  _components_3d); D5 BASSO openrouter: OverflowError nel conteggio dell'uso -> totali a
+  meta'; D6 BASSO database dei profili: riga legacy_backup con percorso assoluto.
+  Nessuna regola per nome/marca trovata; le euristiche sono dichiarate (separazione fragile).
+- A (anteprima footprint), riprodotti (scratchpad/reviewA/test_review_a.py, kicad-cli 10):
+  A1 ALTO validate_footprint_drawings: arco con tre punti ALLINEATI accettato e scritto come
+  fp_arc -> KiCad lo legge a raggio infinito (viewBox INT_MIN); l'anteprima lo mostra come
+  spezzata innocua; A2 ALTO Canc o Ctrl+Z/Y DURANTE il trascinamento di una maniglia: la
+  vista tiene il vecchio indice e al rilascio modifica un ALTRO disegno, salvato e scritto;
+  A3 MEDIO _schedule_footprint_rewrite: se un worker e' attivo `_generate` rifiuta e la
+  riscrittura del .kicad_mod va persa (progetto e file divergono; vale anche per testi e
+  pad); A4 MEDIO annulla/ripeti con salvataggio fallito perdono il passo di storia; A5
+  MEDIO dopo una modifica la vista tiene `_hovered_drawing` vecchio: maniglie non tornano,
+  Canc/Ctrl+D inerti; A6 BASSO testi agganciati dall'origine del footprint, non dalla
+  griglia (primo pad): fuori dai puntini.
+- C (footprint/pacchettizzazione, kicad-cli 10.0.6 in sola lettura, DRC sulle anteprime):
+  C-1 MEDIO core/footprint DEFAULT_TEXT_POSITIONS: Reference fisso a (0,-2) su F.SilkS
+  finisce sui pad dei SOIC (DRC silk_over_copper x4) e sul pallino del pin 1 dei pin
+  header; C-2 MEDIO pin_header ~317: contorno serigrafia e pallino ignorano le dimensioni
+  di pad_overrides (silk_over_copper x4 in DRC); C-3 BASSO-MEDIO host_mounting
+  _validate_header_clearance: ignora override e pad quadrati (gap 0,09/0,1 mm accettati
+  sotto MIN_COPPER_GAP_MM 0,2). Note basse non riprodotte come errori: L-1 tavola anteprima
+  senza F/B.Mask/Paste; L-2 versione globale presa dal percorso di kicad-cli (scoop,
+  C:\KiCad -> installazione globale bloccata); L-3 ${REFERENCE} su F.Fab solo nei
+  castellated; L-4 nome interno vs nome file; L-5 nomi temporanei fissi.
+  Corretti: KiCad carica tutti i footprint generati, anteprima senza fp-lib-table,
+  ${KIPRJMOD}, installazione globale con percorsi assoluti e conferma, rollback byte per
+  byte anche su KeyboardInterrupt, voci estranee della tabella preservate.
+CICLO 1 CHIUSO alle 6 aree. CICLO 2: verifica indipendente (agenti nuovi, sola lettura)
+di ogni difetto: CONFERMATO / NON DIFETTO / VOLUTO. Poi correzioni sui confermati.
+CICLO 2 — verifica D+E (verificatore indipendente, FreeCAD reale): TUTTI CONFERMATI
+(D1 medio, D2 medio-basso, D3 medio-basso, D4/D5/D6 bassi; E1 ALTO, E2 medio, E3
+medio-basso, E4 basso-medio, E5/E6 bassi). Contratti che cambiano: D3 (fixture dei test
+pre-v5 da portare a v5), E1 (rotazione nel carico CAD). CORREZIONI D ed E AVVIATE
+(agenti su file disgiunti: services foto/AI e cad3d/), senza commit.
+CICLO 2 — verifica B+F: 17 su 19 CONFERMATI. F9b (UpdateCheckWorker) NON difetto: parent
+= QApplication di proposito (workers.py ~574). F3 in parte VOLUTO (ripartire dai
+predefiniti), difettosi la mancanza di copia e la lettura senza utf-8-sig. B2, B8 e
+l'importatore di B1 raggiungibili solo via API. F8 RAGGIUNGIBILE (NaN in una riga del
+pinout in project_config.json: finestra non chiudibile). B7 (terminali dei glifi a 3,81)
+LASCIATO FUORI: serve una decisione dell'utente sul posizionamento dei glifi.
+CORREZIONI B AVVIATE (agente su symbol_tab, generators/symbol*, klc_checks, i18n.py).
+CICLO 2 — verifica A+C: tutti e 10 CONFERMATI (gravita' riviste: A3 la peggiore,
+medio-alta: due modifiche rapide bastano a disallineare progetto e .kicad_mod; A1 medio;
+A2 basso-medio; A4/A5/A6 bassi; C-2 e C-3 medi; L-2 basso). C-1 LASCIATO FUORI: la
+posizione fissa (0,-2) era una scelta dell'utente del 13/10 («i file senza scelta non
+cambiano»); correggerla cambia i footprint esistenti: DECISIONE DELL'UTENTE.
+CORREZIONI A/F (main_window, footprint_view, config, crash_report, scritture con fsync)
+e C (core/footprint, pin_header, host_mounting, kicad_library) AVVIATE. Tutti e cinque i
+gruppi di correzioni ora in corso, su file disgiunti, senza commit.
+CORREZIONI B FATTE (agente, non committate): 382 verdi nella selezione simbolo/klc/i18n/
+localizzazione/documentazione, 40 test nuovi in tests/test_symbol_review_fixes.py (anche
+kicad-cli 10). B3: bozza riportata sui dati nuovi se stessi pin e nessun conflitto,
+altrimenti offerta con «Recupera bozza» + copia `.symbol-draft.superseded.json` (legata alla
+base vecchia, leggibile). B6, B4/B5 (delta agganciato: 2,54 se nel gruppo c'e' un glifo o
+un filo), B8 (numeri di pin ripuliti), B10 (@brief sugli override). B9: SymbolError con
+LocalizedText, str() resta inglese per i log, `exc.localized(tx)` nella UI; 35 voci di
+catalogo. B1: angoli dei testi in decimi (900), lettura compatibile con i vecchi file a 90
+(limite dichiarato: un testo KiCad a 9 gradi si legge 90). B2: set di caratteri vietati per
+tipo condiviso con klc_checks; il nome del simbolo con «"» ora e' RIFIUTATO (contratto
+cambiato). DA INTEGRARE dal coordinatore: main_window ~12043 (esportazione) e
+services/component_check.py mostrano ancora str(exc) in inglese -> `SymbolTab.error_text`.
+CORREZIONI C FATTE (agente, non committate): 24 test nuovi in
+tests/test_footprint_review_fixes.py (falliscono sul codice vecchio, passano sul nuovo);
+uscita identica byte per byte dove non c'era difetto. A1 archi senza circocentro o con
+raggio oltre TEXT_POSITION_LIMIT_MM scartati (kicad-cli: viewBox finito). C-2 serigrafia e
+pallino dai pad reali; `pad_copper_gap` reso pubblico e condiviso. C-3 controllo sui pin
+emessi, forma reale, poligoni per rotazioni non cardinali. L-2 versione da `kicad-cli
+version` con ripiego sul percorso. DA INTEGRARE: (1) main_window ~10057 chiama ora
+kicad-cli nel thread della GUI (fino a 10 s): valutare; (2) test_fixF_kicad_library_safety
+lancia kicad-cli vero: iniettare un runner; (3) test_global_inventory_pipeline
+[castellated] conta 3 chiamate AI invece di 2: da attribuire (probabile correzione D3).
+CORREZIONI E FATTE (agente, non committate; solo kicad/cad3d + tests/test_cad3d_review_fixes.py,
+42 test; 1471 + 392 verdi nei file collegati). E1: `body.rotation_deg` nel carico FreeCAD
+(assente = 0, carico a 0 gradi identico), corpo/raccordi/testi ruotati attorno a Z, fori nel
+riferimento del corpo, etichette dei pin con `body_frame_point`; rotazione + contatti di bordo
+rifiutati. FreeCAD reale: 90 gradi corpo x[-1,1] y[-4,4]; 30 e 45 gradi coerenti con i pad.
+E2: lati locali o solo conteggio con avviso (a 45 gradi 8 piedini dal conteggio). E3:
+note salvate nello snapshot di HeaderModelReuse (campo opzionale, versione 1 invariata).
+E4 figlio ucciso; E5 NO_WINDOW_FLAGS condiviso; E6 versioni numeriche. DUBBI: avviso E2 con
+motivo in inglese dentro un modello tradotto esistente (servirebbe una voce dedicata);
+payload vecchi senza lead_sides_local ora con piedini dal conteggio anche a 0 gradi.
+CORREZIONI D FATTE (agente, non committate; 29 test nuovi in tests/test_photo_review_fixes.py,
+654 verdi nella selezione). D1 NaN/Infinity -> None nel decodificatore degli argomenti
+(_finite_tree), cache che non va piu' in crash. D2 _validated_edge_fillets/_validated_pinout
+con note. D3 tutti i campi v5 obbligatori; RIVEDERE nel ciclo 3: cambiata anche
+`derive_reading` (controllo «completo ma lato non visto» non piu' applicato ai corpi a due
+terminali) e il percorso «famiglia dal conteggio dell'inventario dopo un conteggio PARZIALE
+concordato» non e' piu' raggiungibile; fixture portate a v5 anche in 3 file fuori lista
+(test_global_inventory_pipeline, test_reopen_detector_review, test_yolo_inventory_branch).
+D4 finite_number + numpy. D5 nessun OverflowError. D6 migrazione di legacy_backup al solo
+nome (il database del repo si aggiornera' alla prossima apertura). SEGNALATO, non toccato:
+_lead_count_inventory = 4 (ritaglio) mentre il motivo dice «3 pin» (inventario).
+CORREZIONI A/F FATTE (agente, non committate; 44 test in tests/test_gui_review_fixes.py, 31
+falliscono sul codice vecchio). A3 flag `_fp_rewrite_dirty` con nuovo tentativo dai gestori
+di fine lavoro (pad: `immediate=True`); CAMBIO: un disegno su un progetto acquisito senza
+.kicad_mod ora lo scrive (come gia' i pad). A2 cancel_interaction + `_fp_handle_cancelled`;
+A4 pop solo dopo un'applicazione riuscita; A5 reset_hover; A6 testi via snap_to_grid
+(`_footprint_text_snap_mm` tolta). F1 `_project_list` + NaN/inf -> None in
+read_project_config; F8 «Abbandonare?»; F2/F3 load_config per tipo dei DEFAULTS, utf-8-sig,
+copia `config.json.corrupt-<data>`, `take_load_problems()`; F4 editingFinished e confronto
+normalizzato; F5 testo tradotto; F7 scrubber con spazi e UNC; F9a `fsutil.atomic_write_bytes`
+con fsync (progetto, config; la bozza del simbolo lo faceva gia'). D2 lato GUI: raccordi
+malformati saltati uno per uno.
+INTEGRAZIONE DEL COORDINATORE: 6 voci di catalogo (percorsi completi, abbandono, config.json);
+errori SymbolError tradotti in main_window (salvataggio/esportazione del simbolo) e in
+services/component_check.py; test_fixF iniettano `version_runner` (niente kicad-cli vero);
+rimossa la cartella `b2/` creata per errore nella radice da uno script di verifica.
+Verifica mirata dopo l'integrazione: 168 verdi. Totale del lavoro: 38 file, +1925/-368.
+Test noto INSTABILE e PREESISTENTE: test_package_preview_drills::...44_circular_pads...
+(dipende dall'ordine, fallisce anche col codice di HEAD).
+CICLO 3 AVVIATO: suite completa in due meta' (.venv/claude-suite-A7/B7.log) e tre revisori
+nuovi sulle SOLE modifiche (GUI/stato/footprint, simbolo, foto/AI+CAD) a caccia di regressioni.
+CICLO 3 — revisione delle correzioni del SIMBOLO: 1 regressione MEDIA e alcune basse.
+F1 MEDIO «stesso progetto» deciso dal solo NOME: due progetti omonimi in radici diverse ->
+la bozza di A finisce in B e ne sovrascrive il file di recupero. F2 fusione non validata
+(due pin nello stesso punto con stato «riportate»). F3 bozza riportata/conservata non
+sopravvive al riavvio. F4 copia `.superseded` a posto unico, sovrascritta. F5 un glifo
+fuori griglia non torna sulla 2,54 trascinandolo (delta agganciato). F6 progetti vecchi
+senza id dei grafici -> falso conflitto. F7 docstring dell'angolo incompleta (KiCad ha
+angoli in decimi non a quarti, es. 180 = 18 gradi). CORRETTORE AVVIATO su symbol_tab.
+CICLO 3 — revisione delle correzioni GUI/stato/footprint: R1 MEDIO ciclo infinito di
+tentativi se GenerateWorker.start() fallisce (50 tentativi in 50 giri); R2 MEDIO la
+riscrittura parte DENTRO la pausa della pipeline automatica (QMessageBox di revisione) con
+parametri non ancora rivisti e senza conferma di sovrascrittura; R3 flag bloccato su
+parametri non validi + cambio di comportamento (disegno su progetto senza .kicad_mod lo
+crea); R4 MEDIO (ERRORE DEL COORDINATORE nell'integrazione) component_check passava `tx` a
+localized() -> italiano in ogni lingua: CORRETTO dal coordinatore, chiamata senza argomento,
+test tests/test_component_check_symbol_error.py (2, il positivo falliva col codice errato);
+R5 tetto del raggio degli archi = 500 mm (limite delle coordinate riusato): archi piatti
+legittimi scartati anche al caricamento; R6 scrubber troppo aggressivo (resto della riga,
+\n nei sorgenti, UNC non personali); R7 kicad-cli version nel thread GUI (~0,3 s); R8
+«Area di lavoro» chiude il progetto anche alla perdita del fuoco. CORRETTORE AVVIATO.
+CICLO 3 — revisione delle correzioni foto/AI + CAD: correzioni in gran parte solide
+(138 risposte reali in cache: 0 differenze; FreeCAD a 0/30/45/-60/210 gradi corretto).
+G1 MEDIO derive_reading: risposta a due terminali PARZIALMENTE compilata ora adottata come
+«concordata»; G2 MEDIO 1e999 -> inf passa ancora dal decodificatore (e np.float32 nan);
+G3 MEDIO (difetto PREESISTENTE esposto da un test indebolito) _adopt_terminals eseguita due
+volte sovrascrive _lead_count_inventory (riga SOT-23 con 4 piedini); G4 BASSO payload
+vecchi senza lead_sides_local: piedini sui lati sbagliati anche a 0 gradi; G5 BASSO
+_validated_pinout scarta pin con nome nullo e il pin 0 (pin che spariscono dal simbolo);
+G6 BASSO versioni FreeCAD con suffisso (-dev, RC). TERZO CORRETTORE AVVIATO.
+REGRESSIONI DEL SIMBOLO CORRETTE (54 test in test_symbol_review_fixes.py): identita' del
+progetto dal file di recupero (set_data mostra, set_recovery_path conferma); fusione
+validata con il layout; bozza riportata scritta subito sulla base nuova; istantanee
+`<stem>.superseded-<ns>.json` (massimo MAX_SUPERSEDED_DRAFTS = 5, limite di disco),
+offerte al riavvio, ritirate solo dopo il recupero riletto; trascinamento di gruppi con
+glifo/filo: riferimento assoluto sulla 2,54; id deterministici per grafici vecchi; docstring
+dell'angolo. LIMITI DICHIARATI: (1) congelamento dei fili dei pin scomparsi ancora deciso
+per nome; (2) sul percorso d'errore di main_window la bozza resta in memoria non confermata;
+(3) se l'utente modifica invece di «Recupera bozza», il file principale viene sovrascritto
+(l'istantanea resta); (4) istantanea offerta solo se il file principale non offre nulla;
+(5) progetto spostato di cartella = altro progetto (la bozza resta nel file vecchio).
+REGRESSIONI GUI CORRETTE (1301 verdi nella selezione): R1/R3b un solo tentativo per modifica
+(flag azzerato prima di _generate, `_clear_footprint_rewrite`); R2 `_pipeline_owns_output()`
+(pipeline automatica, applicazione dell'estrazione, pausa d'inventario, parametri automatici
+in attesa) blocca la riscrittura, nessun tentativo da _on_extract_finished se il risultato e'
+applicato (i disegni viaggiano con ogni GenerateWorker); R3a disegni/testi riscrivono solo se
+il .kicad_mod esiste (pad come prima); R5 KICAD_COORD_LIMIT_MM = 2147.483647 (nm a 32 bit) sul
+CENTRO dell'arco, archi piatti legittimi tenuti, avviso corretto «Arco senza centro» (voce
+aggiunta dal coordinatore); R6 scrubber: nomi con spazi solo se segue un separatore, UNC solo
+per condivisioni Users/home/homes/profiles; R7 cache della versione di kicad-cli (anche dei
+fallimenti, finche' l'eseguibile non cambia); R8 «Area di lavoro» solo con Invio o Sfoglia,
+uscita dal campo ripristina il testo. LIMITE: dopo un'estrazione applicata senza generazione
+automatica la modifica pendente va nella generazione successiva (salvata nel progetto).
+SUITE (sul codice PRIMA delle correzioni di regressione): A 3512 verdi, B 4113 verdi, 0 falliti.
+REGRESSIONI FOTO/CAD CORRETTE (2478 verdi nella selezione): G1 esenzione a due terminali solo
+con TUTTI i lati nulli (138 risposte reali: 0 differenze); G3 `_lead_count_inventory` salvato
+una volta (setdefault) + test realistico v5; G2 parse_float e numpy float32; G4 lati locali
+ricalcolati con local_lead_sides dall'angolo negato (FreeCAD reale ok), conteggio solo a 45
+gradi; G5 pin senza nome tenuti con nome vuoto, pin 0 accettato; G6 versione FreeCAD con
+suffisso. NON CORRETTO (fuori autorizzazione, da decidere): `_reconcile_declared_package` prende
+la famiglia dal conteggio dell'inventario anche quando il ritaglio ha adottato un conteggio
+completo diverso (SOT-23 con 4 piedini possibile). DECISIONE APERTA: «FreeCAD 1.1-dev» e
+«FreeCAD 1.1» pari versione, vince la -dev per ordine di percorso.
+CICLO 4 AVVIATO: suite completa sul codice definitivo + revisore finale delle correzioni.
+CICLO 4 — revisore finale: F1 ALTO introdotto dalla correzione R8: con testo digitato e non
+confermato in «Area di lavoro» il progetto resta aperto ma `_project_dir()`/`_library_root()`
+leggevano il testo VIVO -> riscritture, salvataggio del simbolo e file di recupero nella
+cartella digitata (anche un progetto omonimo altrove). CORRETTO dal coordinatore:
+`_library_root()` usa la cartella confermata finche' il campo e' modificato, `_project_dir()`
+passa da li'. F2 MEDIO ramo d'errore di `_refresh_symbol_tab` senza set_recovery_path: bozza
+conservata persa al cambio progetto. CORRETTO dal coordinatore. Commento del flag aggiornato.
+Test: tests/test_gui_review_fixes.py +2 (riscrittura nel progetto aperto con testo non
+confermato e cartella nuova dopo Invio; file di recupero legato anche sul ramo d'errore).
+BASSI lasciati e dichiarati: L1 gruppo con glifo FUORI griglia sposta le forme fuori dalla
+griglia del disegno (solo dati vecchi); L2 scrubber: UNC dopo «[ : , <», nomi con apostrofo,
+nome con spazio a fine testo mascherato a meta'; L3 fallimento di `kicad-cli version` in cache
+per tutta la sessione (voluto); NON VERIFICATO: estrazione fallita azzera il flag di riscrittura.
+AREE del ciclo 1: A anteprima footprint e disegni (footprint_view, parte
+anteprima di main_window, workers); B editor del simbolo (symbol_tab,
+generators/symbol*, glifi); C footprint/generatori/pacchettizzazione KiCad
+(core/, generators/ tranne symbol, services/kicad_library.py); D pipeline
+foto/AI (photo_*, datasheet_extractor, cache); E CAD 3D (cad3d/); F stato
+del progetto, configurazione, i18n, avvio, splash, installer.
+
 ## FINE SESSIONE 13/10 (4) — branch `ADVANCED`, commit `9e41f39` (+ handoff), mergiato in `main`
 
 Committato su richiesta dell'utente («committa tutto, pusha e mergia in main»):

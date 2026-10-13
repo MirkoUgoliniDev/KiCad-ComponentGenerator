@@ -75,7 +75,9 @@ def _answer_call(calls, crop_calls=None):
             # Osservazione (HANDOFF 148) di un corpo opaco a due terminali senza
             # forma riconoscibile: su una riga «resistor» a due terminali la
             # derivazione ridà la classe dell'inventario e non cambia nulla.
-            return {'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
+            # v5 contract (review D3): every required field, class triple included.
+            return {'visual_class': 'unknown', 'visual_class_confidence': 'low', 'visual_class_evidence': '', 'contacts_complete': True, 
+                    'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
                     'body_shape': 'other', 'top_translucent': False,
                     'something_visible_inside': False, 'coloured_patch_at_end': False,
                     'band_at_end': False, 'printed_text': 'none', 'marking': '', 'tab': False,

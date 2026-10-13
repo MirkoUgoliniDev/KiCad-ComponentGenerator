@@ -13,7 +13,7 @@ import math
 import re
 from pathlib import Path
 
-from ..core.validation import covered_fraction, iou
+from ..core.validation import covered_fraction, finite_number, iou
 from .openrouter import OpenRouterError, ToolArgumentsError
 from .photo_audit import valid_fraction_box as _valid_box, write_stage_audit as _write_audit
 from .photo_inventory import draw_inventory, image_block
@@ -560,12 +560,11 @@ def _rescale_boxes(rows, width, height, log, candidate_boxes=None, issues=None):
     """
     def numbers(box):
         # Un intero enorme o un non-numero non descrive un'unita' di misura
-        # diversa: descrive una risposta rotta, che deve restare tale.
-        try:
-            values = [float(v) for v in box]
-        except (TypeError, ValueError, OverflowError):
-            return None
-        return values if all(math.isfinite(v) for v in values) else None
+        # diversa: descrive una risposta rotta, che deve restare tale. A
+        # numeric string is not a coordinate either (review D4): the shared
+        # finite_number accepts only real int/float values, never bool/str.
+        values = [finite_number(v) for v in box]
+        return None if any(v is None for v in values) else values
 
     dict_rows = [row for row in rows if isinstance(row, dict)]
     boxes = [values for row in dict_rows
@@ -1877,7 +1876,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(dict(key=key, response=data), allow_nan=False), encoding='utf-8')
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError: a non-finite number in a field no check reads (the
+            # provider decoder maps NaN to null, a direct caller may not). The
+            # rows are already validated and paid for: log, never crash.
             log(tx("Inventario globale: cache non disponibile ({exc}).", exc=exc))
     uncertainties = data.get('uncertainties', []) if isinstance(data, dict) else []
     if not isinstance(uncertainties, list):

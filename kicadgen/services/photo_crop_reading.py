@@ -794,27 +794,31 @@ def parse_observation(data):
         `size_family` whitespace-normalised; None when the answer does not
         follow the schema (it then counts as a failed reading).
     @note Booleans are rejected where integers are expected (`True` is an
-        int in Python) and every field is required: a partial answer is no
-        observation.
+        int in Python) and every field the schema declares required is
+        mandatory, the visual class triple and `contacts_complete` included:
+        a partial answer is no observation and is never cached (review D3).
+        No default stands in for a missing field: pre-v5 records, which
+        lacked some of them, never reach this parser because PROMPT_VERSION
+        is part of every cache key.
     """
     if not isinstance(data, dict):
         return None
     out = {}
-    # Historical observations remain readable, but contain no classification evidence.
-    visual_class = data.get('visual_class', 'unknown')
-    confidence = data.get('visual_class_confidence', 'low')
-    evidence = data.get('visual_class_evidence', '')
+    visual_class = data.get('visual_class')
+    confidence = data.get('visual_class_confidence')
+    evidence = data.get('visual_class_evidence')
     if visual_class not in VISUAL_CLASSES or confidence not in _RANK or not isinstance(evidence, str):
         return None
     out.update(visual_class=visual_class, visual_class_confidence=confidence,
                visual_class_evidence=' '.join(evidence.split()))
-    # Legacy cached observations retain their old semantics; v5 requests require this.
-    complete = data.get('contacts_complete', True)
+    complete = data.get('contacts_complete')
     if type(complete) is not bool:
         return None
     out['contacts_complete'] = complete
-    # Derived from schema-field presence, never from an incoming private flag.
-    out['_contacts_complete_explicit'] = 'contacts_complete' in data
+    # Always True for a parsed answer (the field is mandatory); derive_reading
+    # still reads it so an observation dict built elsewhere without the field
+    # keeps the conservative reading.
+    out['_contacts_complete_explicit'] = True
     for key in ('bodies_in_frame', 'metal_contacts_total'):
         value = data.get(key)
         if type(value) is not int or not 0 <= value <= 128:
@@ -1044,7 +1048,16 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
             and counted + int(observation['tab']) != contacts):
         reasons.append('contact_total_disagrees_with_sides')
     leaded = contacts >= 3 or counted >= 3
-    if (leaded and observation.get('_contacts_complete_explicit')
+    # A null side is «not seen» only when the schema asked for a count there:
+    # for a body declared with two end terminals it asks to leave EVERY side
+    # null, so an all-null answer is the requested one, not a gap (its
+    # contradiction with >= 3 contacts is contacts_contradict_terminals). A
+    # partly filled answer did count some sides, so its nulls are gaps
+    # whatever the terminal claim says.
+    requested_nulls = (observation['two_end_terminals_only']
+                       and all(value is None for value in leads))
+    if (leaded and not requested_nulls
+            and observation.get('_contacts_complete_explicit')
             and observation.get('contacts_complete') and any(value is None for value in leads)):
         reasons.append('contacts_incomplete')
     # Per-side counts are the more specific observation: the coherence check
@@ -1462,7 +1475,9 @@ def _adopt_terminals(component, reading):
     # bodies): nothing to count, and the global row's terminals stay.
     if known and sum(known) > 0:
         complete = len(known) == len(SIDES)
-        component['_lead_count_inventory'] = component.get('lead_count')
+        # Idempotent: the terminals can be adopted twice for one row (agreed
+        # reading, then agreed geometry); the inventory's count is saved once.
+        component.setdefault('_lead_count_inventory', component.get('lead_count'))
         component['lead_count'] = sum(known)
         component['lead_count_complete'] = complete
         component['lead_count_confidence'] = 'medium'

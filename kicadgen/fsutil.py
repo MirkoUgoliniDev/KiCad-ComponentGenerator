@@ -42,3 +42,38 @@ def replace_file(source, target, *, attempts: int = REPLACE_ATTEMPTS,
                 raise
             sleep(pause)
             pause *= 2
+
+
+def atomic_write_bytes(target, payload: bytes, *, prefix: str | None = None) -> None:
+    """@brief Write `payload` to `target` durably: temporary file, flush, fsync, atomic replace.
+
+    @param target Destination path; its folder must exist.
+    @param payload Complete file content.
+    @param prefix Prefix of the temporary file in the target folder
+        (default: ``.<target name>.``).
+    @throws OSError When the temporary file cannot be written or the replace
+        is refused (see `replace_file`); the previous `target` is then
+        untouched and the temporary file is removed.
+    @note The fsync before the replace makes the rename publish data that is
+        already on disk: without it a power loss right after the replace can
+        leave an empty or truncated file under the final name on some file
+        systems. Shared by the project file, config.json and the other
+        settings files so they cannot drift apart.
+    """
+    import tempfile
+    from pathlib import Path
+    target = Path(target)
+    handle, temporary = tempfile.mkstemp(prefix=prefix or f".{target.name}.", suffix=".tmp",
+                                         dir=target.parent)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        replace_file(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise

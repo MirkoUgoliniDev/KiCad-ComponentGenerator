@@ -99,7 +99,17 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     """@brief Use scratch copies only; failed checks do not suppress independent checks."""
     results = []
     def add(status, title, detail):
-        result = Check(status, title, str(detail))
+        # A generator error (SymbolError) carries its own translatable text.
+        # No lookup argument: `tx` also formats, so the error renders itself
+        # through the catalogue (passing `tx` would fall back to Italian).
+        localized = getattr(detail, 'localized', None)
+        text = None
+        if callable(localized):
+            try:
+                text = str(localized())
+            except Exception:  # noqa: BLE001 - fall back to the plain message
+                text = None
+        result = Check(status, title, text if text is not None else str(detail))
         results.append(result)
         emit(result)
 

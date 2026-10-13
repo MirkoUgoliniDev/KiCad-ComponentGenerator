@@ -199,8 +199,8 @@ class PinHeaderParams:
                     "shape", "rect" if self.pad_shape == "rect" or pin_a == 1 else "circle")
                 shape_b = (self.pad_overrides or {}).get(str(pin_b), {}).get(
                     "shape", "rect" if self.pad_shape == "rect" or pin_b == 1 else "circle")
-                gap = _pad_gap_variable(xa, ya, shape_a, radius_a,
-                                        xb, yb, shape_b, radius_b)
+                gap = pad_copper_gap(xa, ya, shape_a, radius_a,
+                                     xb, yb, shape_b, radius_b)
                 if gap < MIN_PAD_GAP_MM - 1e-9:
                     distance = hypot(xb - xa, yb - ya)
                     raise ValueError(tx(
@@ -212,8 +212,23 @@ class PinHeaderParams:
                         gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
 
 
-def _pad_gap_variable(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> float:
-    """Minimum copper clearance between circular and square pads."""
+def pad_copper_gap(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> float:
+    """@brief Free copper between two axis-aligned round or square pads, mm.
+
+    @param xa Centre X of the first pad, mm.
+    @param ya Centre Y of the first pad, mm.
+    @param shape_a "rect" for a square pad; any other value is a circle.
+    @param radius_a Half the side (square) or the radius (circle), mm.
+    @param xb Centre X of the second pad, mm.
+    @param yb Centre Y of the second pad, mm.
+    @param shape_b As shape_a, for the second pad.
+    @param radius_b As radius_a, for the second pad.
+    @return Euclidean distance between the two copper areas, mm; negative
+        when they overlap. Square corners are counted, so diagonal squares
+        are not mistaken for circles.
+    @note Shared by the header clearance check and the host-mounting lands,
+        so both apply the same geometry to MIN_PAD_GAP_MM.
+    """
     square_a, square_b = shape_a == "rect", shape_b == "rect"
     if not square_a and not square_b:
         return hypot(xb - xa, yb - ya) - radius_a - radius_b
@@ -257,14 +272,15 @@ def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]
             pin += 1
 
 
-def _pin_one_marker(start, end, positions, pad_radius: float):
+def _pin_one_marker(start, end, positions, pads):
     """Silk dot outside the outline corner nearest the pad numbered 1.
 
     The corner is chosen from where pin 1 actually is (a pin map can put it
     anywhere in the grid, e.g. a bottom-view DIP numbering), not assumed to be
     the top-left one; without pads the top-left corner is kept. The dot sits
     0.5 mm diagonally outside that corner and is pushed further out along the
-    same diagonal when it would lie on copper.
+    same diagonal when it would lie on copper; `pads` are the emitted Pad
+    objects, so the copper avoided is each pad's real size.
     """
     number = pin_one(pin for pin, _, _ in positions)
     corners = [(start[0], start[1]), (end[0], start[1]), (end[0], end[1]), (start[0], end[1])]
@@ -274,8 +290,9 @@ def _pin_one_marker(start, end, positions, pad_radius: float):
         corner = min(corners, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
     sx = -1.0 if corner[0] == start[0] else 1.0
     sy = -1.0 if corner[1] == start[1] else 1.0
-    keepouts = [keepout_box(x - pad_radius, y - pad_radius, x + pad_radius, y + pad_radius,
-                            line_width=0.0) for _, x, y in positions]
+    keepouts = [keepout_box(pad.at[0] - pad.size[0] / 2, pad.at[1] - pad.size[1] / 2,
+                            pad.at[0] + pad.size[0] / 2, pad.at[1] + pad.size[1] / 2,
+                            line_width=0.0) for pad in pads]
     return pin_one_marker((corner[0] + 0.5 * sx, corner[1] + 0.5 * sy), keepouts, (sx, sy))
 
 
@@ -312,21 +329,13 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
 
     positions = list(pin_positions(params))
-    # La serigrafia non copre il rame: con margin minore del raggio del pad
-    # il contorno passerebbe sopra le piazzole.
-    radius = params.pad_diameter / 2
-    keepouts = [keepout_box(x - radius, y - radius, x + radius, y + radius, line_width=0.12)
-                for _, x, y in positions]
-    for graphic in silk_rectangle(start, end, keepouts):
-        fp.add_graphic(graphic)
-    fp.add_graphic(_pin_one_marker(start, end, positions, radius))
-
+    pads = []
     for pin, x, y in positions:
         override = (params.pad_overrides or {}).get(str(pin), {})
         shape = override.get("shape", "rect" if pin == 1 and params.pad_shape == "circle"
                              else params.pad_shape)
         size = float(override.get("size", params.pad_diameter))
-        fp.add_pad(Pad(
+        pads.append(Pad(
             number=str(pin),
             pad_type="thru_hole",
             shape=shape,
@@ -335,6 +344,17 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
             drill=params.drill,
             layers=["*.Cu", "*.Mask"],
         ))
+    # Silk never covers copper: the keepouts come from the pads actually
+    # emitted, so a per-pin size override is avoided as well as the default.
+    keepouts = [keepout_box(pad.at[0] - pad.size[0] / 2, pad.at[1] - pad.size[1] / 2,
+                            pad.at[0] + pad.size[0] / 2, pad.at[1] + pad.size[1] / 2,
+                            line_width=0.12) for pad in pads]
+    for graphic in silk_rectangle(start, end, keepouts):
+        fp.add_graphic(graphic)
+    fp.add_graphic(_pin_one_marker(start, end, positions, pads))
+
+    for pad in pads:
+        fp.add_pad(pad)
 
     # Include full copper extents, even when pads protrude beyond the body.
     # Only emitted pads contribute; sparse pin maps retain their exact layout.

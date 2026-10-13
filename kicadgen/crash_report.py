@@ -61,7 +61,36 @@ _state: dict = {
 SECRET_ENV_VARS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
 
 _KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}")
-_USER_SEGMENT = re.compile(r"(?i)([A-Z]:[\\/]+Users[\\/]+|/home/|/Users/)[^\\/\s\"':]+")
+#: Characters a path segment cannot hold: separators, whitespace, quotes,
+#: the colon and the characters a Windows file name cannot hold.
+_NAME_CHAR = r"[^\\/\s\"':<>|*?]"
+#: A user folder name. A name with spaces («Mario Rossi») is taken whole
+#: only when a path separator follows it directly, i.e. when the text itself
+#: proves it is a folder; otherwise only the run up to the first whitespace
+#: is taken, so ``/home/bob and then opened`` keeps the rest of the line.
+#: The spaced form is words joined by single spaces and ending on a word: a
+#: sentence that merely runs into a later path (``bob and then opened /tmp``)
+#: has a space before that separator and is not taken.
+_SEGMENT = (r"(?:" + _NAME_CHAR + r"+(?: " + _NAME_CHAR + r"+)+(?=[\\/])|"
+            + _NAME_CHAR + r"+)")
+#: The user segment of a home path (Windows, Linux, macOS).
+_USER_SEGMENT = re.compile(r"(?i)([A-Z]:[\\/]+Users[\\/]+|/home/|/Users/)" + _SEGMENT)
+#: Shares that hold one folder per user, by path convention (the same kind
+#: of convention as ``C:\\Users\\<name>``): redirected homes and roaming
+#: profiles. A UNC path on any other share (``\\\\fileserver\\Projects``)
+#: names a place, not a person, and is left untouched.
+_USER_SHARES = r"(?:Users|home|homes|profiles)"
+#: The first segment after ``\\\\host\\<user share>\\`` of a UNC path.
+#: The prefix must start a path token (start of text, whitespace, quote,
+#: ``=`` or ``(``), so a doubled separator inside an ordinary path or a
+#: source line (``C:\\\\Windows``, ``"\\\\n\\\\t"``) is not read as UNC. The
+#: host must be a host name (letters, digits, ``.``, ``-``, ``_``, starting
+#: with a letter or a digit), which excludes the ``\\\\.\\`` and ``\\\\?\\``
+#: device namespaces. Separators may be doubled (a repr). Host and share
+#: are kept: they identify a machine, not a person.
+_UNC_SEGMENT = re.compile(r"(?i)(?:^|(?<=[\s\"'=(]))"
+                          r"((?:\\\\){1,2}[A-Za-z0-9][\w.-]*\\{1,2}"
+                          + _USER_SHARES + r"\\{1,2})" + _SEGMENT)
 
 
 def reports_dir(base: Union[str, os.PathLike]) -> Path:
@@ -78,7 +107,9 @@ def scrub(text: str) -> str:
 
     @param text Any text that may contain local paths or keys.
     @return The text with the home folder replaced by "~", other user folder
-        names by "<user>" and API keys by "<redacted>".
+        names (spaces included when a separator follows) and the first
+        folder under a per-user UNC share by "<user>", and API keys by
+        "<redacted>".
     """
     result = str(text)
     for name in SECRET_ENV_VARS:
@@ -94,7 +125,8 @@ def scrub(text: str) -> str:
         for variant in {home, home.replace("\\", "/"), home.replace("/", "\\")}:
             result = re.sub(re.escape(variant) + r"(?=[\\/\s\"':]|$)", "~", result,
                             flags=re.IGNORECASE)
-    return _USER_SEGMENT.sub(lambda m: m.group(1) + "<user>", result)
+    result = _USER_SEGMENT.sub(lambda m: m.group(1) + "<user>", result)
+    return _UNC_SEGMENT.sub(lambda m: m.group(1) + "<user>", result)
 
 
 def _app_version() -> str:

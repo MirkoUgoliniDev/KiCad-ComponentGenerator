@@ -260,6 +260,52 @@ def _style_of(form) -> str:
     return value if value in STROKE_STYLES else "default"
 
 
+def text_angle_to_file(degrees: float) -> int:
+    """@brief The value written in the `(at x y angle)` of a symbol `text` form.
+
+    @param degrees Text angle in degrees, counter-clockwise.
+    @return Tenths of a degree in [0, 3600): KiCad (6 to 10) stores the angle
+        of a symbol-library text in tenths (900 = vertical), unlike pins and
+        properties, which use degrees. Verified on KiCad 10's bundled
+        libraries and with `kicad-cli sym export svg`.
+    """
+    return int(round((float(degrees) % 360) * 10)) % 3600
+
+
+def _quarter_turn(degrees: float) -> bool:
+    """True when an angle in degrees is a multiple of 90."""
+    return math.isclose(degrees / 90, round(degrees / 90), abs_tol=1e-9)
+
+
+def text_angle_from_file(value: float) -> float:
+    """@brief The text angle in degrees of a symbol `text` form's `(at x y value)`.
+
+    @param value The number found in the file.
+    @return Degrees in [0, 360). The value is read as tenths of a degree,
+        as KiCad writes it.
+    @note Compatibility rule, not a geometric one: this program wrote
+        degrees before 2026-10-13 (`(at x y 90)` for a vertical text), always
+        a quarter turn in [0, 360). Read as tenths those become 9, 18 or 27
+        degrees, so a value that is a quarter turn in degrees but not in
+        tenths (90, 180, 270) is taken as degrees. This is ambiguous by
+        construction: KiCad's own libraries DO contain non-quarter text
+        angles in tenths (e.g. the digits of `Switch:SW_Coded_SH-7010` sit at
+        54, 126, 162, 198... degrees), so a genuine KiCad text written as 90,
+        180 or 270 (9, 18 or 27 degrees) loads as 90, 180 or 270 degrees
+        instead. The trade-off was chosen because every symbol this program
+        saved before the fix uses exactly those three values for its
+        vertical or upside-down texts, while a KiCad text at exactly 9, 18
+        or 27 degrees is rare and only rotates a label; the file carries no
+        marker that would tell the two apart. Any other value is read as
+        tenths, so every other KiCad angle is exact.
+    """
+    value = float(value)
+    tenths = value / 10
+    if not _quarter_turn(tenths) and 0 < value < 360 and _quarter_turn(value):
+        return value % 360
+    return tenths % 360
+
+
 def _text_primitive(form) -> Optional[Primitive]:
     """The Primitive of a `(text "..." (at x y angle) (effects (font (size s s)) (justify j)))` form."""
     if len(form) < 2 or not isinstance(form[1], str):
@@ -267,12 +313,8 @@ def _text_primitive(form) -> Optional[Primitive]:
     at = _child(form, "at")
     if not at or len(at) < 3:
         return None
-    angle = float(at[3]) if len(at) > 3 else 0.0
-    # KiCad 6 library files stored the text angle in tenths of a degree
-    # (900 = 90°); later formats use degrees. A value of 360 or more can
-    # only be tenths: interoperability rule, not a geometric one.
-    if abs(angle) >= 360:
-        angle /= 10
+    raw = float(at[3]) if len(at) > 3 else 0.0
+    angle = text_angle_from_file(raw)
     effects = _child(form, "effects")
     font = _child(effects, "font") if effects else None
     size = _child(font, "size") if font else None
@@ -1629,7 +1671,9 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
             if p.kind == "text":
                 (tx_, ty_), = p.points
                 justify = "" if p.justify == "center" else f" (justify {p.justify})"
-                lines.append(f"{indent}(text {_quote_text(p.text)} (at {_num(tx_)} {_num(ty_)} {int(p.angle) % 360}) "
+                # Symbol texts store tenths of a degree (900 = vertical).
+                lines.append(f"{indent}(text {_quote_text(p.text)} (at {_num(tx_)} {_num(ty_)} "
+                             f"{text_angle_to_file(p.angle)}) "
                              f"(effects (font (size {_num(p.size)} {_num(p.size)})){justify}))")
             elif p.kind == "polyline":
                 pts = " ".join(f"(xy {_num(x)} {_num(y)})" for x, y in p.points)

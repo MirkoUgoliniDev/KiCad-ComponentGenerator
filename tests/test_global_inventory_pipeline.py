@@ -82,7 +82,9 @@ def _uninformative_crop_reading():
     keep checking the global inventory's own output; the crop reading itself
     is tested in tests/test_photo_crop_reading.py.
     """
-    return {'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
+    # v5 contract (review D3): every required field, class triple included.
+    return {'visual_class': 'unknown', 'visual_class_confidence': 'low', 'visual_class_evidence': '', 'contacts_complete': True, 
+            'bodies_in_frame': 1, 'metal_contacts_total': 2, 'two_end_terminals_only': True,
             'body_shape': 'other', 'top_translucent': False,
             'something_visible_inside': False, 'coloured_patch_at_end': False,
             'band_at_end': False, 'printed_text': 'none', 'marking': '', 'tab': False,

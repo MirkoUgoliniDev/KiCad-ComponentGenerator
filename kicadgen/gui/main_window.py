@@ -973,6 +973,29 @@ def _saved_pcb_thickness(saved) -> tuple[str, tuple[float, str] | None]:
     return source, proposal
 
 
+def _project_list(mapping: dict, key: str, skipped: list, label: str | None = None) -> list:
+    """@brief A list-valued key of a saved project state, or [] when it is not a list.
+
+    @param mapping The state (or a nested object of it) read from the file.
+    @param key Key whose value must be a JSON array.
+    @param skipped List of ignored settings, logged by `_apply_project_state`.
+    @param label Name used in the log (default: `key`).
+    @return The list (a tuple from a direct caller is accepted too); [] for
+        an absent or null key; [] and one `skipped` entry for any other type.
+    @note One rule for every list-valued key: a hand-edited file with
+        ``"sides": 5`` used to crash the opening (iterating an int), while a
+        string or an object was iterated character by character or key by
+        key and silently produced nothing.
+    """
+    value = mapping.get(key) if isinstance(mapping, dict) else None
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    skipped.append(f"{label or key} ({type(value).__name__})")
+    return []
+
+
 class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
@@ -1057,6 +1080,21 @@ class MainWindow(QMainWindow):
         self._fp_handle_drag: tuple | None = None
         #: Snapped grab point (mm) of a whole-drawing drag, or None.
         self._fp_handle_origin: tuple | None = None
+        #: True between a handle press and its drop.
+        self._fp_handle_active: bool = False
+        #: True when the drawings list changed during that drag: its drop
+        #: (and any further move) is ignored, its indices are stale.
+        self._fp_handle_cancelled: bool = False
+        #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
+        #: Consumed by `_flush_footprint_rewrite` just before its single
+        #: attempt (a failed start is logged once, never retried in a loop)
+        #: and cleared when any generation starts or a project is opened.
+        self._fp_rewrite_dirty: bool = False
+        #: True when a pending edit is a pad edit: those rewrite the
+        #: .kicad_mod even when none exists yet (drawings and texts do not).
+        self._fp_rewrite_pad_edit: bool = False
+        #: True while one rewrite attempt is queued on the event loop.
+        self._fp_rewrite_pending: bool = False
         #: Undo/redo stacks of the drawings list (snapshots), like the symbol editor.
         self._fp_drawings_undo: list = []
         self._fp_drawings_redo: list = []
@@ -1122,6 +1160,10 @@ class MainWindow(QMainWindow):
         #: su quelli: sull'ESP32 la scala usciva del 32% sbagliata (26/09).
         self._board_size_known = False
         self._config = load_config()
+        #: Problems found reading config.json, (template, values) pairs:
+        #: logged once the translator and the log exist (end of __init__).
+        from .app_config import take_load_problems
+        self._config_load_notes: list = take_load_problems()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
         # Log, avanzamento ed errori passano da `messages.tx`: da qui in avanti
@@ -1207,6 +1249,11 @@ class MainWindow(QMainWindow):
         self._init_project_settings()
         self._refresh_start_page()
         self._prepare_native_preview_3d_slot()
+        # A config.json value replaced by its default, or a corrupt file
+        # kept aside, is said in the session log (not in a project log:
+        # it is not about any project).
+        for template, values in self._config_load_notes:
+            self._append_log(tx(template, **values), persist=False)
 
     def _prepare_native_preview_3d_slot(self) -> None:
         """@brief Create the native windows of the 3D pane's ancestor chain before the window shows.
@@ -2575,6 +2622,9 @@ class MainWindow(QMainWindow):
         # dalla ripassata generica (i18n_skip).
         self._refresh_pcb_thickness_row()
         self._refresh_workflow_tooltips()
+        # Full-paths toggle of the KiCad tab: state-dependent text, i18n_skip.
+        self.file_paths_toggle.setText(
+            self._file_paths_toggle_text(self.file_paths_toggle.isChecked()))
         # Icone della modale di avanzamento: tooltip composti, non chiavi.
         self.analysis_overlay.refresh_command_texts()
         self._draw_preview()
@@ -3662,8 +3712,7 @@ class MainWindow(QMainWindow):
         if not name:
             raise ValueError(
                 tx("Il componente non ha ancora un nome: nessuna cartella da usare."))
-        root = self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT)
-        return Path(root) / name
+        return self._library_root() / name
 
     def _docs_dir(self) -> Path:
         """@brief Cartella dei documenti del componente.
@@ -4175,6 +4224,9 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.field_library_root.setText(path)
+            # Explicit: a chosen folder is a decision even when the text
+            # signal was already handled (it returns early then).
+            self._on_library_root_changed()
 
     def _body_size(self):
         """Quote correnti del corpo, per giudicare le viste dall'alto.
@@ -6030,6 +6082,17 @@ class MainWindow(QMainWindow):
                 setattr(self, attribute, None)
 
     def _on_extract_finished(self) -> None:
+        """@brief Close an extraction run: release it, offer the review, start the automatic generation.
+
+        @note A footprint edit left pending while the extraction ran is NOT
+            retried here when the result is applied: the extraction has just
+            put new, not yet reviewed parameters in the window, and a
+            footprint-only rewrite would write them without the review and
+            without `_confirm_output_overwrite`. The edit itself is saved in
+            the project and every GenerateWorker copies drawings and text
+            positions, so the next generation (automatic or the user's)
+            carries it. An abandoned run changed nothing: there the retry runs.
+        """
         # Il worker ha finito, anche se abbandonato: le sue chiamate sono
         # tutte registrate, il progetto della corsa si puo' rilasciare.
         if hasattr(self, "ai_account"):
@@ -6041,6 +6104,7 @@ class MainWindow(QMainWindow):
             # si riaccendono i comandi che erano spenti perche' girava.
             worker = self.sender()
             self._forget_abandoned_worker(worker)
+            self._retry_footprint_rewrite()
             self._append_log(
                 tx("La corsa interrotta dall'utente è terminata adesso: il suo risultato "
                    "è stato scartato, i comandi tornano disponibili."))
@@ -6056,6 +6120,9 @@ class MainWindow(QMainWindow):
         if self._applying_extraction:
             self._extract_finish_pending = True
             return
+        # New parameters own the output now: the pending edit goes with the
+        # next generation (see the docstring), not with a rewrite of its own.
+        self._clear_footprint_rewrite()
         # Il consuntivo riguarda l'analisi AI, che a questo punto e' conclusa:
         # va mostrato anche quando parte subito la generazione automatica, che
         # non fa alcuna chiamata al modello e uscirebbe da qui senza dirlo.
@@ -6805,7 +6872,15 @@ class MainWindow(QMainWindow):
         self._general_project_state.pop("top_text", None)
         # Collegato qui e non alla costruzione del campo: prima della
         # fotografia generale non c'e' un progetto da salvare e chiudere.
-        self.field_library_root.textChanged.connect(self._on_library_root_changed)
+        # Typed text is committed only by Enter (returnPressed): a keystroke
+        # is not a decision, and neither is leaving the field (Alt+Tab, a
+        # click on «Sfoglia»), which restores the committed folder. A text
+        # set by the program (the browse button, a restored folder) is
+        # already a decision.
+        self._library_root_committed = self.field_library_root.text()
+        self.field_library_root.textChanged.connect(self._on_library_root_text_changed)
+        self.field_library_root.returnPressed.connect(self._on_library_root_edit_finished)
+        self.field_library_root.editingFinished.connect(self._on_library_root_focus_left)
         self._last_saved_project_state = None
         self._project_autosave = QTimer(self)
         self._project_autosave.setInterval(PROJECT_AUTOSAVE_MS)
@@ -6928,7 +7003,7 @@ class MainWindow(QMainWindow):
         self._vlm_model = vlm if isinstance(vlm, str) and vlm else None
         self.field_vlm_model.setText(self._photo_detector_model())
         self._sides.clear()
-        for side in state.get("sides") or ():
+        for side in _project_list(state, "sides", skipped):
             if isinstance(side, dict):
                 # Un progetto salvato prima della chiave e' stato generato con
                 # lo stile di allora: lo si conserva, non e' una deduzione.
@@ -6936,7 +7011,7 @@ class MainWindow(QMainWindow):
         # Anche senza lati salvati: la barra del tipo contatto non deve restare
         # quella del progetto precedente.
         self._sync_contact_style_bar()
-        components = [c for c in state.get("components") or () if isinstance(c, dict)]
+        components = [c for c in _project_list(state, "components", skipped) if isinstance(c, dict)]
         try:
             self._set_photo_components(components, replace_excluded=True)
         except (KeyError, TypeError, ValueError) as exc:
@@ -6951,10 +7026,12 @@ class MainWindow(QMainWindow):
         legacy = annotations.get("convention") != ANNOTATION_CONVENTION
         converted = 0
         for kind, target, values, key in ((EdgeFilletAnnotation, self.fillet_annotations,
-                                           annotations.get("fillets"), "edge"),
+                                           _project_list(annotations, "fillets", skipped,
+                                                         "annotations.fillets"), "edge"),
                                           (FaceTextAnnotation, self.face_text_annotations,
-                                           annotations.get("texts"), "face")):
-            for entry in values or ():
+                                           _project_list(annotations, "texts", skipped,
+                                                         "annotations.texts"), "face")):
+            for entry in values:
                 try:
                     entry = dict(entry)
                     if legacy and isinstance(entry.get(key), str):
@@ -6968,7 +7045,8 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Annotazioni 3D: {count} nomi fronte/retro convertiti alla "
                                 "convenzione del cubo 3D (il lato fisico non cambia).",
                                 count=converted))
-        self.pinout = [dict(entry) for entry in state.get("pinout") or () if isinstance(entry, dict)]
+        self.pinout = [dict(entry) for entry in _project_list(state, "pinout", skipped)
+                       if isinstance(entry, dict)]
         pin_map = state.get("pin_map")
         try:
             self.pin_map = ({int(p): (int(r), int(c)) for p, r, c in pin_map}
@@ -6996,6 +7074,10 @@ class MainWindow(QMainWindow):
         self.footprint_text_positions = validate_text_positions(state.get("footprint_texts"))
         self.footprint_drawings = validate_footprint_drawings(state.get("footprint_drawings"))
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
+        # A rewrite still pending belongs to the project being left: the
+        # one now open has its own .kicad_mod, written by its own edits.
+        self._clear_footprint_rewrite()
+        self._end_footprint_drawing_interaction()
         self._refresh_footprint_undo_buttons()
         self._cancel_footprint_drawing()
         self._refresh_type_effect()
@@ -7220,16 +7302,67 @@ class MainWindow(QMainWindow):
         if state is not None and state == self._last_saved_project_state:
             return True
         current = folder or getattr(self, "_open_project_folder", None)
-        if current is not None and current == self._project_config_refused:
+        refused = current is not None and current == self._project_config_refused
+        if refused or state is None:
+            # Two cases where saving can never succeed, so a plain refusal
+            # would trap the user in the project: a file that must not be
+            # overwritten, and a state that cannot be serialised (a value
+            # JSON cannot hold). The user chooses to abandon the edits.
+            question = ("Il file di progetto non e' modificabile. Abbandonare le modifiche non salvate?"
+                        if refused else
+                        "Le impostazioni del progetto contengono valori non salvabili. "
+                        "Abbandonare le modifiche non salvate?")
             answer = QMessageBox.question(
-                self, self.i18n.text("Progetto"), self.i18n.text(
-                    "Il file di progetto non e' modificabile. Abbandonare le modifiche non salvate?"),
+                self, self.i18n.text("Progetto"), self.i18n.text(question),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             return answer == QMessageBox.StandardButton.Yes
         QMessageBox.warning(self, self.i18n.text("Progetto"), self.i18n.text(
             "Impossibile salvare le impostazioni: il progetto resta aperto."))
         return False
+
+    def _on_library_root_text_changed(self, _text: str = "") -> None:
+        """@brief A change of the «Area di lavoro» text: act now only if the program set it.
+
+        @note `isModified()` is True only for text the user is typing (Qt
+            sets it on keyboard edits, `setText` clears it): that text waits
+            for `_on_library_root_edit_finished`.
+        """
+        if self.field_library_root.isModified():
+            return
+        self._on_library_root_changed()
+        self._library_root_committed = self.field_library_root.text()
+
+    def _on_library_root_edit_finished(self) -> None:
+        """@brief The user confirmed the typed «Area di lavoro» with Enter."""
+        self.field_library_root.setModified(False)
+        self._on_library_root_changed()
+        self._library_root_committed = self.field_library_root.text()
+
+    def _on_library_root_focus_left(self) -> None:
+        """@brief Leaving the «Area di lavoro» field without Enter drops the typed text.
+
+        @note `editingFinished` fires on Enter too, after `returnPressed`:
+            the text is then no longer modified and nothing happens here. A
+            text still modified was never confirmed: the committed folder is
+            put back (no project change), so a half-typed path left behind
+            by Alt+Tab or a click on «Sfoglia» neither closes the project nor
+            stays on screen as if it were the working folder.
+        """
+        field = self.field_library_root
+        if not field.isModified():
+            return
+        committed = getattr(self, "_library_root_committed", None)
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is not None and (committed is None or os.path.normcase(
+                os.path.normpath(committed)) != os.path.normcase(os.path.normpath(str(folder.parent)))):
+            # The open project's working folder is the truth.
+            committed = str(folder.parent)
+        if committed is None:
+            return
+        # setText clears the modified state: the text-changed slot then sees
+        # a program-set text, the folder already in use, and changes nothing.
+        field.setText(committed)
 
     def _on_library_root_changed(self, _text: str = "") -> None:
         """@brief Cambiare la cartella di lavoro salva e chiude il progetto aperto.
@@ -7245,7 +7378,11 @@ class MainWindow(QMainWindow):
         folder = getattr(self, "_open_project_folder", None)
         if folder is None or getattr(self, "_restoring_project", False):
             return
-        if self._library_root() / self._component_name() == folder:
+        # Normalised comparison: «C:\Lib\» or «c:/lib» is the same working
+        # folder, and confirming it must not close the project.
+        def normalised(path):
+            return os.path.normcase(os.path.normpath(str(path)))
+        if normalised(self._library_root() / self._component_name()) == normalised(folder):
             return
         if self._background_work_running() or self._automatic_generation_active:
             self.field_library_root.blockSignals(True)
@@ -7287,8 +7424,22 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
 
     def _library_root(self) -> Path:
-        """@brief Cartella di lavoro in cui stanno i progetti."""
-        return Path(self.field_library_root.text().strip() or str(DEFAULT_LIBRARY_ROOT))
+        """@brief Cartella di lavoro in cui stanno i progetti.
+
+        @return The COMMITTED working folder: while the user is typing a
+            new path in «Area di lavoro» (text modified, not yet confirmed
+            with Enter) the folder in use stays the previous one, so a
+            worker finishing meanwhile, an autosave or the symbol recovery
+            never write into a half-typed path, possibly a homonymous
+            project of another working folder (final review, 2026-10-14).
+        """
+        field = self.field_library_root
+        text = field.text()
+        if field.isModified():
+            committed = getattr(self, "_library_root_committed", None)
+            if committed is not None:
+                text = committed
+        return Path(text.strip() or str(DEFAULT_LIBRARY_ROOT))
 
     def _project_change_blocked(self) -> bool:
         """@brief Vero, con un avviso, quando un lavoro in corso impedisce di cambiare progetto.
@@ -7380,9 +7531,15 @@ class MainWindow(QMainWindow):
             return
         name = folder.name
         from .project_state import ProjectConfigError, read_project_config
+        non_finite = []
         try:
-            saved = read_project_config(folder)
+            saved = read_project_config(folder, non_finite)
             self._project_config_refused = None
+            if non_finite:
+                # NaN/infinity from a hand-edited file: dropped (None) so the
+                # state stays serialisable, and said like any invalid value.
+                self._append_log(tx("Impostazioni del progetto non applicate (valori non validi): ")
+                                 + ", ".join(non_finite) + ".")
         except ProjectConfigError as exc:
             saved = None
             # Ne' applicato ne' sovrascritto: resta com'e' finche' qualcuno lo guarda.
@@ -8109,19 +8266,24 @@ class MainWindow(QMainWindow):
             self._append_log(tx("ATTENZIONE: ") + warning)
         self._log_values_to_review(params)
 
-        if params.edge_fillets:
-            for f in params.edge_fillets:
+        # Defence in depth: the extraction cleans the fillets upstream, but
+        # one malformed entry (not an object, a missing key, a radius that
+        # is not a number) must cost that entry only, never the whole apply.
+        applied_fillets = 0
+        raw_fillets = params.edge_fillets if isinstance(params.edge_fillets, (list, tuple)) else ()
+        for f in raw_fillets:
+            try:
                 ann = EdgeFilletAnnotation(edge=f["edge"], radius_mm=float(f["radius_mm"]))
-                try:
-                    ann.validate()
-                except ValueError:
-                    continue
-                self.fillet_annotations.append(ann)
+                ann.validate()
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            self.fillet_annotations.append(ann)
+            applied_fillets += 1
 
         fillet_note = (
             self.i18n.tr(
-                "extraction.fillet_note", count=len(params.edge_fillets))
-            if params.edge_fillets else ""
+                "extraction.fillet_note", count=applied_fillets)
+            if applied_fillets else ""
         )
         if self._auto_after_extraction:
             self._auto_generation_params = params
@@ -9178,7 +9340,7 @@ class MainWindow(QMainWindow):
         artifacts_form.addRow("Simbolo elettrico:", symbol_row)
         artifacts_form.addRow("Modello STEP:", self.label_kicad_step)
         self.file_paths_toggle = QToolButton()
-        self.file_paths_toggle.setText("Mostra percorsi completi")
+        self.file_paths_toggle.setText(self._file_paths_toggle_text(False))
         self.file_paths_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.file_paths_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self.file_paths_toggle.setCheckable(True)
@@ -9807,18 +9969,29 @@ class MainWindow(QMainWindow):
             dialog.exec()
         finally:
             self._component_review_dialog = None
+            self._retry_footprint_rewrite()
         if getattr(dialog, "ai_review_requested", False):
             self.tabs.setCurrentIndex(TAB_SYMBOL)
             self._suggest_pin_types()
+
+    def _file_paths_toggle_text(self, expanded: bool) -> str:
+        """@brief Translated label of the full-paths toggle of the KiCad tab.
+
+        @param expanded True when the paths are shown (the label offers to hide them).
+        @return «Nascondi/Mostra percorsi completi» in the interface language.
+        @note The button is excluded from the generic retranslation
+            (`i18n_skip`, its text depends on its state): the window sets it
+            at construction, on toggle and on a language change.
+        """
+        return self.i18n.text("Nascondi percorsi completi" if expanded
+                              else "Mostra percorsi completi")
 
     def _toggle_kicad_file_paths(self, expanded: bool) -> None:
         """Show or collapse the full generated-file paths in the KiCad tab."""
         self.file_paths_detail.setVisible(expanded)
         self.file_paths_toggle.setArrowType(
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        self.file_paths_toggle.setText(
-            self.i18n.text("Nascondi percorsi completi" if expanded
-                           else "Mostra percorsi completi"))
+        self.file_paths_toggle.setText(self._file_paths_toggle_text(expanded))
 
     def _refresh_kicad_export_history(self) -> None:
         """Refresh the concise, persistent list of KiCad exports."""
@@ -10995,6 +11168,10 @@ class MainWindow(QMainWindow):
             self._on_error(str(exc))
             self._on_generation_finished()
             return False
+        # Every generation writes the .kicad_mod from the data copied into
+        # the worker above: a pending footprint rewrite is now covered,
+        # whoever started it (see `_schedule_footprint_rewrite`).
+        self._clear_footprint_rewrite()
         return True
 
     def _show_generation_steps(self, params, body, single_component=False) -> None:
@@ -11041,7 +11218,10 @@ class MainWindow(QMainWindow):
             tutti e tre i casi. L'interruzione si riconosce da
             `_abort_pending`, che viene azzerato qui perche' qui finisce
             davvero il lavoro che si stava fermando.
+        @note A footprint edit saved while this worker ran is rewritten now
+            (`_retry_footprint_rewrite`).
         """
+        self._retry_footprint_rewrite()
         QTimer.singleShot(0, self._refresh_mounting_actions)
         aborted = self._abort_pending
         self._abort_pending = False
@@ -11492,11 +11672,30 @@ class MainWindow(QMainWindow):
         if not valid:
             # Degenerate shape (zero radius, flat rectangle...): say why
             # nothing appears instead of silently dropping it.
-            self._draw_feedback_toast(self.i18n.text("Disegno scartato."), self.i18n.text(
-                "La forma è degenere (raggio nullo o lato nullo): "
-                "clicca punti distinti sulla griglia."))
+            self._draw_feedback_toast(self.i18n.text("Disegno scartato."),
+                                      self._degenerate_drawing_text(record))
             return
         self._apply_footprint_drawings(self.footprint_drawings + valid)
+
+    def _degenerate_drawing_text(self, record: dict) -> str:
+        """@brief Translated reason why a drawing record was refused by the validator.
+
+        @param record The refused record (kind and points as drawn).
+        @return The aligned-arc explanation when the record is an arc through
+            three distinct points whose centre KiCad cannot hold (collinear,
+            or so nearly collinear that the centre leaves KiCad's coordinate
+            range); otherwise the generic zero-radius/zero-side text.
+        """
+        from ..core.footprint import arc_centre_representable
+        points = [tuple(p) for p in record.get("points") or ()]
+        if (record.get("kind") == "arc" and len(points) == 3 and len(set(points)) == 3
+                and not arc_centre_representable(*points)):
+            return self.i18n.text(
+                "Arco senza centro: i tre punti sono allineati o quasi. "
+                "Sposta il punto intermedio fuori dalla retta.")
+        return self.i18n.text(
+            "La forma è degenere (raggio nullo o lato nullo): "
+            "clicca punti distinti sulla griglia.")
 
     def _draw_feedback_toast(self, title: str, body: str) -> None:
         """@brief Small non-modal card for drawing feedback, next to the cursor.
@@ -11510,14 +11709,20 @@ class MainWindow(QMainWindow):
             toast = self._draw_toast = Toast(self)
         toast.show_message(title, body)
 
-    def _apply_footprint_drawings(self, updated: list, *, history: str = "push") -> None:
+    def _apply_footprint_drawings(self, updated: list, *, history: str = "push") -> bool:
         """@brief Persist a new drawings list; on save failure keep the old one.
 
         @param updated The new list of validated records.
         @param history "push" records the previous list for undo and clears
             redo; "undo"/"redo" move between the stacks instead.
+        @return True when the list was saved and applied; False when the
+            project file could not be written (nothing changed).
         @note Same contract as the pad overrides: the project file is the
             truth, then the preview is redrawn and the .kicad_mod rewritten.
+        @note Any change of the list ends a handle or text drag in progress:
+            the drag holds indices into the OLD list, and its drop would
+            otherwise edit whichever drawing now sits at that index (a
+            Delete or Ctrl+Z pressed while the mouse button is still down).
         """
         previous = self.footprint_drawings
         self.footprint_drawings = updated
@@ -11525,7 +11730,8 @@ class MainWindow(QMainWindow):
             self.footprint_drawings = previous
             QMessageBox.warning(self, self.i18n.text("Errore"),
                                 self.i18n.text("Disegno non salvato."))
-            return
+            return False
+        self._end_footprint_drawing_interaction()
         if history == "push":
             self._fp_drawings_undo.append(deepcopy(previous))
             self._fp_drawings_redo.clear()
@@ -11535,26 +11741,125 @@ class MainWindow(QMainWindow):
             self._fp_drawings_undo.append(deepcopy(previous))
         self._refresh_footprint_undo_buttons()
         self._fp_hovered_drawing = -1
+        view = getattr(self, "preview_view", None)
+        if view is not None:
+            # The view's own hover memory must forget the old list too, or a
+            # pointer that lands again on the same index emits nothing.
+            view.reset_hover()
         self._draw_preview()
         self._schedule_footprint_rewrite()
+        return True
 
-    def _schedule_footprint_rewrite(self) -> None:
-        """@brief Rewrite the .kicad_mod on the next event-loop turn, once for a burst of edits.
+    def _end_footprint_drawing_interaction(self) -> None:
+        """@brief Forget any handle or text drag in progress, in the view and here.
 
-        @note The project file is already saved and the preview redrawn when
-            this is called; deferring the worker start lets the frame that
-            ends a drag paint first, so the drop does not stutter (profiling
-            2026-10-13: 20-115 ms at the drop depending on the pad count).
+        @note Called whenever the drawings list changes: the drag's indices
+            refer to the list it started on.
         """
+        view = getattr(self, "preview_view", None)
+        if view is not None:
+            view.cancel_interaction()
+        if self._fp_handle_active:
+            self._fp_handle_cancelled = True
+        self._fp_handle_active = False
+        self._fp_handle_drag = None
+        self._fp_handle_origin = None
+
+    def _schedule_footprint_rewrite(self, immediate: bool = False, pad_edit: bool = False) -> None:
+        """@brief Mark the .kicad_mod as stale and rewrite it as soon as nothing else runs.
+
+        @param immediate True tries the rewrite now (an edit confirmed in a
+            modal dialog: no drag frame to protect); False defers it to the
+            next event-loop turn. Either way a busy window keeps the flag.
+        @param pad_edit True for a pad edit, which goes to `_generate` as it
+            always did (it rewrites the footprint of an acquired component
+            even before a .kicad_mod exists); False (drawings, text
+            positions) rewrites only a .kicad_mod already in the project.
+
+        @note Every saved edit of the footprint (drawings, text positions,
+            pad overrides) calls this. The «footprint dirty» flag is set here
+            and consumed by the first rewrite attempt made while the window
+            is idle, or by any generation that starts (it copies the same
+            data): an edit made while another worker runs is not lost, it is
+            retried from the finished handler of every worker
+            (`_retry_footprint_rewrite`). A burst of edits gives one rewrite,
+            with the data current when the worker starts.
+        @note The start is deferred to the next event-loop turn so the frame
+            that ends a drag paints first and the drop does not stutter
+            (profiling 2026-10-13: 20-115 ms at the drop depending on the pad
+            count).
+        """
+        self._fp_rewrite_dirty = True
+        self._fp_rewrite_pad_edit = self._fp_rewrite_pad_edit or pad_edit
+        if immediate:
+            self._flush_footprint_rewrite()
+        else:
+            self._retry_footprint_rewrite()
+
+    def _clear_footprint_rewrite(self) -> None:
+        """@brief Forget the pending .kicad_mod rewrite (covered, attempted or obsolete)."""
+        self._fp_rewrite_dirty = False
+        self._fp_rewrite_pad_edit = False
+
+    def _retry_footprint_rewrite(self) -> None:
+        """@brief Queue one attempt of the pending .kicad_mod rewrite, if any.
+
+        @note Safe to call from any worker's finished handler: it does
+            nothing when no edit is pending, and several calls in the same
+            turn coalesce into one attempt.
+        """
+        if not getattr(self, "_fp_rewrite_dirty", False):
+            return
         if getattr(self, "_fp_rewrite_pending", False):
             return
         self._fp_rewrite_pending = True
+        QTimer.singleShot(0, self._flush_footprint_rewrite)
 
-        def rewrite():
-            self._fp_rewrite_pending = False
-            if self._project_has_footprint():
-                self._generate(footprint_only=True)
-        QTimer.singleShot(0, rewrite)
+    def _pipeline_owns_output(self) -> bool:
+        """@brief Tell whether an analysis pipeline is between its steps and owns the output.
+
+        @return True from the moment an extraction starts applying its result
+            until the automatic generation it leads to has finished: result
+            being applied (`_applying_extraction`, `_extract_finish_pending`),
+            automatic generation still to start (`_auto_generation_params`),
+            inventory review open (`_inventory_pause_active`) or automatic
+            generation running (`_automatic_generation_active`).
+        @note In that window the parameters on screen are fresh and not yet
+            reviewed: only the pipeline may write the footprint, after the
+            review and the overwrite confirmation.
+        """
+        return bool(getattr(self, "_automatic_generation_active", False)
+                    or getattr(self, "_applying_extraction", False)
+                    or getattr(self, "_extract_finish_pending", False)
+                    or getattr(self, "_inventory_pause_active", False)
+                    or getattr(self, "_auto_generation_params", None) is not None)
+
+    def _flush_footprint_rewrite(self) -> None:
+        """@brief Make the one attempt of the pending footprint-only rewrite when the window is idle.
+
+        @note Busy (a worker, a modal review) or a pipeline between its steps
+            (`_pipeline_owns_output`): the flag stays set and the next
+            finished handler retries.
+        @note Otherwise the flag is consumed BEFORE the attempt, whatever its
+            outcome: a start that fails (invalid parameters, a thread that
+            cannot start) is logged once by `_generate` and is not re-armed
+            by the finished handler it triggers, which would loop once per
+            event-loop turn. The edit stays saved in the project; the next
+            generation carries it.
+        @note Drawings and text positions rewrite only an existing .kicad_mod
+            (no file yet: the first generation will carry them); a pad edit
+            goes to `_generate`, which decides as it always did.
+        """
+        self._fp_rewrite_pending = False
+        if not getattr(self, "_fp_rewrite_dirty", False):
+            return
+        if self._background_work_running() or self._pipeline_owns_output():
+            return
+        pad_edit = self._fp_rewrite_pad_edit
+        self._clear_footprint_rewrite()
+        if not pad_edit and not self._project_has_footprint():
+            return
+        self._generate(footprint_only=True)
 
     def _refresh_footprint_undo_buttons(self) -> None:
         """@brief Enable undo/redo only when their stack has something."""
@@ -11566,13 +11871,19 @@ class MainWindow(QMainWindow):
         """@brief Go back to the drawings list before the last edit (Ctrl+Z)."""
         if self._fp_drawings_undo:
             self._cancel_footprint_drawing()
-            self._apply_footprint_drawings(self._fp_drawings_undo.pop(), history="undo")
+            # Pop only once applied: a failed save must keep the step.
+            if self._apply_footprint_drawings(self._fp_drawings_undo[-1], history="undo"):
+                self._fp_drawings_undo.pop()
+                self._refresh_footprint_undo_buttons()
 
     def _redo_footprint_drawing(self) -> None:
         """@brief Re-apply the last undone edit of the drawings (Ctrl+Y)."""
         if self._fp_drawings_redo:
             self._cancel_footprint_drawing()
-            self._apply_footprint_drawings(self._fp_drawings_redo.pop(), history="redo")
+            # Pop only once applied: a failed save must keep the step.
+            if self._apply_footprint_drawings(self._fp_drawings_redo[-1], history="redo"):
+                self._fp_drawings_redo.pop()
+                self._refresh_footprint_undo_buttons()
 
     def _delete_hovered_drawing(self) -> None:
         """@brief Delete key: remove the drawing under the pointer, if any."""
@@ -11856,6 +12167,8 @@ class MainWindow(QMainWindow):
 
     def _on_footprint_handle_pressed(self, index: int, point_index: int, x: float, y: float) -> None:
         """@brief A handle or a drawing body was grabbed: remember the grab node."""
+        self._fp_handle_active = True
+        self._fp_handle_cancelled = False
         self._fp_handle_origin = self._snapped_draw_point(x, y) if point_index < 0 else None
         if 0 <= index < len(self.footprint_drawings):
             self._fp_hovered_drawing = index
@@ -11872,6 +12185,8 @@ class MainWindow(QMainWindow):
 
         @param point_index Point of the record, or -1 to move the whole drawing.
         """
+        if self._fp_handle_cancelled:
+            return      # the list changed under the drag: it was cancelled
         if not 0 <= index < len(self.footprint_drawings):
             return
         if point_index < 0:
@@ -11887,9 +12202,17 @@ class MainWindow(QMainWindow):
         self._refresh_drawing_handles()
 
     def _on_footprint_handle_dropped(self, index: int, point_index: int, x: float, y: float) -> None:
-        """@brief A handle was dropped: store the moved point if the shape stays valid."""
+        """@brief A handle was dropped: store the moved point if the shape stays valid.
+
+        @note A drop whose drag was cancelled (the list changed while the
+            button was down) is ignored: its indices refer to the old list.
+        """
         from ..core.footprint import validate_footprint_drawings
         self._fp_handle_drag = None
+        self._fp_handle_active = False
+        if self._fp_handle_cancelled:
+            self._fp_handle_cancelled = False
+            return
         if not 0 <= index < len(self.footprint_drawings):
             return
         record = deepcopy(self.footprint_drawings[index])
@@ -11909,8 +12232,8 @@ class MainWindow(QMainWindow):
                 return
             record["points"][point_index] = list(point)
         if not validate_footprint_drawings([record]):
-            self._draw_feedback_toast(self.i18n.text("Spostamento scartato."), self.i18n.text(
-                "La forma è degenere (raggio nullo o lato nullo): clicca punti distinti sulla griglia."))
+            self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
+                                      self._degenerate_drawing_text(record))
             self._refresh_drawing_handles()
             return
         updated = deepcopy(self.footprint_drawings)
@@ -11956,6 +12279,7 @@ class MainWindow(QMainWindow):
                 self.symbol_tab.use_pin_type_suggestions(dialog.selected())
         finally:
             self._component_review_dialog = None
+            self._retry_footprint_rewrite()
 
     def _symbol_pad_ids(self):
         """Electrical identities come from the actual footprint, never row indices."""
@@ -11980,6 +12304,13 @@ class MainWindow(QMainWindow):
             ids = self._symbol_pad_ids()
         except (ValueError, TypeError) as exc:
             self.symbol_tab.set_data(self._component_name(), self.pinout, pad_ids=[], force=force)
+            # Bind the recovery file on this path too: set_data only shows a
+            # carried draft, set_recovery_path settles it (keeps it durable
+            # and offerable); without it a kept draft could be lost.
+            try:
+                self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
+            except ValueError:
+                pass  # no component name yet: no project folder to bind
             self.symbol_tab.set_error(str(exc))
             return
         rows = deepcopy(self.pinout)
@@ -12044,11 +12375,13 @@ class MainWindow(QMainWindow):
                                  footprint=self.symbol_tab.footprint(), body=body, graphics=graphics,
                                  metadata=self._symbol_metadata(), properties=properties)
         except (OSError, ValueError, TypeError) as exc:
+            # Generator errors carry a translatable text (SymbolError).
+            message = self.symbol_tab.error_text(exc)
             if not quiet:
-                self.symbol_tab.set_status(str(exc))
+                self.symbol_tab.set_status(message)
             else:
                 self._append_log(self.i18n.text(
-                    "Simbolo elettrico non salvato automaticamente: {error}").format(error=exc))
+                    "Simbolo elettrico non salvato automaticamente: {error}").format(error=message))
             return None
 
     def _export_electrical_symbol(self):
@@ -12079,7 +12412,7 @@ class MainWindow(QMainWindow):
             if exported is None:
                 return
         except (OSError, ValueError, TypeError) as exc:
-            self.symbol_tab.set_status(str(exc))
+            self.symbol_tab.set_status(self.symbol_tab.error_text(exc))
             return
         path = str(exported)
         message = self.i18n.text("Simbolo esportato: {path}").format(path=path)
@@ -12819,6 +13152,7 @@ class MainWindow(QMainWindow):
 
     def _on_terminal_detail_finished(self) -> None:
         """Release the run project of the terminal pass and re-enable its commands."""
+        self._retry_footprint_rewrite()
         if hasattr(self, "ai_account"):
             self.ai_account.release_run_project()
         self.btn_terminal_detail.setEnabled(True)
@@ -12962,6 +13296,7 @@ class MainWindow(QMainWindow):
         @note Vale anche per l'interruzione: `finished` scatta comunque, ed e'
             qui che si chiude la richiesta di fermarsi (`_abort_pending`).
         """
+        self._retry_footprint_rewrite()
         aborted, self._abort_pending = self._abort_pending, False
         succeeded, self._regen_3d_succeeded = getattr(self, "_regen_3d_succeeded", False), False
         if succeeded and not aborted:
@@ -14362,8 +14697,9 @@ class MainWindow(QMainWindow):
             return
         self._draw_preview()
         # The selected land is an edit to the generated host footprint, so
-        # write the updated .kicad_mod immediately after persisting the choice.
-        self._generate(footprint_only=True)
+        # write the updated .kicad_mod right after persisting the choice
+        # (retried when another worker is running).
+        self._schedule_footprint_rewrite(immediate=True, pad_edit=True)
 
     # ── Footprint texts (Reference, Value) ───────────────────────────
 
@@ -14421,18 +14757,6 @@ class MainWindow(QMainWindow):
                 item.setToolTip(tooltip)
             group.setZValue(50)
 
-    def _footprint_text_snap_mm(self) -> float:
-        """@brief The step a dropped text snaps to: the drawing grid when shown, else 0.1 mm.
-
-        @note The drawing grid is the main grid divided by the chosen
-            divisor (1/10 by default): texts are graphic elements, so they
-            take the fine grid like the drawings; pads keep the main grid.
-        """
-        if getattr(self, "chk_grid", None) is not None and self.chk_grid.isChecked():
-            main = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
-            return main / self.preview_view.fine_divisor()
-        return 0.1
-
     def _set_footprint_text_position(self, key: str, position) -> bool:
         """@brief Keep a text position (None: back to default), save, redraw and rewrite the footprint.
 
@@ -14479,9 +14803,10 @@ class MainWindow(QMainWindow):
         @param x_scene Drop centre, scene units (20 px/mm in every drawer).
         @param y_scene Drop centre, scene units.
         """
-        step = self._footprint_text_snap_mm()
-        x_mm, y_mm = (round(round(v / 20.0 / step) * step, 4) for v in (x_scene, y_scene))
-        self._set_footprint_text_position(key, (x_mm, y_mm))
+        # Same snap as the drawings: the drawing grid passes through the
+        # first pad, so a text and a drawing dropped at the same point land
+        # on the same node.
+        self._set_footprint_text_position(key, self._snapped_draw_point(x_scene, y_scene))
 
     def _footprint_text_context_menu(self, key: str) -> None:
         """@brief Right click on a text: offer its default position."""
@@ -14581,7 +14906,7 @@ class MainWindow(QMainWindow):
                 "Modifica pad non salvata; il valore precedente è stato ripristinato."))
             return
         self._draw_preview()
-        self._generate(footprint_only=True)
+        self._schedule_footprint_rewrite(immediate=True, pad_edit=True)
 
     #: Italian fallbacks of the dimension-label keys, used only until the
     #: catalogue carries them: `I18n.tr` would otherwise show the bare key.

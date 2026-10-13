@@ -4,7 +4,7 @@ Connections are short-lived; analysis workers receive resolved snapshots, never
 connections. The legacy JSON is backed up and imported once, never overwritten.
 """
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import hashlib
 import json
 import os
@@ -119,6 +119,27 @@ def factory_defaults():
         numbering_prompt=DEFAULT_PIN_NUMBERING_PROMPT)
 
 
+def bare_backup_name(value):
+    """@brief File name of a recorded legacy backup when it was stored as an absolute path.
+
+    Databases created before the bare-name rule recorded ``legacy_backup`` as
+    an absolute path, which puts the user name in a file committed to the
+    repository. The backup always sits next to the database, so its file
+    name is enough.
+    @param value Stored metadata value (any type).
+    @return The last path component when @p value is an absolute Windows
+        (drive or UNC) or POSIX path; otherwise @p value unchanged (empty,
+        bare names and relative paths are left alone).
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    for flavour in (PureWindowsPath, PurePosixPath):
+        path = flavour(value)
+        if path.is_absolute() and path.name:
+            return path.name
+    return value
+
+
 class ProfileError(ValueError):
     """@brief Report invalid or unavailable AI profile data."""
     pass
@@ -204,6 +225,12 @@ class ProfileStore:
                 db.execute('SELECT type_key,name,value FROM ai_overrides LIMIT 1')
                 db.execute('SELECT name,value FROM metadata LIMIT 1')
                 db.execute('SELECT key,language,text FROM translations LIMIT 1')
+                # One-shot repair, idempotent: an absolute legacy_backup becomes
+                # its bare file name; a bare or empty value is left as it is.
+                row = db.execute("SELECT value FROM metadata WHERE name='legacy_backup'").fetchone()
+                if row is not None and bare_backup_name(row['value']) != row['value']:
+                    db.execute("UPDATE metadata SET value=? WHERE name='legacy_backup'",
+                               (bare_backup_name(row['value']),))
                 # Add newly bundled UI keys without overwriting user edits.
                 db.executemany('INSERT OR IGNORE INTO translations VALUES (?,?,?)', _default_translations())
                 # Replace bundled texts that were corrected since, but only where

@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
 from ..services.messages import render_child_line, tx
+
+
+def no_window_flags(platform: str = sys.platform) -> int:
+    """@brief Creation flags that keep a child process from opening a console window.
+
+    @param platform Value of `sys.platform` to decide for.
+    @return CREATE_NO_WINDOW on Windows (the GUI process has no console, and
+        each FreeCAD child would otherwise flash one), 0 elsewhere.
+    """
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform == "win32" else 0
+
+
+#: Creation flags of every FreeCAD child: one value for every launcher in
+#: the package (solid build, model measurement).
+NO_WINDOW_FLAGS = no_window_flags()
 
 
 #: Quanti battiti devono entrare in una finestra di silenzio.
@@ -193,6 +209,13 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                     timer.daemon = True
                     timer.start()
                 process.wait()
+            except BaseException:
+                # Anything raised while reading -- a failing progress
+                # callback, a log write error, KeyboardInterrupt -- leaves
+                # through Popen.__exit__, which waits for the child: a child
+                # still running would make that wait endless. Kill it first.
+                kill_child()
+                raise
             finally:
                 timer.cancel()
                 # Sveglia il sorvegliante anche quando la lettura finisce da

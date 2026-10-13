@@ -594,7 +594,7 @@ def test_texts_and_stroke_types_are_read_and_written_back():
     unit = g._child(g._child(library, "symbol"), "symbol")
     text, tilde, dashed, unknown = g.primitives_of(unit)
     assert (text.kind, text.text, text.points, text.size, text.justify) == ("text", "IN+", ((1.27, 2.54),), 1.27, "left")
-    assert text.angle == 90, "a KiCad 6 angle in tenths of a degree is read as degrees"
+    assert text.angle == 90, "a KiCad angle in tenths of a degree is read as degrees"
     assert (tilde.angle, tilde.justify, tilde.size) == (0, "center", 2.0)
     assert dashed.style == "dash" and unknown.style == "default", "an unknown stroke type falls back"
     glyph = g.Glyph("t", "t", (text, dashed), (), "builtin")

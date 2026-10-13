@@ -593,6 +593,21 @@ def _safe(name, index):
 _FB_SWAP = {"front": "back", "back": "front"}
 
 
+def _body_local_point(x, y, body_turn):
+    """@brief Bring a model-frame point into the frame of a turned body.
+
+    @param x Point X in the model frame (Y up, after _flip_y), mm.
+    @param y Point Y in the model frame, mm.
+    @param body_turn Body `rotation_deg` after _flip_y, degrees; the body is
+        turned by -body_turn about Z through the origin.
+    @return (x, y) in the body's axis-aligned frame: turning it by -body_turn
+        gives back the input point.
+    """
+    angle = math.radians(body_turn)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
+
+
 def _swap_front_back(name):
     return "-".join(_FB_SWAP.get(part, part) for part in str(name).split("-"))
 
@@ -612,6 +627,11 @@ def _flip_y(data):
     """
     body = data["body"]
     body["offset_y_mm"] = -(body["offset_y_mm"] + body["width_mm"])
+    # A body turned about the footprint origin (single package with an
+    # orientation) is reflected like an extra box: the angle changes sign
+    # with the axis. Absent means 0, so older payloads are unchanged.
+    if "rotation_deg" in body:
+        body["rotation_deg"] = -float(body["rotation_deg"])
     for key in ("notches", "edge_contacts", "silk_texts", "components"):
         for item in data.get(key, []) or []:
             try:
@@ -990,6 +1010,12 @@ def main():
     x0, y0 = body["offset_x_mm"], body["offset_y_mm"]
     x1, y1, z1 = x0 + body["length_mm"], y0 + body["width_mm"], body["height_mm"]
     bounds = (x0, y0, x1, y1, z1)
+    # Body turn about the footprint origin (Z axis), model frame after
+    # _flip_y. The body, its fillets and its face texts are built in the
+    # body's own axis-aligned frame (where faces and edges are classified by
+    # `bounds`) and turned at the end; holes given in the footprint frame are
+    # brought into that frame first. 0 leaves every step exactly as before.
+    body_turn = float(body.get("rotation_deg", 0.0) or 0.0)
 
     body_shape = Part.makeBox(
         body["length_mm"], body["width_mm"], body["height_mm"],
@@ -1022,6 +1048,9 @@ def main():
     # ne ha uno per foro come prima.
     cutters = [n for n in data.get("notches", []) if not _covered_by_drill(n, drills)]
     cutters += [{"x": x, "y": y, "radius": r} for x, y, r in drills]
+    if body_turn:
+        cutters = [dict(n, **dict(zip(("x", "y"), _body_local_point(n["x"], n["y"], body_turn))))
+                   for n in cutters]
     cut_heartbeat = _StepHeartbeat("holes").__enter__()
     # Ogni iterazione intercetta le proprie eccezioni, quindi l'uscita qui
     # sotto si raggiunge sempre: il battito non sopravvive al passo.
@@ -1054,6 +1083,12 @@ def main():
     label_anchors = {}
     metadata = {}
 
+    def turned(shape):
+        """Turn a piece built in the body frame into the footprint frame."""
+        if body_turn:
+            shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), -body_turn)
+        return shape
+
     def add(name, shape, color):
         obj = doc.addObject("Part::Feature", name)
         obj.Shape = shape
@@ -1064,17 +1099,19 @@ def main():
         # PCB vero: substrato FR4 tra due strati sottili di soldermask. Visto
         # di taglio si legge come una scheda, non come un blocco verniciato.
         mask_t = float(substrate.get("mask_thickness_mm", 0.02))
-        add("Bottom_mask", _slab(body_shape, 0.0, mask_t, bounds), body_color)
-        add("FR4_substrate", _slab(body_shape, mask_t, z1 - mask_t, bounds),
+        add("Bottom_mask", turned(_slab(body_shape, 0.0, mask_t, bounds)), body_color)
+        add("FR4_substrate", turned(_slab(body_shape, mask_t, z1 - mask_t, bounds)),
             substrate.get("color_hex", "#2f3f1f"))
-        add("Body", _slab(body_shape, z1 - mask_t, z1, bounds), body_color)
+        add("Body", turned(_slab(body_shape, z1 - mask_t, z1, bounds)), body_color)
     else:
-        add("Body", body_shape, body_color)
+        # Face texts are classified on the body before it turns: build them
+        # first, then turn the body (a copy keeps the classification intact).
+        add("Body", turned(body_shape.copy()) if body_turn else body_shape, body_color)
 
     for i, (text_solid, color) in enumerate(
         _build_face_text_solids(body_shape, face_texts, bounds, font_file)
     ):
-        add(f"Serigrafia{i}", text_solid, color)
+        add(f"Serigrafia{i}", turned(text_solid), color)
 
     # Contatti: manicotto metallizzato nel foro + piazzola sulla faccia
     # superiore e inferiore, tutto dello stesso metallo (ENIG dorato o stagno),

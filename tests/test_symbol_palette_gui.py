@@ -893,7 +893,8 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         from kicadgen.generators.symbol import symbol_inputs
         pins, body = symbol_inputs(tab.draft_rows())
         body_text = serialize_symbol('Board', pins, body=body, graphics=tab.graphics())
-        assert '(text "OUT" (at 2.54 5.08 90) (effects (font (size 2.54 2.54)) (justify right)))' in body_text
+        # KiCad stores symbol text angles in tenths of a degree (B1, 2026-10-13).
+        assert '(text "OUT" (at 2.54 5.08 900) (effects (font (size 2.54 2.54)) (justify right)))' in body_text
         assert tab.palette._tool_actions['text'].data() == 'text'
     finally:
         tab.deleteLater()

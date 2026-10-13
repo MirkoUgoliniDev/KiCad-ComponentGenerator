@@ -284,6 +284,63 @@ USER_DRAW_WIDTH_MM = 0.12
 USER_DRAW_TEXT_MM = 1.0
 
 
+#: Largest coordinate KiCad can hold, mm: its internal unit is the
+#: nanometre stored in a signed 32-bit integer, so +-2147483647 nm. A point
+#: (or an arc centre KiCad derives) beyond it cannot be represented at all.
+KICAD_COORD_LIMIT_MM = 2147.483647
+
+
+def _arc_centre(start: Point, mid: Point, end: Point) -> Optional[Point]:
+    """@brief Centre, mm, of the circle through three points, or None when they are collinear.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return (x, y) of the circumcentre in mm; None when the determinant of
+        the three points is exactly zero (no circle passes through them).
+    """
+    (ax, ay), (bx, by), (cx, cy) = start, mid, end
+    det = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if det == 0.0:
+        return None
+    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / det
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / det
+    return ux, uy
+
+
+def _arc_circumradius(start: Point, mid: Point, end: Point) -> Optional[float]:
+    """@brief Radius, mm, of the circle through three points, or None when they are collinear.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return The circumradius in mm; None when no circle passes through them.
+    """
+    centre = _arc_centre(start, mid, end)
+    if centre is None:
+        return None
+    return math.hypot(start[0] - centre[0], start[1] - centre[1])
+
+
+def arc_centre_representable(start: Point, mid: Point, end: Point) -> bool:
+    """@brief Tell whether KiCad can hold the centre of the arc through three points.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return True when the circumcentre exists (non-zero determinant) and both
+        its coordinates are within `KICAD_COORD_LIMIT_MM`.
+    @note This is the file format's own limit, not a plausibility bound: a
+        very flat but real arc (0.1 mm of bow over a 20 mm chord, radius
+        about 500 mm) is kept; collinear points, and nearly collinear ones
+        whose centre lands outside KiCad's coordinate range, are refused.
+    """
+    centre = _arc_centre(start, mid, end)
+    return centre is not None and all(
+        math.isfinite(v) and abs(v) <= KICAD_COORD_LIMIT_MM for v in centre)
+
+
 def validate_footprint_drawings(raw) -> list:
     """@brief Keep the well-formed records of saved footprint user drawings.
 
@@ -292,7 +349,10 @@ def validate_footprint_drawings(raw) -> list:
         kind and layer are known, whose points are pairs of finite numbers
         within `TEXT_POSITION_LIMIT_MM` in the count the kind requires, and
         whose text (text kind only) is one non-blank line of positive size;
-        anything else is left out, like a malformed pad override.
+        an arc must also have a circumcentre KiCad can represent
+        (`arc_centre_representable`: collinear points, or nearly collinear
+        ones whose centre falls outside `KICAD_COORD_LIMIT_MM`, are left
+        out); anything else is left out, like a malformed pad override.
     @note Same contract style as `validate_text_positions`: loading never
         raises, it silently drops what it cannot trust.
     """
@@ -349,6 +409,11 @@ def validate_footprint_drawings(raw) -> list:
                 continue
         elif kind == "arc":
             if len(set(clean_points)) < 3:
+                continue
+            # KiCad derives the arc from its circumcentre: collinear points
+            # have none, and a centre outside its 32-bit nanometre range
+            # cannot be stored. A large radius alone is a legitimate flat arc.
+            if not arc_centre_representable(*clean_points):
                 continue
         result.append(clean)
     return result
