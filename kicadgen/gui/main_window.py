@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QDialog, QListWidget, QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea,
     QSplitter, QListWidgetItem, QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout,
     QToolButton, QWidget, QTableWidget, QTableWidgetItem, QHeaderView, QWizard, QWizardPage,
+    QGridLayout, QInputDialog,
 )
 
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
@@ -129,7 +130,7 @@ class _ModulePreloader(QObject):
 
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
-from .theme import BASE, BLUE, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .theme import BASE, BLUE, GREEN, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .tooltips import install_tooltip_filter
 # Worker e aiutanti del contratto di chiamata: spostati in gui/workers.py
 # (HANDOFF 130, T6/G5) e ri-esportati qui, dove chiamanti e test li cercano.
@@ -817,6 +818,94 @@ def _positive_frame(length, width):
     return values if all(math.isfinite(v) and v > 0 for v in values) else None
 
 
+def _arc_path(start, mid, end):
+    """@brief QPainterPath of the circular arc through three scene points.
+
+    @param start Arc start, scene px.
+    @param mid Point the arc passes through, scene px.
+    @param end Arc end, scene px.
+    @return A path from start to end through mid: the circular arc when the
+        points define one, else the two straight segments (collinear clicks).
+    @note Sampled as short segments: the preview only needs the drawn look,
+        the exported fp_arc keeps the exact three points.
+    """
+    (x1, y1), (x2, y2), (x3, y3) = start, mid, end
+    path = QPainterPath(QPointF(x1, y1))
+    d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-9:
+        path.lineTo(x2, y2)
+        path.lineTo(x3, y3)
+        return path
+    sq1, sq2, sq3 = x1 * x1 + y1 * y1, x2 * x2 + y2 * y2, x3 * x3 + y3 * y3
+    cx = (sq1 * (y2 - y3) + sq2 * (y3 - y1) + sq3 * (y1 - y2)) / d
+    cy = (sq1 * (x3 - x2) + sq2 * (x1 - x3) + sq3 * (x2 - x1)) / d
+    radius = math.hypot(x1 - cx, y1 - cy)
+    a1, am, a3 = (math.atan2(y - cy, x - cx) for x, y in (start, mid, end))
+    ccw_mid, ccw_end = (am - a1) % (2 * math.pi), (a3 - a1) % (2 * math.pi)
+    sweep = ccw_end if ccw_mid <= ccw_end else ccw_end - 2 * math.pi
+    steps = max(16, int(abs(sweep) / 0.08))
+    for index in range(1, steps + 1):
+        angle = a1 + sweep * index / steps
+        path.lineTo(cx + radius * math.cos(angle), cy + radius * math.sin(angle))
+    return path
+
+
+def _ghost_pen() -> QPen:
+    """@brief The dashed yellow pen of a shape in progress, as in the symbol editor."""
+    pen = QPen(QColor(YELLOW), 1.6, Qt.PenStyle.DashLine)
+    pen.setCosmetic(True)
+    return pen
+
+
+def _screen_dot(scene, x, y, size, outline, fill, role, z):
+    """@brief A round marker of constant screen size at a scene point.
+
+    @param scene Scene to draw in.
+    @param x Scene x (px) of the centre.
+    @param y Scene y (px) of the centre.
+    @param size Diameter in screen px.
+    @param outline Outline colour (hex).
+    @param fill Fill colour (hex).
+    @param role Data role set to True so the drawer can remove it later.
+    @param z Z value.
+    @return The ellipse item.
+    """
+    from PyQt6.QtWidgets import QGraphicsItem
+    half = size / 2
+    dot = scene.addEllipse(-half, -half, size, size, QPen(QColor(outline), 1.6), QBrush(QColor(fill)))
+    dot.setPos(x, y)
+    dot.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+    dot.setData(role, True)
+    dot.setZValue(z)
+    return dot
+
+
+def _screen_handle(scene, x, y, size, solid):
+    """@brief A drawing handle square like the symbol editor's (`SymbolTab._handle`).
+
+    @param scene Scene to draw in.
+    @param x Scene x (px) of the centre.
+    @param y Scene y (px) of the centre.
+    @param size Side in screen px.
+    @param solid True for the whole-drawing anchor (opaque fill), False for
+        a vertex (translucent fill, alpha 150 as in the symbol editor).
+    @return The rect item, tagged with role 0x48474F and a cross cursor;
+        the caller sets its handle key and tooltip.
+    """
+    from PyQt6.QtWidgets import QGraphicsItem
+    fill = QColor(GREEN)
+    if not solid:
+        fill.setAlpha(150)
+    half = size / 2
+    square = scene.addRect(-half, -half, size, size, QPen(QColor(YELLOW), 1.0), QBrush(fill))
+    square.setPos(x, y)
+    square.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+    square.setData(0x48474F, True)
+    square.setZValue(9)
+    square.setCursor(Qt.CursorShape.CrossCursor)
+    return square
+
+
 def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
     """@brief Tell whether the STEP predates the footprint it would ship with.
 
@@ -927,6 +1016,27 @@ class MainWindow(QMainWindow):
         #: {key: (x, y)} mm in footprint coordinates (user, 2026-10-13);
         #: a key left out keeps the generator's default.
         self.footprint_text_positions: dict[str, tuple] = {}
+        #: User drawings of the footprint preview (validated records, see
+        #: core.footprint.validate_footprint_drawings); drawn in every 2D
+        #: preview and appended to the exported .kicad_mod (user, 2026-10-13).
+        self.footprint_drawings: list = []
+        #: Armed palette tool of the footprint preview, or None.
+        self._fp_draw_tool: str | None = None
+        #: Points already clicked for the shape in progress, footprint mm.
+        self._fp_draw_clicks: list = []
+        #: Snapped pointer position while a tool is armed, footprint mm, or None.
+        self._fp_draw_hover: tuple | None = None
+        #: Index of the drawing whose handles are shown (-1: none).
+        self._fp_hovered_drawing: int = -1
+        #: (drawing index, point index, snapped point mm) of the handle being
+        #: dragged; point index -1 = the whole drawing, and the third item is
+        #: then the (dx, dy) translation in mm.
+        self._fp_handle_drag: tuple | None = None
+        #: Snapped grab point (mm) of a whole-drawing drag, or None.
+        self._fp_handle_origin: tuple | None = None
+        #: Undo/redo stacks of the drawings list (snapshots), like the symbol editor.
+        self._fp_drawings_undo: list = []
+        self._fp_drawings_redo: list = []
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
         #: Revisione dell'analisi AI, gemella di `_model_revision` per i
@@ -6701,6 +6811,7 @@ class MainWindow(QMainWindow):
                                  if self.package_geometry is not None else None),
             "host_mounting": self._mounting_state(),
             "footprint_texts": {key: list(value) for key, value in self.footprint_text_positions.items()},
+            "footprint_drawings": deepcopy(self.footprint_drawings),
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
@@ -6858,8 +6969,12 @@ class MainWindow(QMainWindow):
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
         self._restore_mounting_state(state.get("host_mounting"))
-        from ..core.footprint import validate_text_positions
+        from ..core.footprint import validate_text_positions, validate_footprint_drawings
         self.footprint_text_positions = validate_text_positions(state.get("footprint_texts"))
+        self.footprint_drawings = validate_footprint_drawings(state.get("footprint_drawings"))
+        self._fp_drawings_undo, self._fp_drawings_redo = [], []
+        self._refresh_footprint_undo_buttons()
+        self._cancel_footprint_drawing()
         self._refresh_type_effect()
         self.package_geometry = package_geometry
         # After the package: the designator proposal reads its family.
@@ -10797,6 +10912,7 @@ class MainWindow(QMainWindow):
         )
         self._worker.footprint_params = host_params
         self._worker.text_positions = deepcopy(self.footprint_text_positions)
+        self._worker.drawings = deepcopy(self.footprint_drawings)
         # PackageGeometry carries no datasheet: the worker passes it to
         # build_package itself (the other generators read it from params).
         self._worker.datasheet = self._effective_datasheet()
@@ -11075,6 +11191,15 @@ class MainWindow(QMainWindow):
             button = self._view_tool_button(asset, tooltip)
             button.clicked.connect(callback)
             header.addWidget(button)
+        # Undo/redo of the drawings, same icons and shortcuts as the symbol
+        # editor (user rule, 2026-10-13: same feature, same look everywhere).
+        self.btn_fp_undo = self._view_tool_button('edit-undo.svg', 'Annulla modifica')
+        self.btn_fp_undo.clicked.connect(self._undo_footprint_drawing)
+        self.btn_fp_redo = self._view_tool_button('edit-redo.svg', 'Ripeti modifica')
+        self.btn_fp_redo.clicked.connect(self._redo_footprint_drawing)
+        header.addWidget(self.btn_fp_undo)
+        header.addWidget(self.btn_fp_redo)
+        self._refresh_footprint_undo_buttons()
         # Stessa icona e stesso tooltip della barra 3D (utente, 2026-09-24):
         # e' lo stesso comando, deve riconoscersi uguale nelle due schede.
         self.btn_pinout_2d = self._view_tool_button(
@@ -11122,14 +11247,16 @@ class MainWindow(QMainWindow):
         self.combo_preview_mounting.currentIndexChanged.connect(
             lambda: self.combo_mounting.setCurrentIndex(self.combo_mounting.findData(
                 self.combo_preview_mounting.currentData())))
-        mounting_row.addWidget(self.combo_preview_mounting, 1)
+        # Combo al contenuto, non a tutta la riga; Pad/Foro alla sua destra
+        # (utente, 2026-10-13: «accorcia la combo, i fori a destra»).
+        self.combo_preview_mounting.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        mounting_row.addWidget(self.combo_preview_mounting)
         self.btn_update_host_footprint_preview = icon_button(
             '', 'wf-regenerate.svg', lambda: self._generate(footprint_only=True))
         self.btn_update_host_footprint_preview.setToolTip("Aggiorna solo il footprint")
         self.btn_update_host_footprint_preview.setAccessibleName("Aggiorna solo il footprint")
         self.btn_update_host_footprint_preview.setEnabled(self.btn_update_host_footprint.isEnabled())
-        mounting_row.addWidget(self.btn_update_host_footprint_preview)
-        mounting_layout.addLayout(mounting_row)
         self.preview_header_dimensions = QWidget()
         dimensions = QHBoxLayout(self.preview_header_dimensions)
         dimensions.setContentsMargins(0, 0, 0, 0)
@@ -11150,8 +11277,10 @@ class MainWindow(QMainWindow):
             label.setBuddy(spin)
             dimensions.addWidget(label)
             dimensions.addWidget(spin)
-        dimensions.addStretch()
-        mounting_layout.addWidget(self.preview_header_dimensions)
+        mounting_row.addWidget(self.preview_header_dimensions)
+        mounting_row.addStretch(1)
+        mounting_row.addWidget(self.btn_update_host_footprint_preview)
+        mounting_layout.addLayout(mounting_row)
         self.label_preview_mounting_error = QLabel()
         self.label_preview_mounting_error.setWordWrap(True)
         self.label_preview_mounting_error.setProperty("i18n_skip", True)
@@ -11159,9 +11288,574 @@ class MainWindow(QMainWindow):
         mounting_layout.addWidget(self.label_preview_mounting_error)
         outer.addWidget(self.preview_mounting_group)
         self._sync_preview_mounting()
-        outer.addWidget(self.preview_view)
+        canvas_row = QHBoxLayout()
+        canvas_row.setSpacing(4)
+        canvas_row.addWidget(self.preview_view, 1)
+        # Palette minima di disegno, a destra come nell'editor del simbolo
+        # (utente, 2026-10-13): soli strumenti liberi, niente pad numerati.
+        canvas_row.addWidget(self._build_footprint_palette())
+        outer.addLayout(canvas_row, 1)
+        self.preview_view.draw_clicked.connect(self._on_footprint_draw_clicked)
+        self.preview_view.draw_finish_requested.connect(self._on_footprint_draw_finish)
+        self.preview_view.draw_cancelled.connect(self._cancel_footprint_drawing)
+        self.preview_view.draw_hovered.connect(self._on_footprint_draw_hovered)
+        self.preview_view.draw_hover_left.connect(self._on_footprint_draw_hover_left)
+        self.preview_view.drawing_hovered.connect(self._on_footprint_drawing_hovered)
+        from PyQt6.QtGui import QShortcut
+        for keys, slot in (('Ctrl+Z', self._undo_footprint_drawing),
+                           ('Ctrl+Y', self._redo_footprint_drawing),
+                           ('Ctrl+Shift+Z', self._redo_footprint_drawing),
+                           ('Ctrl+D', self._duplicate_hovered_drawing),
+                           ('Delete', self._delete_hovered_drawing)):
+            shortcut = QShortcut(QKeySequence(keys), self.preview_view)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(slot)
+        self.preview_view.handle_pressed.connect(self._on_footprint_handle_pressed)
+        self.preview_view.handle_dragged.connect(self._on_footprint_handle_dragged)
+        self.preview_view.handle_dropped.connect(self._on_footprint_handle_dropped)
+        self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
 
         return tab
+
+    #: Layers a preview drawing may go to: (KiCad layer, source label).
+    FOOTPRINT_DRAW_LAYERS = (("F.SilkS", "Serigrafia (stampata)"),
+                             ("F.Fab", "Fabbricazione (documentazione)"),
+                             ("Cmts.User", "Commenti (solo progetto)"))
+
+    def _build_footprint_palette(self) -> QWidget:
+        """@brief Build the minimal drawing palette of the footprint preview.
+
+        @return A narrow column: the target layer selector, then one
+            checkable button per free drawing tool (line, rectangle,
+            circle, arc, text). No library elements and no numbered pads:
+            a pad must match a symbol pin, so it is not free drawing.
+        """
+        from .symbol_tab import glyph_icon, TOOL_HINTS
+        from ..generators.symbol_glyphs import shape_tool_glyphs
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        title = QLabel(self.i18n.text("Disegno"))
+        column.addWidget(title)
+        self.combo_fp_draw_layer = QComboBox()
+        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
+            self.combo_fp_draw_layer.addItem(self.i18n.text(label), layer)
+        self.combo_fp_draw_layer.setToolTip(self.i18n.text(
+            "Layer del disegno: la serigrafia viene stampata sulla scheda, "
+            "la fabbricazione documenta il montaggio, i commenti restano nel progetto."))
+        column.addWidget(self.combo_fp_draw_layer)
+        self._fp_draw_buttons = {}
+        grid = QGridLayout()
+        grid.setSpacing(2)
+        tools = [g for g in shape_tool_glyphs() if g.key != "bezier"]
+        for index, glyph in enumerate(tools):
+            button = QToolButton()
+            button.setIcon(glyph_icon(glyph))
+            button.setIconSize(QSize(28, 28))
+            button.setFixedSize(34, 34)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setProperty("i18n_skip", True)
+            button.setAccessibleName(self.i18n.text(glyph.label))
+            button.setToolTip(self.i18n.text(TOOL_HINTS.get(glyph.key, glyph.label)))
+            button.clicked.connect(lambda _checked=False, k=glyph.key:
+                                   self._toggle_footprint_draw_tool(k))
+            grid.addWidget(button, index // 2, index % 2)
+            self._fp_draw_buttons[glyph.key] = button
+        column.addLayout(grid)
+        column.addStretch(1)
+        return panel
+
+    def _toggle_footprint_draw_tool(self, key: str) -> None:
+        """@brief Arm a palette tool of the preview, or disarm the armed one."""
+        armed = self._fp_draw_tool != key
+        self._cancel_footprint_drawing()
+        if armed:
+            self._fp_draw_tool = key
+            self._fp_draw_buttons[key].setChecked(True)
+            self.preview_view.set_draw_mode(True)
+
+    def _cancel_footprint_drawing(self) -> None:
+        """@brief Disarm the tool and forget the clicks of the shape in progress."""
+        self._fp_draw_tool = None
+        self._fp_draw_clicks = []
+        self._fp_draw_hover = None
+        self._fp_handle_drag = None
+        self._fp_handle_origin = None
+        for button in getattr(self, "_fp_draw_buttons", {}).values():
+            button.setChecked(False)
+        if hasattr(self, "preview_view"):
+            self.preview_view.set_draw_mode(False)
+        self._refresh_draw_markers()
+
+    def _on_footprint_draw_clicked(self, x: float, y: float) -> None:
+        """@brief Collect one drawing click (scene px), snapped to the grid, in mm."""
+        if self._fp_draw_tool is None:
+            return
+        # Nodes of the grid actually drawn (its origin is the first pad, not
+        # the footprint origin); 0.1 mm when the grid is hidden.
+        point = self._snapped_draw_point(x, y)
+        # A double click sends its own press first: ignore the repeat. On a
+        # coarse grid two separate clicks can land on the SAME node (user,
+        # 2026-10-13: armed tool, one cross, «non funziona»): say it instead
+        # of silently waiting forever.
+        if self._fp_draw_clicks and self._fp_draw_clicks[-1] == point:
+            self._draw_feedback_toast(self.i18n.text(
+                "Punto coincidente con il precedente."), self.i18n.text(
+                "Con la griglia attiva i click si agganciano ai suoi nodi: "
+                "clicca un altro nodo o scegli una griglia più fine."))
+            return
+        self._fp_draw_clicks.append(point)
+        from ..core.footprint import USER_DRAW_KINDS
+        count = USER_DRAW_KINDS[self._fp_draw_tool]
+        if count and len(self._fp_draw_clicks) >= count:
+            self._on_footprint_draw_finish()
+        else:
+            self._refresh_draw_markers()
+
+    def _on_footprint_draw_finish(self) -> None:
+        """@brief Close the shape in progress and store it as a drawing record."""
+        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM,
+                                      USER_DRAW_WIDTH_MM, validate_footprint_drawings)
+        tool, points = self._fp_draw_tool, list(self._fp_draw_clicks)
+        if tool is None:
+            return
+        count = USER_DRAW_KINDS[tool]
+        if count and len(points) != count or not count and len(points) < 2:
+            self._cancel_footprint_drawing()
+            return
+        record = {"kind": tool, "layer": self.combo_fp_draw_layer.currentData(),
+                  "width": USER_DRAW_WIDTH_MM, "points": [list(p) for p in points]}
+        if tool == "arc":
+            # Click order is start, end, mid (same hint as the symbol);
+            # the file stores start, mid, end as KiCad writes fp_arc.
+            start, end, mid = points
+            record["points"] = [list(start), list(mid), list(end)]
+        if tool == "text":
+            text, accepted = QInputDialog.getText(
+                self, self.i18n.text("Testo"), self.i18n.text("Testo da scrivere:"))
+            if not accepted or not text.strip():
+                self._cancel_footprint_drawing()
+                return
+            record["text"], record["size"] = text.strip(), USER_DRAW_TEXT_MM
+        valid = validate_footprint_drawings([record])
+        self._cancel_footprint_drawing()
+        if not valid:
+            # Degenerate shape (zero radius, flat rectangle...): say why
+            # nothing appears instead of silently dropping it.
+            self._draw_feedback_toast(self.i18n.text("Disegno scartato."), self.i18n.text(
+                "La forma è degenere (raggio nullo o lato nullo): "
+                "clicca punti distinti sulla griglia."))
+            return
+        self._apply_footprint_drawings(self.footprint_drawings + valid)
+
+    def _draw_feedback_toast(self, title: str, body: str) -> None:
+        """@brief Small non-modal card for drawing feedback, next to the cursor.
+
+        @param title Already translated first line.
+        @param body Already translated explanation.
+        """
+        from .toast import Toast
+        toast = getattr(self, "_draw_toast", None)
+        if toast is None:
+            toast = self._draw_toast = Toast(self)
+        toast.show_message(title, body)
+
+    def _apply_footprint_drawings(self, updated: list, *, history: str = "push") -> None:
+        """@brief Persist a new drawings list; on save failure keep the old one.
+
+        @param updated The new list of validated records.
+        @param history "push" records the previous list for undo and clears
+            redo; "undo"/"redo" move between the stacks instead.
+        @note Same contract as the pad overrides: the project file is the
+            truth, then the preview is redrawn and the .kicad_mod rewritten.
+        """
+        previous = self.footprint_drawings
+        self.footprint_drawings = updated
+        if not self._save_project_config(force=True):
+            self.footprint_drawings = previous
+            QMessageBox.warning(self, self.i18n.text("Errore"),
+                                self.i18n.text("Disegno non salvato."))
+            return
+        if history == "push":
+            self._fp_drawings_undo.append(deepcopy(previous))
+            self._fp_drawings_redo.clear()
+        elif history == "undo":
+            self._fp_drawings_redo.append(deepcopy(previous))
+        elif history == "redo":
+            self._fp_drawings_undo.append(deepcopy(previous))
+        self._refresh_footprint_undo_buttons()
+        self._fp_hovered_drawing = -1
+        self._draw_preview()
+        if self._project_has_footprint():
+            self._generate(footprint_only=True)
+
+    def _refresh_footprint_undo_buttons(self) -> None:
+        """@brief Enable undo/redo only when their stack has something."""
+        if hasattr(self, "btn_fp_undo"):
+            self.btn_fp_undo.setEnabled(bool(self._fp_drawings_undo))
+            self.btn_fp_redo.setEnabled(bool(self._fp_drawings_redo))
+
+    def _undo_footprint_drawing(self) -> None:
+        """@brief Go back to the drawings list before the last edit (Ctrl+Z)."""
+        if self._fp_drawings_undo:
+            self._cancel_footprint_drawing()
+            self._apply_footprint_drawings(self._fp_drawings_undo.pop(), history="undo")
+
+    def _redo_footprint_drawing(self) -> None:
+        """@brief Re-apply the last undone edit of the drawings (Ctrl+Y)."""
+        if self._fp_drawings_redo:
+            self._cancel_footprint_drawing()
+            self._apply_footprint_drawings(self._fp_drawings_redo.pop(), history="redo")
+
+    def _delete_hovered_drawing(self) -> None:
+        """@brief Delete key: remove the drawing under the pointer, if any."""
+        index = self._fp_hovered_drawing
+        if 0 <= index < len(self.footprint_drawings):
+            updated = deepcopy(self.footprint_drawings)
+            del updated[index]
+            self._apply_footprint_drawings(updated)
+
+    def _duplicate_hovered_drawing(self) -> None:
+        """@brief Ctrl+D: duplicate the drawing under the pointer, one grid step away."""
+        index = self._fp_hovered_drawing
+        if 0 <= index < len(self.footprint_drawings):
+            self._duplicate_drawing(index)
+
+    def _duplicate_drawing(self, index: int) -> None:
+        """@brief Copy a drawing shifted by one grid step right and down (as the symbol does)."""
+        from ..core.footprint import validate_footprint_drawings
+        step_px = self.preview_view.grid_step() or 20.0
+        step = step_px / 20.0
+        copy = deepcopy(self.footprint_drawings[index])
+        copy["points"] = [[round(x + step, 4), round(y + step, 4)] for x, y in copy["points"]]
+        valid = validate_footprint_drawings([copy])
+        if valid:
+            self._apply_footprint_drawings(self.footprint_drawings + valid)
+
+    def _set_drawing_field(self, index: int, field: str, value) -> None:
+        """@brief Change one field (layer, width) of a drawing, keeping it valid."""
+        from ..core.footprint import validate_footprint_drawings
+        record = deepcopy(self.footprint_drawings[index])
+        record[field] = value
+        valid = validate_footprint_drawings([record])
+        if not valid:
+            return
+        updated = deepcopy(self.footprint_drawings)
+        updated[index] = valid[0]
+        self._apply_footprint_drawings(updated)
+
+    def _footprint_drawing_context_menu(self, index: int) -> None:
+        """@brief Right click on a drawing: delete it, or edit a text's content."""
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        record = self.footprint_drawings[index]
+        menu = QMenu(self)
+        # Same entries as the symbol editor's element menu, where they apply.
+        duplicate_action = menu.addAction(self.i18n.text("Duplica (Ctrl+D)"))
+        layer_menu = menu.addMenu(self.i18n.text("Layer"))
+        layer_actions = {}
+        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
+            action = layer_menu.addAction(self.i18n.text(label))
+            action.setCheckable(True)
+            action.setChecked(layer == record["layer"])
+            layer_actions[action] = layer
+        edit_action = width_action = None
+        if record["kind"] == "text":
+            menu.addSeparator()
+            edit_action = menu.addAction(self.i18n.text("Modifica testo…"))
+        else:
+            width_action = menu.addAction(self.i18n.text("Spessore del tratto…"))
+        menu.addSeparator()
+        delete_action = menu.addAction(self.i18n.text("Elimina disegno"))
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        if chosen is delete_action:
+            updated = deepcopy(self.footprint_drawings)
+            del updated[index]
+            self._apply_footprint_drawings(updated)
+        elif chosen is duplicate_action:
+            self._duplicate_drawing(index)
+        elif chosen in layer_actions:
+            self._set_drawing_field(index, "layer", layer_actions[chosen])
+        elif chosen is width_action:
+            value, accepted = QInputDialog.getDouble(
+                self, self.i18n.text("Spessore del tratto…"),
+                self.i18n.text("Spessore del tratto in mm"),
+                float(record.get("width", 0.12)), 0.01, 5.0, 3)
+            if accepted:
+                self._set_drawing_field(index, "width", round(float(value), 4))
+        elif chosen is edit_action:
+            text, accepted = QInputDialog.getText(
+                self, self.i18n.text("Testo"), self.i18n.text("Testo da scrivere:"),
+                text=record.get("text", ""))
+            if not accepted or not text.strip() or "\n" in text or "\r" in text:
+                return
+            self._set_drawing_field(index, "text", text.strip())
+
+    def _draw_footprint_drawings(self, mm_to_px: float) -> None:
+        """@brief Draw the user drawings and the clicks in progress on the scene.
+
+        @param mm_to_px Scene scale of the drawer that calls this.
+        @note Called by the three 2D drawers after the geometry, like
+            `_draw_footprint_texts`. Layer tells the colour: silkscreen like
+            the generated silk, fabrication yellow, comments dimmed.
+        """
+        from .footprint_view import DRAWING_KEY_ROLE
+        colors = {"F.SilkS": TEXT, "F.Fab": YELLOW, "Cmts.User": SUBTEXT}
+        for index, record in enumerate(self.footprint_drawings):
+            pen = QPen(QColor(colors.get(record["layer"], TEXT)))
+            pen.setWidthF(max(1.0, record.get("width", 0.12) * mm_to_px))
+            points = [(x * mm_to_px, y * mm_to_px) for x, y in record["points"]]
+            kind = record["kind"]
+            items = []
+            if kind == "line":
+                items = [self.preview_scene.addLine(*a, *b, pen)
+                         for a, b in zip(points, points[1:])]
+            elif kind == "rectangle":
+                (x0, y0), (x1, y1) = points
+                items = [self.preview_scene.addRect(min(x0, x1), min(y0, y1),
+                                                    abs(x1 - x0), abs(y1 - y0), pen)]
+            elif kind == "circle":
+                (cx, cy), (rx, ry) = points
+                radius = math.hypot(rx - cx, ry - cy)
+                items = [self.preview_scene.addEllipse(cx - radius, cy - radius,
+                                                       2 * radius, 2 * radius, pen)]
+            elif kind == "arc":
+                path = _arc_path(*points)
+                if path is not None:
+                    item = self.preview_scene.addPath(path, pen)
+                    items = [item]
+            elif kind == "text":
+                text_item = self.preview_scene.addSimpleText(record["text"])
+                text_item.setBrush(QBrush(QColor(colors.get(record["layer"], TEXT))))
+                font = text_item.font()
+                font.setPointSizeF(max(6.0, record.get("size", 1.0) * mm_to_px * 0.75))
+                text_item.setFont(font)
+                rect = text_item.boundingRect()
+                text_item.setPos(points[0][0] - rect.width() / 2,
+                                 points[0][1] - rect.height() / 2)
+                items = [text_item]
+            for item in items:
+                item.setData(DRAWING_KEY_ROLE, index)
+                item.setZValue(6)
+                item.setToolTip(self.i18n.text(
+                    "Disegno: tasto destro per eliminarlo o modificarlo."))
+        self._refresh_draw_markers()
+        self._refresh_drawing_handles()
+
+    def _snapped_draw_point(self, x: float, y: float) -> tuple:
+        """@brief A scene point (px) snapped to the drawn grid, in footprint mm."""
+        mm_to_px = 20.0
+        sx, sy = self.preview_view.snap_to_grid(x, y, 0.1 * mm_to_px)
+        return (round(sx / mm_to_px, 4), round(sy / mm_to_px, 4))
+
+    def _on_footprint_draw_hovered(self, x: float, y: float) -> None:
+        """@brief The pointer moved with a tool armed: snap marker and ghost follow it."""
+        if self._fp_draw_tool is None:
+            return
+        point = self._snapped_draw_point(x, y)
+        if point != self._fp_draw_hover:
+            self._fp_draw_hover = point
+            self._refresh_draw_markers()
+
+    def _on_footprint_draw_hover_left(self) -> None:
+        """@brief The pointer left the view: no snap marker, no ghost."""
+        if self._fp_draw_hover is not None:
+            self._fp_draw_hover = None
+            self._refresh_draw_markers()
+
+    def _ghost_path(self, points: list, tool: str | None = None, stored: bool = False):
+        """@brief Dashed outline of a shape through `points` (mm).
+
+        @param points The shape's points: clicked ones plus the hovered one
+            while drawing, or a stored record's points with one moved.
+        @param tool Shape kind; None means the armed tool.
+        @param stored True when `points` are in the STORED order (an arc is
+            start, mid, end); False for the click order (start, end, mid).
+        @return A QPainterPath in scene px, or None when nothing can be
+            outlined yet (a text, or a single point).
+        """
+        mm_to_px = 20.0
+        tool = self._fp_draw_tool if tool is None else tool
+        pts = [(x * mm_to_px, y * mm_to_px) for x, y in points]
+        if tool == "text" or len(pts) < 2:
+            return None
+        path = QPainterPath()
+        if tool == "line":
+            path.moveTo(*pts[0])
+            for x, y in pts[1:]:
+                path.lineTo(x, y)
+        elif tool == "rectangle":
+            (x0, y0), (x1, y1) = pts[:2]
+            path.addRect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+        elif tool == "circle":
+            (cx, cy), (rx, ry) = pts[:2]
+            radius = math.hypot(rx - cx, ry - cy)
+            path.addEllipse(cx - radius, cy - radius, 2 * radius, 2 * radius)
+        elif tool == "arc":
+            if len(pts) < 3:
+                path.moveTo(*pts[0])
+                path.lineTo(*pts[1])
+            else:
+                if stored:
+                    start, mid, end = pts[:3]
+                else:
+                    start, end, mid = pts[:3]   # click order: start, end, then mid
+                path = _arc_path(start, mid, end)
+        return path
+
+    def _refresh_draw_markers(self) -> None:
+        """@brief Show the clicked points, the snap node under the pointer and the ghost shape.
+
+        @note Like the symbol editor (user, 2026-10-13: «fare vedere il punto
+            di aggancio»): a dot on every clicked node, a brighter dot on the
+            grid node the next click would take, and the dashed outline the
+            shape would have if clicked there.
+        """
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        for item in list(scene.items()):
+            if item.data(0x44524D) is not None:
+                scene.removeItem(item)
+        if self._fp_draw_tool is None:
+            return
+        mm_to_px = 20.0
+        # Same look as the symbol editor (user, 2026-10-13: «uniforma a quello
+        # già fatto»): yellow dots on the clicked points, yellow dashed ghost.
+        for x_mm, y_mm in self._fp_draw_clicks:
+            _screen_dot(scene, x_mm * mm_to_px, y_mm * mm_to_px, 5, YELLOW, YELLOW, 0x44524D, 7)
+        if self._fp_draw_hover is None:
+            return
+        hx, hy = (v * mm_to_px for v in self._fp_draw_hover)
+        path = self._ghost_path(self._fp_draw_clicks + [self._fp_draw_hover])
+        if path is not None:
+            ghost = scene.addPath(path, _ghost_pen())
+            ghost.setData(0x44524D, True)
+            ghost.setZValue(6)
+        _screen_dot(scene, hx, hy, 7, YELLOW, YELLOW, 0x44524D, 8)
+
+    def _refresh_drawing_handles(self) -> None:
+        """@brief Show the handles of the hovered drawing, and the ghost of a handle drag.
+
+        @note Like the symbol editor (user, 2026-10-13: «quando passo sopra il
+            disegno devono apparire i punti di ancoraggio»): one square per
+            stored point of the hovered drawing, draggable on the grid; the
+            dragged one shows the dashed outline the shape will take.
+        """
+        from .footprint_view import HANDLE_KEY_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        for item in list(scene.items()):
+            if item.data(0x48474F) is not None:
+                scene.removeItem(item)
+        index = self._fp_hovered_drawing
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        record = self.footprint_drawings[index]
+        mm_to_px = 20.0
+        points = [tuple(p) for p in record["points"]]
+        drag = self._fp_handle_drag
+        if drag is not None and drag[0] == index:
+            if drag[1] < 0:
+                dx, dy = drag[2]
+                points = [(round(x + dx, 4), round(y + dy, 4)) for x, y in points]
+            else:
+                points[drag[1]] = drag[2]
+            path = self._ghost_path(points, record["kind"], stored=True)
+            if path is not None:
+                ghost = scene.addPath(path, _ghost_pen())
+                ghost.setData(0x48474F, True)
+                ghost.setZValue(8)
+        # Same handles as the symbol editor: 6 px squares, yellow outline,
+        # translucent green fill, constant screen size at any zoom.
+        for point_index, (x_mm, y_mm) in enumerate(points):
+            handle = _screen_handle(scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
+            handle.setData(HANDLE_KEY_ROLE, f"{index}:{point_index}")
+            handle.setToolTip(self.i18n.text("Punto del disegno: trascinalo sulla griglia."))
+        if len(points) > 1:
+            # The anchor at the centre moves the whole drawing (user,
+            # 2026-10-13: «se seleziono il punto di ancoraggio deve essere
+            # possibile muovere l'elemento»); a text's only point already is.
+            # Same square, solid fill and a little larger, so it reads as
+            # the element's own handle and not as one more vertex.
+            xs, ys = [x for x, _y in points], [y for _x, y in points]
+            cx, cy = (min(xs) + max(xs)) / 2 * mm_to_px, (min(ys) + max(ys)) / 2 * mm_to_px
+            anchor = _screen_handle(scene, cx, cy, 8, solid=True)
+            anchor.setData(HANDLE_KEY_ROLE, f"{index}:-1")
+            anchor.setToolTip(self.i18n.text("Ancora: trascinala per spostare tutto il disegno."))
+
+    def _on_footprint_drawing_hovered(self, index: int) -> None:
+        """@brief The pointer entered (index >= 0) or left (-1) a drawing: handles follow."""
+        if self._fp_handle_drag is not None:
+            return
+        self._fp_hovered_drawing = index
+        self._refresh_drawing_handles()
+
+    def _on_footprint_handle_pressed(self, index: int, point_index: int, x: float, y: float) -> None:
+        """@brief A handle or a drawing body was grabbed: remember the grab node."""
+        self._fp_handle_origin = self._snapped_draw_point(x, y) if point_index < 0 else None
+        if 0 <= index < len(self.footprint_drawings):
+            self._fp_hovered_drawing = index
+            self._refresh_drawing_handles()
+
+    def _whole_drag_delta(self, x: float, y: float) -> tuple:
+        """@brief Translation (mm) of a whole-drawing drag from its grab node to the pointer."""
+        point = self._snapped_draw_point(x, y)
+        origin = self._fp_handle_origin if self._fp_handle_origin is not None else point
+        return (round(point[0] - origin[0], 4), round(point[1] - origin[1], 4))
+
+    def _on_footprint_handle_dragged(self, index: int, point_index: int, x: float, y: float) -> None:
+        """@brief A handle moves: snap it and show the shape it would give.
+
+        @param point_index Point of the record, or -1 to move the whole drawing.
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        if point_index < 0:
+            self._fp_handle_drag = (index, -1, self._whole_drag_delta(x, y))
+        elif point_index < len(self.footprint_drawings[index]["points"]):
+            self._fp_handle_drag = (index, point_index, self._snapped_draw_point(x, y))
+        else:
+            return
+        self._fp_hovered_drawing = index
+        self._refresh_drawing_handles()
+
+    def _on_footprint_handle_dropped(self, index: int, point_index: int, x: float, y: float) -> None:
+        """@brief A handle was dropped: store the moved point if the shape stays valid."""
+        from ..core.footprint import validate_footprint_drawings
+        self._fp_handle_drag = None
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        record = deepcopy(self.footprint_drawings[index])
+        if point_index < 0:
+            dx, dy = self._whole_drag_delta(x, y)
+            self._fp_handle_origin = None
+            if (dx, dy) == (0.0, 0.0):
+                self._refresh_drawing_handles()
+                return
+            record["points"] = [[round(px + dx, 4), round(py + dy, 4)] for px, py in record["points"]]
+        else:
+            if not point_index < len(record["points"]):
+                return
+            point = self._snapped_draw_point(x, y)
+            if list(point) == list(record["points"][point_index]):
+                self._refresh_drawing_handles()
+                return
+            record["points"][point_index] = list(point)
+        if not validate_footprint_drawings([record]):
+            self._draw_feedback_toast(self.i18n.text("Spostamento scartato."), self.i18n.text(
+                "La forma è degenere (raggio nullo o lato nullo): clicca punti distinti sulla griglia."))
+            self._refresh_drawing_handles()
+            return
+        updated = deepcopy(self.footprint_drawings)
+        updated[index] = record
+        self._apply_footprint_drawings(updated)
+        self._refresh_drawing_handles()
 
     def _build_symbol_tab(self):
         from .symbol_tab import SymbolTab
@@ -13129,6 +13823,7 @@ class MainWindow(QMainWindow):
             self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
 
         self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_drawings(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -13384,6 +14079,7 @@ class MainWindow(QMainWindow):
         self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
 
         self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_drawings(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
@@ -13489,6 +14185,7 @@ class MainWindow(QMainWindow):
         self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
         self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_drawings(mm_to_px)
         self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()

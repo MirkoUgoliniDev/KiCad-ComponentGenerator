@@ -193,6 +193,29 @@ class FpCircle:
 
 
 @dataclass
+class FpArc:
+    """@brief Graphic circular arc on a footprint layer, through three points.
+
+    Arco grafico (fp_arc): inizio, punto intermedio e fine, come lo scrive KiCad.
+    """
+
+    start: Point
+    mid: Point
+    end: Point
+    layer: str
+    width: float = 0.12
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this arc graphic to a KiCad S-expression."""
+        node = sx("fp_arc", sx("start", *self.start), sx("mid", *self.mid),
+                  sx("end", *self.end))
+        node.add(_stroke_node(self.width))
+        node.add(sx("layer", self.layer))
+        node.add(sx("uuid", _uuid()))
+        return node
+
+
+@dataclass
 class FpText:
     """@brief Graphic text item on a footprint layer.
 
@@ -245,6 +268,122 @@ def validate_text_positions(raw) -> dict:
             continue
         result[key] = (round(float(value[0]), 4), round(float(value[1]), 4))
     return result
+
+
+#: Layers a user drawing of the footprint preview may live on: printed
+#: silkscreen, assembly documentation, free comments. Copper and courtyard
+#: are deliberately excluded: they carry electrical and DRC meaning the
+#: preview must not let a free sketch change.
+USER_DRAW_LAYERS = ("F.SilkS", "F.Fab", "Cmts.User")
+#: Drawing kinds a record may declare, with the exact point count each needs
+#: (0 means "two or more", the open polyline of the line tool).
+USER_DRAW_KINDS = {"line": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1}
+#: Stroke width, mm, of a user drawing (KiCad's default silkscreen line).
+USER_DRAW_WIDTH_MM = 0.12
+#: Default text height of a user text, mm (KiCad's footprint text default).
+USER_DRAW_TEXT_MM = 1.0
+
+
+def validate_footprint_drawings(raw) -> list:
+    """@brief Keep the well-formed records of saved footprint user drawings.
+
+    @param raw Whatever the project file holds under `footprint_drawings`.
+    @return List of {kind, points, layer, width[, text, size]} records whose
+        kind and layer are known, whose points are pairs of finite numbers
+        within `TEXT_POSITION_LIMIT_MM` in the count the kind requires, and
+        whose text (text kind only) is one non-blank line of positive size;
+        anything else is left out, like a malformed pad override.
+    @note Same contract style as `validate_text_positions`: loading never
+        raises, it silently drops what it cannot trust.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    result = []
+    for record in raw:
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("kind")
+        layer = record.get("layer")
+        points = record.get("points")
+        if kind not in USER_DRAW_KINDS or layer not in USER_DRAW_LAYERS:
+            continue
+        if not isinstance(points, (list, tuple)):
+            continue
+        count = USER_DRAW_KINDS[kind]
+        if count and len(points) != count or not count and len(points) < 2:
+            continue
+        clean_points = []
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) != 2
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               and math.isfinite(v) and abs(v) <= TEXT_POSITION_LIMIT_MM
+                               for v in point)):
+                break
+            clean_points.append((round(float(point[0]), 4), round(float(point[1]), 4)))
+        if len(clean_points) != len(points):
+            continue
+        width = record.get("width", USER_DRAW_WIDTH_MM)
+        if (isinstance(width, bool) or not isinstance(width, (int, float))
+                or not math.isfinite(width) or not 0 < width <= 10):
+            continue
+        clean = {"kind": kind, "layer": layer, "width": round(float(width), 4),
+                 "points": [list(p) for p in clean_points]}
+        if kind == "text":
+            text = record.get("text")
+            size = record.get("size", USER_DRAW_TEXT_MM)
+            if (not isinstance(text, str) or not text.strip()
+                    or "\n" in text or "\r" in text):
+                continue
+            if (isinstance(size, bool) or not isinstance(size, (int, float))
+                    or not math.isfinite(size) or not 0 < size <= 50):
+                continue
+            clean["text"] = text.strip()
+            clean["size"] = round(float(size), 4)
+        elif kind == "circle":
+            # Second point on the rim: a zero radius draws nothing.
+            if clean_points[0] == clean_points[1]:
+                continue
+        elif kind == "rectangle":
+            if (clean_points[0][0] == clean_points[1][0]
+                    or clean_points[0][1] == clean_points[1][1]):
+                continue
+        elif kind == "arc":
+            if len(set(clean_points)) < 3:
+                continue
+        result.append(clean)
+    return result
+
+
+def drawing_graphics(records) -> list:
+    """@brief Convert validated user drawing records into footprint graphics.
+
+    @param records Records in the shape `validate_footprint_drawings` returns
+        (the caller validates; a malformed record here is a programming error).
+    @return Graphic items (FpLine/FpRect/FpCircle/FpArc/FpText) ready for
+        `Footprint.add_graphic`, in record order; a line record yields one
+        FpLine per segment. Points are absolute footprint mm, drawn as-is.
+    """
+    items = []
+    for record in records:
+        kind, layer = record["kind"], record["layer"]
+        width = record.get("width", USER_DRAW_WIDTH_MM)
+        points = [tuple(p) for p in record["points"]]
+        if kind == "line":
+            items.extend(FpLine(start=a, end=b, layer=layer, width=width)
+                         for a, b in zip(points, points[1:]))
+        elif kind == "rectangle":
+            items.append(FpRect(start=points[0], end=points[1], layer=layer, width=width))
+        elif kind == "circle":
+            radius = math.hypot(points[1][0] - points[0][0], points[1][1] - points[0][1])
+            items.append(FpCircle(center=points[0], radius=round(radius, 4),
+                                  layer=layer, width=width))
+        elif kind == "arc":
+            start, mid, end = points
+            items.append(FpArc(start=start, mid=mid, end=end, layer=layer, width=width))
+        elif kind == "text":
+            items.append(FpText(kind="user", text=record["text"], at=points[0],
+                                layer=layer, size=record.get("size", USER_DRAW_TEXT_MM)))
+    return items
 
 
 @dataclass

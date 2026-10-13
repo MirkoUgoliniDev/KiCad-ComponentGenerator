@@ -11,12 +11,25 @@ from test_contact_style import dev_kit
 
 
 def _tips(window):
-    """Tooltip of every copper item and pad number of the scene, by kind."""
+    """Tooltip of every copper item and pad number of the scene, by kind.
+
+    The draggable Reference/Value groups (b99f835) carry tooltips too but
+    are footprint properties, not pads: they and their children are skipped.
+    """
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+
+    def is_property_text(item):
+        while item is not None:
+            if item.data(TEXT_KEY_ROLE) is not None:
+                return True
+            item = item.parentItem()
+        return False
+
     copper, numbers = [], []
     for item in window.preview_scene.items():
         if item.data(0) == 'pin-function':
             continue
-        if not item.toolTip():
+        if not item.toolTip() or is_property_text(item):
             continue
         (numbers if isinstance(item, QGraphicsSimpleTextItem) else copper).append(item.toolTip())
     return copper, numbers

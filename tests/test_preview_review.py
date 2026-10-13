@@ -11,6 +11,20 @@ from kicadgen.gui.theme import BASE, TEXT
 from tests.test_contact_style import dev_kit
 
 
+def _is_property_text(item):
+    """True for the draggable Reference/Value groups and their children.
+
+    They carry tooltips since b99f835 but are footprint properties, not pin
+    labels or copper: the pad/label contracts of this module skip them.
+    """
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+    while item is not None:
+        if item.data(TEXT_KEY_ROLE) is not None:
+            return True
+        item = item.parentItem()
+    return False
+
+
 def test_grid_header_preview_shows_exported_drills(window, monkeypatch):
     """The grid-header renderer must show holes just like castellated hosts."""
     params = header_footprint_params(PinHeaderParams(rows=2, cols=3), 1.8, .9)
@@ -20,7 +34,8 @@ def test_grid_header_preview_shows_exported_drills(window, monkeypatch):
              if isinstance(item, QGraphicsEllipseItem)
              and item.brush().color().name() == BASE]
     labels = [item for item in window.preview_scene.items()
-              if isinstance(item, QGraphicsSimpleTextItem) and item.toolTip()]
+              if isinstance(item, QGraphicsSimpleTextItem) and item.toolTip()
+              and not _is_property_text(item)]
     assert len(holes) == 6
     for _, x, y in pin_positions(params):
         hole = next(item for item in holes
@@ -115,7 +130,8 @@ def test_grid_dimensions_do_not_cover_pin_labels(window, monkeypatch, qapp):
         qapp.setFont(QFont('Segoe UI', 10))
         monkeypatch.setattr(window, '_preview_params', lambda: PinHeaderParams(rows=2, cols=3, margin=.2))
         window._draw_preview()
-        texts = [item for item in window.preview_scene.items() if isinstance(item, QGraphicsSimpleTextItem)]
+        texts = [item for item in window.preview_scene.items()
+                 if isinstance(item, QGraphicsSimpleTextItem) and not _is_property_text(item)]
         pins = [item for item in texts if item.toolTip()]
         dimensions = [item for item in texts if not item.toolTip()]
         assert not any(pin.sceneBoundingRect().intersects(dim.sceneBoundingRect())
