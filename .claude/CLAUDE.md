@@ -244,8 +244,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 7344 passed,
-11 skipped and 2 expected failures (2026-10-12 night, after the adversarial review of the
+is 7443 passed,
+11 skipped, 2 expected failures and 19 subtests, plus 5 failures found by that run and fixed
+afterwards (stale test doubles, two catalogue entries, two contracts), their files re-run green
+(2026-10-13 night, after the footprint drawing palette, fine dotted grid, KiCad layer colours
+and kept camera; before that, 7344 passed, 11 skipped and 2 expected failures on 2026-10-12
+night, after the adversarial review of the
 start-up, lazy 3D viewer, glyph catalogue and symbol-editor work; before that, 2026-10-02 late
 evening: 6630 passed, 8 skipped, 2 expected failures and 19 subtests after the adversarial
 review of the SMD/KiCad/GUI/hole-rule work and the one-retry on unreadable document answers;

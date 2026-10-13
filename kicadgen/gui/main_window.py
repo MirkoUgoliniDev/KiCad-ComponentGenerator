@@ -850,11 +850,34 @@ def _arc_path(start, mid, end):
     return path
 
 
-def _ghost_pen() -> QPen:
-    """@brief The dashed yellow pen of a shape in progress, as in the symbol editor."""
-    pen = QPen(QColor(YELLOW), 1.6, Qt.PenStyle.DashLine)
+#: Layer colours of the 2D footprint preview: the default theme of KiCad's
+#: PCB editor (user, 2026-10-13: «i colori predefiniti di KiCad»), so a
+#: drawing looks the same here and in KiCad. One table for the generated
+#: silkscreen, the user drawings, the layer selector and the ghost shape.
+KICAD_LAYER_COLORS = {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc"}
+
+
+def _layer_color(layer: str) -> str:
+    """@brief The KiCad default colour of a footprint layer (silkscreen when unknown)."""
+    return KICAD_LAYER_COLORS.get(layer, KICAD_LAYER_COLORS["F.SilkS"])
+
+
+def _ghost_pen(color: str = YELLOW) -> QPen:
+    """@brief The dashed pen of a shape in progress, as in the symbol editor.
+
+    @param color The colour of the layer the shape goes to; yellow when
+        no layer is known.
+    """
+    pen = QPen(QColor(color), 1.6, Qt.PenStyle.DashLine)
     pen.setCosmetic(True)
     return pen
+
+
+def _layer_swatch(color: str) -> QIcon:
+    """@brief A small filled square of a layer colour for the layer selector."""
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(QColor(color))
+    return QIcon(pixmap)
 
 
 def _screen_dot(scene, x, y, size, outline, fill, role, z):
@@ -7064,6 +7087,9 @@ class MainWindow(QMainWindow):
         self.project_wizard.set_page(1 if self._project_has_footprint() else 0)
         self.project_details.setExpanded(False)
         self.group_ai_tools.setExpanded(False)
+        # Another project, another footprint: the camera follows it again.
+        if hasattr(self, "preview_view"):
+            self.preview_view.auto_fit = True
         index = self.tabs.currentIndex()
         if index == TAB_PREVIEW:
             self._draw_preview()
@@ -11186,7 +11212,7 @@ class MainWindow(QMainWindow):
         for asset, tooltip, callback in (
             ('zoom-in.svg', 'Ingrandisci', lambda: self.preview_view.zoom(1.2)),
             ('zoom-out.svg', 'Riduci', lambda: self.preview_view.zoom(1 / 1.2)),
-            ('view-fit.svg', 'Adatta alla vista', self._fit_preview),
+            ('view-fit.svg', 'Adatta alla vista', lambda: self._fit_preview(force=True)),
         ):
             button = self._view_tool_button(asset, tooltip)
             button.clicked.connect(callback)
@@ -11221,11 +11247,28 @@ class MainWindow(QMainWindow):
         self.combo_grid_unit.setEnabled(self.chk_grid.isChecked())
         self.combo_grid_unit.currentIndexChanged.connect(self._on_grid_unit_changed)
         header.addWidget(self.combo_grid_unit)
+        # Drawing grid as a fraction of the main grid (user, 2026-10-13:
+        # «griglia puntinata a un decimo di quella attuale per ancorare gli
+        # elementi grafici»); pads and holes never leave the main grid.
+        from .footprint_view import DEFAULT_FINE_GRID_DIVISOR, FootprintView
+        self.combo_fine_grid = QComboBox()
+        for divisor in self.FOOTPRINT_FINE_GRID_DIVISORS:
+            self.combo_fine_grid.addItem(f"1/{divisor}", divisor)
+        self.combo_fine_grid.setProperty("i18n_skip", True)
+        self.combo_fine_grid.setToolTip(self.i18n.text(
+            "Passo della griglia del disegno, frazione della griglia principale: "
+            "disegni e testi si agganciano ai suoi punti, piazzole e fori restano sulla griglia principale."))
+        divisor = self._config.get("draw_grid_divisor", DEFAULT_FINE_GRID_DIVISOR)
+        index = self.combo_fine_grid.findData(divisor)
+        self.combo_fine_grid.setCurrentIndex(max(index, 0))
+        self.combo_fine_grid.setEnabled(self.chk_grid.isChecked())
+        self.combo_fine_grid.currentIndexChanged.connect(self._on_fine_grid_changed)
+        header.addWidget(self.combo_fine_grid)
         outer.addLayout(header)
 
         self.preview_scene = QGraphicsScene()
-        from .footprint_view import FootprintView
         self.preview_view = FootprintView(self.preview_scene)
+        self.preview_view.set_fine_divisor(self.combo_fine_grid.currentData())
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
         self.preview_view.text_moved.connect(self._on_footprint_text_moved)
         self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
@@ -11318,6 +11361,9 @@ class MainWindow(QMainWindow):
         return tab
 
     #: Layers a preview drawing may go to: (KiCad layer, source label).
+    #: Drawing-grid divisors offered in the preview header (1/10 default).
+    FOOTPRINT_FINE_GRID_DIVISORS = (10, 5, 2, 1)
+
     FOOTPRINT_DRAW_LAYERS = (("F.SilkS", "Serigrafia (stampata)"),
                              ("F.Fab", "Fabbricazione (documentazione)"),
                              ("Cmts.User", "Commenti (solo progetto)"))
@@ -11340,7 +11386,9 @@ class MainWindow(QMainWindow):
         column.addWidget(title)
         self.combo_fp_draw_layer = QComboBox()
         for layer, label in self.FOOTPRINT_DRAW_LAYERS:
-            self.combo_fp_draw_layer.addItem(self.i18n.text(label), layer)
+            # The colour square tells which colour the drawing will take.
+            self.combo_fp_draw_layer.addItem(_layer_swatch(_layer_color(layer)),
+                                             self.i18n.text(label), layer)
         self.combo_fp_draw_layer.setToolTip(self.i18n.text(
             "Layer del disegno: la serigrafia viene stampata sulla scheda, "
             "la fabbricazione documenta il montaggio, i commenti restano nel progetto."))
@@ -11488,8 +11536,25 @@ class MainWindow(QMainWindow):
         self._refresh_footprint_undo_buttons()
         self._fp_hovered_drawing = -1
         self._draw_preview()
-        if self._project_has_footprint():
-            self._generate(footprint_only=True)
+        self._schedule_footprint_rewrite()
+
+    def _schedule_footprint_rewrite(self) -> None:
+        """@brief Rewrite the .kicad_mod on the next event-loop turn, once for a burst of edits.
+
+        @note The project file is already saved and the preview redrawn when
+            this is called; deferring the worker start lets the frame that
+            ends a drag paint first, so the drop does not stutter (profiling
+            2026-10-13: 20-115 ms at the drop depending on the pad count).
+        """
+        if getattr(self, "_fp_rewrite_pending", False):
+            return
+        self._fp_rewrite_pending = True
+
+        def rewrite():
+            self._fp_rewrite_pending = False
+            if self._project_has_footprint():
+                self._generate(footprint_only=True)
+        QTimer.singleShot(0, rewrite)
 
     def _refresh_footprint_undo_buttons(self) -> None:
         """@brief Enable undo/redo only when their stack has something."""
@@ -11557,7 +11622,8 @@ class MainWindow(QMainWindow):
         layer_menu = menu.addMenu(self.i18n.text("Layer"))
         layer_actions = {}
         for layer, label in self.FOOTPRINT_DRAW_LAYERS:
-            action = layer_menu.addAction(self.i18n.text(label))
+            action = layer_menu.addAction(_layer_swatch(_layer_color(layer)), self.i18n.text(label))
+            action.setIconVisibleInMenu(True)
             action.setCheckable(True)
             action.setChecked(layer == record["layer"])
             layer_actions[action] = layer
@@ -11604,9 +11670,8 @@ class MainWindow(QMainWindow):
             the generated silk, fabrication yellow, comments dimmed.
         """
         from .footprint_view import DRAWING_KEY_ROLE
-        colors = {"F.SilkS": TEXT, "F.Fab": YELLOW, "Cmts.User": SUBTEXT}
         for index, record in enumerate(self.footprint_drawings):
-            pen = QPen(QColor(colors.get(record["layer"], TEXT)))
+            pen = QPen(QColor(_layer_color(record["layer"])))
             pen.setWidthF(max(1.0, record.get("width", 0.12) * mm_to_px))
             points = [(x * mm_to_px, y * mm_to_px) for x, y in record["points"]]
             kind = record["kind"]
@@ -11630,7 +11695,7 @@ class MainWindow(QMainWindow):
                     items = [item]
             elif kind == "text":
                 text_item = self.preview_scene.addSimpleText(record["text"])
-                text_item.setBrush(QBrush(QColor(colors.get(record["layer"], TEXT))))
+                text_item.setBrush(QBrush(QColor(_layer_color(record["layer"]))))
                 font = text_item.font()
                 font.setPointSizeF(max(6.0, record.get("size", 1.0) * mm_to_px * 0.75))
                 text_item.setFont(font)
@@ -11638,11 +11703,12 @@ class MainWindow(QMainWindow):
                 text_item.setPos(points[0][0] - rect.width() / 2,
                                  points[0][1] - rect.height() / 2)
                 items = [text_item]
+            hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
             for item in items:
                 item.setData(DRAWING_KEY_ROLE, index)
                 item.setZValue(6)
-                item.setToolTip(self.i18n.text(
-                    "Disegno: tasto destro per eliminarlo o modificarlo."))
+                item.setToolTip(hint)
+                item.setCursor(Qt.CursorShape.SizeAllCursor)
         self._refresh_draw_markers()
         self._refresh_drawing_handles()
 
@@ -11733,7 +11799,7 @@ class MainWindow(QMainWindow):
         hx, hy = (v * mm_to_px for v in self._fp_draw_hover)
         path = self._ghost_path(self._fp_draw_clicks + [self._fp_draw_hover])
         if path is not None:
-            ghost = scene.addPath(path, _ghost_pen())
+            ghost = scene.addPath(path, _ghost_pen(_layer_color(self.combo_fp_draw_layer.currentData())))
             ghost.setData(0x44524D, True)
             ghost.setZValue(6)
         _screen_dot(scene, hx, hy, 7, YELLOW, YELLOW, 0x44524D, 8)
@@ -11768,26 +11834,18 @@ class MainWindow(QMainWindow):
                 points[drag[1]] = drag[2]
             path = self._ghost_path(points, record["kind"], stored=True)
             if path is not None:
-                ghost = scene.addPath(path, _ghost_pen())
+                ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
                 ghost.setData(0x48474F, True)
                 ghost.setZValue(8)
         # Same handles as the symbol editor: 6 px squares, yellow outline,
-        # translucent green fill, constant screen size at any zoom.
+        # translucent green fill, constant screen size at any zoom. No extra
+        # centre anchor: the whole drawing moves by its body, as an element
+        # of the symbol editor (user, 2026-10-13: «più discreto»).
+        hint = self.i18n.text("Punto del disegno: trascinalo sulla griglia.")
         for point_index, (x_mm, y_mm) in enumerate(points):
             handle = _screen_handle(scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
             handle.setData(HANDLE_KEY_ROLE, f"{index}:{point_index}")
-            handle.setToolTip(self.i18n.text("Punto del disegno: trascinalo sulla griglia."))
-        if len(points) > 1:
-            # The anchor at the centre moves the whole drawing (user,
-            # 2026-10-13: «se seleziono il punto di ancoraggio deve essere
-            # possibile muovere l'elemento»); a text's only point already is.
-            # Same square, solid fill and a little larger, so it reads as
-            # the element's own handle and not as one more vertex.
-            xs, ys = [x for x, _y in points], [y for _x, y in points]
-            cx, cy = (min(xs) + max(xs)) / 2 * mm_to_px, (min(ys) + max(ys)) / 2 * mm_to_px
-            anchor = _screen_handle(scene, cx, cy, 8, solid=True)
-            anchor.setData(HANDLE_KEY_ROLE, f"{index}:-1")
-            anchor.setToolTip(self.i18n.text("Ancora: trascinala per spostare tutto il disegno."))
+            handle.setToolTip(hint)
 
     def _on_footprint_drawing_hovered(self, index: int) -> None:
         """@brief The pointer entered (index >= 0) or left (-1) a drawing: handles follow."""
@@ -11817,11 +11875,14 @@ class MainWindow(QMainWindow):
         if not 0 <= index < len(self.footprint_drawings):
             return
         if point_index < 0:
-            self._fp_handle_drag = (index, -1, self._whole_drag_delta(x, y))
+            drag = (index, -1, self._whole_drag_delta(x, y))
         elif point_index < len(self.footprint_drawings[index]["points"]):
-            self._fp_handle_drag = (index, point_index, self._snapped_draw_point(x, y))
+            drag = (index, point_index, self._snapped_draw_point(x, y))
         else:
             return
+        if drag == self._fp_handle_drag:
+            return      # pointer still within the same node: nothing to redraw
+        self._fp_handle_drag = drag
         self._fp_hovered_drawing = index
         self._refresh_drawing_handles()
 
@@ -13598,10 +13659,18 @@ class MainWindow(QMainWindow):
             return None
         return width_px / float(length_mm)
 
+    def _on_fine_grid_changed(self, _index: int) -> None:
+        """@brief Keep the chosen drawing-grid divisor and apply it to the preview."""
+        divisor = int(self.combo_fine_grid.currentData())
+        self._config["draw_grid_divisor"] = divisor
+        self._save_config_safely()
+        self.preview_view.set_fine_divisor(divisor)
+
     def _on_grid_toggled(self, checked: bool) -> None:
         self._config["show_grid"] = checked
         self._save_config_safely()
         self.combo_grid_unit.setEnabled(checked)
+        self.combo_fine_grid.setEnabled(checked)
         view = getattr(self, "preview_view", None)
         spec = getattr(self, "_preview_grid_spec", None)
         if view is not None and spec is not None:
@@ -13623,13 +13692,20 @@ class MainWindow(QMainWindow):
                     self.preview_scene.removeItem(item)
             self._draw_grid(**spec)
 
-    def _fit_preview(self) -> None:
-        """Inquadra il footprint, ignorando la griglia.
+    def _fit_preview(self, force: bool = False) -> None:
+        """@brief Inquadra il footprint, ignorando la griglia, se la camera lo segue.
 
         La griglia si estende oltre il componente: includendola
         nell'inquadratura, attivarla e disattivarla cambiava la dimensione
         del disegno a parita' di footprint -- confondente proprio quando la
         griglia serve a valutare le distanze.
+
+        @param force True per «Adatta alla vista»: inquadra comunque e
+            torna a seguire il footprint.
+        @note Dopo uno zoom o uno spostamento dell'utente
+            (`FootprintView.auto_fit` False) i ridisegni lasciano la camera
+            dov'e': modificare un disegno, un testo o un pad non deve
+            cambiare lo zoom (utente, 2026-10-13), come nell'editor del simbolo.
         """
         rect = None
         for item in self.preview_scene.items():
@@ -13645,8 +13721,11 @@ class MainWindow(QMainWindow):
         # An implicit scene rect can grow with previously drawn grid items.
         rect = rect.adjusted(-12, -12, 12, 12)
         self.preview_scene.setSceneRect(rect)
+        if not force and not self.preview_view.auto_fit:
+            return
         self.preview_view.resetTransform()
         self.preview_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        self.preview_view.auto_fit = True
 
     def _draw_grid(
         self, mm_to_px: float, width: float, height: float, margin: float,
@@ -13773,7 +13852,7 @@ class MainWindow(QMainWindow):
             origin=next(((pad.x, pad.y) for pad in pad_positions(p)), (0., 0.)),
         )
 
-        silk_pen = QPen(QColor(TEXT))
+        silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
         half_l = p.body_length / 2 * mm_to_px
         half_w = p.body_width / 2 * mm_to_px
@@ -13965,7 +14044,7 @@ class MainWindow(QMainWindow):
         x1, y1 = courtyard.end[0] - margin, courtyard.end[1] - margin
         self._draw_grid(mm_to_px, x1 - x0, y1 - y0, max(margin, 1), x0=x0, y0=y0,
                         origin=next((pad.at for pad in footprint.pads if pad.number), (0., 0.)))
-        silk_pen = QPen(QColor(TEXT))
+        silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
         for graphic in footprint.graphics:
             if graphic.layer != "F.SilkS":
@@ -13980,7 +14059,7 @@ class MainWindow(QMainWindow):
                 r = graphic.radius * mm_to_px
                 self.preview_scene.addEllipse(graphic.center[0] * mm_to_px - r,
                                               graphic.center[1] * mm_to_px - r, 2 * r, 2 * r,
-                                              silk_pen, QBrush(QColor(TEXT)) if graphic.fill else QBrush())
+                                              silk_pen, QBrush(silk_pen.color()) if graphic.fill else QBrush())
 
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
@@ -14090,7 +14169,7 @@ class MainWindow(QMainWindow):
         mm_to_px = 20.0
         pins = package.pins_seen_from_top()
         margin = 1.0
-        silk_pen = QPen(QColor(TEXT))
+        silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
         if package.body_length_mm and package.body_width_mm:
             # Same outline as build_package: the body turns with the package.
@@ -14343,9 +14422,15 @@ class MainWindow(QMainWindow):
             group.setZValue(50)
 
     def _footprint_text_snap_mm(self) -> float:
-        """@brief The step a dropped text snaps to: the preview grid when shown, else 0.1 mm."""
+        """@brief The step a dropped text snaps to: the drawing grid when shown, else 0.1 mm.
+
+        @note The drawing grid is the main grid divided by the chosen
+            divisor (1/10 by default): texts are graphic elements, so they
+            take the fine grid like the drawings; pads keep the main grid.
+        """
         if getattr(self, "chk_grid", None) is not None and self.chk_grid.isChecked():
-            return 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
+            main = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
+            return main / self.preview_view.fine_divisor()
         return 0.1
 
     def _set_footprint_text_position(self, key: str, position) -> bool:
@@ -14384,7 +14469,7 @@ class MainWindow(QMainWindow):
                 "Posizione del testo non salvata."))
             return False
         self._draw_preview()
-        self._generate(footprint_only=True)
+        self._schedule_footprint_rewrite()
         return True
 
     def _on_footprint_text_moved(self, key: str, x_scene: float, y_scene: float) -> None:

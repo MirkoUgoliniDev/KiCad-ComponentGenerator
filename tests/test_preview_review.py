@@ -8,6 +8,7 @@ from kicadgen.core.package_geometry import PackageGeometry, PinSpec
 from kicadgen.generators.pin_header import PinHeaderParams, pin_positions, build_pin_header
 from kicadgen.core.footprint import FpLine, FpRect
 from kicadgen.gui.theme import BASE, TEXT
+from kicadgen.gui.main_window import KICAD_LAYER_COLORS  # silkscreen drawn in KiCad's colour
 from tests.test_contact_style import dev_kit
 
 
@@ -91,7 +92,7 @@ def test_grid_outline_and_dimensions_match_export(window, monkeypatch, params):
                                         courtyard.end[1] - params.margin))
     actual = []
     for item in window.preview_scene.items():
-        if not isinstance(item, (QGraphicsLineItem, QGraphicsRectItem)) or item.pen().color().name() != TEXT:
+        if not isinstance(item, (QGraphicsLineItem, QGraphicsRectItem)) or item.pen().color().name() != KICAD_LAYER_COLORS['F.SilkS']:
             continue
         if isinstance(item, QGraphicsLineItem):
             line = item.line()

@@ -181,6 +181,180 @@ vista trascina il gruppo (risale ai genitori dal figlio colpito) ed emette
 `pos()` del gruppo. test_package_preview_drills.py esclude i gruppi anche
 dal conteggio del rame.
 
+## 2026-10-13 sera — IN CORSO (analisi, nessuna modifica al codice): marcatori del footprint «più discreti» e trascinamento «poco fluido»
+
+Richiesta dell'utente (screenshot di un quadratino): «questo lo devo fare un
+po' più discreto; lo spostamento degli elementi inseriti non è molto fluido,
+verifica bene; scatena degli agenti e controlla se c'è margine per migliorare».
+Diagnosi preliminare del coordinatore (da confermare dagli agenti):
+`_refresh_drawing_handles` in main_window.py viene chiamata a OGNI
+mouseMoveEvent del drag, scorre `list(scene.items())` dell'intera scena per
+rimuovere le maniglie (ruolo 0x48474F) e ricrea fantasma + tutte le maniglie,
+anche quando il nodo agganciato non è cambiato. Due agenti in sola lettura:
+(1) misura offscreen del costo per movimento e confronto con symbol_tab;
+(2) identificazione del marcatore nello screenshot e confronto visivo con
+l'editor del simbolo. Esito e proposte da riportare all'utente PRIMA di
+toccare il codice (regola: stessa UX in tutte le schede, riuso del codice).
+ESITO DEGLI AGENTI (13/10 sera), DIAGNOSI PRELIMINARE RIBALTATA:
+- Il costo del ricostruire maniglie+fantasma a ogni movimento e' REALE ma
+  IRRILEVANTE: misurato offscreen <= 1,8 ms per movimento con 927 oggetti
+  in scena (200 pad), repaint della regione sporca <= 1,5 ms. Non e' la
+  causa della sensazione di «poco fluido».
+- CAUSA 1 (principale): `FootprintView._handle_at/_drawing_at/_text_item_at`
+  usano `scene().items(mapToScene(pos))` SENZA deviceTransform; le maniglie
+  sono ItemIgnoresTransformations, quindi la zona di presa e' 6 px di SCENA
+  = 6 x scala a schermo: a scala 0,356 -> 1 px, a 0,119 -> manca anche al
+  centro. Una presa mancata cade nel ramo di PAN: la camera salta. L'editor
+  del simbolo usa `QGraphicsView.items(pos)` (consapevole della trasformata).
+- CAUSA 2: il corpo del disegno ha penna non cosmetica (2,4 px scena ->
+  <1 px a schermo da lontano): hover che lampeggia (11 cambi di stato su
+  una corsa di 13 px) e linee quasi imprendibili.
+- CAUSA 3: le maniglie spariscono appena il puntatore lascia il tratto;
+  l'ancora al centro di linee/archi e' irraggiungibile. Il simbolo usa
+  un'area di rivelazione = bbox + HANDLE_HOVER_MARGIN 12 px.
+- CAUSA 4 (minore): un testo REF**/Valore dentro un rettangolo non si
+  trascina (priorita' di pressione ai disegni).
+- Scatto al RILASCIO (non durante): salvataggio + `_draw_preview` completo +
+  `_generate(footprint_only)` sincrono: 20 ms (60 pad) .. 115 ms (200 pad).
+- FALSO: «il simbolo muove gli item con setPos»: ricostruisce TUTTA la scena
+  a ogni movimento; e' fluido per hit test corretti e rivelazione a margine.
+- MARCATORE dello screenshot (5x10 px, colori falsati da cast): per forma e
+  contesto e' l'ANCORA di spostamento (quadrato pieno 8 px, verde, bordo
+  giallo), unico marcatore pieno e SENZA corrispettivo nell'editor del
+  simbolo (che muove l'elemento prendendolo dal corpo, cursore SizeAll).
+  Altre deviazioni dal simbolo: nessuna evidenziazione del disegno sotto il
+  puntatore (simbolo: penna gialla 2,2 px), nessun cursore sul corpo,
+  rivelazione sul tratto e non sull'area con margine, puntino giallo di
+  aggancio non presente nel simbolo.
+PROPOSTA all'utente (in attesa di risposta): (1) hit test con
+`self.items(pos)` della vista; (2) tolleranza in px a schermo per corpo e
+maniglie; (3) isteresi: maniglie visibili finche' il puntatore sta nel
+bbox+12 px, come il simbolo; (4) testi prima dei disegni nella pressione;
+(5) refresh solo se il nodo agganciato cambia; (6) ancora: TOGLIERLA e
+muovere dal corpo con cursore SizeAll (identico al simbolo) oppure renderla
+6 px traslucida come i vertici; (7) rigenerazione del .kicad_mod al
+rilascio differita con timer. Script di misura negli scratchpad della
+sessione (bench_drag.py, bench2/3), non nel repo.
+«OK PROCEDI, POI EVENTUALMENTE RIVEDIAMO» (utente 13/10 sera) + NUOVA
+RICHIESTA: «griglia puntinata a un decimo di quella attuale per ancorare
+gli elementi grafici; piazzole del footprint e pin del simbolo restano
+sugli incroci della griglia principale» (logica confermata dall'utente).
+PIANO IN CORSO (coordinatore su footprint_view.py, main_window.py,
+tests/test_footprint_drawings.py; un agente su symbol_tab.py e i suoi test):
+A. Fluidita' (footprint_view.py): hit test con `self.items(pos)` della
+   vista (consapevole della trasformata) in _handle_at/_drawing_at/
+   _text_item_at e nei menu; tolleranza di presa in px a schermo (rettangolo
+   attorno al puntatore, margine dichiarato come tolleranza UI); isteresi:
+   il disegno resta «sotto il puntatore» finche' questo sta nel suo bbox a
+   schermo + 12 px (come HANDLE_HOVER_MARGIN del simbolo); testi REF**/Valore
+   prima dei disegni nella pressione; cursore SizeAll sul corpo dei disegni.
+B. Ancora centrale TOLTA (scelta del coordinatore in assenza di risposta,
+   opzione consigliata = identica al simbolo): il disegno si sposta
+   prendendolo dal corpo; i vertici restano maniglie. Test aggiornato.
+C. main_window.py: refresh delle maniglie solo se il nodo agganciato / il
+   delta cambia; tooltip calcolati una volta per refresh; rigenerazione del
+   .kicad_mod al rilascio coalescente con QTimer single-shot (il salvataggio
+   e il ridisegno restano immediati).
+D. Griglia fine: FootprintView.set_grid con passo fine = principale/10
+   (stessa origine), disegnata a PUNTI solo se il passo fine a schermo e'
+   >= ~5 px; snap_to_grid(x, y, fallback, fine=True) per disegni/maniglie/
+   testi; i pad NON passano dal snap della vista (invariati). Combo del
+   passo fine nella palette del footprint (1/10 predefinito, 1/5, 1/2, 1/1
+   della principale), salvata nel progetto? NO: preferenza di vista, non di
+   progetto (come il menu del simbolo). Simbolo: griglia puntinata al passo
+   del disegno (DRAWING_GRIDS_MM) quando diverso dai pin, predefinito
+   0,254 mm = 2,54/10; pin sempre a 2,54.
+ESITO (13/10 sera, FATTO, NON committato, suite completa NON eseguita):
+- A fatto in footprint_view.py: `_items_near` (QGraphicsView.items su un
+  quadrato di HIT_MARGIN_PX=4 px a schermo) per maniglie, testi, disegni e
+  menu dei disegni; isteresi con HOVER_KEEP_MARGIN_PX=12 sul bbox del
+  disegno; cursore SizeAll sul corpo. PRIORITA' della pressione corretta
+  durante i test: maniglia > testo > corpo (con «testo prima di tutto» a
+  zoom lontano l'etichetta Valore copriva le maniglie vicine).
+- B fatto: ancora centrale tolta (test riscritto: il corpo sposta il
+  disegno, nessuna maniglia «:-1»). La voce i18n «Ancora: trascinala...»
+  resta nel catalogo, non piu' usata.
+- C fatto: refresh solo se il nodo/delta cambia; tooltip una volta per
+  refresh; `_schedule_footprint_rewrite` (QTimer 0, coalescente) usato da
+  `_apply_footprint_drawings` e `_set_footprint_text_position`.
+- D fatto: footprint_view: DEFAULT_FINE_GRID_DIVISOR=10,
+  FINE_GRID_MIN_SCREEN_PX=5, puntini GRID_DOT_COLOR #4a4a63 esclusi i nodi
+  sulle linee principali; `set_fine_divisor/fine_divisor/fine_step/
+  fine_dots_visible`; snap_to_grid ora sulla griglia fine; testi trascinati
+  anch'essi sulla griglia fine (`_footprint_text_snap_mm`). Combo «1/10,
+  1/5, 1/2, 1/1» accanto all'unita' della griglia, salvata in config.json
+  come `draw_grid_divisor` (preferenza di vista, non di progetto),
+  disabilitata con la griglia spenta. i18n +1. Simbolo (agente, interrotto
+  dal limite d'uso a lavoro gia' scritto; test del pin rifatto dal
+  coordinatore con un vero trascinamento): DEFAULT_DRAWING_GRID_MM=0,254,
+  FINE_GRID_MIN_PX=5, colore 'grid_dots' nei due temi,
+  `_SymbolView.set_drawing_grid/fine_grid_visible`.
+- CONTRATTI DEI TEST aggiornati (motivo: il predefinito ora e' la griglia
+  fine): test_footprint_drawings (helper `_main_grid_snap` dove il caso e'
+  la griglia grossa; fixture con riscrittura immediata, la differita ha il
+  suo test), test_footprint_text_positions (testo su 0,1 mm con griglia
+  1 mm, 1 mm con divisore 1), test_symbol_palette_gui (due test fissano
+  2,54 esplicitamente). Nuovi test: presa a 3 px a scala 0,12 (e non a
+  12 px), isteresi, testo dentro rettangolo, puntini solo se leggibili,
+  riscrittura differita e accorpata; tests/test_symbol_drawing_grid.py (5).
+- Verifiche: mirati 120 verdi; fetta larga GUI (-k preview/footprint/
+  symbol/project_state/startup/start_page/workflow/grid/i18n/
+  documentation) 792 verdi + 2 corretti poi (47 verdi nel file). Resa
+  offscreen controllata a occhio.
+## FINE SESSIONE 13/10 (4) — branch `ADVANCED`, commit `9e41f39` (+ handoff), mergiato in `main`
+
+Committato su richiesta dell'utente («committa tutto, pusha e mergia in main»):
+griglia fine puntinata (footprint e simbolo), correzioni di fluidita' del
+trascinamento, ancora centrale tolta, camera mantenuta dopo le modifiche,
+colori predefiniti di KiCad per layer (disegni, serigrafia generata, combo,
+forma in corso), tasto destro su una maniglia che apre il menu del disegno
+con il sottomenu «Layer» colorato. Dettagli nelle voci qui sotto.
+SUITE COMPLETA (due meta', file ordinati e divisi a meta'): A 3396 verdi,
+7 saltati, 19 sottotest, 2 falliti; B 4047 verdi, 4 saltati, 2 xfail,
+3 falliti. I 5 falliti, tutti CORRETTI e ririprovati per file:
+(1-2) test_gui_block_d e test_project_tab_buttons: footprint finti senza
+`place_texts`, chiamato dal worker da `b99f835` (preesistente, nessun difetto
+del programma); (3) test_message_localization: due tooltip del simbolo
+(Riferimento/Nome, da `e9b9bf5`) senza voce di catalogo: aggiunte nelle 4
+lingue; (4) test_preview_grid: contratto di «Adatta alla vista» (ora
+`_fit_preview(force=True)`); (5) test_preview_review riconosce la
+serigrafia dal colore KiCad. Fetta GUI finale sul codice definitivo: 894
+verdi. La suite completa NON e' stata rilanciata per intero dopo le ultime
+correzioni (colori, tasto destro).
+TRAPPOLA: nei test, il segnale `drawing_context_requested` e' collegato al
+metodo legato originale: sostituire l'attributo della finestra non lo
+intercetta e apre il QMenu vero (il test resta appeso). Sostituire `QMenu`.
+APERTO (non autorizzato): cambio layer di REF**/Valore; marcatori gialli
+vicini al giallo della serigrafia (da rivedere se all'utente da' fastidio).
+
+- RICHIESTA (utente 13/10 sera, screenshot della combo layer): «a seconda del tipo dovrebbe
+  avere un colore diverso per capirlo»; scelta dell'utente: «i colori predefiniti di
+  KiCad». PIANO IN CORSO: tabella unica KICAD_LAYER_COLORS (F.SilkS #f2eda1, F.Fab
+  #afafaf, Cmts.User #5994dc, tema predefinito dell'editor PCB di KiCad) usata da:
+  disegni utente, linee di serigrafia GENERATE (oggi TEXT bianco, tre disegnatori),
+  quadratino colorato in ogni voce della combo layer, forma tratteggiata in corso nel
+  colore del layer scelto. Marcatori (punti, maniglie) restano gialli come nel simbolo:
+  compromesso dichiarato all'utente (giallo serigrafia vicino al giallo dei marcatori).
+  Commit/push/merge chiesti dall'utente: in attesa della seconda meta' della suite.
+- SEGNALAZIONE (utente 13/10 sera, provando l'app): «quando ridimensiono un oggetto,
+  es. il cerchio, non mantiene lo zoom e lo cambia». CAUSA: ogni ridisegno
+  dell'anteprima (`_draw_preview*`) finisce in `_fit_preview` che fa resetTransform +
+  fitInView; succede due volte: al rilascio (_apply_footprint_drawings) e quando la
+  riscrittura del .kicad_mod termina (_on_generated). Stesso difetto per testi e pad
+  modificati nell'anteprima. CORREZIONE IN CORSO (regola del simbolo, `auto_fit`):
+  FootprintView.auto_fit True finche' l'utente non zooma o sposta la camera; con
+  auto_fit False `_fit_preview` aggiorna solo il sceneRect e lascia la camera;
+  «Adatta alla vista» forza l'adattamento e rimette auto_fit; il cambio progetto
+  rimette auto_fit. La suite completa lanciata prima di questa correzione va
+  rilanciata almeno sui file toccati. FATTO: test aggiunto, camera mantenuta.
+- «COMPLETA TUTTO» (utente 13/10 sera): suite completa LANCIATA in due meta'
+  sequenziali (file di test ordinati e divisi a meta': .venv/claude-suite-A.txt
+  175 file, B.txt 176; log .venv/claude-suite-A6.log e B6.log). Poi riallineo
+  dei numeri e commit LOCALE su ADVANCED; push e merge in main solo su
+  conferma esplicita dell'utente.
+- DA FARE: suite completa in due meta'; conferma dell'utente sull'aspetto
+  (puntini, assenza dell'ancora) e sulla fluidita' nell'app reale.
+
 ## FINE SESSIONE 13/10 (3) — branch `ADVANCED`, commit `2e50ad9` (+ handoff), mergiato in `main`
 
 Dopo `b99f835`: punto 193 FATTO e committato (sezione «193» in fondo al
