@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `HASH_DA_INSERIRE` (+ handoff), mergiato in `main`, PC spento
+## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `1075897` (+ handoff), mergiato in `main`, PC spento
 
 Committato su richiesta dell'utente («quando hai terminato committa, pusha,
 mergia in main, torna qui e spegni il pc completamente»): footprint in bozza
