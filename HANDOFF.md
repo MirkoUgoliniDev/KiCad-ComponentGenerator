@@ -1,5 +1,121 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `HASH_DA_INSERIRE` (+ handoff), mergiato in `main`, PC spento
+
+Committato su richiesta dell'utente («quando hai terminato committa, pusha,
+mergia in main, torna qui e spegni il pc completamente»): footprint in bozza
+con Applica/Annulla come il simbolo (sezione sotto), revisione avversariale e
+tutti i suoi reperti corretti (F alto: «Rigenera modello 3D» usava i pad della
+bozza), 11 voci i18n (4 obsolete tolte). Suite completa sul codice finale:
+A 3866 verdi, 7 saltati, 19 sottotest; B 4225 verdi, 4 saltati, 2 xfail;
+0 falliti (totale 8091). Database dei profili invariato. File non tracciati
+lasciati fuori: rows_none_rev.pkl, tmp/, work/. APERTI: con cambio di «Area di
+lavoro» una bozza del SIMBOLO non si applica (scriverebbe il .kicad_sym nella
+cartella nuova): si resta; REF**/Value e testi del simbolo disegnati piu'
+piccoli che in KiCad; qt_fixtures congela le finestre distrutte; richieste
+vecchie (campi obbligatori, «Regole KLC», «Applica ai file»).
+
+## 2026-10-14 sera — FATTO: footprint in bozza con Applica/Annulla, come il simbolo (dopo ace444e/80ded50)
+
+Richiesta (screenshot della finestra del simbolo): «la stessa cosa se faccio
+modifiche nella scheda Footprint; se chiudo non ricevo avvisi, si chiude e
+basta». Spiegato all'utente che oggi il footprint salva ogni modifica subito
+(nulla da perdere). Scelta dell'utente: «Come il simbolo», confermata con il
+riepilogo e «OK, con recupero». Comportamento concordato:
+1. Disegni, posizioni dei testi (REF**/Valore) e modifiche ai pad restano in
+   BOZZA: l'anteprima li mostra, progetto e .kicad_mod non cambiano.
+2. Nella barra del footprint «Applica» e «Annulla» con le stesse icone e lo
+   stesso comportamento del simbolo (regola: stessa UX): Applica salva nel
+   progetto e riscrive il .kicad_mod; Annulla torna all'applicato. Ctrl+Z/Y
+   lavorano dentro la bozza.
+3. Chiusura/cambio progetto: la stessa finestra Applica/Scarta/Resta; con
+   bozze in simbolo E footprint la finestra le elenca entrambe.
+4. Scheda KiCad ed esportazione usano sempre l'applicato; con una bozza in
+   sospeso la scheda KiCad avvisa che le modifiche non sono incluse.
+5. Una nuova generazione/analisi con bozza in sospeso chiede prima di
+   applicare o scartare.
+6. Bozza salvata in un file di recupero come quella del simbolo: dopo un
+   crash compare «Recupera bozza» (riusare il meccanismo del simbolo).
+Progetti esistenti: tutto cio' che e' gia' nel progetto e' l'applicato.
+FATTO (agente, NON committato; tests/test_footprint_draft.py 23 test, 1565+261+496
+verdi nei lotti mirati): bozza = campi in memoria disegnati dall'anteprima,
+`_fp_applied` istantanea dell'applicato, `_project_state` scrive SEMPRE
+l'applicato; `_edit_footprint_draft`, `apply_footprint_draft` (un salvataggio +
+una riscrittura), `discard_footprint_draft` (annullabile); `_generate` ->
+`_generate_applied` dentro `_applied_footprint_in_memory`; domanda unica
+`_ask_pending_edits_choice(editors, can_apply)` con PENDING_EDITS_* (sostituisce
+SYMBOL_EDITS_*); `_finish_footprint_rewrite_now` all'uscita dopo Applica;
+recupero in `<progetto>/.footprint-draft.json` (services/footprint_draft.py),
+pulsante «Recupera bozza» nella barra del footprint; avviso nella scheda KiCad e
+WARN in component_check. conftest: uscita = «Resta», avvio = «Applica»
+(comportamento di prima per i test). Coordinatore: 8 voci i18n, 4 obsolete tolte.
+DUBBI dell'agente: modifiche fatte mentre una bozza di crash e' offerta non sono
+salvate nel recupero (niente istantanee come nel simbolo); «Recupera bozza» sta
+nella scheda Footprint, disattivata prima di un'acquisizione; percorso del
+dialogo pad dell'header non coperto dai test nuovi.
+Revisione e suite: vedi FINE SESSIONE 14/10 sera qui sopra.
+REVISIONE AVVERSARIALE della bozza (riproduzioni in scratchpad/review_fpdraft):
+ALTO F «Rigenera modello 3D» usa i pad della BOZZA (+ package mutato sul posto
+mentre un worker lo usa); MEDI B Applica all'uscita fallisce se cambia l'Area di
+lavoro (e la riscrittura andrebbe nella cartella nuova), A header: bozza dei pad
+invisibile dopo una generazione (_last_params congelato), E modifiche fatte
+mentre una bozza di crash e' offerta non salvate; BASSI C RecursionError nei
+lettori di bozza (anche symbol_draft), H Applica parziale simbolo+footprint,
+bozza dei pad scartata in silenzio da una riconciliazione, riscrittura persa
+uscendo durante la pipeline (da verificare). Tutti affidati all'agente.
+SUITE meta' A (prima delle correzioni): 3856 verdi, 0 falliti.
+ISTRUZIONE DELL'UTENTE (14/10 sera): «quando hai terminato committa, pusha,
+mergia in main, torna qui e spegni il pc completamente». Piano: correggere i
+reperti della revisione, suite verde, commit su ADVANCED + push, merge in main
++ push, ritorno su ADVANCED, `shutdown /s /t 60` (annullabile con
+`shutdown /a`). Se qualcosa resta rosso e non e' correggibile: nessun commit di
+codice rotto, solo handoff con lo stato, poi spegnimento.
+IMPLEMENTAZIONE IN CORSO (agente, non committata). Scelte: in memoria i campi
+(disegni, testi, header_pad_overrides, pins del package) SONO la bozza;
+`_fp_applied` e' la fotografia dell'applicato presa alla prima modifica e
+`_project_state` scrive sempre l'applicato (il salvataggio automatico non
+pubblica mai la bozza); `_generate` lavora sull'applicato se c'e' una bozza
+(la riscrittura differita o automatica non scrive mai la bozza nel
+.kicad_mod). Undo/redo tengono lo stato completo del footprint e restano dopo
+Applica (come il simbolo); Annulla e' annullabile con Ctrl+Z. File di
+recupero `<progetto>/.footprint-draft.json` (stesse regole del simbolo:
+legato all'applicato con l'impronta, mai cartelle create), pulsante
+«Recupera bozza» con menu «Scarta bozza». Una sola domanda Applica/Scarta/
+Resta per simbolo e/o footprint (`_ask_pending_edits_choice`); domanda
+separata all'avvio di generazione/analisi (`_ask_footprint_draft_before_start`,
+conftest: «Applica», equivalente al vecchio salvataggio immediato).
+STATO (agente): implementato, NON committato. tests/test_footprint_draft.py
+(23 verdi); contratti aggiornati con «CONTRACT CHANGED 2026-10-14» in
+test_footprint_drawings, test_footprint_text_positions, test_gui_review_fixes,
+test_gui_residual_fixes, test_package_pad_dialog, test_symbol_navigation,
+test_component_review_integration, conftest. Lotto mirato di 71 file: 1565
+verdi, 1 saltato. APERTO: 8 voci i18n nuove da aggiungere (FR/DE al
+coordinatore; test_i18n rosso finche' mancano) e 4 voci ora inutilizzate
+(«Disegno non salvato.», «Posizione del testo non salvata.», «Modifica pad
+non salvata.», «Modifica pad non salvata; il valore precedente è stato
+ripristinato.»). Suite completa non ancora eseguita.
+REVISIONE AVVERSARIALE (coordinatore) — correzioni IN CORSO: F `_regenerate_3d`
+usa la bozza dei pad (chiedere prima + applicato) e i pin del package vanno
+riassegnati con replace(), mai mutati (un worker puo' tenere l'oggetto); B
+Applica nella domanda di uscita con cambio di «Area di lavoro» deve scrivere
+nel progetto APERTO e mai nella cartella nuova; A anteprima pin-header dopo
+una generazione non mostra la bozza dei pad (`_last_params`); E modifiche
+fatte con una bozza da crash offerta vanno comunque salvate (bozza offerta
+tenuta a parte); C RecursionError nei lettori dei file di recupero; H Applica
+doppia: prima il footprint, poi il simbolo; LOW: avvisare quando una nuova
+analisi scarta la bozza dei pad; verificare la riscrittura in sospeso persa
+uscendo durante la pipeline.
+FATTO (NON committato): tutte le correzioni A-H + LOW. Pin del package
+riassegnati con `_rebind_package_pins`; `_regenerate_3d` chiede e usa
+l'applicato (il riavvio automatico non chiede, flag `_regen_3d_automatic`);
+cambio di cartella: Applica scrive nel progetto aperto
+(`_write_project_config_at`) e marca `footprint_file_stale` (salvato nel
+progetto, avviso nella scheda KiCad, tolto dal primo .kicad_mod scritto);
+stesso marchio uscendo con una riscrittura ancora in sospeso (caso pipeline
+VERIFICATO vero). File `.footprint-draft-kept.json` per le bozze offerte e
+scavalcate. test_footprint_draft 33 verdi; lotto mirato 1748 verdi + 3
+(2 photo_inventory poi corretti, i18n: 3 voci nuove al coordinatore).
+
 ## FINE SESSIONE 14/10 — branch `ADVANCED`, commit `ace444e` (+ handoff), mergiato in `main`
 
 Committato su richiesta dell'utente («committa, pusha e mergia in main»): tutto

@@ -4,7 +4,11 @@ from tests.test_symbol_integration import setup_board
 
 #: The real question, captured at import: conftest answers it with «Resta» in
 #: every test so an unattended window never blocks.
-_REAL_ASK = MainWindow._ask_pending_symbol_choice
+#: CONTRACT CHANGED 2026-10-14 (footprint draft, user): one question covers
+#: the symbol and the footprint, `_ask_pending_edits_choice(editors, can_apply)`
+#: with the PENDING_EDITS_* answers; with only the symbol pending it asks
+#: exactly what `_ask_pending_symbol_choice` asked.
+_REAL_ASK = MainWindow._ask_pending_edits_choice
 
 
 def test_unapplied_symbol_prevents_navigation_and_preserves_draft(window, monkeypatch):
@@ -18,17 +22,17 @@ def test_unapplied_symbol_prevents_navigation_and_preserves_draft(window, monkey
     # CONTRACT CHANGED 2026-10-14 (user): a centred modal asks instead of a
     # status-bar sentence; «Resta» keeps the draft and the project.
     asked = []
-    monkeypatch.setattr(window, "_ask_pending_symbol_choice",
-                        lambda can_apply: asked.append(can_apply) or window.SYMBOL_EDITS_STAY)
+    monkeypatch.setattr(window, "_ask_pending_edits_choice",
+                        lambda editors, can_apply: asked.append((editors, can_apply)) or window.PENDING_EDITS_STAY)
     assert not window._can_leave_project()
-    assert asked == [True]
+    assert asked == [(("symbol",), True)]
     assert window.tabs.currentIndex() == TAB_SYMBOL
     assert tab.draft_rows() == draft
     assert window.pinout == before
     tab.cancel_button.click()
     assert not tab.has_pending_edits()
     assert window._can_leave_project()
-    assert asked == [True], "no question without pending edits"
+    assert asked == [(("symbol",), True)], "no question without pending edits"
 
 
 def test_the_modal_applies_or_discards_and_then_leaves(window, monkeypatch):
@@ -37,13 +41,13 @@ def test_the_modal_applies_or_discards_and_then_leaves(window, monkeypatch):
     tab = window.symbol_tab
     before = deepcopy(window.pinout)
     tab.place_pin('1', 50.8, 25.4)
-    monkeypatch.setattr(window, "_ask_pending_symbol_choice",
-                        lambda can_apply: window.SYMBOL_EDITS_DISCARD)
+    monkeypatch.setattr(window, "_ask_pending_edits_choice",
+                        lambda editors, can_apply: window.PENDING_EDITS_DISCARD)
     assert window._can_leave_project()
     assert not tab.has_pending_edits() and window.pinout == before, "discarded"
     tab.place_pin('1', 50.8, 25.4)
-    monkeypatch.setattr(window, "_ask_pending_symbol_choice",
-                        lambda can_apply: window.SYMBOL_EDITS_APPLY)
+    monkeypatch.setattr(window, "_ask_pending_edits_choice",
+                        lambda editors, can_apply: window.PENDING_EDITS_APPLY)
     assert window._can_leave_project()
     assert not tab.has_pending_edits()
     assert window.pinout[0]['symbol_position'] == [50.8, 25.4], "applied"
@@ -57,10 +61,10 @@ def test_an_apply_answer_with_invalid_edits_stays(window, monkeypatch):
     tab.place_pin('1', 50.8, 25.4)
     monkeypatch.setattr(tab, "can_apply", lambda: False)
     asked = []
-    monkeypatch.setattr(window, "_ask_pending_symbol_choice",
-                        lambda can_apply: asked.append(can_apply) or window.SYMBOL_EDITS_APPLY)
+    monkeypatch.setattr(window, "_ask_pending_edits_choice",
+                        lambda editors, can_apply: asked.append((editors, can_apply)) or window.PENDING_EDITS_APPLY)
     assert not window._can_leave_project()
-    assert asked == [False] and tab.has_pending_edits()
+    assert asked == [(("symbol",), False)] and tab.has_pending_edits()
 
 
 def test_the_modal_has_three_choices_and_stays_on_escape(window, monkeypatch):
@@ -76,13 +80,13 @@ def test_the_modal_has_three_choices_and_stays_on_escape(window, monkeypatch):
         seen["escape"] = box.escapeButton().text()
         return 0
     monkeypatch.setattr(QMessageBox, "exec", fake_exec)
-    monkeypatch.setattr(MainWindow, "_ask_pending_symbol_choice", _REAL_ASK)
-    assert window._ask_pending_symbol_choice(False) == window.SYMBOL_EDITS_STAY
+    monkeypatch.setattr(MainWindow, "_ask_pending_edits_choice", _REAL_ASK)
+    assert window._ask_pending_edits_choice(("symbol",), False) == window.PENDING_EDITS_STAY
     texts = [window.i18n.text(t) for t in ("Applica", "Scarta", "Resta")]
     assert sorted(seen["buttons"]) == sorted(texts)
     assert seen["default"] == seen["escape"] == window.i18n.text("Resta")
     assert seen["apply_enabled"] is False
-    assert window._ask_pending_symbol_choice(True) == window.SYMBOL_EDITS_STAY
+    assert window._ask_pending_edits_choice(("symbol",), True) == window.PENDING_EDITS_STAY
     assert seen["apply_enabled"] is True
 
 

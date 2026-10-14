@@ -105,7 +105,7 @@ def preview(window, monkeypatch):
     # The .kicad_mod rewrite runs on the next event-loop turn; these tests
     # check what is rewritten, so the turn is run right away.
     monkeypatch.setattr(window, "_schedule_footprint_rewrite",
-                        lambda: window._generate(footprint_only=True))
+                        lambda **_kwargs: window._generate(footprint_only=True))
     window._draw_preview()
     assert _text_items(window), "the preview must draw the texts for these tests"
     return window, saves, generations
@@ -150,9 +150,14 @@ def test_a_drop_snaps_to_the_preview_grid_saves_redraws_and_rewrites(preview):
     # 1 mm grid by default; with divisor 1 they take the main grid.
     window._on_footprint_text_moved("Reference", 3.43 * 20, -4.58 * 20)
     assert window.footprint_text_positions == {"Reference": (3.4, -4.6)}
-    assert saves == [True] and generations == [{"footprint_only": True}]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the drop is a draft
+    # edit, drawn at once; «Applica» saves it and rewrites the .kicad_mod once.
+    assert saves == [] and generations == []
     anchor = _text_items(window)["Reference"].pos()
     assert (anchor.x(), anchor.y()) == (pytest.approx(68), pytest.approx(-92))
+    assert window._project_state()["footprint_texts"] == {}, "the file keeps the applied state"
+    assert window.apply_footprint_draft()
+    assert saves == [True] and generations == [{"footprint_only": True}]
     assert window._project_state()["footprint_texts"] == {"Reference": [3.4, -4.6]}
     window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
     window._on_footprint_text_moved("Reference", 3.43 * 20, -4.58 * 20)
@@ -201,17 +206,29 @@ def test_a_left_press_on_the_background_still_pans(preview):
 
 def test_the_default_position_comes_back_and_a_failed_save_keeps_the_previous_choice(preview, monkeypatch):
     window, saves, generations = preview
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): each change is a
+    # draft edit, saved and rewritten by «Applica»; a failed save keeps the
+    # draft (as the symbol's `reject_apply`) instead of the previous choice.
     window._on_footprint_text_moved("Value", 0, 100)
     assert window.footprint_text_positions == {"Value": (0.0, 5.0)}
+    assert window.apply_footprint_draft()
     assert window._set_footprint_text_position("Value", None)
-    assert window.footprint_text_positions == {} and len(generations) == 2
+    assert window.footprint_text_positions == {}
+    assert window.apply_footprint_draft()
+    assert len(generations) == 2 and len(saves) == 2
     assert window._set_footprint_text_position("Value", None), "already default: nothing to do"
+    assert not window.has_pending_footprint_edits()
+    assert window.apply_footprint_draft()
     assert len(saves) == 2, "no save when nothing changed"
     from PyQt6.QtWidgets import QMessageBox
+    warnings = []
     monkeypatch.setattr(window, "_save_project_config", lambda force=False: False)
-    monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
-    assert not window._set_footprint_text_position("Value", (1.0, 1.0))
-    assert window.footprint_text_positions == {}, "the previous choice stays when the project is not written"
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args))
+    assert window._set_footprint_text_position("Value", (1.0, 1.0))
+    assert not window.apply_footprint_draft()
+    assert warnings, "the failed apply is said"
+    assert window.footprint_text_positions == {"Value": (1.0, 1.0)}, "the draft stays to apply later"
+    assert window.has_pending_footprint_edits()
     assert len(generations) == 2, "nothing rewritten"
 
 

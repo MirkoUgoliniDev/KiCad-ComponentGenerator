@@ -2,7 +2,8 @@
 
 Free drawings (line, rectangle, circle, arc, text) on a chosen layer
 (F.SilkS printed, F.Fab documentation, Cmts.User comments) live beside the
-generated footprint, like the pad overrides: saved in the project under
+generated footprint, like the pad overrides: kept in the footprint draft
+until «Applica» (user, 2026-10-14), then saved in the project under
 `footprint_drawings`, validated on load, drawn in the 2D preview and
 appended to the exported .kicad_mod. No numbered pads: a pad must match a
 symbol pin, so it is not free drawing.
@@ -135,7 +136,7 @@ def preview(window, monkeypatch):
     # test_the_rewrite_after_an_edit_is_deferred_and_coalesced): these tests
     # check WHAT is rewritten, so the turn is run right away.
     monkeypatch.setattr(window, "_schedule_footprint_rewrite",
-                        lambda: window._generate(footprint_only=True))
+                        lambda **_kwargs: window._generate(footprint_only=True))
     window._draw_preview()
     return window, saves, generations
 
@@ -163,8 +164,14 @@ def test_an_armed_rectangle_closes_on_its_second_click_and_persists(preview):
     # Drawings take the fine grid (1/10 of the 1 mm grid), not the pad grid.
     assert window.footprint_drawings == [{"kind": "rectangle", "layer": "F.SilkS",
                                           "width": 0.12, "points": [[1.2, 1.2], [4.9, 2.8]]}]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert saves == [] and generations == []
+    assert _drawing_items(window), "the preview draws the drafted rectangle"
+    assert window._project_state()["footprint_drawings"] == [], "the file keeps the applied list"
+    assert window.apply_footprint_draft()
     assert saves == [True] and generations == [{"footprint_only": True}]
-    assert _drawing_items(window), "the preview draws the stored rectangle"
     assert window._project_state()["footprint_drawings"] == window.footprint_drawings
 
 
@@ -178,6 +185,11 @@ def test_the_line_collects_clicks_until_asked_to_finish(preview):
     window._on_footprint_draw_finish()
     assert len(window.footprint_drawings) == 1
     assert window.footprint_drawings[0]["points"] == [[0, 0], [2, 0], [2, 2]]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert not generations
+    window.apply_footprint_draft()
     assert generations, "the .kicad_mod is rewritten"
 
 
@@ -261,6 +273,11 @@ def test_the_context_menu_deletes_the_drawing(preview, monkeypatch):
     monkeypatch.setattr(gui, "QMenu", FakeMenu)
     window._footprint_drawing_context_menu(0)
     assert window.footprint_drawings == []
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert not saves and not generations
+    window.apply_footprint_draft()
     assert saves and generations
 
 
@@ -321,6 +338,11 @@ def test_real_mouse_clicks_draw_a_circle_through_the_view(preview):
     assert window._fp_draw_tool is None, "the circle closed on its second click"
     assert window.footprint_drawings and window.footprint_drawings[0]["kind"] == "circle"
     assert _drawing_items(window), "the circle is drawn in the preview"
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert not generations
+    window.apply_footprint_draft()
     assert generations
 
 
@@ -558,6 +580,11 @@ def test_hovering_a_drawing_reveals_its_handles_and_a_drag_moves_the_point(previ
     assert window._fp_handle_drag == (0, 1, (5.0, 4.0))
     send(QEvent.Type.MouseButtonRelease, 6.3 * 20, 4.8 * 20, Qt.MouseButton.LeftButton)
     assert window.footprint_drawings[0]["points"] == [[0, 0], [6.0, 5.0]]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert saves == [] and generations == []
+    window.apply_footprint_draft()
     assert saves == [True] and generations == [{"footprint_only": True}]
     assert window._fp_handle_drag is None
 
@@ -625,11 +652,17 @@ def test_the_body_moves_the_whole_drawing_without_a_centre_anchor(preview):
     assert window._fp_handle_drag == (0, -1, (1.0, 0.0))
     send(QEvent.Type.MouseButtonRelease, 6.2 * 20, 6.1 * 20, Qt.MouseButton.LeftButton)
     assert window.footprint_drawings[0]["points"] == [[2.0, 5.0], [6.0, 7.0]]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert saves == [] and generations == []
+    window.apply_footprint_draft()
     assert saves == [True] and generations == [{"footprint_only": True}]
-    # A drop on the grab node changes nothing.
+    # A drop on the grab node changes nothing: no new draft, no save.
     send(QEvent.Type.MouseButtonPress, 6 * 20, 6 * 20, Qt.MouseButton.LeftButton)
     send(QEvent.Type.MouseButtonRelease, 6 * 20, 6 * 20, Qt.MouseButton.LeftButton)
     assert window.footprint_drawings[0]["points"] == [[2.0, 5.0], [6.0, 7.0]] and len(saves) == 1
+    assert not window.has_pending_footprint_edits()
     # A text has one point only: its handle is the only one.
     window.footprint_drawings = validate_footprint_drawings([record("text", ((1, 1),), text="X")])
     window._draw_preview()
@@ -669,7 +702,12 @@ def test_undo_and_redo_walk_the_drawing_history_like_the_symbol_editor(preview):
     window._apply_footprint_drawings(window.footprint_drawings + validate_footprint_drawings(
         [record("text", ((1, 1),), text="X")]))
     assert not enabled(window.btn_fp_redo)
-    assert len(saves) == 6, "every step, undo and redo included, is saved"
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert saves == [], "every step, undo and redo included, stays in the draft"
+    assert window.apply_footprint_draft()
+    assert saves == [True], "one save for the whole draft"
 
 
 def test_delete_and_duplicate_act_on_the_hovered_drawing(preview):
@@ -704,7 +742,12 @@ def test_layer_and_width_change_through_the_menu_keep_the_record_valid(preview):
     assert window.footprint_drawings[0]["width"] == 0.25
     window._set_drawing_field(0, "layer", "F.Cu")       # not a drawing layer: refused
     window._set_drawing_field(0, "width", 0)
-    assert window.footprint_drawings[0]["layer"] == "F.Fab" and len(saves) == 2
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
+    # draft (nothing saved, nothing rewritten); «Applica» saves it once and
+    # rewrites the .kicad_mod once.
+    assert window.footprint_drawings[0]["layer"] == "F.Fab" and saves == []
+    window.apply_footprint_draft()
+    assert len(saves) == 1
     state = deepcopy(window._project_state())
     window._apply_project_state(state)
     assert not window.btn_fp_undo.isEnabledTo(window.btn_fp_undo.parentWidget()),         "a project load starts a fresh history"
@@ -815,14 +858,22 @@ def test_the_rewrite_after_an_edit_is_deferred_and_coalesced(window, qapp, monke
     generations = []
     monkeypatch.setattr(window, "_generate", lambda **kwargs: generations.append(kwargs) or True)
     monkeypatch.setattr(window, "_project_has_footprint", lambda: True)
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): edits alone rewrite
+    # nothing; the rewrite follows «Applica», still deferred and coalesced.
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
     window._apply_footprint_drawings(validate_footprint_drawings([record(), record("circle", ((0, 0), (1, 0)))]))
+    qapp.processEvents()
+    assert generations == [], "a draft is not written"
+    window.apply_footprint_draft()
+    window._set_footprint_text_position("Reference", (0.0, -3.0))
+    window.apply_footprint_draft()
     assert generations == [], "nothing rewritten before the event loop turns"
     qapp.processEvents()
     assert generations == [{"footprint_only": True}], "one rewrite for the burst"
     # Negative: no footprint yet, nothing to rewrite.
     monkeypatch.setattr(window, "_project_has_footprint", lambda: False)
     window._apply_footprint_drawings([])
+    window.apply_footprint_draft()
     qapp.processEvents()
     assert generations == [{"footprint_only": True}]
 
@@ -962,7 +1013,10 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     saves.clear()
     _send(view, QEvent.Type.MouseButtonPress, 10 * 20, 10 * 20, Qt.MouseButton.RightButton)
     assert menus, "the right click on the handle opened the drawing menu"
-    assert window.footprint_drawings[0]["layer"] == "F.Fab" and saves == [True]
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): saved on «Applica».
+    assert window.footprint_drawings[0]["layer"] == "F.Fab" and saves == []
+    window.apply_footprint_draft()
+    assert saves == [True]
     menus.clear()
     _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.RightButton)
     assert menus == [], "no drawing there: no drawing menu"

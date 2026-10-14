@@ -43,5 +43,7 @@ def load_draft(path, baseline):
         if [str(r.get('pin')) for r in rows] != [str(r.get('pin')) for r in baseline]:
             return None
         return rows if rows != baseline else None
-    except (ValueError, KeyError, AttributeError):
+    except (ValueError, KeyError, AttributeError, RecursionError):
+        # RecursionError: a deeply nested file (well under the size bound)
+        # exceeds the JSON parser's depth; it is unreadable, not fatal.
         return None

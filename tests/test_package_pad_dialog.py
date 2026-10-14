@@ -52,8 +52,16 @@ def test_a_holed_pad_offers_the_drill_and_the_value_reaches_package_and_footprin
     assert window.package_geometry.pins[index].drill_mm == 0.5
     folder = window._project_dir()
     footprint = folder / f"{folder.name}.pretty" / f"{folder.name}.kicad_mod"
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the pad edit is a
+    # draft until «Applica», which saves the project and rewrites the file.
+    config = folder / PROJECT_CONFIG_NAME
+    assert not config.is_file() or '"drill_mm": 0.5' not in config.read_text(encoding="utf-8")
+    assert not footprint.is_file() or "(drill 0.5)" not in footprint.read_text(encoding="utf-8")
+    assert window.apply_footprint_draft()
+    from PyQt6.QtWidgets import QApplication
+    QApplication.processEvents()      # the rewrite runs on the next event-loop turn
     assert "(drill 0.5)" in footprint.read_text(encoding="utf-8")
-    saved = (folder / PROJECT_CONFIG_NAME).read_text(encoding="utf-8")
+    saved = config.read_text(encoding="utf-8")
     assert '"drill_mm": 0.5' in saved
 
 

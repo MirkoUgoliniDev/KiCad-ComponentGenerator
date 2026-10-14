@@ -37,6 +37,10 @@ def _turns(qapp, count=5):
 
 
 # ── A3: a footprint edit saved while a worker runs is not lost ────────────
+# CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit is a draft
+# until «Applica»; the rewrite rules below (deferred, coalesced, retried
+# after a worker, held by the pipeline) now start from the apply, so each
+# test applies its edits where they used to be saved at once.
 
 @pytest.fixture
 def busy_window(window, monkeypatch, qapp):
@@ -61,9 +65,11 @@ def test_an_edit_made_while_busy_is_written_once_when_the_worker_finishes(busy_w
     busy["on"] = True
     first = validate_footprint_drawings([record()])
     window._apply_footprint_drawings(first)
+    window.apply_footprint_draft()
     _turns(qapp)
     second = validate_footprint_drawings([record(), record("circle", ((0, 0), (1, 0)))])
     window._apply_footprint_drawings(second)
+    window.apply_footprint_draft()
     _turns(qapp)
     assert started == [], "nothing can start while another worker runs"
     assert window._fp_rewrite_dirty, "the edit is remembered, not dropped"
@@ -98,6 +104,7 @@ def test_a_text_move_and_a_pad_edit_while_busy_are_retried(busy_window, qapp, mo
     assert window._set_footprint_text_position("Reference", (1.0, 2.0))
     _drive(monkeypatch, drill=0.3)
     window._edit_package_pad(_tht_index(window))
+    window.apply_footprint_draft()
     _turns(qapp)
     assert started == []
     busy["on"] = False
@@ -113,6 +120,7 @@ def test_any_generation_start_covers_the_pending_rewrite(busy_window, qapp):
     window, busy, started = busy_window
     busy["on"] = True
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp)
     assert window._generate(footprint_only=True) is False
     assert window._fp_rewrite_dirty, "a refused start keeps the edit pending"
@@ -128,6 +136,9 @@ def test_an_idle_window_rewrites_on_the_next_turn(busy_window, qapp):
     """Positive baseline: nothing running, the rewrite starts without any finish."""
     window, _busy, started = busy_window
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    _turns(qapp)
+    assert started == [] and not window._fp_rewrite_dirty, "a draft is not written"
+    window.apply_footprint_draft()
     _turns(qapp)
     assert len(started) == 1 and not window._fp_rewrite_dirty
 
@@ -147,6 +158,7 @@ def test_a_start_that_raises_is_attempted_once(window, monkeypatch, qapp):
     errors = []
     monkeypatch.setattr(window, "_on_error", lambda message: errors.append(message))
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp, 50)
     assert len(attempts) == 1 and len(errors) == 1
     assert not window._fp_rewrite_dirty
@@ -170,9 +182,11 @@ def test_a_later_edit_after_a_failed_start_is_attempted_again(window, monkeypatc
     monkeypatch.setattr(window, "_project_has_footprint", lambda: True)
     monkeypatch.setattr(window, "_on_error", lambda message: None)
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp, 10)
     window._apply_footprint_drawings(validate_footprint_drawings(
         [record(), record("circle", ((0, 0), (1, 0)))]))
+    window.apply_footprint_draft()
     _turns(qapp, 10)
     assert len(attempts) == 2
 
@@ -191,6 +205,7 @@ def test_invalid_parameters_are_logged_once_and_drop_the_flag(busy_window, qapp,
 
     monkeypatch.setattr(window, "_validate_output_name", refuse)
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp)
     for finished in (window._on_regen_3d_finished, window._on_terminal_detail_finished,
                      window._on_generation_finished):
@@ -208,6 +223,7 @@ def test_a_drawing_rewrites_only_an_existing_footprint(busy_window, qapp, monkey
     monkeypatch.setattr(window, "_project_has_footprint", lambda: has_file)
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
     assert window._set_footprint_text_position("Reference", (1.0, 2.0))
+    window.apply_footprint_draft()
     _turns(qapp)
     assert len(started) == (1 if has_file else 0)
     assert not window._fp_rewrite_dirty
@@ -220,6 +236,7 @@ def test_a_pad_edit_without_a_footprint_file_still_rewrites(busy_window, qapp, m
     monkeypatch.setattr(window, "_project_has_footprint", lambda: False)
     _drive(monkeypatch, drill=0.3)
     window._edit_package_pad(_tht_index(window))
+    window.apply_footprint_draft()
     _turns(qapp)
     assert len(started) == 1
 
@@ -250,6 +267,7 @@ def test_an_extraction_does_not_rewrite_before_its_review(busy_window, qapp, mon
     window, busy, started = busy_window
     busy["on"] = True
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp)
     assert window._fp_rewrite_dirty and started == []
     busy["on"] = False
@@ -266,6 +284,7 @@ def test_the_pipeline_window_holds_a_rewrite_until_it_ends(busy_window, qapp):
     window._auto_generation_params = object()
     try:
         window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+        window.apply_footprint_draft()
         _turns(qapp)
         assert started == [] and window._fp_rewrite_dirty
     finally:
@@ -291,6 +310,7 @@ def test_an_abandoned_extraction_still_retries(busy_window, qapp, monkeypatch):
     window, busy, started = busy_window
     busy["on"] = True
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp)
     busy["on"] = False
     monkeypatch.setattr(window, "_analysis_result_is_current", lambda: False)
@@ -373,23 +393,31 @@ def test_a_list_change_during_a_drag_cancels_its_drop(preview, edit):
 
 
 def test_a_failed_save_keeps_the_undo_and_redo_steps(preview, monkeypatch):
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): undo and redo move
+    # inside the draft and save nothing, so they cannot fail on the project
+    # file; the save is «Applica», and a failed one keeps the draft and both
+    # stacks (positive: a working save applies and still keeps the history).
     window = preview
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
     window._apply_footprint_drawings([])
     assert len(window._fp_drawings_undo) == 2
-    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *a, **k: None)
+    warnings = []
+    monkeypatch.setattr(gui.QMessageBox, "warning", lambda *a, **k: warnings.append(a))
     real_save = window._save_project_config
     monkeypatch.setattr(window, "_save_project_config", lambda force=False: False)
     window._undo_footprint_drawing()
-    assert len(window._fp_drawings_undo) == 2 and window.footprint_drawings == []
-    # Positive: once saving works, the same undo applies and pops one step.
-    monkeypatch.setattr(window, "_save_project_config", real_save)
-    window._undo_footprint_drawing()
     assert len(window._fp_drawings_undo) == 1 and len(window.footprint_drawings) == 1
     assert len(window._fp_drawings_redo) == 1
-    monkeypatch.setattr(window, "_save_project_config", lambda force=False: False)
+    assert not window.apply_footprint_draft() and warnings, "the failed apply is said"
+    assert len(window._fp_drawings_undo) == 1 and len(window._fp_drawings_redo) == 1
+    assert len(window.footprint_drawings) == 1 and window.has_pending_footprint_edits()
+    monkeypatch.setattr(window, "_save_project_config", real_save)
+    assert window.apply_footprint_draft()
+    assert not window.has_pending_footprint_edits()
+    assert len(window._fp_drawings_undo) == 1 and len(window._fp_drawings_redo) == 1, \
+        "the history survives the apply, as in the symbol editor"
     window._redo_footprint_drawing()
-    assert len(window._fp_drawings_redo) == 1, "a failed redo keeps its step"
+    assert window.footprint_drawings == [] and window.has_pending_footprint_edits()
 
 
 def test_the_handles_come_back_on_a_moved_drawing(preview):
@@ -826,6 +854,7 @@ def test_a_half_typed_working_folder_is_not_where_output_goes(window, monkeypatc
     busy = {"on": True}
     monkeypatch.setattr(window, "_background_work_running", lambda: busy["on"])
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    window.apply_footprint_draft()
     _turns(qapp)
     field = window.field_library_root
     field.setFocus()
