@@ -200,7 +200,9 @@ def test_the_closed_hole_stays_inside_the_body_on_every_edge():
 
 def test_footprint_writes_valid_file(tmp_path):
     fp = build_castellated_module(rs485_module())
-    target = tmp_path / "mod.pretty" / "RS485.kicad_mod"
+    # CONTRACT CHANGED 2026-10-14 (L-4): Footprint.save refuses a file not
+    # named <footprint name>.kicad_mod, the name KiCad resolves it by.
+    target = tmp_path / "mod.pretty" / f"{fp.name}.kicad_mod"
     fp.save(str(target))
     content = target.read_text(encoding="utf-8")
     assert content.startswith("(footprint")

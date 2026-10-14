@@ -79,9 +79,34 @@ def dev_kit(style=CONTACT_THROUGH_HOLE, row_spacing=22.86, **changes):
 _DESCRIPTION_PROPERTY = re.compile(r'\(property "Description" "[^"]*"')
 
 
+#: CONTRACT CHANGED 2026-10-14 (decision D1): without a user choice the
+#: Reference/Value texts are placed above/below the footprint envelope
+#: (core.footprint.default_text_positions) instead of the fixed (0, -2) and
+#: (0, 2) of the pinned digests. The normaliser puts those two anchors back,
+#: and nothing else; the D1 placement itself is verified in
+#: tests/test_kicad_residual_fixes.py and by
+#: test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides.
+def _legacy_text_anchors(fp):
+    from dataclasses import replace
+    from kicadgen.core.footprint import DEFAULT_TEXT_POSITIONS
+    return replace(fp, reference_at=DEFAULT_TEXT_POSITIONS["Reference"],
+                   value_at=DEFAULT_TEXT_POSITIONS["Value"])
+
+
 def _uuidless(fp):
-    text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
+    text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(fp).render())
     return _DESCRIPTION_PROPERTY.sub('(property "Description" ""', text, count=1)
+
+
+def test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides():
+    """@brief Folding the D1 anchors back changes the two (at ...) of Reference/Value only."""
+    fp = build_castellated_module(rs485())
+    plain = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
+    folded = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(fp).render())
+    assert fp.reference_at != (0.0, -2.0) and fp.value_at != (0.0, 2.0)
+    changed = [(a, b) for a, b in zip(plain.splitlines(), folded.splitlines()) if a != b]
+    assert len(plain.splitlines()) == len(folded.splitlines()) and len(changed) == 2
+    assert all(a.strip().startswith("(at ") for a, _ in changed)
 
 
 def test_the_description_property_is_the_only_text_the_normaliser_hides():

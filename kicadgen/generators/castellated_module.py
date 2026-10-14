@@ -63,7 +63,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import Footprint, FpRect, FpText, Pad
+from ..core.footprint import Footprint, FpRect, FpText, Pad, fab_reference_text
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
@@ -2317,6 +2317,19 @@ def _box_distance(a: tuple, b: tuple) -> float:
     return math.hypot(dx, dy)
 
 
+def preview_grid_origin(params: CastellatedModuleParams) -> tuple:
+    """@brief Origin of the 2D preview grid of a castellated module, mm.
+
+    @param params Module description.
+    @return Centre of the first contact pad_positions yields (the point the
+        preview grid has always passed through, user decision 2026-10-09),
+        or (0, 0) without contacts. Used by the generator for the default
+        text anchors and by the preview drawer for its grid: one definition.
+    """
+    first = next(iter(pad_positions(params)), None)
+    return (0.0, 0.0) if first is None else (float(first.x), float(first.y))
+
+
 def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     """@brief Build the KiCad footprint of the module described by `params`.
 
@@ -2350,7 +2363,8 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         carries no `pad_prop_castellated`: this footprint is the land on the HOST board, which is not cut by any
         board edge; the castellation belongs to the module and is in the 3D.
     @note half_hole and through_hole contacts are emitted exactly as before
-        (byte-identical output).
+        (byte-identical output, apart from the Reference/Value anchors that
+        core.footprint.default_text_positions derives since decision D1).
     """
     params.validate()
 
@@ -2406,8 +2420,8 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
 
     # Riferimento al centro del corpo su F.Fab (KLC F5.2): la serigrafia
     # finisce coperta a modulo montato, F.Fab resta leggibile nei disegni
-    # di assemblaggio.
-    fp.add_graphic(FpText(kind="user", text="${REFERENCE}", at=(0, 0), layer="F.Fab"))
+    # di assemblaggio. Same helper as every other generator.
+    fp.add_graphic(fab_reference_text((0, 0), (params.body_length, params.body_width)))
 
     # Il marcatore indica il pad numerato "1" (o il numero piu' basso), non il
     # primo pad prodotto: con reverse=True o con i lati elencati a partire da
@@ -2511,4 +2525,6 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         # ai moduli misti e' confermata dall'utente (2026-09-24, scelta «A»):
         # anche quelli si posano e si saldano a rifusione, senza pin nei fori.
         fp.description = f"{fp.description} {SMD_WITH_DRILLED_PADS_NOTE}".strip()
-    return fp
+    # Decision D1 (user, 2026-10-14): Reference above and Value below the
+    # envelope; a user-chosen position is applied afterwards (place_texts).
+    return fp.place_default_texts(preview_grid_origin(params))

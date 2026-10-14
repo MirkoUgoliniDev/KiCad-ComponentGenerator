@@ -717,7 +717,10 @@ def test_a_user_name_with_spaces_needs_a_following_separator(text, expected):
     B * 2 + "fileserver" + B + "Projects" + B + "KiCad" + B + "board.kicad_pcb",
     B * 2 + "." + B + "pipe" + B + "kicad-ipc",
     B * 2 + "?" + B + "C:" + B + "Windows" + B + "x.dll",
-    "x=C:" + B * 2 + "srv" + B + "home" + B + "mario",     # not a token start
+    # A drive path as repr() writes it (every separator doubled). The mixed
+    # 2/1 form is a UNC shape and is masked since 2026-10-14 (see
+    # tests/test_gui_residual_fixes.py).
+    "x=C:" + B * 2 + "srv" + B * 2 + "home" + B * 2 + "mario",
 ])
 def test_non_user_unc_and_escapes_are_untouched(text):
     assert cr.scrub(text) == text

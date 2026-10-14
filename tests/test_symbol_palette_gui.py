@@ -859,10 +859,13 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         assert tab.start_shape('text')
         assert tab.add_shape_point(2.6, 5.1) and tab.graphics() == [], 'cancelled: nothing inserted'
         assert tab.shape_tool() == 'text', 'the tool stays armed'
-        answers.append(('   ', 1.27, 'center'))
+        # CONTRACT CHANGED 2026-10-14: the dialog answers (text, size); the
+        # justification choice is gone, a drawn text is anchored at its
+        # bottom-left corner (user request).
+        answers.append(('   ', 1.27))
         tab.add_shape_point(2.6, 5.1)
         assert tab.graphics() == [] and 'Testo non valido' in tab.status.text()
-        answers.append(('IN+', 1.27, 'left'))
+        answers.append(('IN+', 1.27))
         tab.add_shape_point(2.6, 5.1)
         (text,) = tab.graphics()
         assert text['primitives'][0]['kind'] == 'text' and (text['x'], text['y']) == (2.54, 5.08)
@@ -882,9 +885,9 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         assert tab.graphics()[0]['x'] == 2.54
         assert any(isinstance(item, QGraphicsSimpleTextItem) and item.text() == 'IN+' and item.data(0) == ('graphic', 0)
                    for item in tab.view.scene().items()), 'drawn and tagged like any element'
-        answers.append(('OUT', 2.54, 'right'))
+        answers.append(('OUT', 2.54))
         assert tab.edit_text(0) and tab.graphics()[0]['primitives'][0] | {} == dict(
-            tab.graphics()[0]['primitives'][0], text='OUT', size=2.54, justify='right')
+            tab.graphics()[0]['primitives'][0], text='OUT', size=2.54, justify='left', vjustify='bottom')
         assert tab._edit_graphic(0, 'rotate', 90)
         assert any(isinstance(item, QGraphicsSimpleTextItem) and item.text() == 'OUT' and item.rotation() == -90
                    for item in tab.view.scene().items()), 'a turned text is drawn vertical'
@@ -894,7 +897,7 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         pins, body = symbol_inputs(tab.draft_rows())
         body_text = serialize_symbol('Board', pins, body=body, graphics=tab.graphics())
         # KiCad stores symbol text angles in tenths of a degree (B1, 2026-10-13).
-        assert '(text "OUT" (at 2.54 5.08 900) (effects (font (size 2.54 2.54)) (justify right)))' in body_text
+        assert '(text "OUT" (at 2.54 5.08 900) (effects (font (size 2.54 2.54)) (justify left bottom)))' in body_text
         assert tab.palette._tool_actions['text'].data() == 'text'
     finally:
         tab.deleteLater()

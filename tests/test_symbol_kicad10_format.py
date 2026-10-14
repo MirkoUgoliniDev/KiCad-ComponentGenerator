@@ -16,7 +16,7 @@ import pytest
 from kicadgen.core.footprint import Footprint, FpRect, Pad
 from kicadgen.generators import symbol_glyphs as g
 from kicadgen.generators.symbol import (
-    SYMBOL_FORMAT_VERSION, SymbolMetadata, SymbolPin, export_symbol, serialize_symbol,
+    SYMBOL_FORMAT_VERSION, SYMBOL_GENERATOR_VERSION, SymbolMetadata, SymbolPin, export_symbol, serialize_symbol,
 )
 
 
@@ -51,7 +51,10 @@ def _relay_symbol(**metadata):
 def test_header_and_symbol_flags_follow_the_kicad_10_library_format():
     text = serialize_symbol('M', [SymbolPin('1', 'A')])
     assert text.startswith(f'(kicad_symbol_lib (version {SYMBOL_FORMAT_VERSION}) (generator "kicadgen") '
-                           '(generator_version "10.0")')
+                           f'(generator_version "{SYMBOL_GENERATOR_VERSION}")')
+    # kicadgen's own file revision (2026-10-14): "10.0" marks the files whose
+    # text angles were written in degrees (generators.symbol_glyphs).
+    assert SYMBOL_GENERATOR_VERSION != "10.0"
     assert SYMBOL_FORMAT_VERSION == 20251024
     for flag in ('(exclude_from_sim no)', '(in_bom yes)', '(on_board yes)', '(in_pos_files yes)',
                  '(duplicate_pin_numbers_are_jumpers no)', '(pin_names (offset 0.508))', '(embedded_fonts no)'):

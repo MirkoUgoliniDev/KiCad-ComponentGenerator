@@ -50,6 +50,9 @@ from ..generators.castellated_module import (
 from ..generators import castellated_module as _castellated_module
 from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
 from ..generators.package import build_package
+from ..generators.package import preview_grid_origin as package_preview_grid_origin
+from ..generators.castellated_module import preview_grid_origin as castellated_preview_grid_origin
+from ..core.footprint import text_grid_origin
 from ..core.package_geometry import PackageGeometry, package_from_mapping
 from ..services import component_types, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
@@ -818,6 +821,146 @@ def _positive_frame(length, width):
     return values if all(math.isfinite(v) and v > 0 for v in values) else None
 
 
+#: Scene px per footprint mm of the 2D footprint preview (every drawer of
+#: the preview, the drawing snap and the handles use this scale).
+_FP_PREVIEW_MM_TO_PX = 20.0
+
+
+#: Pixel size of the reference font a user text is laid out in before the
+#: item is scaled to KiCad's size (see `_drawing_text_item`).
+_FP_TEXT_REFERENCE_PX = 100
+
+
+def _cap_height_px(font):
+    """@brief Cap height of `font` in px: the outline height of «H».
+
+    @param font The font to measure.
+    @return Height of the QPainterPath outline of "H" (independent of the
+        platform's capHeight metric, and real glyph geometry, not hinted
+        integer metrics).
+    """
+    path = QPainterPath()
+    path.addText(0.0, 0.0, font, "H")
+    return path.boundingRect().height()
+
+
+def _drawing_text_item(record, mm_to_px):
+    """@brief Unplaced Qt item of a user text drawing, drawn at KiCad's size.
+
+    @param record Validated text record (text, size, layer).
+    @param mm_to_px Scene px per mm of the preview.
+    @return A QGraphicsSimpleTextItem at the origin, not in any scene, with
+        the layer colour, laid out in a `_FP_TEXT_REFERENCE_PX` px font and
+        SCALED (setScale) so the outline of «H» is size x mm_to_px px tall:
+        KiCad's text size is the cap height. Scaling the item, not choosing
+        an integer font size, avoids a rounding error of up to 3 %.
+    @note Same definition as the symbol editor (user, 2026-10-14: same UX in
+        every tab). No horizontal stretch: measured against kicad-cli 10,
+        no single factor brings the widths of KiCad's stroke font within
+        5 % (mean error 13.6 %, 8 % with 1.117, while strings like GND,
+        iiiiii, MMMMMM get worse), so the preview width stays the Qt font's
+        own and remains an approximation of KiCad's.
+    """
+    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+    item = QGraphicsSimpleTextItem(record["text"])
+    item.setBrush(QBrush(QColor(_layer_color(record["layer"]))))
+    font = item.font()
+    font.setPixelSize(_FP_TEXT_REFERENCE_PX)
+    item.setFont(font)
+    cap = _cap_height_px(font)
+    if cap > 0:
+        item.setScale(record.get("size", 1.0) * mm_to_px / cap)
+    return item
+
+
+def _legacy_drawing_text_item(record, mm_to_px):
+    """@brief Qt item of a user text with the font the preview used BEFORE 2026-10-14.
+
+    @param record Validated text record (text, size, layer).
+    @param mm_to_px Scene px per mm of the preview.
+    @return An unplaced item whose font em is `size` mm (point size
+        size x mm_to_px x 0.75, at least 6 pt): the text the user saw for a
+        legacy centred record, measured only by `_migrate_drawing_texts` so
+        the migrated anchor is the corner the user saw.
+    """
+    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+    item = QGraphicsSimpleTextItem(record["text"])
+    font = item.font()
+    font.setPointSizeF(max(6.0, record.get("size", 1.0) * mm_to_px * 0.75))
+    item.setFont(font)
+    return item
+
+
+def _drawing_text_baseline(item):
+    """@brief Distance, scene px, from the top of a QGraphicsSimpleTextItem to its baseline.
+
+    @param item The text item (its text and font are read).
+    @return The ascent of the single line QTextLayout lays out from y = 0,
+        which is where the item draws its baseline (fallback fonts included);
+        the font's ascent when no line can be laid out.
+    @note Same definition as the symbol editor's `_text_baseline` (user rule:
+        same UX in every tab), duplicated to keep the two tabs uncoupled.
+    """
+    from PyQt6.QtGui import QFontMetricsF, QTextLayout
+    layout = QTextLayout(item.text(), item.font())
+    layout.beginLayout()
+    line = layout.createLine()
+    layout.endLayout()
+    return line.ascent() if line.isValid() else QFontMetricsF(item.font()).ascent()
+
+
+def _drawing_text_position(record, mm_to_px, item):
+    """@brief Scene position (px) of a text drawing's Qt item.
+
+    @param record Validated text record.
+    @param mm_to_px Scene px per mm of the preview.
+    @param item The text item built by `_drawing_text_item`.
+    @return (x, y) for setPos: an anchored record (`USER_TEXT_ANCHOR`) puts
+        the left edge of the drawn box and the text BASELINE on its point, so
+        the text grows right and up with descenders below, as KiCad's
+        ``(justify left bottom)`` and the symbol editor's bottom-left texts;
+        a legacy record (no anchor) is centred on its point, as before.
+    """
+    from ..core.footprint import USER_TEXT_ANCHOR
+    rect, scale = item.boundingRect(), item.scale()
+    x, y = (v * mm_to_px for v in record["points"][0])
+    if record.get("anchor") == USER_TEXT_ANCHOR:
+        return x - rect.left() * scale, y - _drawing_text_baseline(item) * scale
+    return x - rect.width() * scale / 2, y - rect.height() * scale / 2
+
+
+def _migrate_drawing_texts(records):
+    """@brief Convert the legacy centred text drawings to bottom-left anchors, keeping their drawn box.
+
+    @param records Validated footprint drawing records.
+    @return A new list: every text without ``anchor`` gets its point moved to
+        the left edge and baseline of the text the preview drew for it
+        BEFORE 2026-10-14 (measured with `_legacy_drawing_text_item`, the
+        old em-based font the user saw), and the anchor mark; every other
+        record is copied unchanged. Idempotent.
+    @note The corner (left edge, baseline) stays where the user saw it; the
+        text itself is then drawn at KiCad's size (cap height = size), so it
+        grows from that corner. See `core.footprint.migrate_centred_text`:
+        KiCad's stroke font may place a MIGRATED text a fraction of a
+        character away from where it was; new texts are exact.
+    """
+    from ..core.footprint import migrate_centred_text
+    scale = _FP_PREVIEW_MM_TO_PX
+    result = []
+    for record in records:
+        if record.get("kind") == "text" and record.get("anchor") is None:
+            item = _legacy_drawing_text_item(record, scale)
+            rect = item.boundingRect()
+            # Legacy item top-left was (point - size/2); the new anchor is
+            # its left edge and baseline.
+            offset = ((rect.left() - rect.width() / 2) / scale,
+                      (_drawing_text_baseline(item) - rect.height() / 2) / scale)
+            result.append(migrate_centred_text(record, offset))
+        else:
+            result.append(deepcopy(record))
+    return result
+
+
 def _arc_path(start, mid, end):
     """@brief QPainterPath of the circular arc through three scene points.
 
@@ -1107,6 +1250,13 @@ class MainWindow(QMainWindow):
         #: riconosciuto come scaduto e buttato. Il worker viene marchiato con
         #: il valore corrente alla partenza; l'interruzione lo incrementa.
         self._analysis_revision = 0
+        #: `_analysis_revision` of the last run whose result started being
+        #: applied to the fields (`_on_extracted`), None when none did. Read
+        #: and consumed by `_on_extract_finished`: only a run that changed the
+        #: fields owns the output; a failed one leaves a pending footprint
+        #: edit to its retry. Abandoning a run bumps the revision, so a stale
+        #: value never matches a later run.
+        self._extraction_applied_revision: int | None = None
         #: Workers abandoned with «Interrompi» that are still running. The
         #: list keeps a reference of its own (a live QThread collected by the
         #: garbage collector aborts the process) and removes them from the
@@ -4658,6 +4808,8 @@ class MainWindow(QMainWindow):
         # Marchio della corsa: da qui in poi il risultato di questo worker vale
         # solo finche' la finestra non dichiara scaduta la corsa (interruzione).
         self._extract_worker._analysis_revision = self._analysis_revision
+        # A new run has applied nothing yet (see `_on_extract_finished`).
+        self._extraction_applied_revision = None
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self.analysis_overlay.start(abortable=True)
@@ -5727,6 +5879,8 @@ class MainWindow(QMainWindow):
         self._reconcile_worker.finished.connect(self._on_extract_finished)
         # Vedi _start_extract_worker: marchio della corsa per i risultati tardivi.
         self._reconcile_worker._analysis_revision = self._analysis_revision
+        # A new run has applied nothing yet (see `_on_extract_finished`).
+        self._extraction_applied_revision = None
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self.analysis_overlay.start("Rilancio dell'inventario", announcement,
@@ -6092,6 +6246,12 @@ class MainWindow(QMainWindow):
             the project and every GenerateWorker copies drawings and text
             positions, so the next generation (automatic or the user's)
             carries it. An abandoned run changed nothing: there the retry runs.
+        @note A run that failed before its result reached `_on_extracted`
+            (worker error, nothing applied) also changed nothing: the pending
+            edit is kept and retried once (`_retry_footprint_rewrite`), under
+            the usual rules (never while busy or while
+            `_pipeline_owns_output`). A result that raised half way through
+            being applied counts as applied: some fields may be new.
         """
         # Il worker ha finito, anche se abbandonato: le sue chiamate sono
         # tutte registrate, il progetto della corsa si puo' rilasciare.
@@ -6122,7 +6282,14 @@ class MainWindow(QMainWindow):
             return
         # New parameters own the output now: the pending edit goes with the
         # next generation (see the docstring), not with a rewrite of its own.
-        self._clear_footprint_rewrite()
+        # A run that failed before applying anything changed no field: its
+        # pending edit is kept and retried once the window is idle.
+        # Automatic-generation parameters exist only once a result was applied.
+        applied = (getattr(self, "_extraction_applied_revision", None) == self._analysis_revision
+                   or self._auto_generation_params is not None)
+        self._extraction_applied_revision = None
+        if applied:
+            self._clear_footprint_rewrite()
         # Il consuntivo riguarda l'analisi AI, che a questo punto e' conclusa:
         # va mostrato anche quando parte subito la generazione automatica, che
         # non fa alcuna chiamata al modello e uscirebbe da qui senza dirlo.
@@ -6145,6 +6312,8 @@ class MainWindow(QMainWindow):
         self._offer_inventory_review()
         if params is not None:
             self._start_automatic_generation(params)
+        elif not applied:
+            self._retry_footprint_rewrite()
 
     def _show_ai_cost(self) -> None:
         """@brief Write the cost of the last analysis in the AI log and the analysis modal.
@@ -7072,7 +7241,11 @@ class MainWindow(QMainWindow):
         self._restore_mounting_state(state.get("host_mounting"))
         from ..core.footprint import validate_text_positions, validate_footprint_drawings
         self.footprint_text_positions = validate_text_positions(state.get("footprint_texts"))
-        self.footprint_drawings = validate_footprint_drawings(state.get("footprint_drawings"))
+        # Texts saved before 2026-10-14 are centred on their point: move the
+        # point once to the bottom-left corner the preview drew, so they stay
+        # where the user sees them (saved with the project's next save).
+        self.footprint_drawings = _migrate_drawing_texts(
+            validate_footprint_drawings(state.get("footprint_drawings")))
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
         # A rewrite still pending belongs to the project being left: the
         # one now open has its own .kicad_mod, written by its own edits.
@@ -7282,6 +7455,58 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_project_autosave"):
             self._save_project_config()
 
+    #: Answers of `_ask_pending_symbol_choice`.
+    SYMBOL_EDITS_APPLY, SYMBOL_EDITS_DISCARD, SYMBOL_EDITS_STAY = "apply", "discard", "stay"
+
+    def _ask_pending_symbol_choice(self, can_apply: bool) -> str:
+        """@brief Ask, in a centred modal, what to do with the unapplied symbol edits.
+
+        @param can_apply False disables «Applica» (edits not valid).
+        @return SYMBOL_EDITS_APPLY, SYMBOL_EDITS_DISCARD or SYMBOL_EDITS_STAY
+            (also for Esc and the window's close button).
+        @note Replaces the status-bar sentence the user could not see
+            (user, 2026-10-14). A separate method so tests answer it without
+            opening a window.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.i18n.text("Simbolo elettrico"))
+        box.setText(self.i18n.text("Il simbolo contiene modifiche non applicate."))
+        box.setInformativeText(self.i18n.text(
+            "Applicarle, scartarle oppure restare sul simbolo?"))
+        apply_button = box.addButton(self.i18n.text("Applica"), QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton(self.i18n.text("Scarta"), QMessageBox.ButtonRole.DestructiveRole)
+        stay_button = box.addButton(self.i18n.text("Resta"), QMessageBox.ButtonRole.RejectRole)
+        apply_button.setEnabled(bool(can_apply))
+        box.setDefaultButton(stay_button)
+        box.setEscapeButton(stay_button)
+        box.exec()
+        chosen = box.clickedButton()
+        if chosen is apply_button:
+            return self.SYMBOL_EDITS_APPLY
+        if chosen is discard_button:
+            return self.SYMBOL_EDITS_DISCARD
+        return self.SYMBOL_EDITS_STAY
+
+    def _resolve_pending_symbol_edits(self, symbol) -> bool:
+        """@brief Settle the unapplied symbol edits before leaving the project.
+
+        @param symbol The symbol editor holding pending edits.
+        @return True when the edits were applied or discarded and the caller
+            may go on (close, change project); False to stay on the symbol.
+        @note An apply that the main window refuses (pad mismatch,
+            `reject_apply`) leaves the edits pending: the answer is then
+            «stay», with the editor showing why.
+        """
+        choice = self._ask_pending_symbol_choice(symbol.can_apply())
+        if choice == self.SYMBOL_EDITS_APPLY and symbol.can_apply():
+            symbol.apply()
+        elif choice == self.SYMBOL_EDITS_DISCARD:
+            symbol.discard_edits()
+        else:
+            return False
+        return not symbol.has_pending_edits()
+
     def _can_leave_project(self, folder: Path | None = None) -> bool:
         """Save pending edits before navigation; a failed write retains the open project."""
         if getattr(self, '_component_review_dialog', None) is not None:
@@ -7289,9 +7514,8 @@ class MainWindow(QMainWindow):
         symbol = getattr(self, 'symbol_tab', None)
         if symbol is not None and symbol.has_pending_edits():
             self.tabs.setCurrentIndex(TAB_SYMBOL)
-            symbol.set_status(self.i18n.text(
-                "Il simbolo contiene modifiche non applicate. Usa Applica oppure Annulla prima di cambiare progetto o chiudere."))
-            return False
+            if not self._resolve_pending_symbol_edits(symbol):
+                return False
         if not self._named():
             return True
         if folder is None:
@@ -8099,6 +8323,9 @@ class MainWindow(QMainWindow):
                                 "restano come sono."))
             return
         self._inventory_pause_pending = bool(getattr(params, "components_3d", None))
+        # From here the fields may change (even if applying fails half way):
+        # the run owns the output, see `_on_extract_finished`.
+        self._extraction_applied_revision = self._analysis_revision
         self._applying_extraction = True
         try:
             self._apply_extracted_result(params)
@@ -11644,7 +11871,7 @@ class MainWindow(QMainWindow):
 
     def _on_footprint_draw_finish(self) -> None:
         """@brief Close the shape in progress and store it as a drawing record."""
-        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM,
+        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM, USER_TEXT_ANCHOR,
                                       USER_DRAW_WIDTH_MM, validate_footprint_drawings)
         tool, points = self._fp_draw_tool, list(self._fp_draw_clicks)
         if tool is None:
@@ -11667,6 +11894,8 @@ class MainWindow(QMainWindow):
                 self._cancel_footprint_drawing()
                 return
             record["text"], record["size"] = text.strip(), USER_DRAW_TEXT_MM
+            # The clicked (snapped) node is the bottom-left corner of the text.
+            record["anchor"] = USER_TEXT_ANCHOR
         valid = validate_footprint_drawings([record])
         self._cancel_footprint_drawing()
         if not valid:
@@ -12005,14 +12234,12 @@ class MainWindow(QMainWindow):
                     item = self.preview_scene.addPath(path, pen)
                     items = [item]
             elif kind == "text":
-                text_item = self.preview_scene.addSimpleText(record["text"])
-                text_item.setBrush(QBrush(QColor(_layer_color(record["layer"]))))
-                font = text_item.font()
-                font.setPointSizeF(max(6.0, record.get("size", 1.0) * mm_to_px * 0.75))
-                text_item.setFont(font)
-                rect = text_item.boundingRect()
-                text_item.setPos(points[0][0] - rect.width() / 2,
-                                 points[0][1] - rect.height() / 2)
+                # Anchored texts grow right and up from their point (its
+                # handle sits on the bottom-left corner); legacy ones are
+                # centred on it (see _drawing_text_position).
+                text_item = _drawing_text_item(record, mm_to_px)
+                self.preview_scene.addItem(text_item)
+                text_item.setPos(*_drawing_text_position(record, mm_to_px, text_item))
                 items = [text_item]
             hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
             for item in items:
@@ -12122,6 +12349,8 @@ class MainWindow(QMainWindow):
             disegno devono apparire i punti di ancoraggio»): one square per
             stored point of the hovered drawing, draggable on the grid; the
             dragged one shows the dashed outline the shape will take.
+        @note A text has one stored point, its anchor: the bottom-left corner
+            of the text (user, 2026-10-14), so its square is drawn there.
         """
         from .footprint_view import HANDLE_KEY_ROLE
         scene = getattr(self, "preview_scene", None)
@@ -14180,11 +14409,12 @@ class MainWindow(QMainWindow):
         """
         self.preview_scene.clear()
         mm_to_px = 20.0
+        built = self._built_footprint(lambda: build_castellated_module(p))
 
         self._draw_grid(
             mm_to_px, p.body_length, p.body_width, p.pad_overhang + p.pad_length,
             x0=-p.body_length / 2, y0=-p.body_width / 2,
-            origin=next(((pad.x, pad.y) for pad in pad_positions(p)), (0., 0.)),
+            origin=castellated_preview_grid_origin(p),
         )
 
         silk_pen = QPen(QColor(_layer_color("F.SilkS")))
@@ -14236,9 +14466,8 @@ class MainWindow(QMainWindow):
             self._add_dim_v(-half_w, half_w, left - 40, self._dim_label("dim.body", p.body_width))
             self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
 
-        self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_texts(mm_to_px, built)
         self._draw_footprint_drawings(mm_to_px)
-        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -14378,7 +14607,7 @@ class MainWindow(QMainWindow):
         x0, y0 = courtyard.start[0] + margin, courtyard.start[1] + margin
         x1, y1 = courtyard.end[0] - margin, courtyard.end[1] - margin
         self._draw_grid(mm_to_px, x1 - x0, y1 - y0, max(margin, 1), x0=x0, y0=y0,
-                        origin=next((pad.at for pad in footprint.pads if pad.number), (0., 0.)))
+                        origin=text_grid_origin(footprint))
         silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
         for graphic in footprint.graphics:
@@ -14492,9 +14721,8 @@ class MainWindow(QMainWindow):
         self._add_dim_h(left, right, max(bottom, labels_bottom) + 60, self._dim_label("dim.total", x1 - x0))
         self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
 
-        self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_texts(mm_to_px, footprint)
         self._draw_footprint_drawings(mm_to_px)
-        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -14502,6 +14730,7 @@ class MainWindow(QMainWindow):
         """@brief Draw package copper shapes and drill openings as exported to KiCad."""
         self.preview_scene.clear()
         mm_to_px = 20.0
+        built = self._built_footprint(lambda: build_package(package))
         pins = package.pins_seen_from_top()
         margin = 1.0
         silk_pen = QPen(QColor(_layer_color("F.SilkS")))
@@ -14595,12 +14824,11 @@ class MainWindow(QMainWindow):
         left, top, right, bottom = [value * mm_to_px for value in extent]
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2,
-                        origin=next(((pin.x_mm, pin.y_mm) for pin in pins if str(pin.number).strip()), (0., 0.)))
+                        origin=package_preview_grid_origin(package))
         self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
-        self._draw_footprint_texts(mm_to_px)
+        self._draw_footprint_texts(mm_to_px, built)
         self._draw_footprint_drawings(mm_to_px)
-        self._add_view_caption()
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
 
@@ -14703,14 +14931,32 @@ class MainWindow(QMainWindow):
 
     # ── Footprint texts (Reference, Value) ───────────────────────────
 
-    def _draw_footprint_texts(self, mm_to_px: float) -> None:
+    @staticmethod
+    def _built_footprint(build):
+        """@brief Build the footprint a preview drawer shows, or None when it does not build.
+
+        @param build Callable returning the generator's Footprint.
+        @return The Footprint, or None on a geometry error (the drawer reports
+            invalid geometry itself and still draws what it can).
+        """
+        try:
+            return build()
+        except (ValueError, TypeError, OverflowError, ArithmeticError):
+            return None
+
+    def _draw_footprint_texts(self, mm_to_px: float, footprint=None) -> None:
         """@brief Draw «REF**» and the footprint name where the file puts them, draggable.
 
         @param mm_to_px Scene scale of the drawer that calls this.
+        @param footprint The footprint the generator writes for this preview,
+            or a callable building it; its default Reference/Value anchors
+            (placed by the generator on this drawer's grid, decision D1) are
+            shown as they are, so the preview equals the file. None, or a
+            build that fails, falls back to `core.footprint.DEFAULT_TEXT_POSITIONS`.
         @note Called by the three 2D drawers after the geometry: the texts
             are the footprint's own Reference (silkscreen) and Value
             (fabrication layer) properties, at their chosen or default
-            position (`core.footprint.DEFAULT_TEXT_POSITIONS`). Each text is
+            position. Each text is
             a group whose position IS the KiCad anchor (`at`, the centre of
             the text): a small cross marks it, because a centred text alone
             does not show where it is anchored (user, 2026-10-13). The group
@@ -14719,6 +14965,15 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
         from ..core.footprint import DEFAULT_TEXT_POSITIONS, TEXT_KEYS
         from .footprint_view import TEXT_KEY_ROLE
+        defaults = DEFAULT_TEXT_POSITIONS
+        try:
+            built = footprint() if callable(footprint) else footprint
+            if built is not None:
+                defaults = {"Reference": built.reference_at, "Value": built.value_at}
+        except (ValueError, TypeError, OverflowError, ArithmeticError):
+            # The drawer already reported an invalid geometry; the texts
+            # still show, at the fallback places.
+            pass
         # An unnamed project still shows (and can drag) its Value text.
         texts = {"Reference": "REF**", "Value": self._component_name() or "Value"}
         colours = {"Reference": TEXT, "Value": SUBTEXT}
@@ -14732,7 +14987,7 @@ class MainWindow(QMainWindow):
         # tall, so it reads through the text it is centred on.
         arm = 0.75 * mm_to_px
         for key in TEXT_KEYS:
-            x_mm, y_mm = self.footprint_text_positions.get(key, DEFAULT_TEXT_POSITIONS[key])
+            x_mm, y_mm = self.footprint_text_positions.get(key, defaults[key])
             group = QGraphicsItemGroup()
             self.preview_scene.addItem(group)
             text = self.preview_scene.addSimpleText(texts[key], font)
@@ -14929,35 +15184,6 @@ class MainWindow(QMainWindow):
             entry itself (`{value:.2f}`), so every language keeps two decimals.
         """
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
-
-    #: Narrowest wrap width of the view caption, in scene pixels (see `_add_view_caption`).
-    VIEW_CAPTION_MIN_WIDTH_PX = 360.0
-
-    def _add_view_caption(self) -> None:
-        """@brief Write above the drawing which side the footprint is seen from.
-
-        @note The preview, like a KiCad footprint, is the view from ABOVE the
-            board (component side): a datasheet's BOTTOM VIEW was mirrored to
-            get here. Said on the drawing itself (user, 2026-10-10), not only
-            in the log, so a drawing compared with a bottom-view datasheet is
-            not read as wrong.
-        """
-        from PyQt6.QtWidgets import QGraphicsTextItem
-        rect = self.preview_scene.itemsBoundingRect()
-        if rect.isNull():
-            return
-        caption = QGraphicsTextItem(self.i18n.text(
-            "VISTA DALL'ALTO (lato componenti): il footprint e' visto da sopra la scheda, "
-            "come in KiCad; un disegno «BOTTOM VIEW» del datasheet appare specchiato."))
-        caption.setDefaultTextColor(QColor(YELLOW))
-        # Wrapped to the drawing width (user, 2026-10-11: on one line the
-        # caption was wider than the drawing and shrank it in «fit»). The
-        # floor is a heuristic: below it a small part would split the text
-        # into many short lines; a caption wider than a tiny drawing is the
-        # lesser evil.
-        caption.setTextWidth(max(rect.width(), self.VIEW_CAPTION_MIN_WIDTH_PX))
-        caption.setPos(rect.left(), rect.top() - caption.boundingRect().height() - 24)
-        self.preview_scene.addItem(caption)
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
         """Disegna una linea di quota orizzontale con tacche e testo centrato."""

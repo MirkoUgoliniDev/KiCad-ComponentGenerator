@@ -445,10 +445,11 @@ def check_footprint_text(text: str) -> list[Finding]:
             'Footprint «{name}»: il valore deve stare sul layer F.Fab.', name=name)))
 
     # Only drawn items count as the courtyard/fabrication outline: the Value
-    # text sits on F.Fab too, and a text is not an outline.
+    # property and the ${REFERENCE} fp_text sit on F.Fab too, and a text is
+    # not an outline.
     layers = set()
     for graphic in [form for form in footprint if isinstance(form, list) and form
-                    and str(form[0]).startswith('fp_')]:
+                    and str(form[0]).startswith('fp_') and str(form[0]) != 'fp_text']:
         layer = _child(graphic, 'layer')
         if layer and len(layer) > 1:
             layers.add(str(layer[1]))

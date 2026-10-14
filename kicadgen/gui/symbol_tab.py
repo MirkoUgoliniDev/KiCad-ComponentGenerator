@@ -10,7 +10,8 @@ import os
 import tempfile
 import time
 from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
-from PyQt6.QtGui import QPalette, QAction, QColor, QFont, QPainter, QPen, QShortcut, QKeySequence, QIcon, QPolygonF
+from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QFontMetricsF, QPainter, QPen, QShortcut,
+                         QKeySequence, QIcon, QPolygonF)
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
@@ -32,6 +33,67 @@ MAX_SUPERSEDED_DRAFTS = 5
 #: two copies of the rows (old baseline and draft), twice the 2 MB bound the
 #: recovery file itself is read with (`symbol_draft.load_draft`).
 _SNAPSHOT_MAX_BYTES = 4_000_000
+
+
+def _whole_pitches(value):
+    """True when `value` mm is a whole number of pin-grid steps (to 1e-6 of a step)."""
+    steps = value / GRID_MM
+    return abs(steps - round(steps)) < 1e-6
+
+
+def glyph_grid_reference(instance):
+    """@brief Offset (dx, dy) in mm, from an element's origin, of the point that must sit on the pin grid.
+
+    @param instance A placed record (`symbol_glyphs` instance), with its
+        current rotation and mirror.
+    @return The outer end (where a pin connects) of the reference terminal,
+        turned and mirrored with the element, for a glyph with terminals;
+        (0, 0) for a glyph without terminals, a wire or a shape.
+    @note User decision D2 (2026-10-14): the glyph geometry is never changed.
+        Many catalogue glyphs copy KiCad's Device symbols, whose terminals
+        sit at +-3.81 mm from the origin; snapping the origin would leave
+        them at half pitch where no pin can meet them. The reference is the
+        terminal that puts the MOST terminals on the grid, i.e. the one with
+        the most other terminals a whole number of pitches away on both
+        axes; ties keep the earliest terminal, so the choice is
+        deterministic. When every terminal is a whole number of pitches from
+        the others (R, C, L, diodes...) all land on the grid; otherwise only
+        the largest such group does (the potentiometer: both ends on the
+        grid, the wiper of the catalogue glyph at half pitch).
+        Works for imported glyphs too (terminals read from the library file,
+        `terminals_of`).
+    """
+    from ..generators.symbol_glyphs import is_shape, is_wire, placed_terminals
+    if not isinstance(instance, dict) or is_wire(instance) or is_shape(instance):
+        return 0.0, 0.0
+    terminals = placed_terminals(dict(instance, x=0.0, y=0.0))
+    if not terminals:
+        return 0.0, 0.0
+    best, best_count = terminals[0], -1
+    for candidate in terminals:
+        count = sum(1 for other in terminals
+                    if _whole_pitches(other.x - candidate.x) and _whole_pitches(other.y - candidate.y))
+        if count > best_count:
+            best, best_count = candidate, count
+    return float(best.x), float(best.y)
+
+
+def snap_glyph_origin(instance, x, y):
+    """@brief The origin closest to (x, y) that puts the element's grid reference on the 2.54 mm pin grid.
+
+    @param instance Placed record whose rotation and mirror apply (its own x/y are ignored).
+    @param x Wanted origin X, symbol mm.
+    @param y Wanted origin Y, symbol mm, Y up.
+    @return (x, y) rounded to 0.0001 mm. For a glyph whose first terminal is
+        already a whole number of pitches from the origin, or that has no
+        terminal, this is the origin snapped on the grid as before.
+    @note Applied only when the user places, moves or turns an element: a
+        glyph of an older project saved with its origin on the grid (its
+        terminals at half pitch) is never moved on load, and comes onto the
+        terminal grid the first time the user moves it.
+    """
+    ox, oy = glyph_grid_reference(instance)
+    return tuple(round(round((float(v) + o) / GRID_MM) * GRID_MM - o, 4) for v, o in ((x, ox), (y, oy)))
 
 _TYPE_LABELS = {
     'input': 'Ingresso', 'output': 'Uscita', 'bidirectional': 'Bidirezionale',
@@ -143,9 +205,6 @@ PEN_STYLES = {'default': Qt.PenStyle.SolidLine, 'solid': Qt.PenStyle.SolidLine, 
               'dot': Qt.PenStyle.DotLine, 'dash_dot': Qt.PenStyle.DashDotLine,
               'dash_dot_dot': Qt.PenStyle.DashDotDotLine}
 
-#: The horizontal justifications of a text and their labels.
-JUSTIFY_LABELS = (('left', 'Sinistra'), ('center', 'Centro'), ('right', 'Destra'))
-
 #: Palette tooltip of every tool, by key (Italian source, translated by `tx`).
 #: Side of a handle square and the margin around the selected element
 #: inside which its handles are shown, both in SCREEN pixels at any zoom:
@@ -153,6 +212,26 @@ JUSTIFY_LABELS = (('left', 'Sinistra'), ('center', 'Centro'), ('right', 'Destra'
 #: view scale when the pointer is tested (review, 2026-10-12).
 HANDLE_SIZE_PX = 6
 HANDLE_HOVER_MARGIN = 12
+
+
+def _add_kept_item(scene, item):
+    """@brief Add a Python-constructed graphics item to `scene` and return it.
+
+    @param scene Scene that takes ownership of the item.
+    @param item Item built with its Python constructor (e.g. `QGraphicsRectItem(...)`).
+    @return `item`, now on the scene.
+    @note Use it for every item whose wrapper this tab keeps after drawing
+        (`_handle_groups`, `_wire_cursor_item`). An item made by
+        `scene.addRect()`/`addPath()` is a plain C++ object: when Qt deletes it
+        (scene cleared or destroyed with the window) PyQt is not told, so a
+        wrapper still referenced from Python stays registered at the freed
+        address and a later item allocated there comes back from
+        `scene.items()` with the wrong Python type (a pad ellipse seen as a
+        QGraphicsRectItem; tests/test_kept_scene_items.py). Items built in
+        Python report their deletion, so their wrappers are unregistered.
+    """
+    scene.addItem(item)
+    return item
 
 TOOL_HINTS = {
     'wire': 'Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere',
@@ -166,15 +245,19 @@ TOOL_HINTS = {
 
 
 class TextDialog(QDialog):
-    """@brief Content, font size and justification of a symbol text (insert or edit)."""
+    """@brief Content and font size of a symbol text (insert or edit).
 
-    def __init__(self, tx, text='', size=1.27, justify='center', parent=None):
+    @note No justification choice (user, 2026-10-14): a text drawn with the
+        Text tool is always anchored at its bottom-left corner
+        (`symbol_glyphs.shape_instance`).
+    """
+
+    def __init__(self, tx, text='', size=1.27, parent=None):
         """@brief Build the dialog with the current values.
 
         @param tx Translator of Italian source strings.
         @param text Current text.
         @param size Current font size in mm.
-        @param justify Current horizontal justification (left, center, right).
         @param parent Parent widget.
         """
         super().__init__(parent)
@@ -190,11 +273,6 @@ class TextDialog(QDialog):
         self.size_box.setSuffix(' mm')
         self.size_box.setValue(float(size))
         form.addRow(tx('Dimensione'), self.size_box)
-        self.justify_box = QComboBox()
-        for key, label in JUSTIFY_LABELS:
-            self.justify_box.addItem(tx(label), key)
-        self.justify_box.setCurrentIndex(max(0, self.justify_box.findData(justify)))
-        form.addRow(tx('Giustificazione'), self.justify_box)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -203,8 +281,8 @@ class TextDialog(QDialog):
         self.text_edit.selectAll()
 
     def values(self):
-        """@brief (text, size in mm, justify) as typed."""
-        return (self.text_edit.text(), float(self.size_box.value()), str(self.justify_box.currentData()))
+        """@brief (text, size in mm) as typed."""
+        return (self.text_edit.text(), float(self.size_box.value()))
 
 #: Colours of the symbol canvas. "dark": the application's own theme.
 #: "kicad": the default colour scheme of KiCad's schematic editor, so the
@@ -785,6 +863,9 @@ class SymbolTab(QWidget):
         super().__init__(parent)
         self.tx = tx or (lambda value: value)
         self._baseline = []
+        #: The loaded rows before their user texts took the bottom-left
+        #: anchor, None when the load migrated nothing (`set_data`).
+        self._premigration_baseline = None
         self._original = []
         self._loading = False
         self._name = ''
@@ -814,6 +895,15 @@ class SymbolTab(QWidget):
         #: Recovery file of the project the editor content belongs to: the
         #: project identity (two projects may share a component name).
         self._draft_owner = None
+        #: Project id (`project_id_path`) read when `_draft_owner` was bound:
+        #: recognises the same project after its folder moved.
+        self._draft_owner_id = None
+        #: The last `set_data` load WITHOUT the wires frozen on the strength of
+        #: the component name, until `set_recovery_path` confirms the project.
+        self._unconfirmed_plain = None
+        #: True when the offered draft is the one the recovery file holds
+        #: (not a superseded snapshot nor an in-memory draft).
+        self._recoverable_from_main = False
         #: Draft carried over by `set_data`, confirmed or dropped by the next
         #: `set_recovery_path`: {'old_baseline', 'draft', 'kept'}.
         self._carry = None
@@ -932,7 +1022,7 @@ class SymbolTab(QWidget):
         self.reset_button = icon_button('wf-regenerate.svg', 'Ripristina gli ultimi valori caricati.',
                                         lambda: self._populate(self._original))
         separator()
-        self.cancel_button = icon_button('cancel.svg', 'Annulla', lambda: self._populate(self._baseline))
+        self.cancel_button = icon_button('cancel.svg', 'Annulla', self.discard_edits)
         self.apply_button = icon_button('confirm-use.svg', 'Applica', self.apply)
         # The export command is hosted by the dedicated KiCad tab. This button
         # is NOT in the toolbar (no duplicate command, nothing in the overflow
@@ -969,6 +1059,18 @@ class SymbolTab(QWidget):
         self.pin_types_ai_button = icon_button('wf-relaunch-ai.svg', 'Suggerisci tipi pin con AI', self.pin_types_ai_requested.emit)
         self.recovery_button = icon_button('project-open.svg', 'Recupera bozza', self.recover_draft)
         self.recovery_button.defaultAction().setEnabled(False)
+        # Click: recover. Arrow: the explicit discard, the only other way an
+        # offered draft goes away (`discard_draft`).
+        recovery_menu = QMenu(self.recovery_button)
+        for text, callback in (('Recupera bozza', self.recover_draft), ('Scarta bozza', self.discard_draft)):
+            action = recovery_menu.addAction(self.tx(text))
+            action.setData(text)
+            action.triggered.connect(lambda checked=False, run=callback: run())
+        self.discard_draft_action = recovery_menu.actions()[1]
+        self.discard_draft_action.setEnabled(False)
+        self.recovery_button.setMenu(recovery_menu)
+        self.recovery_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.recovery_button.setFixedSize(44, 32)
         self.properties_button = icon_button('sliders.svg', 'Posizione e orientamento del pin', self._edit_selected_pin)
         separator()
         # Palette of graphic elements (user, 2026-10-10): KiCad's own drawings
@@ -1112,12 +1214,21 @@ class SymbolTab(QWidget):
         self._recoverable = None
         self._recoverable_snapshot = None
         self._stale_recoverable = None
+        self._recoverable_from_main = False
         self.recovery_button.defaultAction().setEnabled(False)
+        self._update_discard_action()
         self._source_key = key
         self._error = ''
-        # The previous layout belongs to this project only when the name is
-        # the same: another project's pins must not freeze this one's wires.
+        # The previous layout belongs to this project only when it is the
+        # same project. The name is only a NECESSARY condition: two projects
+        # in different library roots share it. The identity is the recovery
+        # file confirmed by the next `set_recovery_path`, so whatever is done
+        # here on the strength of the name (frozen wires, carried draft) is
+        # tentative and undone there when the path names another project.
+        # Without any recovery file (no project folder yet) the name is all
+        # the identity there is.
         same_project = bool(self._baseline) and str(name) == self._name
+        self._unconfirmed_plain = None
         if not same_project:
             # Another component: whatever the editor held belongs elsewhere.
             self._draft_owner = None
@@ -1154,6 +1265,7 @@ class SymbolTab(QWidget):
         # and Cancel would regenerate the ids.
         self._assign_legacy_ids(source)
         graphics = self._graphics(source)
+        plain = deepcopy(source) if same_project and graphics else None
         # Wires anchored to a pin the new pinout no longer has keep its last
         # position as a fixed point. Only the layout of the SAME project can
         # tell where that pin was; at the first load, or coming from another
@@ -1177,6 +1289,22 @@ class SymbolTab(QWidget):
             from ..generators.symbol_glyphs import adopt_coincident_anchors
             if adopt_coincident_anchors(graphics, self._pin_ends_of(source)):
                 source = self._with_graphics(source, graphics)
+            if plain is not None:
+                # The same load without the tentative freeze, kept until
+                # `set_recovery_path` confirms or refutes the project.
+                plain_graphics = self._graphics(plain)
+                if adopt_coincident_anchors(plain_graphics, self._pin_ends_of(plain)):
+                    plain = self._with_graphics(plain, plain_graphics)
+                self._unconfirmed_plain = plain if plain != source else None
+        # Texts drawn before the bottom-left anchor (2026-10-14) take it now,
+        # last, still before the baseline (not «modified»), where the editor
+        # drew them; texts carry no terminal, so the wire steps above are
+        # unaffected. The unmigrated rows are kept: a recovery file written
+        # before the migration is bound to them (`_refresh_offer`).
+        unmigrated = deepcopy(source)
+        self._premigration_baseline = unmigrated if self._migrate_text_anchors(source) else None
+        if self._unconfirmed_plain is not None:
+            self._migrate_text_anchors(self._unconfirmed_plain)
         self._history = []
         self._history_index = -1
         self._selected_pin = None
@@ -1215,6 +1343,7 @@ class SymbolTab(QWidget):
             self._stale_recoverable = rebased
             self._recoverable = deepcopy(rebased)
             self.recovery_button.defaultAction().setEnabled(True)
+            self._update_discard_action()
         if broken:
             self.set_status(self.tx('Pinout aggiornato: la bozza non applicata, riportata sui nuovi dati, darebbe '
                                     'una disposizione non valida ed è conservata, usa Recupera bozza per riprenderla.'))
@@ -1340,18 +1469,107 @@ class SymbolTab(QWidget):
                 stale.unlink(missing_ok=True)
             except OSError:
                 pass
+        if path == self._recovery_path:
+            self._claim_project_id()
         return target
 
-    def _offerable_snapshot(self, path):
-        """(rows, file) of the newest snapshot that still changes the applied baseline, else (None, None)."""
+    def _offerable_snapshot(self, path, current=None):
+        """(rows, file) of the newest snapshot that still changes something, else (None, None).
+
+        A snapshot is offered when, carried onto the applied baseline, it
+        differs from it and from `current` (the editor's draft: recovering
+        what is already shown would change nothing).
+        """
         for file in self.superseded_draft_paths(path):
             data = self._read_snapshot(file)
             if data is None:
                 continue
+            # A snapshot written before the bottom-left text anchor: both
+            # sides migrated alike, so only real edits differ.
+            for side in data:
+                self._migrate_text_anchors(side)
             rows = self._rebase_rows(data[0], data[1], self._baseline)[0]
-            if rows != self._baseline:
+            if rows != self._baseline and rows != current:
                 return rows, file
         return None, None
+
+    @staticmethod
+    def project_id_path(path):
+        """@brief The file holding the project id, beside the recovery file.
+
+        @param path The recovery file (`set_recovery_path`).
+        @return `<stem>.project-id` in the same folder.
+        @note The id is a random token written once, together with the
+            first draft or superseded snapshot the editor writes in the
+            folder (`_claim_project_id`): binding alone writes nothing, so it
+            neither creates a folder nor touches the modification time of a
+            project the user only opened. It is only needed to recognise a
+            moved draft, and travels with the folder, so a project moved or
+            renamed as a whole is still recognised (`_same_project`); two
+            projects created separately never share it.
+        """
+        path = Path(path)
+        return path.with_name(f'{path.stem}.project-id')
+
+    @classmethod
+    def _read_project_id(cls, path):
+        """The project id stored beside `path`, or None when absent or unreadable."""
+        try:
+            file = cls.project_id_path(path)
+            if not file.is_file() or file.stat().st_size > 256:
+                return None
+            text = file.read_text(encoding='utf-8').strip()
+            return text if 16 <= len(text) <= 128 and text.isalnum() else None
+        except (OSError, ValueError):
+            return None
+
+    @classmethod
+    def _ensure_project_id(cls, path):
+        """The project id beside `path`, written first when missing; None when it cannot be written.
+
+        Called only after the editor wrote a draft or snapshot in the
+        folder; the folder is never created here.
+        """
+        found = cls._read_project_id(path)
+        if found is not None:
+            return found
+        import uuid
+        token = uuid.uuid4().hex
+        try:
+            file = cls.project_id_path(path)
+            if not file.parent.is_dir():
+                return None
+            # Exclusive create: two editors binding the same new folder keep one id.
+            with open(file, 'x', encoding='utf-8') as stream:
+                stream.write(token)
+        except FileExistsError:
+            return cls._read_project_id(path)
+        except OSError:
+            return None
+        return token
+
+    def _claim_project_id(self):
+        """Write the bound project's id once the editor has written a file in its folder."""
+        if (self._draft_owner_id is None and self._draft_owner is not None
+                and self._draft_owner == self._recovery_path):
+            self._draft_owner_id = self._ensure_project_id(self._draft_owner)
+
+    def _same_project(self, path):
+        """True when the recovery file `path` belongs to the project the editor content belongs to.
+
+        Same recovery file: the same project. Otherwise the same project id
+        (`project_id_path`) is the same project only when the previous
+        location no longer holds that id: the folder was MOVED. When both
+        locations hold it, the folder was copied and the two are different
+        projects from now on, as two homonymous projects in different
+        library roots (each has its own random id) always are.
+        """
+        owner = self._draft_owner
+        if owner is None or path == owner:
+            return True
+        if self._draft_owner_id is None or self._read_project_id(path) != self._draft_owner_id:
+            return False
+        return self._read_project_id(owner) != self._draft_owner_id
 
     @staticmethod
     def _layout_fails(rows):
@@ -1363,6 +1581,26 @@ class SymbolTab(QWidget):
         except ValueError:
             return True
         return False
+
+    def _migrate_text_anchors(self, rows):
+        """Give every legacy user text of `rows` its bottom-left anchor; return how many records changed.
+
+        Every row carries its own copy of the same list and every copy is
+        migrated with the same measure, so the rows keep agreeing. A
+        malformed record is left as it is (the layout reports it).
+        """
+        from ..generators.symbol_glyphs import migrate_text_anchor
+        changed = 0
+        for row in rows:
+            records = row.get('symbol_graphics') if isinstance(row, dict) else None
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                try:
+                    changed += bool(migrate_text_anchor(record, self.text_metrics))
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+                    continue
+        return changed
 
     @staticmethod
     def _assign_legacy_ids(rows):
@@ -1504,100 +1742,228 @@ class SymbolTab(QWidget):
 
         @param path Recovery file of the project (`<project>/.symbol-draft.json`),
             or None to stop checkpointing.
-        @note The path is the identity of the project: two projects may share
-            the component name in different library roots. The owner calls
-            this right after `set_data`, so a draft `set_data` carried over is
-            settled here. Same project: it becomes durable (rebased: the
-            recovery file is rewritten bound to the new baseline; kept: a
-            superseded snapshot is written and offered). Another project:
-            whatever the editor held beyond the applied data is dropped from
-            the editor (it stays in its own project's recovery file) and is
-            never written here. Without a carried draft, the recovery file
-            matching the applied baseline is offered, else the newest
-            superseded snapshot that still changes something.
+        @note Project identity (`_same_project`): the recovery file, or the
+            project id stored beside it (`project_id_path`) when the whole
+            folder was moved; two projects may share the component name in
+            different library roots and never mix. The owner calls this right
+            after `set_data`, so whatever `set_data` did on the strength of
+            the component name is settled here. Same project: a carried draft
+            becomes durable (rebased: the recovery file is rewritten bound to
+            the new baseline; kept: a superseded snapshot is written and
+            offered) and wires frozen at the previous layout stay frozen.
+            Another project: whatever the editor held beyond the applied data
+            is dropped from the editor (it stays in its own project's
+            recovery file), the wires are loaded as stored, nothing is written
+            here. Then every recoverable draft is offered (`_refresh_offer`):
+            the recovery file's own first, then the superseded snapshots,
+            newest first.
         """
         path = Path(path) if path else None
         if path == self._recovery_path:
             return
+        plain, self._unconfirmed_plain = self._unconfirmed_plain, None
         if path is None:
             self._recovery_path = None
             self._recoverable = None
             self._recoverable_snapshot = None
+            self._recoverable_from_main = False
             self.recovery_button.defaultAction().setEnabled(False)
+            self._update_discard_action()
             return
         carry, self._carry = self._carry, None
-        if self._draft_owner is not None and path != self._draft_owner:
+        same = self._same_project(path)
+        moved = same and self._draft_owner is not None and path != self._draft_owner
+        if not same:
             self._recovery_path = None
             self._recoverable = None
             self._stale_recoverable = None
             carry = None
-            if self.has_pending_edits():
+            if plain is not None:
+                # The wires were frozen at ANOTHER project's pin positions:
+                # load this project's data as it is stored.
+                self._baseline = deepcopy(plain)
+                self._original = deepcopy(plain)
+            if self.has_pending_edits() or plain is not None:
                 self._history = []
                 self._history_index = -1
                 self._populate(deepcopy(self._baseline))
         self._recovery_path = path
         self._draft_owner = path
+        # Read only: the id is written with the first draft (`_claim_project_id`).
+        self._draft_owner_id = self._read_project_id(path)
         self._recoverable = None
         self._recoverable_snapshot = None
+        self._recoverable_from_main = False
         if carry is not None:
             if not carry['kept']:
                 # Bound to the NEW baseline now: a restart finds it.
                 self._checkpoint_draft()
+                self._refresh_offer()
                 return
             snapshot = self._write_snapshot(path, carry['old_baseline'], carry['draft'])
+            self._claim_project_id()
             if self._stale_recoverable is not None:
                 self._recoverable = deepcopy(self._stale_recoverable)
                 self._recoverable_snapshot = snapshot
             self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
+            self._update_discard_action()
             return
-        from ..services.symbol_draft import load_draft
-        try:
-            self._recoverable = load_draft(path, self._baseline)
-        except OSError:
-            self.set_status(self.tx('Impossibile leggere la bozza di recupero.'))
-        if self._recoverable is not None:
-            self.recovery_button.defaultAction().setEnabled(True)
+        if moved and self.has_pending_edits():
+            # The same project in its new folder: the edits stay in the
+            # editor and are checkpointed where the project is now.
+            self._checkpoint_draft()
+            self._refresh_offer()
+            return
+        kind = self._refresh_offer()
+        if kind == 'main':
             self.set_status(self.tx('Bozza disponibile: usa Recupera bozza per riprenderla.'))
-            return
-        self._recoverable, self._recoverable_snapshot = self._offerable_snapshot(path)
-        self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
-        if self._recoverable is not None:
+        elif kind == 'snapshot':
             self.set_status(self.tx('Bozza superata da un pinout successivo disponibile: usa Recupera bozza '
                                     'per riprenderla sui dati attuali.'))
 
-    def recover_draft(self):
-        """@brief Restore recovery rows as an editable, unapplied draft.
+    def _refresh_offer(self):
+        """Offer the next recoverable draft of the bound project; return 'main', 'snapshot' or None.
 
-        @note A superseded snapshot is removed only once the recovery file
-            holds the recovered draft, so a failed write never loses it.
+        Order: the recovery file's draft (bound to the applied baseline,
+        the most recent checkpoint) when it differs from what the editor
+        shows, else the newest superseded snapshot that still changes
+        something. Without a recovery file nothing is read and None returned.
         """
+        path = self._recovery_path
+        self._recoverable = None
+        self._recoverable_snapshot = None
+        self._recoverable_from_main = False
+        kind = None
+        if path is not None:
+            from ..services.symbol_draft import load_draft
+            current = self.draft_rows() if getattr(self, '_draft', None) is not None else None
+            main = None
+            try:
+                main = load_draft(path, self._baseline)
+                legacy = self._premigration_baseline
+                if main is None and legacy is not None:
+                    # Saved before the texts took their bottom-left anchor:
+                    # bound to the rows as stored, migrated like them.
+                    main = load_draft(path, legacy)
+                    if main is not None:
+                        main = deepcopy(main)
+                        self._migrate_text_anchors(main)
+                        main = None if main == self._baseline else main
+            except OSError:
+                self.set_status(self.tx('Impossibile leggere la bozza di recupero.'))
+            if main is not None and main != current:
+                self._recoverable, self._recoverable_from_main, kind = main, True, 'main'
+            else:
+                self._recoverable, self._recoverable_snapshot = self._offerable_snapshot(path, current)
+                kind = 'snapshot' if self._recoverable is not None else None
+        self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
+        self._update_discard_action()
+        return kind
+
+    def _update_discard_action(self):
+        """Enable «Scarta bozza» exactly when a draft is offered."""
+        action = getattr(self, 'discard_draft_action', None)
+        if action is not None:
+            action.setEnabled(self._recoverable is not None)
+
+    def recover_draft(self):
+        """@brief Restore the offered draft as an editable, unapplied draft.
+
+        @note Nothing is lost by recovering: unapplied edits the editor holds
+            are first kept as a superseded snapshot (`superseded_draft_paths`)
+            and stay offered; if that snapshot cannot be written the recovery
+            is refused. A recovered snapshot is removed only once the recovery
+            file holds the recovered draft, so a failed write never loses it.
+            Without a recovery file the two drafts are swapped in memory.
+            Whatever else is recoverable stays offered afterwards.
+        """
+        if self._recoverable is None:
+            return
+        rows = deepcopy(self._recoverable)
+        snapshot = self._recoverable_snapshot
+        pending = self._pending_draft()
+        if pending is not None and pending[1] == rows:
+            pending = None
+        if pending is not None and self._recovery_path is not None:
+            if self._write_snapshot(self._recovery_path, pending[0], pending[1]) is None:
+                return
+        self._recoverable = None
+        self._recoverable_snapshot = None
+        self._recoverable_from_main = False
+        self._stale_recoverable = None
+        self.recovery_button.defaultAction().setEnabled(False)
+        self._populate(rows)
+        if snapshot is not None and self._recovery_path is not None:
+            from ..services.symbol_draft import load_draft
+            try:
+                if load_draft(self._recovery_path, self._baseline) == self.draft_rows():
+                    snapshot.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if self._recovery_path is None:
+            if pending is not None:
+                self._recoverable = pending[1]
+            self.recovery_button.defaultAction().setEnabled(self._recoverable is not None)
+            self._update_discard_action()
+        else:
+            self._refresh_offer()
         if self._recoverable is not None:
-            rows = deepcopy(self._recoverable)
-            snapshot = self._recoverable_snapshot
-            self._recoverable = None
-            self._recoverable_snapshot = None
-            self._stale_recoverable = None
-            self.recovery_button.defaultAction().setEnabled(False)
-            self._populate(rows)
-            if snapshot is not None and self._recovery_path is not None:
-                from ..services.symbol_draft import load_draft
-                try:
-                    if load_draft(self._recovery_path, self._baseline) == self.draft_rows():
-                        snapshot.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            self.set_status(self.tx("Bozza recuperata; un'altra bozza resta disponibile con Recupera bozza."))
+
+    def discard_draft(self):
+        """@brief Explicitly discard the offered draft: the only way an offered draft goes away unrecovered.
+
+        @return True when an offered draft was discarded. A superseded
+            snapshot file is deleted; the recovery file is deleted only when
+            it holds the offered draft and the editor has no unapplied edits
+            of its own (they would be checkpointed there). The next
+            recoverable draft, if any, is offered.
+        """
+        if self._recoverable is None:
+            return False
+        try:
+            if self._recoverable_snapshot is not None:
+                self._recoverable_snapshot.unlink(missing_ok=True)
+            elif self._recoverable_from_main and self._recovery_path is not None \
+                    and not self.has_pending_edits():
+                self._recovery_path.unlink(missing_ok=True)
+        except OSError:
+            self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
+            return False
+        self._stale_recoverable = None
+        self._recoverable = None
+        self._recoverable_snapshot = None
+        self._recoverable_from_main = False
+        self._refresh_offer()
+        self.set_status(self.tx('Bozza scartata.'))
+        return True
 
     def _checkpoint_draft(self):
+        """Write the unapplied draft to the recovery file; never lose an offered draft doing so.
+
+        An offered draft that only the recovery file holds would be
+        overwritten by the checkpoint: it is first kept as a superseded
+        snapshot (bound to the applied baseline) and the offer is
+        re-evaluated, so editing instead of pressing «Recupera bozza» never
+        retires it; only `recover_draft` or `discard_draft` do.
+        """
         if self._recovery_path is None or self._applying or self._gesture_before is not None:
             return
         from ..services.symbol_draft import save_draft
         try:
             if self.has_pending_edits():
+                offered = self._recoverable is not None
+                if offered and self._recoverable_snapshot is None:
+                    # Held by the recovery file (overwritten now) or only in
+                    # memory: give it a file of its own first.
+                    if self._write_snapshot(self._recovery_path, deepcopy(self._baseline),
+                                            deepcopy(self._recoverable)) is None:
+                        return
                 save_draft(self._recovery_path, self._baseline, self.draft_rows())
-                self._recoverable = None
-                self._recoverable_snapshot = None
+                self._claim_project_id()
                 self._stale_recoverable = None
-                self.recovery_button.defaultAction().setEnabled(False)
+                if offered:
+                    self._refresh_offer()
             elif self._recoverable is None:
                 self._recovery_path.unlink(missing_ok=True)
         except OSError:
@@ -2026,7 +2392,7 @@ class SymbolTab(QWidget):
                 self.view.wiring = True
                 self._draw(self._symbol)
                 return False
-            record = shape_instance(key, points, text=answer[0], size=answer[1], justify=answer[2])
+            record = shape_instance(key, points, text=answer[0], size=answer[1])
             one_shot = True
             if record is None:
                 self.set_status(self.tx('Testo non valido: serve una riga non vuota con dimensione maggiore di zero.'))
@@ -2057,12 +2423,13 @@ class SymbolTab(QWidget):
         self._select_graphic(len(graphics) - 1)
         return True
 
-    def _text_prompt(self, text='', size=1.27, justify='center'):
-        """@brief Ask the user a text, its size and justification; None when cancelled.
+    def _text_prompt(self, text='', size=1.27):
+        """@brief Ask the user a text and its size; None when cancelled.
 
+        @return (text, size in mm), or None.
         @note Tests replace this method to answer without a dialog.
         """
-        dialog = TextDialog(self.tx, text, size, justify, self)
+        dialog = TextDialog(self.tx, text, size, self)
         try:
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return None
@@ -2081,8 +2448,7 @@ class SymbolTab(QWidget):
         primitives = graphics[index].get('primitives') or [{}]
         if primitives[0].get('kind') != 'text':
             return False
-        answer = self._text_prompt(str(primitives[0].get('text', '')), float(primitives[0].get('size', 1.27)),
-                                   str(primitives[0].get('justify', 'center')))
+        answer = self._text_prompt(str(primitives[0].get('text', '')), float(primitives[0].get('size', 1.27)))
         if answer is None:
             return False
         if not self._edit_graphic(index, 'text', answer):
@@ -2172,10 +2538,11 @@ class SymbolTab(QWidget):
         glyph = next((g for g in catalogue() if g.key == key), None)
         if glyph is None:
             return
-        x = round(round(point.x() / SCENE_UNITS_PER_MM / GRID_MM) * GRID_MM, 4)
-        y = round(round(-point.y() / SCENE_UNITS_PER_MM / GRID_MM) * GRID_MM, 4)
+        instance = instance_from_glyph(glyph, 0.0, 0.0)
+        instance['x'], instance['y'] = snap_glyph_origin(instance, point.x() / SCENE_UNITS_PER_MM,
+                                                         -point.y() / SCENE_UNITS_PER_MM)
         rows = self._free_rows(self.draft_rows(), self._symbol)
-        graphics = self._graphics(rows) + [instance_from_glyph(glyph, x, y)]
+        graphics = self._graphics(rows) + [instance]
         if self._accept_geometry(self._with_graphics(rows, graphics)):
             self._select_graphic(len(graphics) - 1)
             self.set_status(self.tx('Elemento inserito: trascinalo per spostarlo, tasto destro per ruotare, specchiare o eliminare; i pin trascinati sui suoi terminali vi si agganciano.'))
@@ -2184,8 +2551,9 @@ class SymbolTab(QWidget):
         """@brief Place a catalogue glyph programmatically (tests and automation).
 
         @param key Catalogue key.
-        @param x Symbol X in mm (snapped to the grid).
-        @param y Symbol Y in mm, Y up (snapped to the grid).
+        @param x Wanted origin X in mm; snapped so that the glyph's first
+            terminal lands on the pin grid (`snap_glyph_origin`).
+        @param y Wanted origin Y in mm, Y up (snapped likewise).
         @param rotation Quarter turns in degrees.
         @param mirror Mirror about the vertical axis.
         @return True when placed.
@@ -2195,8 +2563,9 @@ class SymbolTab(QWidget):
         if glyph is None or self._symbol is None:
             return False
         rows = self._free_rows(self.draft_rows(), self._symbol)
-        snapped = [round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y)]
-        graphics = self._graphics(rows) + [instance_from_glyph(glyph, snapped[0], snapped[1], rotation, mirror)]
+        instance = instance_from_glyph(glyph, 0.0, 0.0, rotation, mirror)
+        instance['x'], instance['y'] = snap_glyph_origin(instance, x, y)
+        graphics = self._graphics(rows) + [instance]
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
             return False
         self._select_graphic(len(graphics) - 1)
@@ -2327,10 +2696,12 @@ class SymbolTab(QWidget):
             on their pins and terminals, destroying the shape.
         @note 'fill' (value: none/outline/background), 'style' (a KiCad stroke
             type) and 'width' (value: mm) restyle every primitive of the
-            element (`set_primitive_style`); 'text' (value: (text, size mm,
-            justify)) rewrites a text element (`set_text`).
+            element (`set_primitive_style`); 'text' (value: (text, size mm),
+            or the former (text, size mm, justify)) rewrites a text element
+            (`set_text`; the justification of a bottom-left anchored text
+            does not change).
         """
-        from ..generators.symbol_glyphs import is_wire, set_primitive_style, set_text
+        from ..generators.symbol_glyphs import is_shape, is_wire, set_primitive_style, set_text
         if self._symbol is None or self._gesture_before is not None:
             return False
         rows = self._free_rows(self.draft_rows(), self._symbol)
@@ -2342,8 +2713,14 @@ class SymbolTab(QWidget):
             return False
         if operation == 'rotate':
             instance['rotation'] = (int(instance.get('rotation', 0)) + int(value)) % 360
+            # Turned about its origin, a glyph whose terminals are not a
+            # whole pitch from it is moved back onto the terminal grid.
+            if not is_shape(instance):
+                instance['x'], instance['y'] = snap_glyph_origin(instance, instance['x'], instance['y'])
         elif operation == 'mirror':
             instance['mirror'] = not bool(instance.get('mirror', False))
+            if not is_shape(instance):
+                instance['x'], instance['y'] = snap_glyph_origin(instance, instance['x'], instance['y'])
         elif operation == 'move':
             instance['x'], instance['y'] = float(value[0]), float(value[1])
         elif operation == 'fill':
@@ -2400,8 +2777,11 @@ class SymbolTab(QWidget):
 
         @param index Element index.
         @param x Origin X in mm: a typed value, taken as is for a shape
-            (rounded to 0.0001 mm) and snapped to the pin grid for a glyph
-            or a wire, whose terminals and anchors must meet the pins.
+            (rounded to 0.0001 mm); for a glyph snapped so that its first
+            terminal lands on the pin grid (`snap_glyph_origin`, after the
+            new rotation and mirror), for a wire snapped on the pin grid.
+            When x, y, rotation and mirror all equal the current values of
+            a glyph or wire, nothing is changed nor snapped (True returned).
         @param y Origin Y in mm.
         @param rotation 0/90/180/270, None keeps (ignored for wires).
         @param mirror True/False, None keeps (ignored for wires).
@@ -2418,13 +2798,23 @@ class SymbolTab(QWidget):
         if index is None or not 0 <= index < len(graphics):
             return False
         instance = graphics[index]
+        if not is_shape(instance):
+            # Half of the dialog's last shown decimal (3 decimals): a value
+            # shown and returned unchanged is the same place.
+            same_place = all(math.isclose(float(v), float(instance.get(k, 0.0)), abs_tol=5e-4)
+                             for v, k in ((x, 'x'), (y, 'y')))
+            same_turn = is_wire(instance) or (
+                (rotation is None or int(rotation) % 360 == int(instance.get('rotation', 0)) % 360)
+                and (mirror is None or bool(mirror) == bool(instance.get('mirror', False))))
+            if same_place and same_turn:
+                # Confirming the dialog unchanged is not a placement: an
+                # older glyph (origin on the grid) is not re-snapped.
+                return True
         if is_shape(instance):
             instance['x'], instance['y'] = round(float(x), 4), round(float(y), 4)
             if any(v is not None for v in (width, height, radius)) \
                     and not scale_shape(instance, width=width, height=height, radius=radius):
                 return False
-        else:
-            instance['x'], instance['y'] = (round(round(float(v) / GRID_MM) * GRID_MM, 4) for v in (x, y))
         if not is_wire(instance):
             if rotation is not None:
                 if int(rotation) % 90:
@@ -2432,6 +2822,9 @@ class SymbolTab(QWidget):
                 instance['rotation'] = int(rotation) % 360
             if mirror is not None:
                 instance['mirror'] = bool(mirror)
+        if not is_shape(instance):
+            # After the turn: the reference terminal depends on it.
+            instance['x'], instance['y'] = snap_glyph_origin(instance, x, y)
         return self._accept_geometry(self._with_graphics(rows, graphics))
 
     def _edit_element_properties(self, index):
@@ -2694,6 +3087,8 @@ class SymbolTab(QWidget):
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
         for action in self.align_button.defaultAction().menu().actions():
             action.setText(self.tx(action.data()))
+        for action in self.recovery_button.menu().actions():
+            action.setText(self.tx(action.data()))
         self.table.setHorizontalHeaderLabels([self.tx('Pin'), self.tx('Funzione'), self.tx('Tipo elettrico')])
         for row in range(self.table.rowCount()):
             combo = self.table.cellWidget(row, 2)
@@ -2712,6 +3107,22 @@ class SymbolTab(QWidget):
     def has_pending_edits(self):
         """@brief Compare editable rows with the applied baseline."""
         return self.draft_rows() != self._baseline
+
+    def can_apply(self):
+        """@brief Tell whether «Applica» would publish the edits now.
+
+        @return True when there are pending edits and they are valid (the same
+            state that enables the «Applica» button).
+        """
+        return self.apply_button.defaultAction().isEnabled()
+
+    def discard_edits(self):
+        """@brief Drop the unapplied edits and show the applied symbol again, as «Annulla» does.
+
+        @note The draft stays recoverable as before: discarding only reloads
+            the applied baseline into the editor.
+        """
+        self._populate(self._baseline)
 
     def footprint(self):
         """@brief Return the associated footprint library identifier."""
@@ -3349,20 +3760,43 @@ class SymbolTab(QWidget):
             # shape leads): its terminals meet the pins again even when it
             # had been left off the grid, and the others follow by the same
             # delta.
+            # Each member then lands on ITS own grid (S5/S7, 2026-10-14):
+            # a glyph by its reference terminal on the pin grid
+            # (`snap_glyph_origin`), a wire by a whole number of pin steps,
+            # a shape by a whole number of drawing-grid steps. With every
+            # member already on its grid the three deltas are equal (the
+            # drawing steps divide 2.54 mm) and the group moves rigidly; a
+            # member left off its grid is pulled back onto it instead of
+            # dragging the others off theirs.
+            from ..generators.symbol_glyphs import is_wire
             raw = (delta.x() / SCENE_UNITS_PER_MM, -delta.y() / SCENE_UNITS_PER_MM)
             members = [index for index in origins if 0 <= index < len(graphics)]
             pinned = [index for index in members if not is_shape(graphics[index])]
+            step = self._grid_mm if self._snap else 0.01
             if members and not pinned:
-                step = self._grid_mm if self._snap else 0.01
                 dx, dy = (round(round(v / step) * step, 4) for v in raw)
+                pin_delta = shape_delta = (dx, dy)
+                reference = None
             else:
                 reference = target[1] if target[1] in pinned else (pinned[0] if pinned else target[1])
                 rx, ry = origins.get(reference, origin)
-                dx, dy = (round(round((o + v) / GRID_MM) * GRID_MM - o, 4)
-                          for o, v in ((rx, raw[0]), (ry, raw[1])))
+                sx, sy = snap_glyph_origin(graphics[reference], rx + raw[0], ry + raw[1])
+                dx, dy = sx - rx, sy - ry
+                pin_delta = tuple(round(round(v / GRID_MM) * GRID_MM, 4) for v in (dx, dy))
+                shape_delta = tuple(round(round(v / step) * step, 4) for v in (dx, dy))
             for index, (ox, oy) in origins.items():
-                if 0 <= index < len(graphics):
-                    graphics[index]['x'], graphics[index]['y'] = round(ox + dx, 4), round(oy + dy, 4)
+                if not 0 <= index < len(graphics):
+                    continue
+                record = graphics[index]
+                if is_shape(record):
+                    x, y = ox + shape_delta[0], oy + shape_delta[1]
+                elif is_wire(record) and index != reference:
+                    # A wire follows by whole pin steps: its anchored ends
+                    # stay on their pins and terminals anyway.
+                    x, y = ox + pin_delta[0], oy + pin_delta[1]
+                else:
+                    x, y = snap_glyph_origin(record, ox + dx, oy + dy)
+                record['x'], record['y'] = round(x, 4), round(y, 4)
             self._accept_geometry(self._with_graphics(rows, graphics))
             return
         if target[0] == 'vertex':
@@ -3508,13 +3942,16 @@ class SymbolTab(QWidget):
             the group's area or a drag is in progress
             (`_update_handle_visibility`).
         """
-        from PyQt6.QtWidgets import QGraphicsItem
+        from PyQt6.QtGui import QBrush
+        from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem
         theme = self.theme
         fill = QColor(theme['handle'])
         fill.setAlpha(150)
         half = HANDLE_SIZE_PX / 2
-        square = scene.addRect(-half, -half, HANDLE_SIZE_PX, HANDLE_SIZE_PX,
-                               QPen(QColor(theme['selected']), 1.0), fill)
+        # Kept in `_handle_groups` after the call: built in Python, see `_add_kept_item`.
+        square = _add_kept_item(scene, QGraphicsRectItem(-half, -half, HANDLE_SIZE_PX, HANDLE_SIZE_PX))
+        square.setPen(QPen(QColor(theme['selected']), 1.0))
+        square.setBrush(QBrush(fill))
         square.setPos(sx, sy)
         # Constant screen size at any zoom (the rect is in device pixels
         # about the item position).
@@ -3524,6 +3961,23 @@ class SymbolTab(QWidget):
         square.setVisible(False)
         group.append(square)
         return square
+
+    @staticmethod
+    def _add_rubber_band(scene, path, pen):
+        """@brief Add the unfilled path that follows the cursor while wiring or drawing a shape.
+
+        @param scene Scene of the symbol view.
+        @param path Initial path, scene units.
+        @param pen Dashed pen of the tool.
+        @return The path item, kept in `_wire_cursor_item` and reshaped by `_update_readout`.
+        @note Built in Python because the tab keeps it (see `_add_kept_item`).
+        """
+        from PyQt6.QtGui import QBrush
+        from PyQt6.QtWidgets import QGraphicsPathItem
+        item = _add_kept_item(scene, QGraphicsPathItem(path))
+        item.setPen(pen)
+        item.setBrush(QBrush(QColor(0, 0, 0, 0)))
+        return item
 
     def _update_handle_visibility(self, point):
         """@brief Show the handles of the selected element while the pointer is in its area.
@@ -3559,22 +4013,126 @@ class SymbolTab(QWidget):
             for item in items:
                 item.setVisible(visible)
 
-    def _draw_text_primitive(self, scene, scale, p, selected):
-        """A text primitive as a scene item: font size `p.size` mm, turned by
-        `p.angle`, justified about its anchor point; returns the item."""
-        theme = self.theme
+    def _legacy_text_font(self, size):
+        """The font symbol texts were drawn with before 2026-10-14: em (pixel size) = `size` mm.
+
+        Kept only as the measure of the one-off anchor migration
+        (`text_metrics`): it is what the user saw when the old texts were placed.
+        """
         font = QFont(self.font())
-        font.setPixelSize(max(1, int(round(p.size * scale))))
+        font.setPixelSize(max(1, int(round(size * SCENE_UNITS_PER_MM))))
+        return font
+
+    @staticmethod
+    def _text_baseline(text, font):
+        """Distance, item units, from the top of a QGraphicsSimpleTextItem to its baseline.
+
+        The item lays its single line out with QTextLayout from y = 0, so the
+        baseline is that line's ascent (fallback fonts included).
+        """
+        from PyQt6.QtGui import QTextLayout
+        layout = QTextLayout(text, font)
+        layout.beginLayout()
+        line = layout.createLine()
+        layout.endLayout()
+        return line.ascent() if line.isValid() else QFontMetricsF(font).ascent()
+
+    def text_metrics(self, text, size):
+        """@brief LEGACY width, line height and baseline depth of a symbol text (font em = size).
+
+        @param text The text (one line).
+        @param size Font size in mm.
+        @return (width, height, ascent) in mm: the bounding width and height of
+            the item the editor drew before 2026-10-14 and the distance from
+            its top to the baseline.
+        @note The measure `symbol_glyphs.migrate_text_anchor` uses: the old
+            texts must keep the corner the user SAW, drawn with this metric,
+            even though texts are now drawn at KiCad's size
+            (`drawn_text_metrics`). Do not change it to the new metric.
+        """
+        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        font = self._legacy_text_font(size)
+        item = QGraphicsSimpleTextItem(text)
+        item.setFont(font)
+        bounds = item.boundingRect()
+        scale = SCENE_UNITS_PER_MM
+        return bounds.width() / scale, bounds.height() / scale, self._text_baseline(text, font) / scale
+
+    #: Pixel size of the reference font texts are laid out with; the item is
+    #: then scaled (`_kicad_text_font`). Large, so the measured cap height
+    #: is precise and the scale is not quantised by integer pixel sizes.
+    _TEXT_REFERENCE_PX = 100
+
+    def _kicad_text_font(self, size):
+        """(font, scale) that draw a symbol text at KiCad's size: capitals `size` mm tall.
+
+        KiCad's text size is the glyph (cap) height (user decision,
+        2026-10-14, shared with the footprint tab); the editor font's em is
+        not, so the text is laid out at `_TEXT_REFERENCE_PX` and the item
+        scaled by size / measured cap height. The cap height is the height
+        of the outline of «H» (what is painted), with the tight bounding
+        rect and QFontMetricsF.capHeight as fallbacks.
+        """
+        from PyQt6.QtGui import QPainterPath
+        font = QFont(self.font())
+        font.setPixelSize(self._TEXT_REFERENCE_PX)
+        outline = QPainterPath()
+        outline.addText(0, 0, font, 'H')
+        metrics = QFontMetricsF(font)
+        cap = (outline.boundingRect().height() or metrics.tightBoundingRect('H').height()
+               or metrics.capHeight() or 0.7 * self._TEXT_REFERENCE_PX)
+        return font, size * SCENE_UNITS_PER_MM / cap
+
+    def drawn_text_metrics(self, text, size):
+        """@brief Width, line height, baseline depth and cap height of a symbol text as drawn now.
+
+        @param text The text (one line).
+        @param size KiCad text size in mm (= cap height).
+        @return (width, height, ascent, cap) in mm, at KiCad's size
+            (`_kicad_text_font`): cap equals `size` by construction.
+        @note The width is the editor font's, not KiCad's stroke font: on the
+            2026-10-14 measure (Segoe UI against kicad-cli 10) it is about
+            0.83-0.89 of KiCad's for ordinary texts, with wider spread for
+            «iiii» (0.73) or «MMMM» (1.13); no horizontal stretch is applied
+            because a single factor does not bring every text within 5%.
+        """
+        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        font, factor = self._kicad_text_font(size)
+        item = QGraphicsSimpleTextItem(text)
+        item.setFont(font)
+        bounds = item.boundingRect()
+        unit = factor / SCENE_UNITS_PER_MM
+        return (bounds.width() * unit, bounds.height() * unit, self._text_baseline(text, font) * unit, size)
+
+    def _draw_text_primitive(self, scene, scale, p, selected):
+        """A text primitive as a scene item: capitals `p.size` mm tall (KiCad's
+        size), turned by `p.angle`, placed about its anchor point; returns the item.
+
+        The anchor is, in the text's own frame (reading direction, glyph
+        up), at the left end, centre or right end (`p.justify`) of the line
+        and on its baseline ("bottom"), half a cap height above it
+        ("center") or a cap height above it ("top"), as KiCad places its
+        texts (`p.vjustify`). A bottom-left text therefore starts at its
+        anchor and grows right and up; turned 90 degrees, up and to the left.
+        Library glyph texts are drawn by this same function, at KiCad's size.
+        """
+        theme = self.theme
+        font, factor = self._kicad_text_font(p.size)
         item = scene.addSimpleText(p.text, font)
         item.setBrush(QColor(theme['selected']) if selected else QColor(theme['graphic']))
+        item.setScale(factor)
         bounds = item.boundingRect()
-        dx = bounds.width() if p.justify == 'right' else bounds.width() / 2 if p.justify == 'center' else 0
+        cap = p.size * scale / factor
+        along = bounds.width() if p.justify == 'right' else bounds.width() / 2 if p.justify == 'center' else 0
+        baseline = self._text_baseline(p.text, font)
+        down = baseline if p.vjustify == 'bottom' else baseline - cap if p.vjustify == 'top' else baseline - cap / 2
+        along, down = along * factor, down * factor
         (x, y), = p.points
         if p.angle % 180 == 90:
             item.setRotation(-90)
-            item.setPos(x * scale - bounds.height() / 2, -y * scale + dx)
+            item.setPos(x * scale - down, -y * scale + along)
         else:
-            item.setPos(x * scale - dx, -y * scale - bounds.height() / 2)
+            item.setPos(x * scale - along, -y * scale - down)
         return item
 
     def _draw(self, symbol):
@@ -3609,8 +4167,8 @@ class SymbolTab(QWidget):
             for x, y in points:
                 scene.addEllipse(x * scale - 2.5, -y * scale - 2.5, 5, 5, wire_pen, QColor(theme['wire']))
             last = points[-1]
-            self._wire_cursor_item = scene.addPath(
-                QPainterPath(QPointF(last[0] * scale, -last[1] * scale)), wire_pen, QColor(0, 0, 0, 0))
+            self._wire_cursor_item = self._add_rubber_band(
+                scene, QPainterPath(QPointF(last[0] * scale, -last[1] * scale)), wire_pen)
         elif self._shape_points:
             # The clicked points of the shape and, from the cursor, the
             # shape they would make (`_update_readout`).
@@ -3618,8 +4176,8 @@ class SymbolTab(QWidget):
             shape_pen = QPen(QColor(theme['wire']), 1.6, Qt.PenStyle.DashLine)
             for x, y in self._shape_points:
                 scene.addEllipse(x * scale - 2.5, -y * scale - 2.5, 5, 5, shape_pen, QColor(theme['wire']))
-            self._wire_cursor_item = scene.addPath(
-                self._outline_path(self._shape_outline(self._shape_points), scale), shape_pen, QColor(0, 0, 0, 0))
+            self._wire_cursor_item = self._add_rubber_band(
+                scene, self._outline_path(self._shape_outline(self._shape_points), scale), shape_pen)
         else:
             self._wire_cursor_item = None
 

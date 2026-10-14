@@ -39,7 +39,7 @@ from .process_log import NO_WINDOW_FLAGS, ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
 from ..fsutil import replace_file
 from ..core.validation import is_finite_number
-from ..kicad_versions import newest_version_first
+from ..kicad_versions import newest_version_first, parse_version
 from .lead_sides import local_lead_sides
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
@@ -470,13 +470,85 @@ def freecad_folder_version(executable: str) -> str:
         ``""`` when the folder carries none (``FreeCAD``, ``/usr``): such an
         installation is still usable but never preferred.
     @note A folder named after FreeCAD gives the number right after the name,
-        and a suffix after it is ignored: «FreeCAD 1.1-dev» and «FreeCAD 1.1
-        RC» are version 1.1, not unversioned folders ranked below 0.19. Any
-        other folder gives the number at its end, as before.
+        and a suffix after it does not change the number: «FreeCAD 1.1-dev»
+        and «FreeCAD 1.1 RC» are version 1.1, not unversioned folders ranked
+        below 0.19. Whether the suffix marks a pre-release is a separate
+        question, answered by `freecad_folder_is_prerelease`. Any other folder
+        gives the number at its end, as before.
     """
     folder = Path(str(executable).replace("\\", "/")).parent.parent.name
     match = _FREECAD_FOLDER_VERSION.search(folder) or _FOLDER_VERSION.search(folder)
     return match.group(1) if match else ""
+
+
+#: One word of a folder suffix that marks a pre-release build: «dev», «alpha»,
+#: «beta», «rc», «pre», «preview» or a development build («nightly», «weekly»,
+#: «snapshot»), optionally followed by digits («rc2»), or the short PEP 440
+#: forms «a»/«b» followed by digits («b1»).
+_PRERELEASE_WORD = re.compile(
+    r"(?:dev|alpha|beta|rc|pre|preview|nightly|weekly|snapshot)\d*|[ab]\d+", re.IGNORECASE)
+
+
+def freecad_folder_is_prerelease(executable: str) -> bool:
+    """@brief Tell whether the installation folder of a freecadcmd path names a pre-release.
+
+    @param executable Path of freecadcmd, as for `freecad_folder_version`.
+    @return True when the folder is named after FreeCAD, carries a version
+        and the text after that version contains a pre-release word
+        («FreeCAD 1.1-dev», «FreeCAD 1.1 RC», «FreeCAD 1.0rc2»,
+        «FreeCAD 1.1 beta»); False otherwise, including folders without a
+        version.
+    @note The suffix is split into alphanumeric words and each word is
+        compared with an explicit list (`_PRERELEASE_WORD`): dev, alpha,
+        beta, rc, pre, preview, and the development builds nightly, weekly
+        and snapshot, each optionally followed by digits, and
+        a/b followed by digits. Any other word is a packaging tag, not a
+        pre-release: «FreeCAD_1.0.2-conda-Windows-x86_64» is a release. An
+        unknown suffix therefore ranks as a release (user decision D4,
+        2026-10-14).
+    """
+    folder = Path(str(executable).replace("\\", "/")).parent.parent.name
+    match = _FREECAD_FOLDER_VERSION.search(folder)
+    if not match:
+        return False
+    words = re.split(r"[^0-9A-Za-z]+", folder[match.end():])
+    return any(_PRERELEASE_WORD.fullmatch(word) for word in words if word)
+
+
+def _freecad_install_order(candidates: list) -> list:
+    """@brief Order freecadcmd paths from the most to the least preferred.
+
+    @param candidates freecadcmd paths found on the system.
+    @return The paths, highest numeric folder version first; at equal
+        version a release before a pre-release; then by path text, as
+        `newest_version_first` breaks ties. Unversioned folders come last.
+    @note The second sort is stable, so the text tie-break of
+        `newest_version_first` survives among installations of the same
+        version and the same release state (two pre-releases of one
+        version, e.g. «1.1-dev» and «1.1 RC», keep the reverse text order:
+        «FreeCAD 1.1-dev» before «FreeCAD 1.1 RC»).
+    @note Trailing zero components are dropped before comparing
+        (`_comparable_version`): «1.1.0» and «1.1» are the same version,
+        otherwise «FreeCAD 1.1.0-dev» would outrank the release «FreeCAD 1.1».
+    """
+    ordered = newest_version_first(candidates, freecad_folder_version)
+    ordered.sort(key=lambda path: (_comparable_version(freecad_folder_version(path)),
+                                   not freecad_folder_is_prerelease(path)),
+                 reverse=True)
+    return ordered
+
+
+def _comparable_version(name: str) -> tuple:
+    """@brief Numeric version without trailing zero components, for equality tests.
+
+    @param name Dotted version such as ``"1.1.0"``, or ``""``.
+    @return ``(1, 1)`` for ``"1.1.0"`` and ``"1.1"``; ``()`` when the name is
+        not a version, so unversioned folders still sort last.
+    """
+    version = list(parse_version(name) or ())
+    while version and version[-1] == 0:
+        version.pop()
+    return tuple(version)
 
 
 def find_freecadcmd() -> str:
@@ -486,8 +558,12 @@ def find_freecadcmd() -> str:
     @throws Cad3DError When no installation is found.
     @note Among several installations the highest NUMERIC folder version
         wins (``FreeCAD 1.10`` over ``FreeCAD 1.9`` over ``FreeCAD 0.21``):
-        a text sort ranked ``1.9`` above ``1.10``. Folders without a version
-        come last; ties are broken by the path text (`newest_version_first`).
+        a text sort ranked ``1.9`` above ``1.10``. At equal version the
+        official release beats a pre-release (``FreeCAD 1.1`` over
+        ``FreeCAD 1.1-dev``), while a higher number still wins
+        (``FreeCAD 1.2-dev`` over ``FreeCAD 1.1``). Folders without a version
+        come last; remaining ties are broken by the path text
+        (`_freecad_install_order`).
 
     Cerca freecadcmd: variabile d'ambiente FREECAD_CMD_PATH, poi le
     installazioni tipiche di Windows sotto Program Files."""
@@ -502,7 +578,7 @@ def find_freecadcmd() -> str:
         candidates.extend(glob.glob(f"{base}/freecadcmd"))
 
     if candidates:
-        return newest_version_first(candidates, freecad_folder_version)[0]
+        return _freecad_install_order(candidates)[0]
 
     raise Cad3DError(
         tx("freecadcmd non trovato. Installa FreeCAD, oppure imposta la variabile "

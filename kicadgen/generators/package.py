@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from ..core.footprint import Footprint, FpLine, FpRect, Pad
+from ..core.footprint import Footprint, FpLine, FpRect, Pad, fab_reference_text
 from ..core.package_geometry import PackageGeometry, pad_outline
 from ..core.silk import clip_segment, keepout_box, pin_one, pin_one_marker, silk_rectangle
 
@@ -49,6 +49,19 @@ def footprint_attr(pad_types) -> str | None:
     return None
 
 
+def preview_grid_origin(geometry: PackageGeometry) -> tuple:
+    """@brief Origin of the 2D preview grid of a package, mm.
+
+    @param geometry Package model.
+    @return Position of the first numbered pin as seen from the top
+        (pins_seen_from_top, the coordinates the pads are written at), or
+        (0, 0) without one. Used by the generator for the default text
+        anchors and by the preview drawer for its grid: one definition.
+    """
+    first = next((pin for pin in geometry.pins_seen_from_top() if str(pin.number).strip()), None)
+    return (0.0, 0.0) if first is None else (float(first.x_mm), float(first.y_mm))
+
+
 def build_package(geometry: PackageGeometry, name: str | None = None, *,
                   datasheet: str = "", description: str = "") -> Footprint:
     """@brief Build the footprint of a package described by explicit pad coordinates.
@@ -63,7 +76,9 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         about an estimated body centre is appended in both cases.
     @return Footprint whose pads keep the source numbers and relative
         positions; the footprint origin is the (possibly estimated) body
-        centre, see PackageGeometry.body_frame_offset.
+        centre, see PackageGeometry.body_frame_offset. A ``${REFERENCE}``
+        text on F.Fab marks the body centre (core.footprint.fab_reference_text);
+        Reference/Value at core.footprint.default_text_positions.
     @throws ValueError When the geometry does not validate or the pin-1
         marker cannot be placed off the copper.
     """
@@ -140,6 +155,15 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         fp.add_graphic(FpRect(start=(round(extent[0] - m, 6), round(extent[1] - m, 6)),
                               end=(round(extent[2] + m, 6), round(extent[3] + m, 6)),
                               layer="F.CrtYd", width=0.05))
+        # KLC F5.2 reference on F.Fab: centred on the body (the footprint
+        # origin) when its size is known, otherwise on the pad field.
+        if geometry.body_length_mm and geometry.body_width_mm:
+            anchor = (0.0, 0.0)
+            size = (geometry.body_length_mm, geometry.body_width_mm)
+        else:
+            anchor = (round((extent[0] + extent[2]) / 2, 6), round((extent[1] + extent[3]) / 2, 6))
+            size = (extent[2] - extent[0], extent[3] - extent[1])
+        fp.add_graphic(fab_reference_text(anchor, size))
 
     for pin in pins:
         fp.add_pad(Pad(
@@ -149,4 +173,6 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
             layers=PAD_LAYERS[pin.pad_type], rotation=pin.rotation_deg, drill=pin.drill_mm,
             roundrect_rratio=0.25 if pin.shape == "roundrect" else None,
         ))
-    return fp
+    # Decision D1 (user, 2026-10-14): Reference above and Value below the
+    # envelope; a user-chosen position is applied afterwards (place_texts).
+    return fp.place_default_texts(preview_grid_origin(geometry))

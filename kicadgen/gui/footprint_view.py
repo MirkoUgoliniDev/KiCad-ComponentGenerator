@@ -367,7 +367,8 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             # A handle belongs to its drawing: the handles cover the stroke
-            # (and a text's only handle covers the text) while hovered.
+            # (a text's only handle sits on its bottom-left anchor corner,
+            # 2026-10-14) while hovered.
             drawing_index = self._drawing_at(event.pos())
             if drawing_index >= 0:
                 self.drawing_context_requested.emit(drawing_index)

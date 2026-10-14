@@ -483,7 +483,9 @@ def test_package_without_body_still_gets_a_courtyard_around_the_pads():
     fp = build_package(_package(PinSpec("1", 0, 0, 1, 1), PinSpec("2", 3, 0, 1, 1)))
     court = next(g for g in fp.graphics if isinstance(g, FpRect) and g.layer == "F.CrtYd")
     assert court.start == pytest.approx((-0.75, -0.75)) and court.end == pytest.approx((3.75, 0.75))
-    assert not any(g.layer == "F.Fab" for g in fp.graphics)
+    # CONTRACT CHANGED 2026-10-14 (L-3): the KLC ${REFERENCE} text sits on
+    # F.Fab of every footprint; without a body there is still no F.Fab outline.
+    assert not any(g.layer == "F.Fab" for g in fp.graphics if type(g).__name__ != "FpText")
 
 
 # -- G10: pinout dialog order ----------------------------------------------------------

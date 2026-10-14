@@ -27,7 +27,13 @@ PIN_GRID_MM = 2.54
 #: KiCad 10 writes itself (see its bundled `Relay.kicad_sym`). Older KiCad
 #: releases cannot read it; KiCad 8/9 would need 20231120 or 20241209.
 SYMBOL_FORMAT_VERSION = 20251024
-SYMBOL_GENERATOR_VERSION = '10.0'
+#: `generator_version` written beside `(generator "kicadgen")`. It is this
+#: program's file revision, not a KiCad release. «10.0» is ambiguous: it
+#: marked files with symbol text angles in degrees (`0389777`..`bc01ca2`)
+#: and, in `af3a92a`, in KiCad's tenths; «10.0.1» marks tenths only. Readers
+#: apply the value fallback only to the «10.0» header
+#: (`symbol_glyphs.text_angle_from_file`), so this must never go back to «10.0».
+SYMBOL_GENERATOR_VERSION = '10.0.1'
 #: Characters a symbol name must not contain, besides control characters:
 #: `:` separates the library nickname in «Library:Name»; KiCad 10 refuses to
 #: load a library whose symbol name holds `"`, `\\`, `<` or `>` (verified

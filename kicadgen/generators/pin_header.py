@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from math import hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
-from ..core.footprint import Footprint, FpRect, Pad
+from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
@@ -300,7 +300,9 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     """@brief Build a THT footprint with body contours and a union courtyard.
 
     @param params Grid, pad and optional body dimensions in mm.
-    @return Footprint with unchanged pin coordinates and numbering.
+    @return Footprint with unchanged pin coordinates and numbering and a
+        ``${REFERENCE}`` text on F.Fab (see core.footprint.fab_reference_text);
+        Reference/Value at core.footprint.default_text_positions.
     @throws ValueError If params contain invalid geometry.
     """
     params.validate()
@@ -372,4 +374,11 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     fp.add_graphic(FpRect(
         start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05,
     ))
-    return fp
+    # KLC F5.2 reference on F.Fab, centred on the body outline when one is
+    # declared, otherwise on the pin field the silkscreen frames.
+    fp.add_graphic(fab_reference_text(
+        (round((start[0] + end[0]) / 2, 6), round((start[1] + end[1]) / 2, 6)),
+        (end[0] - start[0], end[1] - start[1])))
+    # Decision D1 (user, 2026-10-14): Reference above and Value below the
+    # envelope; a user-chosen position is applied afterwards (place_texts).
+    return fp.place_default_texts()

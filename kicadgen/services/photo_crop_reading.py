@@ -1541,51 +1541,116 @@ def _inventory_lead_count(component):
     return count if type(count) is int else None
 
 
-def _reconcile_declared_package(component, envelope, tab):
-    """Replace a declared leaded package the measurement excludes by the family the evidence allows.
+def _family_lead_count(package):
+    """Ordinary leads a declared leaded family has by its standard, None when unknown.
+
+    LEADED_SIZES_MM families carry their registered count; SOIC-n has n. Any
+    other name (two-terminal size families, unknown names) has no count here,
+    so it can never contradict an observed count.
+    """
+    family = package_family(package)
+    if family in LEADED_SIZES_MM:
+        return LEADED_SIZES_MM[family]['leads']
+    soic = re.fullmatch(r'SOIC-(\d+)', family)
+    return int(soic.group(1)) if soic else None
+
+
+def _reconcile_declared_package(component, envelope, tab, crop_count=None):
+    """Replace a declared leaded package the evidence excludes by the family the evidence allows.
 
     Applies only to rows of a leaded class (leaded_class). When the row's
     package names a family that cannot have the measured envelope
-    (declared_package_contradicts_measure) the name decays: the family
-    leaded_family_from_evidence derives from the INVENTORY lead count, the
-    tab observation `tab` (None when not trusted) and the envelope replaces
-    it (package_confidence 'medium', `package_source`
+    (declared_package_contradicts_measure) -- or, with `crop_count`, a family
+    whose standard lead count differs from it -- the name decays: the family
+    leaded_family_from_evidence derives from the lead count, the tab
+    observation `tab` (None when not trusted) and the envelope replaces it
+    (package_confidence 'medium', `package_source`
     PACKAGE_SOURCE_COUNT_AND_MEASURE); without a unique family the package
     becomes empty at low confidence (PACKAGE_SOURCE_NAME_REJECTED). The
     declared name goes to `_package_inventory` and a translated review
-    reason names both: never silent (HANDOFF 149). Returns True when the
-    package changed.
+    reason names both and says which count was used: never silent (HANDOFF
+    149). Returns True when the package changed.
+
+    @note Source of the count (user decision D3, 2026-10-14): `crop_count`
+    is the COMPLETE per-side count both crop readings agreed on and
+    _adopt_terminals already wrote into the row (every side known, sum > 0,
+    `lead_count_complete` True). The caller passes it only in that case; it
+    then outranks the inventory count, because two agreeing observations of
+    every side are the more specific evidence and the row's `lead_count` is
+    already that value: a family derived from the inventory count would
+    contradict the row (a «SOT-23» with four leads). With `crop_count` None
+    (no complete count adopted: partial or hidden leads, an outvoted or
+    failed reading) the INVENTORY count is used as before
+    (_inventory_lead_count). The row's `lead_count_complete` alone cannot
+    tell the two apart, since the inventory sets it too: hence the explicit
+    argument.
+    @note Invariant: after this call, with `crop_count` given, a non-empty
+    package of a family with a known lead count (_family_lead_count) never
+    contradicts the row's lead count.
     """
     package = str(component.get('package') or '')
-    if not package or not leaded_class(component.get('class')) \
-            or not declared_package_contradicts_measure(package, envelope):
+    if not package or not leaded_class(component.get('class')):
         return False
-    count = _inventory_lead_count(component)
+    from_crop = type(crop_count) is int and crop_count > 0
+    declared_count = _family_lead_count(package)
+    count_contradicts = from_crop and declared_count is not None and declared_count != crop_count
+    measure_contradicts = declared_package_contradicts_measure(package, envelope)
+    if not measure_contradicts and not count_contradicts:
+        return False
+    count = crop_count if from_crop else _inventory_lead_count(component)
     family = leaded_family_from_evidence(count, tab, envelope)
     component['_package_inventory'] = package
     component['package'] = family or ''
+    fitting = '' if family or count is None else (
+        ', '.join(_leaded_families(count, tab, envelope, strict=False)) or '-')
     if family:
         component['package_confidence'] = 'medium'
         component['package_source'] = PACKAGE_SOURCE_COUNT_AND_MEASURE
-        _add_review_reason(component, tx(
-            "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
-            "famiglia «{family}» derivata da {n} piedini e misura; da verificare.",
-            declared=package, long=envelope[0], short=envelope[1], family=family, n=count))
     else:
         component['package_confidence'] = 'low'
         component['package_source'] = PACKAGE_SOURCE_NAME_REJECTED
-        if count is None:
-            _add_review_reason(component, tx(
-                "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm "
-                "e numero di piedini dell'inventario sconosciuto: package lasciato vuoto, "
-                "da verificare.", declared=package, long=envelope[0], short=envelope[1]))
-        else:
-            fitting = _leaded_families(count, tab, envelope, strict=False)
-            _add_review_reason(component, tx(
+    if from_crop and measure_contradicts:
+        if family:
+            reason = tx(
                 "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
-                "nessuna famiglia univoca da {n} piedini e misura ({families}); package "
-                "lasciato vuoto, da verificare.", declared=package, long=envelope[0],
-                short=envelope[1], n=count, families=', '.join(fitting) or '-'))
+                "famiglia «{family}» derivata da {n} piedini contati da entrambe le letture del "
+                "ritaglio e misura; da verificare.",
+                declared=package, long=envelope[0], short=envelope[1], family=family, n=count)
+        else:
+            reason = tx(
+                "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
+                "nessuna famiglia univoca da {n} piedini contati da entrambe le letture del "
+                "ritaglio e misura ({families}); package lasciato vuoto, da verificare.",
+                declared=package, long=envelope[0], short=envelope[1], n=count, families=fitting)
+    elif from_crop:
+        if family:
+            reason = tx(
+                "Package «{declared}» incompatibile con i {n} piedini contati da entrambe le "
+                "letture del ritaglio: famiglia «{family}» derivata da quel conteggio e dalla "
+                "misura; da verificare.", declared=package, family=family, n=count)
+        else:
+            reason = tx(
+                "Package «{declared}» incompatibile con i {n} piedini contati da entrambe le "
+                "letture del ritaglio: nessuna famiglia univoca da quel conteggio e dalla misura "
+                "({families}); package lasciato vuoto, da verificare.",
+                declared=package, n=count, families=fitting)
+    elif family:
+        reason = tx(
+            "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
+            "famiglia «{family}» derivata da {n} piedini e misura; da verificare.",
+            declared=package, long=envelope[0], short=envelope[1], family=family, n=count)
+    elif count is None:
+        reason = tx(
+            "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm "
+            "e numero di piedini dell'inventario sconosciuto: package lasciato vuoto, "
+            "da verificare.", declared=package, long=envelope[0], short=envelope[1])
+    else:
+        reason = tx(
+            "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: "
+            "nessuna famiglia univoca da {n} piedini e misura ({families}); package "
+            "lasciato vuoto, da verificare.", declared=package, long=envelope[0],
+            short=envelope[1], n=count, families=fitting)
+    _add_review_reason(component, reason)
     return True
 
 
@@ -1701,8 +1766,12 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
         have decays to the family derived from the inventory lead count
         and the envelope, `_package_inventory`, `package_source`). The
         same check runs on an agreed reading of a leaded class that gave
-        no family (incomplete per-side count), so an inventory name the
-        measurement excludes never survives unnoticed. Every attempted row records
+        no family, so an inventory name the measurement excludes never
+        survives unnoticed; when that agreed reading carries a COMPLETE
+        per-side count (adopted into the row) the family comes from that
+        count instead of the inventory's, and a declared name whose standard
+        lead count differs from it decays too (user decision D3,
+        2026-10-14). Every attempted row records
         `_crop_reading` ('agreed'/'disagreed'/'inconclusive'/'outvoted'/'failed'),
         `_crop_observations` (both parsed answers), `_crop_readings` (both
         derivations), `_crop_reading_version` and
@@ -1935,6 +2004,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                     leads='-' if component.get('lead_count') is None else component['lead_count']))
                 # La linguetta del ritaglio non viene usata: e' la stessa
                 # osservazione dei terminali appena messa in minoranza.
+                # Outvoted readings adopted nothing: the inventory count stays
+                # the source (no crop_count, decision D3).
                 _reconcile_declared_package(component, envelope, None)
                 status = 'outvoted'
             elif reasons:
@@ -1968,10 +2039,14 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                 # il nome dell'inventario resta, ma se la misura lo esclude
                 # decade a favore della famiglia da conteggio + misura
                 # (HANDOFF 149). La linguetta solo se le due letture concordano.
+                # Decision D3 (2026-10-14): a complete count both readings
+                # agreed on, already adopted by _adopt, is the count the
+                # family comes from; otherwise the inventory's.
                 if not agreed['family']:
                     _reconcile_declared_package(
                         component, envelope,
-                        first['tab'] if first['tab'] == second['tab'] else None)
+                        first['tab'] if first['tab'] == second['tab'] else None,
+                        crop_count=sum(agreed['leads']) if complete_leads else None)
                 status = 'agreed'
             _choose_marking(component, first, second)
         # A category disagreement cannot invalidate independently agreed terminal geometry.

@@ -110,7 +110,8 @@ def test_turned_package_body_matches_the_footprint_outline(monkeypatch, tmp_path
     footprint = build_package(package)
     fab_points = set()
     for graphic in footprint.graphics:
-        if getattr(graphic, "layer", "") != "F.Fab":
+        # The ${REFERENCE} text on F.Fab (L-3, 2026-10-14) is not outline.
+        if getattr(graphic, "layer", "") != "F.Fab" or type(graphic).__name__ == "FpText":
             continue
         (sx, sy), (ex, ey) = graphic.start, graphic.end
         # A rectangle (multiple of 90 degrees) stores two opposite corners.
@@ -259,10 +260,10 @@ def test_without_local_sides_only_the_count_is_used(parts, monkeypatch, changes,
     calls, warnings = [], []
     monkeypatch.setattr(parts, "_ic_observed_pins",
                         lambda *a, **k: calls.append(k) or [("body", "#000")])
-    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(v))
+    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(template))
     parts.build_component(_qfn(45.0, **changes), 1.6)
     assert calls == [{"pin_count": count, "pins_by_side": None, "marker": None}]
-    assert any("not mappable" in str(v.get("exc")) for v in warnings)
+    assert any("non riportabili" in template for template in warnings)
 
 
 @pytest.mark.parametrize("rotation", [0.0, 90.0, 180.0, 270.0, -90.0, 30.0])
@@ -278,14 +279,14 @@ def test_missing_local_sides_are_recomputed_from_the_image_sides(parts, flip_y, 
     calls, warnings = [], []
     monkeypatch.setattr(parts, "_ic_observed_pins",
                         lambda *a, **k: calls.append(k) or [("body", "#000")])
-    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(v))
+    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(template))
     legacy = _qfn(rotation, pins_by_side=raw)
     del legacy["lead_sides_local"]
     data = flip_y({"body": {"offset_y_mm": 0.0, "width_mm": 10.0}, "components": [legacy]})
     parts.build_component(data["components"][0], 1.6)
     expected = local_lead_sides(raw, rotation)
     assert expected and calls[0]["pins_by_side"] == expected
-    assert not any("not mappable" in str(v.get("exc")) for v in warnings)
+    assert not any("non riportabili" in template for template in warnings)
 
 
 def test_unmappable_missing_local_sides_still_fall_back_to_the_count(parts, flip_y, monkeypatch):
@@ -294,13 +295,13 @@ def test_unmappable_missing_local_sides_still_fall_back_to_the_count(parts, flip
     calls, warnings = [], []
     monkeypatch.setattr(parts, "_ic_observed_pins",
                         lambda *a, **k: calls.append(k) or [("body", "#000")])
-    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(v))
+    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(template))
     legacy = _qfn(45.0, pins_by_side=raw)
     del legacy["lead_sides_local"]
     data = flip_y({"body": {"offset_y_mm": 0.0, "width_mm": 10.0}, "components": [legacy]})
     parts.build_component(data["components"][0], 1.6)
     assert calls == [{"pin_count": 4, "pins_by_side": None, "marker": None}]
-    assert any("not mappable" in str(v.get("exc")) for v in warnings)
+    assert any("non riportabili" in template for template in warnings)
 
 
 def test_raw_side_total_counts_numpy_integers_but_not_bools_or_floats(parts):
@@ -315,10 +316,10 @@ def test_local_sides_are_passed_unchanged(parts, monkeypatch):
     calls, warnings = [], []
     monkeypatch.setattr(parts, "_ic_observed_pins",
                         lambda *a, **k: calls.append(k) or [("body", "#000")])
-    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(v))
+    monkeypatch.setattr(parts, "_warn", lambda template, **v: warnings.append(template))
     parts.build_component(_qfn(90), 1.6)
     assert calls[0]["pins_by_side"] == {"left": 4, "right": 4}
-    assert not any("not mappable" in str(v.get("exc")) for v in warnings)
+    assert not any("non riportabili" in template for template in warnings)
 
 
 # -- E3: notes survive the header-only reuse -----------------------------------------

@@ -120,3 +120,30 @@ def test_detail_uses_cache_but_changed_body_invalidates_it(png,tmp_path):
     original[0]['terminal_geometry']['body_bbox'] = [.19,.2,.8,.8]
     refine_leads(png,original,'m',call,lambda _:None,tmp_path)
     assert call.call_count == 2
+
+
+@pytest.mark.parametrize('bad,reason', [
+    (detail([-.01,.35,.2,.45]), 'invalid_rectangle'),
+    (detail([.05,.35,.05,.45]), 'empty_rectangle'),
+    (dict(bbox=LEADS[0],confidence='low',source='photo_separation_v1'), 'no_evidence'),
+    (detail([.05,.25,.2,.45]), 'exceeds_envelope'),
+    (detail([.05,.35,.19,.45]), 'not_one_face'),
+])
+def test_each_rejection_carries_a_stable_reason_code(bad, reason):
+    from kicadgen.cad3d.lead_geometry import LeadDetailRejected, REJECTION_REASONS
+    with pytest.raises(LeadDetailRejected) as info:
+        validated_lead_bbox(BODY,ENVELOPES[0],bad)
+    assert info.value.reason == reason and reason in REJECTION_REASONS
+
+
+def test_discarded_detail_reason_is_fully_translated():
+    from kicadgen.cad3d.lead_geometry import LeadDetailRejected
+    from kicadgen.services.photo_leads import _rejection_text
+    texts = {reason: _rejection_text(LeadDetailRejected(reason, 'english diagnostic'))
+             for reason in ('invalid_rectangle', 'empty_rectangle', 'no_evidence',
+                            'exceeds_envelope', 'not_one_face')}
+    # Every code has its own text and none leaks the English diagnostic.
+    assert len(set(texts.values())) == 5
+    assert all('english diagnostic' not in text for text in texts.values())
+    # Errors that are not a rejection (malformed answer) get the generic text.
+    assert _rejection_text(KeyError('bbox')) not in texts.values()

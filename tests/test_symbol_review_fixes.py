@@ -330,7 +330,7 @@ def test_b1_text_angle_is_written_in_tenths():
 
 @pytest.mark.parametrize("value, degrees", [
     (0, 0), (900, 90), (1800, 180), (2700, 270), (450, 45),   # KiCad: tenths
-    (90, 90), (180, 180), (270, 270),                        # files written before the fix
+    (90, 9), (180, 18), (270, 27),                           # KiCad tenths, no value heuristic
     (9, 0.9), (300, 30)])                                   # not a legacy quarter turn: tenths
 def test_b1_text_angle_reading(value, degrees):
     assert g.text_angle_from_file(value) == pytest.approx(degrees)
@@ -462,7 +462,13 @@ def test_f1_same_name_in_another_library_root_never_receives_the_draft(qapp, tmp
         tab.table.item(0, 1).setText("A_AGAIN")
         _flow(tab, pb, _rows(p4="NEW"), 4, force=True)
         assert _names(tab)["1"] == "P1" and not tab.has_pending_edits()
-        assert not SymbolTab.superseded_draft_paths(pb) and not SymbolTab.superseded_draft_paths(pa)
+        # Each project's own offered draft may be kept as a snapshot in its own
+        # folder (S2, 2026-10-14): what matters is that nothing crosses over.
+        for snapshot in SymbolTab.superseded_draft_paths(pb):
+            assert "A_" not in snapshot.read_text(encoding="utf-8")
+        for snapshot in SymbolTab.superseded_draft_paths(pa):
+            text = snapshot.read_text(encoding="utf-8")
+            assert "B_OWN" not in text and "typing in B" not in text
         assert "A_AGAIN" not in pb.read_text(encoding="utf-8")
         tab.undo()
         assert _names(tab)["1"] == "P1", "undo cannot reach the other project's draft"
@@ -730,9 +736,10 @@ def test_f6_a_real_upstream_graphics_change_is_still_a_conflict(qapp):
         tab.deleteLater()
 
 
-def test_f7_kicad_tenths_and_the_documented_legacy_ambiguity():
+def test_f7_kicad_tenths_and_the_legacy_files_told_by_their_header():
     assert g.text_angle_from_file(540) == pytest.approx(54), "a KiCad angle in tenths is exact"
-    assert g.text_angle_from_file(180) == pytest.approx(180), \
-        "documented trade-off: 180 is read as a legacy 180 degrees, not as KiCad's 18"
+    assert g.text_angle_from_file(180) == pytest.approx(18), "KiCad's 18 degrees, no value heuristic"
+    assert g.text_angle_from_file(180, legacy_degrees=True) == pytest.approx(180), \
+        "a file whose header marks kicadgen's degree writer keeps 180 degrees"
     doc = g.text_angle_from_file.__doc__
-    assert doc.lstrip().startswith("@brief") and "SW_Coded_SH-7010" in doc and "trade-off" in doc
+    assert doc.lstrip().startswith("@brief") and "SW_Coded_SH-7010" in doc and "header" in doc

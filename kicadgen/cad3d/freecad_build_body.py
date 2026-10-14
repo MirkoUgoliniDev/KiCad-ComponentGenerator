@@ -709,7 +709,9 @@ def _through_features(x, y, radius, pad_diameter, z1, plating, pad_t, clip):
         where two coincident faces of different colours flicker.
     """
     if pad_diameter <= 2 * radius:
-        raise ValueError("through pad diameter must exceed hole diameter")
+        # Second argument: stable reason code the contact loop translates
+        # (a plain ValueError, so tests that lift this function stay valid).
+        raise ValueError("through pad diameter must exceed hole diameter", "pad_not_wider_than_hole")
     tubes = [
         dict(x=x, y=y, r_in=radius, r_out=radius + plating, z0=0.0, z1=z1, clip=clip),
         dict(x=x, y=y, r_in=radius, r_out=pad_diameter / 2, z0=z1, z1=z1 + pad_t, clip=False),
@@ -808,7 +810,7 @@ def _contact_features(contact, bounds, plating, pad_t):
             s_len = float(stadium["length_mm"])
             s_r = float(stadium["width_mm"]) / 2
             if s_len < s_r:
-                raise ValueError("stadium shorter than its round end")
+                raise ValueError("stadium shorter than its round end", "stadium_too_short")
             for z in (z1, -pad_t):
                 stadiums.append(dict(x=ex, y=ey, nx=nx, ny=ny, length=s_len, r=s_r,
                                      z0=z, z1=z + pad_t))
@@ -1038,7 +1040,17 @@ def main():
         try:
             plated.append((contact, _contact_features(contact, bounds, plating, pad_t)))
         except Exception as exc:  # noqa: BLE001 - un contatto in meno non e' fatale
-            _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
+            # I motivi scritti da questo script hanno un codice stabile: testo
+            # tradotto. Gli errori di FreeCAD/OCC restano nel testo con {exc}.
+            reason = exc.args[1] if isinstance(exc, ValueError) and len(exc.args) == 2 else None
+            if reason == "pad_not_wider_than_hole":
+                _warn("contatto {get} non generato: piazzola non piu' larga del foro",
+                      get=contact.get('number'))
+            elif reason == "stadium_too_short":
+                _warn("contatto {get} non generato: piazzola allungata piu' corta della sua "
+                      "estremita' tonda", get=contact.get('number'))
+            else:
+                _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
     drills = [drill for _, features in plated for drill in features["drills"]]
 
     # Semi-fori e fori (moduli castellated): cilindri di cui resta nel solido
