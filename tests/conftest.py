@@ -103,17 +103,23 @@ def no_unattended_modal_dialog(monkeypatch):
                 monkeypatch.setattr(target, method, refuse(f"{class_name}.{method}"),
                                     raising=False)
 
-    # The unapplied-symbol choice (2026-10-14) is a built QMessageBox, not one
-    # of the static calls above: unattended it answers «Resta», which is what
-    # leaving a project with pending symbol edits did before the modal (the
-    # window fixtures close windows that still hold a draft). Tests of the
-    # choice patch it themselves.
+    # The unapplied-edits choice (2026-10-14, symbol and/or footprint) is a
+    # built QMessageBox, not one of the static calls above: unattended it
+    # answers «Resta», which is what leaving a project with pending symbol
+    # edits did before the modal (the window fixtures close windows that
+    # still hold a draft). Tests of the choice patch it themselves.
+    # The footprint-draft question before a generation or analysis
+    # (2026-10-14) answers «Applica»: before the draft existed every
+    # footprint edit was saved at once, so a run started after an edit
+    # always carried it; «Applica» keeps that behaviour for older tests.
     try:
         from kicadgen.gui import main_window
     except ImportError:
         return
-    monkeypatch.setattr(main_window.MainWindow, "_ask_pending_symbol_choice",
-                        lambda self, can_apply: main_window.MainWindow.SYMBOL_EDITS_STAY)
+    monkeypatch.setattr(main_window.MainWindow, "_ask_pending_edits_choice",
+                        lambda self, editors, can_apply: main_window.MainWindow.PENDING_EDITS_STAY)
+    monkeypatch.setattr(main_window.MainWindow, "_ask_footprint_draft_before_start",
+                        lambda self: main_window.MainWindow.PENDING_EDITS_APPLY)
 
 
 @pytest.fixture(autouse=True)

@@ -7,6 +7,7 @@ preview, electrical symbol editing, 3D review and KiCad installation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from html import escape
@@ -1238,9 +1239,39 @@ class MainWindow(QMainWindow):
         self._fp_rewrite_pad_edit: bool = False
         #: True while one rewrite attempt is queued on the event loop.
         self._fp_rewrite_pending: bool = False
-        #: Undo/redo stacks of the drawings list (snapshots), like the symbol editor.
+        #: Undo/redo stacks of the footprint edits, like the symbol editor:
+        #: each entry is a full edit state (`_footprint_edit_state`: drawings,
+        #: text positions, host pad overrides, package pads), deep-copied.
         self._fp_drawings_undo: list = []
         self._fp_drawings_redo: list = []
+        #: Footprint draft (user, 2026-10-14): the four edit fields above ARE
+        #: the draft the preview draws; this is the applied state (what the
+        #: project file and the .kicad_mod hold), captured at the first edit
+        #: after an apply, or None when nothing was edited since.
+        self._fp_applied: dict | None = None
+        #: Package object the applied state and the undo history refer to:
+        #: an analysis that replaces the package rebases them
+        #: (`_sync_footprint_draft_package`).
+        self._fp_draft_package = None
+        #: Draft offered by «Recupera bozza» (JSON form, from the recovery
+        #: file after a crash), or None.
+        self._fp_recoverable: dict | None = None
+        #: Where the offered draft is stored: "main" (the current-draft
+        #: file) or "kept" (the kept-drafts file); None when none is offered.
+        self._fp_recoverable_source: str | None = None
+        #: True when the project file holds applied footprint edits that the
+        #: .kicad_mod does not (a rewrite that could not run before leaving
+        #: the project); saved with the project, cleared by the next footprint
+        #: written, shown in the KiCad tab.
+        self._fp_file_stale: bool = False
+        #: True while `_flush_footprint_rewrite` starts the rewrite of an
+        #: APPLIED edit: `_generate` must not ask about a newer draft then.
+        self._fp_rewrite_flushing: bool = False
+        #: True while `_run_pending_regen_3d` restarts the 3D model by itself:
+        #: `_regenerate_3d` does not ask about the footprint draft then.
+        self._regen_3d_automatic: bool = False
+        #: Pending state last shown by the KiCad tab (refreshed on a change).
+        self._fp_draft_was_pending: bool = False
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
         #: Revisione dell'analisi AI, gemella di `_model_revision` per i
@@ -3545,10 +3576,12 @@ class MainWindow(QMainWindow):
 
     def _mounting_state(self) -> dict:
         """@brief Serialize the host mounting independently from the physical board."""
+        # The APPLIED pad overrides: an unapplied footprint draft never
+        # reaches the project file (user, 2026-10-14).
         return {"mode": self.combo_mounting.currentData(),
                 "pad_diameter": self.spin_header_pad.value(),
                 "drill": self.spin_header_drill.value(),
-                "pad_overrides": deepcopy(self.header_pad_overrides)}
+                "pad_overrides": deepcopy(self._applied_footprint_state()["pad_overrides"])}
 
     def _host_footprint_params(self, params):
         """@brief Derive host pads only; callers retain params for the photo-faithful 3D."""
@@ -3616,6 +3649,31 @@ class MainWindow(QMainWindow):
         self.preview_header_dimensions.setVisible(
             self.combo_mounting.currentData() in {"headers", "headers_square"})
 
+    @staticmethod
+    def _valid_pad_overrides(raw) -> dict:
+        """@brief Keep the well-formed host pad overrides of a saved mapping.
+
+        @param raw {pad number: {"shape", "size"}} as read from a file.
+        @return Overrides with a known shape ("circle", "rect") and a finite
+            size of 0.1-10 mm, keyed by the pad number as text; the others
+            are dropped.
+        @note One validator for the project file and the footprint recovery
+            file (`_footprint_state_from_json`).
+        """
+        overrides = {}
+        if not isinstance(raw, dict):
+            return overrides
+        for number, override in raw.items():
+            if not isinstance(override, dict) or override.get("shape") not in {"circle", "rect"}:
+                continue
+            try:
+                size = float(override.get("size"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(size) and 0.1 <= size <= 10.0:
+                overrides[str(number)] = {"shape": override["shape"], "size": size}
+        return overrides
+
     def _restore_mounting_state(self, state) -> None:
         """@brief Restore host settings, defaulting legacy projects to their original lands."""
         state = state if isinstance(state, dict) else {}
@@ -3634,19 +3692,7 @@ class MainWindow(QMainWindow):
                          and math.isfinite(value) and widget.minimum() <= value <= widget.maximum())
                 widget.setValue(value if valid else fallback)
             widget.blockSignals(blocked)
-        self.header_pad_overrides = {}
-        raw_overrides = state.get("pad_overrides", {})
-        if isinstance(raw_overrides, dict):
-            for number, override in raw_overrides.items():
-                if not isinstance(override, dict) or override.get("shape") not in {"circle", "rect"}:
-                    continue
-                try:
-                    size = float(override.get("size"))
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(size) and 0.1 <= size <= 10.0:
-                    self.header_pad_overrides[str(number)] = {
-                        "shape": override["shape"], "size": size}
+        self.header_pad_overrides = self._valid_pad_overrides(state.get("pad_overrides", {}))
         square = self.combo_mounting.currentData() == "headers_square"
         self.header_pad_label.setText(self.i18n.text(
             "Lato pad sulla scheda ospitante:" if square else
@@ -4129,6 +4175,17 @@ class MainWindow(QMainWindow):
                     "ATTENZIONE: il modello STEP è più vecchio del footprint. Se dopo "
                     "l'ultimo 3D hai cambiato il corpo, rigenera il modello 3D prima di "
                     "installare.")
+            if self.has_pending_footprint_edits():
+                # Test, export and installation copy the .kicad_mod on disk,
+                # which holds the APPLIED footprint (user, 2026-10-14).
+                status += "\n" + self.i18n.text(
+                    "ATTENZIONE: il footprint ha modifiche non applicate. Verifica, test, "
+                    "esportazione e installazione usano il footprint applicato: usa Applica "
+                    "nella scheda Footprint per includerle.")
+            if getattr(self, "_fp_file_stale", False):
+                status += "\n" + self.i18n.text(
+                    "ATTENZIONE: il file .kicad_mod non contiene le ultime modifiche applicate "
+                    "al footprint: usa «Aggiorna solo il footprint» prima di installare.")
             self.label_kicad_status.setText(status)
         return footprint_available
 
@@ -4485,6 +4542,10 @@ class MainWindow(QMainWindow):
         """
         if (getattr(self, "_extract_preparing", False) or self._background_work_running()
                 or self._automatic_generation_active):
+            return
+        # The analysis ends in a generation: a pending footprint draft is
+        # applied or discarded first, or the run does not start.
+        if not self._settle_footprint_draft_before_start():
             return
         self._extract_preparing = True
         try:
@@ -5792,6 +5853,9 @@ class MainWindow(QMainWindow):
         photo_png = self._review_photo(bundle)
         if not photo_png:
             return
+        # The reconciliation ends in a generation: settle a footprint draft first.
+        if not self._settle_footprint_draft_before_start():
+            return
         # La base sintetizzata finisce in _last_extracted per far rientrare il
         # risultato da _on_reconciled: da li' in poi `_last_extracted is None`
         # non basta piu' a riconoscerla, serve il flag esplicito, che solo una
@@ -6993,7 +7057,13 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Rigenerazione automatica del 3D non avviata: il gruppo "
                                 "«Modello 3D» è spento."))
             return
-        self._regenerate_3d()
+        # Automatic retry: no question (`_regenerate_3d` still gives the
+        # worker the applied pads, never the footprint draft's).
+        self._regen_3d_automatic = True
+        try:
+            self._regenerate_3d()
+        finally:
+            self._regen_3d_automatic = False
 
     def _invalidate_generated_mesh(self) -> None:
         # Running CAD workers still describe the previous input revision.
@@ -7070,15 +7140,22 @@ class MainWindow(QMainWindow):
             widget = getattr(self, name, None)
             if widget is not None:
                 widgets[name] = widget_value(widget)
-        return {
+        # The footprint fields are the APPLIED ones: an unapplied draft of
+        # the footprint preview never reaches the file, whoever saves it
+        # (autosave timer, a parameter change, a project switch).
+        applied = self._applied_footprint_state()
+        package = None
+        if self.package_geometry is not None:
+            package = {**asdict(self.package_geometry), "name": self._component_name()}
+            if applied["package_pins"] is not None:
+                package["pins"] = [asdict(pin) for pin in applied["package_pins"]]
+        state = {
             "project_kind": getattr(self, "project_kind", None),
             "widgets": widgets,
-            "package_geometry": ({**asdict(self.package_geometry),
-                                  "name": self._component_name()}
-                                 if self.package_geometry is not None else None),
+            "package_geometry": package,
             "host_mounting": self._mounting_state(),
-            "footprint_texts": {key: list(value) for key, value in self.footprint_text_positions.items()},
-            "footprint_drawings": deepcopy(self.footprint_drawings),
+            "footprint_texts": {key: list(value) for key, value in applied["texts"].items()},
+            "footprint_drawings": deepcopy(applied["drawings"]),
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
@@ -7109,6 +7186,10 @@ class MainWindow(QMainWindow):
                         "pin_numbers_3d": self._pin_numbers_3d(),
                         "pause_after_inventory": self._inventory_pause_enabled()},
         }
+        if getattr(self, "_fp_file_stale", False):
+            # Only when true: projects without the key read as «up to date».
+            state["footprint_file_stale"] = True
+        return state
 
     def _apply_project_state(self, state: dict) -> None:
         """@brief Rimette nella finestra le impostazioni salvate di un progetto.
@@ -7247,6 +7328,13 @@ class MainWindow(QMainWindow):
         self.footprint_drawings = _migrate_drawing_texts(
             validate_footprint_drawings(state.get("footprint_drawings")))
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
+        # What the file holds is the applied state: no draft, nothing offered
+        # until `_offer_footprint_recovery` reads this project's recovery file.
+        self._fp_applied = None
+        self._fp_recoverable = None
+        self._fp_recoverable_source = None
+        self._fp_draft_was_pending = False
+        self._fp_file_stale = state.get("footprint_file_stale") is True
         # A rewrite still pending belongs to the project being left: the
         # one now open has its own .kicad_mod, written by its own edits.
         self._clear_footprint_rewrite()
@@ -7354,6 +7442,8 @@ class MainWindow(QMainWindow):
             self._enter_3d_tab()
         # Lo stato appena applicato e' quello salvato: non va riscritto.
         self._last_saved_project_state = self._project_state_text()
+        # A footprint draft left by a crash is offered, never applied.
+        self._offer_footprint_recovery()
         if prompt_was_normalized:
             self._save_project_config(force=True)
         # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
@@ -7455,25 +7545,41 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_project_autosave"):
             self._save_project_config()
 
-    #: Answers of `_ask_pending_symbol_choice`.
-    SYMBOL_EDITS_APPLY, SYMBOL_EDITS_DISCARD, SYMBOL_EDITS_STAY = "apply", "discard", "stay"
+    #: Answers of `_ask_pending_edits_choice` and `_ask_footprint_draft_before_start`.
+    PENDING_EDITS_APPLY, PENDING_EDITS_DISCARD, PENDING_EDITS_STAY = "apply", "discard", "stay"
 
-    def _ask_pending_symbol_choice(self, can_apply: bool) -> str:
-        """@brief Ask, in a centred modal, what to do with the unapplied symbol edits.
+    def _ask_pending_edits_choice(self, editors: tuple, can_apply: bool) -> str:
+        """@brief Ask, in a centred modal, what to do with the unapplied symbol and/or footprint edits.
 
-        @param can_apply False disables «Applica» (edits not valid).
-        @return SYMBOL_EDITS_APPLY, SYMBOL_EDITS_DISCARD or SYMBOL_EDITS_STAY
+        @param editors The editors holding unapplied edits, in display order:
+            a non-empty tuple of "symbol" and/or "footprint".
+        @param can_apply False disables «Applica» (some edits not valid).
+        @return PENDING_EDITS_APPLY, PENDING_EDITS_DISCARD or PENDING_EDITS_STAY
             (also for Esc and the window's close button).
         @note Replaces the status-bar sentence the user could not see
-            (user, 2026-10-14). A separate method so tests answer it without
-            opening a window.
+            (user, 2026-10-14); one question for both editors, whose text
+            names the editors concerned (symbol, footprint or both). A
+            separate method so tests answer it without opening a window.
         """
+        editors = tuple(editors)
+        # Literal catalogue keys in every branch (the i18n scan reads them).
+        if editors == ("footprint",):
+            title = self.i18n.text("Footprint")
+            text = self.i18n.text("Il footprint contiene modifiche non applicate.")
+            question = self.i18n.text("Applicarle, scartarle oppure restare sul footprint?")
+        elif "footprint" in editors:
+            title = self.i18n.text("Modifiche non applicate")
+            text = self.i18n.text("Il simbolo e il footprint contengono modifiche non applicate.")
+            question = self.i18n.text("Applicarle tutte, scartarle tutte oppure restare?")
+        else:
+            title = self.i18n.text("Simbolo elettrico")
+            text = self.i18n.text("Il simbolo contiene modifiche non applicate.")
+            question = self.i18n.text("Applicarle, scartarle oppure restare sul simbolo?")
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(self.i18n.text("Simbolo elettrico"))
-        box.setText(self.i18n.text("Il simbolo contiene modifiche non applicate."))
-        box.setInformativeText(self.i18n.text(
-            "Applicarle, scartarle oppure restare sul simbolo?"))
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setInformativeText(question)
         apply_button = box.addButton(self.i18n.text("Applica"), QMessageBox.ButtonRole.AcceptRole)
         discard_button = box.addButton(self.i18n.text("Scarta"), QMessageBox.ButtonRole.DestructiveRole)
         stay_button = box.addButton(self.i18n.text("Resta"), QMessageBox.ButtonRole.RejectRole)
@@ -7483,39 +7589,84 @@ class MainWindow(QMainWindow):
         box.exec()
         chosen = box.clickedButton()
         if chosen is apply_button:
-            return self.SYMBOL_EDITS_APPLY
+            return self.PENDING_EDITS_APPLY
         if chosen is discard_button:
-            return self.SYMBOL_EDITS_DISCARD
-        return self.SYMBOL_EDITS_STAY
+            return self.PENDING_EDITS_DISCARD
+        return self.PENDING_EDITS_STAY
 
-    def _resolve_pending_symbol_edits(self, symbol) -> bool:
-        """@brief Settle the unapplied symbol edits before leaving the project.
+    def _resolve_pending_edits(self, symbol, footprint: bool, folder: Path | None = None) -> bool:
+        """@brief Settle the unapplied symbol and/or footprint edits before leaving the project.
 
-        @param symbol The symbol editor holding pending edits.
-        @return True when the edits were applied or discarded and the caller
-            may go on (close, change project); False to stay on the symbol.
-        @note An apply that the main window refuses (pad mismatch,
-            `reject_apply`) leaves the edits pending: the answer is then
-            «stay», with the editor showing why.
+        @param symbol The symbol editor when it holds pending edits, else None.
+        @param footprint True when the footprint preview holds a draft.
+        @param folder The open project's folder when the working folder has
+            already changed (`_on_library_root_changed`): `_project_dir()`
+            then names a folder of the NEW working folder, so the footprint
+            is saved explicitly here and its .kicad_mod is not rewritten
+            (it would land in the other working folder); the project is
+            marked stale instead (`_fp_file_stale`). None for a normal leave.
+        @return True when every pending edit was applied or discarded and the
+            caller may go on (close, change project); False to stay.
+        @note «Applica» is offered only when every pending edit can be
+            applied (`SymbolTab.can_apply`; a footprint draft is validated
+            edit by edit, so it always can). The footprint is applied FIRST:
+            it is the part that can fail on the project file, and when it
+            fails nothing is applied. If the symbol then refuses (pad
+            mismatch, `reject_apply`) the footprint stays applied and the
+            user is told which part was applied; the answer is «stay».
+        @note An applied footprint is written to the .kicad_mod before the
+            project is left (`_finish_footprint_rewrite_now`): the deferred
+            rewrite would otherwise be dropped by the next project.
         """
-        choice = self._ask_pending_symbol_choice(symbol.can_apply())
-        if choice == self.SYMBOL_EDITS_APPLY and symbol.can_apply():
-            symbol.apply()
-        elif choice == self.SYMBOL_EDITS_DISCARD:
-            symbol.discard_edits()
+        editors = (("symbol",) if symbol is not None else ()) + (("footprint",) if footprint else ())
+        if not editors:
+            return True
+        can_apply = symbol.can_apply() if symbol is not None else True
+        choice = self._ask_pending_edits_choice(editors, can_apply)
+        if choice == self.PENDING_EDITS_APPLY and can_apply:
+            if footprint:
+                if not self.apply_footprint_draft(folder=folder):
+                    return False
+                if folder is None:
+                    self._finish_footprint_rewrite_now()
+            if symbol is not None and symbol.can_apply():
+                symbol.apply()
+            if symbol is not None and symbol.has_pending_edits() and footprint:
+                QMessageBox.warning(self, self.i18n.text("Modifiche non applicate"), self.i18n.text(
+                    "Il footprint è stato applicato; il simbolo no e resta in bozza."))
+        elif choice == self.PENDING_EDITS_DISCARD:
+            if symbol is not None:
+                symbol.discard_edits()
+            if footprint:
+                self.discard_footprint_draft()
         else:
             return False
-        return not symbol.has_pending_edits()
+        return not ((symbol is not None and symbol.has_pending_edits())
+                    or self.has_pending_footprint_edits())
 
     def _can_leave_project(self, folder: Path | None = None) -> bool:
         """Save pending edits before navigation; a failed write retains the open project."""
         if getattr(self, '_component_review_dialog', None) is not None:
             return False
         symbol = getattr(self, 'symbol_tab', None)
-        if symbol is not None and symbol.has_pending_edits():
-            self.tabs.setCurrentIndex(TAB_SYMBOL)
-            if not self._resolve_pending_symbol_edits(symbol):
+        symbol_pending = symbol is not None and symbol.has_pending_edits()
+        footprint_pending = self.has_pending_footprint_edits()
+        if symbol_pending or footprint_pending:
+            # Show the editor the question is about (the symbol first).
+            self.tabs.setCurrentIndex(TAB_SYMBOL if symbol_pending else TAB_PREVIEW)
+            if not self._resolve_pending_edits(symbol if symbol_pending else None,
+                                               footprint_pending, folder):
                 return False
+        if getattr(self, "_fp_rewrite_dirty", False):
+            # An applied footprint edit not yet in the .kicad_mod (applied
+            # while a pipeline owned the output, or just now): write it while
+            # this project is still open; when that cannot run (busy, or the
+            # working folder already changed) the project records that its
+            # .kicad_mod is behind (`_fp_file_stale`), never silently.
+            if folder is None:
+                self._finish_footprint_rewrite_now()
+            if getattr(self, "_fp_rewrite_dirty", False):
+                self._fp_file_stale = True
         if not self._named():
             return True
         if folder is None:
@@ -7646,6 +7797,32 @@ class MainWindow(QMainWindow):
             self._last_saved_project_state = text
         except (OSError, TypeError, ValueError) as exc:
             self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
+
+    def _write_project_config_at(self, folder: Path) -> bool:
+        """@brief Write the current settings into `folder`, the OPEN project's folder, now.
+
+        @param folder Must be `_open_project_folder`; any other folder is refused.
+        @return True when the file was written.
+        @note For the leave question after a working-folder change, when
+            `_save_project_config` refuses because `_project_dir()` already
+            names the other working folder. Never writes elsewhere.
+        """
+        open_folder = getattr(self, "_open_project_folder", None)
+        if open_folder is None or Path(folder) != Path(open_folder):
+            return False
+        if self._project_config_refused is not None and folder == self._project_config_refused:
+            return False
+        text = self._project_state_text()
+        if text is None:
+            return False
+        from .project_state import write_project_config
+        try:
+            write_project_config(folder, json.loads(text))
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log(tx("Impostazioni del progetto non salvate: {exc}", exc=exc))
+            return False
+        self._last_saved_project_state = text
+        return True
 
     def _library_root(self) -> Path:
         """@brief Cartella di lavoro in cui stanno i progetti.
@@ -10187,9 +10364,12 @@ class MainWindow(QMainWindow):
         if not self.symbol_tab.has_pending_edits():
             self._refresh_symbol_tab()
         pending = self.symbol_tab.has_pending_edits()
+        # The check reads the .kicad_mod on disk: the applied footprint. A
+        # pending footprint draft is reported, like the symbol's.
         args = dict(directory=self._project_dir(), name=self._component_name(),
                     rows=deepcopy(self.symbol_tab.rows()), pending=pending,
-                    issues=self.symbol_tab.review_issues() if not pending else ())
+                    issues=self.symbol_tab.review_issues() if not pending else (),
+                    footprint_pending=self.has_pending_footprint_edits())
         dialog = ComponentCheckDialog(args, self, tx=self.i18n.text)
         self._component_review_dialog = dialog
         try:
@@ -11202,7 +11382,33 @@ class MainWindow(QMainWindow):
         @param body_override Body size decided by the user, or the sentinel.
         @return True when the worker was started; False when nothing ran
             (work already running, automatic pipeline active, no footprint
-            yet for a footprint-only rewrite, invalid parameters).
+            yet for a footprint-only rewrite, invalid parameters, a pending
+            footprint draft the user chose to keep).
+        @note Footprint draft (user, 2026-10-14): a generation the user
+            starts with unapplied footprint edits asks first to apply or
+            discard them (`_settle_footprint_draft_before_start`); the
+            automatic pipeline asked at its own start, and the rewrite of
+            an applied edit (`_flush_footprint_rewrite`) does not ask. In
+            every case the files get the APPLIED footprint
+            (`_applied_footprint_in_memory`), never a draft.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
+            return False
+        if (not automatic and not self._fp_rewrite_flushing
+                and not self._settle_footprint_draft_before_start()):
+            return False
+        with self._applied_footprint_in_memory():
+            return self._generate_applied(automatic=automatic, footprint_only=footprint_only,
+                                          body_override=body_override)
+
+    def _generate_applied(self, automatic=False, footprint_only=False,
+                          body_override=_BODY_OVERRIDE_UNSET) -> bool:
+        """@brief Body of `_generate`, run with the applied footprint in the fields.
+
+        @param automatic See `_generate`.
+        @param footprint_only See `_generate`.
+        @param body_override See `_generate`.
+        @return See `_generate`.
         """
         if self._background_work_running() or self._automatic_generation_active:
             return False
@@ -11521,6 +11727,9 @@ class MainWindow(QMainWindow):
         # refuses a stale baseline after every first generation (review C, 5).
         self._refresh_symbol_tab()
         self._save_applied_electrical_symbol(quiet=True)
+        # Every generation writes the APPLIED footprint: the file is in step
+        # with the project again (the autosave records it).
+        self._fp_file_stale = False
         self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
         if not self._cad_result_is_current():
@@ -11632,6 +11841,31 @@ class MainWindow(QMainWindow):
         self.btn_fp_redo.clicked.connect(self._redo_footprint_drawing)
         header.addWidget(self.btn_fp_undo)
         header.addWidget(self.btn_fp_redo)
+        # Footprint draft (user, 2026-10-14: «come il simbolo»): same icons,
+        # texts and behaviour as the symbol editor's Annulla/Applica and
+        # «Recupera bozza» (click: recover; arrow: «Scarta bozza»).
+        self.btn_fp_cancel = self._view_tool_button('cancel.svg', 'Annulla')
+        self.btn_fp_cancel.clicked.connect(self.discard_footprint_draft)
+        self.btn_fp_apply = self._view_tool_button('confirm-use.svg', 'Applica')
+        # A lambda: `clicked` passes a bool that would land in `folder`.
+        self.btn_fp_apply.clicked.connect(lambda _checked=False: self.apply_footprint_draft())
+        self.btn_fp_recover = self._view_tool_button('project-open.svg', 'Recupera bozza')
+        self.btn_fp_recover.clicked.connect(self.recover_footprint_draft)
+        recovery_menu = QMenu(self.btn_fp_recover)
+        recover_action = recovery_menu.addAction(self.i18n.text("Recupera bozza"))
+        recover_action.triggered.connect(lambda _checked=False: self.recover_footprint_draft())
+        self.action_fp_discard_recovery = recovery_menu.addAction(self.i18n.text("Scarta bozza"))
+        self.action_fp_discard_recovery.triggered.connect(
+            lambda _checked=False: self.discard_footprint_recovery())
+        # Menu entries are not widgets: the language pass does not reach
+        # them, so they take the current language when the menu opens.
+        recovery_menu.aboutToShow.connect(lambda: (
+            recover_action.setText(self.i18n.text("Recupera bozza")),
+            self.action_fp_discard_recovery.setText(self.i18n.text("Scarta bozza"))))
+        self.btn_fp_recover.setMenu(recovery_menu)
+        self.btn_fp_recover.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        for button in (self.btn_fp_cancel, self.btn_fp_apply, self.btn_fp_recover):
+            header.addWidget(button)
         self._refresh_footprint_undo_buttons()
         # Stessa icona e stesso tooltip della barra 3D (utente, 2026-09-24):
         # e' lo stesso comando, deve riconoscersi uguale nelle due schede.
@@ -11939,44 +12173,636 @@ class MainWindow(QMainWindow):
         toast.show_message(title, body)
 
     def _apply_footprint_drawings(self, updated: list, *, history: str = "push") -> bool:
-        """@brief Persist a new drawings list; on save failure keep the old one.
+        """@brief Put a new drawings list in the footprint draft (nothing is saved).
 
         @param updated The new list of validated records.
-        @param history "push" records the previous list for undo and clears
-            redo; "undo"/"redo" move between the stacks instead.
-        @return True when the list was saved and applied; False when the
-            project file could not be written (nothing changed).
-        @note Same contract as the pad overrides: the project file is the
-            truth, then the preview is redrawn and the .kicad_mod rewritten.
-        @note Any change of the list ends a handle or text drag in progress:
-            the drag holds indices into the OLD list, and its drop would
-            otherwise edit whichever drawing now sits at that index (a
+        @param history "push" records the previous edit state for undo and
+            clears redo; "none" records nothing (undo and redo go through
+            `_step_footprint_history`).
+        @return True (the draft always takes a validated list).
+        @note CONTRACT CHANGED 2026-10-14 (footprint draft, user): the list is
+            no longer saved and the .kicad_mod no longer rewritten here; both
+            happen on «Applica» (`apply_footprint_draft`).
+        """
+        return self._edit_footprint_draft({"drawings": updated}, history=history)
+
+    # ── Footprint draft: Applica / Annulla / Recupera bozza (user, 2026-10-14) ──
+
+    def _footprint_edit_state(self) -> dict:
+        """@brief The footprint edits the preview shows now (the draft), by reference.
+
+        @return {"drawings", "texts", "pad_overrides", "package_pins"}; the
+            last is the list of the package pads, or None without a package.
+        @note Not copied: callers that keep it deep-copy it.
+        """
+        package = getattr(self, "package_geometry", None)
+        return {"drawings": self.footprint_drawings,
+                "texts": self.footprint_text_positions,
+                "pad_overrides": self.header_pad_overrides,
+                "package_pins": list(package.pins) if package is not None else None}
+
+    def _sync_footprint_draft_package(self) -> None:
+        """@brief Rebase the draft when an analysis replaced the package object.
+
+        @note The applied package pads and the undo history refer to the
+            package object they were taken from. A new package (extraction,
+            project switch) makes them meaningless: the applied pads become
+            the new package's, and the history is dropped (its steps would
+            put another package's pads back). Drawings, texts and pad
+            overrides of the draft are untouched.
+        """
+        package = getattr(self, "package_geometry", None)
+        old_package = getattr(self, "_fp_draft_package", None)
+        if package is old_package:
+            return
+        self._fp_draft_package = package
+        applied = getattr(self, "_fp_applied", None)
+        if applied is not None:
+            dropped = (old_package is not None and applied["package_pins"] is not None
+                       and list(old_package.pins) != list(applied["package_pins"]))
+            applied["package_pins"] = list(package.pins) if package is not None else None
+            if dropped:
+                # Said, never silent: the pad edits belonged to the package
+                # the analysis replaced. The KiCad tab, the recovery file and
+                # the buttons follow on the next turn (this runs inside
+                # state reads, e.g. a project save).
+                self._append_log(self.i18n.text(
+                    "Footprint: una nuova analisi ha sostituito il package; le modifiche "
+                    "ai pad non applicate sono state scartate."))
+                QTimer.singleShot(0, self._after_footprint_package_rebase)
+        self._fp_drawings_undo, self._fp_drawings_redo = [], []
+        self._refresh_footprint_undo_buttons()
+
+    def _after_footprint_package_rebase(self) -> None:
+        """@brief Refresh what follows the draft after `_sync_footprint_draft_package` dropped pad edits."""
+        if getattr(self, "_window_closed", False):
+            return
+        self._checkpoint_footprint_draft()
+        self._refresh_footprint_undo_buttons()
+        self._refresh_footprint_draft_notice()
+
+    def _applied_footprint_state(self) -> dict:
+        """@brief The applied footprint edits: what the project file and the .kicad_mod hold.
+
+        @return The same keys as `_footprint_edit_state`; the draft itself
+            when nothing was edited since the last apply. Not copied.
+        """
+        if getattr(self, "_fp_applied", None) is None:
+            return self._footprint_edit_state()
+        self._sync_footprint_draft_package()
+        return self._fp_applied
+
+    def has_pending_footprint_edits(self) -> bool:
+        """@brief Tell whether the footprint preview shows edits not yet applied.
+
+        @return True when the draft differs from the applied state; an edit
+            undone back to the applied state is not pending.
+        """
+        if getattr(self, "_fp_applied", None) is None:
+            return False
+        self._sync_footprint_draft_package()
+        return self._footprint_edit_state() != self._fp_applied
+
+    def _set_footprint_edit_state(self, state: dict) -> None:
+        """@brief Make `state` (a deep copy of it) the draft the preview shows.
+
+        @param state Edit state as `_footprint_edit_state` returns it. Its
+            package pads are applied only to a package with the same pad
+            numbers, in the same order (never another package's pads).
+        """
+        self.footprint_drawings = deepcopy(state["drawings"])
+        self.footprint_text_positions = deepcopy(state["texts"])
+        self.header_pad_overrides = deepcopy(state["pad_overrides"])
+        pins = state.get("package_pins")
+        package = self.package_geometry
+        if (package is not None and pins is not None and list(pins) != list(package.pins)
+                and [p.number for p in pins] == [p.number for p in package.pins]):
+            self._rebind_package_pins(pins)
+
+    def _rebind_package_pins(self, pins) -> None:
+        """@brief Give the package new pads by REBINDING it to a copy, never by mutating it.
+
+        @param pins The new pad list.
+        @note A worker started earlier may hold the package object (a
+            generation started with no draft pending passes the live
+            object): mutating it would let that worker see a later draft
+            edit. The copy replaces the package everywhere the window refers
+            to the same object (the draft's package identity, the
+            parameters the 2D preview draws), so it is not mistaken for a
+            package replaced by an analysis (`_sync_footprint_draft_package`).
+        """
+        old = self.package_geometry
+        new = replace(old, pins=list(pins))
+        self.package_geometry = new
+        if getattr(self, "_fp_draft_package", None) is old:
+            self._fp_draft_package = new
+        if getattr(self, "_last_params", None) is old:
+            self._last_params = new
+
+    def _edit_footprint_draft(self, changes: dict, *, history: str = "push") -> bool:
+        """@brief Change fields of the footprint draft, with undo, and show it.
+
+        @param changes Subset of the edit-state keys with their new values
+            ("package_pins": the full new pad list of the package).
+        @param history "push" records the previous state for undo and clears
+            redo; "none" records nothing.
+        @return True.
+        @note The first edit after an apply captures the applied state
+            (`_fp_applied`). Nothing is written to the project file or the
+            .kicad_mod: «Applica» does (`apply_footprint_draft`). The draft
+            is checkpointed to the recovery file (`_checkpoint_footprint_draft`).
+        """
+        self._sync_footprint_draft_package()
+        before = deepcopy(self._footprint_edit_state())
+        if self._fp_applied is None:
+            self._fp_applied = deepcopy(before)
+            self._fp_draft_package = self.package_geometry
+        for key, value in changes.items():
+            if key == "drawings":
+                self.footprint_drawings = value
+            elif key == "texts":
+                self.footprint_text_positions = value
+            elif key == "pad_overrides":
+                self.header_pad_overrides = value
+            elif key == "package_pins" and self.package_geometry is not None and value is not None:
+                self._rebind_package_pins(value)
+        if history == "push":
+            self._fp_drawings_undo.append(before)
+            self._fp_drawings_redo.clear()
+        self._footprint_draft_changed()
+        return True
+
+    def _step_footprint_history(self, source: list, target: list) -> bool:
+        """@brief Move one step of the footprint history (undo: source=undo, target=redo).
+
+        @param source Stack the restored state is popped from.
+        @param target Stack the current state is pushed to.
+        @return True when a step was taken.
+        @note A step changes the draft only; the applied state is captured
+            first when there was no draft (undo right after an apply).
+        """
+        self._cancel_footprint_drawing()
+        self._sync_footprint_draft_package()
+        if not source:
+            return False
+        current = deepcopy(self._footprint_edit_state())
+        if self._fp_applied is None:
+            self._fp_applied = deepcopy(current)
+            self._fp_draft_package = self.package_geometry
+        self._set_footprint_edit_state(source.pop())
+        target.append(current)
+        self._footprint_draft_changed()
+        return True
+
+    def _footprint_draft_changed(self) -> None:
+        """@brief Show the draft after any change: preview, buttons, recovery file, KiCad tab.
+
+        @note Any change of the drawings ends a handle or text drag in
+            progress: the drag holds indices into the OLD list, and its drop
+            would otherwise edit whichever drawing now sits at that index (a
             Delete or Ctrl+Z pressed while the mouse button is still down).
         """
-        previous = self.footprint_drawings
-        self.footprint_drawings = updated
-        if not self._save_project_config(force=True):
-            self.footprint_drawings = previous
-            QMessageBox.warning(self, self.i18n.text("Errore"),
-                                self.i18n.text("Disegno non salvato."))
-            return False
         self._end_footprint_drawing_interaction()
-        if history == "push":
-            self._fp_drawings_undo.append(deepcopy(previous))
-            self._fp_drawings_redo.clear()
-        elif history == "undo":
-            self._fp_drawings_redo.append(deepcopy(previous))
-        elif history == "redo":
-            self._fp_drawings_undo.append(deepcopy(previous))
-        self._refresh_footprint_undo_buttons()
         self._fp_hovered_drawing = -1
         view = getattr(self, "preview_view", None)
         if view is not None:
             # The view's own hover memory must forget the old list too, or a
             # pointer that lands again on the same index emits nothing.
             view.reset_hover()
+        self._refresh_footprint_undo_buttons()
         self._draw_preview()
-        self._schedule_footprint_rewrite()
+        self._checkpoint_footprint_draft()
+        self._refresh_footprint_draft_notice()
+
+    def _refresh_footprint_draft_notice(self) -> None:
+        """@brief Refresh the KiCad tab when the footprint draft starts or stops being pending."""
+        pending = self.has_pending_footprint_edits()
+        if pending != getattr(self, "_fp_draft_was_pending", False):
+            self._fp_draft_was_pending = pending
+            self._refresh_output_actions()
+
+    def apply_footprint_draft(self, folder: Path | None = None) -> bool:
+        """@brief «Applica»: save the draft in the project and rewrite the .kicad_mod once.
+
+        @param folder None saves through `_save_project_config` (the open
+            project in the current working folder). The open project's
+            folder when the working folder has already changed (leave
+            question of `_on_library_root_changed`): the project file is
+            written there explicitly (`_write_project_config_at`).
+        @return True when nothing was pending or the draft was saved; False
+            when the project file could not be written (the draft is kept,
+            like `SymbolTab.reject_apply`, and the user is told).
+        @note One project write, then one rewrite through
+            `_schedule_footprint_rewrite` (deferred, coalesced, never while a
+            worker runs or an analysis pipeline owns the output; a pad edit
+            rewrites even before a .kicad_mod exists, as before). The undo
+            history is kept, as in the symbol editor: undoing after an apply
+            starts a new draft over the new applied state.
+        """
+        if not self.has_pending_footprint_edits():
+            self._fp_applied = None
+            self._refresh_footprint_undo_buttons()
+            self._refresh_footprint_draft_notice()
+            return True
+        self._cancel_footprint_drawing()
+        applied = self._fp_applied
+        current = self._footprint_edit_state()
+        pad_edit = (current["pad_overrides"] != applied["pad_overrides"]
+                    or current["package_pins"] != applied["package_pins"])
+        self._fp_applied = None
+        was_stale = self._fp_file_stale
+        if folder is not None:
+            # No rewrite can run for a project being left from another
+            # working folder (it would write there): the file says so.
+            self._fp_file_stale = True
+        saved = (self._save_project_config(force=True) if folder is None
+                 else self._write_project_config_at(folder))
+        if not saved:
+            self._fp_file_stale = was_stale
+            self._fp_applied = applied
+            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
+                "Modifiche al footprint non salvate: restano da applicare."))
+            return False
+        self._checkpoint_footprint_draft()
+        self._refresh_footprint_undo_buttons()
+        self._refresh_footprint_draft_notice()
+        if folder is None:
+            self._schedule_footprint_rewrite(pad_edit=pad_edit)
+        return True
+
+    def discard_footprint_draft(self) -> None:
+        """@brief «Annulla»: show the applied footprint again, dropping the draft.
+
+        @note Undoable: the discarded draft is pushed on the undo stack, so
+            Ctrl+Z brings it back (as a draft). Nothing is written to the
+            project or the .kicad_mod; the recovery file goes, unless a
+            crash draft is still offered (it is retired only explicitly).
+        """
+        if not self.has_pending_footprint_edits():
+            return
+        self._cancel_footprint_drawing()
+        self._fp_drawings_undo.append(deepcopy(self._footprint_edit_state()))
+        self._fp_drawings_redo.clear()
+        self._set_footprint_edit_state(self._fp_applied)
+        self._fp_applied = None
+        self._footprint_draft_changed()
+
+    def _settle_footprint_draft_before_start(self) -> bool:
+        """@brief Before a generation or analysis starts, apply or discard a pending footprint draft.
+
+        @return True to go on with the start (no draft, or applied, or
+            discarded); False to cancel it (the user's choice, or a draft
+            that could not be saved).
+        """
+        if not self.has_pending_footprint_edits():
+            return True
+        choice = self._ask_footprint_draft_before_start()
+        if choice == self.PENDING_EDITS_APPLY:
+            return self.apply_footprint_draft()
+        if choice == self.PENDING_EDITS_DISCARD:
+            self.discard_footprint_draft()
+            return True
+        return False
+
+    def _ask_footprint_draft_before_start(self) -> str:
+        """@brief Ask, in a centred modal, what to do with the footprint draft before a new run.
+
+        @return PENDING_EDITS_APPLY, PENDING_EDITS_DISCARD, or
+            PENDING_EDITS_STAY to cancel the start (also Esc and the close
+            button).
+        @note Same look as `_ask_pending_edits_choice`. A separate method so
+            tests answer it without opening a window (conftest answers
+            «Applica»: before the draft every edit was already saved when a
+            run started, so that answer keeps the earlier behaviour).
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.i18n.text("Footprint"))
+        box.setText(self.i18n.text("Il footprint contiene modifiche non applicate."))
+        box.setInformativeText(self.i18n.text(
+            "Applicarle o scartarle prima di avviare? Con «Resta» non parte nulla."))
+        apply_button = box.addButton(self.i18n.text("Applica"), QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton(self.i18n.text("Scarta"), QMessageBox.ButtonRole.DestructiveRole)
+        stay_button = box.addButton(self.i18n.text("Resta"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stay_button)
+        box.setEscapeButton(stay_button)
+        box.exec()
+        chosen = box.clickedButton()
+        if chosen is apply_button:
+            return self.PENDING_EDITS_APPLY
+        if chosen is discard_button:
+            return self.PENDING_EDITS_DISCARD
+        return self.PENDING_EDITS_STAY
+
+    def _finish_footprint_rewrite_now(self) -> None:
+        """@brief Run the pending .kicad_mod rewrite to its end before the project is left.
+
+        @note Used after «Applica» in the leave question: the deferred
+            rewrite would be dropped by the project opened next (or by the
+            closed window). When the window is busy the rewrite cannot start;
+            the applied edits are in the project file and the next generation
+            writes them (same rule as `_flush_footprint_rewrite`).
+        """
+        if not getattr(self, "_fp_rewrite_dirty", False):
+            return
+        self._flush_footprint_rewrite()
+        worker = getattr(self, "_worker", None)
+        if worker is not None and worker.isRunning():
+            loop = QEventLoop()
+            worker.finished.connect(loop.quit)
+            if worker.isRunning():
+                loop.exec()
+
+    @contextmanager
+    def _applied_footprint_in_memory(self):
+        """@brief Context in which the footprint fields hold the APPLIED state, then the draft again.
+
+        @note `_generate` runs inside it: whatever starts a generation (the
+            deferred rewrite of an earlier apply, the automatic pipeline),
+            the files get the applied footprint, never an unapplied draft
+            (user, 2026-10-14: exports always use the applied state). The
+            package is swapped for a copy carrying the applied pads, so the
+            worker keeps that copy and the preview keeps its draft object.
+        """
+        if not self.has_pending_footprint_edits():
+            yield
+            return
+        applied = self._fp_applied
+        saved = (self.footprint_drawings, self.footprint_text_positions,
+                 self.header_pad_overrides, self.package_geometry)
+        self.footprint_drawings = deepcopy(applied["drawings"])
+        self.footprint_text_positions = deepcopy(applied["texts"])
+        self.header_pad_overrides = deepcopy(applied["pad_overrides"])
+        if self.package_geometry is not None and applied["package_pins"] is not None:
+            self.package_geometry = replace(self.package_geometry, pins=list(applied["package_pins"]))
+        # The swapped package is not a new package: the draft keeps its own.
+        draft_package = self._fp_draft_package
+        swapped = self.package_geometry
+        self._fp_draft_package = swapped
+        try:
+            yield
+        finally:
+            (self.footprint_drawings, self.footprint_text_positions,
+             self.header_pad_overrides, self.package_geometry) = saved
+            self._fp_draft_package = draft_package
+            # The 2D preview draws `_last_params` first: it must keep showing
+            # the draft package, not the applied copy the worker received.
+            if swapped is not saved[3] and getattr(self, "_last_params", None) is swapped:
+                self._last_params = saved[3]
+
+    # ── Footprint recovery file (same conventions as the symbol's) ──
+
+    def _footprint_recovery_path(self, name: str | None = None) -> Path | None:
+        """@brief A recovery file of the open project, or None without an existing project folder.
+
+        @param name File name; None means the current-draft file
+            (`footprint_draft.FOOTPRINT_DRAFT_FILE`).
+        @return The path in the OPEN project folder (`_open_project_folder`),
+            never in a folder derived from a working folder being typed or
+            changed.
+        """
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is None or not Path(folder).is_dir():
+            return None
+        from ..services.footprint_draft import FOOTPRINT_DRAFT_FILE
+        return Path(folder) / (name or FOOTPRINT_DRAFT_FILE)
+
+    def _footprint_kept_path(self) -> Path | None:
+        """@brief File of the offered crash drafts displaced by newer edits, or None without a folder."""
+        from ..services.footprint_draft import KEPT_DRAFTS_FILE
+        return self._footprint_recovery_path(KEPT_DRAFTS_FILE)
+
+    @staticmethod
+    def _footprint_state_json(state: dict) -> dict:
+        """@brief JSON form of a footprint edit state (lists, pad mappings), for the recovery file.
+
+        @param state Edit state (`_footprint_edit_state`).
+        @return The same data as plain JSON values.
+        @throws ValueError When a value cannot be written as JSON (NaN).
+        """
+        from dataclasses import asdict
+        pins = state.get("package_pins")
+        return json.loads(json.dumps({
+            "drawings": state["drawings"],
+            "texts": {key: list(value) for key, value in state["texts"].items()},
+            "pad_overrides": state["pad_overrides"],
+            "package_pins": [asdict(pin) for pin in pins] if pins is not None else None,
+        }, ensure_ascii=False, allow_nan=False))
+
+    def _footprint_state_from_json(self, data: dict) -> dict:
+        """@brief Validated edit state from the JSON form read back from a recovery file.
+
+        @param data JSON form (`_footprint_state_json`).
+        @return An edit state; values that do not validate are dropped with
+            the same validators as the project file. Package pads are kept
+            only when they rebuild a valid package with the open package's
+            pad numbers, else the open package's pads stay.
+        """
+        from dataclasses import asdict
+        from ..core.footprint import validate_footprint_drawings, validate_text_positions
+        package = self.package_geometry
+        pins = list(package.pins) if package is not None else None
+        raw_pins = data.get("package_pins")
+        if package is not None and isinstance(raw_pins, list):
+            try:
+                rebuilt = package_from_mapping({**asdict(package), "pins": raw_pins})
+            except (AttributeError, KeyError, TypeError, ValueError):
+                rebuilt = None
+            if rebuilt is not None and [p.number for p in rebuilt.pins] == [p.number for p in package.pins]:
+                pins = list(rebuilt.pins)
+        return {"drawings": validate_footprint_drawings(data.get("drawings")),
+                "texts": validate_text_positions(data.get("texts")),
+                "pad_overrides": self._valid_pad_overrides(data.get("pad_overrides")),
+                "package_pins": pins}
+
+    def _keep_offered_footprint_draft(self, extra: dict | None = None) -> bool:
+        """@brief Move the offered crash draft (and `extra`) into the kept-drafts file.
+
+        @param extra Another draft (JSON form) to keep, newest, or None.
+        @return True when nothing needed keeping or the kept file was written;
+            False when it could not be written (the caller must not overwrite
+            the current-draft file then).
+        @note Called before the current-draft file is overwritten or removed
+            while it still holds the offered draft (`_fp_recoverable_source`
+            "main"): the offered draft stays offered, now from the kept file,
+            until the user recovers or discards it.
+        """
+        drafts = []
+        if extra is not None:
+            drafts.append(extra)
+        if self._fp_recoverable is not None and self._fp_recoverable_source == "main":
+            drafts.append(self._fp_recoverable)
+        if not drafts:
+            return True
+        path = self._footprint_kept_path()
+        if path is None:
+            return True
+        from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
+        try:
+            if not save_kept_drafts(path, drafts + load_kept_drafts(path)):
+                return False
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log(self.i18n.text(
+                "Bozza non salvata: verifica lo spazio e i permessi della cartella.") + f" ({exc})")
+            return False
+        if self._fp_recoverable is not None and self._fp_recoverable_source == "main":
+            self._fp_recoverable_source = "kept"
+        return True
+
+    def _checkpoint_footprint_draft(self) -> None:
+        """@brief Write the pending draft to the recovery file, or remove the file when nothing is pending.
+
+        @note An offered crash draft still held by that file is first moved
+            to the kept-drafts file (`_keep_offered_footprint_draft`), so the
+            current edits are always checkpointed and the offered draft stays
+            recoverable: a second crash offers the newest edits first, then
+            the kept one. A write failure is logged, never raised (the draft
+            stays in memory).
+        """
+        path = self._footprint_recovery_path()
+        if path is None:
+            return
+        from ..services.footprint_draft import remove_footprint_draft, save_footprint_draft
+        try:
+            pending = self.has_pending_footprint_edits()
+            current = self._footprint_state_json(self._footprint_edit_state()) if pending else None
+            if (self._fp_recoverable is not None and self._fp_recoverable_source == "main"
+                    and current != self._fp_recoverable
+                    and not self._keep_offered_footprint_draft()):
+                return
+            if pending:
+                save_footprint_draft(path, self._footprint_state_json(self._fp_applied), current)
+            else:
+                remove_footprint_draft(path)
+        except (OSError, TypeError, ValueError) as exc:
+            self._append_log(self.i18n.text(
+                "Bozza non salvata: verifica lo spazio e i permessi della cartella.") + f" ({exc})")
+
+    def _next_footprint_offer(self) -> None:
+        """@brief Offer the next recoverable draft: the current-draft file first, then the kept ones.
+
+        @note Read only. The current-draft file is offered only when bound to
+            the applied state now in the project (as for the symbol,
+            `symbol_draft.load_draft`) and different from what the preview
+            shows; kept drafts are complete states, offered whatever the
+            applied state, and re-validated when recovered.
+        """
+        self._fp_recoverable = None
+        self._fp_recoverable_source = None
+        path = self._footprint_recovery_path()
+        if path is None:
+            return
+        from ..services.footprint_draft import load_footprint_draft, load_kept_drafts
+        current = self._footprint_state_json(self._footprint_edit_state())
+        try:
+            main = load_footprint_draft(
+                path, self._footprint_state_json(self._applied_footprint_state()))
+            if main is not None and main != current:
+                self._fp_recoverable, self._fp_recoverable_source = main, "main"
+                return
+            for kept in load_kept_drafts(self._footprint_kept_path()):
+                if kept != current:
+                    self._fp_recoverable, self._fp_recoverable_source = kept, "kept"
+                    return
+        except (OSError, ValueError, RecursionError):
+            self._append_log(self.i18n.text("Impossibile leggere la bozza di recupero."))
+
+    def _offer_footprint_recovery(self) -> None:
+        """@brief Offer the draft a crash left in this project's recovery files («Recupera bozza»).
+
+        @note Read only: the draft is offered, never applied nor loaded, and
+            its file stays until the user recovers or discards it. Called
+            when a project is opened; an unreadable file (even one nested
+            too deeply for the parser) is logged and never blocks the open.
+        """
+        try:
+            self._next_footprint_offer()
+        except (OSError, ValueError, TypeError, RecursionError):
+            self._fp_recoverable = None
+            self._fp_recoverable_source = None
+            self._append_log(self.i18n.text("Impossibile leggere la bozza di recupero."))
+        if self._fp_recoverable is not None:
+            self._append_log(self.i18n.text("Footprint") + ": " + self.i18n.text(
+                "Bozza disponibile: usa Recupera bozza per riprenderla."))
+        self._refresh_footprint_undo_buttons()
+
+    def _drop_kept_footprint_draft(self, draft: dict) -> bool:
+        """Remove one draft from the kept-drafts file; False when the file cannot be written."""
+        path = self._footprint_kept_path()
+        if path is None:
+            return True
+        from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
+        try:
+            return save_kept_drafts(path, [d for d in load_kept_drafts(path) if d != draft])
+        except (OSError, TypeError, ValueError):
+            self._append_log(self.i18n.text(
+                "Bozza non salvata: verifica lo spazio e i permessi della cartella."))
+            return False
+
+    def recover_footprint_draft(self) -> None:
+        """@brief «Recupera bozza»: make the offered crash draft the footprint draft (not applied).
+
+        @note Nothing is lost: unapplied edits shown before are kept as a
+            recoverable draft (kept-drafts file) and pushed on the undo stack;
+            if they cannot be kept the recovery is refused. The recovered
+            draft then becomes the content of the current-draft file, and
+            the next recoverable draft, if any, is offered.
+        """
+        offered, source = self._fp_recoverable, self._fp_recoverable_source
+        if offered is None:
+            return
+        if self.has_pending_footprint_edits():
+            own = self._footprint_state_json(self._footprint_edit_state())
+            if own != offered and not self._keep_offered_footprint_draft(extra=own):
+                return
+            source = self._fp_recoverable_source
+        if source == "kept" and not self._drop_kept_footprint_draft(offered):
+            return
+        state = self._footprint_state_from_json(offered)
+        self._fp_recoverable = None
+        self._fp_recoverable_source = None
+        self._edit_footprint_draft(state)
+        self._offer_next_after_recovery()
+
+    def _offer_next_after_recovery(self) -> None:
+        """Offer the next kept draft, if any, after a recovery or a discard."""
+        try:
+            self._next_footprint_offer()
+        except (OSError, ValueError, TypeError, RecursionError):
+            self._fp_recoverable = None
+            self._fp_recoverable_source = None
+        self._refresh_footprint_undo_buttons()
+
+    def discard_footprint_recovery(self) -> bool:
+        """@brief «Scarta bozza»: retire the offered crash draft explicitly.
+
+        @return True when an offered draft was discarded; False when none was
+            offered or its file could not be changed (the offer stays).
+        @note A draft offered from the current-draft file removes that file
+            (the preview has no own edits then: they would have moved it to
+            the kept file); a kept draft leaves the kept file. The next
+            recoverable draft, if any, is offered.
+        """
+        if self._fp_recoverable is None:
+            return False
+        if self._fp_recoverable_source == "kept":
+            if not self._drop_kept_footprint_draft(self._fp_recoverable):
+                return False
+        else:
+            path = self._footprint_recovery_path()
+            from ..services.footprint_draft import remove_footprint_draft
+            try:
+                if path is not None:
+                    remove_footprint_draft(path)
+            except OSError:
+                self._append_log(self.i18n.text(
+                    "Bozza non salvata: verifica lo spazio e i permessi della cartella."))
+                return False
+        self._fp_recoverable = None
+        self._fp_recoverable_source = None
+        self._checkpoint_footprint_draft()
+        self._append_log(self.i18n.text("Footprint") + ": " + self.i18n.text("Bozza scartata."))
+        self._offer_next_after_recovery()
         return True
 
     def _end_footprint_drawing_interaction(self) -> None:
@@ -12084,35 +12910,44 @@ class MainWindow(QMainWindow):
             return
         if self._background_work_running() or self._pipeline_owns_output():
             return
+        open_folder = getattr(self, "_open_project_folder", None)
+        if open_folder is not None and self._named() and Path(open_folder) != self._project_dir():
+            # The working folder changed under the open project: a rewrite
+            # now would write into the other working folder. Kept pending;
+            # leaving the project marks it stale (`_can_leave_project`).
+            return
         pad_edit = self._fp_rewrite_pad_edit
         self._clear_footprint_rewrite()
         if not pad_edit and not self._project_has_footprint():
             return
-        self._generate(footprint_only=True)
+        # The rewrite of APPLIED edits: a draft made since then is not asked
+        # about, and not written (`_generate` works on the applied state).
+        self._fp_rewrite_flushing = True
+        try:
+            self._generate(footprint_only=True)
+        finally:
+            self._fp_rewrite_flushing = False
 
     def _refresh_footprint_undo_buttons(self) -> None:
-        """@brief Enable undo/redo only when their stack has something."""
+        """@brief Enable undo/redo, Applica/Annulla and «Recupera bozza» from the draft state."""
         if hasattr(self, "btn_fp_undo"):
             self.btn_fp_undo.setEnabled(bool(self._fp_drawings_undo))
             self.btn_fp_redo.setEnabled(bool(self._fp_drawings_redo))
+        if hasattr(self, "btn_fp_apply"):
+            pending = self.has_pending_footprint_edits()
+            self.btn_fp_apply.setEnabled(pending)
+            self.btn_fp_cancel.setEnabled(pending)
+            offered = getattr(self, "_fp_recoverable", None) is not None
+            self.btn_fp_recover.setEnabled(offered)
+            self.action_fp_discard_recovery.setEnabled(offered)
 
     def _undo_footprint_drawing(self) -> None:
-        """@brief Go back to the drawings list before the last edit (Ctrl+Z)."""
-        if self._fp_drawings_undo:
-            self._cancel_footprint_drawing()
-            # Pop only once applied: a failed save must keep the step.
-            if self._apply_footprint_drawings(self._fp_drawings_undo[-1], history="undo"):
-                self._fp_drawings_undo.pop()
-                self._refresh_footprint_undo_buttons()
+        """@brief Go back to the footprint edits before the last change (Ctrl+Z), inside the draft."""
+        self._step_footprint_history(self._fp_drawings_undo, self._fp_drawings_redo)
 
     def _redo_footprint_drawing(self) -> None:
-        """@brief Re-apply the last undone edit of the drawings (Ctrl+Y)."""
-        if self._fp_drawings_redo:
-            self._cancel_footprint_drawing()
-            # Pop only once applied: a failed save must keep the step.
-            if self._apply_footprint_drawings(self._fp_drawings_redo[-1], history="redo"):
-                self._fp_drawings_redo.pop()
-                self._refresh_footprint_undo_buttons()
+        """@brief Re-apply the last undone footprint edit (Ctrl+Y), inside the draft."""
+        self._step_footprint_history(self._fp_drawings_redo, self._fp_drawings_undo)
 
     def _delete_hovered_drawing(self) -> None:
         """@brief Delete key: remove the drawing under the pointer, if any."""
@@ -13431,7 +14266,25 @@ class MainWindow(QMainWindow):
         return self.i18n.text(pending), STATUS_INFO
 
     def _regenerate_3d(self) -> None:
-        """Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e')."""
+        """@brief Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e').
+
+        @note Footprint draft (review, 2026-10-14): the solid is built from
+            the package pads (drill, pad size), so a pending footprint draft
+            is applied or discarded first, as for a generation, and the
+            worker gets the APPLIED pads (`_applied_footprint_in_memory`).
+            The automatic retry (`_run_pending_regen_3d`, flag
+            `_regen_3d_automatic`) does not ask; it still gets the applied pads.
+        """
+        if self._background_work_running() or self._automatic_generation_active:
+            return
+        if (not getattr(self, "_regen_3d_automatic", False)
+                and not self._settle_footprint_draft_before_start()):
+            return
+        with self._applied_footprint_in_memory():
+            self._regenerate_3d_applied()
+
+    def _regenerate_3d_applied(self) -> None:
+        """@brief Body of `_regenerate_3d`, run with the applied footprint in the fields."""
         if self._background_work_running() or self._automatic_generation_active:
             return
         if self._selected_family() == "single_smd" and self.package_geometry is None:
@@ -14557,6 +15410,11 @@ class MainWindow(QMainWindow):
                 self._current_castellated_params() if self._is_castellated()
                 else self._current_params()
             )
+            if (isinstance(params, PinHeaderParams)
+                    and (params.pad_overrides or {}) != self.header_pad_overrides):
+                # The last generation froze the APPLIED pad overrides; the
+                # preview draws the footprint draft (review A, 2026-10-14).
+                params = replace(params, pad_overrides=deepcopy(self.header_pad_overrides))
             params.validate()
             params = self._host_footprint_params(params)
             self._set_mounting_error("")
@@ -14916,18 +15774,11 @@ class MainWindow(QMainWindow):
                                     self.i18n.text("Il pad deve essere più grande del foro."))
                 return
             updated[number] = {"shape": shape.currentData(), "size": pad_size}
-        previous = deepcopy(self.header_pad_overrides)
-        self.header_pad_overrides = updated
-        if not self._save_project_config(force=True):
-            self.header_pad_overrides = previous
-            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
-                "Modifica pad non salvata."))
+        if updated == self.header_pad_overrides:
             return
-        self._draw_preview()
-        # The selected land is an edit to the generated host footprint, so
-        # write the updated .kicad_mod right after persisting the choice
-        # (retried when another worker is running).
-        self._schedule_footprint_rewrite(immediate=True, pad_edit=True)
+        # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the land is a
+        # draft edit; «Applica» saves it and rewrites the .kicad_mod.
+        self._edit_footprint_draft({"pad_overrides": updated})
 
     # ── Footprint texts (Reference, Value) ───────────────────────────
 
@@ -15013,15 +15864,15 @@ class MainWindow(QMainWindow):
             group.setZValue(50)
 
     def _set_footprint_text_position(self, key: str, position) -> bool:
-        """@brief Keep a text position (None: back to default), save, redraw and rewrite the footprint.
+        """@brief Put a text position (None: back to default) in the footprint draft and redraw.
 
         @param key One of `core.footprint.TEXT_KEYS`.
         @param position (x, y) mm in footprint coordinates, or None for the default.
-        @return True when the choice was saved; False (and the previous
-            choice kept) when the project could not be written.
-        @note Same contract as a pad edit: the chosen text position is an
-            edit to the generated footprint, so the .kicad_mod is written
-            again right after the project file.
+        @return True when the draft took the position (or already had it);
+            False for an unknown key or an invalid position.
+        @note CONTRACT CHANGED 2026-10-14 (footprint draft, user): the
+            position is a draft edit like the drawings, saved in the project
+            and written to the .kicad_mod by «Applica» (`apply_footprint_draft`).
         """
         from ..core.footprint import TEXT_KEYS, validate_text_positions
         if key not in TEXT_KEYS:
@@ -15039,17 +15890,7 @@ class MainWindow(QMainWindow):
                 self._draw_preview()
                 return True
             updated[key] = checked[key]
-        previous = self.footprint_text_positions
-        self.footprint_text_positions = updated
-        if not self._save_project_config(force=True):
-            self.footprint_text_positions = previous
-            self._draw_preview()
-            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
-                "Posizione del testo non salvata."))
-            return False
-        self._draw_preview()
-        self._schedule_footprint_rewrite()
-        return True
+        return self._edit_footprint_draft({"texts": updated})
 
     def _on_footprint_text_moved(self, key: str, x_scene: float, y_scene: float) -> None:
         """@brief Slot of the view: a text was dropped at a scene point; snap it and keep it.
@@ -15146,22 +15987,20 @@ class MainWindow(QMainWindow):
         updated = replace(pin, shape=selected_shape,
                           pad_length_mm=pad_width, pad_width_mm=pad_height,
                           **({"drill_mm": drill.value()} if drill is not None else {}))
-        old_pins = package.pins
-        package.pins = list(package.pins)
-        package.pins[pad_index] = updated
+        new_pins = list(package.pins)
+        new_pins[pad_index] = updated
+        if new_pins == list(package.pins):
+            return
+        # Validated on a copy: the package object itself is never mutated
+        # (a worker may hold it, see `_rebind_package_pins`).
         try:
-            package.validate()
+            replace(package, pins=new_pins).validate()
         except (TypeError, ValueError) as exc:
-            package.pins = old_pins
             QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"), str(exc))
             return
-        if not self._save_project_config(force=True):
-            package.pins = old_pins
-            QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
-                "Modifica pad non salvata; il valore precedente è stato ripristinato."))
-            return
-        self._draw_preview()
-        self._schedule_footprint_rewrite(immediate=True, pad_edit=True)
+        # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the pad is a
+        # draft edit; «Applica» saves it and rewrites the .kicad_mod.
+        self._edit_footprint_draft({"package_pins": new_pins})
 
     #: Italian fallbacks of the dimension-label keys, used only until the
     #: catalogue carries them: `I18n.tr` would otherwise show the bare key.

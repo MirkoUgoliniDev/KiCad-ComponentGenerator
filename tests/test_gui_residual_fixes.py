@@ -140,6 +140,9 @@ def pending_edit(busy_window, qapp, monkeypatch):
     window, busy, started = busy_window
     busy["on"] = True
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))
+    # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the edit is saved
+    # (and its rewrite armed) by «Applica», no longer by the edit itself.
+    window.apply_footprint_draft()
     _turns(qapp)
     assert window._fp_rewrite_dirty and started == []
     busy["on"] = False

@@ -95,8 +95,21 @@ def _pad_geometry(pad):
     return args
 
 
-def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None):
-    """@brief Use scratch copies only; failed checks do not suppress independent checks."""
+def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None,
+                     footprint_pending=False):
+    """@brief Use scratch copies only; failed checks do not suppress independent checks.
+
+    @param directory Component folder.
+    @param name Component name.
+    @param rows Applied symbol rows.
+    @param pending True when the symbol editor holds unapplied edits.
+    @param issues Review messages of the symbol editor.
+    @param emit Callback receiving each Check as it is produced.
+    @param footprint_pending True when the footprint preview holds an
+        unapplied draft: the footprint checked is the applied one on disk,
+        and a warning says the draft is not included.
+    @return The list of Check results.
+    """
     results = []
     def add(status, title, detail):
         # A generator error (SymbolError) carries its own translatable text.
@@ -127,6 +140,9 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         add('OK', tx('KiCad CLI'), cli)
     if pending:
         add('WARN', tx('Modifiche non applicate'), tx('Verificato il simbolo applicato; la bozza non è inclusa.'))
+    if footprint_pending:
+        add('WARN', tx('Modifiche non applicate'),
+            tx('Verificato il footprint applicato; la bozza del footprint non è inclusa.'))
     for issue in issues:
         add('WARN', tx('Revisione simbolo'), issue)
     # Inspect the applied snapshot even when the editor has an unrelated draft.

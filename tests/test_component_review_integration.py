@@ -6,7 +6,7 @@ from kicadgen.gui import component_check_dialog, pin_type_dialog
 
 def test_verification_is_guarded_and_uses_applied_snapshot(window, monkeypatch):
     # The pending draft would ask in a modal (2026-10-14): answer «stay».
-    monkeypatch.setattr(window, '_ask_pending_symbol_choice', lambda can_apply: window.SYMBOL_EDITS_STAY)
+    monkeypatch.setattr(window, '_ask_pending_edits_choice', lambda editors, can_apply: window.PENDING_EDITS_STAY)
     window.symbol_tab.set_data('Demo', [{'pin': '1', 'name': 'GND'}])
     window.symbol_tab.table.item(0, 1).setText('Draft')
     captured = []
