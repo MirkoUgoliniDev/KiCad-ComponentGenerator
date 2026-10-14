@@ -23,6 +23,7 @@ import base64
 import copy
 import mimetypes
 import math
+import numbers
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,7 @@ from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.package_geometry import package_from_mapping
+from ..core.validation import finite_number
 from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
 )
@@ -4028,19 +4030,34 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
     return messages
 
 
+def _real_number(value) -> Optional[float]:
+    """A finite real number as float, or None; numeric TEXT is never a number.
+
+    Delegates to the shared `finite_number` (review D4: "12" used to pass as a
+    coordinate). Real scalars that are not Python int/float, such as the
+    numpy values the program's own photo pipeline may carry into trusted
+    components, are converted first: they are numbers, unlike text.
+    """
+    if (isinstance(value, numbers.Real) and not isinstance(value, (bool, int, float))):
+        try:
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return finite_number(value)
+
+
 def _optional_number(value, *, positive=False, integer=False):
-    """Discard malformed optional numerics; signed offsets remain valid."""
-    if value is None or isinstance(value, bool):
+    """Discard malformed optional numerics; signed offsets remain valid.
+
+    Strings, booleans, non-finite values and integers too large for a float
+    are malformed (see `_real_number`).
+    """
+    number = _real_number(value)
+    if number is None or (positive and number <= 0):
         return None
-    try:
-        number = float(value)
-        if not math.isfinite(number) or (positive and number <= 0):
-            return None
-        if integer and number != int(number):
-            return None
-        return int(number) if integer else number
-    except (TypeError, ValueError, OverflowError):
+    if integer and number != int(number):
         return None
+    return int(number) if integer else number
 
 
 class _PinNumberConflict(ExtractionError):
@@ -4403,20 +4420,13 @@ def _components_3d(raw: Optional[Sequence[dict]],
             entry = {key: value for key, value in entry.items()
                      if not (isinstance(key, str) and key.startswith("_"))
                      and key not in _TRUSTED_ONLY_FIELDS}
-        try:
-            if any(isinstance(entry.get(k), bool) for k in
-                   ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")):
-                continue
-            component = {
-                "name": str(entry.get("name") or "Componente"),
-                "x_mm": float(entry["x_mm"]),
-                "y_mm": float(entry["y_mm"]),
-                "length_mm": float(entry["length_mm"]),
-                "width_mm": float(entry["width_mm"]),
-                "height_mm": float(entry["height_mm"]),
-            }
-        except (KeyError, TypeError, ValueError, OverflowError):
+        # Booleans, numeric strings, non-finite and overflowing values are not
+        # measures (review D4): the entry is dropped, the others stay.
+        geometry = {key: _real_number(entry.get(key)) for key in
+                    ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")}
+        if any(value is None for value in geometry.values()):
             continue
+        component = {"name": str(entry.get("name") or "Componente"), **geometry}
         # Il modello vede anche elementi della PCB che non sono componenti
         # montati: pad, via, semi-fori e contatti del bordo. Se passano dallo
         # schema, eliminarli qui evita che finiscano nella tabella 3D come
@@ -4944,8 +4954,8 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         pcb_thickness_mm=_opt_float("pcb_thickness_mm"),
         body_offset_y_mm=_opt_float("body_offset_y_mm"),
         pin_length_3d_mm=_opt_float("pin_length_3d_mm"),
-        edge_fillets=data.get("edge_fillets") or None,
-        pinout=data.get("pinout") or None,
+        edge_fillets=_validated_edge_fillets(data.get("edge_fillets"), notes),
+        pinout=_validated_pinout(data.get("pinout"), notes),
         pin_map=pin_map,
         body_offset_x_mm=_opt_float("body_offset_x_mm"),
         body_color_hex=data.get("body_color_hex") or None,
@@ -4969,6 +4979,75 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
     return params
+
+
+def _validated_edge_fillets(raw, notes: list) -> Optional[list[dict]]:
+    """Optional edge_fillets: only ``{"edge": <EDGE_NAMES>, "radius_mm": > 0}`` entries.
+
+    A malformed entry is dropped with a note and the valid ones stay (review
+    D2): the consumer reads ``entry["edge"]`` and ``float(entry["radius_mm"])``
+    without checks, so nothing else may reach it. The radius must be a real
+    finite number: numeric text is malformed like everywhere else.
+    @return The valid fillets with only those two keys, or None when none is.
+    """
+    if raw is None or raw == []:
+        return None
+    entries = raw if isinstance(raw, (list, tuple)) else [raw]
+    valid = []
+    for index, entry in enumerate(entries):
+        edge = entry.get("edge") if isinstance(entry, dict) else None
+        radius = (_optional_number(entry.get("radius_mm"), positive=True)
+                  if isinstance(entry, dict) else None)
+        if isinstance(edge, str) and edge in EDGE_NAMES and radius is not None:
+            valid.append({"edge": edge, "radius_mm": radius})
+        else:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).",
+                            key=f"edge_fillets[{index}]", value=entry))
+    return valid or None
+
+
+def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
+    """@brief Optional pinout: only ``{"pin": <number or label>, "name": <text>}`` entries.
+
+    @param raw The ``pinout`` value of the model's answer.
+    @param notes Extraction notes; every dropped or repaired entry adds one.
+    @return The kept entries, each with only the two keys the schema
+        declares, in the source order; None when none is kept.
+    @note ``pin`` is a non-negative integer (an integral float such as 3.0
+        included; 0 is a real pad number on some packages and the symbol
+        and pinout tables accept any pin text) or a non-empty label such as
+        "A2" for grid packages. An entry without a usable pin id is dropped
+        with a note: there is no pin to keep (review D2).
+    @note A missing or non-text ``name`` does not drop the pin: the symbol
+        must keep every pin of the source pinout, so the pin stays with an
+        empty name and a note names the discarded ``pinout[i].name`` (review G5).
+    """
+    if raw is None or raw == []:
+        return None
+    entries = raw if isinstance(raw, (list, tuple)) else [raw]
+    valid = []
+    for index, entry in enumerate(entries):
+        pin = None
+        if isinstance(entry, dict):
+            raw_pin = entry.get("pin")
+            if isinstance(raw_pin, str):
+                pin = raw_pin.strip() or None
+            else:
+                pin = _optional_number(raw_pin, integer=True)
+                if pin is not None and pin < 0:
+                    pin = None
+        if pin is None:
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).",
+                            key=f"pinout[{index}]", value=entry))
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str):
+            # Only the name is discarded (the note names the field): the pin stays.
+            notes.append(tx("{key} scartato: valore non valido ({value!r}).",
+                            key=f"pinout[{index}].name", value=name))
+            name = ""
+        valid.append({"pin": pin, "name": name})
+    return valid or None
 
 
 def _validated_lead_exit(raw, notes: list) -> Optional[str]:

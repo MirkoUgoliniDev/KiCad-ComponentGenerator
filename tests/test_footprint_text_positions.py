@@ -16,7 +16,8 @@ from PyQt6.QtCore import QEvent, QPointF, Qt  # noqa: E402
 from PyQt6.QtGui import QMouseEvent  # noqa: E402
 
 from kicadgen.core.footprint import (  # noqa: E402
-    DEFAULT_TEXT_POSITIONS, TEXT_KEYS, Footprint, Pad, validate_text_positions,
+    DEFAULT_TEXT_POSITIONS, TEXT_KEYS, Footprint, Pad, default_text_positions,
+    validate_text_positions,
 )
 from kicadgen.gui.footprint_view import TEXT_KEY_ROLE  # noqa: E402
 
@@ -73,7 +74,10 @@ def test_the_worker_writes_the_chosen_position_in_the_file(tmp_path, qapp):
     assert written, "the footprint was written"
     text = (tmp_path / "H.pretty" / "H.kicad_mod").read_text(encoding="utf-8")
     assert _property_at(text, "Value") == (0.0, 6.5)
-    assert _property_at(text, "Reference") == DEFAULT_TEXT_POSITIONS["Reference"]
+    # CONTRACT CHANGED 2026-10-14 (decision D1): the text without a choice
+    # takes the geometry-derived default, no longer the fixed (0, -2).
+    from kicadgen.generators.pin_header import build_pin_header
+    assert _property_at(text, "Reference") == default_text_positions(build_pin_header(params))["Reference"]
 
 
 # ── Window ───────────────────────────────────────────────────────────
@@ -113,8 +117,20 @@ def test_both_texts_are_drawn_at_their_default_position(preview):
     assert set(items) == set(TEXT_KEYS)
     assert _text_of(items["Reference"]) == "REF**"
     assert _text_of(items["Value"]) == (window._component_name() or "Value")
+    # CONTRACT CHANGED 2026-10-14 (decision D1): the preview shows the same
+    # geometry-derived default the generator writes, not the fixed positions.
+    from kicadgen.core.package_geometry import PackageGeometry
+    from kicadgen.generators.castellated_module import CastellatedModuleParams, build_castellated_module
+    from kicadgen.generators.package import build_package
+    from kicadgen.generators.pin_header import build_pin_header
+    params = window._preview_params()
+    built = (build_package(params) if isinstance(params, PackageGeometry) else
+             build_castellated_module(params) if isinstance(params, CastellatedModuleParams)
+             else build_pin_header(params))
+    defaults = default_text_positions(built)
+    assert defaults != DEFAULT_TEXT_POSITIONS
     for key, item in items.items():
-        assert (item.pos().x(), item.pos().y()) == tuple(v * 20 for v in DEFAULT_TEXT_POSITIONS[key])
+        assert (item.pos().x(), item.pos().y()) == pytest.approx(tuple(v * 20 for v in defaults[key]))
         # The anchor is visible: a cross of two lines centred on it, and the
         # text centred on it too.
         from PyQt6.QtWidgets import QGraphicsLineItem

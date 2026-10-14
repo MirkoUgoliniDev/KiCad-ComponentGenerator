@@ -162,7 +162,9 @@ Requirements:
 - Python 3.11 or newer;
 - packages listed in requirements.txt;
 - FreeCAD with freecadcmd on PATH for STEP/VRML generation;
-- KiCad 8 or newer for inspecting the generated footprint.
+- KiCad 10 or newer for opening the generated footprint and symbol: they are
+  written in the KiCad 10 file formats (footprint `20260206`, symbol library
+  `20251024`), which KiCad 8 and 9 cannot read.
 
 ~~~bash
 python -m venv .venv

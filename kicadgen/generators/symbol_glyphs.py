@@ -112,8 +112,10 @@ class Primitive:
         stroke width in mm (0 = KiCad default). `style` is the KiCad stroke
         type (STROKE_STYLES). A `text` primitive (KiCad `(text ...)`) has one
         point (its position), the `text` itself, its font `size` in mm,
-        its `angle` (0 or 90 degrees) and its horizontal `justify`
-        (TEXT_JUSTIFY); fill, width and style are unused for it.
+        its `angle` (0 or 90 degrees), its horizontal `justify`
+        (TEXT_JUSTIFY) and its vertical `vjustify` (TEXT_VJUSTIFY, "center"
+        when the file names none, as in KiCad); fill, width and style are
+        unused for it.
     """
     kind: str
     points: tuple[tuple[float, float], ...]
@@ -125,6 +127,7 @@ class Primitive:
     size: float = 1.27
     angle: int = 0
     justify: str = "center"
+    vjustify: str = "center"
 
 
 #: The KiCad stroke types, in the order the editor offers them.
@@ -132,6 +135,16 @@ STROKE_STYLES = ("default", "solid", "dash", "dot", "dash_dot", "dash_dot_dot")
 
 #: Horizontal justifications of a symbol text, in the order the editor offers them.
 TEXT_JUSTIFY = ("left", "center", "right")
+
+#: Vertical justifications of a symbol text as KiCad writes them ("center" is implicit).
+TEXT_VJUSTIFY = ("top", "center", "bottom")
+
+#: Value of the record field `text_anchor` of a text drawn with the Text tool
+#: whose anchor is the bottom-left corner of the text (user, 2026-10-14:
+#: «il quadratino di ancoraggio del testo lo vorrei nell'angolo in basso a
+#: SX»): written by `shape_instance` and by `migrate_text_anchor`, it marks
+#: the record as already in that convention, so the migration runs once.
+TEXT_ANCHOR_BOTTOM_LEFT = "bottom_left"
 
 #: Default font size of a symbol text, mm (the KLC size of every symbol text).
 TEXT_SIZE_MM = 1.27
@@ -260,33 +273,110 @@ def _style_of(form) -> str:
     return value if value in STROKE_STYLES else "default"
 
 
-def _text_primitive(form) -> Optional[Primitive]:
+def text_angle_to_file(degrees: float) -> int:
+    """@brief The value written in the `(at x y angle)` of a symbol `text` form.
+
+    @param degrees Text angle in degrees, counter-clockwise.
+    @return Tenths of a degree in [0, 3600): KiCad (6 to 10) stores the angle
+        of a symbol-library text in tenths (900 = vertical), unlike pins and
+        properties, which use degrees. Verified on KiCad 10's bundled
+        libraries and with `kicad-cli sym export svg`.
+    """
+    return int(round((float(degrees) % 360) * 10)) % 3600
+
+
+#: (generator, generator_version) of the AMBIGUOUS kicadgen files. Two
+#: writers used this header: `0389777` (first text primitives) up to
+#: `bc01ca2` stored text angles in DEGREES, always a quarter turn
+#: (0/90/180/270); `af3a92a` (2026-10-14 01:33) stored TENTHS (0/900/1800/
+#: 2700) under the very same header. Older `(generator kicadgen)` files
+#: (format 20211014) hold no text; every later kicadgen file carries
+#: another `generator_version` (`symbol.SYMBOL_GENERATOR_VERSION`).
+LEGACY_DEGREES_GENERATOR = ("kicadgen", "10.0")
+
+#: Values that, inside a LEGACY_DEGREES_GENERATOR file, can only come from
+#: the degree writer (it only wrote quarter turns; the tenths writer wrote
+#: 900/1800/2700 for the same turns).
+_LEGACY_DEGREE_VALUES = (90.0, 180.0, 270.0)
+
+_HEADER_RE = re.compile(
+    r'\(kicad_symbol_lib(?=[\s(])[^()]*(?:\((?:version|generator|generator_version)\s+[^()]*\)\s*)*')
+_HEADER_FIELD_RE = re.compile(r'\((generator|generator_version)\s+"?([^")\s]*)"?\s*\)')
+
+
+def text_angles_in_degrees(library_text: str) -> bool:
+    """@brief Whether a symbol library file has the legacy kicadgen header whose text angles may be degrees.
+
+    @param library_text The text of a `.kicad_sym` file (only its header is read).
+    @return True only for a file whose header names the generator and version
+        of LEGACY_DEGREES_GENERATOR; False for KiCad's own files, for files of
+        any other generator and for kicadgen files of any other version.
+    @note The header selects WHICH rule applies: outside it every angle is
+        KiCad tenths, whatever its value (a KiCad text at 9 degrees is 90).
+        Inside it `text_angle_from_file` still has to tell the two writers
+        apart by value. Files saved again by KiCad name KiCad as generator
+        and are read as tenths, as KiCad itself reads them.
+    """
+    header = _HEADER_RE.match(library_text.lstrip())
+    if header is None:
+        return False
+    fields = dict(_HEADER_FIELD_RE.findall(header.group(0)))
+    return (fields.get("generator"), fields.get("generator_version")) == LEGACY_DEGREES_GENERATOR
+
+
+def text_angle_from_file(value: float, legacy_degrees: bool = False) -> float:
+    """@brief The text angle in degrees of a symbol `text` form's `(at x y value)`.
+
+    @param value The number found in the file.
+    @param legacy_degrees True when the file has the legacy kicadgen header
+        (`text_angles_in_degrees`).
+    @return Degrees in [0, 360), read as tenths of a degree as KiCad writes
+        it. Only inside a legacy header, 90, 180 and 270 are degrees.
+    @note Two-level rule. (1) The file header decides whether any doubt
+        exists: files of KiCad, of any other generator and of kicadgen with
+        any `generator_version` but LEGACY_DEGREES_GENERATOR are pure tenths
+        (KiCad's own libraries hold non-quarter angles in tenths, e.g. the
+        digits of `Switch:SW_Coded_SH-7010` at 54, 126, 162... degrees, and a
+        genuine 90 is 9 degrees). (2) Inside the legacy header two writers
+        coexist (`0389777`..`bc01ca2` degrees, `af3a92a` tenths), and the
+        value is the only evidence left: both wrote quarter turns only, so
+        90/180/270 can only be the degree writer and 900/1800/2700 only the
+        tenths writer; 0 is 0 for both and any other value is read as tenths.
+        This value check is a compatibility fallback limited to that one
+        header, which no writer emits any more.
+    """
+    value = float(value)
+    if legacy_degrees and value in _LEGACY_DEGREE_VALUES:
+        return value % 360
+    return (value / 10) % 360
+
+
+def _text_primitive(form, legacy_degrees: bool = False) -> Optional[Primitive]:
     """The Primitive of a `(text "..." (at x y angle) (effects (font (size s s)) (justify j)))` form."""
     if len(form) < 2 or not isinstance(form[1], str):
         return None
     at = _child(form, "at")
     if not at or len(at) < 3:
         return None
-    angle = float(at[3]) if len(at) > 3 else 0.0
-    # KiCad 6 library files stored the text angle in tenths of a degree
-    # (900 = 90°); later formats use degrees. A value of 360 or more can
-    # only be tenths: interoperability rule, not a geometric one.
-    if abs(angle) >= 360:
-        angle /= 10
+    raw = float(at[3]) if len(at) > 3 else 0.0
+    angle = text_angle_from_file(raw, legacy_degrees)
     effects = _child(form, "effects")
     font = _child(effects, "font") if effects else None
     size = _child(font, "size") if font else None
     justify = _child(effects, "justify") if effects else None
     horizontal = next((str(v) for v in (justify[1:] if justify else ()) if str(v) in TEXT_JUSTIFY), "center")
+    vertical = next((str(v) for v in (justify[1:] if justify else ()) if str(v) in ("top", "bottom")), "center")
     return Primitive("text", (_xy(at),), 0.0, "none", 0.0, "default", str(form[1]),
                      float(size[1]) if size and len(size) > 1 else TEXT_SIZE_MM,
-                     int(round(angle)) % 360, horizontal)
+                     int(round(angle)) % 360, horizontal, vertical)
 
 
-def primitives_of(unit_form) -> list[Primitive]:
+def primitives_of(unit_form, legacy_text_degrees: bool = False) -> list[Primitive]:
     """@brief The drawing primitives of one `(symbol "Name_u_s" ...)` unit form.
 
     @param unit_form Parsed unit form.
+    @param legacy_text_degrees True when the file's header says its text
+        angles are degrees (`text_angles_in_degrees`); KiCad tenths otherwise.
     @return Polylines, circles, arcs, rectangles, beziers and texts in
         order; pins are not primitives and are skipped.
     """
@@ -322,7 +412,7 @@ def primitives_of(unit_form) -> list[Primitive]:
             if len(points) == 4:
                 result.append(Primitive("bezier", points, 0.0, _fill_of(item), _width_of(item), _style_of(item)))
         elif kind == "text":
-            text = _text_primitive(item)
+            text = _text_primitive(item, legacy_text_degrees)
             if text is not None:
                 result.append(text)
     return result
@@ -501,8 +591,9 @@ def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: st
         return None
     primitives: list[Primitive] = []
     terminals: list[Terminal] = []
+    legacy = text_angles_in_degrees(text)
     for unit in _children(symbol, "symbol"):
-        primitives.extend(primitives_of(unit))
+        primitives.extend(primitives_of(unit, legacy))
         terminals.extend(terminals_of(unit))
     primitives, body_hint = _drop_body_outline(primitives)
     if not primitives:
@@ -712,12 +803,16 @@ def primitive_record(p: Primitive) -> dict:
     """@brief The JSON-friendly dict of a primitive as stored in a placed record.
 
     @return kind, points, radius, fill, width, style; plus text, size, angle
-        and justify for a text primitive.
+        and justify for a text primitive, and `vjustify` when it is not
+        "center" (records written before vertical justification existed are
+        vertically centred, so the absence means "center").
     """
     record = {"kind": p.kind, "points": [list(pt) for pt in p.points], "radius": p.radius,
               "fill": p.fill, "width": p.width, "style": p.style}
     if p.kind == "text":
         record.update({"text": p.text, "size": p.size, "angle": int(p.angle) % 360, "justify": p.justify})
+        if p.vjustify != "center":
+            record["vjustify"] = p.vjustify
     return record
 
 
@@ -733,7 +828,8 @@ def primitive_from_record(record: dict, points=None) -> Primitive:
     return Primitive(kind, points, float(record.get("radius", 0.0)), str(record.get("fill", "none")),
                      float(record.get("width", 0.0)), style if style in STROKE_STYLES else "default",
                      str(record.get("text", "")), float(record.get("size", TEXT_SIZE_MM)),
-                     int(record.get("angle", 0)) % 360, str(record.get("justify", "center")))
+                     int(record.get("angle", 0)) % 360, str(record.get("justify", "center")),
+                     str(record.get("vjustify", "center")))
 
 
 def _point_xy(point) -> tuple[float, float]:
@@ -988,7 +1084,7 @@ def placed_primitives(instance: dict, graphics: Optional[Iterable[dict]] = None,
             # (KiCad never mirrors glyphs of a text).
             primitive = Primitive(primitive.kind, points, primitive.radius, primitive.fill, primitive.width,
                                   primitive.style, primitive.text, primitive.size,
-                                  (primitive.angle + rotation) % 180, primitive.justify)
+                                  (primitive.angle + rotation) % 180, primitive.justify, primitive.vjustify)
         result.append(primitive)
     return result
 
@@ -1229,7 +1325,7 @@ def shape_tool_glyphs() -> list[Glyph]:
 
 
 def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: str = "none",
-                   text: str = "", size: float = TEXT_SIZE_MM, justify: str = "center") -> Optional[dict]:
+                   text: str = "", size: float = TEXT_SIZE_MM, justify: Optional[str] = None) -> Optional[dict]:
     """@brief The placed record of a shape drawn with a tool from the points clicked.
 
     @param key Tool key (SHAPE_TOOLS).
@@ -1238,13 +1334,21 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
     @param fill KiCad fill: none, outline or background.
     @param text The text of a text tool (non-blank, single line).
     @param size Font size of a text, mm (> 0).
-    @param justify Horizontal justification of a text (TEXT_JUSTIFY).
+    @param justify Deprecated, kept for callers of the previous signature:
+        None or a value of TEXT_JUSTIFY (anything else refuses the text, as
+        before); the value itself is ignored, see the note.
     @return A record like `instance_from_glyph` whose origin is the centre of
         the shape's bounds (so turning and mirroring act about the shape
         itself) and whose points are relative to it; None when the clicks
         do not make the shape (too few, a circle of zero radius, a
         rectangle without area, an arc through a repeated point, a text
         that is blank or not on one line or of non-positive size).
+    @note A text's origin is the clicked point and that point is the
+        BOTTOM-LEFT corner of the text (user, 2026-10-14): `justify` "left",
+        `vjustify` "bottom" and the record marked `text_anchor` =
+        TEXT_ANCHOR_BOTTOM_LEFT. The text grows right and up from it (for a
+        90-degree text: up and left, the corner KiCad uses for a rotated
+        left-bottom text), so the anchor does not depend on the font width.
     """
     tool = shape_tool(key)
     if tool is None:
@@ -1258,14 +1362,15 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
         text = str(text).strip()
         if not text or "\n" in text or "\r" in text or isinstance(size, bool) \
                 or not isinstance(size, (int, float)) or not math.isfinite(size) or size <= 0 \
-                or justify not in TEXT_JUSTIFY:
+                or (justify is not None and justify not in TEXT_JUSTIFY):
             return None
         (ox, oy), = points
         return {
             "id": new_instance_id(), "key": f"shape:{key}", "label": label, "source": SHAPE_SOURCE,
-            "x": ox, "y": oy, "rotation": 0, "mirror": False,
+            "x": ox, "y": oy, "rotation": 0, "mirror": False, "text_anchor": TEXT_ANCHOR_BOTTOM_LEFT,
             "primitives": [primitive_record(Primitive("text", ((0.0, 0.0),), text=text,
-                                                      size=round(float(size), 4), justify=justify))],
+                                                      size=round(float(size), 4), justify="left",
+                                                      vjustify="bottom"))],
             "terminals": [],
         }
     if kind == "circle":
@@ -1487,14 +1592,18 @@ def set_primitive_style(instance: dict, width: Optional[float] = None, fill: Opt
     return True
 
 
-def set_text(instance: dict, text: str, size: float, justify: str = "center") -> bool:
-    """@brief Change the content, size and justification of a text element.
+def set_text(instance: dict, text: str, size: float, justify: Optional[str] = None) -> bool:
+    """@brief Change the content and size (and, for a legacy text, the justification) of a text element.
 
     @param instance Placed record whose first primitive is a text, mutated in place.
     @param text New text (non-blank, one line).
     @param size Font size in mm (> 0).
-    @param justify Horizontal justification (TEXT_JUSTIFY).
+    @param justify Horizontal justification (TEXT_JUSTIFY), or None to keep
+        the stored one. Ignored for a bottom-left anchored text
+        (`is_bottom_left_text`), whose anchor convention is fixed.
     @return True when written; False for a non-text record or an invalid value.
+    @note The anchor point does not move: for a bottom-left anchored text a
+        longer or bigger text grows right and up from the same corner.
     """
     primitives = instance.get("primitives") if isinstance(instance, dict) else None
     if not isinstance(primitives, list) or not primitives or not isinstance(primitives[0], dict) \
@@ -1503,9 +1612,79 @@ def set_text(instance: dict, text: str, size: float, justify: str = "center") ->
     text = str(text).strip()
     if not text or "\n" in text or "\r" in text or isinstance(size, bool) \
             or not isinstance(size, (int, float)) or not math.isfinite(size) or size <= 0 \
-            or justify not in TEXT_JUSTIFY:
+            or (justify is not None and justify not in TEXT_JUSTIFY):
         return False
-    primitives[0].update({"text": text, "size": round(float(size), 4), "justify": justify})
+    primitives[0].update({"text": text, "size": round(float(size), 4)})
+    if justify is not None and not is_bottom_left_text(instance):
+        primitives[0]["justify"] = justify
+    return True
+
+
+def is_bottom_left_text(instance) -> bool:
+    """@brief True for a text drawn with the Text tool whose anchor is its bottom-left corner.
+
+    @param instance Placed record.
+    @return True when the record carries `text_anchor` ==
+        TEXT_ANCHOR_BOTTOM_LEFT (new texts and migrated ones); False for a
+        legacy user text not migrated yet, for glyph texts imported from a
+        KiCad library (they keep the justification read from the file) and
+        for any other record.
+    """
+    return isinstance(instance, dict) and instance.get("text_anchor") == TEXT_ANCHOR_BOTTOM_LEFT
+
+
+def migrate_text_anchor(instance: dict, measure) -> bool:
+    """@brief Move the anchor of a legacy user-drawn text to its bottom-left corner, keeping where it is drawn.
+
+    @param instance Placed record, mutated in place.
+    @param measure Callable `(text, size_mm) -> (width_mm, height_mm,
+        ascent_mm)`: the advance width, the line height and the distance
+        from the top of the line to the baseline of the text as the editor
+        draws it (the editor passes its own Qt metrics).
+    @return True when the record was migrated; False when there was nothing
+        to do: not a shape text (`is_shape` and a text primitive), already
+        bottom-left (`is_bottom_left_text`), or a measure that is not finite.
+    @note Legacy user texts (Text tool before 2026-10-14) were drawn with
+        their anchor at the left end, centre or right end of the text,
+        vertically centred on the line height. The new anchor is the point
+        the editor already drew as the left end of the baseline, so the
+        text stays exactly where the user saw it in the editor; the record
+        becomes `justify` left, `vjustify` bottom, `text_anchor`
+        TEXT_ANCHOR_BOTTOM_LEFT, and a second call does nothing
+        (idempotent). The anchor moves in the text's own frame (reading
+        direction and glyph up), so a 90-degree text is migrated along its
+        own axes.
+    @note Only for MIGRATED texts, KiCad may place the text a fraction of a
+        character away from where it showed it before: the offset is
+        computed with the editor's font, while KiCad draws its stroke font,
+        whose width and centring differ slightly. New texts are exact: a
+        left-bottom anchor does not depend on the text width at all.
+        Library glyph texts are never migrated (they are not shapes).
+    """
+    if not is_shape(instance) or is_bottom_left_text(instance):
+        return False
+    primitives = instance.get("primitives")
+    if not isinstance(primitives, list) or not primitives or not isinstance(primitives[0], dict) \
+            or primitives[0].get("kind") != "text":
+        return False
+    placed = placed_primitives(instance)[0]
+    width, height, ascent = (float(v) for v in measure(placed.text, placed.size))
+    if not all(math.isfinite(v) for v in (width, height, ascent)):
+        return False
+    along = width if placed.justify == "right" else width / 2 if placed.justify == "center" else 0.0
+    # Baseline offset, in the glyph-up direction, from the old anchor: a
+    # vertically centred line has its baseline `ascent - height / 2` below it.
+    up = 0.0 if placed.vjustify == "bottom" else height / 2 - ascent
+    if placed.angle % 180 == 90:
+        # Reading direction +Y, glyph up -X.
+        dx, dy = -up, -along
+    else:
+        dx, dy = -along, up
+    instance["x"] = round(float(instance.get("x", 0.0)) + dx, 4)
+    instance["y"] = round(float(instance.get("y", 0.0)) + dy, 4)
+    primitives[0]["justify"] = "left"
+    primitives[0]["vjustify"] = "bottom"
+    instance["text_anchor"] = TEXT_ANCHOR_BOTTOM_LEFT
     return True
 
 
@@ -1628,8 +1807,11 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
             fill = f"(fill (type {p.fill}))"
             if p.kind == "text":
                 (tx_, ty_), = p.points
-                justify = "" if p.justify == "center" else f" (justify {p.justify})"
-                lines.append(f"{indent}(text {_quote_text(p.text)} (at {_num(tx_)} {_num(ty_)} {int(p.angle) % 360}) "
+                words = [w for w in (p.justify, p.vjustify) if w in TEXT_JUSTIFY + TEXT_VJUSTIFY and w != "center"]
+                justify = f" (justify {' '.join(words)})" if words else ""
+                # Symbol texts store tenths of a degree (900 = vertical).
+                lines.append(f"{indent}(text {_quote_text(p.text)} (at {_num(tx_)} {_num(ty_)} "
+                             f"{text_angle_to_file(p.angle)}) "
                              f"(effects (font (size {_num(p.size)} {_num(p.size)})){justify}))")
             elif p.kind == "polyline":
                 pts = " ".join(f"(xy {_num(x)} {_num(y)})" for x, y in p.points)

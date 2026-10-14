@@ -594,7 +594,7 @@ def test_texts_and_stroke_types_are_read_and_written_back():
     unit = g._child(g._child(library, "symbol"), "symbol")
     text, tilde, dashed, unknown = g.primitives_of(unit)
     assert (text.kind, text.text, text.points, text.size, text.justify) == ("text", "IN+", ((1.27, 2.54),), 1.27, "left")
-    assert text.angle == 90, "a KiCad 6 angle in tenths of a degree is read as degrees"
+    assert text.angle == 90, "a KiCad angle in tenths of a degree is read as degrees"
     assert (tilde.angle, tilde.justify, tilde.size) == (0, "center", 2.0)
     assert dashed.style == "dash" and unknown.style == "default", "an unknown stroke type falls back"
     glyph = g.Glyph("t", "t", (text, dashed), (), "builtin")
@@ -607,8 +607,13 @@ def test_texts_and_stroke_types_are_read_and_written_back():
 
 
 def test_a_text_record_is_validated_and_edited():
+    # CONTRACT CHANGED 2026-10-14: a drawn text is always anchored at its
+    # bottom-left corner (user: «il quadratino di ancoraggio del testo lo
+    # vorrei nell'angolo in basso a SX»); `justify` is a deprecated argument,
+    # still validated but no longer stored.
     record = g.shape_instance("text", [(2.54, 1.27)], text="  CLK ", size=1.27, justify="right")
-    assert record["primitives"][0]["text"] == "CLK" and record["primitives"][0]["justify"] == "right"
+    assert record["primitives"][0]["text"] == "CLK" and record["primitives"][0]["justify"] == "left"
+    assert record["primitives"][0]["vjustify"] == "bottom" and g.is_bottom_left_text(record)
     assert (record["x"], record["y"]) == (2.54, 1.27) and record["primitives"][0]["points"] == [[0.0, 0.0]]
     assert g.shape_instance("text", [(0, 0)], text="   ") is None
     assert g.shape_instance("text", [(0, 0)], text="a\nb") is None

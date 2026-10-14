@@ -852,7 +852,9 @@ def test_production_inventory_sends_weak_bodies_to_global_review(setup, monkeypa
         if kwargs['tool']['function']['name'] == 'observe_body':
             # Contratto aggiornato (HANDOFF 144, 148): i corpi tenuti si rileggono
             # dal loro ritaglio dopo l'inventario; qui conta solo l'inventario.
-            return {'bodies_in_frame': 1, 'metal_contacts_total': 2,
+            # v5 contract (review D3): every required field, class triple included.
+            return {'visual_class': 'unknown', 'visual_class_confidence': 'low', 'visual_class_evidence': '', 'contacts_complete': True, 
+                    'bodies_in_frame': 1, 'metal_contacts_total': 2,
                     'two_end_terminals_only': True, 'body_shape': 'other',
                     'top_translucent': False, 'something_visible_inside': False,
                     'coloured_patch_at_end': False, 'band_at_end': False,

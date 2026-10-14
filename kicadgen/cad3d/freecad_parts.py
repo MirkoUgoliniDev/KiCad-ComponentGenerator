@@ -18,6 +18,7 @@ separati per poter avere ciascuno il proprio colore in STEP e VRML.
 
 import json
 import math
+import numbers
 import os
 import sys
 import threading
@@ -39,6 +40,32 @@ def _warn(template, **values):
                "v": {key: value if value is None or isinstance(value, (bool, int, float, str))
                      else str(value) for key, value in values.items()}}
     print("KICADGEN_WARN:" + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+class _CheckFailed(ValueError):
+    """@brief A validation written in this script failed.
+
+    @note Its English text is a diagnostic for developers only and never
+        reaches a warning: the catching site recognises the class and sends a
+        dedicated Italian template of its own (`_warn`), which the parent
+        translates in full. Embedding the English text in a translated
+        template showed users of every language a half-English sentence.
+        Errors of other classes (FreeCAD/OCC, I/O) carry text this script did
+        not write and still travel as a value.
+    @note `code` is a stable identifier of the failed check: the catching
+        site picks the template from it, so the user keeps the detail of
+        which check failed without reading English.
+    """
+
+    def __init__(self, code, message):
+        """@brief Store the stable check code next to the English diagnostic.
+
+        @param code Stable identifier of the failed check.
+        @param message English developer diagnostic, returned by str().
+        """
+        super().__init__(message)
+        self.code = code
+
 
 V = FreeCAD.Vector
 
@@ -138,30 +165,80 @@ def _generic(cx, cy, z0, length, width, height, color):
 def _normalized_box(value):
     """Validate a local image rectangle without clipping or guessing coordinates."""
     if not isinstance(value, (list, tuple)) or len(value) != 4:
-        raise ValueError("terminal_geometry bbox must contain four coordinates")
+        raise _CheckFailed("bbox_not_four", "terminal_geometry bbox must contain four coordinates")
     if any(isinstance(v, bool) or not isinstance(v, (int, float))
            or not math.isfinite(v) or not 0 <= v <= 1 for v in value):
-        raise ValueError("terminal_geometry bbox coordinates must be finite numbers in [0, 1]")
+        raise _CheckFailed("bbox_out_of_range",
+                           "terminal_geometry bbox coordinates must be finite numbers in [0, 1]")
     left, top, right, bottom = value
     if left >= right or top >= bottom:
-        raise ValueError("terminal_geometry bbox must have positive area")
+        raise _CheckFailed("bbox_empty", "terminal_geometry bbox must have positive area")
     return tuple(value)
 
 
-def _validated_terminal_geometry(geometry):
-    """Validate the complete observation before constructing any CAD shapes."""
+def _warn_lead_detail(reason, name, terminal):
+    """@brief Warn that a photo lead detail was ignored, with its reason translated.
+
+    @param reason `lead_geometry.LeadDetailRejected.reason`, or None for a
+        detail the validator could not even read (a TypeError).
+    @param name Component name, for the user.
+    @param terminal 1-based position of the terminal in the observation.
+    @note One literal template per reason: the parent translates whole
+        sentences only (`messages.child_warning_text`), so a reason passed as
+        a value would stay in the language it was written in. The reasons
+        mirror `services.photo_leads._rejection_text`.
+    """
+    if reason == "invalid_rectangle":
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato (rettangolo "
+              "del reoforo non valido); terminale originale conservato",
+              get=name, terminal=terminal)
+    elif reason == "empty_rectangle":
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato (rettangolo "
+              "del reoforo vuoto); terminale originale conservato",
+              get=name, terminal=terminal)
+    elif reason == "no_evidence":
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato "
+              "(separazione senza evidenza esplicita ad alta confidenza); terminale "
+              "originale conservato", get=name, terminal=terminal)
+    elif reason == "exceeds_envelope":
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato (reoforo "
+              "oltre l'ingombro del terminale originale); terminale originale conservato",
+              get=name, terminal=terminal)
+    elif reason == "not_one_face":
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato (il reoforo "
+              "deve toccare esattamente una faccia del corpo); terminale originale conservato",
+              get=name, terminal=terminal)
+    else:
+        _warn("componente {get}, terminale {terminal}: dettaglio reoforo ignorato (dettaglio "
+              "malformato); terminale originale conservato",
+              get=name, terminal=terminal)
+
+
+def _validated_terminal_geometry(geometry, name=None):
+    """@brief Validate the complete observation before constructing any CAD shapes.
+
+    @param geometry The `terminal_geometry` observation.
+    @param name Component name, used only to say which part a warning is about.
+    @return (body box, terminal boxes), normalized.
+    @throws _CheckFailed With a stable `code` when the observation is malformed.
+    @note An invalid lead detail does not fail the observation: the terminal
+        keeps its original envelope and a warning names component, terminal
+        (1-based position) and reason.
+    """
     if not isinstance(geometry, dict):
-        raise ValueError("terminal_geometry must be an object")
+        raise _CheckFailed("not_object", "terminal_geometry must be an object")
     if geometry.get("confidence") not in ("high", "medium"):
-        raise ValueError("terminal_geometry confidence must be high or medium")
+        raise _CheckFailed("low_confidence", "terminal_geometry confidence must be high or medium")
     body = _normalized_box(geometry.get("body_bbox"))
     terminals = geometry.get("terminals")
     if not isinstance(terminals, list) or len(terminals) > 128:
-        raise ValueError("terminal_geometry terminals must be a list of at most 128 boxes")
+        raise _CheckFailed("terminals_not_list",
+                           "terminal_geometry terminals must be a list of at most 128 boxes")
     boxes = []
-    for terminal in terminals:
+    for position, terminal in enumerate(terminals, start=1):
         if not isinstance(terminal, dict):
-            raise ValueError("terminal_geometry terminal must be an object with bbox")
+            raise _CheckFailed("terminal_not_object",
+                               "terminal_geometry terminal must be an object with bbox")
         envelope = _normalized_box(terminal.get("bbox"))
         detail = terminal.get('lead_detail')
         if detail is not None:
@@ -172,12 +249,14 @@ def _validated_terminal_geometry(geometry):
                     from lead_geometry import validated_lead_bbox
                 envelope = validated_lead_bbox(body, envelope, detail)
             except (ValueError,TypeError) as exc:
-                _warn("dettaglio reoforo ignorato ({exc}); terminale originale conservato", exc=exc)
+                # lead_geometry's own validation: its reason code, never its
+                # English text, reaches the user (see `_CheckFailed`).
+                _warn_lead_detail(getattr(exc, "reason", None), name, position)
         boxes.append(envelope)
     return body, boxes
 
 
-def _observed_terminals(cx, cy, z0, length, width, height, color, geometry):
+def _observed_terminals(cx, cy, z0, length, width, height, color, geometry, name=None):
     """Render observed boxes in the existing total envelope, with no pin inference.
 
     Rectangles use local X-right/Y-down coordinates. The caller has already
@@ -185,7 +264,7 @@ def _observed_terminals(cx, cy, z0, length, width, height, color, geometry):
     once. Only the local Y offset is inverted here; axes are never swapped based
     on aspect ratio. Heights and small risers are conservative visual estimates.
     """
-    body_bbox, terminal_boxes = _validated_terminal_geometry(geometry)
+    body_bbox, terminal_boxes = _validated_terminal_geometry(geometry, name)
 
     def bounds(bbox):
         left, top, right, bottom = bbox
@@ -1106,7 +1185,7 @@ def _read_library_parts(path, color, heartbeat=None):
     try:
         imported = Import.insert(str(path), doc.Name, merge=False)
         if not imported:
-            raise ValueError("headless importer returned no colored shapes")
+            raise _CheckFailed("no_colored_shapes", "headless importer returned no colored shapes")
         parts = []
         for obj, colors in imported:
             # Copiare le forme di un assieme grande e' lento quanto leggerlo:
@@ -1115,14 +1194,16 @@ def _read_library_parts(path, color, heartbeat=None):
                 heartbeat.beat_if_due()
             shape = obj.Shape.copy()
             if shape.isNull() or not shape.Solids or not shape.isValid():
-                raise ValueError("library model contains invalid or non-solid geometry")
+                raise _CheckFailed("non_solid_geometry",
+                                  "library model contains invalid or non-solid geometry")
             # Imported assembly objects may have placements inherited from a parent.
             shape.Placement = obj.getGlobalPlacement()
             colors = list(colors)
             if len(colors) == 1:
                 colors *= len(shape.Faces)
             if len(colors) != len(shape.Faces):
-                raise ValueError("native face-color count does not match geometry")
+                raise _CheckFailed("face_colour_mismatch",
+                                  "native face-color count does not match geometry")
             parts.append((shape, _ModelColor(color, colors, path)))
         return parts
     finally:
@@ -1925,13 +2006,27 @@ def _library_model(component, cx, cy, z0, color):
             try:
                 parts = _read_library_parts(path, color, heartbeat)
             except Exception as exc:
-                _warn("colori nativi {path} non disponibili ({exc}); si conserva la "
-                   "geometria con colore fotografico",
-                   path=path,
-                   exc=exc)
+                code = getattr(exc, "code", None) if isinstance(exc, _CheckFailed) else None
+                if code == "face_colour_mismatch":
+                    _warn("colori nativi {path} non disponibili (il numero dei colori delle "
+                          "facce non corrisponde alla geometria); si conserva la geometria "
+                          "con colore fotografico", path=path)
+                elif code == "non_solid_geometry":
+                    _warn("colori nativi {path} non disponibili (il modello contiene "
+                          "geometria non valida o non solida); si conserva la geometria con "
+                          "colore fotografico", path=path)
+                elif code == "no_colored_shapes":
+                    _warn("colori nativi {path} non disponibili (l'importazione non ha "
+                          "restituito forme colorate); si conserva la geometria con colore "
+                          "fotografico", path=path)
+                else:
+                    _warn("colori nativi {path} non disponibili ({exc}); si conserva la "
+                       "geometria con colore fotografico",
+                       path=path,
+                       exc=exc)
                 shape = Part.read(str(path))
                 if shape.isNull() or not shape.Solids or not shape.isValid():
-                    raise ValueError("library model has no valid solids")
+                    raise _CheckFailed("no_valid_solids", "library model has no valid solids")
                 parts = [(shape, _ModelColor(color, None, path))]
             heartbeat.beat_if_due()
             combined = Part.makeCompound([shape for shape, _ in parts])
@@ -1995,7 +2090,7 @@ def _library_model(component, cx, cy, z0, color):
             angle = _placement_angle(component, inferred)
             dz = float(component.get("model_z_offset_mm", 0))
             if not math.isfinite(angle) or not math.isfinite(dz):
-                raise ValueError("non-finite library placement")
+                raise _CheckFailed("placement_not_finite", "non-finite library placement")
             centre = V((reference.XMin + reference.XMax) / 2,
                        (reference.YMin + reference.YMax) / 2, 0)
             for shape, _ in parts:
@@ -2010,9 +2105,17 @@ def _library_model(component, cx, cy, z0, color):
         return parts
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla forma sintetica
         component["_model_import_error"] = _safe_import_error(exc)
-        _warn("modello {path} non caricabile ({exc}); si usa la forma approssimata",
-           path=path,
-           exc=exc)
+        code = getattr(exc, "code", None) if isinstance(exc, _CheckFailed) else None
+        if code == "placement_not_finite":
+            _warn("modello {path} non caricabile (posizionamento non finito); si usa la "
+                  "forma approssimata", path=path)
+        elif code == "no_valid_solids":
+            _warn("modello {path} non caricabile (nessun solido valido); si usa la forma "
+                  "approssimata", path=path)
+        else:
+            _warn("modello {path} non caricabile ({exc}); si usa la forma approssimata",
+               path=path,
+               exc=exc)
         return None
 
 
@@ -2034,6 +2137,85 @@ _MARKED_KINDS = ("ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "capacitor_tantalum", 
 #: leads), connectors and modules (their own builders), power_tab (the tab is
 #: not an ordinary lead and would be lost).
 OBSERVED_LEAD_KINDS = ("ic", "ic_sot", "ic_soic", "ic_qfp", "generic")
+
+
+def _raw_side_total(sides):
+    """@brief Total of observed per-side lead counts, independent of any frame.
+
+    @param sides {side: count} as observed (image frame), or anything else.
+    @return The sum of the valid non-negative integer counts, or None when
+        there is none: a count does not depend on which side a lead is on.
+    """
+    if not isinstance(sides, dict):
+        return None
+    # Integral by abstract type, as lead_sides._integral: numpy integers from
+    # the photo pipeline count, booleans and floats do not.
+    total = sum(int(count) for count in sides.values()
+                if isinstance(count, numbers.Integral) and not isinstance(count, bool)
+                and count > 0)
+    return total or None
+
+
+def _recomputed_local_sides(sides, model_rotation):
+    """@brief Local lead sides of a payload that lacks them, as the payload writer computes them.
+
+    @param sides Observed {side: count} in the image frame (`pins_by_side`).
+    @param model_rotation `rotation_deg` of the payload after `_flip_y`
+        (model frame, the negated footprint angle), or anything else.
+    @return `lead_sides.local_lead_sides(sides, footprint angle)`, or None
+        when the angle is not a finite real number or that function returns None.
+    """
+    if (isinstance(model_rotation, bool) or not isinstance(model_rotation, numbers.Real)
+            or not math.isfinite(model_rotation)):
+        return None
+    try:
+        from kicadgen.cad3d.lead_sides import local_lead_sides
+    except ModuleNotFoundError:
+        from lead_sides import local_lead_sides
+    return local_lead_sides(sides, -float(model_rotation))
+
+
+def _local_sides_or_count(component, kind):
+    """@brief Per-side lead counts usable by a builder that draws in the LOCAL frame.
+
+    @param component Payload of one component.
+    @param kind Rendered kind, for the warning.
+    @return `lead_sides_local` (the observed sides already moved into the
+        builder's frame by `lead_sides.local_lead_sides`) when leads were
+        observed per side (`pins_by_side`) and their local sides are known,
+        else None. Without an observation nothing is drawn per side, as
+        before: the local sides only say WHERE observed leads go.
+    @note `pins_by_side` names IMAGE sides: passing it to a builder that
+        draws before the caller's rotation put the leads of a turned body on
+        the wrong sides (a QFN photographed at 90 degrees with leads on the
+        image top/bottom got them on its local top/bottom, i.e. image
+        left/right). A payload without the conversion (written before
+        `lead_sides_local` existed) gets it here, from the image sides and the
+        same `local_lead_sides` the payload writer uses: exact at any multiple
+        of 90 degrees, the nearest quarter turn otherwise. Only when that
+        function cannot map the sides either -- an angle exactly between two
+        quarter turns, or sides that are no clean observation -- the image
+        sides say nothing about the local ones: the caller falls back to the
+        total count, spread by the builder's own rule, and a warning says so.
+    @note The payload reaches this script after `freecad_build_body._flip_y`,
+        which negates `rotation_deg`; the writer converted the sides with the
+        footprint-frame angle, so the conversion here uses its negation.
+    """
+    raw = component.get("pins_by_side")
+    if not _raw_side_total(raw):
+        return None
+    local = component.get("lead_sides_local")
+    if isinstance(local, dict) and local:
+        return local
+    local = _recomputed_local_sides(raw, component.get("rotation_deg"))
+    if local:
+        return local
+    # Written as a literal on purpose: the catalog coverage test collects the
+    # templates of `_warn` calls from the source.
+    _warn("componente {get} ({kind}) semplificato: lati dei reofori osservati non "
+          "riportabili nel riferimento del corpo; reofori distribuiti dal solo conteggio",
+          get=component.get("name"), kind=kind)
+    return None
 
 
 def _observed_marker(component):
@@ -2088,6 +2270,45 @@ def _safe_import_error(exc):
         "".join(c if c.isprintable() else " " for c in message).split()))[:500]
 
 
+def _warn_terminal_geometry(code, name, kind):
+    """@brief Warn that a terminal_geometry observation was refused, with its reason translated.
+
+    @param code `_CheckFailed.code` raised by `_validated_terminal_geometry`
+        or `_normalized_box`.
+    @param name Component name.
+    @param kind Rendered kind.
+    @note One literal template per code (see `_warn_lead_detail`). A code
+        without a template of its own -- none exists today -- gets the
+        reason-less sentence rather than an English one.
+    """
+    if code == "bbox_not_four":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida (un "
+              "rettangolo non ha quattro coordinate); si usa l'ingombro", get=name, kind=kind)
+    elif code == "bbox_out_of_range":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida (coordinate "
+              "di un rettangolo non finite o fuori da [0, 1]); si usa l'ingombro",
+              get=name, kind=kind)
+    elif code == "bbox_empty":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida (un "
+              "rettangolo ha area nulla); si usa l'ingombro", get=name, kind=kind)
+    elif code == "not_object":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida "
+              "(l'osservazione non e' un oggetto); si usa l'ingombro", get=name, kind=kind)
+    elif code == "low_confidence":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida "
+              "(confidenza diversa da alta o media); si usa l'ingombro", get=name, kind=kind)
+    elif code == "terminals_not_list":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida (i "
+              "terminali non sono un elenco di al massimo 128 rettangoli); si usa "
+              "l'ingombro", get=name, kind=kind)
+    elif code == "terminal_not_object":
+        _warn("componente {get} ({kind}) semplificato: terminal_geometry non valida (un "
+              "terminale non e' un oggetto con bbox); si usa l'ingombro", get=name, kind=kind)
+    else:
+        _warn("componente {get} ({kind}) semplificato: osservazione terminal_geometry "
+              "non valida; si usa l'ingombro", get=name, kind=kind)
+
+
 def build_component(component, z0):
     """@brief Build shapes, skipping invalid envelopes without raising.
 
@@ -2111,20 +2332,32 @@ def build_component(component, z0):
     kind = str(component.get("kind") or "generic")
     builder = BUILDERS.get(kind, _generic)
     color = component.get("color_hex") or "#303030"
+    # One dedicated template per reason: the reason is part of the translated
+    # sentence, never an English value inside it (see `_CheckFailed`).
+    keys = ("length_mm", "width_mm", "height_mm", "x", "y")
+    missing = [key for key in keys if key not in component]
+    if missing:
+        _warn("componente {get} ignorato: geometria non valida (manca il campo {field})",
+              get=component.get('name'), field=missing[0])
+        return []
+    values = [component[key] for key in keys] + [z0, component.get("rotation_deg") or 0]
+    if any(isinstance(value, bool) for value in values):
+        _warn("componente {get} ignorato: geometria non valida (valore booleano)",
+              get=component.get('name'))
+        return []
     try:
-        values = [component[key] for key in ("length_mm", "width_mm", "height_mm", "x", "y")]
-        values += [z0, component.get("rotation_deg") or 0]
-        if any(isinstance(value, bool) for value in values):
-            raise ValueError("boolean geometry value")
         length, width, height, cx, cy, z0, rotation = map(float, values)
-        if not all(math.isfinite(value) for value in (length, width, height, cx, cy, z0, rotation)):
-            raise ValueError("non-finite geometry value")
-        if min(length, width, height) <= 0:
-            raise ValueError("dimensions must be positive")
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        _warn("componente {get} skipped: invalid geometry ({exc})",
-           get=component.get('name'),
-           exc=exc)
+    except (TypeError, ValueError, OverflowError):
+        _warn("componente {get} ignorato: geometria non valida (valore non numerico o "
+              "fuori scala)", get=component.get('name'))
+        return []
+    if not all(math.isfinite(value) for value in (length, width, height, cx, cy, z0, rotation)):
+        _warn("componente {get} ignorato: geometria non valida (valore non finito)",
+              get=component.get('name'))
+        return []
+    if min(length, width, height) <= 0:
+        _warn("componente {get} ignorato: geometria non valida (dimensioni non positive)",
+              get=component.get('name'))
         return []
     try:
         # Modello reale della libreria KiCad, gia' risolto e verificato dal
@@ -2145,7 +2378,8 @@ def build_component(component, z0):
             return _generic(cx, cy, z0, length, width, height, color)
         if component.get("terminal_geometry") is not None:
             return _observed_terminals(cx, cy, z0, length, width, height, color,
-                                       component["terminal_geometry"])
+                                       component["terminal_geometry"],
+                                       name=component.get("name"))
         observed = component.get("lead_sides_local")
         connector_hint = kind == "generic" and (
             component.get("_detected_kind") == "connector"
@@ -2187,7 +2421,9 @@ def build_component(component, z0):
                get=component.get('name'),
                kind=kind)
         pin_count = component.get("pin_count")
-        pins_by_side = component.get("pins_by_side")
+        pins_by_side = _local_sides_or_count(component, kind)
+        if pins_by_side is None and not pin_count:
+            pin_count = _raw_side_total(component.get("pins_by_side"))
         marker = _observed_marker(component) if kind in _MARKED_KINDS else None
         if kind in {"ic_soic", "ic_qfn"} and (pin_count or pins_by_side):
             return _ic_observed_pins(cx, cy, z0, length, width, height, color, kind,
@@ -2205,14 +2441,20 @@ def build_component(component, z0):
             return builder(cx, cy, z0, length, width, height, color, marker=marker)
         return builder(cx, cy, z0, length, width, height, color)
     except Exception as exc:  # noqa: BLE001 - si ripiega sulla scatola
-        _warn("componente {get} ({kind}) semplificato: {exc}",
-           get=component.get('name'),
-           kind=kind,
-           exc=exc)
+        if isinstance(exc, _CheckFailed):
+            # On this path only the terminal_geometry validators raise it:
+            # `_library_model` handles its own checks and returns None.
+            _warn_terminal_geometry(exc.code, component.get('name'), kind)
+        else:
+            _warn("componente {get} ({kind}) semplificato: {exc}",
+               get=component.get('name'),
+               kind=kind,
+               exc=exc)
         try:
             return _generic(cx, cy, z0, length, width, height, color)
         except Exception as fallback_exc:
-            _warn("componente {get} skipped: generic fallback failed ({fallback_exc})",
+            _warn("componente {get} ignorato: anche la forma generica non e' costruibile "
+                  "({fallback_exc})",
                get=component.get('name'),
                fallback_exc=fallback_exc)
             return []

@@ -16,7 +16,7 @@ def test_invalid_dimensions_skip_before_occ(cad, capsys, key, value):
     module, made = cad
     assert module.build_component(component(**{key: value}), 1.6) == []
     assert made == []
-    assert "skipped: invalid geometry" in capsys.readouterr().out
+    assert "ignorato: geometria non valida" in capsys.readouterr().out
 
 
 def test_failed_generic_fallback_does_not_rethrow(cad, capsys, monkeypatch):
@@ -28,7 +28,7 @@ def test_failed_generic_fallback_does_not_rethrow(cad, capsys, monkeypatch):
     monkeypatch.setattr(module, "_generic", fail)
     monkeypatch.setitem(module.BUILDERS, "generic", fail)
     assert module.build_component(component(kind="generic"), 1.6) == []
-    assert "generic fallback failed" in capsys.readouterr().out
+    assert "forma generica non e' costruibile" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("size", [(4, 4, 2), (14, 14, 4), (8, 3, 2)])

@@ -294,8 +294,10 @@ def test_footprint_extent_falls_back_to_pads_without_a_courtyard():
 # -- C10: atomic save, strict mirror flag, shared pad numbers ------------------------
 
 def test_footprint_save_failure_keeps_the_previous_file(tmp_path, monkeypatch):
+    # Both footprints are named "A" like their file (L-4, 2026-10-14: save
+    # refuses a mismatched name); their descriptions tell them apart.
     target = tmp_path / "A.pretty" / "A.kicad_mod"
-    Footprint(name="OLD").save(str(target))
+    Footprint(name="A", description="OLD").save(str(target))
     old = target.read_text(encoding="utf-8")
 
     import kicadgen.fsutil as fsutil
@@ -305,7 +307,7 @@ def test_footprint_save_failure_keeps_the_previous_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fsutil, "replace_file", refuse)
     with pytest.raises(PermissionError):
-        Footprint(name="NEW").save(str(target))
+        Footprint(name="A", description="NEW").save(str(target))
     assert target.read_text(encoding="utf-8") == old
     assert sorted(p.name for p in target.parent.iterdir()) == ["A.kicad_mod"]
 
@@ -441,7 +443,8 @@ def _soic(orientation):
 def _fab_points(footprint):
     points = []
     for graphic in footprint.graphics:
-        if getattr(graphic, "layer", "") == "F.Fab":
+        # Outline only: the ${REFERENCE} text on F.Fab (L-3, 2026-10-14) is no edge.
+        if getattr(graphic, "layer", "") == "F.Fab" and type(graphic).__name__ != "FpText":
             points += [graphic.start, graphic.end]
     return points
 
@@ -458,7 +461,8 @@ def test_a_rotated_package_turns_its_body_outline_with_its_pads():
     assert max(xs0) - min(xs0) == pytest.approx(3.9)
     assert max(xs90) - min(xs90) == pytest.approx(4.9)
     slanted = build_package(_soic(30))
-    fab = [g for g in slanted.graphics if getattr(g, "layer", "") == "F.Fab"]
+    fab = [g for g in slanted.graphics if getattr(g, "layer", "") == "F.Fab"
+           and type(g).__name__ != "FpText"]   # outline only (L-3 adds the F.Fab reference)
     assert len(fab) == 4 and all(type(g).__name__ == "FpLine" for g in fab)
     assert any(abs(g.start[0] - g.end[0]) > 1e-6 and abs(g.start[1] - g.end[1]) > 1e-6
                for g in fab)
@@ -467,7 +471,8 @@ def test_a_rotated_package_turns_its_body_outline_with_its_pads():
 def test_an_unrotated_package_keeps_its_axis_aligned_outline():
     """Negativo: a 0 gradi il corpo resta un FpRect di 3.9 x 4.9, come prima."""
     from kicadgen.generators.package import build_package
-    fab = [g for g in build_package(_soic(0)).graphics if getattr(g, "layer", "") == "F.Fab"]
+    fab = [g for g in build_package(_soic(0)).graphics if getattr(g, "layer", "") == "F.Fab"
+           and type(g).__name__ != "FpText"]   # outline only (L-3 adds the F.Fab reference)
     assert len(fab) == 1 and type(fab[0]).__name__ == "FpRect"
     assert abs(fab[0].end[0] - fab[0].start[0]) == pytest.approx(3.9)
 

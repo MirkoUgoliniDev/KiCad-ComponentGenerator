@@ -421,26 +421,18 @@ def test_a_package_body_carries_the_pin_numbers_choice(window):
     assert window._current_body_params().pin_numbers_3d is False
 
 
-def test_the_footprint_preview_says_it_is_the_top_view(window):
-    """User, 2026-10-10: the drawing must state which side it shows.
-    User, 2026-10-11: wrapped to the drawing width, not one long line."""
-    from PyQt6.QtWidgets import QGraphicsTextItem
+def test_the_footprint_preview_has_no_view_caption(window):
+    """User, 2026-10-14: the «VISTA DALL'ALTO ...» caption above the drawing is removed.
 
-    def is_caption(item):
-        return isinstance(item, QGraphicsTextItem) and "VISTA DALL'ALTO" in item.toPlainText()
+    Negative twin: the preview still draws its own texts (pad numbers), so
+    the check is not satisfied by an empty scene.
+    """
+    from PyQt6.QtWidgets import QGraphicsTextItem, QGraphicsSimpleTextItem
 
     _select_single_tht(window)
     window._draw_preview()
-    captions = [item for item in window.preview_scene.items() if is_caption(item)]
-    assert len(captions) == 1
-    caption = captions[0]
-    others = [item for item in window.preview_scene.items() if not is_caption(item)]
-    top = min(item.sceneBoundingRect().top() for item in others)
-    assert caption.sceneBoundingRect().bottom() <= top, "above everything else"
-    drawing_width = max(item.sceneBoundingRect().right() for item in others) - min(
-        item.sceneBoundingRect().left() for item in others)
-    limit = max(drawing_width, window.VIEW_CAPTION_MIN_WIDTH_PX)
-    assert caption.sceneBoundingRect().width() <= limit + 1.0, "wrapped, not one long line"
-    assert caption.document().lineCount() >= 1
-    assert caption.boundingRect().height() > caption.document().firstBlock().layout().lineAt(0).height() * 1.5, (
-        "the long sentence takes more than one line at the drawing width")
+    items = window.preview_scene.items()
+    assert not [item for item in items if isinstance(item, QGraphicsTextItem)
+                and "VISTA DALL'ALTO" in item.toPlainText()]
+    assert not hasattr(window, "_add_view_caption")
+    assert any(isinstance(item, QGraphicsSimpleTextItem) for item in items)

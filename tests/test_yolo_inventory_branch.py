@@ -39,7 +39,9 @@ def test_inventory_yolo_branch_bypasses_ai_localizer(monkeypatch,tmp_path):
     # Qui le letture non dicono nulla, cosi' la riga resta quella dell'inventario.
     # Osservazione (HANDOFF 148) di un corpo opaco a due terminali senza forma
     # riconoscibile: sulla riga «resistor» ridà la classe dell'inventario.
-    blank=dict(bodies_in_frame=1,metal_contacts_total=2,two_end_terminals_only=True,
+    # v5 contract (review D3): every required field, class triple included.
+    blank=dict(visual_class='unknown',visual_class_confidence='low',visual_class_evidence='',contacts_complete=True,
+               bodies_in_frame=1,metal_contacts_total=2,two_end_terminals_only=True,
                body_shape='other',top_translucent=False,something_visible_inside=False,
                coloured_patch_at_end=False,band_at_end=False,printed_text='none',marking='',
                tab=False,size_family='',

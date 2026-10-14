@@ -62,8 +62,13 @@ def _stroke_node(width: float) -> SExpr:
     return sx("stroke", sx("width", width), sx("type", Symbol("solid")))
 
 
-def _text_effects(size: float = 1.0, thickness: float = 0.15) -> SExpr:
-    return sx("effects", sx("font", sx("size", size, size), sx("thickness", thickness)))
+def _text_effects(size: float = 1.0, thickness: float = 0.15,
+                  justify: Optional[Tuple[str, ...]] = None) -> SExpr:
+    """Text ``effects`` node; ``justify`` adds ``(justify ...)`` after the font, as KiCad writes it."""
+    node = sx("effects", sx("font", sx("size", size, size), sx("thickness", thickness)))
+    if justify:
+        node.add(sx("justify", *(Symbol(word) for word in justify)))
+    return node
 
 
 @dataclass
@@ -220,6 +225,13 @@ class FpText:
     """@brief Graphic text item on a footprint layer.
 
     Testo grafico (usato per riferimenti extra, non Reference/Value).
+
+    @param justify KiCad justification words written as
+        ``(justify <words>)`` inside ``effects`` (for example
+        ``("left", "bottom")``: `at` is then the bottom-left corner of the
+        text box); None (default) writes no justify node, so KiCad centres
+        the text on `at`, and the output stays byte-identical to the one
+        written before this option existed.
     """
 
     kind: str  # "user" | "reference" | "value"
@@ -228,6 +240,7 @@ class FpText:
     layer: str
     size: float = 1.0
     thickness: float = 0.15
+    justify: Optional[Tuple[str, ...]] = None
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this text graphic to a KiCad S-expression."""
@@ -235,16 +248,65 @@ class FpText:
         node.add(_at_node(self.at))
         node.add(sx("layer", self.layer))
         node.add(sx("uuid", _uuid()))
-        node.add(_text_effects(self.size, self.thickness))
+        node.add(_text_effects(self.size, self.thickness, self.justify))
         return node
+
+
+#: Largest and smallest height of the ``${REFERENCE}`` text on F.Fab, mm.
+#: 1.0 mm is the KLC default for fabrication text (and what the castellated
+#: generator always wrote); 0.5 mm is the floor the text is reduced to so it
+#: stays legible on parts whose body is too small for 1.0 mm.
+FAB_REFERENCE_MAX_MM = 1.0
+FAB_REFERENCE_MIN_MM = 0.5
+#: Share of the fabrication outline's smaller side the text may fill.
+FAB_REFERENCE_FILL = 0.8
+
+
+def fab_reference_text(center: Point, outline_size: Optional[Point] = None) -> "FpText":
+    """@brief Build the ``${REFERENCE}`` text that KLC F5.2 asks for on F.Fab.
+
+    @param center Anchor (text centre) in footprint mm: the centre of the
+        fabrication outline, or of the pad field when there is none.
+    @param outline_size (width, height) mm of that outline; None keeps the
+        full FAB_REFERENCE_MAX_MM height.
+    @return User text on F.Fab with height min(MAX, max(MIN, FILL x smaller
+        side)) and stroke 15 % of the height (KLC thickness ratio).
+    @throws ValueError When `center` is not finite or lies beyond
+        KICAD_COORD_LIMIT_MM (KiCad cannot represent it). The tighter
+        TEXT_POSITION_LIMIT_MM bounds the texts the USER moves, not generated
+        geometry: a package far from the origin must still build.
+    @note The silkscreen Reference is hidden under a mounted part; the F.Fab
+        copy stays readable in assembly drawings, so every generator emits it.
+    """
+    x, y = (float(center[0]), float(center[1]))
+    if not (math.isfinite(x) and math.isfinite(y)) or max(abs(x), abs(y)) > KICAD_COORD_LIMIT_MM:
+        raise ValueError(f"fabrication reference: invalid position {center!r}")
+    size = FAB_REFERENCE_MAX_MM
+    if outline_size is not None:
+        side = min(abs(float(outline_size[0])), abs(float(outline_size[1])))
+        if math.isfinite(side):
+            size = min(FAB_REFERENCE_MAX_MM, max(FAB_REFERENCE_MIN_MM, round(side * FAB_REFERENCE_FILL, 2)))
+    return FpText(kind="user", text="${REFERENCE}", at=(x + 0.0, y + 0.0), layer="F.Fab",
+                  size=size, thickness=round(size * 0.15, 4))
 
 
 #: Visible footprint texts whose position the user may choose (the KiCad
 #: properties drawn on the board), in the order they are written.
 TEXT_KEYS = ("Reference", "Value")
-#: Where they go unless moved: the positions every footprint had before they
-#: became movable (user, 2026-10-13), so files without a choice do not change.
+#: Fallback positions for a footprint with no geometry at all (no pad and no
+#: outline, see default_text_positions): the fixed places every footprint
+#: used before decision D1 (user, 2026-10-14). A footprint with geometry
+#: gets its texts above and below its envelope instead.
 DEFAULT_TEXT_POSITIONS = {"Reference": (0.0, -2.0), "Value": (0.0, 2.0)}
+#: Grid the default text anchors are snapped to, mm: the 2D preview's
+#: default drawing grid (1 mm main step / fine divisor 10), anchored like it
+#: on the first numbered pad, so a default text sits on a node the user can
+#: also drag it back to.
+TEXT_GRID_MM = 0.1
+#: Layers whose graphics make up the footprint envelope for the default text
+#: positions, with the pads: courtyard (keep-out), fabrication outline (body)
+#: and silkscreen (pin-1 marker, outline pieces), so the texts clear them all.
+TEXT_ENVELOPE_LAYERS = ("F.CrtYd", "F.Fab", "F.SilkS")
 #: Bound of a chosen coordinate, mm: nothing on a footprint is farther.
 TEXT_POSITION_LIMIT_MM = 500.0
 
@@ -282,17 +344,89 @@ USER_DRAW_KINDS = {"line": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1}
 USER_DRAW_WIDTH_MM = 0.12
 #: Default text height of a user text, mm (KiCad's footprint text default).
 USER_DRAW_TEXT_MM = 1.0
+#: Value of a text record's ``anchor`` field when its point is the
+#: BOTTOM-LEFT corner of the text (user, 2026-10-14): left edge and baseline
+#: (descenders below, as KiCad); the text grows right and up from it and the
+#: .kicad_mod writes ``(justify left bottom)``. A
+#: text record without the field is a record saved before that date, whose
+#: point is the CENTRE of the text (KiCad's default justification).
+USER_TEXT_ANCHOR = "left_bottom"
+#: KiCad justification written for a text record anchored at `USER_TEXT_ANCHOR`.
+USER_TEXT_JUSTIFY = ("left", "bottom")
+
+
+#: Largest coordinate KiCad can hold, mm: its internal unit is the
+#: nanometre stored in a signed 32-bit integer, so +-2147483647 nm. A point
+#: (or an arc centre KiCad derives) beyond it cannot be represented at all.
+KICAD_COORD_LIMIT_MM = 2147.483647
+
+
+def _arc_centre(start: Point, mid: Point, end: Point) -> Optional[Point]:
+    """@brief Centre, mm, of the circle through three points, or None when they are collinear.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return (x, y) of the circumcentre in mm; None when the determinant of
+        the three points is exactly zero (no circle passes through them).
+    """
+    (ax, ay), (bx, by), (cx, cy) = start, mid, end
+    det = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if det == 0.0:
+        return None
+    a2, b2, c2 = ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / det
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / det
+    return ux, uy
+
+
+def _arc_circumradius(start: Point, mid: Point, end: Point) -> Optional[float]:
+    """@brief Radius, mm, of the circle through three points, or None when they are collinear.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return The circumradius in mm; None when no circle passes through them.
+    """
+    centre = _arc_centre(start, mid, end)
+    if centre is None:
+        return None
+    return math.hypot(start[0] - centre[0], start[1] - centre[1])
+
+
+def arc_centre_representable(start: Point, mid: Point, end: Point) -> bool:
+    """@brief Tell whether KiCad can hold the centre of the arc through three points.
+
+    @param start First point of the arc, mm.
+    @param mid Point the arc passes through, mm.
+    @param end Last point of the arc, mm.
+    @return True when the circumcentre exists (non-zero determinant) and both
+        its coordinates are within `KICAD_COORD_LIMIT_MM`.
+    @note This is the file format's own limit, not a plausibility bound: a
+        very flat but real arc (0.1 mm of bow over a 20 mm chord, radius
+        about 500 mm) is kept; collinear points, and nearly collinear ones
+        whose centre lands outside KiCad's coordinate range, are refused.
+    """
+    centre = _arc_centre(start, mid, end)
+    return centre is not None and all(
+        math.isfinite(v) and abs(v) <= KICAD_COORD_LIMIT_MM for v in centre)
 
 
 def validate_footprint_drawings(raw) -> list:
     """@brief Keep the well-formed records of saved footprint user drawings.
 
     @param raw Whatever the project file holds under `footprint_drawings`.
-    @return List of {kind, points, layer, width[, text, size]} records whose
-        kind and layer are known, whose points are pairs of finite numbers
-        within `TEXT_POSITION_LIMIT_MM` in the count the kind requires, and
-        whose text (text kind only) is one non-blank line of positive size;
-        anything else is left out, like a malformed pad override.
+    @return List of {kind, points, layer, width[, text, size[, anchor]]}
+        records whose kind and layer are known, whose points are pairs of
+        finite numbers within `TEXT_POSITION_LIMIT_MM` in the count the kind
+        requires, and whose text (text kind only) is one non-blank line of
+        positive size; a text keeps ``anchor`` only when it is
+        `USER_TEXT_ANCHOR` (point = bottom-left corner), no ``anchor`` means a
+        legacy centred text, any other anchor value drops the record;
+        an arc must also have a circumcentre KiCad can represent
+        (`arc_centre_representable`: collinear points, or nearly collinear
+        ones whose centre falls outside `KICAD_COORD_LIMIT_MM`, are left
+        out); anything else is left out, like a malformed pad override.
     @note Same contract style as `validate_text_positions`: loading never
         raises, it silently drops what it cannot trust.
     """
@@ -337,8 +471,13 @@ def validate_footprint_drawings(raw) -> list:
             if (isinstance(size, bool) or not isinstance(size, (int, float))
                     or not math.isfinite(size) or not 0 < size <= 50):
                 continue
+            anchor = record.get("anchor")
+            if anchor is not None and anchor != USER_TEXT_ANCHOR:
+                continue
             clean["text"] = text.strip()
             clean["size"] = round(float(size), 4)
+            if anchor is not None:
+                clean["anchor"] = anchor
         elif kind == "circle":
             # Second point on the rim: a zero radius draws nothing.
             if clean_points[0] == clean_points[1]:
@@ -349,6 +488,11 @@ def validate_footprint_drawings(raw) -> list:
                 continue
         elif kind == "arc":
             if len(set(clean_points)) < 3:
+                continue
+            # KiCad derives the arc from its circumcentre: collinear points
+            # have none, and a centre outside its 32-bit nanometre range
+            # cannot be stored. A large radius alone is a legitimate flat arc.
+            if not arc_centre_representable(*clean_points):
                 continue
         result.append(clean)
     return result
@@ -362,6 +506,9 @@ def drawing_graphics(records) -> list:
     @return Graphic items (FpLine/FpRect/FpCircle/FpArc/FpText) ready for
         `Footprint.add_graphic`, in record order; a line record yields one
         FpLine per segment. Points are absolute footprint mm, drawn as-is.
+    @note A text anchored at `USER_TEXT_ANCHOR` is written with
+        ``(justify left bottom)`` at its point; a legacy text (no anchor)
+        keeps KiCad's default centred justification, exactly as before.
     """
     items = []
     for record in records:
@@ -381,9 +528,58 @@ def drawing_graphics(records) -> list:
             start, mid, end = points
             items.append(FpArc(start=start, mid=mid, end=end, layer=layer, width=width))
         elif kind == "text":
+            justify = USER_TEXT_JUSTIFY if record.get("anchor") == USER_TEXT_ANCHOR else None
             items.append(FpText(kind="user", text=record["text"], at=points[0],
-                                layer=layer, size=record.get("size", USER_DRAW_TEXT_MM)))
+                                layer=layer, size=record.get("size", USER_DRAW_TEXT_MM),
+                                justify=justify))
     return items
+
+
+def migrate_centred_text(record: dict, corner_offset: Point) -> dict:
+    """@brief Move a legacy centred text record's point to the bottom-left corner of its drawn box.
+
+    @param record A validated drawing record (any kind).
+    @param corner_offset (dx, dy) mm from the record's centred point to the
+        left edge and baseline of the text the preview draws for it (dx
+        usually negative, dy positive: Y grows downwards). The caller
+        measures it with the preview's own text metrics.
+    @return A new record: for a text without ``anchor``, its point moved by
+        `corner_offset` (rounded to 0.1 um) and ``anchor`` set to
+        `USER_TEXT_ANCHOR`; the record unchanged (a copy) for any other kind,
+        for a text already anchored (idempotent), or when the moved point
+        would leave `TEXT_POSITION_LIMIT_MM` (it then stays a valid legacy
+        centred text instead of being dropped).
+    @note The conversion keeps the text where the user SEES it in the
+        preview. KiCad's stroke font is not the preview's font: for a
+        MIGRATED text the box KiCad draws may differ from the old centred
+        placement by a fraction of a character. New texts are exact: a
+        bottom-left anchor does not depend on the text width.
+    """
+    clean = dict(record)
+    clean["points"] = [list(p) for p in record.get("points", ())]
+    if record.get("kind") != "text" or record.get("anchor") is not None:
+        return clean
+    (x, y), (dx, dy) = record["points"][0], corner_offset
+    moved = (round(float(x) + float(dx), 4), round(float(y) + float(dy), 4))
+    if not all(math.isfinite(v) and abs(v) <= TEXT_POSITION_LIMIT_MM for v in moved):
+        return clean
+    clean["points"] = [list(moved)]
+    clean["anchor"] = USER_TEXT_ANCHOR
+    return clean
+
+
+#: Extension of a KiCad footprint file inside a ``.pretty`` library folder.
+FOOTPRINT_FILE_SUFFIX = ".kicad_mod"
+
+
+def footprint_file_name(name: str) -> str:
+    """@brief Return the only file name KiCad accepts for footprint `name`.
+
+    @param name Footprint name as written in ``(footprint "<name>" ...)``.
+    @return ``<name>.kicad_mod``: KiCad resolves ``library:<name>`` through
+        the file name, so the two must be identical, case included.
+    """
+    return f"{name}{FOOTPRINT_FILE_SUFFIX}"
 
 
 @dataclass
@@ -407,6 +603,22 @@ class Footprint:
 
     pads: list = field(default_factory=list)
     graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
+
+    def place_default_texts(self, grid_origin: Optional[Point] = None) -> "Footprint":
+        """@brief Move Reference and Value to their geometry-derived defaults.
+
+        @param grid_origin Origin of the grid the 2D preview draws for this
+            footprint (each generator passes its own, the one its drawer
+            uses); None uses text_grid_origin.
+        @return self, for chaining.
+        @note Generators call this once their pads and outlines are complete
+            and before any user choice (place_texts) or user drawing is
+            added, so neither moves the default (decision D1, 2026-10-14).
+        """
+        positions = default_text_positions(self, grid_origin)
+        self.reference_at = positions["Reference"]
+        self.value_at = positions["Value"]
+        return self
 
     def place_texts(self, positions) -> "Footprint":
         """@brief Put the Reference and Value texts where the user chose; the others keep their default.
@@ -485,19 +697,31 @@ class Footprint:
     def save(self, path: str) -> None:
         """@brief Write the .kicad_mod file to `path` atomically, creating missing folders.
 
-        @param path Destination .kicad_mod path.
+        @param path Destination .kicad_mod path; its file name must be
+            ``<name>.kicad_mod``.
+        @throws ValueError When the file name is not ``<name>.kicad_mod``
+            (nothing is written).
         @throws OSError When the folder cannot be created or the file cannot
             be written or replaced; the previous file, if any, is left intact.
         @note The text is written to a temporary sibling and moved onto
             `path` with fsutil.replace_file: an interrupted write (full disk,
             killed process) never leaves a truncated footprint that KiCad or
             the library installer would pick up.
+        @note KiCad identifies a library footprint by its file name
+            (``library:<file stem>``) and reports a footprint whose internal
+            name differs from it; every generator writes through this method,
+            so the check here keeps the two identical on every path.
         """
         import os
         import tempfile
 
         from ..fsutil import replace_file
 
+        expected = footprint_file_name(self.name)
+        if os.path.basename(path) != expected:
+            raise ValueError(
+                f"footprint file name {os.path.basename(path)!r} does not match "
+                f"the footprint name {self.name!r} (expected {expected!r})")
         folder = os.path.dirname(path) or "."
         os.makedirs(folder, exist_ok=True)
         data = self.render().encode("utf-8")
@@ -513,3 +737,141 @@ class Footprint:
             except OSError:
                 pass
             raise
+
+
+def pad_copper_centre(pad: Pad) -> Point:
+    """@brief Centre of a pad's copper shape in footprint mm.
+
+    @param pad Any pad; one carrying ``drill_offset`` (dx, dy) in pad-local
+        axes, as the castellated OffsetDrillPad does, has its copper there.
+    @return ``at`` plus the offset turned by the pad rotation, as KiCad's
+        PAD::ShapePos does (RotatePoint: x' = x cos + y sin, y' = -x sin +
+        y cos, counter-clockwise on the y-down board); ``at`` when there is no
+        offset. In KiCad ``at`` is the HOLE and the offset moves the copper.
+    """
+    dx, dy = getattr(pad, "drill_offset", None) or (0.0, 0.0)
+    if not (dx or dy):
+        return (float(pad.at[0]), float(pad.at[1]))
+    angle = math.radians(float(pad.rotation or 0.0))
+    ca, sa = math.cos(angle), math.sin(angle)
+    return (float(pad.at[0]) + dx * ca + dy * sa, float(pad.at[1]) - dx * sa + dy * ca)
+
+
+def _pad_box(pad: Pad) -> Tuple[float, float, float, float]:
+    """Axis-aligned box of a pad's copper (drill offset and rotation included), mm."""
+    half_w, half_h = float(pad.size[0]) / 2, float(pad.size[1]) / 2
+    angle = math.radians(float(pad.rotation or 0.0))
+    ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
+    dx, dy = half_w * ca + half_h * sa, half_w * sa + half_h * ca
+    cx, cy = pad_copper_centre(pad)
+    return (cx - dx, cy - dy, cx + dx, cy + dy)
+
+
+def text_grid_origin(footprint: "Footprint") -> Point:
+    """@brief Generic origin of the text grid: the first numbered pad, mm.
+
+    @param footprint Footprint whose pads are read.
+    @return Position (``at``) of the first numbered pad, or (0, 0) without
+        one. It is the grid origin of the pin-header preview and the fallback
+        of default_text_positions; a generator whose preview anchors its grid
+        elsewhere passes that origin explicitly (castellated: its first
+        contact, see castellated_module.preview_grid_origin; package: its
+        first numbered pin, see package.preview_grid_origin).
+    @note The grid passes through a pad, not through the footprint origin
+        (user choice: pads sit on grid lines). A part symmetric about its
+        origin therefore gets mirror-image texts only when that pad lies a
+        whole number of half grid steps from the centre; otherwise the two
+        anchors differ from a mirror image by less than one TEXT_GRID_MM.
+    """
+    pad = next((pad for pad in footprint.pads if str(pad.number).strip()), None)
+    return (0.0, 0.0) if pad is None else (float(pad.at[0]) + 0.0, float(pad.at[1]) + 0.0)
+
+
+def _graphic_points(item) -> list:
+    """Points bounding a footprint graphic (circles by their radius); [] for texts."""
+    if isinstance(item, FpText):
+        return []
+    if isinstance(item, FpCircle):
+        (cx, cy), r = item.center, abs(float(item.radius))
+        return [(cx - r, cy - r), (cx + r, cy + r)]
+    return [p for p in (getattr(item, "start", None), getattr(item, "mid", None),
+                        getattr(item, "end", None)) if p is not None]
+
+
+def footprint_envelope(footprint: "Footprint") -> Optional[Tuple[float, float, float, float]]:
+    """@brief Bounding box of a footprint's pads and outline graphics, mm.
+
+    @param footprint Footprint whose pads and graphics are read.
+    @return (min x, min y, max x, max y) of the pad copper (rotation and
+        drill offset included) and of the graphics on TEXT_ENVELOPE_LAYERS (texts
+        excluded); None when there is neither, or a value is not finite.
+    @note Arcs are bounded by their three points, a slight underestimate
+        that the text margin covers.
+    """
+    xs, ys = [], []
+    for pad in footprint.pads:
+        x0, y0, x1, y1 = _pad_box(pad)
+        xs += [x0, x1]
+        ys += [y0, y1]
+    for item in footprint.graphics:
+        if getattr(item, "layer", "") in TEXT_ENVELOPE_LAYERS:
+            for x, y in _graphic_points(item):
+                xs.append(float(x))
+                ys.append(float(y))
+    if not xs or not all(math.isfinite(v) for v in (*xs, *ys)):
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def default_text_positions(footprint: "Footprint", grid_origin: Optional[Point] = None) -> dict:
+    """@brief Default Reference/Value anchors of a footprint, from its geometry.
+
+    @param footprint Generated footprint (pads and outlines complete).
+    @param grid_origin Origin of the preview grid of this footprint, mm;
+        None uses text_grid_origin.
+    @return {"Reference": (x, y), "Value": (x, y)} mm: Reference centred
+        above the envelope (footprint_envelope), Value centred below it,
+        each clear of it by half the text box (size + stroke, 1.0 + 0.15 mm,
+        the property text written by Footprint) plus SILK_PAD_CLEARANCE_MM,
+        the silk-to-copper clearance of the silkscreen outlines. Anchors are
+        snapped to TEXT_GRID_MM from `grid_origin` (the preview grid),
+        outwards for y (never closer than the margin) and to the nearest node
+        for x. Each coordinate beyond TEXT_POSITION_LIMIT_MM is clamped to
+        the last grid node inside it, text by text (the other text keeps its
+        place). DEFAULT_TEXT_POSITIONS only when the footprint has no geometry.
+    @note Decision D1 (user, 2026-10-14): the old fixed (0, -2) put «REF**»
+        on the pads of SOIC packages and on the pin-1 marker of pin headers
+        (KiCad DRC silk_over_copper). The envelope is the larger of pads and
+        body/courtyard, so a rotated or off-centre package uses its real extent.
+    """
+    from .silk import SILK_PAD_CLEARANCE_MM
+
+    envelope = footprint_envelope(footprint)
+    if envelope is None:
+        return dict(DEFAULT_TEXT_POSITIONS)
+    x0, y0, x1, y1 = envelope
+    margin = (1.0 + 0.15) / 2 + SILK_PAD_CLEARANCE_MM
+    ox, oy = text_grid_origin(footprint) if grid_origin is None else (
+        float(grid_origin[0]), float(grid_origin[1]))
+    grid = TEXT_GRID_MM
+    limit = TEXT_POSITION_LIMIT_MM
+
+    def snap(value, origin, rounding):
+        # Integer steps from the origin; the tiny tolerance keeps a value
+        # already on a node there despite float noise. A value past the
+        # limit is first brought to it, then to the last node inside it.
+        if abs(value) > limit:
+            value = math.copysign(limit, value)
+            rounding = math.ceil if value < 0 else math.floor
+        steps = (value - origin) / grid
+        if rounding is math.floor:
+            steps = math.floor(steps + 1e-9)
+        elif rounding is math.ceil:
+            steps = math.ceil(steps - 1e-9)
+        else:
+            steps = math.floor(steps + 0.5)
+        return round(origin + steps * grid, 6) + 0.0
+
+    x = snap((x0 + x1) / 2, ox, round)
+    return {"Reference": (x, snap(y0 - margin, oy, math.floor)),
+            "Value": (x, snap(y1 + margin, oy, math.ceil))}

@@ -181,7 +181,8 @@ def test_global_table_path_uses_detected_kicad_version(tmp_path):
     """@brief Resolve the Windows global table without hard-coding a version."""
     executable = Path("C:/Program Files/KiCad/10.0/bin/kicad-cli.exe")
     result = global_fp_lib_table_path(
-        executable, environ={"APPDATA": str(tmp_path)}, platform="win32")
+        executable, environ={"APPDATA": str(tmp_path)}, platform="win32",
+        version_runner=lambda path: None)
     assert result == tmp_path / "kicad" / "10.0" / "fp-lib-table"
 
 
@@ -189,4 +190,5 @@ def test_global_table_path_rejects_an_unknown_version(tmp_path):
     """@brief Refuse global writes when the KiCad version cannot be resolved."""
     with pytest.raises(KiCadLibraryError, match="installed KiCad version"):
         global_fp_lib_table_path(
-            tmp_path / "kicad-cli.exe", environ={}, platform="win32")
+            tmp_path / "kicad-cli.exe", environ={}, platform="win32",
+            version_runner=lambda path: None)

@@ -42,8 +42,16 @@ def _row(**extra):
 
 
 def _obs(left=4, right=4, top=0, bottom=0, marking='VPT 858B', **over):
-    """A leaded body observed with two rows of four leads (an SOIC-8), as the model answers it."""
-    answer = {'bodies_in_frame': 1,
+    """A leaded body observed with two rows of four leads (an SOIC-8), as the model answers it.
+
+    A complete v5 answer: every field the schema requires is present, the
+    visual class triple and `contacts_complete` included (review D3: a fresh
+    answer missing one is no observation). The class fields carry the most
+    neutral values (unknown, low, no evidence).
+    """
+    answer = {'visual_class': 'unknown', 'visual_class_confidence': 'low',
+              'visual_class_evidence': '', 'contacts_complete': True,
+              'bodies_in_frame': 1,
               'metal_contacts_total': sum(v for v in (left, right, top, bottom) if v),
               'two_end_terminals_only': False, 'body_shape': 'thick_moulded_block',
               'top_translucent': False, 'something_visible_inside': False,
@@ -164,9 +172,20 @@ def test_explicit_complete_leaded_observation_cannot_have_an_unseen_side():
     assert 'contacts_incomplete' in forged['inconclusive']
 
 
-def test_legacy_null_sides_and_two_end_caps_keep_their_semantics():
-    legacy = _derive(_obs(4, 4, None, 0))
-    assert 'contacts_incomplete' not in legacy['inconclusive']
+def test_an_answer_without_contacts_complete_is_no_observation_and_two_end_caps_stay_complete():
+    """Review D3: the pre-v5 leniency (missing contacts_complete read as True) is gone.
+
+    The contract changed: an answer lacking the field used to be a «legacy»
+    observation with null sides accepted as complete; PROMPT_VERSION in the
+    cache key already keeps pre-v5 records out, so a fresh answer missing it
+    is simply not an observation.
+    """
+    pre_v5 = _obs(4, 4, None, 0)
+    del pre_v5['contacts_complete']
+    assert crop.parse_observation(pre_v5) is None
+    # Positive twin: the same body answered with the field is an observation,
+    # and a complete leaded count with an unseen side stays inconclusive.
+    assert 'contacts_incomplete' in _derive(_obs(4, 4, None, 0))['inconclusive']
     two_caps = _derive(_chip(contacts_complete=True), inventory_class='resistor')
     assert 'contacts_incomplete' not in two_caps['inconclusive']
 
@@ -583,7 +602,7 @@ def test_a_terminal_count_contradicting_the_inventory_is_inconclusive_in_both_di
     for inventory in ('diode', 'resistor', 'capacitor', 'led'):
         reading = _derive(leaded, inventory_class=inventory)
         assert reading['inconclusive'] == ['terminals_contradict_inventory'], inventory
-    assert _derive(_obs(None, None, None, None, metal_contacts_total=3),
+    assert _derive(_obs(2, 1, 0, 0, metal_contacts_total=3),
                    inventory_class='diode')['inconclusive'] == ['terminals_contradict_inventory']
     # Negatives: coherent pairs raise nothing.
     assert _derive(two_terminals, inventory_class='resistor', lead_count=2)['inconclusive'] == []
@@ -733,7 +752,7 @@ def test_three_contacts_with_two_end_terminals_is_inconclusive():
     # Negative: two contacts with two terminals is coherent; three contacts
     # WITHOUT the two-terminal claim is simply a leaded package.
     assert _derive(_chip())['inconclusive'] == []
-    leaded = _derive(_obs(None, None, None, None, metal_contacts_total=3))
+    leaded = _derive(_obs(2, 1, 0, 0, metal_contacts_total=3))
     assert leaded['inconclusive'] == [] and leaded['class'] == 'semiconductor_unknown'
 
 
@@ -993,7 +1012,7 @@ def test_a_derived_semiconductor_unknown_does_not_overwrite_a_specific_leaded_cl
     """A leaded body whose function is not visible generalises transistor/regulator/ic."""
     for specific in ('transistor', 'regulator', 'ic'):
         component = _row(**{'class': specific}, package='SOT-23', length_mm=3.0, width_mm=2.6)
-        answer = _obs(2, 1, None, None, metal_contacts_total=3)
+        answer = _obs(2, 1, 0, 0, metal_contacts_total=3)
         _read([component], Script(answer, dict(answer)))
         assert component['_crop_reading'] == 'agreed'
         assert component['class'] == specific and component['package'] == 'SOT-23'
@@ -1577,7 +1596,11 @@ def _sot_row(**extra):
 
 def _recorded_two_terminal(**over):
     """One of the four identical crop answers of the recorded run on C6/C7."""
-    answer = dict(bodies_in_frame=1, metal_contacts_total=2, two_end_terminals_only=True,
+    # v5 contract (review D3): the class triple and contacts_complete are
+    # required, so the recorded answer carries them with neutral values.
+    answer = dict(visual_class='unknown', visual_class_confidence='low',
+                  visual_class_evidence='', contacts_complete=True,
+                  bodies_in_frame=1, metal_contacts_total=2, two_end_terminals_only=True,
                   top_translucent=False, something_visible_inside=False,
                   coloured_patch_at_end=False, band_at_end=False, tab=False,
                   body_shape='thick_moulded_block', printed_text='mixed', marking='A15HB',
@@ -1826,19 +1849,32 @@ def test_a_two_terminal_inventory_row_with_a_two_terminal_crop_is_untouched_by_t
 
 
 def test_an_agreed_leaded_reading_without_a_family_still_lets_the_measure_reject_the_name():
-    """Three contacts counted on two sides only: no family from the crop, the inventory name decays."""
+    """A crop that sees no lead names no family: the inventory name still decays by the measure.
+
+    Contract change (review D3 and G3): this test used a pre-v5 answer, two
+    sides counted and two left null with no contacts_complete field, which
+    the parser accepted as an agreed partial count. A v5 answer always
+    declares contacts_complete, and a leaded body with an unseen side is then
+    inconclusive, so that scenario can no longer reach the adoption. An
+    intermediate rewrite used a complete 2 + 2 count against an inventory of
+    three leads and asserted the resulting self-contradictory row (SOT-23
+    with four leads). The realistic v5 case of an agreed reading without a
+    family is a body whose terminals the crop cannot see (under the body, as
+    on a leadless package): the crop counts nothing, the row keeps the
+    inventory's three leads, and the family comes from that count and the
+    measure. The crop adopts no count, so `_lead_count_inventory` is never
+    written.
+    """
     from kicadgen.services.messages import tx
-    partial = _obs(2, 1, None, None, metal_contacts_total=3, marking='A15HB')
+    hidden = _obs(None, None, None, None, metal_contacts_total=0, marking='A15HB')
     component = _sot_row()
-    _read([component], Script(partial, dict(partial)))
+    _read([component], Script(hidden, dict(hidden)))
     assert component['_crop_reading'] == 'agreed'
     assert component['package'] == 'SOT-23' and component['_package_inventory'] == 'SOT-223'
     assert component['package_source'] == crop.PACKAGE_SOURCE_COUNT_AND_MEASURE
     assert component['package_confidence'] == 'medium'
-    # The crop's partial count (2 + 1 + ? + ?) is adopted as before; the family
-    # came from the INVENTORY count of three, saved in _lead_count_inventory.
-    assert component['lead_count'] == 3 and component['lead_count_complete'] is False
-    assert component['_lead_count_inventory'] == 3
+    assert component['lead_count'] == 3 and component['lead_count_complete'] is True
+    assert '_lead_count_inventory' not in component
     assert component['_review_reason'].startswith(tx(
         "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: famiglia "
         "«{family}» derivata da {n} piedini e misura; da verificare.", declared='SOT-223',
@@ -1846,16 +1882,67 @@ def test_an_agreed_leaded_reading_without_a_family_still_lets_the_measure_reject
     # Negatives: a name the measure allows stays; a tab the two readings agree on
     # excludes the tab-less families; a class without a package is not touched.
     fine = _sot_row(package='SOT-23')
-    _read([fine], Script(partial, dict(partial)))
+    _read([fine], Script(hidden, dict(hidden)))
     assert fine['package'] == 'SOT-23' and '_package_inventory' not in fine
     assert 'incompatibile' not in fine.get('_review_reason', '')
     tabbed = _sot_row()
-    with_tab = dict(partial, tab=True)
+    # The tab is the one metal contact the crop sees.
+    with_tab = dict(hidden, tab=True, metal_contacts_total=1)
     _read([tabbed], Script(with_tab, dict(with_tab)))
     assert tabbed['package'] == '' and 'nessuna famiglia univoca da 3 piedini' in tabbed['_review_reason']
     module = _sot_row(**{'class': 'module', 'kind': 'module'}, package='SOT-223')
-    _read([module], Script(partial, dict(partial)))
+    _read([module], Script(hidden, dict(hidden)))
     assert module['package'] == 'SOT-223' and 'package_source' not in module
+
+
+def test_an_agreed_complete_count_keeps_the_inventory_count_through_both_adoptions():
+    """Review G3: an agreed reading with agreed geometry adopts the terminals twice.
+
+    _adopt writes the crop count and saves the inventory's in
+    `_lead_count_inventory`; the agreed-geometry branch adopts the same
+    terminals again. The second adoption must not overwrite the saved
+    inventory count with the crop count it just wrote: the row would then
+    have lost the only trace of what the inventory declared.
+    """
+    sot23 = _obs(2, 1, 0, 0, metal_contacts_total=3, marking='A15HB')
+    # Positive: the inventory declared four leads, the crop counts three.
+    component = _sot_row(lead_count=4, pin_count=4)
+    _read([component], Script(sot23, dict(sot23)))
+    assert component['_crop_reading'] == 'agreed' and component['_terminal_status'] == 'supported'
+    assert component['lead_count'] == 3 and component['lead_count_complete'] is True
+    assert component['_lead_count_inventory'] == 4
+    assert crop._inventory_lead_count(component) == 4
+    # Negative: a crop whose sides are not all seen adopts nothing, so the
+    # row keeps its count and no saved inventory count appears.
+    unseen = _obs(2, 1, None, None, metal_contacts_total=3, marking='A15HB')
+    kept = _sot_row(lead_count=4, pin_count=4)
+    _read([kept], Script(unseen, dict(unseen)))
+    assert kept['_crop_reading'] != 'agreed'
+    assert kept['lead_count'] == 4 and '_lead_count_inventory' not in kept
+
+
+def test_a_partly_filled_two_terminal_answer_is_still_an_incomplete_count():
+    """Review G1: the two-terminal exemption covers only the all-null answer the schema asks for.
+
+    For a body declared with two end terminals the schema asks to leave every
+    side null, so those nulls are no gap. An answer that counted some sides
+    and left others null did count, and its nulls are unseen sides: with a
+    leaded total it stays inconclusive and is never adopted.
+    """
+    partly = _obs(2, 2, None, None, metal_contacts_total=4, two_end_terminals_only=True,
+                  contacts_complete=True)
+    reading = _derive(partly, inventory_class='ic')
+    assert 'contacts_incomplete' in reading['inconclusive']
+    component = _row(**{'class': 'ic', 'kind': 'ic'})
+    _read([component], Script(partly, dict(partly)))
+    assert component['_crop_reading'] != 'agreed'
+    # Negative: the requested all-null answer is not an incomplete count
+    # (its contradiction with >= 3 contacts has its own reason).
+    all_null = _obs(None, None, None, None, metal_contacts_total=4,
+                    two_end_terminals_only=True, contacts_complete=True)
+    inconclusive = _derive(all_null, inventory_class='ic')['inconclusive']
+    assert 'contacts_incomplete' not in inconclusive
+    assert 'contacts_contradict_terminals' in inconclusive
 
 
 def test_the_global_inventory_copies_the_detector_evidence_of_a_single_source_row():

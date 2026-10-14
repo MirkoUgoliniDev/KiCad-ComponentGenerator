@@ -135,7 +135,9 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
     for pad in fp.pads:
         assert math.dist(marker.center, pad.at) - pad.size[0] / 2 - marker.radius >= 0.2 - 1e-6
     assert math.dist(marker.center, pad1.at) == min(math.dist(marker.center, p.at) for p in fp.pads)
-    assert not any(g.layer == "F.Fab" for g in fp.graphics)
+    # CONTRACT CHANGED 2026-10-14 (L-3): every footprint carries the KLC
+    # ${REFERENCE} text on F.Fab; without a body there is still no F.Fab OUTLINE.
+    assert not any(g.layer == "F.Fab" for g in fp.graphics if type(g).__name__ != "FpText")
     courtyard = _rect(fp, "F.CrtYd")
     assert courtyard.start == pytest.approx((-1.15, -1.15))
     assert courtyard.end == pytest.approx((5.15, 6.15))

@@ -334,7 +334,9 @@ def test_global_table_path_honours_kicad_config_home(tmp_path):
     result = global_fp_lib_table_path(
         executable,
         environ={"KICAD_CONFIG_HOME": str(override), "APPDATA": str(tmp_path)},
-        platform="win32")
+        platform="win32",
+        # The version comes from the path folder: never run a real kicad-cli here.
+        version_runner=lambda _path: None)
     assert result == override / "10.0" / "fp-lib-table"
 
 
@@ -344,7 +346,9 @@ def test_empty_kicad_config_home_falls_back_to_the_platform_default(tmp_path):
     result = global_fp_lib_table_path(
         executable,
         environ={"KICAD_CONFIG_HOME": " ", "XDG_CONFIG_HOME": str(tmp_path)},
-        platform="linux")
+        platform="linux",
+        # The version comes from the path folder: never run a real kicad-cli here.
+        version_runner=lambda _path: None)
     assert result == tmp_path / "kicad" / "9.0" / "fp-lib-table"
 
 

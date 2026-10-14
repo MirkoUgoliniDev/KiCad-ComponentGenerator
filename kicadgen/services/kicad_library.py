@@ -213,6 +213,57 @@ def _append_root_child(text: str, child: str) -> str:
     return f"{prefix}\n{child}\n)\n"
 
 
+_FOOTPRINT_HEAD = re.compile(
+    r'\A(\s*\(\s*footprint\s+)("(?:[^"\\]|\\.)*"|[^\s()"]+)')
+
+
+_VALUE_HEAD = re.compile(
+    r'\A(\(\s*property\s+(?:"Value"|Value)\s+)("(?:[^"\\]|\\.)*"|[^\s()"]+)')
+
+
+def name_footprint(footprint_text: str, name: str) -> str:
+    """@brief Rename a footprint to `name`, as the project rename does.
+
+    @param footprint_text Content of a .kicad_mod file.
+    @param name Name the footprint must carry: the stem of the file it is
+        written to (see core.footprint.footprint_file_name).
+    @return The text with the root ``(footprint "<old>" ...)`` atom set to
+        `name` and, when the root ``(property "Value" ...)`` still reads the
+        old name, that value too; unchanged when the name already matches.
+    @throws KiCadLibraryError ``invalid_footprint`` when the text does not
+        start with a named footprint node.
+    @note KiCad resolves ``library:<name>`` through the file name and flags a
+        footprint whose internal name differs from it. A source footprint can
+        carry another name (a file renamed by hand, an older project), so the
+        copy the installer writes is renamed instead of trusting the source.
+    @note Rule for Value, the same as the project rename of the GUI: the
+        generators write the footprint name as Value, so a Value equal to the
+        OLD name is that default and follows the rename; any other Value was
+        customised by the user and is kept as it is.
+    """
+    match = _FOOTPRINT_HEAD.match(footprint_text)
+    if match is None:
+        raise KiCadLibraryError(
+            "The generated file is not a KiCad footprint.",
+            code="invalid_footprint",
+        )
+    old = _node_arguments(f"(footprint {match.group(2)})")[0]
+    if old == name:
+        return footprint_text
+    renamed = footprint_text[:match.start(2)] + _quote(name) + footprint_text[match.end(2):]
+    for start, end in _direct_child_ranges(renamed, "property"):
+        block = renamed[start:end]
+        arguments = _node_arguments(block)
+        if arguments[:1] != ["Value"]:
+            continue
+        value = _VALUE_HEAD.match(block)
+        if value is not None and len(arguments) > 1 and arguments[1] == old:
+            block = block[:value.start(2)] + _quote(name) + block[value.end(2):]
+            renamed = renamed[:start] + block + renamed[end:]
+        break
+    return renamed
+
+
 def attach_3d_model(footprint_text: str, model_reference: str) -> str:
     """@brief Replace root model nodes with one normalized STEP reference."""
     without_models = _remove_direct_children(footprint_text, "model")
@@ -249,6 +300,38 @@ _PREVIEW_MIN_OUTLINE = (65.0, 75.0, 135.0, 125.0)
 
 #: Free board around the footprint courtyard, mm.
 PREVIEW_OUTLINE_MARGIN_MM = 5.0
+
+#: Layer table of the preview board as (KiCad ordinal, canonical name, type,
+#: user name or ""), in the order KiCad 10 writes a new two-layer board.
+#: @note KiCad enables on a board only the layers its table declares: a
+#:     layer missing here is dropped when the board is loaded, so whatever a
+#:     footprint draws on it (pad solder mask and paste, Cmts.User drawings)
+#:     is neither shown in the PCB Editor nor checked by DRC. The ordinals are
+#:     those of the board format written (KICAD_VERSION, KiCad 9+ numbering:
+#:     front/back copper 0/2, technical layers odd); a ``kicad-cli pcb upgrade``
+#:     keeps this table verbatim (checked with kicad-cli 10.0).
+PREVIEW_BOARD_LAYERS: tuple[tuple[int, str, str, str], ...] = (
+    (0, "F.Cu", "signal", ""),
+    (2, "B.Cu", "signal", ""),
+    (9, "F.Adhes", "user", "F.Adhesive"),
+    (11, "B.Adhes", "user", "B.Adhesive"),
+    (13, "F.Paste", "user", ""),
+    (15, "B.Paste", "user", ""),
+    (5, "F.SilkS", "user", "F.Silkscreen"),
+    (7, "B.SilkS", "user", "B.Silkscreen"),
+    (1, "F.Mask", "user", ""),
+    (3, "B.Mask", "user", ""),
+    (17, "Dwgs.User", "user", "User.Drawings"),
+    (19, "Cmts.User", "user", "User.Comments"),
+    (21, "Eco1.User", "user", "User.Eco1"),
+    (23, "Eco2.User", "user", "User.Eco2"),
+    (25, "Edge.Cuts", "user", ""),
+    (27, "Margin", "user", ""),
+    (31, "F.CrtYd", "user", "F.Courtyard"),
+    (29, "B.CrtYd", "user", "B.Courtyard"),
+    (35, "F.Fab", "user", ""),
+    (33, "B.Fab", "user", ""),
+)
 
 _COURTYARD_LAYERS = ("F.CrtYd", "B.CrtYd")
 _GRAPHIC_NODES = ("fp_rect", "fp_line", "fp_poly", "fp_circle", "fp_arc")
@@ -372,21 +455,17 @@ def create_preview_project(
         _atomic_copy(artifacts.wrl_path, preview_dir / f"{artifacts.name}.wrl")
 
     outline_uuid = uuid.uuid4()
+    layer_rows = "".join(
+        f"\t\t({ordinal} {_quote(name)} {kind}"
+        + (f" {_quote(user_name)}" if user_name else "") + ")\n"
+        for ordinal, name, kind, user_name in PREVIEW_BOARD_LAYERS)
     board = (
         f"(kicad_pcb (version {KICAD_VERSION}) (generator \"kicadgen_tool\")\n"
         f"\t(generator_version \"{GENERATOR_VERSION}\")\n"
         "\t(general (thickness 1.6))\n"
         "\t(paper \"A4\")\n"
         "\t(layers\n"
-        "\t\t(0 \"F.Cu\" signal)\n"
-        "\t\t(31 \"B.Cu\" signal)\n"
-        "\t\t(36 \"B.SilkS\" user \"b.silkscreen\")\n"
-        "\t\t(37 \"F.SilkS\" user \"f.silkscreen\")\n"
-        "\t\t(44 \"Edge.Cuts\" user)\n"
-        "\t\t(46 \"B.CrtYd\" user \"b.courtyard\")\n"
-        "\t\t(47 \"F.CrtYd\" user \"f.courtyard\")\n"
-        "\t\t(48 \"B.Fab\" user)\n"
-        "\t\t(49 \"F.Fab\" user)\n"
+        f"{layer_rows}"
         "\t)\n"
         "\t(setup (pad_to_mask_clearance 0))\n"
         f"{footprint.rstrip()}\n"
@@ -413,9 +492,88 @@ def kicad_lock_file(document_path: str | os.PathLike[str]) -> Path:
     return document.with_name(f"~{document.name}.lck")
 
 
-def _temporary_sibling(target: Path, suffix: str = ".kicadgen.tmp") -> Path:
-    """Return a scratch path in the target directory, so os.replace is atomic."""
-    return target.with_name(f"{target.name}{suffix}")
+#: Suffix of every scratch file this module writes next to a target.
+TEMPORARY_SUFFIX = ".kicadgen.tmp"
+#: Hex characters of the random token in a scratch name: short, because the
+#: name is appended to the target's (Windows MAX_PATH without long paths);
+#: uniqueness comes from the exclusive creation, not from the length.
+TEMPORARY_TOKEN_HEX = 8
+#: Attempts at an unused scratch name before giving up (a collision of
+#: 8 hex characters is already a one-in-four-billion event).
+TEMPORARY_ATTEMPTS = 32
+#: Age after which a scratch file of ours next to a target is considered
+#: left by a killed run and removed, seconds. A live run replaces or removes
+#: its own scratch file within seconds; a day leaves a wide margin for a
+#: slow network folder or a paused machine.
+STALE_SCRATCH_AGE_S = 24 * 3600
+
+
+def _scratch_pattern(target: Path, suffix: str) -> "re.Pattern[str]":
+    """Names of OUR scratch files for `target`: legacy fixed, 32-hex and short-hex tokens."""
+    return re.compile(re.escape(target.name)
+                      + r"(?:\.(?:[0-9a-f]{%d}|[0-9a-f]{32}))?" % TEMPORARY_TOKEN_HEX
+                      + re.escape(suffix) + r"\Z")
+
+
+def _remove_stale_scratch(target: Path, suffix: str = TEMPORARY_SUFFIX,
+                          now: float | None = None) -> list[Path]:
+    """Remove scratch files a killed run left next to `target`; return those removed.
+
+    Only regular files whose name matches `_scratch_pattern` (ours, for this
+    very target) and whose modification time is older than
+    STALE_SCRATCH_AGE_S are removed. A file another process holds open is
+    refused by Windows and kept; folders, other names and young files are
+    never touched, so a concurrent run's scratch file survives. Failures
+    are ignored: cleanup must never block the operation itself.
+    """
+    import time
+    pattern = _scratch_pattern(target, suffix)
+    limit = (time.time() if now is None else now) - STALE_SCRATCH_AGE_S
+    removed: list[Path] = []
+    try:
+        entries = list(os.scandir(target.parent))
+    except OSError:
+        return removed
+    for entry in entries:
+        if not pattern.match(entry.name):
+            continue
+        try:
+            if not entry.is_file(follow_symlinks=False) or entry.stat().st_mtime > limit:
+                continue
+            os.remove(entry.path)
+            removed.append(Path(entry.path))
+        except OSError:
+            continue
+    return removed
+
+
+def _temporary_sibling(target: Path, suffix: str = TEMPORARY_SUFFIX) -> Path:
+    """Create and return a fresh, empty scratch file in the target directory.
+
+    The scratch file sits in the target's own folder so the final
+    ``os.replace`` is an atomic rename on one volume. Its name is
+    ``<target>.<8 hex>`` + suffix, created with O_EXCL and retried on a
+    collision: a fixed name let two concurrent runs (two windows, two
+    instances) write over each other's half-written copy, and a stale one
+    left by a killed process (or a folder in its place) made every later
+    run fail. Stale scratch files of ours older than STALE_SCRATCH_AGE_S are
+    removed first (see `_remove_stale_scratch`); their suffix keeps them out
+    of KiCad's scan of ``*.kicad_mod`` and ``*.step`` meanwhile.
+    Raises FileExistsError when TEMPORARY_ATTEMPTS names are all taken and
+    OSError when the folder does not accept a new file.
+    """
+    import secrets
+    _remove_stale_scratch(target, suffix)
+    for _attempt in range(TEMPORARY_ATTEMPTS):
+        candidate = target.with_name(
+            f"{target.name}.{secrets.token_hex(TEMPORARY_TOKEN_HEX // 2)}{suffix}")
+        try:
+            handle = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            continue
+        os.close(handle)
+        return candidate
+    raise FileExistsError(f"No free scratch name next to {target}")
 
 
 def _unlink_quietly(path: Path) -> None:
@@ -852,6 +1010,8 @@ def install_component_library(
         kept in a rollback folder, removes files and empty folders the install
         created, and deletes the rollback folder only when every step
         succeeded. Each rollback step runs even if an earlier one failed.
+    @note The installed copy is named ``<artifacts.name>`` inside, like its
+        file (see name_footprint); the source footprint is not modified.
     """
     if not _SAFE_LIBRARY_NAME.fullmatch(library_name):
         raise KiCadLibraryError(
@@ -892,7 +1052,9 @@ def install_component_library(
         if project_library else target_step.as_posix()
     )
     rendered = attach_3d_model(
-        artifacts.footprint_path.read_text(encoding="utf-8"), model_reference)
+        name_footprint(artifacts.footprint_path.read_text(encoding="utf-8"),
+                       artifacts.name),
+        model_reference)
 
     # Folders created here are removed again by a failed install when empty.
     created_dirs = [
@@ -900,20 +1062,24 @@ def install_component_library(
         for directory in (*reversed(root.parents), root, pretty_dir, shapes_dir)
         if not directory.exists()
     ]
-    staged_footprint = _temporary_sibling(target_footprint)
-    staged_step = _temporary_sibling(target_step)
-    staged = [(staged_footprint, target_footprint), (staged_step, target_step)]
-    staged_wrl = None
-    if target_wrl is not None:
-        staged_wrl = _temporary_sibling(target_wrl)
-        staged.append((staged_wrl, target_wrl))
+    # Scratch files are created (exclusively) inside the library folders, so
+    # the list fills only once those folders exist; a failure at any step
+    # removes exactly the scratch files created so far.
+    staged: list[tuple[Path, Path]] = []
     rollback_dir = root / f".kicadgen-rollback-{uuid.uuid4().hex}"
     try:
         pretty_dir.mkdir(parents=True, exist_ok=True)
         shapes_dir.mkdir(parents=True, exist_ok=True)
+        staged_footprint = _temporary_sibling(target_footprint)
+        staged.append((staged_footprint, target_footprint))
+        staged_step = _temporary_sibling(target_step)
+        staged.append((staged_step, target_step))
+        if target_wrl is not None:
+            staged_wrl = _temporary_sibling(target_wrl)
+            staged.append((staged_wrl, target_wrl))
         staged_footprint.write_text(rendered, encoding="utf-8", newline="\n")
         shutil.copy2(artifacts.step_path, staged_step)
-        if staged_wrl is not None and artifacts.wrl_path is not None:
+        if target_wrl is not None and artifacts.wrl_path is not None:
             shutil.copy2(artifacts.wrl_path, staged_wrl)
         rollback_dir.mkdir()
     except BaseException:
@@ -969,29 +1135,102 @@ def install_component_library(
     )
 
 
+#: Seconds `kicad-cli version` may take before the path folder is used
+#: instead. The command prints one line and exits; the bound only keeps a
+#: hung executable from blocking the caller, it is not a performance target.
+KICAD_CLI_VERSION_TIMEOUT_S = 10
+
+
+#: Outputs of ``kicad-cli version`` already obtained in this process, keyed
+#: by (absolute path, modification time ns, size) of the executable. The
+#: command is run from the GUI thread (global installation) and costs about
+#: 0.3 s, up to the timeout when the executable hangs; an executable whose
+#: file did not change prints the same version, a reinstalled one changes
+#: its key and is asked again.
+_KICAD_CLI_VERSION_CACHE: dict[tuple[str, int, int], str | None] = {}
+
+
+def _run_kicad_cli_version(executable: Path) -> str | None:
+    """@brief Stdout of ``kicad-cli version``, or None when it cannot be obtained.
+
+    @param executable Path of kicad-cli.
+    @return The command output; None when the file is missing, the command
+        fails or times out.
+    @note Cached per executable path and file identity for the process
+        lifetime (`_KICAD_CLI_VERSION_CACHE`), failures included: a hung
+        executable must not block the window again at every installation.
+    """
+    try:
+        stat = executable.stat()
+    except OSError:
+        return None
+    if not executable.is_file():
+        return None
+    key = (str(executable.resolve()), stat.st_mtime_ns, stat.st_size)
+    if key in _KICAD_CLI_VERSION_CACHE:
+        return _KICAD_CLI_VERSION_CACHE[key]
+    try:
+        proc = subprocess.run(
+            [str(executable), "version"], capture_output=True, text=True,
+            errors="replace", timeout=KICAD_CLI_VERSION_TIMEOUT_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        output = None
+    else:
+        output = proc.stdout if proc.returncode == 0 else None
+    _KICAD_CLI_VERSION_CACHE[key] = output
+    return output
+
+
+def kicad_settings_version(text: str | None) -> str | None:
+    """@brief Extract the ``<major>.<minor>`` settings folder name from ``kicad-cli version`` output.
+
+    @param text Output of the command (e.g. ``10.0.6`` or a nightly
+        ``10.99.0-123-g1234abcd``); None or empty when unavailable.
+    @return ``"10.0"``, ``"10.99"``... as KiCad names its settings folder;
+        None when the first non-blank line does not start with a version.
+    """
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            match = re.match(r"v?(\d+)\.(\d+)", line)
+            return f"{int(match.group(1))}.{int(match.group(2))}" if match else None
+    return None
+
+
 def global_fp_lib_table_path(
         kicad_cli_path: str | os.PathLike[str],
         *, environ: dict[str, str] | None = None,
-        platform: str | None = None) -> Path:
+        platform: str | None = None,
+        version_runner=None) -> Path:
     """@brief Resolve the per-user global fp-lib-table for the installed KiCad.
 
     @details Mirrors KiCad's settings path: ``$KICAD_CONFIG_HOME/<version>``
     when that variable is set and not empty, otherwise the platform default
     (``%APPDATA%/kicad/<version>``, ``~/Library/Preferences/kicad/<version>``
     or ``$XDG_CONFIG_HOME/kicad/<version>``).
-    @param kicad_cli_path Path of kicad-cli; its ``<major>.<minor>`` folder
-        gives the settings version.
+    @param kicad_cli_path Path of kicad-cli. The settings version is the
+        ``<major>.<minor>`` printed by ``kicad-cli version`` (a nightly
+        ``10.99.x`` gives ``10.99``, which its install folder may not show);
+        when the command gives nothing usable, the ``<major>.<minor>`` folder
+        in the path is used, as before.
     @param environ Environment used instead of ``os.environ`` (tests).
     @param platform Platform used instead of ``sys.platform`` (tests).
+    @param version_runner Callable taking the executable Path and returning
+        the command's stdout or None; defaults to running ``kicad-cli
+        version`` (read-only). Injected by tests that have no KiCad.
     @return Path of the table; the file may not exist yet.
     @throws KiCadLibraryError ``version_unknown`` when no version is found.
     """
     executable = Path(kicad_cli_path)
-    version = next(
-        (part for part in reversed(executable.parts)
-         if re.fullmatch(r"\d+\.\d+", part)),
-        None,
-    )
+    runner = _run_kicad_cli_version if version_runner is None else version_runner
+    version = kicad_settings_version(runner(executable))
+    if version is None:
+        version = next(
+            (part for part in reversed(executable.parts)
+             if re.fullmatch(r"\d+\.\d+", part)),
+            None,
+        )
     if version is None:
         raise KiCadLibraryError(
             "Unable to determine the installed KiCad version.",

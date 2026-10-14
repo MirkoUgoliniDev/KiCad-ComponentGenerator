@@ -21,6 +21,7 @@ from dataclasses import dataclass
 import math
 import unicodedata
 
+from ..generators.symbol import SYMBOL_NAME_ILLEGAL_CHARACTERS
 from ..generators.symbol_glyphs import parse_sexpr
 from .messages import tx
 
@@ -42,10 +43,19 @@ BODY_FILL = "background"
 #: Tolerance of the grid/size comparisons: KiCad writes at most 4-6 decimals.
 TOLERANCE = 1e-4
 
-#: Characters KiCad refuses in library item names: the library separator and
-#: the path separators (they would break `Library:Name` references and file
-#: names). Control characters are refused as well.
+#: Characters KiCad refuses in footprint names: the library separator and
+#: the path separators (a footprint is one `.kicad_mod` file, so they would
+#: break `Library:Name` references and file names). Control characters are
+#: refused as well.
 ILLEGAL_NAME_CHARACTERS = ':/\\'
+#: Illegal characters per item kind. A symbol lives inside a library file,
+#: so `/` is fine there, but KiCad refuses to load a symbol name with
+#: `"`, `\\`, `<` or `>`; the set is the generator's own, so the export and
+#: this check refuse exactly the same names.
+ILLEGAL_NAME_CHARACTERS_BY_KIND = {
+    'footprint': ILLEGAL_NAME_CHARACTERS,
+    'symbol': SYMBOL_NAME_ILLEGAL_CHARACTERS,
+}
 
 SEVERITIES = ('error', 'warning')
 
@@ -86,22 +96,27 @@ def _string(metadata: dict, key: str) -> str:
     return value if isinstance(value, str) else ''
 
 
-def name_findings(name: str, *, code: str, label: str) -> list[Finding]:
+def name_findings(name: str, *, code: str, label: str, kind: str = 'footprint') -> list[Finding]:
     """@brief Check a symbol or footprint name for characters KiCad forbids or discourages.
 
     @param name Name to check (not a path).
     @param code Finding code prefix, e.g. `footprint_name`.
     @param label Translated label of the item, used in the messages.
-    @return Error for empty name, `:` `/` `\\` or control characters;
-        warning for spaces (allowed by KiCad, discouraged by the KLC).
+    @param kind `footprint` (default) or `symbol`: selects the illegal set
+        of `ILLEGAL_NAME_CHARACTERS_BY_KIND`.
+    @return Error for empty name, a character of the kind's illegal set or
+        control characters; warning for spaces (allowed by KiCad,
+        discouraged by the KLC).
+    @throws KeyError For an unknown `kind`.
     """
+    illegal = ILLEGAL_NAME_CHARACTERS_BY_KIND[kind]
     findings = []
     if not name or not name.strip():
         return [_error(code + '_empty', tx('{label}: nome vuoto.', label=label))]
-    if _has_control(name) or any(c in ILLEGAL_NAME_CHARACTERS for c in name):
+    if _has_control(name) or any(c in illegal for c in name):
         findings.append(_error(code + '_illegal', tx(
-            '{label}: il nome «{name}» contiene caratteri vietati da KiCad (: / \\ o di controllo).',
-            label=label, name=name)))
+            '{label}: il nome «{name}» contiene caratteri vietati da KiCad ({characters} o di controllo).',
+            label=label, name=name, characters=' '.join(illegal))))
     if any(c.isspace() for c in name):
         findings.append(_warning(code + '_spaces', tx(
             '{label}: il nome «{name}» contiene spazi, sconsigliati dalle convenzioni KiCad.',
@@ -268,7 +283,8 @@ def check_symbol_text(text: str) -> list[Finding]:
     """@brief Check a `.kicad_sym` text against the symbol rules of the KLC.
 
     @param text Whole library text (one or more symbols).
-    @return Findings: format version (error), pin off the 100 mil grid
+    @return Findings: format version (error), empty symbol name or one with
+        a character KiCad refuses (error, `symbol_name_*`), pin off the 100 mil grid
         (error), duplicate pin number or two pins at one position (error),
         pin length other than 2.54 mm, pin texts other than 1.27 mm, body
         outline other than 0.254 mm/background fill, missing pin name
@@ -293,6 +309,10 @@ def check_symbol_text(text: str) -> list[Finding]:
 
     for symbol in [form for form in library if isinstance(form, list) and form and form[0] == 'symbol']:
         name = str(symbol[1]) if len(symbol) > 1 else ''
+        # Only the refusals: spaces are already advised on the footprint
+        # name, which is the same component name.
+        findings.extend(f for f in name_findings(name, code='symbol_name', label=tx('Simbolo'), kind='symbol')
+                        if f.severity == 'error')
         pin_names = _child(symbol, 'pin_names')
         offset = _child(pin_names, 'offset') if pin_names else None
         offset_value = _number(offset[1]) if offset and len(offset) > 1 else None
@@ -425,10 +445,11 @@ def check_footprint_text(text: str) -> list[Finding]:
             'Footprint «{name}»: il valore deve stare sul layer F.Fab.', name=name)))
 
     # Only drawn items count as the courtyard/fabrication outline: the Value
-    # text sits on F.Fab too, and a text is not an outline.
+    # property and the ${REFERENCE} fp_text sit on F.Fab too, and a text is
+    # not an outline.
     layers = set()
     for graphic in [form for form in footprint if isinstance(form, list) and form
-                    and str(form[0]).startswith('fp_')]:
+                    and str(form[0]).startswith('fp_') and str(form[0]) != 'fp_text']:
         layer = _child(graphic, 'layer')
         if layer and len(layer) > 1:
             layers.add(str(layer[1]))

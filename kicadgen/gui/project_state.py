@@ -14,10 +14,8 @@ not overwritten, and the caller says why in the log.
 from datetime import datetime, timezone
 import json
 import math
-import os
 from pathlib import Path
-import tempfile
-from ..fsutil import replace_file
+from ..fsutil import atomic_write_bytes
 
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QPlainTextEdit, QSpinBox, QTextEdit)
@@ -124,15 +122,41 @@ def project_config_path(project_dir) -> Path:
     return Path(project_dir) / PROJECT_CONFIG_NAME
 
 
-def read_project_config(project_dir):
+def _drop_non_finite(value, path: str, dropped: list):
+    """Replace every NaN/infinity in a parsed JSON value with None, recording where.
+
+    JSON written by this program never holds them (`allow_nan=False`), but
+    Python's parser accepts them in a hand-edited file; one left in the state
+    makes it unserialisable and the project could no longer be saved.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        dropped.append(path or "state")
+        return None
+    if isinstance(value, dict):
+        return {key: _drop_non_finite(item, f"{path}.{key}" if path else str(key), dropped)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_drop_non_finite(item, f"{path}[{index}]", dropped)
+                for index, item in enumerate(value)]
+    return value
+
+
+def read_project_config(project_dir, dropped: list | None = None):
     """@brief Read the project file of a folder.
 
     @param project_dir Project folder.
+    @param dropped Optional list that receives the path (e.g.
+        ``widgets.spin_pitch``) of every NaN or infinity found in the state;
+        each one is replaced with None, which every key's validator treats as
+        a missing value.
     @return The saved state (the `state` object of the file), or None when
         the folder has no project file (an older project, or a new one).
     @throws ProjectConfigError When the file exists but is unreadable, is not
         a KiCadGen project file, or has a newer version: it must be neither
         applied nor overwritten.
+    @note A non-finite number is not a reason to refuse the whole file: it
+        is one invalid value, dropped like any other the caller skips, so the
+        state the window builds from the file stays serialisable.
     """
     path = project_config_path(project_dir)
     if not path.is_file():
@@ -154,6 +178,10 @@ def read_project_config(project_dir):
     state = document.get("state")
     if not isinstance(state, dict):
         raise ProjectConfigError(tx("{name} senza impostazioni", name=path.name))
+    found = []
+    state = _drop_non_finite(state, "", found)
+    if dropped is not None:
+        dropped.extend(found)
     saved_package_geometry(state.get("package_geometry"))
     return state
 
@@ -167,8 +195,9 @@ def write_project_config(project_dir, state: dict) -> Path:
     @throws OSError When the folder or the file cannot be written.
     @throws TypeError / ValueError When `state` is not JSON-serialisable or
         contains NaN/infinity: nothing is written then.
-    @note Temporary file in the same folder, then os.replace: a crash while
-        writing never leaves half a project file behind.
+    @note Temporary file in the same folder, flushed and fsynced, then
+        replaced atomically (`fsutil.atomic_write_bytes`): a crash or a power
+        loss while writing never leaves half a project file behind.
     """
     folder = Path(project_dir)
     folder.mkdir(parents=True, exist_ok=True)
@@ -176,16 +205,6 @@ def write_project_config(project_dir, state: dict) -> Path:
                 "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "state": state}
     text = json.dumps(document, ensure_ascii=False, indent=2, allow_nan=False, sort_keys=True)
-    handle, temporary = tempfile.mkstemp(prefix=".project_config-", suffix=".tmp", dir=folder)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(text + "\n")
-        target = project_config_path(folder)
-        replace_file(temporary, target)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    target = project_config_path(folder)
+    atomic_write_bytes(target, (text + "\n").encode("utf-8"), prefix=".project_config-")
     return target

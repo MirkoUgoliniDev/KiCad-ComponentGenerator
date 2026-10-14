@@ -255,6 +255,16 @@ def test_each_footprint_convention_is_a_single_warning(override, code):
     assert [(f.code, f.severity) for f in findings] == [(code, 'warning')]
 
 
+def test_a_fab_text_alone_is_not_a_fabrication_outline():
+    """Every generator writes ${REFERENCE} on F.Fab (2026-10-14): a text is not an outline."""
+    text_only = '(fp_text user "${REFERENCE}" (at 0 0) (layer "F.Fab"))'
+    findings = k.check_footprint_text(_footprint(fab=text_only))
+    assert [(f.code, f.severity) for f in findings] == [('footprint_fab', 'warning')]
+    # With a drawn outline next to the text nothing is reported.
+    both = '(fp_rect (start -1 -1) (end 1 1) (layer "F.Fab")) ' + text_only
+    assert k.check_footprint_text(_footprint(fab=both)) == []
+
+
 def test_through_hole_attribute_passes():
     assert k.check_footprint_text(_footprint(attr='(attr through_hole)')) == []
 

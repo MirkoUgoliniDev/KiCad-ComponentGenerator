@@ -244,9 +244,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 7443 passed,
-11 skipped, 2 expected failures and 19 subtests, plus 5 failures found by that run and fixed
-afterwards (stale test doubles, two catalogue entries, two contracts), their files re-run green
+is 8058 passed,
+11 skipped, 2 expected failures and 19 subtests (2026-10-14, after the residuals of the
+four-cycle review, the four user decisions D1-D4, bottom-left anchored drawn texts at KiCad
+size, the centred unapplied-symbol modal and the root cause of the flaky drill test; merged
+into `main`). Before that, 7695 passed, 11 skipped, 2 expected failures and 19 subtests
+(2026-10-14 night, after the four-cycle adversarial review and its fixes). Before that,
+7443 passed, 11 skipped, 2 expected failures and 19 subtests plus 5 fixed failures
 (2026-10-13 night, after the footprint drawing palette, fine dotted grid, KiCad layer colours
 and kept camera; before that, 7344 passed, 11 skipped and 2 expected failures on 2026-10-12
 night, after the adversarial review of the

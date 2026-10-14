@@ -316,6 +316,33 @@ class FootprintView(QGraphicsView):
         """@brief The index of the drawing whose handles are shown (-1: none)."""
         return self._hovered_drawing
 
+    def reset_hover(self):
+        """@brief Forget the hovered drawing and its bounds, without emitting.
+
+        @note For the window, after it changed the drawings list: the index
+            and bounds remembered here describe the old list, so the next
+            pointer move over the same index would otherwise emit nothing
+            and the handles would not come back. No signal: the window has
+            already reset its own hover state.
+        """
+        self._hovered_drawing = -1
+        self._hover_bounds = None
+
+    def cancel_interaction(self):
+        """@brief End a handle or text drag in progress, without reporting a drop.
+
+        @note For the window, when the drawings list changes while the mouse
+            button is still down (Delete, Ctrl+Z, Ctrl+Y, Ctrl+D): the drag
+            holds indices into the old list, and its release would move a
+            different drawing. The release that follows then does nothing.
+            Panning and draw mode are untouched: they hold no index.
+        """
+        dragging = self._handle_drag is not None or self._text_drag is not None
+        self._handle_drag = None
+        self._text_drag = None
+        if dragging:
+            self.viewport().unsetCursor()
+
     def mousePressEvent(self, event):
         """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
 
@@ -340,7 +367,8 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             # A handle belongs to its drawing: the handles cover the stroke
-            # (and a text's only handle covers the text) while hovered.
+            # (a text's only handle sits on its bottom-left anchor corner,
+            # 2026-10-14) while hovered.
             drawing_index = self._drawing_at(event.pos())
             if drawing_index >= 0:
                 self.drawing_context_requested.emit(drawing_index)

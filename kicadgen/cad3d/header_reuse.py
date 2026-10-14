@@ -50,6 +50,9 @@ class HeaderModelReuse:
         self.path = Path(directory) / '.header-model-reuse.json'
         self.show = bool(body.show_pins_3d)
         self.key = None
+        #: Model-resolution messages of the run that saved the snapshot, set
+        #: by a successful `load` (empty for a snapshot written without them).
+        self.notes = []
         try:
             physical = asdict(body)
             physical.pop('show_pins_3d', None)
@@ -75,6 +78,9 @@ class HeaderModelReuse:
                 return None
             if any(_stamp(path) != stamp for path, stamp in saved['files'].items()):
                 return None
+            notes = saved.get('notes', [])
+            self.notes = ([str(note) for note in notes if isinstance(note, str)]
+                          if isinstance(notes, list) else [])
             return components
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             return None
@@ -106,8 +112,15 @@ class HeaderModelReuse:
                                              else record[source])
         return _digest(inputs)
 
-    def save(self, components, result):
-        """@brief Publish a snapshot only after a successful STEP exists; best effort."""
+    def save(self, components, result, notes=None):
+        """@brief Publish a snapshot only after a successful STEP exists; best effort.
+
+        @param components Resolved component payloads to reuse.
+        @param result Generator result; `step_path` must name the built STEP.
+        @param notes Model-resolution messages of this run, replayed by the
+            caller when the snapshot is reused (see `self.notes`); optional, a
+            snapshot without them reloads with no messages.
+        """
         if self.key is None or not result.get('step_path'):
             return
         temporary = None
@@ -124,7 +137,8 @@ class HeaderModelReuse:
                     files[str(path)] = _stamp(path)
             saved = dict(version=1, keys=[self.key, self._feedback_key(components)],
                          show=self.show, components=components,
-                         digest=_digest(components), files=files)
+                         digest=_digest(components), files=files,
+                         notes=[str(note) for note in (notes or [])])
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix='.header-reuse-', dir=self.path.parent)
             with os.fdopen(fd, 'w', encoding='utf-8') as stream:

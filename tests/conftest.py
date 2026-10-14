@@ -103,6 +103,18 @@ def no_unattended_modal_dialog(monkeypatch):
                 monkeypatch.setattr(target, method, refuse(f"{class_name}.{method}"),
                                     raising=False)
 
+    # The unapplied-symbol choice (2026-10-14) is a built QMessageBox, not one
+    # of the static calls above: unattended it answers «Resta», which is what
+    # leaving a project with pending symbol edits did before the modal (the
+    # window fixtures close windows that still hold a draft). Tests of the
+    # choice patch it themselves.
+    try:
+        from kicadgen.gui import main_window
+    except ImportError:
+        return
+    monkeypatch.setattr(main_window.MainWindow, "_ask_pending_symbol_choice",
+                        lambda self, can_apply: main_window.MainWindow.SYMBOL_EDITS_STAY)
+
 
 @pytest.fixture(autouse=True)
 def no_real_api_key_sources(monkeypatch, tmp_path):
@@ -252,6 +264,9 @@ def pytest_sessionfinish(session, exitstatus):
             for name in ("information", "warning", "critical", "question"):
                 setattr(QMessageBox, name, staticmethod(
                     lambda *args, **kwargs: QMessageBox.StandardButton.No))
+            # Built message boxes too (e.g. the unapplied-symbol choice):
+            # exec() returns at once with no button clicked, i.e. «stay».
+            QMessageBox.exec = lambda self, *args, **kwargs: 0
             kept = {id(item) for item in _GRAVEYARD}
             for widget in list(application.topLevelWidgets()):
                 if id(widget) in kept:

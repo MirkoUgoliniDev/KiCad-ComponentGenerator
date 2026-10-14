@@ -34,6 +34,22 @@ def separation_tool():
             'type':'object','properties':props,'required':list(props)}}},'required':['terminals']}}}
 
 
+def _rejection_text(exc):
+    """Translated reason of a discarded lead detail (LeadDetailRejected code, else malformed)."""
+    reason = getattr(exc, 'reason', None)
+    if reason == 'invalid_rectangle':
+        return tx("rettangolo del reoforo non valido")
+    if reason == 'empty_rectangle':
+        return tx("rettangolo del reoforo vuoto")
+    if reason == 'no_evidence':
+        return tx("separazione senza evidenza esplicita ad alta confidenza")
+    if reason == 'exceeds_envelope':
+        return tx("reoforo oltre l'ingombro del terminale originale")
+    if reason == 'not_one_face':
+        return tx("il reoforo deve toccare esattamente una faccia del corpo")
+    return tx("risposta del dettaglio malformata")
+
+
 def _frame_box(box, source, destination):
     l,t,r,b = rect(box)
     sx,sy,sr,sb = source
@@ -98,11 +114,13 @@ def refine_leads(photo_png, components, model, call, log, cache_dir=None, system
                     terminal['lead_detail'] = detail
                     accepted += 1
                 except (ValueError,TypeError,KeyError) as exc:
-                    log(tx("#{index}/{identifier}: dettaglio scartato ({exc}); terminale "
+                    # The constraint's English text is a developer diagnostic:
+                    # the user reads the translated reason of its stable code.
+                    log(tx("#{index}/{identifier}: dettaglio scartato ({reason}); terminale "
                            "invariato.",
                            index=index,
                            identifier=identifier,
-                           exc=exc))
+                           reason=_rejection_text(exc)))
         except (OpenRouterError,ValueError,TypeError,KeyError,OSError) as exc:
             log(tx("#{index}: separazione reofori non disponibile ({exc}); geometria "
                    "conservata.",

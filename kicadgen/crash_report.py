@@ -61,7 +61,79 @@ _state: dict = {
 SECRET_ENV_VARS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
 
 _KEY_PATTERN = re.compile(r"sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}")
-_USER_SEGMENT = re.compile(r"(?i)([A-Z]:[\\/]+Users[\\/]+|/home/|/Users/)[^\\/\s\"':]+")
+#: Characters a path segment cannot hold: separators, whitespace, quotes,
+#: the colon and the characters a Windows file name cannot hold.
+_NAME_CHAR = r"[^\\/\s\"':<>|*?]"
+#: One word of a user folder name. An ASCII apostrophe belongs to the name
+#: only between two word characters (``O'Brien``); an apostrophe next to
+#: anything else (``'/home/bob', 'x'``) closes a quoted string and is left
+#: out, together with what follows it.
+_WORD = _NAME_CHAR + r"+(?:(?<=\w)'(?=\w)" + _NAME_CHAR + r"+)*"
+#: Words joined by single spaces and ending on a word («Mario Rossi»).
+_SPACED = _WORD + r"(?: " + _WORD + r")+"
+#: A user folder name in free text. A name with spaces is taken whole only
+#: when a path separator follows it directly, i.e. when the text itself
+#: proves it is a folder; otherwise only the run up to the first whitespace
+#: is taken, so ``/home/bob and then opened`` keeps the rest of the line. A
+#: sentence that merely runs into a later path (``bob and then opened /tmp``)
+#: has a space before that separator and is not taken. The other proofs of
+#: where a spaced name ends are handled by `_DELIMITED_USER`.
+_SEGMENT = r"(?:" + _SPACED + r"(?=[\\/])|" + _WORD + r")"
+#: Prefix of the user segment of a home path (Windows, Linux, macOS).
+_HOME_PREFIX = r"(?:[A-Z]:[\\/]+Users[\\/]+|/home/|/Users/)"
+#: Shares that hold one folder per user, by path convention (the same kind
+#: of convention as ``C:\\Users\\<name>``): redirected homes and roaming
+#: profiles. A UNC path on any other share (``\\\\fileserver\\Projects``)
+#: names a place, not a person, and is left untouched.
+_USER_SHARES = r"(?:Users|home|homes|profiles)"
+#: Prefix ``\\\\host\\<user share>\\`` of a per-user UNC path. The host must
+#: be a host name (letters, digits, ``.``, ``-``, ``_``, starting with a
+#: letter or a digit), which excludes the ``\\\\.\\`` and ``\\\\?\\`` device
+#: namespaces. Separators may be doubled (a repr). Host and share are kept:
+#: they identify a machine, not a person.
+_UNC_PREFIX = (r"(?:\\\\){1,2}[A-Za-z0-9][\w.-]*\\{1,2}" + _USER_SHARES
+               + r"\\{1,2}")
+#: A letter that is a word of its own, then a colon (``a:``, ``C:``).
+_LONE_LETTER_COLON = r"(?<![^\W_])[^\W\d_]:"
+#: Where a UNC path token may start: start of text, whitespace, a quote,
+#: ``=``, ``(``, ``[``, ``,``, ``<``, or a colon that does not follow a
+#: lone letter (``error:\\\\srv``). A doubled separator inside a path or a
+#: source line (``"\\\\n\\\\t"``) has none of these before it and is not
+#: read as UNC. A colon after a lone letter is handled by
+#: `_UNC_AFTER_LETTER`.
+_UNC_START = r"(?:^|(?<=[\s\"'=(\[,<])|(?<=:)(?<!" + _LONE_LETTER_COLON + r"))"
+#: The same per-user UNC prefix with CONSISTENT separators: the leading run
+#: is exactly twice the inner separator, as in raw text
+#: (``\\\\srv\\home\\``, 2 then 1) or in a repr (4 then 2).
+_UNC_PREFIX_CONSISTENT = (
+    r"(?:\\\\[A-Za-z0-9][\w.-]*\\" + _USER_SHARES + r"\\"
+    r"|\\\\\\\\[A-Za-z0-9][\w.-]*\\\\" + _USER_SHARES + r"\\\\)")
+#: A per-user UNC path right after a lone letter and a colon (``a:``,
+#: ``x:`` in prose or a label, or a drive letter). The letter alone cannot
+#: tell a label from a drive, the separators can: a drive path keeps one
+#: separator width throughout (``C:\\srv\\home``, or ``C:\\\\srv\\\\home``
+#: in a repr) and never matches the consistent UNC prefix, whose leading
+#: run is twice its inner separator (``a:\\\\srv\\home\\bob``). A drive
+#: path with a redundant doubled separator and single ones after it has the
+#: UNC shape exactly and is masked: over-masking one folder name is the
+#: safe side of a report meant for a public issue.
+_UNC_AFTER_LETTER = r"(?<=" + _LONE_LETTER_COLON + r")"
+#: The user segment of a home path, in free text.
+_USER_SEGMENT = re.compile(r"(?i)(" + _HOME_PREFIX + r")" + _SEGMENT)
+#: The first segment after the prefix of a per-user UNC path, in free text.
+_UNC_SEGMENT = re.compile(r"(?i)(?:" + _UNC_START + r"(" + _UNC_PREFIX + r")|"
+                          + _UNC_AFTER_LETTER + r"(" + _UNC_PREFIX_CONSISTENT
+                          + r"))" + _SEGMENT)
+#: Any user-folder prefix, home or per-user UNC share.
+_ANY_PREFIX = r"(?:" + _HOME_PREFIX + r"|" + _UNC_PREFIX + r")"
+#: Spaced user names whose end the text itself proves, never guessed from
+#: the words: a path separator follows the name, or the quote that opened
+#: the path closes right after it (``'C:\\Users\\Mario Rossi'``). Group 1
+#: (or 2) holds the name.
+_PROVEN_NAMES = (
+    re.compile(r"(?i)" + _ANY_PREFIX + r"(" + _SPACED + r")(?=[\\/])"),
+    re.compile(r"(?i)(\"|')" + _ANY_PREFIX + r"(" + _SPACED + r")(?=\1)"),
+)
 
 
 def reports_dir(base: Union[str, os.PathLike]) -> Path:
@@ -78,7 +150,14 @@ def scrub(text: str) -> str:
 
     @param text Any text that may contain local paths or keys.
     @return The text with the home folder replaced by "~", other user folder
-        names by "<user>" and API keys by "<redacted>".
+        names and the first folder under a per-user UNC share by "<user>",
+        and API keys by "<redacted>".
+    @note A user name with spaces is masked whole only when the text proves
+        where it ends: a path separator or the quote that opened the path
+        follows it, here or at another occurrence of the same name. Without
+        such a proof only its first word is masked, so the prose after a
+        path is never eaten: an unquoted ``.../Users/Mario Rossi`` at the
+        end of a line has the same shape as ``/Users/alice is missing``.
     """
     result = str(text)
     for name in SECRET_ENV_VARS:
@@ -94,7 +173,36 @@ def scrub(text: str) -> str:
         for variant in {home, home.replace("\\", "/"), home.replace("/", "\\")}:
             result = re.sub(re.escape(variant) + r"(?=[\\/\s\"':]|$)", "~", result,
                             flags=re.IGNORECASE)
-    return _USER_SEGMENT.sub(lambda m: m.group(1) + "<user>", result)
+    result = _mask_proven_names(result)
+    for pattern in (_USER_SEGMENT, _UNC_SEGMENT):
+        # The prefix is the one group that took part (two alternatives in UNC).
+        result = pattern.sub(lambda m: m.group(m.lastindex) + "<user>", result)
+    return result
+
+
+def _mask_proven_names(text: str) -> str:
+    """Mask every occurrence of a spaced user name the text proves somewhere.
+
+    A spaced name is proved by a separator or a closing quote right after it
+    (`_PROVEN_NAMES`). Once proved, the same name after a user-folder prefix
+    is masked whole wherever it appears, also where nothing follows it (end
+    of the text, a full stop): ``cwd C:\\Users\\Mario Rossi`` loses «Rossi»
+    when a traceback line elsewhere holds ``C:\\Users\\Mario Rossi\\app``.
+    The name ends at the end of a word: an apostrophe after it (a
+    possessive, ``Mario Rossi's notes``) does not stop the masking, a longer
+    word (``Mario Rossini``) does.
+    An unproved spaced name keeps only its first word masked, because
+    ``/Users/alice is missing`` has the same shape and its prose must stay.
+    """
+    names = {match.group(match.lastindex) for pattern in _PROVEN_NAMES
+             for match in pattern.finditer(text)}
+    if not names:
+        return text
+    alternatives = "|".join(re.escape(name) for name in
+                            sorted(names, key=len, reverse=True))
+    pattern = re.compile(r"(?i)(" + _ANY_PREFIX + r")(?:" + alternatives + r")"
+                         r"(?!\w)")
+    return pattern.sub(lambda m: m.group(1) + "<user>", text)
 
 
 def _app_version() -> str:

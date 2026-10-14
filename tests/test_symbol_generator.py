@@ -83,9 +83,14 @@ def test_failed_atomic_replace_preserves_original(tmp_path, monkeypatch):
 
 
 def test_user_strings_are_quoted():
-    text = serialize_symbol('Module "test"', [SymbolPin('A1', 'GPIO"2\\x')])
-    assert '"Module \\"test\\""' in text
+    # Pin names and the footprint may hold quotes and backslashes (KiCad
+    # loads them escaped); a symbol NAME may not: KiCad 10 refuses the whole
+    # library (review B2, 2026-10-13), so the generator refuses it first.
+    text = serialize_symbol('Module', [SymbolPin('A1', 'GPIO"2\\x')], footprint='Lib:F"p')
     assert '"GPIO\\"2\\\\x"' in text
+    assert '"Lib:F\\"p"' in text
+    with pytest.raises(ValueError, match='must not contain'):
+        serialize_symbol('Module "test"', [SymbolPin('A1', 'A')])
 
 
 @pytest.mark.parametrize('free_positions', [False, True])

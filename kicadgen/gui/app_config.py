@@ -13,10 +13,13 @@ non contiene segreti (la API key resta nel .env).
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
+import logging
+import math
 import os
-import tempfile
+import shutil
 from pathlib import Path
 
 from ..services.datasheet_extractor import DEFAULT_SYSTEM_PROMPT
@@ -83,25 +86,133 @@ DEFAULTS = {
 }
 
 
-def load_config() -> dict:
+_LOG = logging.getLogger(__name__)
+
+#: Message templates reported by `load_config` (Italian sources of `tx`).
+CONFIG_BAD_TYPE_MESSAGE = ("config.json: valore di «{key}» non valido ({found} invece di "
+                           "{expected}), uso il predefinito.")
+CONFIG_CORRUPT_KEPT_MESSAGE = ("config.json illeggibile ({error}): copia conservata in {backup}, "
+                               "uso le impostazioni predefinite.")
+CONFIG_UNREADABLE_MESSAGE = "config.json illeggibile ({error}): uso le impostazioni predefinite."
+
+
+def _same_kind(value, default) -> bool:
+    """True when a loaded value has the JSON kind of its default.
+
+    bool is its own kind (in Python it is also an int); int and float are
+    the same kind, finite only; anything else must share the default's type.
+    """
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value))
+    return isinstance(value, type(default))
+
+
+#: Problems of the most recent `load_config`, until `take_load_problems`.
+_pending_problems: list = []
+
+
+def _keep_corrupt_copy(path: Path) -> Path | None:
+    """Copy an unparsable config.json aside before a later save replaces it.
+
+    Returns the copy (an existing one with the same bytes is reused, so
+    reading the same broken file several times keeps one copy), or None
+    when it could not be made.
+    """
+    try:
+        content = path.read_bytes()
+        for existing in sorted(path.parent.glob(f"{path.name}.corrupt-*")):
+            if existing.is_file() and existing.read_bytes() == content:
+                return existing
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}")
+        shutil.copy2(path, backup)
+    except OSError:
+        return None
+    return backup
+
+
+def _report(problems: list, template: str, **values) -> None:
+    """Log a load problem and keep it, untranslated, for the caller."""
+    _LOG.warning(template.format(**values))
+    problems.append((template, values))
+
+
+def take_load_problems() -> list:
+    """@brief Return and forget the problems found by the most recent `load_config`.
+
+    @return ``(template, values)`` pairs: the template is the Italian source
+        of `messages.tx`, translated by the caller once its translator is
+        installed (config.json is read before it).
+    """
+    problems = list(_pending_problems)
+    _pending_problems.clear()
+    return problems
+
+
+def load_config(report: list | None = None) -> dict:
     """@brief Read config.json merged over the defaults; an unreadable file yields the defaults.
 
-    Legge config.json, completando le chiavi mancanti con i default.
+    @param report Optional list that also receives the ``(template, values)``
+        problems of this call (see `take_load_problems`). Every problem is
+        written to the `logging` module too.
+    @return The defaults updated with the valid values of the file.
+    @note A key that has a default keeps the default when the file holds a
+        value of another kind (a list where a string is expected, a string
+        where a boolean is expected): one bad value never reaches the widgets
+        or makes the window fail at start. The rule is generic, by the kind
+        of the default, not per key; keys without a default are copied as
+        they are and validated where they are read.
+    @note A file that cannot be parsed still yields the defaults (intended:
+        the program must start), but it is first copied to
+        ``config.json.corrupt-<timestamp>``, so the next save -- which
+        rewrites config.json from the defaults -- does not destroy the
+        user's settings without a trace.
+    @note Read as ``utf-8-sig``: a file saved by an editor with a BOM is
+        valid JSON for the user and must not be treated as corrupt.
     """
+    problems: list = []
+    config = _read_config(problems)
+    _pending_problems[:] = problems
+    if report is not None:
+        report.extend(problems)
+    return config
+
+
+def _read_config(problems: list) -> dict:
+    """The body of `load_config`; problems are appended to `problems`."""
     config = dict(DEFAULTS)
-    if config_path().is_file():
-        try:
-            with open(config_path(), "r", encoding="utf-8") as fh:
-                loaded = json.load(fh)
-                if not isinstance(loaded, dict):
-                    raise ValueError(tx("La configurazione deve essere un oggetto JSON."))
-                config.update(loaded)
-            if _prompt_hash(config.get("system_prompt") or "") in LEGACY_DEFAULT_PROMPT_HASHES:
-                config["system_prompt"] = DEFAULT_SYSTEM_PROMPT
-        except (OSError, ValueError):
-            # File illeggibile o corrotto: si riparte dai default invece di
-            # impedire l'avvio dell'applicazione.
-            pass
+    path = config_path()
+    if not path.is_file():
+        return config
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except OSError as exc:
+        # Locked or unreadable: nothing to copy, the file is left as it is.
+        _report(problems, CONFIG_UNREADABLE_MESSAGE, error=exc)
+        return config
+    except ValueError as exc:
+        loaded = exc
+    if not isinstance(loaded, dict):
+        error = loaded if isinstance(loaded, ValueError) else \
+            tx("La configurazione deve essere un oggetto JSON.")
+        backup = _keep_corrupt_copy(path)
+        if backup is None:
+            _report(problems, CONFIG_UNREADABLE_MESSAGE, error=error)
+        else:
+            _report(problems, CONFIG_CORRUPT_KEPT_MESSAGE, error=error, backup=backup)
+        return config
+    for key, value in loaded.items():
+        if key in DEFAULTS and not _same_kind(value, DEFAULTS[key]):
+            _report(problems, CONFIG_BAD_TYPE_MESSAGE, key=key, found=type(value).__name__,
+                    expected=type(DEFAULTS[key]).__name__)
+            continue
+        config[key] = value
+    if _prompt_hash(config.get("system_prompt") or "") in LEGACY_DEFAULT_PROMPT_HASHES:
+        config["system_prompt"] = DEFAULT_SYSTEM_PROMPT
     return config
 
 
@@ -152,7 +263,8 @@ def save_config(config: dict) -> bool:
     """@brief Atomically write the interface preferences to config.json, leaving out the AI profile fields.
 
     The JSON is first serialised in memory, then written to a temporary file in
-    the same folder and moved onto config.json with `fsutil.replace_file`.
+    the same folder, flushed, fsynced and moved onto config.json
+    (`fsutil.atomic_write_bytes`, shared with the project file).
     A failure at any step (locked file, read-only folder, full disk, value
     that is not JSON-serialisable) leaves the previous config.json untouched
     and removes the temporary file.
@@ -166,7 +278,7 @@ def save_config(config: dict) -> bool:
     """
     # AI profiles are persisted only in SQLite after startup migration.
     from ..services.analysis_profiles import PROFILE_FIELDS
-    from ..fsutil import replace_file
+    from ..fsutil import atomic_write_bytes
     preferences = {k: v for k, v in config.items() if k not in PROFILE_FIELDS}
     try:
         # Serialising before touching the disk means an unserialisable value
@@ -178,23 +290,9 @@ def save_config(config: dict) -> bool:
     except (TypeError, ValueError):
         return False
     target = config_path()
-    temporary = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-        temporary = Path(name)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
-        replace_file(temporary, target)
-        temporary = None
+        atomic_write_bytes(target, payload)
         return True
     except OSError:
         return False
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass

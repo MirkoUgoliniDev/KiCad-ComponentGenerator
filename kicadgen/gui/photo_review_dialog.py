@@ -1867,7 +1867,12 @@ class PhotoReviewDialog(QDialog):
         layout.addWidget(self.draw_hint)
 
         self.scene = QGraphicsScene(self)
-        self.photo_item = self.scene.addPixmap(pixmap)
+        # Kept by the dialog: built in Python so PyQt learns when Qt deletes
+        # it (an addPixmap() item would leave its wrapper registered at the
+        # freed address; see symbol_tab._add_kept_item).
+        from PyQt6.QtWidgets import QGraphicsPixmapItem
+        self.photo_item = QGraphicsPixmapItem(pixmap)
+        self.scene.addItem(self.photo_item)
         self.photo_item.setZValue(-100)
         self.photo_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.photo_rect = QRectF(0, 0, pixmap.width(), pixmap.height())
