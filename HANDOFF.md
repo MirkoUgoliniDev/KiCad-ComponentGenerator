@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 14/10 — branch `ADVANCED`, commit `HASH_DA_INSERIRE` (+ handoff), mergiato in `main`
+## FINE SESSIONE 14/10 — branch `ADVANCED`, commit `ace444e` (+ handoff), mergiato in `main`
 
 Committato su richiesta dell'utente («committa, pusha e mergia in main»): tutto
 il lavoro del 14/10 descritto nelle sezioni sotto (residui della revisione in 4
