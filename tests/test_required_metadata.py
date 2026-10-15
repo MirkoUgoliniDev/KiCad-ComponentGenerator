@@ -60,8 +60,9 @@ def _mark_written(window):
 def _open(window, tmp_path, *, filled=True, name=NAME):
     """Project with complete outputs; the required fields filled or all three emptied.
 
-    The window starts with default keywords («pin header THT»), so «not
-    filled» empties every field explicitly instead of trusting the defaults.
+    The window used to start with keywords «pin header THT» (empty since
+    2026-10-15); «not filled» still empties every field explicitly instead of
+    trusting the defaults.
     """
     if filled:
         _fill(window)
