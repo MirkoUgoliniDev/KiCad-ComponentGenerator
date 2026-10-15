@@ -8647,8 +8647,14 @@ class MainWindow(QMainWindow):
             except (OSError, ValueError, TypeError) as exc:
                 self._append_log(tx("Scelte KiCad precedenti non ripristinate: {exc}", exc=exc))
         self.field_description.setText(params.description)
-        if params.tags:
-            self.field_tags.setText(params.tags)
+        # Keywords follow the extraction ALWAYS, like the description, also
+        # when it has none (user decision 2026-10-15, option 1): copying only
+        # a non-empty result kept the previous value — the old «pin header
+        # THT» default or the keywords of another analysis — which then went
+        # into the footprint tags and the symbol ki_keywords of a different
+        # part without anyone noticing, because the field was not empty. An
+        # empty field is now visible: the required-field gate names it.
+        self.field_tags.setText(params.tags or "")
 
         self.package_geometry = validated_package_geometry
         if params.package_geometry:
@@ -9226,7 +9232,15 @@ class MainWindow(QMainWindow):
         """
         # Dati del componente e matrice THT.
         self.field_description = TextValue()
-        self.field_tags = TextValue("pin header THT")
+        # Keywords start EMPTY (user decision 2026-10-15, option 1): the old
+        # default «pin header THT» described one kind of part and reached the
+        # tags/ki_keywords of every other kind (a SOIC, a module) unnoticed,
+        # since a filled field passes the required-field check. Empty, the
+        # gate names «Parole chiave» until the user or an extraction fills it.
+        # Projects saved with «pin header THT» keep it: in the project file it
+        # cannot be told apart from a value the user chose, so it is restored
+        # as saved and never rewritten here.
+        self.field_tags = TextValue("")
         # Righe e colonne: nessun tetto proprio; quante ne stanno lo dicono il
         # passo e le quote (`_validate_automatic_input`). Il massimo qui tiene
         # solo il numero memorizzabile.

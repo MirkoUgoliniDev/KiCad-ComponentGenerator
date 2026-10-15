@@ -1,5 +1,30 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 sera — FATTO (commit in corso): parole chiave predefinite (M-1), scelta dell'utente: opzione 1
+
+Spiegato all'utente in dettaglio (ki_keywords/tags servono alla ricerca in
+KiCad; `field_tags = TextValue("pin header THT")` main_window ~9229; ~8650
+copia le parole chiave dell'estrazione solo se non vuote, quindi restano il
+predefinito o quelle di un'analisi precedente). Scelta: campo VUOTO.
+Da fare (agente C): predefinito "" ; una nuova estrazione imposta SEMPRE il
+campo (anche vuoto), come gia' fa con la descrizione; il blocco dei campi
+obbligatori fa il resto. Progetti salvati con «pin header THT» restano cosi'
+(non distinguibili da una scelta). Verificare stato generale/nuovo progetto
+(`_general_project_state`), pin header manuali (nessuna estrazione), test.
+FATTO (agente C, non committato): `field_tags = TextValue("")`;
+`_apply_extracted_result` imposta sempre le parole chiave (anche vuote);
+tests/test_keywords_default.py 6 test (5 rossi sul codice vecchio), end to
+end: blocco con «Parole chiave», poi Applica -> tags e ki_keywords scritti.
+389 + 848 + 14 verdi. Lasciato: `PinHeaderParams.tags` del generatore
+predefinito «pin header THT» (solo uso diretto dell'API; la finestra passa
+sempre il campo). Effetto visibile: un pin header senza analisi chiede ora
+le parole chiave prima di installare.
+SUITE COMPLETA (passaggi 4 e 5 inclusi): A 3881 verdi, 7 saltati, 19
+sottotest; B 4363 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8244). NON
+committato. Etichetta su «Applica ai file»: mostrate due immagini (oggi /
+proposta); utente: «per me ora va bene cosi'» -> interpretato come NESSUNA
+modifica (si lascia la sola icona), detto all'utente perche' possa correggere.
+
 ## 2026-10-15 sera — `ADVANCED` (`5427ec3` + handoff `0a3560d`) mergiato in `main` come `309d3a3`, pushato
 
 Su richiesta dell'utente. Si lavora di nuovo su `ADVANCED`. Suite: 8237
