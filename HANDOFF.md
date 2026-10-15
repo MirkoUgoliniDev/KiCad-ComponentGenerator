@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-15 — FATTO (non committato): testi di proprieta' e pin alla grandezza KiCad (simbolo e footprint)
+## 2026-10-15 — FATTO, commit `c07059c`: testi di proprieta' e pin alla grandezza KiCad (simbolo e footprint)
 
 Richiesta: punto aperto «REF**/Value e testi delle proprieta'/pin disegnati
 piu' piccoli che in KiCad». Misurato: simbolo Reference/Value e nomi dei pin
@@ -36,7 +36,7 @@ ruotati come KiCad.
 SEGNALATO, NON AUTORIZZATO (preesistente, ora piu' visibile): con un pin sul
 lato superiore la posizione predefinita del Value (`default_property_positions`)
 cade sulla punta del pin; uguale nel file, quindi anche in KiCad.
-STATO: fatto e verificato, NON committato.
+STATO: committato su ADVANCED come `c07059c` (+ handoff) e pushato, su richiesta dell'utente. NON mergiato in main.
 
 ## 2026-10-15 — FATTO, commit `9f1a5e7`: «Applica» della bozza del SIMBOLO con cambio di «Area di lavoro»
 
