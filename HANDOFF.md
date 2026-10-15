@@ -1,5 +1,14 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 — MERGE: `ADVANCED` (fino a `99cbad3`) mergiato in `main` come `9c08a46`, pushato
+
+Su richiesta dell'utente («mergia in main tutto e torna qui»). Contiene `9f1a5e7`
+(bozza del simbolo con cambio di Area di lavoro) e `c07059c` (testi alla
+grandezza KiCad). Si lavora di nuovo su `ADVANCED`. Suite: 8096 verdi, 11
+saltati, 2 xfail, 19 sottotest. APERTI: Value sopra la punta di un pin sul lato
+superiore (posizione predefinita); qt_fixtures congela le finestre distrutte;
+richieste vecchie (campi obbligatori, «Regole KLC», «Applica ai file»).
+
 ## 2026-10-15 — FATTO, commit `c07059c`: testi di proprieta' e pin alla grandezza KiCad (simbolo e footprint)
 
 Richiesta: punto aperto «REF**/Value e testi delle proprieta'/pin disegnati
