@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-15 — FATTO (non committato): «Applica» della bozza del SIMBOLO con cambio di «Area di lavoro»
+## 2026-10-15 — FATTO, commit `9f1a5e7`: «Applica» della bozza del SIMBOLO con cambio di «Area di lavoro»
 
 Richiesta dell'utente (OK alla proposta): oggi, cambiando «Area di lavoro» con
 una bozza del simbolo, «Applica» fallisce («Pinout non salvato...») perche'
@@ -29,7 +29,7 @@ li'. Due test nuovi in tests/test_footprint_draft.py, entrambi ROSSI sul
 codice vecchio e verdi sul nuovo; 37 verdi nel lotto mirato.
 SUITE COMPLETA (2026-10-15, due meta'): A 3853 verdi, 7 saltati, 19 sottotest;
 B 4240 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8093 = 8091 + i 2 nuovi).
-STATO: fatto e verificato, NON committato (in attesa dell'utente).
+STATO: committato su ADVANCED come `9f1a5e7` (+ handoff) e pushato, su richiesta dell'utente. NON mergiato in main.
 
 ## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `1075897` (+ handoff), mergiato in `main`, PC spento
 
