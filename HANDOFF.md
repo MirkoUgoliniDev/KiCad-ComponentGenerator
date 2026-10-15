@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-15 pomeriggio — FATTO (commit in corso): «scatena agenti esperti e fixa tutto» (utente)
+## 2026-10-15 pomeriggio — FATTO, commit `5427ec3`: «scatena agenti esperti e fixa tutto» (utente)
 
 Richiesta: risolvere tutti i punti aperti, con piu' passaggi fino a
 soluzione, commenti nel codice sempre. Interpretazione:
