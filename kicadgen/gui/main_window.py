@@ -7604,7 +7604,9 @@ class MainWindow(QMainWindow):
             then names a folder of the NEW working folder, so the footprint
             is saved explicitly here and its .kicad_mod is not rewritten
             (it would land in the other working folder); the project is
-            marked stale instead (`_fp_file_stale`). None for a normal leave.
+            marked stale instead (`_fp_file_stale`); the symbol is saved and
+            its .kicad_sym written here too (`_symbol_apply_folder`). None
+            for a normal leave.
         @return True when every pending edit was applied or discarded and the
             caller may go on (close, change project); False to stay.
         @note «Applica» is offered only when every pending edit can be
@@ -7630,7 +7632,13 @@ class MainWindow(QMainWindow):
                 if folder is None:
                     self._finish_footprint_rewrite_now()
             if symbol is not None and symbol.can_apply():
-                symbol.apply()
+                # `_apply_symbol_pinout` runs inside `apply()` (signal): it
+                # reads the folder to write into from here.
+                self._symbol_apply_folder = folder
+                try:
+                    symbol.apply()
+                finally:
+                    self._symbol_apply_folder = None
             if symbol is not None and symbol.has_pending_edits() and footprint:
                 QMessageBox.warning(self, self.i18n.text("Modifiche non applicate"), self.i18n.text(
                     "Il footprint è stato applicato; il simbolo no e resta in bozza."))
@@ -13357,6 +13365,22 @@ class MainWindow(QMainWindow):
         return list(dict.fromkeys(str(p.number) for p in footprint.pads
                                  if p.pad_type != 'np_thru_hole' and str(p.number).strip()))
 
+    def _symbol_recovery_path(self) -> Path | None:
+        """@brief The symbol recovery file of the OPEN project.
+
+        @return `<open project>/.symbol-draft.json`, or None while the
+            component has no name (no project folder to bind).
+        @note `_open_project_folder`, not `_project_dir()`: during the leave
+            question of a working-folder change `_project_dir()` already names
+            the other working folder, and showing the symbol tab (the question
+            shows the editor concerned) would rebind the editor there, which
+            drops the draft from the editor before the user answers.
+        """
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is None:
+            folder = self._project_dir_or_none()
+        return None if folder is None else Path(folder) / '.symbol-draft.json'
+
     def _refresh_symbol_tab(self, force=False):
         if not hasattr(self, 'symbol_tab'):
             return
@@ -13371,10 +13395,9 @@ class MainWindow(QMainWindow):
             # Bind the recovery file on this path too: set_data only shows a
             # carried draft, set_recovery_path settles it (keeps it durable
             # and offerable); without it a kept draft could be lost.
-            try:
-                self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
-            except ValueError:
-                pass  # no component name yet: no project folder to bind
+            recovery = self._symbol_recovery_path()
+            if recovery is not None:  # no component name yet: no project folder to bind
+                self.symbol_tab.set_recovery_path(recovery)
             self.symbol_tab.set_error(str(exc))
             return
         rows = deepcopy(self.pinout)
@@ -13382,12 +13405,27 @@ class MainWindow(QMainWindow):
         rows.extend({'pin': number, 'name': ''} for number in ids if number not in existing)
         self.symbol_tab.set_data(self._component_name(), rows,
             footprint=f'KiCadGen:{self._component_name()}', pad_ids=ids, force=force)
-        self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
+        recovery = self._symbol_recovery_path()
+        if recovery is not None:  # as above: an unnamed project has no folder
+            self.symbol_tab.set_recovery_path(recovery)
 
     def _apply_symbol_pinout(self, rows):
+        """@brief «Applica» of the symbol editor: save the rows in the project and the .kicad_sym.
+
+        @param rows The applied symbol rows.
+        @note `_symbol_apply_folder` is the open project's folder while the
+            leave question of a working-folder change applies the draft
+            (`_resolve_pending_edits`): `_project_dir()` then names the other
+            working folder, so the project file and the .kicad_sym are
+            written explicitly into the open project, never under the new
+            working folder. A refused write keeps the draft (`reject_apply`).
+        """
+        folder = getattr(self, "_symbol_apply_folder", None)
         previous = self.pinout
         self.pinout = deepcopy(rows)
-        if not self._save_project_config(force=True):
+        saved = (self._save_project_config(force=True) if folder is None
+                 else self._write_project_config_at(folder))
+        if not saved:
             self.pinout = previous
             self.symbol_tab.reject_apply(self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
@@ -13395,7 +13433,9 @@ class MainWindow(QMainWindow):
         self._draw_preview()
         self._sync_3d_pin_functions()
         self.symbol_tab.accept_apply()
-        self._save_applied_electrical_symbol(quiet=True)
+        self._save_applied_electrical_symbol(
+            None if folder is None else Path(folder) / f'{self._component_name()}.kicad_sym',
+            quiet=True)
 
     def _symbol_pad_mismatch(self) -> str:
         """@brief Why the applied symbol rows do not match the footprint pads, '' when they do.

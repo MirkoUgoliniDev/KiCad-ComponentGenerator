@@ -1,5 +1,36 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 — FATTO (non committato): «Applica» della bozza del SIMBOLO con cambio di «Area di lavoro»
+
+Richiesta dell'utente (OK alla proposta): oggi, cambiando «Area di lavoro» con
+una bozza del simbolo, «Applica» fallisce («Pinout non salvato...») perche'
+`_save_project_config` rifiuta: `_project_dir()` punta gia' alla cartella
+nuova. Si resta, nulla si perde, ma Applica e' un vicolo cieco.
+Correzione concordata, come il footprint (stessa UX): con `folder` del progetto
+aperto, `_apply_symbol_pinout` salva con `_write_project_config_at(folder)` e
+scrive il `.kicad_sym` in `folder/<nome>.kicad_sym`; mai nulla sotto la nuova
+area di lavoro; se una scrittura fallisce la bozza resta e si resta.
+Test: positivo (simbolo applicato nella cartella aperta, niente nella nuova) e
+negativo (scrittura rifiutata -> bozza intatta, si resta).
+CORREZIONE DELLA DIAGNOSI (la prima, data anche all'utente, era incompleta):
+prima ancora del salvataggio rifiutato, la domanda mostra la scheda Simbolo e
+`_on_tab_changed` -> `_refresh_symbol_tab` legava il file di recupero a
+`_project_dir()/.symbol-draft.json`, cioe' alla cartella NUOVA: per
+`set_recovery_path` e' «un altro progetto», quindi la bozza spariva
+dall'editor (restava solo nel file di recupero del progetto aperto) e
+«Applica» compariva DISATTIVATO, non in errore. Causa radice: il file di
+recupero seguiva la cartella calcolata, non il progetto aperto.
+FATTO (non committato): `_symbol_recovery_path()` usa `_open_project_folder`
+(None senza nome: nessun legame, come prima nel ramo d'errore; prima il ramo
+normale con progetto senza nome sollevava ValueError, raggiungibile solo con
+pad validi senza nome); `_resolve_pending_edits` passa la cartella con
+`_symbol_apply_folder` e `_apply_symbol_pinout` scrive progetto e .kicad_sym
+li'. Due test nuovi in tests/test_footprint_draft.py, entrambi ROSSI sul
+codice vecchio e verdi sul nuovo; 37 verdi nel lotto mirato.
+SUITE COMPLETA (2026-10-15, due meta'): A 3853 verdi, 7 saltati, 19 sottotest;
+B 4240 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8093 = 8091 + i 2 nuovi).
+STATO: fatto e verificato, NON committato (in attesa dell'utente).
+
 ## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `1075897` (+ handoff), mergiato in `main`, PC spento
 
 Committato su richiesta dell'utente («quando hai terminato committa, pusha,
