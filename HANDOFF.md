@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## FINE SESSIONE 16/10 notte — branch `ADVANCED`, commit in corso, NON mergiato in `main`, PC spento
+## FINE SESSIONE 16/10 notte — branch `ADVANCED`, commit `50791d3` (+ handoff), NON mergiato in `main`, PC spento
 
 Istruzione dell'utente: «fai un report, non mergiare in main, puoi
 committare e pushare, poi spegni il PC». Committati su ADVANCED i MEDI 1-11
