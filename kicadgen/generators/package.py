@@ -63,7 +63,7 @@ def preview_grid_origin(geometry: PackageGeometry) -> tuple:
 
 
 def build_package(geometry: PackageGeometry, name: str | None = None, *,
-                  datasheet: str = "", description: str = "") -> Footprint:
+                  datasheet: str = "", description: str = "", tags: str = "") -> Footprint:
     """@brief Build the footprint of a package described by explicit pad coordinates.
 
     @param geometry Validated package model; pins are normalized to the top
@@ -74,6 +74,10 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     @param description The project's own description for `descr` and the
         "Description" property; "" keeps the generic family text. The note
         about an estimated body centre is appended in both cases.
+    @param tags The project's keywords for the footprint `tags`; "" (or
+        blanks) keeps the package family, as before the keywords were passed
+        (review 2026-10-15, R2-M2: the project keywords never reached the
+        footprint on the package and host-mounted paths).
     @return Footprint whose pads keep the source numbers and relative
         positions; the footprint origin is the (possibly estimated) body
         centre, see PackageGeometry.body_frame_offset. A ``${REFERENCE}``
@@ -90,7 +94,10 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         # Fixed file language (see FOOTPRINT_TEXT_LANGUAGE): the estimate is
         # recorded in the library itself, not only in the session log.
         description += "; centro del corpo stimato dal campo dei pad"
-    fp = Footprint(name=footprint_name, description=description, tags=geometry.family,
+    # The project's keywords when given, like the pin-header and castellated
+    # generators; otherwise the family, so a project without keywords keeps a
+    # byte-identical file.
+    fp = Footprint(name=footprint_name, description=description, tags=tags.strip() or geometry.family,
                    datasheet=datasheet, attr=footprint_attr(p.pad_type for p in pins))
 
     # Lists, not dicts keyed by number: several pads may share one number

@@ -127,8 +127,14 @@ def test_dragging_the_value_snaps_to_the_grid_and_reaches_the_rows_and_the_file(
     tab._end_gesture(True)
     expected = (7.62, round(round((defaults['Value'][1] - 10.3) / 2.54) * 2.54, 4))
     assert all(row[PROPERTIES_KEY]['Value'] == list(expected) for row in tab.draft_rows())
-    assert all(tuple(row[PROPERTIES_KEY]['Reference']) == defaults['Reference'] for row in tab.draft_rows()), \
-        'the untouched property keeps its default, written explicitly'
+    # CONTRACT CHANGED 2026-10-15 (review M3): the untouched property is no
+    # longer written with its default. Persisting it froze it there, so the
+    # default rule (which lifts the texts above top pins) never reached it
+    # again; now only the moved key is stored and the other one follows the
+    # default, which still draws it at the same place today.
+    assert all(set(row[PROPERTIES_KEY]) == {'Value'} for row in tab.draft_rows()), \
+        'only the moved property is written'
+    assert tab._property_positions(tab.draft_rows(), tab._symbol)['Reference'] == defaults['Reference']
     assert tab.has_pending_edits()
     tab.apply()
     pins, body = symbol_inputs(tab.rows())
@@ -147,7 +153,10 @@ def test_dragging_the_reference_moves_only_the_reference(tab):
     tab._end_gesture(True)
     chosen = symbol_property_positions(tab.draft_rows())
     assert chosen['Reference'] == (-5.08, defaults['Reference'][1])
-    assert chosen['Value'] == defaults['Value']
+    # CONTRACT CHANGED 2026-10-15 (review M3): Value is not persisted with its
+    # default any more; it is absent and keeps following the default rule.
+    assert 'Value' not in chosen
+    assert tab._property_positions(tab.draft_rows(), tab._symbol)['Value'] == defaults['Value']
 
 
 def test_undo_restores_the_position_and_reset_layout_forgets_it(tab):
@@ -178,6 +187,85 @@ def test_a_cancelled_drag_leaves_the_rows_untouched(tab):
 def test_move_property_refuses_an_unknown_key(tab):
     assert not tab.move_property('Footprint', 0, 0)
     assert symbol_property_positions(tab.draft_rows()) == {}
+
+
+# ── Review M3 (2026-10-15): only the moved key is persisted ──────────
+
+def _drag(tab, key, dx_mm, dy_mm):
+    """Drag a property by (dx, dy) mm in symbol coordinates (y up) and commit."""
+    from PyQt6.QtCore import QPointF
+    from kicadgen.gui.symbol_tab import SCENE_UNITS_PER_MM
+    tab._begin_gesture(('property', key), QPointF(0, 0))
+    # Scene y grows downwards: a positive symbol dy is a negative scene dy.
+    tab._move_gesture(('property', key), QPointF(dx_mm * SCENE_UNITS_PER_MM, -dy_mm * SCENE_UNITS_PER_MM))
+    tab._end_gesture(True)
+
+
+def test_after_moving_the_reference_the_value_still_follows_the_default_rule(tab):
+    # Positive: the user drags Reference, then adds a top pin. Value was not
+    # moved, so it must clear the new pin; Reference stays where it was put.
+    _drag(tab, 'Reference', -5.08, 0)
+    moved = symbol_property_positions(tab.draft_rows())['Reference']
+    assert tab.move_pin('2', 'top', 0)
+    lifted = default_property_positions(tab._symbol)
+    tip = max(p.y for p in tab._symbol.pins if p.angle == 270)
+    assert lifted['Value'][1] >= tip + 2.54 - 1e-7, 'precondition: the rule lifts Value above the top pin'
+    positions = tab._property_positions(tab.draft_rows(), tab._symbol)
+    assert positions['Value'] == lifted['Value'], 'the unmoved Value follows the lifted default'
+    assert positions['Reference'] == moved, 'the moved Reference keeps the user choice'
+    pins, body = symbol_inputs(tab.draft_rows())
+    text = serialize_symbol('Board', pins, body=body, properties=symbol_property_positions(tab.draft_rows()))
+    assert f'(at 0 {lifted["Value"][1]:g} 0)' in _property_line(text, 'Value')
+
+
+def test_a_property_moved_by_the_user_does_not_follow_the_default_rule(tab):
+    # Negative: the property the user DID move is a choice and stays put
+    # when a top pin would lift the default.
+    _drag(tab, 'Value', 7.62, 0)
+    chosen = symbol_property_positions(tab.draft_rows())['Value']
+    assert tab.move_pin('2', 'top', 0)
+    assert tab._property_positions(tab.draft_rows(), tab._symbol)['Value'] == chosen
+    assert chosen != default_property_positions(tab._symbol)['Value']
+
+
+def test_a_second_drag_keeps_the_first_choice_and_adds_only_its_own_key(tab):
+    _drag(tab, 'Reference', -5.08, 0)
+    first = symbol_property_positions(tab.draft_rows())
+    _drag(tab, 'Value', 5.08, 0)
+    both = symbol_property_positions(tab.draft_rows())
+    assert set(both) == {'Reference', 'Value'}
+    assert both['Reference'] == first['Reference']
+    tab.undo()
+    assert symbol_property_positions(tab.draft_rows()) == first, 'undo returns to the single-key choice'
+    tab.redo()
+    assert symbol_property_positions(tab.draft_rows()) == both
+
+
+def test_dragging_a_property_back_onto_its_default_writes_nothing(tab):
+    # A drag that ends where it started (or on the default) must not pin
+    # the text: the rows keep no `symbol_properties`.
+    before = tab.draft_rows()
+    _drag(tab, 'Value', 0.3, -0.2)   # snaps back onto the default
+    assert tab.draft_rows() == before
+    assert all(PROPERTIES_KEY not in row for row in tab.draft_rows())
+
+
+def test_a_project_holding_both_keys_is_left_as_it_is(qapp):
+    # Projects saved by the old code carry both keys although one was only
+    # the default; they cannot be told apart from an explicit choice, so a
+    # new drag of one key keeps the other one untouched.
+    from kicadgen.gui.symbol_tab import SymbolTab
+    legacy = {'Reference': [0.0, 10.16], 'Value': [0.0, 7.62]}
+    rows = [dict(row, **{PROPERTIES_KEY: deepcopy(legacy)}) for row in ROWS]
+    tab = SymbolTab()
+    try:
+        tab.set_data('Board', rows, 'KiCadGen:Board', ['1', '2'])
+        _drag(tab, 'Reference', -5.08, 0)
+        chosen = symbol_property_positions(tab.draft_rows())
+        assert chosen['Value'] == (0.0, 7.62)
+        assert chosen['Reference'] == (-5.08, 10.16)
+    finally:
+        tab.deleteLater()
 
 
 def test_property_texts_do_not_enter_the_pin_name_overlap_check(tab):

@@ -4135,23 +4135,12 @@ class MainWindow(QMainWindow):
                 "action_test_kicad", "action_export", "action_install_global"):
             action = getattr(self, attr, None)
             if action is not None:
-                action.setEnabled(complete_available)
-                enabled_tooltips = {
-                    "btn_test_kicad": "Apre un progetto temporaneo: non installa e non modifica librerie KiCad",
-                    "btn_export": "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato",
-                    "btn_install_global": "Installa nella cartella scelta e registra la libreria globale di KiCad",
-                }
-                source = (enabled_tooltips.get(attr, "") if complete_available else
+                source = (self.OUTPUT_ACTION_TOOLTIPS.get(attr, "") if complete_available else
                           "Genera prima footprint e modello STEP del componente corrente")
-                if isinstance(action, QWidget) and action.property("workflow_title_source"):
-                    # Icona: prima riga il nome, poi la spiegazione o il motivo.
-                    self._set_workflow_detail(action, source)
-                    continue
-                rendered = self.i18n.text(source) if source else ""
-                if isinstance(action, QWidget):
-                    action.setProperty("i18n_tooltip_source", source)
-                    action.setProperty("i18n_tooltip_rendered", rendered)
-                action.setToolTip(rendered)
+                # The installation commands may be switched off again right
+                # after by `_refresh_install_gate` (missing required metadata),
+                # which `_refresh_metadata_proposals` below runs.
+                self._set_output_action_state(action, complete_available, source)
         # Verification must remain reachable when a footprint lacks its STEP.
         self._refresh_kicad_tab(footprint_available)
         if hasattr(self, "group_metadata"):
@@ -4205,6 +4194,45 @@ class MainWindow(QMainWindow):
                     "al footprint: usa «Aggiorna solo il footprint» prima di installare.")
             self.label_kicad_status.setText(status)
         return footprint_available
+
+    #: Explanation shown on the KiCad commands when they are available, by
+    #: attribute name; the menu entries keep the reason-only tooltip.
+    OUTPUT_ACTION_TOOLTIPS = {
+        "btn_test_kicad": "Apre un progetto temporaneo: non installa e non modifica librerie KiCad",
+        "btn_export": "Crea KiCadGen.pretty e KiCadGen.3dshapes nel progetto selezionato",
+        "btn_install_global": "Installa nella cartella scelta e registra la libreria globale di KiCad",
+    }
+
+    #: Every widget or menu entry that starts an INSTALLATION into a KiCad
+    #: library (project or global). The required-metadata block (user,
+    #: 2026-10-15) switches exactly these off; the isolated preview
+    #: (`btn_test_kicad`/`action_test_kicad`) and «Applica ai file» are NOT
+    #: in the list on purpose: they never write into a KiCad library.
+    INSTALL_ACTION_ATTRS = ("btn_export", "btn_install_global",
+                            "action_export", "action_install_global")
+
+    def _set_output_action_state(self, action, enabled: bool, source: str) -> None:
+        """@brief Enable or disable one KiCad command and set its tooltip.
+
+        @param action QToolButton made by `_workflow_tool_button` or a menu QAction.
+        @param enabled New enabled state.
+        @param source Italian catalogue source of the explanation, or an
+            already translated composed text (`I18n.text` returns a text
+            without a catalogue entry unchanged).
+        @note Icon buttons keep their name on the first tooltip line
+            (`_set_workflow_detail`); other widgets record the source so
+            the generic retranslation can redo it.
+        """
+        action.setEnabled(enabled)
+        if isinstance(action, QWidget) and action.property("workflow_title_source"):
+            # Icona: prima riga il nome, poi la spiegazione o il motivo.
+            self._set_workflow_detail(action, source)
+            return
+        rendered = self.i18n.text(source) if source else ""
+        if isinstance(action, QWidget):
+            action.setProperty("i18n_tooltip_source", source)
+            action.setProperty("i18n_tooltip_rendered", rendered)
+        action.setToolTip(rendered)
 
     #: Position of the «KiCad» tab in `self.tabs`.
     KICAD_TAB_INDEX = TAB_KICAD
@@ -7206,6 +7234,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_fp_file_stale", False):
             # Only when true: projects without the key read as «up to date».
             state["footprint_file_stale"] = True
+        if getattr(self, "_applied_metadata", None) is not None:
+            # Only when known: a project without the key reads as «not
+            # applied» (M1, fail closed) and opening it does not make it dirty.
+            state["metadata_applied"] = dict(self._applied_metadata)
         return state
 
     def _apply_project_state(self, state: dict) -> None:
@@ -7352,6 +7384,9 @@ class MainWindow(QMainWindow):
         self._fp_recoverable_source = None
         self._fp_draft_was_pending = False
         self._fp_file_stale = state.get("footprint_file_stale") is True
+        # What the footprint on disk carries of the metadata (M1); before the
+        # metadata fields are restored, whose refresh reads it.
+        self._applied_metadata = self._valid_applied_metadata(state.get("metadata_applied"))
         # A rewrite still pending belongs to the project being left: the
         # one now open has its own .kicad_mod, written by its own edits.
         self._clear_footprint_rewrite()
@@ -9922,7 +9957,7 @@ class MainWindow(QMainWindow):
         group = CollapsibleGroupBox("Metadati del componente")
         group.setToolTip(
             "Designatore, descrizione, parole chiave, datasheet e filtri del "
-            "componente, con le regole KLC. Clic sul titolo per aprire o chiudere.")
+            "componente, con i controlli KiCad (KLC). Clic sul titolo per aprire o chiudere.")
         self.metadata_body = group.body
         self._metadata_help_buttons: dict[str, QToolButton] = {}
         self._metadata_help_dialog = None
@@ -9981,9 +10016,12 @@ class MainWindow(QMainWindow):
         self.klc_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.klc_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.klc_list.setMaximumHeight(120)
-        self.label_klc = QLabel("Regole KLC:")
+        # Renamed from «Regole KLC:» (user, 2026-10-15, option 3: the old
+        # label did not say these are checks run on the component).
+        self.label_klc = QLabel("Controlli KiCad (KLC):")
         self.label_klc.setToolTip(
-            "Osservazioni sulle convenzioni delle librerie KiCad: ⛔ errore, ⚠ avviso.")
+            "Controlli sulle convenzioni delle librerie KiCad (KLC): ⛔ errore, ⚠ avviso. "
+            "Passa il mouse su una riga per sapere che cosa correggere e dove.")
         form.addRow(self.label_klc, self._metadata_field_row(self.klc_list, "klc", top=True))
         QWidget.setTabOrder(self.field_reference, self.field_meta_description)
         QWidget.setTabOrder(self.field_meta_description, self.field_meta_keywords)
@@ -10003,7 +10041,7 @@ class MainWindow(QMainWindow):
         "keywords": "Parole chiave",
         "datasheet": "Datasheet (URL o file)",
         "fp_filters": "Filtri footprint",
-        "klc": "Regole KLC",
+        "klc": "Controlli KiCad (KLC)",
     }
 
     def _metadata_field_row(self, field: QWidget, key: str, top: bool = False) -> QWidget:
@@ -10050,8 +10088,10 @@ class MainWindow(QMainWindow):
         @param key A key of `METADATA_HELP_TITLES`.
         @return Translated sections in reading order; empty for an unknown key.
         @note The KLC statements must agree with `services.klc_checks`: an
-            «error» there blocks the installation (after a confirmation), a
-            «warning» is advice. Keep both in step when a rule changes.
+            empty REQUIRED field (designator, description, keywords,
+            datasheet; user, 2026-10-15) blocks the installation with no
+            override, any other «error» asks for a confirmation, a «warning»
+            is advice. Keep both in step when a rule changes.
         """
         where = self.i18n.text("Dove finisce")
         what = self.i18n.text("Che cosa inserire")
@@ -10067,8 +10107,9 @@ class MainWindow(QMainWindow):
                     "Proprietà «Reference» del simbolo. Il footprint eredita il riferimento dal simbolo "
                     "quando lo schema viene annotato e portato sul PCB.")),
                 (rules, self.i18n.text(
-                    "KLC S6.1: prefisso di sole lettere. Un designatore vuoto o con altri caratteri è un "
-                    "errore ⛔: «Applica ai file» lo rifiuta e l’installazione chiede conferma.")),
+                    "KLC S6.1: prefisso di sole lettere. È un campo obbligatorio: senza valore né proposta "
+                    "è un errore ⛔ che blocca l’installazione finché non viene compilato. Con cifre, spazi "
+                    "o «?» è un errore ⛔: «Applica ai file» lo rifiuta e l’installazione chiede conferma.")),
                 (examples, self.i18n.text(
                     "U circuiti integrati e moduli · J connettori · K relè · Q transistor · D diodi e LED · "
                     "R resistori · C condensatori · L induttori · Y quarzi · SW interruttori.")),
@@ -10082,8 +10123,9 @@ class MainWindow(QMainWindow):
                     "Proprietà «Description» del simbolo e campo «descr» del footprint: lo stesso testo "
                     "in entrambi, così simbolo e footprint restano riconoscibili come coppia.")),
                 (rules, self.i18n.text(
-                    "Le convenzioni KiCad la richiedono: vuota è un avviso ⚠ (non blocca). Su più righe o "
-                    "con caratteri di controllo è un errore ⛔.")),
+                    "Campo obbligatorio: vuota è un errore ⛔ che blocca l’installazione finché non viene "
+                    "compilata («Applica ai file» resta disponibile). Su più righe o con caratteri di "
+                    "controllo è un errore ⛔.")),
                 (examples, self.i18n.text(
                     "«Modulo ESP32-S3-WROOM-1U, 2x22 contatti castellated, 63.30 x 25.40 mm» · "
                     "«Regolatore LDO 3.3 V 1 A, SOT-223».")),
@@ -10096,8 +10138,9 @@ class MainWindow(QMainWindow):
                 (where, self.i18n.text(
                     "Proprietà «ki_keywords» del simbolo e campo «tags» del footprint.")),
                 (rules, self.i18n.text(
-                    "Vuote è un avviso ⚠: la ricerca funziona peggio ma l’installazione procede. "
-                    "Con caratteri di controllo è un errore ⛔.")),
+                    "Campo obbligatorio: vuote è un errore ⛔ che blocca l’installazione finché non vengono "
+                    "compilate («Applica ai file» resta disponibile). Con caratteri di controllo è un "
+                    "errore ⛔.")),
                 (examples, self.i18n.text(
                     "«ESP32-S3 wifi bluetooth modulo castellated» · «ldo regolatore 3.3V sot-223».")),
             ],
@@ -10110,7 +10153,8 @@ class MainWindow(QMainWindow):
                     "Proprietà «Datasheet» del simbolo e del footprint. In KiCad si apre dal menu del "
                     "componente con «Mostra datasheet».")),
                 (rules, self.i18n.text(
-                    "Vuoto o con spazi è un avviso ⚠: si installa lo stesso. Con caratteri di controllo "
+                    "Campo obbligatorio: vuoto è un errore ⛔ che blocca l’installazione finché non viene "
+                    "compilato. Con spazi è un avviso ⚠: si installa lo stesso. Con caratteri di controllo "
                     "è un errore ⛔.")),
                 (examples, self.i18n.text(
                     "«https://www.espressif.com/documentation/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf» · "
@@ -10134,22 +10178,54 @@ class MainWindow(QMainWindow):
             "klc": [
                 (what, self.i18n.text(
                     "Le KiCad Library Conventions (KLC) sono le regole con cui vengono scritte le librerie "
-                    "ufficiali di KiCad. Qui vengono controllate quelle sui metadati e sul footprint, "
-                    "mentre scrivi: la lista si aggiorna da sola.")),
+                    "ufficiali di KiCad. Qui vengono controllate quelle sui metadati, sul footprint e sul "
+                    "simbolo, mentre scrivi: la lista si aggiorna da sola. Passa il mouse su una riga: il "
+                    "suggerimento dice che cosa correggere e in quale campo, scheda o comando.")),
                 (where, self.i18n.text(
-                    "⛔ errore: ciò che KiCad o le convenzioni rifiutano; l’installazione chiede conferma "
-                    "prima di procedere. ⚠ avviso: un consiglio, l’installazione procede.")),
+                    "⛔ errore: ciò che KiCad o le convenzioni rifiutano. Un campo obbligatorio vuoto blocca "
+                    "l’installazione finché non viene compilato; per gli altri errori l’installazione chiede "
+                    "conferma prima di procedere. ⚠ avviso: un consiglio, l’installazione procede.")),
                 (rules, self.i18n.text(
-                    "Designatore vuoto o non alfabetico, testi su più righe, filtri con separatori, nome "
-                    "del footprint vuoto o con caratteri vietati: errori. Descrizione, parole chiave o "
-                    "datasheet vuoti, spazi nel nome del footprint: avvisi. Il riferimento completo è "
-                    "kicad.org, sezione «Library Conventions».")),
+                    "Campi obbligatori vuoti (designatore, descrizione, parole chiave, datasheet), "
+                    "designatore non alfabetico, testi su più righe, filtri con separatori, nome del "
+                    "footprint vuoto o con caratteri vietati: errori. Filtri footprint vuoti, datasheet con "
+                    "spazi, spazi nel nome del footprint: avvisi. Il riferimento completo è kicad.org, "
+                    "sezione «Library Conventions».")),
                 (examples, self.i18n.text(
-                    "«Nessuna osservazione.» vuol dire che i controlli eseguiti qui sono passati, non che "
+                    "«Nessun problema trovato» vuol dire che i controlli eseguiti qui sono passati, non che "
                     "il componente sia verificato in KiCad: per quello c’è «Verifica prima "
                     "dell’installazione».")),
             ],
         }
+        # Review pass 2 (M1, 2026-10-15): installation also waits until the
+        # fields are WRITTEN into the files. The sentence is appended to the
+        # «Regole KLC» section of the fields in the applied record
+        # (`APPLIED_METADATA_KEYS`) and to the «Dove finisce» section of the
+        # KLC help, which already explains what blocks the installation. The
+        # designator is excluded: it lives only in the symbol, which the
+        # installation does not copy, so it is not in the applied record.
+        # Appended rather than merged into the existing texts so each sentence
+        # is one catalogue entry, translated once. It says the footprint is
+        # REGENERATED (review 2026-10-15, L-a): on an old project the first
+        # Apply rewrites the .kicad_mod with the current generator, which can
+        # differ from the file on disk in more than the metadata.
+        applied_note = {
+            field: self.i18n.text(
+                "Anche con il campo compilato, l’installazione resta bloccata finché il valore non è "
+                "scritto nei file con «Applica ai file», che rigenera il footprint; un progetto salvato "
+                "prima di questo controllo richiede un «Applica ai file» prima della prima "
+                "installazione, e il footprint viene rigenerato con la versione attuale del programma.")
+            for field in self.APPLIED_METADATA_KEYS}
+        applied_note["klc"] = self.i18n.text(
+            "Anche con i campi compilati, l’installazione resta bloccata finché descrizione, parole "
+            "chiave e datasheet non sono scritti nei file con «Applica ai file», che rigenera il "
+            "footprint; un progetto salvato prima di questo controllo richiede un «Applica ai file» "
+            "prima della prima installazione, e il footprint viene rigenerato con la versione "
+            "attuale del programma.")
+        section = {**{field: rules for field in self.APPLIED_METADATA_KEYS}, "klc": where}
+        if key in applied_note:
+            content[key] = [(title, f"{body} {applied_note[key]}" if title == section[key] else body)
+                            for title, body in content[key]]
         return content.get(key, [])
 
     def _show_metadata_help(self, key: str) -> None:
@@ -10318,17 +10394,268 @@ class MainWindow(QMainWindow):
                                     symbol_text=texts[0], footprint_text=texts[1])
 
     def _refresh_klc_findings(self) -> None:
-        """@brief Rewrite the read-only KLC list from the current fields and files."""
+        """@brief Rewrite the read-only KLC list from the current fields and files.
+
+        @note Runs on every edit of a metadata field, so it also refreshes the
+            installation block (`_refresh_install_gate`): filling the last
+            missing required field re-enables the install commands at once,
+            emptying one disables them.
+        """
         if not hasattr(self, "klc_list"):
             return
         self.klc_list.clear()
         findings = self._klc_findings()
         if not findings:
-            self.klc_list.addItem(self.i18n.text("Nessuna osservazione."))
-            return
+            # Empty state (user, 2026-10-15): a blank list read as «nothing
+            # was checked». This row is NOT a finding: it carries no code in
+            # FINDING_CODE_ROLE, and the gates (`_refresh_install_gate`,
+            # `_confirm_klc_errors`, «Applica ai file») read `_klc_findings`,
+            # never the rows of this list.
+            self.klc_list.addItem(self.i18n.text("Nessun problema trovato"))
+        from ..services import klc_checks
         for finding in findings:
             prefix = "⛔ " if finding.severity == "error" else "⚠ "
-            self.klc_list.addItem(prefix + finding.message)
+            item = QListWidgetItem(prefix + finding.message)
+            item.setData(self.FINDING_CODE_ROLE, finding.code)
+            # The remedy (what to change and where) lives next to the rule
+            # in klc_checks.FIX_HINTS; the GUI only shows it. A finding made
+            # without one (tests, future callers) falls back to the table.
+            item.setToolTip(finding.hint or klc_checks.fix_hint(finding.code))
+            self.klc_list.addItem(item)
+        self._refresh_install_gate(findings)
+
+    #: Item data role holding the finding code of a «Controlli KiCad (KLC)»
+    #: row; the empty-state row has none, which is how tests tell it apart.
+    FINDING_CODE_ROLE = Qt.ItemDataRole.UserRole
+
+    # ── Required metadata block of the installation (user, 2026-10-15) ──
+
+    def _missing_required_metadata(self, findings=None) -> list[str]:
+        """@brief The required metadata fields that are empty now.
+
+        @param findings KLC findings already computed, or None to compute them.
+        @return Keys of `METADATA_HELP_TITLES` (reference, description,
+            keywords, datasheet) in form order; empty when nothing is missing,
+            when no project is open, or before the metadata form exists (a
+            field that cannot be typed cannot be required).
+        @note The designator counts as filled while its proposal applies
+            (`_effective_reference`): that proposal is the value the files
+            get. Footprint filters are optional and never listed.
+        """
+        if not hasattr(self, "field_reference"):
+            return []
+        from ..services import klc_checks
+        if findings is None:
+            findings = self._klc_findings()
+        return klc_checks.missing_required_fields(findings)
+
+    def _required_metadata_reason(self, missing: list[str]) -> str:
+        """@brief Translated reason of the installation block, naming the missing fields.
+
+        @param missing Field keys from `_missing_required_metadata` (non-empty).
+        @return One sentence for the tooltip of the install commands and for
+            the refusal message of a direct call.
+        """
+        fields = ", ".join(self.i18n.text(self.METADATA_HELP_TITLES[key]) for key in missing)
+        return self.i18n.text(
+            "Installazione bloccata: compila i campi obbligatori in «Metadati del "
+            "componente»: {fields}.").format(fields=fields)
+
+    # ── Metadata applied to the files (review pass 2, M1, 2026-10-15) ──
+    #
+    # The installation copies the .kicad_mod and the STEP ON DISK, whose
+    # descr/tags/Datasheet were written by the last generation, not the
+    # fields on screen. Checking only the fields let a footprint generated
+    # with an empty description be installed after the user typed one but
+    # never pressed «Applica ai file». The rule must hold on what is installed,
+    # so the installation also waits until the values in the fields are the
+    # values the last footprint generation wrote.
+    #
+    # Why a snapshot of what was written and not a read-back of the file:
+    # the generators do not copy the fields verbatim. A package appends a
+    # note to the description («; centro del corpo stimato…») and, with the
+    # keywords empty, writes its family as tags (since R2-M2 the keywords,
+    # when given, are written on every path); pin headers and modules write
+    # a generic description when the field is empty. Comparing the file with
+    # the fields would block
+    # those components forever, or need a copy of every generator's rules
+    # here. Every .kicad_mod write goes through `_generate` -> GenerateWorker
+    # -> `_on_generated` (generation, «Applica ai file», «Aggiorna solo il
+    # footprint», the rewrite after a footprint edit, the automatic pipeline),
+    # so the values handed to the worker ARE what the file holds once the
+    # worker reports success. Comparing VALUES, not an «edited» flag, makes
+    # an edit reverted to the applied value, an undo or a language change
+    # (which changes no value) neutral. The snapshot is saved with the
+    # project (`metadata_applied`): a project saved before this check, or
+    # whose save was lost, has none and fails CLOSED (one «Applica ai file»
+    # re-establishes it), never open.
+    # Limit: a .kicad_mod replaced outside the program keeps the old
+    # snapshot; the isolated preview and «Verifica componente» read the file.
+
+    #: Keys of the snapshot: the required metadata that reach the INSTALLED
+    #: footprint. The designator is not in it: it lives only in the symbol,
+    #: which the KiCad-tab installation does not copy.
+    APPLIED_METADATA_KEYS = ("description", "keywords", "datasheet")
+
+    def _metadata_snapshot(self) -> dict:
+        """@brief The metadata values a footprint generation started now would write.
+
+        @return {description, keywords, datasheet}, stripped, as
+            `_metadata_dict` gives them to the generators.
+        """
+        values = self._metadata_dict()
+        return {key: values[key] for key in self.APPLIED_METADATA_KEYS}
+
+    def _note_metadata_written(self, snapshot) -> None:
+        """@brief Record the metadata a successful footprint write carried.
+
+        @param snapshot Dict made by `_metadata_snapshot` when the worker was
+            created; anything else is ignored (the previous record stays).
+        """
+        if isinstance(snapshot, dict) and set(snapshot) == set(self.APPLIED_METADATA_KEYS) \
+                and all(isinstance(value, str) for value in snapshot.values()):
+            self._applied_metadata = dict(snapshot)
+
+    @classmethod
+    def _valid_applied_metadata(cls, value):
+        """@brief The `metadata_applied` record of a project file, or None when absent or invalid.
+
+        @param value Raw value read from the project file.
+        @return A dict with exactly `APPLIED_METADATA_KEYS` as strings, or None
+            (treated as «not applied»: the safe side).
+        """
+        if (isinstance(value, dict) and set(value) == set(cls.APPLIED_METADATA_KEYS)
+                and all(isinstance(item, str) for item in value.values())):
+            return dict(value)
+        return None
+
+    def _metadata_not_applied(self) -> bool:
+        """@brief True while the fields hold metadata the footprint on disk does not.
+
+        @return True when no write has been recorded for this project or the
+            recorded values differ from the current fields.
+        """
+        applied = getattr(self, "_applied_metadata", None)
+        return applied is None or applied != self._metadata_snapshot()
+
+    def _install_block_reason(self, findings=None) -> str:
+        """@brief Why the metadata block the installation now, or '' when they do not.
+
+        @param findings KLC findings already computed, or None to compute them.
+        @return Translated reason: the missing required fields first (filling
+            them is the first step), otherwise the request to press
+            «Applica ai file» when the fields are not in the files yet.
+        @note Without the metadata form there is nothing to fill or apply:
+            no block (see `_missing_required_metadata`).
+        """
+        if not hasattr(self, "field_reference"):
+            return ""
+        missing = self._missing_required_metadata(findings)
+        if missing:
+            return self._required_metadata_reason(missing)
+        if self._metadata_not_applied():
+            return self.i18n.text(
+                "Installazione bloccata: i metadati non sono ancora nei file del componente. "
+                "Premi «Applica ai file» in «Metadati del componente».")
+        return ""
+
+    def _refresh_install_gate(self, findings=None) -> list[str]:
+        """@brief Switch the installation commands off while the metadata block it.
+
+        @param findings KLC findings already computed, or None to compute them.
+        @return The missing required field keys (empty when none is missing;
+            the commands may still be off because the metadata are not applied).
+        @note Blocked while a required field is empty (user, 2026-10-15) or
+            while the fields are not yet written into the footprint that
+            would be installed (review pass 2, M1; see the block comment
+            above `APPLIED_METADATA_KEYS`).
+        @note Only the commands of `INSTALL_ACTION_ATTRS` change, and only
+            while footprint and STEP exist: without them
+            `_refresh_output_actions_inner` has already disabled them with the
+            «Genera prima…» reason, which stays. The isolated preview and
+            «Applica ai file» are left alone on purpose (user, 2026-10-15).
+        @note The install methods check again on their own
+            (`_refuse_install_for_metadata`): a disabled button is not the
+            only guard, a menu entry, the usage wizard or a direct call must
+            be refused too.
+        """
+        missing = self._missing_required_metadata(findings)
+        complete = self._kicad_output_complete()
+        reason = self._install_block_reason(findings) if complete else ""
+        if complete:
+            for attr in self.INSTALL_ACTION_ATTRS:
+                action = getattr(self, attr, None)
+                if action is not None:
+                    self._set_output_action_state(
+                        action, not reason, reason or self.OUTPUT_ACTION_TOOLTIPS.get(attr, ""))
+        self._auto_expand_metadata(bool(reason), complete)
+        return missing
+
+    def _metadata_project_key(self):
+        """@brief Identity of the open project for the auto-open of the metadata box.
+
+        @return The open project folder (`_open_project_folder`), else the
+            folder the name points to, as a normalised string; None without a
+            project.
+        @note The FOLDER, not the component name (review pass 2, L5): two
+            projects with the same name in different working folders are two
+            contexts.
+        """
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is None and self._named():
+            folder = self._project_dir()
+        return os.path.normcase(os.path.normpath(str(folder))) if folder is not None else None
+
+    def _auto_expand_metadata(self, blocked: bool, complete: bool = True) -> None:
+        """@brief Open «Metadati del componente» when it starts blocking the installation.
+
+        @param blocked True while the metadata block the installation (a
+            required field empty or the fields not applied to the files).
+        @param complete True while footprint and STEP exist; only then is the
+            block state meaningful.
+        @note The box opens only on a TRANSITION into the blocked state:
+            from a complete unblocked state to blocked, or to a blocked state
+            of another project (another folder is a new context, review pass
+            2, L5). While the state stays blocked nothing is reopened, so a
+            user who collapses the box is not fought on every keystroke;
+            emptying a field again after having filled them all is a new
+            transition and reopens it.
+        @note A refresh while footprint or STEP is absent (a file being
+            rewritten, deleted outside the program) changes nothing: the last
+            known state is kept, so such a refresh during a regeneration
+            cannot pose as «unblocked» and reopen the box afterwards.
+        """
+        group = getattr(self, "group_metadata", None)
+        key = self._metadata_project_key()
+        last_key, last_blocked = getattr(self, "_metadata_block_seen", (None, False))
+        if key != last_key:
+            # Another project: its first blocked state is a transition.
+            last_blocked = False
+        if complete:
+            if blocked and not last_blocked and group is not None:
+                group.setExpanded(True)
+            last_blocked = blocked
+        self._metadata_block_seen = (key, last_blocked)
+
+    def _refuse_install_for_metadata(self) -> bool:
+        """@brief Defence in depth: refuse an installation while the metadata block it.
+
+        @return True when the installation must stop (the user was told why).
+        @note Covers both blocks: a required field empty, and fields not yet
+            applied to the files (`_install_block_reason`).
+        @note No «install anyway» question (user, 2026-10-15): the only way
+            on is to fill the fields and apply them. The box is opened because
+            the user has just asked for the installation, so showing the
+            fields and «Applica ai file» is the answer, not an intrusion.
+        """
+        reason = self._install_block_reason()
+        if not reason:
+            return False
+        if hasattr(self, "group_metadata"):
+            self.group_metadata.setExpanded(True)
+        self._append_log(reason)
+        QMessageBox.warning(self, self.i18n.text("Metadati del componente"), reason)
+        return True
 
     def _confirm_klc_errors(self) -> bool:
         """@brief Ask before installing a component whose KLC checks report ERRORS.
@@ -10337,6 +10664,8 @@ class MainWindow(QMainWindow):
         @note Warnings never block: they are advice. Errors are what KiCad or
             the conventions reject, so installing them is a choice to make
             knowingly, not a default.
+        @note Empty REQUIRED fields never reach this question: the install
+            methods refuse them first (`_refuse_install_for_metadata`).
         """
         errors = [f for f in self._klc_findings() if f.severity == "error"]
         if not errors:
@@ -10362,13 +10691,26 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, self.i18n.text("Metadati del componente"),
                                     self.i18n.text("Attendi la fine del lavoro in corso."))
             return
-        errors = [f for f in self._klc_findings() if f.severity == "error"]
+        from ..services import klc_checks
+        # Only errors in the VALUES this command writes stop it
+        # (`klc_checks.WRITE_BLOCKING_CODES`, review 2026-10-15, R2-M1): an
+        # empty description/keywords/datasheet is a valid empty property, a
+        # broken .kicad_mod is what the regeneration repairs (its hint sends
+        # the user here), and symbol/name findings belong to the install-time
+        # confirmation. Refusing those made «Applica ai file» unreachable and,
+        # since installation waits for it, blocked installation for good.
+        errors = [f for f in self._klc_findings()
+                  if f.severity == "error" and f.code in klc_checks.WRITE_BLOCKING_CODES]
         if errors:
             # An error means KiCad or the KLC refuse the value (e.g. a
             # designator with digits): writing it would only move the
-            # problem into the files. The list under the fields shows it.
+            # problem into the files. The message names exactly the findings
+            # that stop this command (review 2026-10-15, L-4): the list under
+            # the fields also holds errors that do not (file and symbol
+            # findings), and «the listed errors» left the user guessing.
             QMessageBox.warning(self, self.i18n.text("Metadati del componente"), self.i18n.text(
-                "Correggi prima gli errori KLC elencati: i file non sono stati riscritti."))
+                "Correggi prima questi errori dei metadati, poi riprova: i file non sono stati "
+                "riscritti.\n{errors}").format(errors="\n".join("⛔ " + f.message for f in errors)))
             return
         self._save_project_config(force=True)
         if not self._generate(footprint_only=True):
@@ -10599,12 +10941,18 @@ class MainWindow(QMainWindow):
         self.label_kicad_status.setText(message)
 
     def _install_project_library(self) -> None:
-        """@brief Install the current artifacts as a portable project library."""
+        """@brief Install the current artifacts as a portable project library.
+
+        @note Refused while a required metadata field is empty, before any
+            folder is asked (`_refuse_install_for_metadata`).
+        """
         if not self._kicad_output_complete():
             self._kicad_outputs_went_missing()
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
+            return
+        if self._refuse_install_for_metadata():
             return
         destination = QFileDialog.getExistingDirectory(
             self, self.i18n.text("Scegli la cartella del progetto KiCad"),
@@ -10627,12 +10975,18 @@ class MainWindow(QMainWindow):
             root, project_library=True, artifacts=artifacts)
 
     def _install_global_library(self) -> None:
-        """@brief Install the current artifacts in the global KiCad table."""
+        """@brief Install the current artifacts in the global KiCad table.
+
+        @note Refused while a required metadata field is empty, before KiCad
+            is looked for or a folder is asked.
+        """
         if not self._kicad_output_complete():
             self._kicad_outputs_went_missing()
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
+            return
+        if self._refuse_install_for_metadata():
             return
         applications = detect_external_applications()
         if not applications.kicad_cli:
@@ -10661,9 +11015,21 @@ class MainWindow(QMainWindow):
     def _install_kicad_library(
             self, destination: Path, *, project_library: bool,
             table_path: Path | None = None, artifacts=None) -> None:
-        """@brief Install with an explicit overwrite decision and final report."""
+        """@brief Install with an explicit overwrite decision and final report.
+
+        @param destination Folder that receives KiCadGen.pretty/.3dshapes.
+        @param project_library True for a portable project library.
+        @param table_path Global fp-lib-table, for a global installation.
+        @param artifacts Discovered artifacts, or None to discover them.
+        @note The common sink of both installations checks the required
+            metadata again, so no caller (button, menu, wizard, test or a
+            future one) can bypass the block; only then are the remaining
+            KLC errors confirmed.
+        """
         artifacts = artifacts or self._current_kicad_artifacts()
         if artifacts is None:
+            return
+        if self._refuse_install_for_metadata():
             return
         if not self._confirm_klc_errors():
             return
@@ -11574,6 +11940,16 @@ class MainWindow(QMainWindow):
         # build_package itself (the other generators read it from params).
         self._worker.datasheet = self._effective_datasheet()
         self._worker.description = self.field_description.text().strip()
+        # The project keywords reach the footprint `tags` on the PackageGeometry
+        # path too (R2-M2); the other generators read them from `params.tags`,
+        # which `_current_params`/`_current_castellated_params` fill with the
+        # same stripped `field_tags`: every path writes what the snapshot
+        # below records as «keywords».
+        self._worker.tags = self.field_tags.text().strip()
+        # The metadata this write carries (review pass 2, M1): recorded as
+        # «applied» by `_on_generated` only when the worker reports the file
+        # written, so a failed or refused generation applies nothing.
+        self._worker.metadata_snapshot = self._metadata_snapshot()
         self._worker._model_revision = self._model_revision
         self._worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._worker.done.connect(self._on_generated)
@@ -11755,6 +12131,10 @@ class MainWindow(QMainWindow):
         # Every generation writes the APPLIED footprint: the file is in step
         # with the project again (the autosave records it).
         self._fp_file_stale = False
+        # The metadata the worker wrote into this file are now the applied
+        # ones (M1). `sender()` is the worker that wrote it; a direct call
+        # (no worker) records nothing.
+        self._note_metadata_written(getattr(self.sender(), "metadata_snapshot", None))
         self._refresh_output_actions()
         self._append_log(f"OK -> {path}")
         if not self._cad_result_is_current():

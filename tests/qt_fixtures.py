@@ -168,13 +168,30 @@ def shutdown_main_window(w, app):
         the collector destroyed the window during a later test, whose fakes
         were then called by the dying widgets. A worker that does not stop in
         time keeps the window alive for the session instead of crashing it.
+    @note The window is NOT frozen (2026-10-15). pytest still references it
+        here (`item.funcargs`), so the old gc.freeze() pinned its whole Python
+        graph, and the sip wrappers that graph kept, for the rest of the
+        session. Instead the attributes of the destroyed window are dropped
+        (`_release_destroyed_window`), so what is reachable ONLY through them
+        is collected right here, while the test's fakes and guards are still
+        installed. Not everything goes now: objects the test or its other
+        fixtures still reference survive, and the `monkeypatch` fixture,
+        torn down after this one, writes the attributes it patched on the
+        window back onto the cleared wrapper (the class's bound methods, or
+        whatever instance value the test replaced), which recreates small
+        window -> value -> window cycles. Those, and the wrapper itself, are
+        collected once pytest releases the test, by the guarded post-test
+        collection (`conftest.request_post_test_collection`).
     """
     from PyQt6 import sip
     from PyQt6.QtCore import QEvent, QThread
     from PyQt6.QtWidgets import QApplication
-    from conftest import _GRAVEYARD, _THREAD_LEAKS, _current_test, join_qthreads
+    from conftest import (_GRAVEYARD, _THREAD_LEAKS, _current_test, join_qthreads,
+                          request_post_test_collection)
     if sip.isdeleted(w):
+        _release_destroyed_window(w)
         gc.collect()
+        request_post_test_collection()
         return
     workers = [value for value in vars(w).values() if isinstance(value, QThread)]
     workers += [worker for worker in (getattr(w, "_abandoned_workers", None) or [])
@@ -182,6 +199,8 @@ def shutdown_main_window(w, app):
     leaked = join_qthreads(workers)
     app.processEvents()
     if leaked:
+        # Deliberately kept alive, graph included: freeing a running QThread
+        # is a qFatal, and its slots may still reach the window's attributes.
         _GRAVEYARD.append(w)
         _GRAVEYARD.extend(leaked)
         _THREAD_LEAKS.append((_current_test(), "MainWindow workers: " + ", ".join(
@@ -193,8 +212,29 @@ def shutdown_main_window(w, app):
         w.deleteLater()
         QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
     app.processEvents()
+    _release_destroyed_window(w)
     del w
     gc.collect()
-    # What survived is frozen: never rescanned nor destroyed in a later test
-    # (see conftest._collect_new_top_level_widgets).
-    gc.freeze()
+    request_post_test_collection()
+
+
+def _release_destroyed_window(w) -> None:
+    """Drop the Python attributes of a window whose C++ object is already destroyed.
+
+    The attributes (dialogs, scenes, kept graphics items, workers, closures)
+    are reachable from the wrapper, and the wrapper from pytest until the
+    test is over: without this they could only be collected between tests,
+    with the test's monkeypatches already undone and no network guard. Only
+    what no other live object references is freed by the caller's
+    collection; values monkeypatch restores later land back on the wrapper
+    and are freed after the test (see `shutdown_main_window`). A window that
+    still exists on the C++ side is left untouched, because its widgets may
+    still call back into those attributes.
+    """
+    from PyQt6 import sip
+    if not sip.isdeleted(w):
+        return
+    try:
+        vars(w).clear()
+    except TypeError:       # a wrapper without __dict__ holds nothing to drop
+        pass

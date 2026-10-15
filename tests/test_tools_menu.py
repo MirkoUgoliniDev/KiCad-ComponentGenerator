@@ -1,7 +1,7 @@
 """@brief «Strumenti» menu: the six entries removed on 25/09, back in one place (user, 2026-09-26)."""
 from PyQt6.QtWidgets import QMessageBox
 
-from tests.test_photo_inventory_gui import gui
+from tests.test_photo_inventory_gui import fill_required_metadata, gui
 
 KICAD_ACTIONS = ("action_test_kicad", "action_export", "action_install_global")
 
@@ -36,6 +36,9 @@ def test_kicad_entries_are_off_with_the_reason_until_footprint_and_step_exist(wi
     _write_outputs(window, step=False)
     assert window.action_open_output.isEnabled()
     assert not any(getattr(window, attr).isEnabled() for attr in KICAD_ACTIONS)
+    # CONTRACT CHANGED 2026-10-15: the install entries also need the required
+    # metadata (user); filled so this test keeps checking the file gate.
+    fill_required_metadata(window)
     _write_outputs(window, step=True)
     assert all(getattr(window, attr).isEnabled() for attr in KICAD_ACTIONS)
 

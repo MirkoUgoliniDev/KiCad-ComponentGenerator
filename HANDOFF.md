@@ -1,5 +1,176 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 pomeriggio — FATTO (commit in corso): «scatena agenti esperti e fixa tutto» (utente)
+
+Richiesta: risolvere tutti i punti aperti, con piu' passaggi fino a
+soluzione, commenti nel codice sempre. Interpretazione:
+- DIFETTI (si procede subito, agenti su file disgiunti):
+  A. Value/Reference predefiniti sopra la punta di un pin sul lato superiore
+     (`generators/symbol.default_property_positions`): regola generale dalla
+     geometria (punte dei pin superiori), file senza pin in alto invariati.
+     Agente A: generators/symbol.py + test nuovi.
+  B. `tests/qt_fixtures.shutdown_main_window` congela (gc.freeze) il grafo
+     delle finestre distrutte: liberarle senza riaprire l'instabilita' del
+     test drills (wrapper sip riusati). Agente B: tests/qt_fixtures.py,
+     tests/conftest.py, tests/test_test_infrastructure.py.
+  A FATTO (agente, rivisto dal coordinatore, non committato): base = punto
+  piu' alto disegnato da linea e numero di qualunque pin (`_pin_drawing_top`,
+  dalla posizione reale, non dal campo side), arrotondato in su a 1,27
+  (`PROPERTY_GRID_MM`) se sopra il corpo; Value +2,54, Reference +5,08 come
+  prima. Stime volutamente abbondanti (numero = caratteri x size, gap 0,508):
+  al massimo un passo di griglia in piu'. Senza pin sopra il corpo: posizioni
+  e file identici (provato su 3 corpi). Limiti dichiarati: ignora l'estensione
+  orizzontale (qualunque pin alto solleva), nomi dei pin non contati, pin
+  laterale con numero >= 2,04 mm solleva anche senza pin in alto.
+  tests/test_symbol_property_defaults.py 19 test; 120 + 338 verdi.
+  B FATTO (agente, rivisto dal coordinatore, non committato; solo test):
+  causa: `shutdown_main_window` gira nel teardown della fixture quando pytest
+  tiene ancora la finestra (item.funcargs), quindi gc.freeze() congelava tutto
+  il suo grafo ciclico (~727 oggetti/test, 8/8 finestre vive a fine sessione).
+  Ora: finestra C++ distrutta -> `_release_destroyed_window` svuota vars(w) e
+  gc.collect dentro il test (fake e guardie ancora attive); hook
+  `pytest_runtest_protocol` (conftest, `request_post_test_collection`) fa
+  collect + DeferredDelete + attesa pool (<= 10 s) + gc.freeze DOPO che pytest
+  ha rilasciato il test. Worker bloccato: resta in _GRAVEYARD come prima.
+  4 test nuovi in test_test_infrastructure (positivo rosso sul vecchio).
+  Prefisso 38 file + drills: 3 corse verdi, RSS di picco 437 MB contro 755.
+  Rischio dichiarato: un distruttore Qt/VTK sensibile all'ordine ora
+  cadrebbe fra un test e l'altro (nessun crash visto).
+- RICHIESTE VECCHIE (funzioni nuove: proposta da confermare, una domanda
+  alla volta, regola dell'utente): (1) campi obbligatori che inibiscono
+  l'installazione; (2) «Regole KLC» poco chiaro; (3) etichetta accanto
+  all'icona «Applica ai file».
+  (1) CONFERMATO dall'utente (15/10, «ok» alla proposta ripetuta): obbligatori
+  designatore, descrizione, parole chiave, datasheet (filtri facoltativi);
+  vuoto = errore ⛔; con errori pulsanti di installazione (progetto e
+  globale) disattivati con tooltip che nomina il campo, nessun «Installare
+  comunque?»; «Applica ai file» e prova isolata attivi; riquadro metadati
+  aperto da solo quando blocca. Affidato all'agente C.
+  (1) FATTO (agente C, non committato): klc_checks description/keywords/
+  datasheet_empty da avviso a errore, `REQUIRED_FIELD_CODES`,
+  `missing_required_fields`; main_window `_refresh_install_gate` (btn_export,
+  btn_install_global, action_export, action_install_global disattivati con
+  tooltip), `_install_project_library`/`_install_global_library` e il pozzo
+  `_install_kicad_library` rifiutano da soli (`_refuse_install_for_missing_metadata`,
+  nessuna domanda), `_auto_expand_metadata` solo sulla transizione; 11 voci
+  i18n, DB profili riseminato; tests/test_required_metadata.py 33 test,
+  contratti cambiati in test_klc_checks, test_metadata_help,
+  test_component_metadata_gui, test_photo_inventory_gui, test_tools_menu;
+  1210 + 393 + 106 + 14 verdi nei lotti. DUBBI da chiedere all'utente:
+  designatore proposto in grigio («U») conta come compilato; parole chiave
+  predefinite «pin header THT» non vuote, quindi non bloccano.
+  (2) DECISO dall'utente (15/10, opzione 3): etichetta «Regole KLC:» ->
+  «Controlli KiCad (KLC):», lista vuota con «Nessun problema trovato», e
+  tooltip su OGNI voce della lista che spiega cosa correggere e dove.
+  Stessi file dell'agente C (main_window, klc_checks): si affida all'agente C
+  DOPO che ha finito i campi obbligatori (mai due agenti sullo stesso file).
+  (2) FATTO (agente C, non committato): etichetta «Controlli KiCad (KLC):»,
+  riga neutra «Nessun problema trovato» (nessun codice, non conta in nessun
+  controllo), `klc_checks.FIX_HINTS` (41 codici, 29 testi) + `fix_hint` +
+  `Finding.hint`, tooltip = rimedio; guardia strutturale in
+  tests/test_klc_findings_ui.py (scansione dei codici emessi, fallisce se ne
+  manca uno o ne avanza uno); 36 voci i18n, DB riseminato. 1466 + 407 + 147
+  + 14 verdi nei lotti. Dubbi minori: sezione «Regole KLC» dentro le finestre
+  d'aiuto lasciata cosi'; rimedi generici per reperti che compaiono solo su
+  file modificati a mano.
+- REVISIONE AVVERSARIALE 1 (sola lettura, 15/10): nessun ALTO. MEDI: M1
+  blocco sui campi del modulo ma l'installazione copia i file su disco:
+  campi compilati senza «Applica ai file» -> installato con metadati vuoti;
+  M2 nome del pin ignorato ma un pin ruotato/libero lo disegna sopra il corpo
+  (riprodotto); M3 `move_property` salva ENTRAMBE le proprieta' (anche la
+  predefinita), cosi' la nuova regola non raggiunge piu' l'altra; M4 la
+  guardia dei rimedi KLC salta forme di chiamata che non riconosce
+  (riprodotto con 4 forme). BASSI: L1 raccolta post-test senza watchdog; L2
+  fughe dell'ultima raccolta perse; L3 undo di monkeypatch riscrive attributi
+  sulla finestra svuotata (innocuo, correggere la doc); L4 pin nascosti
+  sollevano le proprieta' (KiCad non li disegna); L5 apertura automatica
+  legata al nome del componente, non al progetto.
+  PASSAGGIO 2 affidato: agente A2 (symbol.py, symbol_tab.py, test proprieta')
+  M2 M3 L4; agente C (main_window, klc_checks, test) M1 M4 L5; agente B
+  (conftest, qt_fixtures, test infrastruttura) L1 L2 L3.
+  PASSAGGIO 2, agente B FATTO: L1 `_collect_after_test` con faulthandler
+  (`POST_TEST_WATCHDOG_S`, riga in HANG_REPORT), dialoghi modali vietati
+  (`_refuse_modal_dialogs_after_test`), `sys.unraisablehook` registrato; L2
+  fughe dopo l'ultimo test -> `_SESSION_END_ESCAPES`, sessione fallita e
+  sezione nel riepilogo; L3 solo documentazione. 4 test nuovi (processo
+  figlio), 24 + 112 + 734 verdi.
+  PASSAGGIO 2, agente A2 FATTO: M2 `_pin_drawing_top` conta il nome quando
+  parte fuori dal rettangolo del corpo (`_drawn_name_length`, «~» = 0); file
+  di layout_symbol identici (provato); M3 `move_property` salva solo la
+  proprieta' spostata (trascinamento che torna sul predefinito non scrive
+  nulla); progetti vecchi con entrambe le chiavi lasciati cosi'; L4 pin
+  nascosti esclusi. 15 test nuovi (11 rossi sul codice precedente), 2
+  contratti cambiati in test_symbol_properties_move; 383 verdi. Dubbio
+  dichiarato: nome che parte dentro il corpo ma e' piu' lungo del corpo non
+  contato (cambierebbe i byte dei simboli di layout_symbol).
+  PASSAGGIO 2, agente C FATTO: M1 registro `metadata_applied` (descrizione,
+  parole chiave, datasheet consegnati al worker e registrati in
+  `_on_generated` solo per una scrittura vera, via sender()); confronto di
+  VALORI (annulla/riscrittura dello stesso valore neutri); salvato nel
+  progetto; progetti vecchi senza registro = bloccati finche' non si preme
+  una volta «Applica ai file» (fallisce chiuso). Scelto il registro e non la
+  rilettura del file perche' i generatori non copiano i campi alla lettera
+  (suffisso del centro stimato, descrizioni generiche). M4 scanner rigoroso
+  (`UnresolvedCode` su qualunque forma non risolta, 6 autotest). L5 chiave =
+  cartella del progetto, file mancanti non toccano lo stato. 413 + 579 + 14
+  verdi. Frase sui metadati non applicati aggiunta agli aiuti (descrizione,
+  parole chiave, datasheet, KLC; 2 voci i18n), 118 + 14 verdi.
+- REVISIONE AVVERSARIALE 2 (15/10): nessun ALTO. R2-M1 (riprodotto) vicolo
+  cieco: errori KLC di file (footprint_version/format/unreadable, errori del
+  simbolo) hanno come rimedio «Applica ai file», che rifiuta ogni errore che
+  non sia un campo vuoto; con M1 Applica e' obbligatorio, quindi blocco
+  totale (unica uscita non segnalata: «Aggiorna solo il footprint»).
+  R2-M2 (riprodotto) i package scrivono `tags = geometry.family`
+  (generators/package.py:93; workers passa solo descrizione e datasheet),
+  quindi le parole chiave non arrivano mai nel footprint ma il registro le
+  considera applicate. BASSI: L-a i progetti vecchi si rigenerano col codice
+  attuale al primo Applica (da dire all'utente); L-b `_collect_after_test`
+  apre HANG_REPORT e arma faulthandler fuori dal try; L-c scanner aggirabile
+  solo con codice artificioso (accettato, annotato).
+  PASSAGGIO 3: agente C R2-M1 (Applica rifiuta solo errori dei valori che
+  scrive) + R2-M2 (build_package prende le parole chiave del progetto come
+  tags, ripiego sulla famiglia se vuote; anche moduli montati con header);
+  agente B L-b.
+  PASSAGGIO 3, agente B FATTO (L-b): apertura del report e faulthandler
+  dentro il try (OSError -> fuga registrata); la raccolta post-test non gira
+  piu' in un finally: un'interruzione/pytest.exit del test si propaga intatta.
+  3 test figli nuovi (rossi sul conftest del passaggio 2), 27 + 88 verdi.
+  PASSAGGIO 3, agente C FATTO: R2-M1 `klc_checks.WRITE_BLOCKING_CODES`
+  (solo valori che Applica non puo' scrivere fermano Applica; errori di file
+  e del simbolo tornano alla domanda all'installazione); R2-M2
+  `build_package(..., tags="")` scrive `tags.strip() or geometry.family`,
+  `GenerateWorker.tags` dal campo; pin header e castellated usavano gia'
+  params.tags; senza parole chiave file identici (provato);
+  tests/test_footprint_keywords.py nuovo; L-a aiuto: «rigenera il footprint».
+  391 + 453 + 14 verdi. Suite completa sullo stato del passaggio 2: A 3885,
+  B 4320 verdi, 0 falliti (piu' veloce: 6 + 9 min).
+- REVISIONE AVVERSARIALE 3 (15/10): nessun ALTO. M-1 (riprodotto): il
+  predefinito di `field_tags` e' «pin header THT» (main_window ~9229) e
+  un'estrazione con tags vuoti lo lascia: dopo il passaggio 3 un SOIC viene
+  installato con `(tags "pin header THT")` (il simbolo lo aveva gia' in
+  ki_keywords). Serve una decisione dell'utente (predefinito vuoto o
+  proposta in grigio come il designatore). BASSI: L-1 due commenti superati
+  (APPLIED_METADATA_KEYS, missing_required_fields); L-2 senza parole chiave
+  package scrivono la famiglia, pin header/castellated nessun tags (innocuo:
+  l'installazione e' bloccata); L-3 Genera/Aggiorna/pipeline non controllano
+  WRITE_BLOCKING_CODES (il file resta leggibile, KiCad lo rilegge;
+  all'installazione resta la domanda); L-4 il rifiuto di Applica non dice
+  quale errore lo blocca.
+  PASSAGGIO 4, agente C FATTO: L-1 commenti riallineati; L-4 il rifiuto di
+  Applica elenca solo gli errori che lo bloccano (nuova voce i18n, DB
+  riseminato), test nuovo; 216 + 14 verdi. M-1 IN ATTESA DELL'UTENTE
+  (domanda posta: predefinito vuoto, raccomandato, o proposta in grigio).
+  SUITE COMPLETA dopo il passaggio 3 (pass 4 = solo commenti e un messaggio,
+  verificato a parte con 216 + 14): A 3893 verdi, 7 saltati, 19 sottotest;
+  B 4344 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8237). NON committato.
+- COMMIT su richiesta dell'utente («committa pusha mergia in main poi torna
+  qui»). DOMANDE ANCORA APERTE (una alla volta): M-1 parole chiave
+  predefinite «pin header THT» (vuoto, raccomandato, o proposta in grigio);
+  etichetta visibile su «Applica ai file»; designatore in grigio «U» che
+  conta come compilato.
+- Dopo gli agenti: integrazione, revisione avversariale, suite completa,
+  nuovi passaggi finche' non resta nulla.
+
 ## 2026-10-15 — MERGE: `ADVANCED` (fino a `99cbad3`) mergiato in `main` come `9c08a46`, pushato
 
 Su richiesta dell'utente («mergia in main tutto e torna qui»). Contiene `9f1a5e7`

@@ -3533,9 +3533,20 @@ class SymbolTab(QWidget):
         @param x Target x, mm in symbol coordinates.
         @param y Target y, mm in symbol coordinates (y up).
         @return True when the draft was updated (or already there), False on an unknown key.
-        @note The chosen position is written on every row (`symbol_properties`)
+        @note Only the moved key is written on every row (`symbol_properties`)
             and reaches the file through `symbol_property_positions`; the
-            other property keeps its position, chosen or default.
+            other property keeps its own choice when it has one and otherwise
+            stays absent, so it keeps following `default_property_positions`
+            (e.g. it still clears a top pin added later). Writing its default
+            too would freeze it there for good (review M3, 2026-10-15).
+        @note Moving a property that has no choice back onto its current
+            default writes nothing: the position equals the default and the
+            property keeps following it. A drag that ends where it began must
+            not pin the text.
+        @note Projects saved before 2026-10-15 may hold BOTH keys although the
+            user moved only one (the old code persisted the other's default).
+            They cannot be told apart from an explicit choice of both, so
+            they are left as they are.
         """
         if self._symbol is None or key not in PROPERTY_KEYS:
             return False
@@ -3545,14 +3556,17 @@ class SymbolTab(QWidget):
         try:
             chosen = symbol_property_positions(source)
         except ValueError:
+            # A malformed mapping is not a choice: it is replaced by the
+            # moved key alone (the editor already draws defaults for it).
             chosen = {}
-        if chosen.get(key) == snapped:
+        unchanged = chosen.get(key) == snapped or (
+            key not in chosen and default_property_positions(symbol)[key] == snapped)
+        if unchanged:
             self._draft = deepcopy(source)
             self._changed()
             return True
-        positions = self._property_positions(source, symbol)
-        positions[key] = snapped
-        return self._accept_geometry(self._with_properties(source, positions))
+        chosen[key] = snapped
+        return self._accept_geometry(self._with_properties(source, chosen))
 
     def rotate_pin(self, number, degrees):
         """@brief Rotate a pin or selected group in grid-preserving quarter turns."""

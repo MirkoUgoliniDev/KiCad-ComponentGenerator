@@ -32,6 +32,21 @@ def _ready(window, tmp_path, name="SCHEDA"):
     return window._project_dir()
 
 
+def _fill_required(window):
+    """Fill the required metadata the designator proposal does not cover.
+
+    Since 2026-10-15 an empty description, keywords or datasheet blocks the
+    installation and opens the metadata box by itself; tests about other
+    behaviour fill them first so that block does not interfere.
+    """
+    window.field_description.setText("Modulo")
+    window.field_tags.setText("modulo")
+    window.field_datasheet.setText("https://example.org/ds.pdf")
+    # Review pass 2 (M1): the installation also waits for the metadata to be
+    # in the files; recorded as written, as a generation would.
+    window._note_metadata_written(window._metadata_snapshot())
+
+
 # ── Designator proposal ──────────────────────────────────────────────────
 
 def test_the_proposal_table_is_keyed_by_declared_families():
@@ -119,18 +134,22 @@ def test_without_findings_the_list_says_so(window, tmp_path, monkeypatch):  # no
     _ready(window, tmp_path)
     monkeypatch.setattr(klc_checks, "check_all", lambda *a, **k: [])
     window.field_reference.setText("U")
-    assert _items(window) == ["Nessuna osservazione."]
+    # CONTRACT CHANGED 2026-10-15: the empty-state row reads «Nessun problema
+    # trovato» (user, option 3: «Nessuna osservazione.» was unclear).
+    assert _items(window) == ["Nessun problema trovato"]
 
 
 def test_the_real_rules_see_the_window_data(window, tmp_path):  # noqa: F811
-    """Positive/negative on the real checker: a bad designator is an error, an
-    empty datasheet only a warning."""
+    """Positive/negative on the real checker: an empty datasheet is an error
+    (required field), one with blanks only a warning."""
+    # CONTRACT CHANGED 2026-10-15: the empty datasheet was a warning; it is a
+    # required field now (user), so the real checker reports an error.
     _ready(window, tmp_path)
     window.field_datasheet.setText("")
     window.field_description.setText("Modulo")
     window.field_tags.setText("modulo")
     codes = {f.code: f.severity for f in window._klc_findings()}
-    assert codes.get("datasheet_empty") == "warning"
+    assert codes.get("datasheet_empty") == "error"
     assert "reference_empty" not in codes  # the proposal counts
     window.field_datasheet.setText("con spazio.pdf")
     codes = {f.code: f.severity for f in window._klc_findings()}
@@ -148,6 +167,10 @@ def _install(window, tmp_path, monkeypatch):
                                         table_path=tmp_path))
     monkeypatch.setattr(gui, "record_kicad_export", lambda **k: True)
     artifacts = SimpleNamespace(name="SCHEDA", component_dir=tmp_path / "SCHEDA")
+    # CONTRACT CHANGED 2026-10-15 (review pass 2, M1): the installation also
+    # waits for the required metadata to be filled and written into the
+    # files; these tests are about the KLC confirmation, so that is satisfied.
+    _fill_required(window)
     window._install_kicad_library(tmp_path / "dest", project_library=True, artifacts=artifacts)
     return installed
 
@@ -194,6 +217,10 @@ def test_the_group_starts_collapsed_and_its_title_opens_it(window, tmp_path):  #
     like the other blocks, carries the arrow and a click on it toggles."""
     from PyQt6.QtCore import QPoint
     from kicadgen.gui.collapsible_group import ARROW_COLLAPSED, ARROW_EXPANDED
+    # CONTRACT CHANGED 2026-10-15: the box now opens by itself when missing
+    # required fields block the installation; «collapsed by default» holds
+    # for a component whose required fields are filled.
+    _fill_required(window)
     _ready(window, tmp_path)
     group = window.group_metadata
     assert window.metadata_body.isHidden() and not group.isExpanded()
@@ -218,6 +245,8 @@ def test_the_translated_title_keeps_the_arrow(window, tmp_path):  # noqa: F811
     """@brief The i18n pass rewrites the title: the arrow must survive and the
     source must stay the bare string (a decorated title must never be re-read as source)."""
     from kicadgen.gui.collapsible_group import ARROW_COLLAPSED
+    # CONTRACT CHANGED 2026-10-15: filled first, see the test above.
+    _fill_required(window)
     _ready(window, tmp_path)
     group = window.group_metadata
     window.i18n.retranslate_widgets(window)

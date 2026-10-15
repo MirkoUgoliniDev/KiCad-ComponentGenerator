@@ -244,7 +244,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8096 passed,
+is 8237 passed,
+11 skipped, 2 expected failures and 19 subtests (2026-10-15 evening, after required
+metadata blocking installation, «Controlli KiCad (KLC)» with remedies, symbol property defaults
+clearing top pins, project keywords in footprint tags and test windows freed instead of frozen;
+three adversarial review rounds). Before that, 8096 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15, after property and pin
 texts drawn at KiCad's size in the symbol and footprint previews). Before that, 8093 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15, after the symbol draft

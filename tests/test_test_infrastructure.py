@@ -6,6 +6,7 @@ defect cannot abort the main run: each child runs a tiny test file with the
 real conftest and the real pytest.ini, and the outcome is read from its
 summary line and exit code.
 """
+import gc
 import os
 import socket
 import subprocess
@@ -365,3 +366,293 @@ def test_shutdown_main_window_keeps_a_window_whose_worker_does_not_stop(monkeypa
         harness._GRAVEYARD.remove(window)
         harness._GRAVEYARD.remove(window._worker)
         del harness._THREAD_LEAKS[leaks_before:]
+
+
+# ---------------------------------------------------------------------------
+# Destroyed windows are collected, not frozen (2026-10-15).
+#
+# The `window` fixture used to call gc.freeze() while pytest still referenced
+# the window: its whole Python graph, and the sip wrappers it kept, lived for
+# the session (HANDOFF «TEST INSTABILE DRILLS»). These child runs check the
+# replacement contract: what only the destroyed window's attributes reach is
+# freed inside its own test, while the test's monkeypatches still apply; the
+# wrapper and what monkeypatch writes back onto it are freed before the next
+# test; a window whose worker never stops is still kept alive on purpose.
+# ---------------------------------------------------------------------------
+
+_WINDOW_LIFETIME_CHILD = """
+    import gc
+    import sys
+    import weakref
+    import pytest
+
+    pytest.importorskip("pyvistaqt")
+
+    #: A module attribute the window tests patch: whoever reads it while the
+    #: patch is active sees "patched".
+    FLAG = "original"
+    WINDOWS = []
+    FINALIZED = []
+    FROZEN = []
+
+    class Probe:
+        \"\"\"Python object hung on the window, in a cycle with it.\"\"\"
+
+    def _graph_size(root):
+        seen, stack = set(), [root]
+        while stack:
+            item = stack.pop()
+            if id(item) in seen or not gc.is_tracked(item):
+                continue
+            seen.add(id(item))
+            stack.extend(gc.get_referents(item))
+        return len(seen)
+
+    @pytest.mark.parametrize("n", range(5))
+    def test_window_with_probe(window, monkeypatch, n):
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "FLAG", "patched")
+        probe = Probe()
+        probe.window = window
+        window._probe = probe
+        # Read FLAG when the probe is destroyed: "patched" proves it was
+        # freed inside this test, before monkeypatch undid the patch.
+        weakref.finalize(probe, lambda: FINALIZED.append(module.FLAG))
+        WINDOWS.append(weakref.ref(window))
+        FROZEN.append((gc.get_freeze_count(), _graph_size(vars(window))))
+
+    def test_windows_and_their_graph_are_gone():
+        assert [ref() for ref in WINDOWS] == [None] * 5
+        assert FINALIZED == ["patched"] * 5
+        # Freeze growth across the four later window tests stays far below
+        # the size of ONE window graph: no window is pinned any more.
+        growth = FROZEN[-1][0] - FROZEN[1][0]
+        assert growth < min(size for _count, size in FROZEN), FROZEN
+"""
+
+
+def test_destroyed_windows_are_collected_inside_their_test_not_frozen(tmp_path):
+    result = run_child(tmp_path, _WINDOW_LIFETIME_CHILD)
+    if "skipped" in result.stdout and "passed" not in result.stdout:
+        pytest.skip("pyvistaqt not installed in the child")
+    assert result.returncode == 0, outcome(result)
+    assert "6 passed" in result.stdout, outcome(result)
+
+
+_STUCK_WORKER_CHILD = """
+    import weakref
+    import pytest
+    from PyQt6.QtCore import QThread
+    import kicadgen_test_harness
+
+    pytest.importorskip("pyvistaqt")
+    kicadgen_test_harness.THREAD_JOIN_TIMEOUT_MS = 100
+    kicadgen_test_harness.ENFORCE_THREAD_JOIN = False
+
+    class Sleeper(QThread):
+        def run(self):
+            self.msleep(1500)
+
+    class Probe:
+        \"\"\"Python object hung on the window: must survive with it.\"\"\"
+
+    REFS = {}
+
+    def test_window_whose_worker_does_not_stop(window):
+        window._stuck_worker = Sleeper()
+        window._probe = Probe()
+        REFS["window"] = weakref.ref(window)
+        REFS["probe"] = weakref.ref(window._probe)
+        window._stuck_worker.start()
+
+    def test_that_window_is_kept_alive_with_its_graph():
+        window = REFS["window"]()
+        assert window is not None
+        assert window in kicadgen_test_harness._GRAVEYARD
+        assert REFS["probe"]() is window._probe   # attributes not dropped
+        window._stuck_worker.wait(5000)
+"""
+
+
+def test_window_whose_worker_does_not_stop_is_kept_alive_with_its_graph(tmp_path):
+    """Negative case: the collection never frees a window with a running worker."""
+    result = run_child(tmp_path, _STUCK_WORKER_CHILD)
+    if "skipped" in result.stdout and "passed" not in result.stdout:
+        pytest.skip("pyvistaqt not installed in the child")
+    assert result.returncode == 0, outcome(result)
+    assert "2 passed" in result.stdout, outcome(result)
+    assert "MainWindow workers: Sleeper" in result.stdout, outcome(result)
+
+
+def test_release_drops_attributes_only_of_a_destroyed_window():
+    """A live window keeps its attributes; a destroyed one loses them."""
+    from PyQt6 import sip
+    from PyQt6.QtWidgets import QMainWindow
+    from qt_fixtures import _release_destroyed_window
+    _application()
+    live = QMainWindow()
+    live._marker = object()
+    _release_destroyed_window(live)
+    assert hasattr(live, "_marker")
+    sip.delete(live)
+    _release_destroyed_window(live)
+    assert vars(live) == {}
+
+
+def test_post_test_collection_is_requested_by_the_window_shutdown():
+    """The window shutdown leaves the freeze to the hook that runs after pytest released the test."""
+    from PyQt6.QtWidgets import QMainWindow
+    from qt_fixtures import shutdown_main_window
+    app = _application()
+    harness._POST_TEST_COLLECTION["requested"] = False
+    window = QMainWindow()
+    window._marker = object()
+    frozen_before = gc.get_freeze_count()
+    shutdown_main_window(window, app)
+    assert harness._POST_TEST_COLLECTION["requested"] is True
+    assert gc.get_freeze_count() == frozen_before   # no freeze inside the test
+    assert vars(window) == {}
+
+
+# ---------------------------------------------------------------------------
+# The post-test collection is guarded like a test (pass 2, 2026-10-15).
+#
+# It runs between two tests, when the per-test watchdog, the modal-dialog
+# guard and the test's monkeypatches are already undone. Each child below
+# hangs an object in a reference cycle on a fixture value, so that only that
+# collection can free it, and gives it a destructor that misbehaves.
+# ---------------------------------------------------------------------------
+
+_POST_TEST_CHILD = """
+    import time
+    from pathlib import Path
+    import pytest
+    from PyQt6.QtWidgets import QApplication
+    import kicadgen_test_harness
+
+    _APP = QApplication.instance() or QApplication([])   # a Qt dialog needs it
+    kicadgen_test_harness.POST_TEST_WATCHDOG_S = 2
+    kicadgen_test_harness.HANG_REPORT = Path({report!r})
+
+    class Cyclic:
+        \"\"\"Freed only by the cyclic collector, i.e. by the post-test collection.\"\"\"
+        def __init__(self):
+            self.me = self
+
+        def __del__(self):
+            {destructor}
+
+    @pytest.fixture
+    def cyclic():
+        kicadgen_test_harness.request_post_test_collection()
+        yield Cyclic()
+
+    def test_one(cyclic):
+        pass
+    {more}
+"""
+
+
+#: A second, empty test for the children: an escape of the post-test
+#: collection of `test_one` must be charged to its setup. Its body line is
+#: indented twice because the template is dedented as a whole.
+_SECOND_TEST = "def test_two():\n        pass"
+
+
+def _post_test_child(tmp_path, destructor: str, more: str = ""):
+    """Run `_POST_TEST_CHILD`; return the result and its hang report path."""
+    report = tmp_path / "hang-report.txt"
+    body = _POST_TEST_CHILD.format(report=str(report), destructor=destructor, more=more)
+    return run_child(tmp_path, body), report
+
+
+def test_blocking_destructor_after_the_test_is_stopped_with_a_hang_report(tmp_path):
+    """The post-test watchdog dumps the stacks and ends the run instead of hanging."""
+    result, report = _post_test_child(tmp_path, "time.sleep(60)")
+    assert result.returncode != 0, outcome(result)
+    text = report.read_text(encoding="utf-8", errors="replace")
+    assert "Post-test garbage collection after test_child.py::test_one" in text, text
+    assert "__del__" in text, text           # the stack names the blocked destructor
+
+
+def test_modal_dialog_opened_after_the_test_fails_the_next_test(tmp_path):
+    """A built dialog's exec() is refused there, not left waiting for a click."""
+    result, _report = _post_test_child(
+        tmp_path,
+        "from PyQt6.QtWidgets import QDialog; QDialog().exec()",
+        more=_SECOND_TEST)
+    assert result.returncode == 1, outcome(result)
+    assert "1 passed, 1 error" in result.stdout, outcome(result)
+    assert "QDialog.exec opened by an object freed after its test" in result.stdout, outcome(result)
+    assert "before this test started" in result.stdout, outcome(result)
+
+
+def test_escape_after_the_last_test_fails_the_session_and_is_listed(tmp_path):
+    """No next setup charges it, so the session fails and the summary lists it."""
+    result, _report = _post_test_child(tmp_path, "raise ValueError('boom after the last test')")
+    assert result.returncode == 1, outcome(result)
+    assert "1 passed" in result.stdout, outcome(result)
+    assert "Exceptions escaped after the last test (session failed)" in result.stdout, outcome(result)
+    assert "boom after the last test" in result.stdout, outcome(result)
+
+
+def test_clean_post_test_collection_leaves_the_session_green(tmp_path):
+    """Negative case: a destructor that behaves changes nothing."""
+    result, _report = _post_test_child(tmp_path, "pass", more=_SECOND_TEST)
+    assert result.returncode == 0, outcome(result)
+    assert "2 passed" in result.stdout, outcome(result)
+    assert "escaped" not in result.stdout, outcome(result)
+
+
+#: Child whose hang report becomes unopenable (a directory) during the test,
+#: after `hang_watchdog` already opened the real file for it: the post-test
+#: collection is the first to open the new path.
+_UNWRITABLE_REPORT_CHILD = """
+    from pathlib import Path
+    import pytest
+    import kicadgen_test_harness
+
+    FOLDER = Path({folder!r})
+
+    @pytest.fixture
+    def collection_requested():
+        kicadgen_test_harness.request_post_test_collection()
+        yield
+
+    def test_one(collection_requested):
+        # Switched in the body, not in a fixture teardown: an interrupted
+        # test skips the remaining teardowns, and the path must still be
+        # unopenable when the post-test collection would run.
+        FOLDER.mkdir(exist_ok=True)
+        kicadgen_test_harness.HANG_REPORT = FOLDER
+        {body}
+"""
+
+
+def _unwritable_report_child(tmp_path, body: str):
+    """Run `_UNWRITABLE_REPORT_CHILD` with the given test body."""
+    folder = tmp_path / "report-is-a-folder"
+    return run_child(tmp_path, _UNWRITABLE_REPORT_CHILD.format(folder=str(folder), body=body))
+
+
+def test_unopenable_hang_report_is_an_escape_not_an_internal_error(tmp_path):
+    """The failed open is charged to the session; pytest itself does not crash."""
+    result = _unwritable_report_child(tmp_path, "pass")
+    assert "INTERNALERROR" not in result.stdout + result.stderr, outcome(result)
+    assert result.returncode == 1, outcome(result)
+    assert "1 passed" in result.stdout, outcome(result)
+    assert "Exceptions escaped after the last test (session failed)" in result.stdout, outcome(result)
+    assert "not writable for the post-test collection" in result.stdout, outcome(result)
+
+
+@pytest.mark.parametrize("body, exit_code, marker", [
+    ("raise KeyboardInterrupt", 2, "KeyboardInterrupt"),
+    ("pytest.exit('stopped by the test', returncode=3)", 3, "stopped by the test"),
+])
+def test_interrupt_from_the_test_is_not_replaced_by_the_collection(tmp_path, body, exit_code, marker):
+    """Negative case of the above: an interrupt or exit keeps its own outcome."""
+    result = _unwritable_report_child(tmp_path, body)
+    assert "INTERNALERROR" not in result.stdout + result.stderr, outcome(result)
+    assert result.returncode == exit_code, outcome(result)
+    assert marker in result.stdout, outcome(result)
+    assert "not writable for the post-test collection" not in result.stdout, outcome(result)
