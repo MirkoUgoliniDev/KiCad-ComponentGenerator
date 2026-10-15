@@ -94,10 +94,20 @@ def test_both_properties_are_drawn_where_the_file_puts_them(tab):
     assert set(items) == {'Reference', 'Value'}
     assert items['Value'].text() == 'Board' and items['Reference'].text() == 'U?'
     defaults = default_property_positions(tab._symbol)
+    # CONTRACT CHANGED 2026-10-15 (texts at KiCad's size, user): vertically
+    # the anchor is the middle of the CAPITALS, as KiCad centres a text, not
+    # the middle of Qt's line box (which also holds the descender space and
+    # sits ~0.12 mm lower at 1.27 mm).
+    from PyQt6.QtGui import QPainterPath
+    from kicadgen.gui.symbol_tab import SymbolTab
     for key, item in items.items():
         centre = item.sceneBoundingRect().center()
         assert centre.x() == pytest.approx(defaults[key][0] * SCENE_UNITS_PER_MM, abs=1)
-        assert centre.y() == pytest.approx(-defaults[key][1] * SCENE_UNITS_PER_MM, abs=1)
+        outline = QPainterPath()
+        outline.addText(0.0, 0.0, item.font(), 'H')
+        cap = outline.boundingRect().height() * item.scale()
+        baseline = item.mapToScene(0, SymbolTab._text_baseline(item.text(), item.font())).y()
+        assert baseline - cap / 2 == pytest.approx(-defaults[key][1] * SCENE_UNITS_PER_MM, abs=0.05)
 
 
 def test_the_reference_text_follows_the_designator(tab):

@@ -862,15 +862,32 @@ def _drawing_text_item(record, mm_to_px):
         iiiiii, MMMMMM get worse), so the preview width stays the Qt font's
         own and remains an approximation of KiCad's.
     """
+    return _kicad_size_text_item(record["text"], record.get("size", 1.0),
+                                 _layer_color(record["layer"]), mm_to_px)
+
+
+def _kicad_size_text_item(text, size, colour, mm_to_px):
+    """@brief Unplaced Qt text item whose capitals are `size` mm tall, as KiCad draws them.
+
+    @param text The text (one line).
+    @param size KiCad text size in mm (= cap height).
+    @param colour Brush colour.
+    @param mm_to_px Scene px per mm of the preview.
+    @return A QGraphicsSimpleTextItem at the origin, not in any scene, laid
+        out in a `_FP_TEXT_REFERENCE_PX` px font and SCALED (setScale) so the
+        outline of «H» is size x mm_to_px px tall.
+    @note Shared by the user's text drawings and the Reference/Value
+        properties (user, 2026-10-15: every text at the size the file gives it).
+    """
     from PyQt6.QtWidgets import QGraphicsSimpleTextItem
-    item = QGraphicsSimpleTextItem(record["text"])
-    item.setBrush(QBrush(QColor(_layer_color(record["layer"]))))
+    item = QGraphicsSimpleTextItem(text)
+    item.setBrush(QBrush(QColor(colour)))
     font = item.font()
     font.setPixelSize(_FP_TEXT_REFERENCE_PX)
     item.setFont(font)
     cap = _cap_height_px(font)
     if cap > 0:
-        item.setScale(record.get("size", 1.0) * mm_to_px / cap)
+        item.setScale(size * mm_to_px / cap)
     return item
 
 
@@ -15854,7 +15871,7 @@ class MainWindow(QMainWindow):
             and its children carry the key in `TEXT_KEY_ROLE` for the drag.
         """
         from PyQt6.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
-        from ..core.footprint import DEFAULT_TEXT_POSITIONS, TEXT_KEYS
+        from ..core.footprint import DEFAULT_TEXT_POSITIONS, PROPERTY_TEXT_SIZE, TEXT_KEYS
         from .footprint_view import TEXT_KEY_ROLE
         defaults = DEFAULT_TEXT_POSITIONS
         try:
@@ -15872,8 +15889,6 @@ class MainWindow(QMainWindow):
                      "Riferimento (REF**) sulla serigrafia: trascinalo dove deve stare; tasto destro per la posizione predefinita."),
                  "Value": self.i18n.text(
                      "Valore sul layer di fabbricazione: trascinalo dove deve stare; tasto destro per la posizione predefinita.")}
-        font = QFont(self.font())
-        font.setPixelSize(max(1, int(round(1.0 * mm_to_px))))  # 1 mm text, KiCad's default size
         # The anchor cross in the accent colour, wider than the glyphs are
         # tall, so it reads through the text it is centred on.
         arm = 0.75 * mm_to_px
@@ -15881,10 +15896,15 @@ class MainWindow(QMainWindow):
             x_mm, y_mm = self.footprint_text_positions.get(key, defaults[key])
             group = QGraphicsItemGroup()
             self.preview_scene.addItem(group)
-            text = self.preview_scene.addSimpleText(texts[key], font)
-            text.setBrush(QBrush(QColor(colours[key])))
+            # Capitals PROPERTY_TEXT_SIZE mm tall, as in the file (user,
+            # 2026-10-15); centred on the anchor as KiCad centres the text:
+            # half the width to the left, half the cap height above the baseline.
+            text = _kicad_size_text_item(texts[key], PROPERTY_TEXT_SIZE, colours[key], mm_to_px)
+            self.preview_scene.addItem(text)
+            scale = text.scale()
             rect = text.boundingRect()
-            text.setPos(-rect.width() / 2, -rect.height() / 2)
+            centre = _drawing_text_baseline(text) - _cap_height_px(text.font()) / 2
+            text.setPos(-rect.width() * scale / 2, -centre * scale)
             group.addToGroup(text)
             cross_pen = QPen(QColor(BLUE))
             cross_pen.setCosmetic(True)

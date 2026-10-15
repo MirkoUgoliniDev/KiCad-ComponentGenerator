@@ -21,6 +21,11 @@ from .pinout_dialog import pin_sort_key
 from ..generators.symbol_edit import transform_selection
 
 SCENE_UNITS_PER_MM = 10.0
+#: Distance (mm) from a pin line to the baseline of its number. KiCad draws
+#: the number bottom-aligned at its text margin (4 mil = 0.1016 mm) plus half
+#: the default pin pen (6 mil / 2 = 0.0762 mm) above the line: an
+#: approximation of KiCad's own drawing, which also follows the pen width.
+PIN_NUMBER_GAP_MM = 0.1016 + 0.0762
 GRID_MM = PIN_GRID_MM
 
 #: Superseded drafts kept per project beside the recovery file (one file per
@@ -4108,31 +4113,43 @@ class SymbolTab(QWidget):
         """A text primitive as a scene item: capitals `p.size` mm tall (KiCad's
         size), turned by `p.angle`, placed about its anchor point; returns the item.
 
-        The anchor is, in the text's own frame (reading direction, glyph
-        up), at the left end, centre or right end (`p.justify`) of the line
-        and on its baseline ("bottom"), half a cap height above it
-        ("center") or a cap height above it ("top"), as KiCad places its
-        texts (`p.vjustify`). A bottom-left text therefore starts at its
-        anchor and grows right and up; turned 90 degrees, up and to the left.
-        Library glyph texts are drawn by this same function, at KiCad's size.
+        Library glyph texts are drawn by this same function, at KiCad's size;
+        the placement is `_kicad_text_item`'s.
         """
         theme = self.theme
-        font, factor = self._kicad_text_font(p.size)
-        item = scene.addSimpleText(p.text, font)
-        item.setBrush(QColor(theme['selected']) if selected else QColor(theme['graphic']))
+        (x, y), = p.points
+        return self._kicad_text_item(
+            scene, p.text, p.size, x * scale, -y * scale, p.angle % 180 == 90, p.justify, p.vjustify,
+            QColor(theme['selected']) if selected else QColor(theme['graphic']))
+
+    def _kicad_text_item(self, scene, text, size, x, y, vertical, justify, vjustify, color):
+        """A text as KiCad draws it: capitals `size` mm tall, anchored at scene point (x, y).
+
+        The anchor is, in the text's own frame (reading direction, glyph
+        up), at the left end, centre or right end (`justify`) of the line
+        and on its baseline ("bottom"), half a cap height above it
+        ("center") or a cap height above it ("top"), as KiCad places its
+        texts (`vjustify`). A bottom-left text therefore starts at its
+        anchor and grows right and up; `vertical` (turned 90 degrees), up
+        and to the left. Shared by the drawn texts, the Reference/Value
+        properties and the pin names and numbers (user, 2026-10-15: every
+        text of the editor at the size the file gives it).
+        """
+        font, factor = self._kicad_text_font(size)
+        item = scene.addSimpleText(text, font)
+        item.setBrush(color)
         item.setScale(factor)
         bounds = item.boundingRect()
-        cap = p.size * scale / factor
-        along = bounds.width() if p.justify == 'right' else bounds.width() / 2 if p.justify == 'center' else 0
-        baseline = self._text_baseline(p.text, font)
-        down = baseline if p.vjustify == 'bottom' else baseline - cap if p.vjustify == 'top' else baseline - cap / 2
+        cap = size * SCENE_UNITS_PER_MM / factor
+        along = bounds.width() if justify == 'right' else bounds.width() / 2 if justify == 'center' else 0
+        baseline = self._text_baseline(text, font)
+        down = baseline if vjustify == 'bottom' else baseline - cap if vjustify == 'top' else baseline - cap / 2
         along, down = along * factor, down * factor
-        (x, y), = p.points
-        if p.angle % 180 == 90:
+        if vertical:
             item.setRotation(-90)
-            item.setPos(x * scale - down, -y * scale + along)
+            item.setPos(x - down, y + along)
         else:
-            item.setPos(x * scale - along, -y * scale - down)
+            item.setPos(x - along, y - down)
         return item
 
     def _draw(self, symbol):
@@ -4151,10 +4168,6 @@ class SymbolTab(QWidget):
         theme = self.theme
         pen = QPen(QColor(theme['outline']), 1.3)
         text_color = QColor(theme['pin_name'])
-        font = QFont(self.font())
-        font.setPixelSize(12)
-        small_font = QFont(font)
-        small_font.setPixelSize(10)
         width, height = symbol.width * scale, symbol.height * scale
         scene.addRect(-width / 2, -height / 2, width, height, pen, QColor(theme['body_fill']))
         self._draw_graphics(scene, scale)
@@ -4188,23 +4201,17 @@ class SymbolTab(QWidget):
                 item.setToolTip(target[1])
             return item
 
-        def label(value, x, y, align='left', small=False, target=None, rotate=False):
-            item = scene.addSimpleText(value, small_font if small else font)
-            item.setBrush(QColor(theme['pin_number']) if small else text_color)
-            bounds = item.boundingRect()
-            dx = bounds.width() if align == 'right' else bounds.width() / 2 if align == 'center' else 0
-            if rotate:
-                item.setRotation(-90)
-                item.setPos(x - bounds.height() / 2, y + dx)
-            else:
-                item.setPos(x - dx, y - bounds.height() / 2)
+        def label(value, x, y, size, align='left', vjustify='center', small=False, target=None, rotate=False):
+            # Capitals `size` mm tall, as KiCad draws the text (`_kicad_text_item`).
+            item = self._kicad_text_item(scene, value, size, x, y, rotate, align, vjustify,
+                                         QColor(theme['pin_number']) if small else text_color)
             if target:
                 tag(item, target)
                 if target[0] == 'pin':
                     self._text_bounds.append((target[1], item.sceneBoundingRect()))
             return item
 
-        from ..generators.symbol import pin_length_of, pin_text_size_of
+        from ..generators.symbol import PIN_NAME_OFFSET, TEXT_SIZE, pin_length_of, pin_text_size_of
         # Reference and Value where the file puts them (user, 2026-10-13):
         # the editor shows what KiCad will show, and both can be dragged.
         positions = self._property_positions(self.draft_rows(), symbol)
@@ -4213,7 +4220,8 @@ class SymbolTab(QWidget):
                  'Value': self.tx('Nome del simbolo (Value): trascinalo dove deve stare nello schema.')}
         for key in PROPERTY_KEYS:
             px, py = positions[key]
-            item = label(texts[key], px * scale, -py * scale, 'center', target=('property', key))
+            # The generator writes the properties at TEXT_SIZE.
+            item = label(texts[key], px * scale, -py * scale, TEXT_SIZE, 'center', target=('property', key))
             item.setToolTip(hints[key])
         for placed in symbol.pins:
             pin = placed.pin
@@ -4227,22 +4235,26 @@ class SymbolTab(QWidget):
             if pin.hidden:
                 # A hidden pin is drawn dotted: present in the symbol, invisible in the schematic.
                 pin_pen.setStyle(Qt.PenStyle.DotLine)
-            text_scale = pin_text_size_of(pin) / 1.27
-            font.setPixelSize(max(1, int(round(12 * text_scale))))
-            small_font.setPixelSize(max(1, int(round(10 * text_scale))))
+            text_size = pin_text_size_of(pin)
             tag(scene.addLine(x, y, end_x, end_y, pin_pen), target)
             tag(scene.addEllipse(x - 3, y - 3, 6, 6, pin_pen), target)
             # Broad transparent target makes thin pin lines easy to grab.
             hit = scene.addLine(x, y, end_x, end_y, QPen(QColor(0, 0, 0, 0), 12))
             tag(hit, target)
+            # As KiCad places them with the names inside the body: the number
+            # over the middle of the pin, its baseline PIN_NUMBER_GAP_MM above
+            # the line; the name centred on the line, PIN_NAME_OFFSET past the
+            # inner end.
+            gap = PIN_NUMBER_GAP_MM * scale
+            offset = PIN_NAME_OFFSET * scale
             if vx:
-                label(pin.number, (x + end_x) / 2, y - 9, 'center', True, target)
-                label(pin.name or '~', end_x + vx * 5, y, 'left' if vx > 0 else 'right', target=target)
+                label(pin.number, (x + end_x) / 2, y - gap, text_size, 'center', 'bottom', True, target)
+                label(pin.name or '~', end_x + vx * offset, y, text_size, 'left' if vx > 0 else 'right',
+                      target=target)
             else:
-                label(pin.number, x - 9, (y + end_y) / 2, 'center', True, target, True)
-                label(pin.name or '~', x, end_y + vy * 5, 'right' if vy > 0 else 'left', target=target, rotate=True)
-        font.setPixelSize(12)
-        small_font.setPixelSize(10)
+                label(pin.number, x - gap, (y + end_y) / 2, text_size, 'center', 'bottom', True, target, True)
+                label(pin.name or '~', x, end_y + vy * offset, text_size, 'right' if vy > 0 else 'left',
+                      target=target, rotate=True)
         handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
         body_handles = []
         for hx, hy in handles:

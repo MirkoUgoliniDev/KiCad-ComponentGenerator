@@ -62,6 +62,11 @@ def _stroke_node(width: float) -> SExpr:
     return sx("stroke", sx("width", width), sx("type", Symbol("solid")))
 
 
+#: Text size (mm) of the Reference/Value properties the generator writes;
+#: the footprint preview draws them at this size (capitals this tall).
+PROPERTY_TEXT_SIZE = 1.0
+
+
 def _text_effects(size: float = 1.0, thickness: float = 0.15,
                   justify: Optional[Tuple[str, ...]] = None) -> SExpr:
     """Text ``effects`` node; ``justify`` adds ``(justify ...)`` after the font, as KiCad writes it."""
@@ -658,7 +663,7 @@ class Footprint:
         if hide:
             node.add(sx("hide", YES))
         node.add(sx("uuid", _uuid()))
-        node.add(_text_effects())
+        node.add(_text_effects(PROPERTY_TEXT_SIZE))
         return node
 
     def to_sexpr(self) -> SExpr:
