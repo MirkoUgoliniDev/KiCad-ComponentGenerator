@@ -243,14 +243,25 @@ def pytest_sessionfinish(session, exitstatus):
 
     @param session pytest session.
     @param exitstatus Session exit status.
-    @note The teardown freezes what survives each test (gc.freeze, see
-        `_collect_new_top_level_widgets`). Left frozen, those Qt wrappers were
+    @note What survives a test with Qt windows is frozen after it (gc.freeze,
+        see `request_post_test_collection`). Left frozen, those Qt wrappers were
         destroyed only during interpreter shutdown, in arbitrary order and
         possibly after the QApplication: the process then died with an access
         violation after all tests had passed (exit 139, HANDOFF 131). Here
         they are unfrozen and collected, and the deferred deletions
         delivered, while the application still exists.
+    @note Exceptions that escaped after the last test (its post-test
+        collection, see `_collect_after_test`) have no next setup to fail.
+        They fail the SESSION instead: the exit status becomes
+        TESTS_FAILED and `pytest_terminal_summary` lists them. A mid-run
+        escape of the same kind fails the next test, so the last test of a
+        run (twice per suite, which runs in two halves) must not be the one
+        place where it is silently dropped; a printed warning with exit 0
+        would not be seen by an unattended run.
     """
+    _SESSION_END_ESCAPES.extend(_take_escaped())
+    if _SESSION_END_ESCAPES and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
     gc.unfreeze()
     try:
         from PyQt6.QtCore import QCoreApplication, QEvent
@@ -547,7 +558,7 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    """@brief List the tests that left QThreads running or tried to reach the network.
+    """@brief List leaked QThreads, network attempts and exceptions escaped after the last test.
 
     @param terminalreporter pytest terminal reporter.
     @param exitstatus Session exit status.
@@ -557,6 +568,11 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.section("QThreads still running at teardown")
         for test_id, description in _THREAD_LEAKS:
             terminalreporter.line(f"{test_id}: {description}")
+    if _SESSION_END_ESCAPES:
+        # Charged to the session, not to a test (see pytest_sessionfinish).
+        terminalreporter.section("Exceptions escaped after the last test (session failed)")
+        for text in _SESSION_END_ESCAPES:
+            terminalreporter.line(text)
     if _NETWORK_ATTEMPTS:
         terminalreporter.section("Network access blocked (mock it or mark allow_network)")
         for test_id, attempt in _NETWORK_ATTEMPTS:
@@ -615,11 +631,11 @@ def join_qthreads(threads, timeout_ms: int | None = None) -> list:
 def _collect_new_top_level_widgets(application, before: set) -> None:
     """Free, inside the owning test, top-level widgets it left for the garbage collector.
 
-    After the collection everything still alive is frozen (gc.freeze): it was
-    reachable at the end of its test, and later collections neither rescan it
-    (the suite had become about 60% slower) nor destroy it at a random moment
-    in another test, which was the origin of the native crashes (HANDOFF 113).
-    The price is some memory held for the rest of the session.
+    The survivors are NOT frozen here: at this point pytest still references
+    the test's fixture values (`item.funcargs`, the fixture caches), so a
+    freeze would pin them, and every object they reach, for the whole session
+    (2026-10-15, see `request_post_test_collection`). The freeze that keeps
+    later collections fast happens after the test, in `pytest_runtest_protocol`.
     """
     try:
         current = {id(widget) for widget in application.topLevelWidgets()}
@@ -632,7 +648,215 @@ def _collect_new_top_level_widgets(application, before: set) -> None:
     gc.collect()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
     application.processEvents()
-    gc.freeze()
+    request_post_test_collection()
+
+
+#: Set by `request_post_test_collection`, consumed by `pytest_runtest_protocol`.
+_POST_TEST_COLLECTION = {"requested": False}
+#: Bounded wait, in milliseconds, for the global Qt pool after the post-test
+#: collection: a job started by an object freed there must not run into the
+#: next test, but nothing may block between tests without a watchdog.
+POST_TEST_POOL_WAIT_MS = 10_000
+
+
+def request_post_test_collection() -> None:
+    """@brief Ask for one garbage collection and freeze once pytest has released the test.
+
+    @note Why the collection cannot happen in the teardown itself
+        (2026-10-15). Until the end of `runtestprotocol` pytest holds the
+        test's fixture values in `item.funcargs` and in the fixture caches,
+        so a destroyed MainWindow is still reachable while its fixture tears
+        down. The old teardown called gc.freeze() at that point: the window's
+        Python graph moved to the permanent generation and was never
+        collected (about 730 objects per window test, measured), and the
+        sip wrappers it kept stayed registered for the session, which let a
+        new C++ object allocated at a reused address come back as a stale
+        wrapper of another type (HANDOFF «TEST INSTABILE DRILLS»).
+    @note Why a freeze is still done afterwards. It was introduced for speed
+        (HANDOFF 131 block B: the teardown collections rescanned the whole
+        heap, second half of the suite from about 3 to 7 minutes) and so
+        that what survives a test is never destroyed at a random moment of a
+        later test (HANDOFF 113). Both reasons hold for what is still alive
+        once pytest has dropped the test: that is long-lived by definition.
+    """
+    _POST_TEST_COLLECTION["requested"] = True
+
+
+#: Watchdog of the post-test collection, in seconds. It runs between two
+#: tests, after `hang_watchdog` has disarmed its own timer, so it needs one
+#: of its own: a destructor or slot that blocks there would otherwise hang
+#: the suite with no report. Module global, read at call time (tests lower it).
+POST_TEST_WATCHDOG_S = TEST_WATCHDOG_S
+#: Exceptions of the post-test collection after the LAST test: no next setup
+#: will charge them, so `pytest_sessionfinish` fails the session with them
+#: and `pytest_terminal_summary` lists them.
+_SESSION_END_ESCAPES: list[str] = []
+
+
+def _refuse_modal_dialogs_after_test(patcher) -> None:
+    """Make every blocking dialog raise during the post-test collection.
+
+    The per-test guard `no_unattended_modal_dialog` is already undone at that
+    point. Here the static Qt dialogs of `_BLOCKING_DIALOGS` AND the `exec`
+    of built dialogs are refused: no test is running, so no dialog is ever
+    expected, and a dialog opened by a dying object would wait for a click
+    that never comes. The raised AssertionError is recorded (excepthook for
+    slots, the unraisable hook installed by `_collect_after_test` for
+    destructors) and reported like any other escaped exception.
+    """
+    try:
+        from PyQt6 import QtWidgets
+    except ImportError:
+        return
+
+    def refuse(name):
+        def blocked(*args, **kwargs):
+            raise AssertionError(f"{name} opened by an object freed after its test "
+                                 "(post-test garbage collection): nobody can close it")
+        return blocked
+
+    # In PyQt6 6.11 the standard dialogs inherit QDialog.exec, but a binding
+    # that redefines it on a subclass would bypass a QDialog-only patch; the
+    # standard ones are listed too (monkeypatch removes the added class
+    # attribute on undo, so the inherited method comes back unchanged).
+    built = tuple((name, ("exec",)) for name in (
+        "QDialog", "QMessageBox", "QFileDialog", "QInputDialog", "QColorDialog",
+        "QFontDialog", "QProgressDialog", "QErrorMessage", "QWizard"))
+    for class_name, methods in _BLOCKING_DIALOGS + built:
+        target = getattr(QtWidgets, class_name, None)
+        if target is None:
+            continue
+        for method in methods:
+            if hasattr(target, method):
+                patcher.setattr(target, method, refuse(f"{class_name}.{method}"), raising=False)
+
+
+def _record_unraisable(unraisable) -> None:
+    """Record an exception raised in a destructor (`__del__`, weakref callback) as escaped.
+
+    Python only prints those («Exception ignored in ...»); outside a test
+    pytest's own unraisable plugin is not listening, so without this hook an
+    AssertionError from a refused dialog in a destructor would vanish.
+    """
+    exc = unraisable.exc_value
+    text = ("".join(traceback.format_exception(unraisable.exc_type, exc, unraisable.exc_traceback))
+            if exc is not None else repr(unraisable))
+    with _ESCAPED_LOCK:
+        _ESCAPED.append(f"Exception in a destructor ({unraisable.object!r}):\n{text}")
+
+
+def _collect_after_test(test_id: str = "?") -> None:
+    """Collect the released test objects, drain Qt, then freeze the survivors.
+
+    Runs between two tests, after pytest dropped the finished test's fixture
+    values and before the next test's setup. Most of the window graph was
+    already freed inside the test (see `qt_fixtures.shutdown_main_window`);
+    what is freed here is what only pytest or monkeypatch still referenced:
+    fixture values (e.g. a widget a fixture yielded and the test never
+    destroyed) and the attributes monkeypatch wrote back onto a cleared
+    window. A job or deferred deletion triggered by them is delivered now.
+    @note Safety boundary: no per-test guard is active here (watchdog,
+        modal-dialog guard, network guard and the test's monkeypatches are
+        all undone). So this phase arms its own faulthandler watchdog
+        (POST_TEST_WATCHDOG_S, stacks into HANG_REPORT, then the process
+        exits), refuses every modal dialog, and records exceptions from
+        slots (session excepthook) and destructors (unraisable hook). They
+        are charged to the next test's setup, or to the session when this
+        was the last test (`pytest_sessionfinish`).
+    """
+    _POST_TEST_COLLECTION["requested"] = False
+    _append_to_hang_report(f"\nPost-test garbage collection after {test_id} "
+                           f"(limit {POST_TEST_WATCHDOG_S} s)\n")
+    patcher = pytest.MonkeyPatch()
+    previous_unraisable = sys.unraisablehook
+    report = None
+    # Every step, the opening of the report included, is inside the guarded
+    # region: this runs inside the `pytest_runtest_protocol` hook, where an
+    # exception would become an INTERNALERROR. A failure is recorded as an
+    # escape (charged like the others) and the finally always disarms.
+    try:
+        try:
+            report = open(HANG_REPORT, "a", encoding="utf-8")
+        except OSError as error:
+            # Without the report the watchdog still runs (a hang must end the
+            # process) and dumps to the original stderr. Caveat: pytest's fd
+            # capture also redirects fd 2, so that dump may be lost when the
+            # process exits; the escape below says why there is no report.
+            with _ESCAPED_LOCK:
+                _ESCAPED.append(f"Hang report {HANG_REPORT} not writable for the post-test "
+                                f"collection ({error!r}); its watchdog dumps to stderr")
+        target = report if report is not None else sys.__stderr__
+        if target is not None:
+            faulthandler.dump_traceback_later(POST_TEST_WATCHDOG_S, exit=True, file=target)
+        _refuse_modal_dialogs_after_test(patcher)
+        sys.unraisablehook = _record_unraisable
+        application = None
+        try:
+            from PyQt6.QtCore import QCoreApplication, QEvent, QThreadPool
+            from PyQt6.QtWidgets import QApplication
+            application = QApplication.instance()
+        except ImportError:
+            pass
+        gc.collect()
+        if application is not None:
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+            application.processEvents()
+            try:
+                pool = QThreadPool.globalInstance()
+            except BaseException:  # noqa: BLE001 - a leftover fake must not abort the session
+                pool = None
+            if pool is not None and not pool.waitForDone(POST_TEST_POOL_WAIT_MS):
+                with _ESCAPED_LOCK:
+                    _ESCAPED.append(
+                        f"QThreadPool still has {pool.activeThreadCount()} running job(s) "
+                        f"{POST_TEST_POOL_WAIT_MS} ms after the post-test garbage collection")
+            application.processEvents()
+        gc.freeze()
+    finally:
+        sys.unraisablehook = previous_unraisable
+        patcher.undo()
+        faulthandler.cancel_dump_traceback_later()
+        if report is not None:
+            report.close()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """@brief Run the post-test collection requested during the test, once pytest released it.
+
+    @param item Test whose protocol runs.
+    @param nextitem Next test, or None.
+    @return The wrapped hook's result.
+    @note `runtestprotocol` clears `item.funcargs` after the teardown, so
+        after the yield the finished test is no longer referenced by pytest
+        (except by `sys.last_traceback` when it failed).
+    @note Not a `finally`: when the protocol raises (KeyboardInterrupt,
+        pytest.exit) the collection is skipped so it can never mask that
+        exception; an ordinary exception of the collection itself is
+        recorded as an escape, never propagated as an INTERNALERROR.
+    """
+    try:
+        result = yield
+    except BaseException:
+        # The protocol itself raised: KeyboardInterrupt, pytest.exit, an
+        # internal error. The run is ending; collecting here could only delay
+        # it or, worse, replace that exception with one of ours. The frozen
+        # and pending objects are freed by `pytest_sessionfinish` instead.
+        _POST_TEST_COLLECTION["requested"] = False
+        raise
+    if _POST_TEST_COLLECTION["requested"]:
+        try:
+            _collect_after_test(item.nodeid)
+        except Exception as error:  # noqa: BLE001 - must never become an INTERNALERROR
+            # Recorded like an escape: it fails the next setup or the session.
+            with _ESCAPED_LOCK:
+                _ESCAPED.append(f"Post-test garbage collection after {item.nodeid} failed: "
+                                f"{error!r}")
+        if nextitem is None:
+            # Last test of the run: no next setup will charge what the
+            # collection let escape, so keep it for the session end.
+            _SESSION_END_ESCAPES.extend(_take_escaped())
+    return result
 
 
 @pytest.fixture(autouse=True)

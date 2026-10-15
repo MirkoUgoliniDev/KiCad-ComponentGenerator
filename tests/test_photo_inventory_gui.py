@@ -244,6 +244,10 @@ def test_output_actions_require_current_footprint(window, tmp_path, monkeypatch)
     controls = footprint_controls + complete_controls
     tab_open = lambda: window.tabs.isTabEnabled(window.KICAD_TAB_INDEX)  # noqa: E731
     assert all(not control.isEnabled() for control in controls)
+    # CONTRACT CHANGED 2026-10-15: installation also needs the required
+    # metadata (user); filled here so this test keeps checking the FILE gate.
+    # The metadata gate has its own tests in test_required_metadata.py.
+    fill_required_metadata(window)
     window._docs_dir().mkdir(parents=True, exist_ok=True)
     window._refresh_output_actions()
     assert all(not control.isEnabled() for control in controls)
@@ -324,8 +328,24 @@ def _write_complete_kicad_output(window):
     )
     # A complete STEP: the KiCad tab refuses one without the ISO trailer.
     step.write_bytes(b"ISO-10303-21;\nEND-ISO-10303-21;\n")
+    # CONTRACT CHANGED 2026-10-15: the installation is refused while a
+    # required metadata field is empty (user); a complete output now includes
+    # them, the designator being covered by its proposal.
+    fill_required_metadata(window)
     window._refresh_output_actions()
     return footprint, step
+
+
+def fill_required_metadata(window):
+    """@brief Fill description, keywords and datasheet: the required metadata
+    the designator proposal does not cover (user, 2026-10-15), and record
+    them as written into the files, as the generation of the footprint the
+    test writes by hand would (review pass 2, M1: installation also waits
+    for the metadata to be applied to the files)."""
+    window.field_description.setText("Modulo di prova")
+    window.field_tags.setText("prova modulo")
+    window.field_datasheet.setText("https://example.org/ds.pdf")
+    window._note_metadata_written(window._metadata_snapshot())
 
 
 def test_kicad_tab_opens_isolated_preview(window, tmp_path, monkeypatch):

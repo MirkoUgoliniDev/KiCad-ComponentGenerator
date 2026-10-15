@@ -59,6 +59,173 @@ ILLEGAL_NAME_CHARACTERS_BY_KIND = {
 
 SEVERITIES = ('error', 'warning')
 
+#: Finding codes of the REQUIRED metadata fields left empty, mapped to the
+#: field key the GUI uses (`MainWindow.METADATA_HELP_TITLES`). User decision
+#: of 2026-10-15: designator, description, keywords and datasheet are
+#: required, and while one of them is empty the component cannot be
+#: installed (no «install anyway» override). Footprint filters stay optional:
+#: their empty value is only a warning. The order is the form's row order, so
+#: a list of missing fields reads like the form.
+REQUIRED_FIELD_CODES = {
+    'reference_empty': 'reference',
+    'description_empty': 'description',
+    'keywords_empty': 'keywords',
+    'datasheet_empty': 'datasheet',
+}
+
+
+#: Error codes that stop «Applica ai file» (review 2026-10-15, R2-M1). Apply
+#: writes the metadata VALUES into the files by regenerating them, so it must
+#: refuse only a value it cannot write: an empty or non-alphabetic
+#: designator (the symbol exporter rejects it), text with line breaks or
+#: control characters, a filter with path separators, metadata that are not
+#: a dictionary. Everything else is NOT here on purpose:
+#: - empty description/keywords/datasheet are valid empty properties;
+#: - file-level findings of the footprint (unreadable, no version, missing
+#:   attribute…) are what the regeneration itself repairs, and their hint
+#:   says «Applica ai file»: refusing them would make the remedy unreachable;
+#: - symbol and name findings are the business of the install-time
+#:   confirmation (`MainWindow._confirm_klc_errors`) and of their own
+#:   remedies (symbol tab, project rename); since Apply is required before
+#:   installing, refusing them here would turn that confirmation into a
+#:   hard block.
+#: Every code here has a hint that names a field of «Metadati del
+#: componente», never «Applica ai file» (tests/test_klc_findings_ui.py).
+WRITE_BLOCKING_CODES = frozenset({
+    'metadata_type', 'reference_empty', 'reference_letters', 'description_multiline',
+    'keywords_multiline', 'datasheet_format', 'fp_filters_format',
+})
+
+
+def missing_required_fields(findings) -> list[str]:
+    """@brief The required metadata fields that the findings report as empty.
+
+    @param findings Iterable of `Finding`, e.g. the result of `check_all`.
+    @return Field keys (`reference`, `description`, `keywords`, `datasheet`)
+        in form order, each at most once; empty when every required field
+        has a value.
+    @note Only the `*_empty` codes count: a filled but malformed value (e.g.
+        a multi-line description) is a different error: «Applica ai file»
+        refuses it (`WRITE_BLOCKING_CODES`), so it never reaches the files
+        or the installation; it is not part of the required-field block.
+    """
+    codes = {finding.code for finding in findings}
+    return [field for code, field in REQUIRED_FIELD_CODES.items() if code in codes]
+
+
+# ── How to fix each finding (user decision of 2026-10-15, option 3) ─────────
+#
+# The message of a finding says WHAT is wrong; the user found the list
+# unclear because it never said what to do about it. Each code therefore has
+# a hint, an Italian catalogue source translated through `tx`, that says WHAT
+# to change and WHERE in the program (field of «Metadati del componente»,
+# tab, or command). The GUI only displays it, as the tooltip of the row.
+# Several codes share one text when the remedy is the same, so a remedy is
+# worded (and translated) once. tests/test_klc_findings_ui.py enumerates every
+# code this module can produce and fails when one has no hint: a new rule
+# without a remedy cannot be merged by accident.
+
+_HINT_NAME_EMPTY = ('Il componente non ha nome: il nome è quello del progetto. '
+                    'Dagli un nome con File › «Rinomina progetto...».')
+_HINT_NAME_ILLEGAL = ('Rinomina il progetto con File › «Rinomina progetto...» togliendo i caratteri '
+                      'indicati: il nome del progetto è il nome di footprint e simbolo.')
+_HINT_NAME_SPACES = ('Facoltativo: rinomina il progetto con File › «Rinomina progetto...» '
+                     'sostituendo gli spazi con «_» o «-».')
+_HINT_SYMBOL_FILE = ('Il file .kicad_sym nella cartella del componente è vuoto, danneggiato o non è un '
+                     'simbolo KiCad: riesportalo con «Esporta simbolo KiCad…» invece di modificarlo a mano.')
+_HINT_SYMBOL_GENERATED = ('Riesporta il simbolo con «Esporta simbolo KiCad…»: il programma lo scrive '
+                          'secondo le convenzioni KLC, quindi un file modificato a mano torna conforme.')
+_HINT_PIN_LAYOUT = ('Nella scheda «Simbolo elettrico» ridisponi il pin indicato sulla griglia di 2,54 mm, '
+                    'premi Applica e riesporta il simbolo con «Esporta simbolo KiCad…».')
+_HINT_FOOTPRINT_FILE = ('Il file .kicad_mod nella cartella del componente è vuoto, danneggiato o non è un '
+                        'footprint: rigeneralo con «Applica ai file» in «Metadati del componente», invece '
+                        'di modificarlo a mano.')
+_HINT_FOOTPRINT_GENERATED = ('Rigenera il footprint con «Applica ai file» in «Metadati del componente»: il '
+                             'programma lo scrive secondo le convenzioni KLC, quindi un file modificato a '
+                             'mano torna conforme.')
+_HINT_FOOTPRINT_OUTLINE = ('Rigenera il footprint con «Applica ai file» in «Metadati del componente»: '
+                           'courtyard e contorno di fabbricazione vengono disegnati attorno a pad e corpo. '
+                           'Se mancano ancora, controlla le dimensioni del corpo nella scheda «Anteprima '
+                           'footprint».')
+
+#: Code -> Italian source of the remedy shown as the tooltip of the finding.
+FIX_HINTS = {
+    'metadata_type': ('Errore interno: i metadati non sono un elenco di campi. Riapri il progetto; se si '
+                      'ripete, segnala il problema dal menu «?».'),
+    'reference_empty': ('Scrivi un prefisso di sole lettere (U, J, K…) nel campo «Designatore di '
+                        'riferimento» di «Metadati del componente», in questa scheda.'),
+    'reference_letters': ('Nel campo «Designatore di riferimento» di «Metadati del componente» lascia solo '
+                          'lettere: togli cifre, spazi e «?», il numero lo aggiunge KiCad.'),
+    'description_empty': ('Scrivi una riga che dica che cosa è il componente (funzione, package, dimensioni '
+                          'principali) nel campo «Descrizione» di «Metadati del componente».'),
+    'description_multiline': ('Nel campo «Descrizione» di «Metadati del componente» porta il testo su una '
+                              'sola riga, senza a capo né tabulazioni.'),
+    'keywords_empty': ('Scrivi alcune parole separate da spazi (famiglia, funzione, package) nel campo '
+                       '«Parole chiave» di «Metadati del componente».'),
+    'keywords_multiline': ('Nel campo «Parole chiave» di «Metadati del componente» togli a capo e '
+                           'tabulazioni: solo parole separate da spazi.'),
+    'datasheet_empty': ('Incolla l’URL del documento tecnico, o il percorso del file, nel campo «Datasheet '
+                        '(URL o file)» di «Metadati del componente».'),
+    'datasheet_format': ('Nel campo «Datasheet (URL o file)» di «Metadati del componente» togli a capo e '
+                         'caratteri di controllo dall’URL o dal percorso.'),
+    'datasheet_blanks': ('Facoltativo: nel campo «Datasheet (URL o file)» di «Metadati del componente» '
+                         'preferisci un URL o un percorso senza spazi; così com’è si installa lo stesso.'),
+    'fp_filters_empty': ('Facoltativo: nel campo «Filtri footprint» di «Metadati del componente» scrivi uno '
+                         'schema come «Nome*», oppure lascia la proposta in grigio.'),
+    'fp_filters_format': ('Nel campo «Filtri footprint» di «Metadati del componente» usa solo nomi con * e ?, '
+                          'separati da spazi, senza separatori di percorso e con al più un «:».'),
+    # The footprint and the symbol carry the component name, i.e. the
+    # project name: the remedy is the same for both kinds.
+    'footprint_name_empty': _HINT_NAME_EMPTY,
+    'footprint_name_illegal': _HINT_NAME_ILLEGAL,
+    'footprint_name_spaces': _HINT_NAME_SPACES,
+    'symbol_name_empty': _HINT_NAME_EMPTY,
+    'symbol_name_illegal': _HINT_NAME_ILLEGAL,
+    'symbol_name_spaces': _HINT_NAME_SPACES,
+    'symbol_unreadable': _HINT_SYMBOL_FILE,
+    'symbol_format': _HINT_SYMBOL_FILE,
+    'symbol_version': ('Il simbolo è scritto in un formato vecchio o senza versione: riesportalo con '
+                       '«Esporta simbolo KiCad…», che usa il formato attuale.'),
+    'pin_names_offset': _HINT_SYMBOL_GENERATED,
+    'body_stroke': _HINT_SYMBOL_GENERATED,
+    'body_fill': _HINT_SYMBOL_GENERATED,
+    'pin_position': _HINT_PIN_LAYOUT,
+    'pin_grid': _HINT_PIN_LAYOUT,
+    'pin_length': ('Nella scheda «Simbolo elettrico» porta la lunghezza del pin a 2,54 mm o a un multiplo '
+                   'di 1,27 mm, premi Applica e riesporta il simbolo con «Esporta simbolo KiCad…».'),
+    'pin_text_size': ('Nella scheda «Simbolo elettrico» porta i testi del pin a 1,27 mm, premi Applica e '
+                      'riesporta il simbolo con «Esporta simbolo KiCad…».'),
+    'pin_duplicate': ('Nella scheda «Simbolo elettrico» correggi la numerazione confrontandola con il '
+                      'pinout del documento: ogni pin ha un numero diverso. Poi Applica e riesporta il '
+                      'simbolo.'),
+    'pin_overlap': ('Nella scheda «Simbolo elettrico» separa i pin sovrapposti (o lascia visibile uno solo '
+                    'dei pin con lo stesso nome), premi Applica e riesporta il simbolo.'),
+    'footprint_unreadable': _HINT_FOOTPRINT_FILE,
+    'footprint_format': _HINT_FOOTPRINT_FILE,
+    'footprint_version': _HINT_FOOTPRINT_FILE,
+    'footprint_attr': _HINT_FOOTPRINT_GENERATED,
+    'footprint_reference': _HINT_FOOTPRINT_GENERATED,
+    'footprint_value': _HINT_FOOTPRINT_GENERATED,
+    'footprint_pads': ('Il footprint non ha pad: controlla i contatti nella scheda «Anteprima footprint» (o '
+                       'ripeti l’analisi nella scheda «Progetto»), poi rigenera con «Applica ai file».'),
+    'footprint_descr': ('Compila «Descrizione» in «Metadati del componente» e premi «Applica ai file»: la '
+                        'stessa riga va nel campo descr del footprint.'),
+    'footprint_courtyard': _HINT_FOOTPRINT_OUTLINE,
+    'footprint_fab': _HINT_FOOTPRINT_OUTLINE,
+}
+
+
+def fix_hint(code: str) -> str:
+    """@brief The translated remedy of a finding code.
+
+    @param code A finding code (`Finding.code`).
+    @return What to change and where, in the interface language; '' for a
+        code without a hint (only possible for codes made outside this
+        module, e.g. in tests: every code of this module has one).
+    """
+    source = FIX_HINTS.get(code)
+    return tx(source) if source else ''
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -69,22 +236,31 @@ class Finding:
     @param severity `error` (KiCad or the KLC rejects it) or `warning`
         (the KLC discourages it, the file still loads).
     @param message Translated text for the user.
+    @param hint Translated remedy (what to change and where); filled by the
+        checks from `FIX_HINTS`, '' when built without one.
     """
     code: str
     severity: str
     message: str
+    hint: str = ''
 
     def __post_init__(self) -> None:
+        """@brief Refuse a severity outside `SEVERITIES`.
+
+        @throws ValueError For an unknown severity.
+        """
         if self.severity not in SEVERITIES:
             raise ValueError(f'severity: expected one of {SEVERITIES}')
 
 
 def _error(code: str, message: str) -> Finding:
-    return Finding(code, 'error', message)
+    """An error finding with the remedy of its code attached."""
+    return Finding(code, 'error', message, fix_hint(code))
 
 
 def _warning(code: str, message: str) -> Finding:
-    return Finding(code, 'warning', message)
+    """A warning finding with the remedy of its code attached."""
+    return Finding(code, 'warning', message, fix_hint(code))
 
 
 def _has_control(text: str) -> bool:
@@ -133,13 +309,17 @@ def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:
     @return Findings in rule order; empty when everything complies.
     @note The designator prefix must be letters only (S6.1: `U`, `K`, `RV`,
         no digits, spaces or `?`): KiCad appends the number itself.
+    @note An empty required field (see `REQUIRED_FIELD_CODES`; blanks only
+        count as empty) is an ERROR since 2026-10-15: it blocks the
+        installation. Footprint filters stay optional (warning).
     """
     findings = []
     if not isinstance(metadata, dict):
         return [_error('metadata_type', tx('Metadati non validi: atteso un dizionario.'))]
     reference = _string(metadata, 'reference').strip()
     if not reference:
-        findings.append(_error('reference_empty', tx('Designatore vuoto: serve un prefisso come U, K o J.')))
+        findings.append(_error('reference_empty', tx(
+            'Designatore vuoto: campo obbligatorio, serve un prefisso come U, K o J.')))
     elif not reference.isalpha():
         findings.append(_error('reference_letters', tx(
             'Designatore «{reference}»: solo lettere, senza cifre, spazi o «?».', reference=reference)))
@@ -149,15 +329,17 @@ def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:
         findings.append(_error('description_multiline', tx(
             'Descrizione su più righe o con caratteri di controllo: deve stare su una riga.')))
     elif not description.strip():
-        findings.append(_warning('description_empty', tx('Descrizione vuota: le convenzioni KiCad la richiedono.')))
+        # Required field (user, 2026-10-15): an error, so it blocks installing.
+        findings.append(_error('description_empty', tx(
+            'Descrizione vuota: campo obbligatorio, l’installazione resta bloccata finché manca.')))
 
     keywords = _string(metadata, 'keywords')
     if _has_control(keywords):
         findings.append(_error('keywords_multiline', tx(
             'Parole chiave con caratteri di controllo: devono stare su una riga.')))
     elif not keywords.strip():
-        findings.append(_warning('keywords_empty', tx(
-            'Parole chiave vuote: aiutano la ricerca nel selettore dei simboli.')))
+        findings.append(_error('keywords_empty', tx(
+            'Parole chiave vuote: campo obbligatorio, l’installazione resta bloccata finché mancano.')))
 
     datasheet = _string(metadata, 'datasheet')
     if _has_control(datasheet):
@@ -169,7 +351,8 @@ def check_metadata(metadata: dict, footprint_name: str) -> list[Finding]:
         findings.append(_warning('datasheet_blanks', tx(
             'Datasheet «{datasheet}»: deve essere un URL o un percorso senza spazi.', datasheet=datasheet)))
     elif not datasheet.strip():
-        findings.append(_warning('datasheet_empty', tx('Datasheet vuoto: indicare l’URL o il percorso del documento.')))
+        findings.append(_error('datasheet_empty', tx(
+            'Datasheet vuoto: campo obbligatorio, indicare l’URL o il percorso del documento.')))
 
     fp_filters = _string(metadata, 'fp_filters')
     if _has_control(fp_filters):

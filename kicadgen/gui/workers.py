@@ -435,6 +435,11 @@ class GenerateWorker(_Cad3DRunWorker):
         #: Project description for the footprint's `descr` and "Description";
         #: "" keeps the generator's generic text (same reason as `datasheet`).
         self.description = ""
+        #: Project keywords for the footprint's `tags` on the PackageGeometry
+        #: path (explicit packages and modules mounted with headers); ""
+        #: keeps the package family. The pin-header and castellated params
+        #: carry their own `tags` (review 2026-10-15, R2-M2).
+        self.tags = ""
         #: Chosen positions of the Reference and Value texts, {key: (x, y)}
         #: mm (user, 2026-10-13); {} keeps the generator's defaults.
         self.text_positions = {}
@@ -453,7 +458,8 @@ class GenerateWorker(_Cad3DRunWorker):
                 _patch_point("build_castellated_module")(host)
                 if isinstance(host, CastellatedModuleParams)
                 else _patch_point("build_package")(host, datasheet=self.datasheet,
-                                                   description=self.description)
+                                                   description=self.description,
+                                                   tags=self.tags)
                 if isinstance(host, PackageGeometry)
                 else _patch_point("build_pin_header")(host)
             )

@@ -295,16 +295,142 @@ PROPERTY_KEYS = ('Reference', 'Value')
 PROPERTIES_KEY = 'symbol_properties'
 
 
+#: Grid the default property positions snap to, mm: KiCad's 50 mil text grid.
+PROPERTY_GRID_MM = 1.27
+#: Upper bound of the gap between a horizontal pin's line and the baseline of
+#: its number, mm. KiCad uses a 4 mil text margin plus half the pin pen
+#: (~0.18 mm, see `symbol_tab.PIN_NUMBER_GAP_MM`); 0.508 mm (20 mil) is a
+#: deliberately generous bound so the clearance estimate errs upwards.
+_PIN_NUMBER_GAP_BOUND_MM = 0.508
+#: Upper bound of the advance of one stroke-font character, as a fraction of
+#: the font size. KiCad's stroke font advances digits and capitals by less
+#: than the font size, so 1.0 overestimates a pin number's length: the
+#: estimate may lift the properties a grid step too far, never too little.
+_CHAR_ADVANCE_BOUND = 1.0
+
+
+def _drawn_name_length(name: str) -> int:
+    """Characters KiCad draws for a pin name: none for an empty name or «~».
+
+    `serialize_symbol` writes an empty name as `~`, which KiCad treats as
+    «no name» and does not draw; anything else is drawn in full.
+    """
+    return 0 if name in ('', '~') else len(name)
+
+
+def _pin_drawing_top(placed: 'PositionedPin', default_length: float,
+                     half_width: float, half_height: float) -> float:
+    """Highest y (mm, symbol coordinates, y up) reached by a pin's line, number and outside name.
+
+    The pin line runs from the connection point (`placed.x`, `placed.y`) to
+    the inner end, one pin length along the pin angle (0 = +x, 90 = +y,
+    180 = -x, 270 = -y, as KiCad stores it). The texts are drawn as KiCad
+    places them with the names inside (`pin_names (offset 0.508)`):
+    - the number, on a vertical pin, is rotated and centred on the middle of
+      the line, so it overshoots the outer end only when the text is longer
+      than the pin (half the excess on each side); on a horizontal pin it
+      sits above the line, one text height plus a small gap
+      (`_PIN_NUMBER_GAP_BOUND_MM`) higher;
+    - the name starts PIN_NAME_OFFSET beyond the inner end and runs on along
+      the pin direction (rotated on a vertical pin, centred on the line on a
+      horizontal one). It is decided by geometry, never by the `side` field:
+      a pin rotated or dragged so that it points away from the body (e.g. at
+      the top edge with angle 90) draws its name above the body.
+    The text length is bounded by `_CHAR_ADVANCE_BOUND` x size per character.
+
+    @param placed The pin with its resolved connection point and angle.
+    @param default_length Pin length used when the pin has none, mm.
+    @param half_width Half the body width, mm (the body is centred on 0, 0).
+    @param half_height Half the body height, mm.
+    @return The highest y the pin draws, mm.
+    @note The name counts only when it STARTS outside the body rectangle
+        (the point PIN_NAME_OFFSET beyond the inner end lies outside it).
+        `layout_symbol` puts every inner end on the body edge with the pin
+        pointing inwards, so each of its names starts inside the body and is
+        ignored: those symbols keep their exact property positions and file.
+        A name that starts inside but is longer than the body (e.g. a long
+        name on a bottom pin of a low body) is a body-size problem, not a
+        property one: it is deliberately left out, so that a symbol without
+        any pin above the body never moves its properties.
+    """
+    length = pin_length_of(placed.pin, default_length)
+    dx, dy = {0: (1, 0), 90: (0, 1), 180: (-1, 0), 270: (0, -1)}[placed.angle]
+    inner_x, inner_y = placed.x + dx * length, placed.y + dy * length
+    top = max(placed.y, inner_y)
+    size = pin_text_size_of(placed.pin)
+    if dx == 0:
+        # Vertical pin: the rotated number spans len x advance along y,
+        # centred on the middle of the line.
+        half_text = len(placed.pin.number) * size * _CHAR_ADVANCE_BOUND / 2
+        top = max(top, (placed.y + inner_y) / 2 + half_text)
+    else:
+        # Horizontal pin: the number stands on the line, one text height tall.
+        top = max(top, placed.y + _PIN_NUMBER_GAP_BOUND_MM + size)
+    characters = _drawn_name_length(placed.pin.name)
+    if characters:
+        start_x, start_y = inner_x + dx * PIN_NAME_OFFSET, inner_y + dy * PIN_NAME_OFFSET
+        # Closed rectangle with a small tolerance: a name starting exactly on
+        # the edge would be drawn over the outline, which we treat as inside.
+        inside = abs(start_x) <= half_width + 1e-7 and abs(start_y) <= half_height + 1e-7
+        if not inside:
+            if dx == 0:
+                # Vertical pin: the rotated name runs along y from its start;
+                # pointing down (dy = -1) its highest point is the start.
+                top = max(top, start_y + max(dy, 0) * characters * size * _CHAR_ADVANCE_BOUND)
+            else:
+                # Horizontal pin: the name is centred on the line, half a
+                # text height above it (below the number, kept for clarity).
+                top = max(top, start_y + size / 2)
+    return top
+
+
 def default_property_positions(layout: 'SymbolLayout') -> dict:
     """@brief Where KiCad's visible properties go unless the user moved them.
 
+    The base line is the body top edge (h = half body height), lifted to the
+    highest point drawn by any pin (its line and its number, see
+    `_pin_drawing_top`) when that point is above the body; the lifted value
+    is rounded up to the 1.27 mm grid. Value then sits 2.54 mm and Reference
+    5.08 mm above the base line, as before.
+
     @param layout The symbol geometry.
-    @return {'Reference': (0, h + 5.08), 'Value': (0, h + 2.54)}, mm,
-        above the body on the x axis: the positions every symbol had before
-        they became movable, so files without a choice do not change.
+    @return {'Reference': (0, base + 5.08), 'Value': (0, base + 2.54)}, mm,
+        on the x axis, both on the 1.27 mm grid.
+    @note Rule (2026-10-15): a pin on the top side sticks out of the body by
+        its own length, so the old fixed `h + 2.54` put the Value text on the
+        tip of a top pin. With the base line at the highest drawn pin point,
+        the Value text (1.27 mm tall, centred on its anchor) keeps at least
+        2.54 - 1.27 / 2 = 1.905 mm of clearance from every pin line and
+        number, whatever the pin length or text size.
+    @note Backward compatibility: pins placed by `layout_symbol` on the
+        left, right or bottom side never reach above the body with the
+        default 1.27 mm text (a side pin is at least 2.54 mm below the top
+        edge, its number at most 0.508 + 1.27 mm above its line), so those
+        symbols keep exactly `h + 2.54` / `h + 5.08` and write the same file.
+        A side pin in the top row with a number of 2.04 mm or more does reach
+        above the body and lifts the properties too: same class of overlap.
+    @note The rule ignores the horizontal extent of the texts: any pin drawn
+        above the body lifts the properties, even one far from x = 0. That
+        errs on the side of clearance and needs no text-width estimate of
+        the Value, which depends on the symbol name.
+    @note Pin names count when they are drawn outside the body (a pin rotated
+        or dragged to point away from it), see `_pin_drawing_top`.
+    @note Hidden pins (`SymbolPin.hidden`, written `(hide yes)`) are left
+        out: KiCad draws neither their line nor their texts in the
+        schematic, so there is nothing for the properties to clear, and the
+        file stays the one of a symbol without that pin.
     """
     h = layout.height / 2
-    return {'Reference': (0.0, round(h + 5.08, 4)), 'Value': (0.0, round(h + 2.54, 4))}
+    base = h
+    drawn = [placed for placed in layout.pins if not placed.pin.hidden]
+    if drawn:
+        highest = max(_pin_drawing_top(placed, layout.pin_length, layout.width / 2, h) for placed in drawn)
+        if highest > h + 1e-7:
+            # Round up to the 50 mil grid so the properties stay where KiCad
+            # can place texts; the small tolerance keeps a tip already on the
+            # grid (body edge and pin lengths are grid multiples) unchanged.
+            base = math.ceil(highest / PROPERTY_GRID_MM - 1e-7) * PROPERTY_GRID_MM
+    return {'Reference': (0.0, round(base + 5.08, 4)), 'Value': (0.0, round(base + 2.54, 4))}
 
 
 def _property_position(value, key: str) -> tuple:

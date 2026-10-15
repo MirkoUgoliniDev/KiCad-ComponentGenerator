@@ -74,15 +74,21 @@ def test_letter_prefixes_pass(reference):
     assert k.check_metadata({**GOOD_METADATA, 'reference': reference}, 'FP') == []
 
 
-def test_description_empty_is_a_warning_and_multiline_is_an_error():
-    empty = k.check_metadata({**GOOD_METADATA, 'description': ''}, 'FP')
-    assert [(f.code, f.severity) for f in empty] == [('description_empty', 'warning')]
+def test_description_empty_and_multiline_are_errors():
+    # CONTRACT CHANGED 2026-10-15: an empty description was a warning; the
+    # user made it a REQUIRED field that blocks the installation, so it is
+    # now an error. Blanks only count as empty.
+    for blank in ('', '   '):
+        empty = k.check_metadata({**GOOD_METADATA, 'description': blank}, 'FP')
+        assert [(f.code, f.severity) for f in empty] == [('description_empty', 'error')]
     multi = k.check_metadata({**GOOD_METADATA, 'description': 'one\ntwo'}, 'FP')
     assert [(f.code, f.severity) for f in multi] == [('description_multiline', 'error')]
 
 
-def test_keywords_empty_is_a_warning_and_control_characters_an_error():
-    assert _codes(k.check_metadata({**GOOD_METADATA, 'keywords': ' '}, 'FP')) == ['keywords_empty']
+def test_keywords_empty_and_control_characters_are_errors():
+    # CONTRACT CHANGED 2026-10-15: empty keywords were a warning; required now.
+    empty = k.check_metadata({**GOOD_METADATA, 'keywords': ' '}, 'FP')
+    assert [(f.code, f.severity) for f in empty] == [('keywords_empty', 'error')]
     assert _codes(k.check_metadata({**GOOD_METADATA, 'keywords': 'a\tb'}, 'FP')) == ['keywords_multiline']
 
 
@@ -91,6 +97,51 @@ def test_keywords_empty_is_a_warning_and_control_characters_an_error():
     ('https://x.org/a\x00.pdf', ['datasheet_format']), ('C:/docs/a.pdf', [])])
 def test_datasheet_is_empty_a_url_or_a_path_without_blanks(datasheet, codes):
     assert _codes(k.check_metadata({**GOOD_METADATA, 'datasheet': datasheet}, 'FP')) == codes
+
+
+def test_an_empty_datasheet_is_an_error_and_blanks_inside_a_warning():
+    """CONTRACT CHANGED 2026-10-15: the empty datasheet was a warning; it is a
+    required field now. A path with blanks stays advice (a Windows path)."""
+    (empty,) = k.check_metadata({**GOOD_METADATA, 'datasheet': '  '}, 'FP')
+    assert (empty.code, empty.severity) == ('datasheet_empty', 'error')
+    (blanks,) = k.check_metadata({**GOOD_METADATA, 'datasheet': 'docs/a b.pdf'}, 'FP')
+    assert (blanks.code, blanks.severity) == ('datasheet_blanks', 'warning')
+
+
+# ── Required fields (user, 2026-10-15) ────────────────────────────────────
+
+@pytest.mark.parametrize('key,code', [
+    ('reference', 'reference_empty'), ('description', 'description_empty'),
+    ('keywords', 'keywords_empty'), ('datasheet', 'datasheet_empty')])
+def test_each_empty_required_field_is_named_by_missing_required_fields(key, code):
+    """Negative per field: emptying exactly one required field reports exactly that one."""
+    # Blanks only (a no-break space included) count as empty; a TAB would be
+    # a control character, which is a different error (`*_multiline`/format).
+    findings = k.check_metadata({**GOOD_METADATA, key: '   '}, 'FP')
+    assert [(f.code, f.severity) for f in findings] == [(code, 'error')]
+    assert k.missing_required_fields(findings) == [key]
+
+
+def test_complete_metadata_and_empty_filters_miss_no_required_field():
+    """Positive: the four required fields filled; the optional filters may stay empty."""
+    assert k.missing_required_fields(k.check_metadata(GOOD_METADATA, 'FP')) == []
+    no_filters = k.check_metadata({**GOOD_METADATA, 'fp_filters': ''}, 'FP')
+    assert [(f.code, f.severity) for f in no_filters] == [('fp_filters_empty', 'warning')]
+    assert k.missing_required_fields(no_filters) == []
+
+
+def test_a_malformed_but_filled_field_is_not_a_missing_one():
+    """Negative: a multi-line description or a designator with digits are
+    errors of another kind, not missing required fields."""
+    findings = k.check_metadata({**GOOD_METADATA, 'description': 'a\nb', 'reference': 'U1'}, 'FP')
+    assert {f.code for f in findings} == {'description_multiline', 'reference_letters'}
+    assert k.missing_required_fields(findings) == []
+
+
+def test_missing_required_fields_follow_the_form_order():
+    findings = k.check_metadata({'fp_filters': 'X*'}, 'FP')
+    assert k.missing_required_fields(reversed(findings)) == [
+        'reference', 'description', 'keywords', 'datasheet']
 
 
 @pytest.mark.parametrize('filters,codes', [
@@ -272,8 +323,11 @@ def test_through_hole_attribute_passes():
 # ── check_all ──────────────────────────────────────────────────────────────
 
 def test_check_all_merges_errors_first_and_skips_absent_texts():
-    findings = k.check_all({**GOOD_METADATA, 'description': ''}, 'FP', symbol_text=_symbol(version='1'))
-    assert _codes(findings) == ['symbol_version', 'description_empty']
+    # CONTRACT CHANGED 2026-10-15: the warning used here was the empty
+    # description, now an error (required field); the empty footprint filter
+    # is still a warning and keeps the «errors first» ordering under test.
+    findings = k.check_all({**GOOD_METADATA, 'fp_filters': ''}, 'FP', symbol_text=_symbol(version='1'))
+    assert _codes(findings) == ['symbol_version', 'fp_filters_empty']
     assert k.check_all(GOOD_METADATA, 'FP') == []
     both = k.check_all(GOOD_METADATA, 'FP', symbol_text=_symbol(), footprint_text=_footprint(pad=''))
     assert _codes(both) == ['footprint_pads']
