@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 2026-10-15 sera — FATTO (commit in corso): parole chiave predefinite (M-1), scelta dell'utente: opzione 1
+## 2026-10-15 sera — FATTO, commit `066c499` mergiato in main: parole chiave predefinite (M-1), scelta dell'utente: opzione 1
 
 Spiegato all'utente in dettaglio (ki_keywords/tags servono alla ricerca in
 KiCad; `field_tags = TextValue("pin header THT")` main_window ~9229; ~8650
