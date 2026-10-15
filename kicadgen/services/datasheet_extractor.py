@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
-from ..core.package_geometry import package_from_mapping
+from ..core.package_geometry import package_doubts, package_from_mapping
 from ..core.validation import finite_number
 from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
@@ -225,31 +225,83 @@ _EXTRACTION_TOOL = {
                     "custom). Quando e' presente e' la fonte del footprint. Coordinate "
                     "locali del centro di ogni pad, come appaiono nella vista indicata "
                     "da source_view (la specchiatura della vista dal basso la fa il "
-                    "programma). Un pad esposto/termico e' un pin a se'. Non inventare "
+                    "programma). CONVENZIONE DEGLI ASSI, come il disegno appare sulla "
+                    "pagina: X cresce verso DESTRA e Y cresce verso il BASSO (un pad piu' "
+                    "in basso nel disegno ha y_mm MAGGIORE; non usare la convenzione "
+                    "matematica con Y verso l'alto, che specchierebbe il footprint e "
+                    "invertirebbe l'ordine dei pin). Ogni angolo (orientation_deg, "
+                    "rotation_deg) e' in gradi in senso ANTIORARIO come appare sulla "
+                    "pagina. Un pad esposto/termico e' un pin a se'. Non inventare "
                     "coordinate non supportate dal documento."
                 ),
                 "properties": {
                     "family": {"type": "string", "enum": [
                         "unknown", "dip", "sip", "soic", "tssop", "qfn", "qfp",
                         "module", "castellated", "custom"]},
-                    "body_length_mm": {"type": "number", "exclusiveMinimum": 0},
-                    "body_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "body_length_mm": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "description": (
+                            "Estensione del corpo lungo l'asse X di queste coordinate "
+                            "(orizzontale nella vista di source_view), qualunque nome le "
+                            "dia il datasheet (D, E, E1, length). Con i pin sui lati "
+                            "sinistro e destro (SOIC disegnato in verticale) e' la "
+                            "dimensione TRASVERSALE alle file di pin, non quella lungo le "
+                            "file."),
+                    },
+                    "body_width_mm": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "description": (
+                            "Estensione del corpo lungo l'asse Y di queste coordinate "
+                            "(verticale nella vista di source_view), qualunque nome le dia "
+                            "il datasheet. Con i pin sui lati sinistro e destro e' la "
+                            "dimensione LUNGO le file di pin."),
+                    },
                     "body_height_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "lead_form": {
+                        "type": "string", "enum": ["gull_wing", "j_lead", "unknown"],
+                        "description": (
+                            "Forma dei terminali come appare nella vista laterale: "
+                            "\"gull_wing\" se escono dai fianchi e si piegano verso "
+                            "l'esterno ad ala di gabbiano, \"j_lead\" se si piegano a J "
+                            "sotto il bordo del corpo (le piazzole stanno sotto il bordo), "
+                            "\"unknown\" se il disegno non mostra la vista laterale. Non "
+                            "dedurlo dal nome del package."),
+                    },
                     "origin": {"type": "string", "enum": ["body_center", "pin1", "custom"]},
                     "source_view": {"type": "string", "enum": ["top", "bottom"]},
-                    "orientation_deg": {"type": "number"},
-                    "mirrored": {"type": "boolean"},
+                    "orientation_deg": {
+                        "type": "number",
+                        "description": (
+                            "Rotazione da applicare al disegno per ottenere il footprint, "
+                            "in gradi ANTIORARI come appare sulla pagina; 0 per disegnare "
+                            "il footprint come il disegno."),
+                    },
+                    "mirrored": {
+                        "type": "boolean",
+                        "description": (
+                            "true SOLO se il disegno stesso e' un'immagine speculare della "
+                            "vista dichiarata in source_view per un motivo DIVERSO dall'essere "
+                            "una vista dal basso (es. etichettato «mirror image» o «vista "
+                            "dall'alto in trasparenza»). Una BOTTOM VIEW si dichiara SOLO con "
+                            "source_view \"bottom\" e mirrored false: la specchiatura della "
+                            "vista dal basso la fa gia' il programma, e mirrored true la "
+                            "annullerebbe."),
+                    },
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "needs_review": {"type": "boolean"},
                     "pins": {"type": "array", "items": {"type": "object", "properties": {
                         "number": {"type": "string"}, "name": {"type": "string"},
                         "x_mm": {"type": "number"}, "y_mm": {"type": "number"},
-                        "pad_length_mm": {"type": "number", "exclusiveMinimum": 0},
-                        "pad_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
+                                          "description": "Dimensione del pad lungo X, prima di rotation_deg."},
+                        "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
+                                         "description": "Dimensione del pad lungo Y, prima di rotation_deg."},
                         "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
                         "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
                         "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid"]},
-                        "rotation_deg": {"type": "number"}, "drill_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "rotation_deg": {"type": "number",
+                                         "description": "Angolo del pad in gradi ANTIORARI come appare sulla pagina."},
+                        "drill_mm": {"type": "number", "exclusiveMinimum": 0},
                     }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
                 },
                 "required": ["family", "source_view", "pins"],
@@ -355,18 +407,24 @@ _EXTRACTION_TOOL = {
                 "type": "number",
                 "description": (
                     "SOLO se il datasheet ha un disegno meccanico (\"Outline Dimensions\" "
-                    "o simile) con l'ingombro del corpo del componente: lunghezza del "
-                    "corpo (asse X, stessa direzione del pitch) nell'unita' di "
-                    "drawing_unit. Ometti se "
+                    "o simile) con l'ingombro del corpo del componente: estensione del "
+                    "corpo lungo l'asse X del footprint (orizzontale nella vista), "
+                    "nell'unita' di drawing_unit, qualunque nome le dia il datasheet. "
+                    "In una matrice di pin X e' la direzione delle colonne, quindi del "
+                    "pitch; con pad espliciti (package_geometry, o pads) X e' l'asse X delle loro "
+                    "coordinate, anche quando le file di pin corrono in verticale (pin a "
+                    "sinistra e a destra: e' la dimensione trasversale alle file). Ometti se "
                     "il disegno meccanico non e' presente."
                 ),
             },
             "body_width_mm": {
                 "type": "number",
                 "description": (
-                    "Larghezza del corpo, asse Y (vista dall'alto/bottom view del "
-                    "disegno meccanico -- e' la dimensione del CONTORNO ESTERNO del "
-                    "case, NON la distanza tra le due righe di pin: e' quasi sempre "
+                    "Larghezza del corpo, estensione lungo l'asse Y del footprint "
+                    "(verticale nella vista; stessa convenzione di body_length_mm), "
+                    "dalla vista dall'alto o dal basso del disegno meccanico: e' la "
+                    "dimensione del CONTORNO ESTERNO del case. In una matrice di pin NON "
+                    "e' la distanza tra le due righe di pin: e' quasi sempre "
                     "un valore diverso e leggermente maggiore di row_spacing_mm, "
                     "perche' il case e' piu' largo della sola distanza tra i pin."
                 ),
@@ -1652,6 +1710,11 @@ class ExtractedParams:
         (e.g. "castellated_sides.left.half_hole_diameter_mm"). A value the
         program itself estimated (e.g. `fit_body_to_pin_field`) is
         "estimated". Absent keys are values the result does not carry.
+    @note `geometry_doubts` lists the structural contradictions of
+        `package_geometry` (body covering the lead pads, with `swap_clears`
+        when swapping body length and width would resolve it; clockwise lead
+        numbering; bottom view also declared mirrored). The geometry is kept
+        as read; each doubt's message is also in `notes`.
     """
 
     name: str
@@ -1694,6 +1757,12 @@ class ExtractedParams:
     pin_map_conflict: Optional[str] = None
     #: One of LEAD_EXITS, None when the model did not say.
     lead_exit: Optional[str] = None
+    #: Structural doubts of `package_geometry` (core.package_geometry.package_doubts),
+    #: each as GeometryDoubt.as_dict(): {"code", "message", "pins", "swap_clears"}.
+    #: None when there is no package geometry or nothing is contradicted. The
+    #: geometry is never corrected: the same messages are in `notes`, and a
+    #: GUI can show `swap_clears` / the code to ask the user what is true.
+    geometry_doubts: Optional[Sequence[dict]] = None
 
     def values_to_review(self) -> list[str]:
         """@brief Return the keys of `value_sources` whose value was not read nor derived.
@@ -1808,33 +1877,355 @@ def _guess_media_type(path: Path) -> str:
 #: EXIF tag of the orientation; 1 means «stored upright».
 _EXIF_ORIENTATION = 0x0112
 
+#: JPEG APP0 identifier kept: the JFIF header only declares density and colour
+#: space, never the camera or the place.
+_JPEG_JFIF_ID = b"JFIF\x00"
+#: JPEG APP14 identifier kept: Adobe's segment tells the decoder how to convert
+#: CMYK/YCCK colours, so dropping it would change the pixels.
+_JPEG_ADOBE_ID = b"Adobe"
+
+#: PNG chunks that describe pixels and are therefore kept; every other chunk
+#: (eXIf, tEXt, zTXt, iTXt, iCCP, tIME, C2PA and any private chunk) is dropped.
+#: acTL/fcTL/fdAT are the animation chunks of APNG, cICP/mDCv/cLLi the
+#: colour-encoding chunks of the third edition: none carries free text.
+_PNG_PIXEL_CHUNKS = frozenset({
+    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+    b"sBIT", b"bKGD", b"pHYs", b"hIST", b"acTL", b"fcTL", b"fdAT",
+    b"cICP", b"mDCv", b"cLLi",
+})
+
+#: WebP chunks that describe pixels and are therefore kept (an allow-list,
+#: like PNG): lossy and lossless bitstreams, the extended header, alpha and
+#: animation. EXIF, XMP, ICCP, C2PA and any private chunk are dropped.
+_WEBP_PIXEL_CHUNKS = frozenset({b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"})
+#: VP8X flag bits announcing the metadata chunks (ICC 0x20, EXIF 0x08, XMP
+#: 0x04): always cleared, since those chunks are never kept.
+_WEBP_METADATA_FLAGS = 0x20 | 0x08 | 0x04
+
+
+class _UncleanableImage(Exception):
+    """An image that cannot be sent safely: its metadata or orientation cannot be handled.
+
+    Private signal of the privacy boundary; `_file_to_content_block` turns it
+    into a translated ExtractionError naming the file.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        #: "metadata" (no cleaner understands the file) or "orientation"
+        #: (a rotation tag that no decoder can apply).
+        self.reason = reason
+
+
+def _jpeg_without_metadata(data: bytes) -> Optional[bytes]:
+    """The JPEG with its metadata segments removed, entropy-coded data untouched.
+
+    Lossless: the compressed pixels are copied byte for byte, so quality and
+    size do not change (re-encoding would lose quality at every upload).
+    Removed: every APPn segment except the JFIF APP0 and the Adobe APP14
+    (EXIF with GPS and device, XMP, ICC profile, IPTC, MPF and maker
+    segments), every COM comment, and everything after the end-of-image
+    marker (phones append there a second, full-metadata picture or a trailer).
+
+    A file cut short (no end-of-image marker, or a scan truncated by a copy
+    that did not finish) is cleaned up to the end of its data and closed with
+    an end-of-image marker: the cleaning fails closed, it never falls back to
+    the raw bytes, whose header still holds the metadata.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes, or None when the data is not a JPEG or ends
+        before its first scan (no pixels to send).
+    """
+    size = len(data)
+    if size < 4 or data[:2] != b"\xff\xd8":
+        return None
+    out = bytearray(b"\xff\xd8")
+    index = 2
+    scanned = False  # True once compressed pixels have been copied
+
+    def closed() -> Optional[bytes]:
+        """The cleaned bytes so far, closed, when they hold pixels."""
+        return bytes(out) + b"\xff\xd9" if scanned else None
+
+    while index < size:
+        if data[index] != 0xFF:
+            return closed()
+        while index < size and data[index] == 0xFF:  # fill bytes before a marker
+            index += 1
+        if index >= size:
+            return closed()
+        marker = data[index]
+        index += 1
+        if marker == 0xD9:  # end of image: whatever follows is not this picture
+            out += b"\xff\xd9"
+            return bytes(out)
+        if 0xD0 <= marker <= 0xD7 or marker == 0x01:  # markers without a length
+            out += bytes((0xFF, marker))
+            continue
+        if index + 2 > size:
+            return closed()
+        length = int.from_bytes(data[index:index + 2], "big")
+        if length < 2 or index + length > size:
+            return closed()
+        body = data[index + 2:index + length]
+        segment = data[index - 2:index + length]
+        index += length
+        if marker == 0xFE:
+            continue  # COM: free text
+        if 0xE0 <= marker <= 0xEF:
+            keep = ((marker == 0xE0 and body.startswith(_JPEG_JFIF_ID))
+                    or (marker == 0xEE and body.startswith(_JPEG_ADOBE_ID)))
+            if not keep:
+                continue
+        out += segment
+        if marker == 0xDA:
+            # Start of scan: entropy-coded data up to the next real marker
+            # (0xFF followed by neither a stuffed 0x00, a restart marker nor
+            # another fill byte). Progressive files have several scans: the
+            # outer loop handles the segments between them.
+            start = index
+            while True:
+                index = data.find(b"\xff", index)
+                if index < 0 or index + 1 >= size:
+                    # Scan cut short: keep the pixels that are there (a
+                    # lone trailing 0xFF is half a marker, not data).
+                    end = size - 1 if data.endswith(b"\xff") else size
+                    out += data[start:end]
+                    scanned = True
+                    return closed()
+                following = data[index + 1]
+                if following == 0x00 or 0xD0 <= following <= 0xD7 or following == 0xFF:
+                    index += 1
+                    continue
+                break
+            out += data[start:index]
+            scanned = True
+    return closed()
+
+
+def _png_without_metadata(data: bytes) -> Optional[bytes]:
+    """The PNG with only the chunks that describe pixels, compressed data untouched.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes (chunks of `_PNG_PIXEL_CHUNKS`, up to IEND; any
+        trailer after IEND dropped), or None when the data is not a PNG whose
+        chunk list ends with IEND (a truncated PNG is then decoded and
+        re-encoded, or refused).
+    """
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        return None
+    out = bytearray(signature)
+    index, size = len(signature), len(data)
+    while index + 12 <= size:
+        length = int.from_bytes(data[index:index + 4], "big")
+        kind = data[index + 4:index + 8]
+        end = index + 12 + length  # length + type + data + CRC
+        if end > size:
+            return None
+        if kind in _PNG_PIXEL_CHUNKS:
+            out += data[index:end]
+        index = end
+        if kind == b"IEND":
+            return bytes(out)
+    return None
+
+
+def _webp_without_metadata(data: bytes) -> Optional[bytes]:
+    """The WebP with only the chunks that describe pixels, compressed data untouched.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes (chunks of `_WEBP_PIXEL_CHUNKS`) with the RIFF
+        size and the VP8X metadata flags updated, or None when the data is
+        not a well-formed RIFF/WEBP container holding a bitstream.
+    """
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    chunks = []
+    index, size = 12, len(data)
+    while index + 8 <= size:
+        kind = data[index:index + 4]
+        length = int.from_bytes(data[index + 4:index + 8], "little")
+        if index + 8 + length > size:
+            return None
+        end = index + 8 + length + (length & 1)  # chunks are padded to an even size
+        if kind in _WEBP_PIXEL_CHUNKS:
+            chunk = bytearray(data[index:min(end, size)])
+            if len(chunk) & 1:
+                chunk += b"\x00"  # a last chunk without its padding byte
+            chunks.append(chunk)
+        index = end
+    if not any(chunk[:4] in (b"VP8 ", b"VP8L", b"ANMF") for chunk in chunks):
+        return None
+    for chunk in chunks:
+        if chunk[:4] == b"VP8X" and len(chunk) > 8:
+            chunk[8] &= ~_WEBP_METADATA_FLAGS & 0xFF
+    body = b"WEBP" + b"".join(bytes(chunk) for chunk in chunks)
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+def _reencoded_without_metadata(data: bytes) -> Optional[bytes]:
+    """The image decoded and saved again from its bare pixels, for other formats.
+
+    Used for the formats without a lossless cleaner above (GIF), or for a
+    container the walkers reject but PIL can decode. The new image is built
+    from the pixel buffer alone, so no `info` entry (comment, XMP, ICC, EXIF)
+    can reach the encoder whatever the Pillow version copies by default; only
+    the palette and the transparency index, which define pixels, are copied.
+    An animated GIF becomes its first frame: the models read a still image.
+
+    @param data Encoded bytes.
+    @return The re-encoded bytes in the same format, or None when PIL cannot
+        decode the data.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(data)) as image:
+            file_format = image.format or "PNG"
+            image.load()
+            bare = Image.frombytes(image.mode, image.size, image.tobytes())
+            if image.mode == "P" and image.palette is not None:
+                bare.putpalette(image.getpalette())
+            options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
+            if "transparency" in image.info and file_format.upper() in ("GIF", "PNG"):
+                options["transparency"] = image.info["transparency"]
+            out = BytesIO()
+            bare.save(out, format=file_format, **options)
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 - None tells the caller nothing could be cleaned
+        return None
+
+
+def _image_without_metadata(data: bytes) -> bytes:
+    """The image bytes with every metadata block removed, pixels unchanged.
+
+    Privacy boundary of every document upload (audit 2026-10-15, security
+    M2): a phone photo carries the GPS position, the device make and model
+    and capture times in EXIF/XMP, none of which the model needs to read a
+    board. JPEG, PNG and WebP are cleaned losslessly by walking their
+    container (`_jpeg_without_metadata`, `_png_without_metadata`,
+    `_webp_without_metadata`); any other format, or a container those
+    walkers reject, is decoded and re-encoded from its bare pixels.
+
+    @param data Encoded image bytes.
+    @return Metadata-free bytes in the same format.
+    @throws _UncleanableImage ("metadata") When no cleaner applies and PIL
+        cannot decode the data either (an HEIC photo renamed .jpg, a damaged
+        file): it FAILS CLOSED, because the raw bytes may still carry the
+        metadata (review 2026-10-15, M1). The caller refuses the upload.
+    @note The ICC profile is dropped too: it can name the device, and the
+        models read photos and drawings without colour management.
+    """
+    for cleaner in (_jpeg_without_metadata, _png_without_metadata,
+                    _webp_without_metadata, _reencoded_without_metadata):
+        cleaned = cleaner(data)
+        if cleaned is not None:
+            return cleaned
+    raise _UncleanableImage("metadata")
+
+
+def _sniffed_extension(data: bytes) -> Optional[str]:
+    """OpenCV file extension of the container, read from its magic bytes."""
+    if data[:2] == b"\xff\xd8":
+        return ".jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _oriented_with_opencv(data: bytes, orientation: int) -> Optional[bytes]:
+    """The image rotated by OpenCV when PIL read the tag but cannot decode the pixels.
+
+    A truncated phone photo still has its header: PIL reads the orientation
+    but refuses the cut pixels, while OpenCV decodes what is there. The tag
+    is applied here explicitly (decoding with IMREAD_IGNORE_ORIENTATION, so
+    no decoder version applies it twice) with the same transforms as
+    PIL's `ImageOps.exif_transpose`; OpenCV writes no metadata.
+
+    @param data Encoded bytes (JPEG, PNG or WebP).
+    @param orientation EXIF orientation 2..8.
+    @return Re-encoded upright bytes in the same container (JPEG/WebP at
+        quality 95, as the PIL path), or None when OpenCV cannot decode them.
+    """
+    try:
+        import cv2
+        import numpy as np
+        extension = _sniffed_extension(data)
+        if extension is None:
+            return None
+        pixels = cv2.imdecode(np.frombuffer(data, np.uint8),
+                              cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        if pixels is None:
+            return None
+        transforms = {
+            2: lambda a: a[:, ::-1],                         # mirror left-right
+            3: lambda a: a[::-1, ::-1],                      # rotate 180
+            4: lambda a: a[::-1, :],                         # mirror top-bottom
+            5: lambda a: a.transpose(1, 0, 2),               # main diagonal
+            6: lambda a: np.rot90(a, -1),                    # rotate 90 clockwise
+            7: lambda a: a[::-1, ::-1].transpose(1, 0, 2),   # anti-diagonal
+            8: lambda a: np.rot90(a, 1),                     # rotate 90 counter-clockwise
+        }
+        upright = np.ascontiguousarray(transforms[orientation](pixels))
+        params = ([cv2.IMWRITE_JPEG_QUALITY, 95] if extension == ".jpg"
+                  else [cv2.IMWRITE_WEBP_QUALITY, 95] if extension == ".webp" else [])
+        ok, encoded = cv2.imencode(extension, upright, params)
+        return encoded.tobytes() if ok else None
+    except Exception:  # noqa: BLE001 - None: the caller refuses the image
+        return None
+
 
 def _upright_image_bytes(data: bytes) -> bytes:
-    """The image as the analysis and the preview see it, EXIF orientation applied.
+    """The image as the analysis and the preview see it, EXIF orientation applied, without metadata.
 
     Phones store the pixels one way and the right way in the orientation tag.
     OpenCV (the analysis) and the preview apply it; a provider may not, and
     the model would then read a rotated photo (utente, 2026-09-25). A photo
-    without a rotation tag is returned byte for byte; one with it is rotated
-    and re-encoded in the same format, without the tag. Any decoding problem
-    returns the original bytes: sending the file as it is was the old
-    behaviour, never worse than failing.
+    with a rotation tag is rotated and re-encoded in the same format; every
+    photo, rotated or not, then loses its metadata (`_image_without_metadata`):
+    sending an unrotated phone photo byte for byte used to leak its GPS
+    position and device (audit 2026-10-15).
+
+    When PIL reads a rotation tag but cannot decode the pixels (a truncated
+    file), OpenCV rotates them (`_oriented_with_opencv`); when neither can,
+    the image is refused rather than sent with its tag stripped and its
+    pixels unrotated (review 2026-10-15, L7): the model would read it sideways
+    while the analysis and the preview show it upright.
+
+    @param data Encoded image bytes as read from the document file.
+    @return Upright, metadata-free bytes in the same format.
+    @throws _UncleanableImage "orientation" when a rotation tag cannot be
+        applied; "metadata" when the metadata cannot be removed.
     """
+    orientation = 1
     try:
         from io import BytesIO
         from PIL import Image, ImageOps
         with Image.open(BytesIO(data)) as image:
             orientation = image.getexif().get(_EXIF_ORIENTATION, 1)
-            if orientation in (None, 1):
-                return data
-            file_format = image.format or "PNG"
-            upright = ImageOps.exif_transpose(image)
-            out = BytesIO()
-            options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
-            upright.save(out, format=file_format, **options)
-            return out.getvalue()
-    except Exception:  # noqa: BLE001 - si ripiega sul file originale
-        return data
+            if orientation not in (None, 1):
+                file_format = image.format or "PNG"
+                upright = ImageOps.exif_transpose(image)
+                # The transposed copy may still hold EXIF/ICC/XMP in `info`;
+                # they are removed below from the encoded result.
+                out = BytesIO()
+                options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
+                upright.save(out, format=file_format, **options)
+                data = out.getvalue()
+                orientation = 1
+    except Exception:  # noqa: BLE001 - handled below with the orientation still pending
+        pass
+    if orientation in range(2, 9):
+        # Cleaned first: the JPEG walker closes a truncated file with its
+        # end-of-image marker, which OpenCV needs to decode it at all.
+        rotated = _oriented_with_opencv(_image_without_metadata(data), orientation)
+        if rotated is None:
+            raise _UncleanableImage("orientation")
+        data = rotated
+    return _image_without_metadata(data)
 
 
 #: Component family whose contacts are the holes cut by the board edge.
@@ -1862,7 +2253,9 @@ def _edge_strip_blocks(doc_paths, document_roles) -> list:
             payload = _upright_image_bytes(Path(path).read_bytes())
             image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
             strips = edge_strips(image) if image is not None else []
-        except (OSError, ValueError, cv2.error):
+        except (OSError, ValueError, cv2.error, _UncleanableImage):
+            # An image refused by the privacy boundary gives no strips; the
+            # upload of the photo itself reports the reason.
             strips = []
         for edge, png in strips:
             blocks.append({"type": "text", "text": (
@@ -1943,6 +2336,10 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     @param model Receiving model identifier, or None: an image is enlarged to
         that model's provider limits when the provider resolves more detail
         from an enlarged image (`_enlarged_image_bytes`); a PDF is sent as is.
+    @return The content block; an image always upright and without metadata.
+    @throws ExtractionError For an unsupported or too large file, and for an
+        image whose metadata cannot be removed or whose rotation tag cannot
+        be applied: such an image is refused, never sent raw (fail closed).
     """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
@@ -1959,10 +2356,28 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     media_type = _guess_media_type(path)
     payload = path.read_bytes()
     if media_type.startswith("image/"):
-        payload = _upright_image_bytes(payload)
-        enlarged = _enlarged_image_bytes(payload, model)
-        if enlarged is not payload:
-            payload, media_type = enlarged, "image/png"
+        try:
+            payload = _upright_image_bytes(payload)
+            enlarged = _enlarged_image_bytes(payload, model)
+            if enlarged is not payload:
+                payload, media_type = enlarged, "image/png"
+                # The enlarged PNG is built from a decoded image whose `info`
+                # may still carry an ICC profile: the privacy boundary is
+                # applied again on the bytes that actually leave the computer.
+                payload = _image_without_metadata(payload)
+        except _UncleanableImage as exc:
+            # Fail closed: nothing that may carry the GPS position or a
+            # sideways picture leaves the computer (review 2026-10-15, M1/L7).
+            if exc.reason == "orientation":
+                raise ExtractionError(tx(
+                    "{name}: immagine danneggiata con un'indicazione di rotazione che il "
+                    "programma non riesce ad applicare; non viene inviata all'AI, che la "
+                    "leggerebbe ruotata. Salvala di nuovo come JPEG o PNG e riprova.",
+                    name=path.name)) from exc
+            raise ExtractionError(tx(
+                "{name}: immagine che il programma non riesce a leggere; non viene inviata "
+                "all'AI perche' i suoi metadati (posizione GPS, dispositivo) non si possono "
+                "rimuovere. Salvala come JPEG o PNG e riprova.", name=path.name)) from exc
     data_b64 = base64.b64encode(payload).decode("ascii")
     data_url = f"data:{media_type};base64,{data_b64}"
 
@@ -4872,13 +5287,19 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
                             "parametri a matrice o del modulo."))
         package_geometry = None
+    geometry_doubts = None
     if package_geometry is not None:
         try:
             # Validate now, while the source response and its warnings are still
             # available; the GUI must never receive malformed pad coordinates.
-            package_from_mapping(package_geometry)
+            geometry = package_from_mapping(package_geometry)
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
+        # Structural contradictions (body over the pads, clockwise numbering,
+        # bottom view also declared mirrored) are exposed, never repaired:
+        # which reading is true is a question for the user (audit 2026-10-15).
+        geometry_doubts = [doubt.as_dict() for doubt in package_doubts(geometry)] or None
+        notes.extend(doubt["message"] for doubt in geometry_doubts or ())
 
     if layout == "castellated":
         sides = _castellated_sides(
@@ -4964,6 +5385,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         lead_diameter_mm=_opt_float("lead_diameter_mm"),
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
         pin_map_conflict=pin_map_conflict,
+        geometry_doubts=geometry_doubts,
     )
     if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
         notes.append(data["_numbering_note"])

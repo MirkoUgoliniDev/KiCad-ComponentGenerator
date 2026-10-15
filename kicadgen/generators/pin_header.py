@@ -19,7 +19,7 @@ posizioni vengono generate (comportamento di un normale pin header).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import hypot, isfinite
+from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text
@@ -178,26 +178,62 @@ class PinHeaderParams:
     def _validate_pad_clearance(self) -> None:
         """Refuse populated pads closer than MIN_PAD_GAP_MM of free copper.
 
+        Grid-bucketed neighbour check, equivalent to a scan of every pair
+        (same pairs judged, same first pair reported), see the comment below.
+
         The pads actually emitted are checked (pin_positions), so a sparse
         pin map with a small grid pitch is accepted when the populated pads
         are far apart, and a full grid is checked along the pitch, the row
         spacing and the diagonal alike. Square header pads use their corners
         when checking copper clearance.
         """
-        radius = self.pad_diameter / 2
+        # Only pads whose centres are close in BOTH axes can leave less than
+        # the minimum gap: for a circle the copper gap is at least the centre
+        # distance minus the two radii, for an axis-aligned square it is
+        # max(|dx|, |dy|) minus the two half-sides, so a violating pair has
+        # |dx| < ra + rb + gap and |dy| < ra + rb + gap, both at most
+        # `window` (the two largest pads). Pads are bucketed on a grid of
+        # that window and only pairs of adjacent cells are judged: O(n) on a
+        # regular matrix instead of the O(n²) scan of every later pad (review
+        # pass 4, 2026-10-15: a 30 x 30 matrix cost ~300 ms per validation).
+        # The judged pairs are visited in the order of the former scan
+        # (sorted by x, then original order), so the first pair reported is
+        # the same; tests/test_pad_clearance_equivalence.py checks the
+        # equivalence against that scan on random matrices.
+        overrides = self.pad_overrides or {}
         pads = sorted(pin_positions(self), key=lambda item: item[1])
-        for index, (pin_a, xa, ya) in enumerate(pads):
-            for pin_b, xb, yb in pads[index + 1:]:
-                size_a = float((self.pad_overrides or {}).get(str(pin_a), {}).get(
-                    "size", self.pad_diameter))
-                size_b = float((self.pad_overrides or {}).get(str(pin_b), {}).get(
-                    "size", self.pad_diameter))
-                radius_a, radius_b = size_a / 2, size_b / 2
+        if not pads:
+            return
+        sizes = [float(overrides.get(str(pin), {}).get("size", self.pad_diameter))
+                 for pin, _x, _y in pads]
+        window = max(sizes) + MIN_PAD_GAP_MM
+        if not window > 0:
+            return
+        cells: dict = {}
+        for index, (_pin, x, y) in enumerate(pads):
+            cells.setdefault((floor(x / window), floor(y / window)), []).append(index)
+        # Pad by pad in sorted order, its LATER neighbours of the adjacent
+        # cells in sorted order, stopping at the first violation: no pair is
+        # collected that a violation found earlier makes useless (review
+        # pass 4: one pad far larger than the pitch puts every pad in one
+        # cell, and collecting all n²/2 pairs first cost 333 ms where the
+        # former scan stopped after 2 ms).
+        for index_a, (pin_a, xa, ya) in enumerate(pads):
+            cell_x, cell_y = floor(xa / window), floor(ya / window)
+            later = set()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for index_b in cells.get((cell_x + dx, cell_y + dy), ()):
+                        if index_b > index_a:
+                            later.add(index_b)
+            for index_b in sorted(later):
+                pin_b, xb, yb = pads[index_b]
+                radius_a, radius_b = sizes[index_a] / 2, sizes[index_b] / 2
                 if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
                     continue
-                shape_a = (self.pad_overrides or {}).get(str(pin_a), {}).get(
+                shape_a = overrides.get(str(pin_a), {}).get(
                     "shape", "rect" if self.pad_shape == "rect" or pin_a == 1 else "circle")
-                shape_b = (self.pad_overrides or {}).get(str(pin_b), {}).get(
+                shape_b = overrides.get(str(pin_b), {}).get(
                     "shape", "rect" if self.pad_shape == "rect" or pin_b == 1 else "circle")
                 gap = pad_copper_gap(xa, ya, shape_a, radius_a,
                                      xb, yb, shape_b, radius_b)

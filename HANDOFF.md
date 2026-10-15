@@ -1,5 +1,357 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## FINE SESSIONE 16/10 notte — branch `ADVANCED`, commit in corso, NON mergiato in `main`, PC spento
+
+Istruzione dell'utente: «fai un report, non mergiare in main, puoi
+committare e pushare, poi spegni il PC». Committati su ADVANCED i MEDI 1-11
+della verifica del 15/10 con quattro giri di revisione avversariale (sezione
+«correzione dei MEDI 1-11» sotto, dettagli per passaggio). SUITE FINALE:
+A 4017 verdi, 8 saltati, 19 sottotest; B 4540 verdi, 4 saltati, 2 xfail;
+0 falliti (totale 8557, +313). Database dei profili controllato: nessun
+segreto. `.env.example` (solo segnaposto) entra nel repository. File non
+tracciati: nessuno (tmp/, work/, *.pkl ora ignorati).
+COMPORTAMENTI NUOVI DA SAPERE: installazione e anteprima bloccate finche'
+footprint, simbolo e STEP su disco non corrispondono ai parametri (ogni
+blocco nomina un rimedio abilitato: Applica ai file / Aggiorna il file del
+simbolo / Rigenera 3D / Rimuovi il modello 3D obsoleto); cambiare solo
+colori o annotazioni 3D blocca fino a «Rigenera 3D»; i progetti vecchi
+possono richiedere un «Applica ai file» e, se il contorno e' cambiato di
+versione, lo stesso; un pin header manuale senza analisi NON ha corpo 3D
+(decisione dell'utente); una foto i cui metadati non si possono togliere
+viene rifiutata; i dubbi sull'orientamento del package vengono chiesti.
+APERTI (MEDI 12-16 della verifica, mai autorizzati): 107 testi non
+ritradotti al cambio lingua + chiave `inventory_pause.question`; regola
+della documentazione (225 funzioni senza @param, ~310 docstring italiane);
+README/docs superati; codice morto gui/yolo_review_dialog.py (1366 righe,
+rimozione da autorizzare); piedini staccati nel 3D da «Rileva terminali».
+Bassi residui elencati nelle sezioni di verifica. Preesistente: tasto
+nell'editor del simbolo con 900 righe 174 ms. Domanda ancora aperta:
+designatore in grigio «U» conta come compilato.
+
+## 2026-10-15 notte — IN CORSO: correzione dei MEDI 1-11 della verifica (utente: «ok correggi i medi da 1 a 11»)
+
+Elenco nella sezione «verifica accurata» qui sotto. Comportamenti scelti (da
+dire all'utente; si correggono se non gli vanno):
+ 1. Registro dei parametri con cui sono stati generati i file su disco; se i
+    campi non corrispondono: scheda KiCad «file non aggiornati, rigenera»,
+    installazione e prova isolata bloccate (stesso schema del blocco dei
+    metadati); il controllo simbolo<->pad legge il footprint scritto.
+ 2. Una nuova analisi che scarterebbe nomi dei pin scritti a mano lo chiede
+    prima (domanda di sovrascrittura che elenca anche il .kicad_sym); «No»
+    li conserva; l'azzeramento non avviene prima della risposta.
+ 3. Schema: Y verso il basso, verso degli angoli, asse di lunghezza del
+    corpo; controllo strutturale corpo<->pad: se il corpo copre i pad il
+    dato e' segnato dubbio e si chiede all'utente (mai scambio silenzioso);
+    `mirrored`+`bottom` documentati senza doppia inversione.
+ 4. «Rigenera 3D» di una matrice senza quote del corpo rifiuta come il
+    percorso package (niente 10x10x5 inventato).
+ 5. Installazione e prova isolata bloccate durante lavori in background.
+ 6. kicad_library: tabella non UTF-8 -> errore leggibile; copie senza
+    attributo sola lettura; rollback solo di cio' che e' stato toccato;
+    rotazione dei backup solo dopo una scrittura riuscita; fsync.
+ 7. Immagini sempre ricodificate senza metadati prima dell'invio all'AI.
+ 8. `.env.example` (segnaposto) tolto dall'esclusione di .gitignore e
+    aggiunto (commit solo con l'OK dell'utente); ignorare *.pkl, /tmp/, /work/.
+ 9. Rinomina: riaggancio dell'editor del simbolo, .kicad_sym rinominato,
+    bozze del simbolo che non creano cartelle.
+10. Editor simbolo: cursore del filo azzerato dopo scene.clear; «Proprieta'
+    pin» in un solo passo (Annulla annulla davvero).
+11. Nomi dei pin dei package (pads[].name) portati nella piedinatura se
+    l'analisi non ne fornisce una.
+Punto 8 FATTO (coordinatore): .env.example verificato (solo commenti e
+OPENROUTER_API_KEY segnaposto di 12 caratteri), `!.env.example` in .gitignore,
+ignorati /tmp/, /work/, *.pkl; il file entrera' nel commit quando l'utente da' l'OK.
+Punto 6 FATTO (agente B, non committato): kicad_library `_read_utf8`
+(file_not_utf8), `_copy_writable`, `_remove_clearing_readonly`, rollback solo
+di cio' che e' stato sostituito (`_same_content`), rotazione dopo la
+scrittura, `_write_durably` (fsync), preview_write_refused; 2 voci i18n; DB
+riseminato; tests/test_kicad_library_robustness.py 22 test (14 rossi prima);
+136 + 80 verdi. Seguito chiesto: PermissionError grezzo -> codice chiaro;
+sblocco automatico dei file nella propria cartella .kicad-preview.
+Seguito FATTO: `install_write_refused` (percorso reale, causa conservata)
+dopo il rollback completo; file della cartella .kicad-preview sbloccati
+(cartella del programma); `_fsync_file` nel ripristino. 136 verdi. 2 test di
+test_fixCoord rossi per il nuovo blocco dell'agente A (segnalato ad A).
+Punto 10 + parte di 9 FATTI (agente D, non committato): symbol_tab
+`_forget_scene_items` dopo scene.clear (strumento resta armato, clic ignorati
+con bozza non valida); `edit_pin` atomico (dialogo Proprieta' pin passa solo
+i campi cambiati, OK senza modifiche non scrive); selezione multipla = un
+passo di annulla; symbol_draft.save_draft e _write_snapshot non creano
+cartelle; selezione grafica azzerata su progetto diverso; QAction della
+tavolozza non piu' perse. Guardia strutturale in test_kept_scene_items
+(scansione degli attributi), tests/test_symbol_editor_robustness.py 17 test;
+568 verdi. Contratti cambiati in test_symbol_advanced/residual/review_fixes.
+Dubbio: dopo una rinomina, finche' main_window non riaggancia l'editor (ondata
+2), le modifiche del simbolo non hanno recupero (solo log).
+Punti 7 e 3 (parte dati) FATTI (agente C, non committato): 7
+`_image_without_metadata` (JPEG/PNG/WebP puliti senza ricodifica, GIF
+ricodificato, coda dopo EOI tolta), sempre applicato; altri percorsi gia'
+puliti (OpenCV); PDF non toccati. 3: schema con X a destra, Y in basso,
+angoli antiorari, lunghezza/larghezza del corpo = estensione in X/Y delle
+coordinate; bottom+mirrored -> dubbio `bottom_view_mirrored` (nessuna
+normalizzazione); `package_doubts` in core/package_geometry (famiglie
+dichiarate dip/soic/tssop/qfp): `body_pad_mismatch` con `swap_clears`,
+`pin_order_clockwise`; `ExtractedParams.geometry_doubts` + note «DUBBIO».
+4 voci i18n. tests/test_upload_privacy.py 35, test_package_orientation_contract
+30; 838 verdi. SEPARAZIONE FRAGILE (da dire all'utente): la regola che
+rileva il SOIC dell'audit si basa sull'assunto IPC «larghezza della piazzola
+~ larghezza del piedino»; tolleranza solo 1e-6, una piazzola letta proprio sul
+bordo del corpo puo' dare un falso dubbio; un TSSOP trasposto non e'
+rilevabile. Ondata 2: la GUI deve mostrare i dubbi e chiedere.
+Punti 1 e 5 FATTI (agente A, non committato): footprint confrontato
+RILEGGENDO i pad del .kicad_mod (numero, tipo, posizione, rotazione, misure,
+foro; tolleranza 1e-4 mm) con quelli dei campi applicati; STEP: pad di
+origine registrati alla scrittura (`step_source_pads`, progetti vecchi senza
+registro = sconosciuto, non blocca). Non allineati: stato KiCad con la
+ragione, anteprima e installazioni disattivate e rifiutate; simbolo Applica/
+esporta confrontati con il file; «Rigenera 3D» rifiutato se il footprint su
+disco non corrisponde (salvo riscrittura gia' in coda). Punto 5: i 6 comandi
+KiCad disattivati e rifiutati durante qualunque lavoro in background
+(`_apply_kicad_command_states`, menu ricalcolato su aboutToShow). 7 voci
+i18n. tests/test_generated_files_alignment.py 18, test_install_during_work 9
+(tutti rossi prima); 480 + 553 + 878 verdi; fixCoord sistemati nel setup.
+Limiti: si confrontano solo i pad (contorno del corpo no); .kicad_mod
+modificato a mano in KiCad ora blocca.
+REVISIONE AVVERSARIALE ONDATA 1 (escluso main_window): nessun ALTO. MEDI:
+M1 pulizia foto «fallisce aperta» (JPEG troncato/senza EOI, HEIC rinominato
+-> byte originali con GPS, riprodotto); M2 WebP con lista di blocchi da
+togliere invece che da tenere (C2PA passa, riprodotto); M3 package_doubts:
+falsi dubbi su package corretti (TSSOP/QSOP alla misura minima, SOJ con
+piedini J, riprodotto); M4 swap_clears suggerisce lo scambio anche quando
+e' stata letta E al posto di E1 (riprodotto); M5 file installati senza
+fsync e senza retry sui blocchi di Windows. BASSI: L1 backup piu' vecchio
+perso se la rotazione fallisce a meta'; L2 tabella con BOM UTF-8 detta non
+valida; L3 tabella CRLF riscritta in LF; L4 _clear_readonly segue i
+collegamenti simbolici; L5 percorsi interni nei messaggi; L6 DIP/SOIC-4 non
+controllabili; L7 orientamento perso se Pillow non decodifica; L9 bozze non
+scritte solo nel log; L10 selezione azzerata anche se la cancellazione e'
+rifiutata. PASSAGGIO 2 ONDATA 1: agente C (M1 M2 M3 M4 L6 L7), agente B (M5
+L1 L2 L3 L4 L5), agente D (L9 L10).
+Passaggio 2 agente D FATTO: L9 avviso una volta nella barra di stato
+dell'editor quando la bozza non si puo' salvare (cartella mancante), tolto
+quando torna a funzionare (nuova voce i18n, DB riseminato); L10 selezione
+conservata se la cancellazione e' rifiutata; commento della tavolozza
+corretto. 4 test nuovi; 470 verdi + test_i18n rosso per stringhe ancora in
+corso dell'agente A (ondata 2).
+Passaggio 2 agente B FATTO: M5 file installati scritti e fsync prima della
+sostituzione, `replace_file` con tentativi; L1 rotazione dei backup esatta o
+errore `table_backup_rotation_incomplete`; L2 BOM accettato e conservato; L3
+fine riga della tabella conservate (cambia solo la riga aggiunta); L4 nessuno
+sblocco attraverso link/junction; L5 percorso reale dell'utente,
+`install_target_is_folder`. 2 voci i18n. 151 + 80 verdi (1 saltato: link
+simbolici reali senza privilegio).
+Passaggio 2 agente C FATTO: privacy «fallisce chiusa» (JPEG troncati
+ripuliti e chiusi, illeggibili rifiutati con messaggio, mai byte grezzi),
+WebP con lista di blocchi ammessi, orientamento applicato con OpenCV quando
+Pillow non decodifica; package_doubts con due regole fisiche (faccia lungo la
+fila con larghezza del piedino stimata 0,4 x piazzola — euristica dichiarata
+— e regola trasversale), `body_over_lead_lands` (E letta al posto di E1, mai
+scambio proposto), campo `lead_form` (gull_wing/j_lead/unknown) nello schema
+e in PackageGeometry, DIP/SOIC-4 con direzione dalla piazzola allungata.
+SEPARAZIONE STRETTA (DA DIRE ALL'UTENTE): margini sotto 0,1 mm (TSSOP-16 al
+minimo 0,085; QSOP-16 0,098; SOIC trasposto dell'audit scatta di 0,075):
+per questo e' solo un dubbio. Un SOJ non marcato j_lead fa una domanda.
+7 voci i18n; contratti cambiati (immagini finte nei test sostituite da PNG
+veri). 921 verdi. test_package_project_gui::...legacy_project_without_package
+rosso per le modifiche in corso di main_window (segnalato all'agente A).
+ONDATA 2 FATTA (agente A, non committato): 2 `_user_pin_names` (nomi
+applicati dall'utente, salvati nel progetto), nessun azzeramento prima della
+risposta, domanda «Mantieni i miei nomi»/«Usa i nomi della nuova analisi»,
+.kicad_sym nella domanda di sovrascrittura; 11 `_package_pinout` (tabella >
+nomi dei pad > nomi dei lati castellated); 4 `_body_size_declared` (progetti
+vecchi: dichiarato se diverso dal segnaposto 10x10x5 — euristica dichiarata),
+niente F.Fab/serigrafia/3D inventati, «Rigenera 3D» disattivato con
+tooltip; schede fotografate esenti; 9 rinomina del .kicad_sym (nome,
+Value, Footprint) nel rename transazionale, `SymbolTab.rename_project`
+mantiene la bozza e la storia, file di anteprima vecchi rimossi (non con
+KiCad aperto); 3 GUI `_review_geometry_doubts` con risposte registrate per
+dati (hash). 29 voci i18n. 47 test nuovi; 935 verdi; ~7 test di foto rossi
+per le immagini finte rifiutate dalla nuova privacy (affidati all'agente C).
+DECISO dall'utente (15/10 notte, opzione 1): pin header manuale senza
+analisi NON ha un corpo 3D (nessun dialogo per le quote); il footprint resta
+corretto. Voce di catalogo morta del tooltip del corpo: lasciata.
+Test fotografici sistemati (agente C: PNG 4x4 veri al posto di byte finti,
+nessun cambio di produzione). Corsa di 248 file: 2 rossi: test_footprint_
+drawings::test_the_body_moves... (regressione dell'ondata 2, affidata ad A)
+e test_test_infrastructure::...worker_does_not_stop... (instabile sotto
+carico, affidato all'agente dei test). Domanda posta all'utente: dialogo per
+le quote del corpo del pin header manuale (raccomandata) o lasciare cosi'.
+REVISIONE AVVERSARIALE ONDATA 2 (+ punti 1 e 5): nessun ALTO. MEDI
+riprodotti: M1 «Mantieni i miei nomi» riaggiunge pin spariti (2x4 -> 2x2:
+pin 8 rimesso, .kicad_sym a 8 pin con footprint a 4 pad, scheda KiCad
+«pronti»); M2 «Mantieni» dopo pin spostati copia la riga intera (posizione)
+-> simbolo non riscritto, solo log; M3 l'esenzione delle schede usa ancora il
+corpo 10x10x5 (non controlla `_board_size_known`). BASSI: L1 «pronti» falso
+dopo modifiche solo del corpo («Scambia» + «No»); L2 costo del controllo
+(0,9 s primo aggiornamento, 75 ms a tasto su 900 pad); L3 cache mtime/size
+su filesystem con timestamp grossolani; L4 messaggio fuorviante per progetti
+di versioni vecchie; L5 autosalvataggio durante le domande modali; L6
+comandi spenti se un aggiornamento avviene durante la revisione; L7 per
+progetto (da dire all'utente). Affidati all'agente A dopo la regressione.
+Test instabile CHIUSO (agente dei test): non era l'asserzione ma un crash
+nativo (0xC0000005, 3 su 6) all'uscita del processo figlio: le finestre del
+_GRAVEYARD non venivano mai distrutte e morivano dopo la QApplication.
+`_release_graveyard()` in pytest_unconfigure (solo se nessun thread perso e'
+ancora vivo); tre test a tempo resi deterministici con threading.Event; 2
+test nuovi; 8/8 + 29 + 120 verdi.
+PASSAGGIO 2 ONDATA 2 FATTO (agente A): regressione del trascinamento =
+test basato sul corpo inventato (contratto aggiornato + caso senza corpo);
+M1 nomi tenuti solo per pin ancora presenti, pin spariti elencati e
+dimenticati, il blocco controlla anche il .kicad_sym su disco; M2 «Mantieni»
+tiene solo i nomi, disposizione utente solo se lo stesso insieme di pin e
+valida; M3 schede richiedono `_board_size_known`; L1 confronto degli
+ingombri F.Fab/F.CrtYd + `step_source_body` (corpo, colori, annotazioni);
+L2 7 ms per aggiornamento, 2-3 ms a tasto (cache in klc_checks); L3 cache con
+inode/ctime e invalidata alle nostre scritture; L4 messaggio; L5 autosalvataggio
+sospeso durante l'applicazione dell'estrazione, note DUBBIO tolte se risolte;
+L6 comandi aggiornati all'apertura/chiusura delle revisioni. 7 voci i18n.
+tests/test_review_pass2_alignment.py 14 (13 rossi prima); 128 file, 2843 verdi.
+PIU' SEVERO (da dire all'utente): cambiare solo colori/annotazioni 3D blocca
+l'installazione fino a «Rigenera 3D»; footprint di versioni vecchie con
+F.Fab/courtyard diversi risultano non aggiornati (basta un Applica ai file).
+SUITE COMPLETA dopo le due ondate e i passaggi 2: A 3984 verdi, 8 saltati,
+19 sottotest; B 4500 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8484,
++240 rispetto a 8244). NON committato. In corso: revisione avversariale
+finale sulle interazioni.
+REVISIONE FINALE (interazioni): 2 ALTI riprodotti, vicoli ciechi creati
+dai nuovi blocchi: H1 meno pin con piedinatura piena (2x4 -> 2 colonne,
+Applica ai file): .kicad_sym resta a 8 pin, blocco «Simbolo non
+aggiornato… Applica il simbolo», ma Applica e' disattivato (nessuna
+modifica in sospeso) e nessuna UI toglie i pin in piu'; H2 STEP generato con
+corpo, poi analisi senza quote del corpo: blocco «Modello STEP non
+aggiornato… Rigenera il modello 3D» con «Rigenera 3D» disattivato (mancano
+le quote): unica uscita una nuova analisi a pagamento. MEDIO M1: il blocco
+del simbolo confronta solo i numeri dei pin: nomi diversi fra progetto e
+.kicad_sym -> «pronti» e installa il simbolo vecchio. BASSI: L1 provenienza
+dei nomi sporcata da annulla + Applica; L2 `_release_graveyard` chiama
+close() vero -> possibile modale all'uscita; L3 chiave di lingua della cache
+klc; L4 corpo reale 10x10x5 letto come non dichiarato. PASSAGGIO 3 affidato
+all'agente A (H1 H2 M1 L1 L4) e all'agente dei test (L2 L3).
+PRINCIPIO (da fissare nel codice): ogni blocco deve nominare un'azione che
+lo toglie, e quell'azione deve essere abilitata; test strutturale.
+L2 FATTO (agente dei test): `_release_graveyard` usa hide()+deleteLater,
+mai close(); modali rifiutati nel frattempo; test figlio (con close() e senza
+guardia il figlio si bloccava 23 s). 121 verdi. L3: chiave della cache klc
+sulla lingua (codice, non frase) affidata all'agente A con test di guardia.
+PASSAGGIO 3 FATTO (agente A): principio «ogni blocco nomina un rimedio
+abilitato» fissato in `_kicad_block()` -> (codice, ragione) e
+`KICAD_BLOCK_REMEDIES`; tests/test_kicad_gate_remedies.py guida ogni rimedio
+e verifica che il blocco sparisca (copertura: codice senza riga = rosso).
+H1 `_reconcile_pinout_with_written_footprint` in _on_generated + nuova azione
+«Rimuovi i pin assenti dal footprint» nell'editor (modifica di bozza,
+annullabile); H2 codice `step_unbuildable` con pulsante «Rimuovi il modello
+3D obsoleto» (conferma, cancella STEP/WRL/preview/FCStd); installazione
+senza STEP resta non supportata (kicad_library require_3d) e il blocco lo
+dice; M1 simbolo confrontato per contenuto (esportatore reale, metadati
+esclusi), rimedio «Aggiorna il file del simbolo»; L1 provenienza contro
+`analysis_pin_names`; L4 `_legacy_body_evidence` (STEP/preview.json con le
+stesse quote); cache klc chiavata sul codice lingua. 20 voci i18n. 23 test
+nuovi (22 rossi prima); 128 file, 3031 verdi. Tastiera 4 ms, aggiornamento
+11 ms. Limite: .kicad_sym salvato da KiCad risulta non aggiornato (basta
+«Aggiorna il file del simbolo»).
+VERIFICA DEL PASSAGGIO 3: principio CONFERMATO in tutte le combinazioni
+(nessun loop); H1, H2, M1 CONFERMATI RISOLTI; L1, L4, cache klc confermati.
+ANCORA ROTTO (MEDIO): tastiera sui metadati a 316-524 ms su 900 pad perche'
+`_footprint_signature_of` ha come chiave `repr(params)` che include
+descrizione/tags/datasheet (ogni tasto ricostruisce il footprint, con
+`_validate_pad_clearance` O(n^2)). BASSI: `_update_symbol_file()` chiamato
+direttamente scrive anche se occupato; tooltip sbagliato del pulsante
+«Aggiorna il file del simbolo» quando i pin non combaciano; blocco che nomina
+«Applica ai file» mentre Applica rifiuta per un errore KLC di scrittura;
+bozza non applicata con meno pin: .kicad_sym riscritto ma non elencato nella
+domanda; NUOVO basso preesistente: progetto senza tipo riaperto -> domanda del
+tipo -> falso step_body (pcb_thickness/show_pins_3d aggiunti alle impronte).
+Stato KiCad mostra la ragione dei file e non «occupato» (cosmetico).
+PASSAGGIO 4 affidato all'agente A.
+ISTRUZIONE DELL'UTENTE (15/10 notte): «quando hai finito fai un report,
+NON mergiare in main, puoi committare e pushare, poi spegni il PC».
+Piano: passaggio 4 -> verifica -> suite completa -> handoff e report ->
+commit su ADVANCED + push (NO merge in main) -> spegnimento con
+`shutdown /s /t 60` (annullabile con `shutdown /a`). Se resta qualcosa di
+rosso e non correggibile: niente commit di codice rotto, solo l'handoff.
+PASSAGGIO 4 FATTO (agente A): chiave della cache `_geometry_key(params)`
+(tutti i campi tranne `NON_GEOMETRIC_FIELDS`: nome, descrizione, tags,
+datasheet, colori 3D, scritte serigrafiche); `_validate_pad_clearance` O(n) a
+griglia, esatto (stessa prima coppia e stesso messaggio del vecchio scan),
+tests/test_pad_clearance_equivalence.py (1000 matrici casuali contro il
+vecchio codice tenuto come oracolo); tastiera su 900 pad 3,0-3,4 ms (da
+316-524). Bassi a-f fatti (rifiuto se occupato, tooltip giusto, campo KLC da
+correggere nominato nel blocco, .kicad_sym elencato se la bozza verrebbe
+spostata, impronta STEP indipendente dai campi aggiunti dal tipo, stato
+«occupato» prima). 2 voci i18n; 51 test nuovi; 5 lotti verdi (3103).
+VERIFICA DEL PASSAGGIO 4: tutto CONFERMATO (controllo O(n) esatto, 2436
+confronti con l'oracolo; chiave della cache senza campi geometrici
+mancanti; a-f; tastiera 3,6-4,6 ms). Ultimo basso FATTO: uscita anticipata
+nel controllo delle distanze (pad enorme in una sola cella: 1,3 ms da 333),
+278 verdi. Preesistente e fuori ambito: tasto nell'editor del simbolo con
+900 righe 174 ms.
+Ondata 1 (file disgiunti): A main_window (1, 5); B kicad_library (6);
+C datasheet_extractor/package_geometry/pin_type_ai (3 schema+controllo, 7);
+D symbol_tab/symbol_draft (10, parte di 9); coordinatore: 8.
+Ondata 2 (main_window, dopo A) AVVIATA: 2, 4, 9 (rinomina), 11, e la parte di 3 che
+mostra la domanda all'utente. Poi revisione avversariale e altri giri.
+
+## 2026-10-15 sera — FATTA: verifica accurata di tutta la codebase (utente in palestra), NULLA CORRETTO
+
+Richiesta: «lancia degli agenti esperti e rifai una verifica accurata di tutta
+la code base; quando torno facciamo il punto; voglio un prodotto
+professionale». Interpretazione: VERIFICA in sola lettura, nessuna correzione
+senza autorizzazione (il punto si fa al ritorno). Piano: 7 agenti revisori
+per area (pipeline foto/AI; geometria e generatori; packaging KiCad;
+main_window/worker/stato progetto; altre GUI; sicurezza/robustezza/installer;
+qualita' test/documentazione/i18n), poi conferma indipendente dei reperti
+ALTI/MEDI, suite completa, rapporto finale qui e all'utente.
+Aggiunta dell'utente: «fai anche verifica avversariale, non trascurare
+nulla» -> dopo i 7 revisori, verifica avversariale indipendente di OGNI
+reperto (anche BASSI: confermare o smontare con riproduzioni) e un revisore
+avversariale trasversale che cerca cio' che i 7 non hanno visto (confini fra
+aree, flussi completi utente: foto -> footprint -> installazione).
+ESITO (dettaglio completo, con riproduzioni: scratchpad della sessione
+audit_findings.md; riassunto qui). 7 revisori + 5 verificatori avversariali +
+1 revisore trasversale + suite completa (8244 verdi, 0 falliti). Nessun ALTO
+dopo la verifica (l'unico ALTO, file non allineati ai parametri, e' sceso a
+MEDIO: serve il «No» alla sovrascrittura). Falsi positivi scartati: 6.
+MEDI CONFERMATI, per priorita' proposta:
+ 1. File su disco non allineati ai parametri dopo «No» alla sovrascrittura:
+    KiCad tab «pronti», installa il footprint vecchio, simbolo/STEP con
+    numero di pin diverso dai pad (manca un registro dei parametri dei file;
+    il controllo simbolo<->pad legge i campi).
+ 2. Nomi dei pin scritti a mano persi da una nuova analisi, senza avviso.
+ 3. Corpo del package con lunghezza/larghezza scambiabili (F.Fab e STEP
+    coprono i pad) + schema senza Y verso il basso / verso degli angoli e
+    `mirrored`+`bottom` che si annullano (footprint specchiato).
+ 4. «Rigenera 3D» di un pin header senza quote usa un corpo 10x10x5 inventato.
+ 5. Installazione/anteprima possibili durante la rigenerazione 3D.
+ 6. fp-lib-table non UTF-8 chiude l'app; backup in sola lettura bloccano
+    tutte le installazioni globali successive; rollback con falso allarme.
+ 7. Foto inviate all'AI con GPS e dati del telefono.
+ 8. `.env.example` mai committato: CI e build di rilascio rosse su checkout pulito.
+ 9. Rinomina progetto: simbolo legato al nome vecchio, cartella fantasma,
+    OLD.kicad_sym orfano.
+10. Editor del simbolo: errore a ogni movimento del mouse (TAB incollato in un
+    nome); «Annulla» in Proprieta' pin non annulla.
+11. Nomi dei pin dei package (pads[].name) mai portati nel simbolo.
+12. 107 testi restano in italiano cambiando lingua; chiave
+    `inventory_pause.question` mancante; combo di montaggio mai tradotto.
+13. Regola della documentazione: 225 funzioni senza @param, ~310 docstring in
+    italiano; il test controlla solo @brief.
+14. Documentazione utente superata (README, README.it, docs/).
+15. Codice morto: gui/yolo_review_dialog.py (1366 righe) tenuto vivo dai test:
+    rimozione DA AUTORIZZARE.
+16. «Rileva terminali dalla foto» puo' dare piedini staccati dal corpo nello
+    STEP (xfail documentato dal 13/09).
+BASSI: circa 25 (vedi file dei reperti). Nessuna correzione fatta: l'utente
+decide al ritorno cosa sistemare e in che ordine; commit solo con il suo OK.
+
+## DA CHIEDERE ALL'UTENTE STASERA (15/10, sua richiesta: «segna la domanda per questa sera»)
+
+Designatore di riferimento e blocco dell'installazione: oggi il designatore
+conta come compilato anche quando vale la proposta in grigio («U», quella che
+finisce davvero nei file; `_missing_required_metadata`). Va bene cosi', o deve
+essere scritto a mano per sbloccare l'installazione (allora
+`_missing_required_metadata` guarda `field_reference.text()`)? Tutto il resto
+e' committato e mergiato in main (`1ac0102`).
+
 ## 2026-10-15 sera — FATTO, commit `066c499` mergiato in main: parole chiave predefinite (M-1), scelta dell'utente: opzione 1
 
 Spiegato all'utente in dettaglio (ki_keywords/tags servono alla ricerca in

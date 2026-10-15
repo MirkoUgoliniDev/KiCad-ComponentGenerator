@@ -33,16 +33,19 @@ REQUIRED = {
 }
 
 
-def _write_outputs(root, name=NAME):
-    """A valid footprint (attribute + one pad) and a STEP: the install commands' file gate is open."""
+def _write_outputs(root, name=NAME, *, window):
+    """A valid footprint (attribute + the pads the fields generate) and a STEP: the install commands' file gate is open.
+
+    CONTRACT CHANGED 2026-10-15 (audit H1): the installation is refused while the
+    .kicad_mod pads differ from those the window's fields generate, so the
+    footprint written here carries exactly those pads (`minimal_aligned_footprint`).
+    """
+    from tests.test_photo_inventory_gui import minimal_aligned_footprint
     pretty = root / name / f"{name}.pretty"
     shapes = root / name / f"{name}.3dshapes"
     pretty.mkdir(parents=True, exist_ok=True)
     shapes.mkdir(parents=True, exist_ok=True)
-    (pretty / f"{name}.kicad_mod").write_text(
-        f'(footprint "{name}"\n\t(version 20260206)\n\t(generator "test")\n\t(layer "F.Cu")\n'
-        '\t(attr smd)\n\t(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))\n)\n',
-        encoding="utf-8")
+    (pretty / f"{name}.kicad_mod").write_text(minimal_aligned_footprint(window, name), encoding="utf-8")
     (shapes / f"{name}.step").write_bytes(b"ISO-10303-21;\nEND-ISO-10303-21;\n")
 
 
@@ -73,7 +76,7 @@ def _open(window, tmp_path, *, filled=True, name=NAME):
     # (review pass 2, M1: installation waits for the fields to be applied).
     _mark_written(window)
     window.field_library_root.setText(str(tmp_path))
-    _write_outputs(tmp_path, name)
+    _write_outputs(tmp_path, name, window=window)
     window.field_name.setText(name)
     window._refresh_output_actions()
     assert window.tabs.isTabEnabled(KICAD)
@@ -182,7 +185,7 @@ def test_without_outputs_the_file_reason_wins(window, tmp_path):  # noqa: F811
     """Negative of the gate's scope: with no STEP the commands keep «Genera prima…»,
     the metadata reason never hides the missing file."""
     window.field_library_root.setText(str(tmp_path))
-    _write_outputs(tmp_path)
+    _write_outputs(tmp_path, window=window)
     (tmp_path / NAME / f"{NAME}.3dshapes" / f"{NAME}.step").unlink()
     window.field_name.setText(NAME)
     window._refresh_output_actions()
@@ -331,7 +334,7 @@ def test_another_blocked_component_is_a_new_transition(window, tmp_path):  # noq
     group = window.group_metadata
     _open(window, tmp_path, filled=False)
     group.setExpanded(False)
-    _write_outputs(tmp_path, "ALTRO")
+    _write_outputs(tmp_path, "ALTRO", window=window)
     window.field_name.setText("ALTRO")
     window._refresh_output_actions()
     assert group.isExpanded()
@@ -500,7 +503,7 @@ def test_a_same_named_project_in_another_folder_is_a_new_context(window, tmp_pat
     _open(window, first, filled=False)
     assert group.isExpanded()
     group.setExpanded(False)
-    _write_outputs(second)
+    _write_outputs(second, window=window)
     # As opening the homonymous project of the other working folder does:
     # the open project folder changes, the name stays the same.
     previous = window.field_library_root.blockSignals(True)

@@ -9,6 +9,23 @@ from kicadgen.services import photo_inventory as inv
 from kicadgen.services.openrouter import OpenRouterError
 
 
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    CONTRACT CHANGED 2026-10-15: document images must be decodable, because
+    an upload whose metadata cannot be removed is refused (fail closed); fake
+    bytes named .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
+
 def test_gif_photo_uses_first_frame_even_without_opencv_gif_support(tmp_path, monkeypatch):
     import cv2
     from PIL import Image
@@ -176,7 +193,7 @@ def test_vertical_board_is_rejected(tmp_path):
 def test_pipeline_passes_source_selection_and_retains_overlay(monkeypatch,tmp_path):
     from kicadgen.services import datasheet_extractor as ext
     photo = tmp_path / "top.png"
-    photo.write_bytes(b"fake-png")
+    photo.write_bytes(_TINY_PNG)
     monkeypatch.setattr(ext,"api_key",lambda:"test-not-a-key")
     monkeypatch.setattr(inv,"prepare_photo",lambda *a:np.full((200,400,3),30,np.uint8))
     requests = []
@@ -209,7 +226,7 @@ def test_pipeline_passes_source_selection_and_retains_overlay(monkeypatch,tmp_pa
 def test_pipeline_keeps_global_inventory_when_all_photo_calls_fail(monkeypatch,tmp_path):
     from kicadgen.services import datasheet_extractor as ext
     photo = tmp_path / "top.png"
-    photo.write_bytes(b"fake-png")
+    photo.write_bytes(_TINY_PNG)
     monkeypatch.setattr(ext,"api_key",lambda:"test-not-a-key")
     monkeypatch.setattr(inv,"prepare_photo",lambda *a:np.full((200,400,3),30,np.uint8))
     def call(**kw):

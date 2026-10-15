@@ -103,6 +103,10 @@ class PackageGeometry:
     confidence: str = "low"
     needs_review: bool = True
     pins: list[PinSpec] = field(default_factory=list)
+    #: Lead shape seen in a side view, one of LEAD_FORMS: "j_lead" tells the
+    #: structural checks that the lands lie under the body edge by design
+    #: (package_doubts); "unknown" when the drawing does not show it.
+    lead_form: str = "unknown"
 
     def validate(self) -> None:
         """@brief Validate the object against its supported contract.
@@ -125,6 +129,8 @@ class PackageGeometry:
         if not isinstance(self.mirrored, bool):
             raise ValueError(tx("mirrored deve essere true o false"))
         _finite(self.orientation_deg, "orientation_deg")
+        if self.lead_form not in LEAD_FORMS:
+            raise ValueError(tx("lead_form non valido: {lead_form}", lead_form=self.lead_form))
         if self.confidence not in {"high", "medium", "low"}:
             raise ValueError(tx("confidence non valida"))
         for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
@@ -334,6 +340,315 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         # before; only a non-boolean value is refused (validate).
         mirrored=False if data.get("mirrored") is None else data.get("mirrored"),
         confidence=data.get("confidence", "low"), needs_review=data.get("needs_review", True), pins=pins,
+        # Optional, added 2026-10-15: absent or null means «not observed».
+        lead_form="unknown" if data.get("lead_form") is None else data.get("lead_form"),
     )
     geometry.validate()
     return geometry
+
+
+#: Families whose leads leave the body through its SIDES and bend down to a
+#: land at or beyond the body edge (gull-wing or J-lead SOIC/TSSOP/QFP,
+#: through-hole DIP). It is a DECLARED attribute (`PackageGeometry.family`),
+#: never inferred from a part name. Excluded on purpose: SIP (the leads leave
+#: the bottom edge of a standing body, under its footprint), QFN and modules
+#: (bottom-terminated: their pads lie under the body by design) and
+#: unknown/custom families, where the data cannot tell side leads from
+#: bottom terminations.
+SIDE_LEAD_FAMILIES = frozenset({"dip", "soic", "tssop", "qfp"})
+
+#: Doubt codes of `package_doubts`, stable identifiers for the GUI.
+#: The body is too short along a lead row (the outer leads would leave
+#: beyond its end): the signature of length and width written transposed.
+DOUBT_BODY_PADS = "body_pad_mismatch"
+#: The body across the rows reaches over the lead lands: J-leads (then it is
+#: right) or the overall width E (lead tip to lead tip) read instead of the
+#: body width E1. Swapping length and width is never the answer to this one.
+DOUBT_BODY_OVER_LANDS = "body_over_lead_lands"
+DOUBT_PIN_ORDER = "pin_order_clockwise"
+DOUBT_VIEW_MIRROR = "bottom_view_mirrored"
+
+#: Numerical tolerance of the structural checks, mm. It absorbs float noise
+#: only: it is not a calibrated margin.
+_DOUBT_EPS = 1e-6
+
+#: DECLARED HEURISTIC: smallest lead width as a fraction of the SMD land width
+#: along the row. A lead leaves the body through its face, so the outer lead
+#: of a row must lie within the body end, lead width included; the drawing
+#: gives the land, not the lead. IPC-7351 lands are the maximum lead width
+#: plus a few hundredths of side fillet, and the narrowest JEDEC ratio of
+#: minimum lead width to a usual land is about 0.42 (TSSOP: b 0.19 mm on a
+#: 0.45 mm land), so 0.4 under-estimates every lead and keeps legitimate
+#: parts clear. Margins, with the KiCad/IPC lands and the MINIMUM body length
+#: of the datasheets: TSSOP-16 (D 4.9 min) clears by 0.085 mm, QSOP-16
+#: (D 4.8 min) by 0.098 mm, every SOIC-8/14/16, TSSOP-8/14/20, SSOP, LQFP
+#: and PLCC by more; the audit's transposed SOIC-8 (body 3.9 along a 3.81 mm
+#: row of 0.6 mm lands) is caught by 0.075 mm. Both margins are below
+#: 0.1 mm: the separation is real but narrow, which is why the result is a
+#: doubt and never a correction. A declared lead width in the schema would
+#: make the fraction unnecessary.
+_LEAD_WIDTH_FRACTION_OF_LAND = 0.4
+
+#: Lead shapes `PackageGeometry.lead_form` may declare (seen in a side view).
+LEAD_FORMS = frozenset({"unknown", "gull_wing", "j_lead"})
+
+
+@dataclass(frozen=True)
+class GeometryDoubt:
+    """@brief A structural inconsistency of a package geometry, to be confirmed by the user.
+
+    A doubt never changes the geometry: it states what the data contradicts
+    and, when one exists, which alternative reading the data supports, so the
+    GUI can ask instead of guessing.
+    """
+    #: One of DOUBT_BODY_PADS, DOUBT_BODY_OVER_LANDS, DOUBT_PIN_ORDER, DOUBT_VIEW_MIRROR.
+    code: str
+    #: Localized explanation, starting with «DUBBIO» like the other doubts
+    #: written in the extraction notes.
+    message: str
+    #: Pin numbers involved, in geometry order; empty when the doubt is global.
+    pins: tuple = ()
+    #: For DOUBT_BODY_PADS: True when swapping body length and width gives a
+    #: body consistent with every lead (the two values are probably
+    #: transposed and the swap may be proposed), False otherwise; None for
+    #: the other codes.
+    swap_clears: Optional[bool] = None
+
+    def as_dict(self) -> dict:
+        """@brief Return the doubt as a plain JSON-compatible dict.
+
+        @return {"code", "message", "pins" (list), "swap_clears"}.
+        """
+        return {"code": self.code, "message": self.message, "pins": list(self.pins),
+                "swap_clears": self.swap_clears}
+
+
+def _extent(pin: PinSpec) -> tuple:
+    """Half extents (x, y) of a pad's copper, rotation included, mm."""
+    corners = pad_outline(0.0, 0.0, pin.pad_length_mm, pin.pad_width_mm, pin.rotation_deg)
+    return (max(abs(c[0]) for c in corners), max(abs(c[1]) for c in corners))
+
+
+def _lead_pads(pins: Sequence[PinSpec]) -> list:
+    """Electrical pads lying on an outer row of the pad field, with the row direction.
+
+    A pad belongs to the left/right row when its centre is at the minimum or
+    maximum X of the field, to the top/bottom row when at the minimum or
+    maximum Y, within half its smaller copper extent. A corner pad near both
+    goes to the more populated row (a dual-row SOIC: the column of four beats
+    the pair of end pads). On a tie (two pins per side: DIP-4, SOIC-4) the
+    land shape decides, because a side lead's SMD land is elongated across
+    its row; a round or square land leaves the direction unknown (None), and
+    the pad still counts as a lead for the checks that need no direction.
+    Pads on no outer row (an exposed thermal pad) are not leads.
+
+    @return A list of (pin, axis) where axis is "y" for a left/right row
+        (the row runs along Y), "x" for a top/bottom row, None when unknown.
+    """
+    pads = [pin for pin in pins if pin.pad_type != "np_thru_hole" and str(pin.number).strip()]
+    if len(pads) < 2:
+        return []
+    xs = [float(pin.x_mm) for pin in pads]
+    ys = [float(pin.y_mm) for pin in pads]
+    tolerances = [min(_extent(pin)) for pin in pads]
+    groups = {}
+    for key, values, extreme, axis in (("left", xs, min(xs), "y"), ("right", xs, max(xs), "y"),
+                                       ("top", ys, min(ys), "x"), ("bottom", ys, max(ys), "x")):
+        groups[key] = (axis, {index for index in range(len(pads))
+                              if abs(values[index] - extreme) <= tolerances[index]})
+    # A field one column wide (or one row high) has no distinct left and right
+    # rows: the same pads would be counted twice.
+    if groups["left"][1] == groups["right"][1]:
+        groups.pop("right")
+    if groups["top"][1] == groups["bottom"][1]:
+        groups.pop("bottom")
+    result = []
+    for index, pin in enumerate(pads):
+        owners = sorted(((len(members), axis) for axis, members in groups.values()
+                         if index in members), reverse=True)
+        if not owners:
+            continue
+        axis = owners[0][1]
+        if len(owners) > 1 and owners[0][0] == owners[1][0] and owners[0][1] != owners[1][1]:
+            half_x, half_y = _extent(pin)
+            axis = ("y" if half_x > half_y + _DOUBT_EPS else
+                    "x" if half_y > half_x + _DOUBT_EPS else None)
+        result.append((pin, axis))
+    return result
+
+
+def _body_pad_violations(geometry: "PackageGeometry", leads: list,
+                         length: float, width: float) -> tuple:
+    """Lead pads inconsistent with a body of `length` x `width`, in the source frame.
+
+    Two independent physical rules for leads leaving the body through its sides:
+    - FACE (along the row): the outer lead lies within the body end, its
+      width included (estimated from the land, `_LEAD_WIDTH_FRACTION_OF_LAND`;
+      through-hole: the lead centre, since the annular ring is far wider
+      than the lead). Violated when the body is too short along the row.
+    - OVER (across the rows): a through-hole lead must enter the board
+      outside the body (its hole centre not under the body); an SMD land
+      must reach beyond the body edge (a side lead always lands at least
+      partly outside), and a gull-wing land centre is outside the body. A
+      J-lead (`lead_form` "j_lead") lands under the body edge by design, so
+      its covered centre is expected.
+
+    @return (face, over): pin numbers violating each rule, geometry order.
+    """
+    centre_x, centre_y = geometry.body_frame_offset()
+    half = {"x": float(length) / 2, "y": float(width) / 2}
+    face, over = [], []
+    for pin, axis in leads:
+        offset = {"x": float(pin.x_mm) - centre_x, "y": float(pin.y_mm) - centre_y}
+        extent = dict(zip(("x", "y"), _extent(pin)))
+        centre_covered = all(abs(offset[a]) < half[a] - _DOUBT_EPS for a in ("x", "y"))
+        if pin.pad_type == "smd":
+            land_inside = all(abs(offset[a]) + extent[a] <= half[a] + _DOUBT_EPS
+                              for a in ("x", "y"))
+            if land_inside or (centre_covered and geometry.lead_form != "j_lead"):
+                over.append(pin.number)
+        elif centre_covered:
+            over.append(pin.number)
+        if axis is not None:
+            reach = abs(offset[axis])
+            if pin.pad_type == "smd":
+                reach += _LEAD_WIDTH_FRACTION_OF_LAND * extent[axis]
+            if reach > half[axis] + _DOUBT_EPS:
+                face.append(pin.number)
+    return face, over
+
+
+def _numbering_area(leads: list) -> Optional[float]:
+    """Signed shoelace area of the lead centres taken in pin-number order, source frame.
+
+    @return The area (negative = counter-clockwise on screen, Y down), or
+        None when a lead has a non-integer number, there are fewer than three
+        leads, or they are collinear: the turning sense is then undefined.
+    """
+    numbered = []
+    for pin, _axis in leads:
+        text = str(pin.number).strip()
+        if not text.isdigit():
+            return None
+        numbered.append((int(text), float(pin.x_mm), float(pin.y_mm)))
+    if len(numbered) < 3:
+        return None
+    numbered.sort()
+    area = 0.0
+    for index, (_n, x0, y0) in enumerate(numbered):
+        _m, x1, y1 = numbered[(index + 1) % len(numbered)]
+        area += x0 * y1 - x1 * y0
+    return area / 2 if abs(area) > _DOUBT_EPS else None
+
+
+def package_doubts(geometry: "PackageGeometry") -> list:
+    """@brief Structural doubts of a package geometry, never corrected silently.
+
+    Checks founded on declared attributes and measured geometry, never on a
+    part name:
+    - DOUBT_VIEW_MIRROR: `source_view` "bottom" together with `mirrored`
+      true. The two reflections cancel (see `pins_seen_from_top`), so the
+      footprint is drawn exactly as the drawing; a model that set mirrored
+      only BECAUSE the drawing is a bottom view produces a mirrored
+      footprint. The data alone cannot tell the two readings apart, so this
+      is always a doubt, never a normalisation.
+    - For SIDE_LEAD_FAMILIES with both body sizes known (rules in
+      `_body_pad_violations`):
+      DOUBT_BODY_PADS when the body is too short along a lead row.
+      `swap_clears` is True only when the swapped body breaks NO rule: a
+      transposition. The swap is only proposed.
+      DOUBT_BODY_OVER_LANDS when the body across the rows reaches over the
+      lead lands and the swap does not resolve everything: the overall width
+      E read instead of E1, or J-leads not declared as such. Never answered
+      by a swap: a swapped E would give a wrong body (review 2026-10-15, M4).
+    - DOUBT_PIN_ORDER, for SIDE_LEAD_FAMILIES: seen from the top, the lead
+      numbering of these families runs counter-clockwise (JEDEC convention).
+      A clockwise numbering is the signature of a drawing read with Y up or
+      reflected twice; reverse-pinout parts exist, so it is a doubt. Works
+      with two pins per side too (DIP-4, SOIC-4).
+
+    @param geometry The package geometry, validated here.
+    @return GeometryDoubt objects in the order above; empty when nothing is
+        contradicted or the checks do not apply.
+    @throws ValueError When the geometry is invalid (see `PackageGeometry.validate`).
+    @note Limits, stated so they are not mistaken for guarantees: a body
+        transposed so that NEITHER orientation breaks a rule (a TSSOP-8 whose
+        length along the rows is shorter than its width) is not detected;
+        with two round through-hole pins per side (DIP-4) the row direction
+        is unknown and the FACE rule is skipped; families outside
+        SIDE_LEAD_FAMILIES are not checked for body/pad or numbering, because
+        their terminals may lie under the body by design and their numbering
+        has no single convention. The FACE rule rests on the declared
+        heuristic `_LEAD_WIDTH_FRACTION_OF_LAND`, whose margins are below 0.1 mm.
+    """
+    geometry.validate()
+    doubts = []
+    if geometry.source_view == "bottom" and geometry.mirrored:
+        doubts.append(GeometryDoubt(DOUBT_VIEW_MIRROR, tx(
+            "DUBBIO vista: il disegno e' dichiarato vista dal basso e anche speculare "
+            "(mirrored): le due specchiature si annullano e il footprint e' disegnato come "
+            "il disegno. Se mirrored e' stato indicato solo perche' e' una vista dal basso, "
+            "il footprint risulta specchiato. Da confermare sul disegno.")))
+    if geometry.family not in SIDE_LEAD_FAMILIES:
+        return doubts
+    leads = _lead_pads(geometry.pins)
+    if geometry.body_length_mm and geometry.body_width_mm and leads:
+        length, width = float(geometry.body_length_mm), float(geometry.body_width_mm)
+        face, over = _body_pad_violations(geometry, leads, length, width)
+        swapped_face, swapped_over = _body_pad_violations(geometry, leads, width, length)
+        transposed = bool(face) and not swapped_face and not swapped_over
+        if face:
+            pins = ", ".join(str(number) for number in face)
+            if transposed:
+                message = tx(
+                    "DUBBIO corpo/pad ({family}): con body_length_mm={length:g} lungo X e "
+                    "body_width_mm={width:g} lungo Y il corpo e' troppo corto lungo la fila "
+                    "dei pin {pins}, che uscirebbero oltre la sua estremita'; scambiando le "
+                    "due quote il corpo e' coerente con tutti i pin: lunghezza e larghezza "
+                    "sembrano invertite. Da confermare sul disegno quotato.",
+                    family=geometry.family, length=length, width=width, pins=pins)
+            else:
+                message = tx(
+                    "DUBBIO corpo/pad ({family}): con body_length_mm={length:g} lungo X e "
+                    "body_width_mm={width:g} lungo Y il corpo e' troppo corto lungo la fila "
+                    "dei pin {pins}, che uscirebbero oltre la sua estremita', e scambiare le "
+                    "due quote non basta. Da verificare sul disegno quotato.",
+                    family=geometry.family, length=length, width=width, pins=pins)
+            doubts.append(GeometryDoubt(DOUBT_BODY_PADS, message, tuple(face),
+                                        swap_clears=transposed))
+        if over and not transposed:
+            pins = ", ".join(str(number) for number in over)
+            if geometry.lead_form == "unknown" and all(
+                    pin.pad_type == "smd" for pin, _axis in leads if pin.number in over):
+                message = tx(
+                    "DUBBIO corpo/piazzole ({family}): il corpo ({length:g} x {width:g} mm) "
+                    "arriva sopra le piazzole dei pin {pins}. Se i terminali sono a J "
+                    "(piegati sotto il bordo del corpo) e' corretto; altrimenti e' stata "
+                    "probabilmente letta la larghezza totale E (da punta a punta dei "
+                    "terminali) invece della larghezza del corpo E1. Da confermare sul "
+                    "disegno quotato.",
+                    family=geometry.family, length=length, width=width, pins=pins)
+            else:
+                message = tx(
+                    "DUBBIO corpo/piazzole ({family}): il corpo ({length:g} x {width:g} mm) "
+                    "copre le piazzole o i fori dei pin {pins}, da cui i terminali laterali "
+                    "dovrebbero restare fuori: probabilmente e' stata letta la larghezza "
+                    "totale E (da punta a punta dei terminali) invece della larghezza del "
+                    "corpo E1. Da verificare sul disegno quotato.",
+                    family=geometry.family, length=length, width=width, pins=pins)
+            doubts.append(GeometryDoubt(DOUBT_BODY_OVER_LANDS, message, tuple(over)))
+    area = _numbering_area(leads)
+    if area is not None:
+        # The check runs in the source frame: a rotation keeps the turning
+        # sense, each reflection (bottom view, explicit mirror) inverts it.
+        flips = int(geometry.source_view == "bottom") + int(geometry.mirrored)
+        seen_from_top = -area if flips % 2 else area
+        if seen_from_top > 0:  # positive shoelace with Y down = clockwise on screen
+            doubts.append(GeometryDoubt(DOUBT_PIN_ORDER, tx(
+                "DUBBIO ordine dei pin ({family}): visti dall'alto i pin sono numerati in "
+                "senso orario, mentre in questa famiglia la numerazione standard e' "
+                "antioraria. Il disegno potrebbe essere stato letto con l'asse Y verso "
+                "l'alto o specchiato due volte; esistono pero' package a piedinatura "
+                "inversa. Da confermare sul disegno.", family=geometry.family),
+                tuple(pin.number for pin, _axis in leads)))
+    return doubts

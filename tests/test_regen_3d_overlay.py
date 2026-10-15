@@ -15,6 +15,9 @@ def test_the_overlay_opens_when_the_regeneration_starts(window, monkeypatch):
 
 def test_the_overlay_closes_when_the_worker_ends(window):
     """Anche in errore: finished di QThread scatta comunque."""
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     window._analysis_tabs_enabled = window.tabs.isEnabled()
     window.tabs.setEnabled(False)
     window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
@@ -40,6 +43,9 @@ def test_the_icon_only_command_shows_it_is_busy_and_then_recovers(window, monkey
     visibile in altro modo -- comando spento, icona della clessidra, nome e
     tooltip che dicono «in corso».
     """
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     idle_icon = window.btn_regen_3d.icon().cacheKey()
     window._set_regen_busy(True)
     button = window.btn_regen_3d

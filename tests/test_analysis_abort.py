@@ -95,6 +95,9 @@ def _prepare_3d(window):  # noqa: F811
     window.field_body_length.setValue(10.0)
     window.field_body_width.setValue(8.0)
     window.field_body_height.setValue(2.0)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes
+    # build a solid; these values stand for an analysis that declared them.
+    window._body_size_declared = True
 
 
 def _say_yes(monkeypatch, answers):

@@ -12,6 +12,9 @@ env/
 # Local configuration and secrets
 .env
 .env.*
+# The template holds only a placeholder key and is shipped by the build
+# (packaging/KiCadGen.spec) and required by tests/test_packaging.py.
+!.env.example
 config.json
 data/*.sqlite3*
 !data/analysis_profiles.sqlite3
@@ -77,3 +80,8 @@ private/
 
 # Output di lavoro degli agenti Claude: mai su GitHub.
 Claude outputs/
+
+# Local scratch areas and pickled dumps of debugging sessions (never sources)
+/tmp/
+/work/
+*.pkl

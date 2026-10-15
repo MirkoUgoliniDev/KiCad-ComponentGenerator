@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from html import escape
 import json
 from functools import partial
@@ -54,7 +54,8 @@ from ..generators.package import build_package
 from ..generators.package import preview_grid_origin as package_preview_grid_origin
 from ..generators.castellated_module import preview_grid_origin as castellated_preview_grid_origin
 from ..core.footprint import text_grid_origin
-from ..core.package_geometry import PackageGeometry, package_from_mapping
+from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, PackageGeometry,
+                                     package_from_mapping)
 from ..services import component_types, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
 from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
@@ -96,7 +97,7 @@ from .generation_options_dialog import GenerationOptionsDialog
 from .guided_documents import GuidedDocuments
 from .model_dialog import pick_model
 from ..services.openrouter import PHOTO_CAPABILITIES
-from .pinout_dialog import PinoutDialog
+from .pinout_dialog import PinoutDialog, pin_sort_key
 from .photo_review_dialog import PhotoReviewDialog, PhotoTransform, ai_only_excluded
 from .preview_3d_pending import Preview3DPending
 
@@ -590,6 +591,117 @@ def _side_pinout(side: dict) -> list[dict]:
         {"pin": number, "name": name}
         for number, name in zip(numbers, side.get("pin_names") or ())
     ]
+
+
+def renamed_symbol_text(text: str, old_name: str, new_name: str) -> str:
+    """@brief Rename a component's .kicad_sym content: symbol, units, Value and Footprint link.
+
+    @param text The .kicad_sym written by `generators.symbol.export_symbol`.
+    @param old_name Project (component) name before the rename.
+    @param new_name Project name after the rename.
+    @return The text with `(symbol "OLD"` and its unit symbols `"OLD_<u>_<s>"`,
+        the Value property equal to the old name and a Footprint property
+        `<library>:OLD` all carrying the new name; everything else untouched.
+    @note Audit 2026-10-15, item 9: a rename left `OLD.kicad_sym` behind with
+        «Footprint KiCadGen:OLD», breaking the rule that footprint, symbol
+        and 3D model names stay consistent. Project names are folder names,
+        which cannot contain the quote or backslash KiCad would escape.
+    """
+    old = re.escape(old_name)
+    text = re.sub(r'(\(symbol\s+)"' + old + r'((?:_\d+_\d+)?)"',
+                  lambda match: f'{match.group(1)}"{new_name}{match.group(2)}"', text)
+    text = re.sub(r'(\(property\s+"Value"\s+)"' + old + r'"',
+                  lambda match: f'{match.group(1)}"{new_name}"', text)
+    text = re.sub(r'(\(property\s+"Footprint"\s+"[^":]*:)' + old + r'"',
+                  lambda match: f'{match.group(1)}{new_name}"', text)
+    return text
+
+
+#: Symbol properties that belong to the METADATA gate, left out of the
+#: comparison between the applied symbol and its file (review pass 3, M1).
+SYMBOL_METADATA_PROPERTIES = ("Reference", "Description", "ki_keywords", "Datasheet", "ki_fp_filters")
+
+
+def _symbol_text_without_metadata(text: str) -> str:
+    """@brief A .kicad_sym text with its metadata property lines removed and whitespace normalised.
+
+    @param text The library text (file or rendered).
+    @return The lines that describe the symbol itself (name, Footprint link,
+        pins, graphics, property positions), stripped, joined by newlines.
+    """
+    kept = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(stripped.startswith(f'(property "{key}"') for key in SYMBOL_METADATA_PROPERTIES):
+            continue
+        kept.append(stripped)
+    return "\n".join(kept)
+
+
+#: Fields of the footprint parameters that change no pad and no outline:
+#: the metadata the footprint carries as text and the colours of the 3D
+#: model. Left out of the signature cache key (review pass 4, 2026-10-15):
+#: `_current_params` copies description, keywords and datasheet into the
+#: parameters, so a metadata keystroke missed the cache and rebuilt the
+#: footprint; on a 30 x 30 matrix with a 1 mm pitch that cost 316-524 ms per
+#: character (measured on the reviewer's probe, before this change).
+NON_GEOMETRIC_FIELDS = frozenset({
+    "name", "description", "tags", "datasheet", "component_color_hex",
+    "substrate_color_hex", "silk_color_hex", "show_silk_labels_3d", "silk_labels",
+})
+
+
+def _geometry_key(params) -> str:
+    """@brief The cache key of footprint parameters: every field but the non-geometric ones.
+
+    @param params A parameters dataclass (PinHeaderParams, CastellatedModuleParams).
+    @return repr of the (field, value) pairs that decide pads and outline.
+    @note Measured after the change on the same 900-pad probe: 3-4 ms per
+        metadata keystroke, no footprint rebuilt (test
+        `test_a_metadata_keystroke_never_rebuilds_a_big_matrix`).
+    """
+    from dataclasses import fields, is_dataclass
+    if not is_dataclass(params):
+        return repr(params)
+    return repr(tuple((field.name, getattr(params, field.name)) for field in fields(params)
+                      if field.name not in NON_GEOMETRIC_FIELDS))
+
+
+def _pin_key(value) -> str:
+    """@brief A pin number as the text every pinout comparison uses (stripped)."""
+    return str(value if value is not None else "").strip()
+
+
+def _pin_name_text(value) -> str:
+    """@brief A pin name as compared for provenance: stripped, KiCad's «~» read as empty."""
+    text = str(value if value is not None else "").strip()
+    return "" if text == "~" else text
+
+
+def _package_pinout(geometry) -> list[dict]:
+    """@brief Pin number -> name rows from the per-pad names of a package geometry.
+
+    @param geometry `PackageGeometry` whose `pins[].name` the analysis filled
+        (package `pins` or single-component `pads`, see
+        `datasheet_extractor.single_answer_to_data`).
+    @return One row {"pin", "name"} per electrical pad number carrying a name,
+        in pad order; the first non-empty name wins for a number shared by
+        several pads (a ground tab). Empty when no pad is named.
+    @note Same role as `_side_pinout` for castellated modules (audit
+        2026-10-15, item 11): the names the analysis read beside the pads
+        reach the symbol when no explicit pinout table was given.
+    """
+    rows, seen = [], set()
+    for pin in getattr(geometry, "pins", ()) or ():
+        number = _pin_key(getattr(pin, "number", ""))
+        name = _pin_name_text(getattr(pin, "name", ""))
+        if not number or not name or number in seen or getattr(pin, "pad_type", "") == "np_thru_hole":
+            continue
+        seen.add(number)
+        rows.append({"pin": number, "name": name})
+    return rows
 
 
 def _castellated_body_available(params) -> bool:
@@ -1090,6 +1202,12 @@ def _screen_handle(scene, x, y, size, solid):
     return square
 
 
+#: Placeholder body of the pin-matrix fields (length, width, height in mm):
+#: the values the fields hold before any analysis. They are NOT a measure;
+#: see `MainWindow._body_size_declared` (audit 2026-10-15, item 4).
+PLACEHOLDER_BODY_MM = (10.0, 10.0, 5.0)
+
+
 def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
     """@brief Tell whether the STEP predates the footprint it would ship with.
 
@@ -1107,6 +1225,272 @@ def _step_older_than_footprint(footprint: Path, step: Path) -> bool:
         return step.stat().st_mtime < footprint.stat().st_mtime
     except OSError:
         return False
+
+
+# ── Alignment of the files on disk with the parameters (audit 2026-10-15, H1) ──
+#
+# A pad record is the copper interface of one pad, the part every consumer of
+# the files depends on: installation and the isolated preview copy it, the
+# symbol pins must match its numbers, the STEP leads are built over it. It is
+# (number, pad type, x, y, rotation, width, height, drill values, drill
+# offset), mm and degrees. Metadata, text positions and user drawings are
+# NOT in it on purpose: they have their own trackers (`metadata_applied`,
+# `_fp_file_stale`) and never change which pads a board gets.
+
+#: Largest difference (mm, or degrees for a rotation) still read as the same
+#: value when a pad read back from a .kicad_mod is compared with one built in
+#: memory. The file holds 6 decimals (core.sexpr `_fmt`), so the rounding is
+#: at most 5e-7; any real edit of a field (spin boxes step 0.01 mm or more)
+#: is orders of magnitude larger than this tolerance.
+PAD_COMPARE_TOLERANCE = 1e-4
+
+
+def _pad_number_text(value) -> str:
+    """@brief A pad number as KiCad text, whether it was quoted or a bare number in the file.
+
+    @param value Atom read by `parse_sexpr` (str, or float for a bare number
+        such as the `(pad 1 ...)` of very old KiCad files).
+    @return The number as text; an integral float gives "1", not "1.0".
+    """
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else repr(value)
+    return str(value)
+
+
+def footprint_pad_records(footprint) -> list[tuple]:
+    """@brief The pad records of a footprint built in memory by one of the generators.
+
+    @param footprint `core.footprint.Footprint` (its `pads` list is read).
+    @return One record per pad, see the block comment above
+        `PAD_COMPARE_TOLERANCE`; mechanical holes included (a moved mounting
+        hole is a geometry change too).
+    """
+    records = []
+    for pad in footprint.pads:
+        drill = () if pad.drill is None else (float(pad.drill),)
+        offset = tuple(float(v) for v in getattr(pad, "drill_offset", (0.0, 0.0)))
+        records.append((str(pad.number), str(pad.pad_type), float(pad.at[0]), float(pad.at[1]),
+                        float(pad.rotation or 0.0) % 360.0, float(pad.size[0]),
+                        float(pad.size[1]), drill, offset))
+    return records
+
+
+def read_footprint_pad_records(path: Path) -> list[tuple] | None:
+    """@brief Read the pad records back from a .kicad_mod on disk.
+
+    @param path The footprint file.
+    @return The records, or None when the file cannot be read, is not a
+        footprint s-expression, or holds no pad at all (the generators never
+        write a footprint without pads, so such a file says nothing about
+        which parameters produced it).
+    @note Read-back, not a recorded fingerprint: the file is what the
+        installation copies, so comparing IT covers projects saved before
+        this check, a lost project save and a file replaced outside the
+        program, with no fail-closed step forced on old projects.
+    """
+    signature = read_footprint_signature(path)
+    return signature[0] if signature is not None else None
+
+
+def read_footprint_signature(path: Path):
+    """@brief Read pads and outline extents back from a .kicad_mod on disk.
+
+    @param path The footprint file.
+    @return (pad records, outline extents) as `footprint_text_signature`, or
+        None when the file cannot be read or holds no pad.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return footprint_text_signature(text)
+
+
+#: Layers whose OVERALL extent is compared between the file and the
+#: parameters: the body outline (F.Fab) and the courtyard (F.CrtYd). The
+#: overall box, not every line, so details inside the outline (component
+#: outlines of a board) never make a file look stale (review pass 2, L1).
+OUTLINE_LAYERS = ("F.Fab", "F.CrtYd")
+
+
+def _outline_extents(root) -> dict:
+    """@brief {layer: (min x, min y, max x, max y)} of the OUTLINE_LAYERS shapes of a footprint form."""
+    import math as _math
+
+    def child(form, name):
+        return next((item for item in form if isinstance(item, list) and item
+                     and item[0] == name), None)
+
+    boxes: dict = {}
+    for form in root:
+        if not (isinstance(form, list) and form
+                and form[0] in ("fp_line", "fp_rect", "fp_circle", "fp_arc", "fp_poly")):
+            continue
+        layer = child(form, "layer")
+        if layer is None or len(layer) < 2 or layer[1] not in OUTLINE_LAYERS:
+            continue
+        points = []
+        for name in ("start", "mid", "end", "center"):
+            node = child(form, name)
+            if node is not None and len(node) >= 3:
+                points.append((float(node[1]), float(node[2])))
+        if form[0] == "fp_circle" and len(points) >= 2:
+            (cx, cy), (ex, ey) = points[0], points[-1]
+            radius = _math.hypot(ex - cx, ey - cy)
+            points = [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+        pts = child(form, "pts")
+        if pts is not None:
+            points.extend((float(xy[1]), float(xy[2])) for xy in pts[1:]
+                          if isinstance(xy, list) and xy and xy[0] == "xy" and len(xy) >= 3)
+        if not points:
+            continue
+        xs, ys = [x for x, _y in points], [y for _x, y in points]
+        old = boxes.get(layer[1])
+        box = (min(xs), min(ys), max(xs), max(ys))
+        boxes[layer[1]] = box if old is None else (min(old[0], box[0]), min(old[1], box[1]),
+                                                    max(old[2], box[2]), max(old[3], box[3]))
+    return boxes
+
+
+def footprint_text_signature(text: str):
+    """@brief Pads and outline extents of a footprint s-expression text.
+
+    @param text A .kicad_mod text, from disk or rendered in memory.
+    @return (pad records, {layer: box}) or None when the text is not a
+        footprint or holds no pad.
+    @note The SAME parser reads the file and the footprint built from the
+        parameters (rendered), so formatting cannot make them differ.
+    """
+    from ..generators.symbol_glyphs import parse_sexpr
+    try:
+        forms = parse_sexpr(text)
+    except ValueError:
+        return None
+    root = next((form for form in forms if isinstance(form, list) and form
+                 and form[0] in ("footprint", "module")), None)
+    if root is None:
+        return None
+    pads = _pad_records_from_root(root)
+    if not pads:
+        return None
+    try:
+        extents = _outline_extents(root)
+    except (TypeError, ValueError):
+        extents = {}
+    return pads, extents
+
+
+def _extents_differ(first: dict, second: dict) -> bool:
+    """@brief True when two outline-extent dicts differ by more than PAD_COMPARE_TOLERANCE.
+
+    @param first Extents read from the file.
+    @param second Extents of the footprint the parameters build.
+    @note A file without any outline layer (a minimal or foreign file) says
+        nothing about the body: not compared, like a file without pads.
+    """
+    if not first:
+        return False
+    if set(first) != set(second):
+        return True
+    return any(abs(a - b) > PAD_COMPARE_TOLERANCE
+               for layer in first for a, b in zip(first[layer], second[layer]))
+
+
+def _pad_records_from_root(root) -> list[tuple] | None:
+    """@brief Pad records of a parsed footprint form, None when a pad cannot be read."""
+
+    def child(form, name):
+        return next((item for item in form if isinstance(item, list) and item
+                     and item[0] == name), None)
+
+    records = []
+    try:
+        for form in root:
+            if not (isinstance(form, list) and form and form[0] == "pad"):
+                continue
+            at, size = child(form, "at"), child(form, "size")
+            if len(form) < 3 or at is None or size is None or len(at) < 3 or len(size) < 3:
+                return None
+            drill_form = child(form, "drill")
+            drill, offset = (), (0.0, 0.0)
+            if drill_form is not None:
+                drill = tuple(float(v) for v in drill_form[1:] if isinstance(v, float))
+                offset_form = child(drill_form, "offset")
+                if offset_form is not None and len(offset_form) >= 3:
+                    offset = (float(offset_form[1]), float(offset_form[2]))
+            rotation = float(at[3]) if len(at) > 3 and isinstance(at[3], float) else 0.0
+            records.append((_pad_number_text(form[1]), str(form[2]), float(at[1]), float(at[2]),
+                            rotation % 360.0, float(size[1]), float(size[2]), drill, offset))
+    except (TypeError, ValueError):
+        return None
+    return records or None
+
+
+def _pad_records_differ(first, second) -> bool:
+    """@brief Tell whether two pad-record lists describe different pads.
+
+    @param first Records from `footprint_pad_records` or
+        `read_footprint_pad_records`.
+    @param second Records to compare with.
+    @return True when a pad is missing, extra, renumbered, of another type,
+        or moved/resized/redrilled by more than `PAD_COMPARE_TOLERANCE`.
+    @note Order-independent: pads are paired inside each (number, type)
+        group by nearest match, because KiCad may save pads in another order
+        and several pads may share a number (a ground tab, a thermal pad).
+        A sort on rounded coordinates would flip two pads that straddle a
+        rounding boundary.
+    """
+    if len(first) != len(second):
+        return True
+
+    def close(a, b) -> bool:
+        if abs(a[4] - b[4]) % 360.0 > PAD_COMPARE_TOLERANCE and \
+                360.0 - abs(a[4] - b[4]) % 360.0 > PAD_COMPARE_TOLERANCE:
+            return False
+        if len(a[7]) != len(b[7]):
+            return False
+        values_a = (a[2], a[3], a[5], a[6], *a[7], *a[8])
+        values_b = (b[2], b[3], b[5], b[6], *b[7], *b[8])
+        return all(abs(x - y) <= PAD_COMPARE_TOLERANCE for x, y in zip(values_a, values_b))
+
+    groups: dict = {}
+    for record in second:
+        groups.setdefault((record[0], record[1]), []).append(record)
+    for record in first:
+        candidates = groups.get((record[0], record[1]))
+        if not candidates:
+            return True
+        match = next((index for index, other in enumerate(candidates) if close(record, other)), None)
+        if match is None:
+            return True
+        candidates.pop(match)
+    return False
+
+
+def _valid_pad_records(value) -> list[tuple] | None:
+    """@brief The `step_source_pads` record of a project file, or None when absent or invalid.
+
+    @param value Raw value read from the project file (JSON lists).
+    @return Records as tuples, or None: a missing or damaged record means
+        «unknown», never «aligned» nor «misaligned» (see
+        `MainWindow._step_alignment_reason`).
+    """
+    if not isinstance(value, list) or not value:
+        return None
+    records = []
+    for item in value:
+        if not (isinstance(item, list) and len(item) == 9 and isinstance(item[0], str)
+                and isinstance(item[1], str) and isinstance(item[7], list)
+                and isinstance(item[8], list) and len(item[8]) == 2):
+            return None
+        numbers = [item[2], item[3], item[4], item[5], item[6], *item[7], *item[8]]
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                   for v in numbers):
+            return None
+        records.append((item[0], item[1], float(item[2]), float(item[3]), float(item[4]),
+                        float(item[5]), float(item[6]), tuple(float(v) for v in item[7]),
+                        tuple(float(v) for v in item[8])))
+    return records
 
 
 def _saved_pcb_thickness(saved) -> tuple[str, tuple[float, str] | None]:
@@ -1281,6 +1665,47 @@ class MainWindow(QMainWindow):
         #: the project); saved with the project, cleared by the next footprint
         #: written, shown in the KiCad tab.
         self._fp_file_stale: bool = False
+        #: Pad records (`footprint_pad_records`) of the parameters the STEP on
+        #: disk was built from, recorded by every successful STEP write and
+        #: saved with the project (`step_source_pads`); None = unknown (a
+        #: project saved before the record existed). See
+        #: `_step_alignment_reason`.
+        self._step_source_pads: list | None = None
+        #: Body, colours and 3D annotations the STEP on disk was built from
+        #: (`_step_body_fingerprint`), recorded with `_step_source_pads` and
+        #: saved as `step_source_body`; None = unknown (review pass 2, L1).
+        self._step_source_body: dict | None = None
+        #: True when the pin-matrix body fields (length, width, height) hold
+        #: dimensions declared by the documents, False while they hold the
+        #: placeholder (`PLACEHOLDER_BODY_MM`) or the values of an analysis
+        #: that gave no body. Only declared dimensions build a 3D body or a
+        #: body outline (audit 2026-10-15, item 4: an invented 10x10x5 block
+        #: anchored at pin 1 was built with no message). Saved with the
+        #: project (`body_size_declared`).
+        self._body_size_declared: bool = False
+        #: Pin names the USER applied (symbol editor «Applica», pinout
+        #: dialog), {pin number: name}; names that came from an analysis are
+        #: not in it. A new analysis that would replace or drop one of them
+        #: asks first (`_settle_extracted_pinout`, audit 2026-10-15, item 2).
+        #: Saved with the project (`user_pin_names`).
+        self._user_pin_names: dict = {}
+        #: Pin names the LAST ANALYSIS gave, {pin: name} ('' = none): the
+        #: reference the user's names are judged against (review pass 3, L1:
+        #: typing an analysis name back must clear the provenance, not record
+        #: the analysis name as the user's). None = unknown (older project):
+        #: the current pinout stands for it. Saved as `analysis_pin_names`.
+        self._analysis_pin_names: dict | None = None
+        #: While an extraction is applied: the pinout the castellated sides
+        #: propose, collected instead of being written at once (None outside).
+        self._extraction_side_pinout: list | None = None
+        #: Answers to the structural doubts of a package geometry
+        #: (`_review_geometry_doubts`), {"<code>:<data key>": answer}; the
+        #: same doubt on the same analysed data is never asked twice. Saved
+        #: with the project (`geometry_doubt_answers`).
+        self._geometry_doubt_answers: dict = {}
+        #: Small cache of pad records built from parameters, keyed by the
+        #: parameters' repr: the gate runs on every metadata keystroke.
+        self._pad_records_cache: dict = {}
         #: True while `_flush_footprint_rewrite` starts the rewrite of an
         #: APPLIED edit: `_generate` must not ask about a newer draft then.
         self._fp_rewrite_flushing: bool = False
@@ -1529,6 +1954,10 @@ class MainWindow(QMainWindow):
             self.i18n.text("Installa nel progetto KiCad..."), self._install_project_library)
         self.action_install_global = tools_menu.addAction(
             self.i18n.text("Installa come libreria globale..."), self._install_global_library)
+        # The entries must say what a click does NOW (audit 2026-10-15,
+        # H1/M3): a field changed on another tab or work started since the
+        # last refresh changes it, so the gate is recomputed on opening.
+        tools_menu.aboutToShow.connect(self._refresh_kicad_command_gate)
         tools_menu.addSeparator()
         # Installato, la cartella scrivibile (config, database) e' quella
         # dell'utente, non quella del programma.
@@ -3974,6 +4403,8 @@ class MainWindow(QMainWindow):
     def _refresh_output_actions(self) -> bool:
         footprint_available = self._refresh_output_actions_inner()
         self._refresh_mounting_actions()
+        self._refresh_regen_3d_availability()
+        self._refresh_kicad_remedies()
         self._refresh_workflow_state()
         return footprint_available
 
@@ -4130,17 +4561,11 @@ class MainWindow(QMainWindow):
                         "modello STEP e documenti.")
                 else:
                     action.setToolTip(self.i18n.text(reason) if reason else "")
-        for attr in (
-                "btn_test_kicad", "btn_export", "btn_install_global",
-                "action_test_kicad", "action_export", "action_install_global"):
-            action = getattr(self, attr, None)
-            if action is not None:
-                source = (self.OUTPUT_ACTION_TOOLTIPS.get(attr, "") if complete_available else
-                          "Genera prima footprint e modello STEP del componente corrente")
-                # The installation commands may be switched off again right
-                # after by `_refresh_install_gate` (missing required metadata),
-                # which `_refresh_metadata_proposals` below runs.
-                self._set_output_action_state(action, complete_available, source)
+        # Missing files, work in progress or files not matching the
+        # parameters (audit 2026-10-15, H1/M3). The installation commands may
+        # be switched off again right after by `_refresh_install_gate`
+        # (required metadata), which `_refresh_metadata_proposals` below runs.
+        self._apply_kicad_command_states(complete_available)
         # Verification must remain reachable when a footprint lacks its STEP.
         self._refresh_kicad_tab(footprint_available)
         if hasattr(self, "group_metadata"):
@@ -4173,7 +4598,12 @@ class MainWindow(QMainWindow):
                 self.label_kicad_footprint_path.setText(footprint_path_text)
                 self.label_kicad_step_path.setText(step_path_text)
                 self.label_kicad_symbol_path.setText(symbol_path_text)
-            status = (self.i18n.text("Footprint e modello STEP pronti per la verifica.")
+            # Files that do not match the parameters are not «ready» (H1):
+            # the reason replaces the sentence and asks to regenerate.
+            # The same reason as the buttons, work in progress first (pass 4, f).
+            alignment = self._kicad_command_block_reason() if complete_available else ""
+            status = (alignment if alignment else
+                      self.i18n.text("Footprint e modello STEP pronti per la verifica.")
                       if complete_available else
                       self.i18n.text("Genera footprint e modello STEP per continuare."))
             if complete_available and _step_older_than_footprint(footprint, step):
@@ -4926,6 +5356,8 @@ class MainWindow(QMainWindow):
         # della corsa precedente (verifica avversariale B6).
         self._extraction_detector = photo_detector
         self._extract_worker.start()
+        # KiCad commands off while the analysis runs (audit 2026-10-15, M3).
+        self._track_background_work(self._extract_worker)
 
     #: Estensioni delle foto che l'inventario prova come vista dall'alto
     #: (stesso filtro di `photo_inventory.extract_inventory`).
@@ -5032,6 +5464,7 @@ class MainWindow(QMainWindow):
             self.analysis_overlay.start("Pretest YOLO in corso",
                                         "Rilevamento dei componenti sulla foto…", abortable=True)
             worker.start()
+            self._track_background_work(worker)
         except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
             self._on_yolo_pretest_finished()
             self._on_yolo_pretest_error(str(exc))
@@ -5995,6 +6428,7 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.start("Rilancio dell'inventario", announcement,
                                     abortable=True)
         self._reconcile_worker.start()
+        self._track_background_work(self._reconcile_worker)
 
     def _on_reconciled(self, report) -> None:
         """@brief Sostituisce i componenti e rientra nella via di un'estrazione normale.
@@ -7094,6 +7528,13 @@ class MainWindow(QMainWindow):
         if self._background_work_running() or self._automatic_generation_active:
             return
         self._regen_3d_pending = False
+        missing = self._missing_body_reason()
+        if missing:
+            # Not the «group off» sentence below: the 3D is on, the body
+            # dimensions are what is missing (audit item 4).
+            self._set_3d_status(missing, STATUS_WARNING)
+            self._append_log(missing)
+            return
         if self._current_body_params() is None:
             self._set_3d_status(self.i18n.text(
                 "Componenti corretti dalla foto. Modello 3D da rigenerare: "
@@ -7220,6 +7661,7 @@ class MainWindow(QMainWindow):
                         [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
             "board_size_known": bool(getattr(self, "_board_size_known", False)),
+            "body_size_declared": bool(getattr(self, "_body_size_declared", False)),
             "yolo_settings": self._chosen_yolo_settings(),
             "pcb_thickness": {
                 "source": getattr(self, "_pcb_thickness_source", "standard"),
@@ -7238,6 +7680,22 @@ class MainWindow(QMainWindow):
             # Only when known: a project without the key reads as «not
             # applied» (M1, fail closed) and opening it does not make it dirty.
             state["metadata_applied"] = dict(self._applied_metadata)
+        if getattr(self, "_geometry_doubt_answers", None):
+            state["geometry_doubt_answers"] = dict(self._geometry_doubt_answers)
+        if getattr(self, "_user_pin_names", None):
+            # Only when some exist: older projects stay byte-identical.
+            state["user_pin_names"] = dict(self._user_pin_names)
+        if getattr(self, "_analysis_pin_names", None) is not None:
+            state["analysis_pin_names"] = dict(self._analysis_pin_names)
+        if getattr(self, "_step_source_body", None) is not None:
+            state["step_source_body"] = deepcopy(self._step_source_body)
+        if getattr(self, "_step_source_pads", None) is not None:
+            # Only when known (H1, 2026-10-15): a project without the key
+            # reads as «STEP origin unknown», which warns but never blocks,
+            # and opening it does not make it dirty.
+            state["step_source_pads"] = [
+                [r[0], r[1], r[2], r[3], r[4], r[5], r[6], list(r[7]), list(r[8])]
+                for r in self._step_source_pads]
         return state
 
     def _apply_project_state(self, state: dict) -> None:
@@ -7346,6 +7804,23 @@ class MainWindow(QMainWindow):
                                 count=converted))
         self.pinout = [dict(entry) for entry in _project_list(state, "pinout", skipped)
                        if isinstance(entry, dict)]
+        # Provenance of the names (item 2). A project saved before the record
+        # has none: its names cannot be told apart and count as an analysis's.
+        saved_answers = state.get("geometry_doubt_answers")
+        self._geometry_doubt_answers = (
+            {key: value for key, value in saved_answers.items()
+             if isinstance(key, str) and value in self.GEOMETRY_DOUBT_ANSWERS}
+            if isinstance(saved_answers, dict) else {})
+        saved_analysis = state.get("analysis_pin_names")
+        self._analysis_pin_names = ({_pin_key(pin): _pin_name_text(name)
+                                     for pin, name in saved_analysis.items()
+                                     if isinstance(pin, str) and isinstance(name, str)}
+                                    if isinstance(saved_analysis, dict) else None)
+        saved_names = state.get("user_pin_names")
+        self._user_pin_names = ({_pin_key(pin): _pin_name_text(name)
+                                 for pin, name in saved_names.items()
+                                 if isinstance(pin, str) and isinstance(name, str)}
+                                if isinstance(saved_names, dict) else {})
         pin_map = state.get("pin_map")
         try:
             self.pin_map = ({int(p): (int(r), int(c)) for p, r, c in pin_map}
@@ -7357,6 +7832,18 @@ class MainWindow(QMainWindow):
         self._declared_row_spacing = (
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
             and math.isfinite(float(spacing)) and float(spacing) > 0 else None)
+        declared = state.get("body_size_declared")
+        # Projects saved before the flag (2026-10-15): the body fields are
+        # declared when they differ from the placeholder, i.e. when an
+        # analysis wrote them. Declared heuristic: a documented body of
+        # exactly 10 x 10 x 5 mm is indistinguishable from the placeholder and
+        # reads as undeclared (the 3D then asks for a new analysis instead of
+        # building a block that may be invented).
+        self._body_size_declared = (
+            declared if isinstance(declared, bool) else
+            (self.field_body_length.value(), self.field_body_width.value(),
+             self.field_body_height.value()) != PLACEHOLDER_BODY_MM
+            or self._legacy_body_evidence(state))
         known = state.get("board_size_known")
         # Progetti salvati prima del 26/09: le quote sono note se il progetto
         # ha gia' un footprint, cioe' se un'analisi le ha scritte.
@@ -7387,6 +7874,10 @@ class MainWindow(QMainWindow):
         # What the footprint on disk carries of the metadata (M1); before the
         # metadata fields are restored, whose refresh reads it.
         self._applied_metadata = self._valid_applied_metadata(state.get("metadata_applied"))
+        # Which pads the STEP on disk was built over (H1); absent = unknown.
+        self._step_source_pads = _valid_pad_records(state.get("step_source_pads"))
+        saved_body = state.get("step_source_body")
+        self._step_source_body = deepcopy(saved_body) if isinstance(saved_body, dict) else None
         # A rewrite still pending belongs to the project being left: the
         # one now open has its own .kicad_mod, written by its own edits.
         self._clear_footprint_rewrite()
@@ -8113,6 +8604,11 @@ class MainWindow(QMainWindow):
         applied = self._rename_project_folder(dialog.project_name())
         if applied != current:
             self.field_name.setText(applied)
+            # The symbol editor was bound to the old name: footprint link
+            # «KiCadGen:OLD» and the recovery file under OLD\ (audit
+            # 2026-10-15, item 9). Rebound here, whatever tab is showing; a
+            # pending draft stays a draft (`_rebind_symbol_after_rename`).
+            self._rebind_symbol_after_rename()
             self._last_mesh_path = None
             self._restore_saved_mesh()
             self._append_log(tx("Progetto rinominato: {old_name} diventa {new_name}.",
@@ -8124,6 +8620,24 @@ class MainWindow(QMainWindow):
                     old_name=current, new_name=applied, n_files=moved_documents))
             if self.tabs.currentIndex() == TAB_MODEL_3D:
                 self._enter_3d_tab()
+
+    def _rebind_symbol_after_rename(self) -> None:
+        """@brief Point the symbol editor at the renamed project, keeping its draft.
+
+        @note A rename is the same project: `SymbolTab.rename_project` changes
+            only the identity (name, «KiCadGen:<new>» link, recovery file,
+            which moved with the folder), so a pending draft stays pending
+            with its undo history. A refresh through `_refresh_symbol_tab`
+            alone would treat the new name as another baseline and keep the
+            draft only as «Recupera bozza». The ordinary refresh follows, and
+            finds nothing to reload.
+        """
+        tab = getattr(self, "symbol_tab", None)
+        if tab is None:
+            return
+        name = self._component_name()
+        tab.rename_project(name, f"KiCadGen:{name}", self._symbol_recovery_path())
+        self._refresh_symbol_tab()
 
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
         """Sposta i documenti nella cartella del nuovo nome componente.
@@ -8264,6 +8778,8 @@ class MainWindow(QMainWindow):
         # targets exactly as they are.
         for output_file in (
                 old_project / f"{old_name}.pretty" / f"{old_name}.kicad_mod",
+                # The symbol is renamed and rewritten too (item 9).
+                old_project / f"{old_name}.kicad_sym",
                 *(old_project / f"{old_name}.3dshapes" / f"{old_name}{suffix}"
                   for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"))):
             if linked_or_reparse(output_file):
@@ -8275,6 +8791,9 @@ class MainWindow(QMainWindow):
         moves: list[tuple[Path, Path]] = []
         original_footprint: bytes | None = None
         footprint_path: Path | None = None
+        # The symbol is rolled back like the footprint: bytes, then name.
+        original_symbol: bytes | None = None
+        symbol_path: Path | None = None
         staged_project_link_rejected = False
 
         def write_bytes_atomically(path: Path, payload: bytes) -> None:
@@ -8416,6 +8935,24 @@ class MainWindow(QMainWindow):
                     r'(\(model\s+)"([^"\r\n]+)(")', renamed_model_reference, source_text)
                 write_bytes_atomically(footprint_path, source_text.encode("utf-8"))
 
+            # The electrical symbol follows the name (audit 2026-10-15,
+            # item 9): file name, symbol and unit names, Value and the
+            # Footprint link, so it keeps pointing at the renamed footprint.
+            symbol_path = stage / f"{old_name}.kicad_sym"
+            if linked_or_reparse(symbol_path):
+                raise OSError(tx(
+                    "Rinomina annullata: {path} è diventato un collegamento simbolico o "
+                    "una giunzione durante la rinomina.", path=symbol_path))
+            if symbol_path.is_file():
+                original_symbol = symbol_path.read_bytes()
+                renamed_symbol = stage / f"{new_name}.kicad_sym"
+                move_case_safe(symbol_path, renamed_symbol)
+                symbol_path = renamed_symbol
+                write_bytes_atomically(symbol_path, renamed_symbol_text(
+                    original_symbol.decode("utf-8"), old_name, new_name).encode("utf-8"))
+            else:
+                symbol_path = None
+
             if new_shapes.is_dir():
                 for suffix in (".step", ".stp", ".wrl", ".preview.json", ".FCStd"):
                     move_case_safe(new_shapes / f"{old_name}{suffix}",
@@ -8439,6 +8976,12 @@ class MainWindow(QMainWindow):
                     write_bytes_atomically(footprint_path, original_footprint)
                 except OSError:
                     pass
+            # Same for the symbol (item 9).
+            if original_symbol is not None and symbol_path is not None:
+                try:
+                    write_bytes_atomically(symbol_path, original_symbol)
+                except OSError:
+                    pass
             for source, target in reversed(moves):
                 current = target
                 if current == new_project and not current.exists():
@@ -8457,7 +9000,40 @@ class MainWindow(QMainWindow):
 
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
+        self._remove_stale_previews(new_project, old_name)
         return new_name
+
+    def _remove_stale_previews(self, project: Path, old_name: str) -> None:
+        """@brief Delete the isolated-preview files still named after the old project name.
+
+        @param project The renamed project folder.
+        @param old_name The name before the rename.
+        @note Audit 2026-10-15, item 9. The `.kicad-preview` folder holds only
+            files the program generates (`kicad_library.create_preview_project`),
+            rebuilt by the next «Prova in KiCad» under the new name; the old
+            ones would be a second, outdated board. Removed after the rename
+            succeeded, so the rename's own rollback is unaffected; a board that
+            KiCad holds open (its lock file exists) is left alone and said so,
+            like any file the system refuses.
+        """
+        from ..services.kicad_library import PREVIEW_DIR_NAME, kicad_lock_file
+        folder = project / PREVIEW_DIR_NAME
+        if not folder.is_dir():
+            return
+        board = folder / f"{old_name}-preview.kicad_pcb"
+        if kicad_lock_file(board).exists():
+            self._append_log(tx("Anteprima KiCad con il nome vecchio lasciata in {path}: è aperta "
+                                "in KiCad.", path=folder))
+            return
+        for stale in (board, folder / f"{old_name}-preview.kicad_pro",
+                      folder / f"{old_name}-preview.kicad_prl",
+                      folder / f"{old_name}.step", folder / f"{old_name}.wrl"):
+            try:
+                if stale.is_file() and not stale.is_symlink():
+                    stale.unlink()
+            except OSError as exc:
+                self._append_log(tx("Anteprima KiCad con il nome vecchio non rimossa: {path} "
+                                    "({exc}).", path=stale, exc=exc))
 
     def _rename_folder_case(self, old_project: Path, new_project: Path,
                             old_name: str, new_name: str) -> str:
@@ -8565,7 +9141,11 @@ class MainWindow(QMainWindow):
         self._extraction_applied_revision = self._analysis_revision
         self._applying_extraction = True
         try:
-            self._apply_extracted_result(params)
+            # The questions asked while applying (contact style, geometry
+            # doubts, the user's pin names) run modal loops: the autosave must
+            # not write a half-applied project meanwhile (review pass 2, L5).
+            with self._autosave_suspended():
+                self._apply_extracted_result(params)
         except Exception as exc:
             self._auto_generation_params = None
             # Campi applicati a meta': non c'e' un inventario coerente da far
@@ -8578,6 +9158,381 @@ class MainWindow(QMainWindow):
             if self._extract_finish_pending:
                 self._extract_finish_pending = False
                 self._on_extract_finished()
+
+    @contextmanager
+    def _autosave_suspended(self):
+        """@brief Context in which the periodic project autosave does not run.
+
+        @note Review pass 2, L5: a modal question inside `_apply_extracted_result`
+            spins an event loop, and the autosave timer fired there saved a
+            project with half the analysis applied. The timer is stopped for
+            the duration and restarted only if it was running; explicit saves
+            inside the context still happen (the apply ends with one).
+        """
+        timer = getattr(self, "_project_autosave", None)
+        running = timer is not None and timer.isActive()
+        if running:
+            timer.stop()
+        try:
+            yield
+        finally:
+            if running:
+                timer.start()
+
+    @staticmethod
+    def _drop_note(params, message) -> None:
+        """@brief Remove a resolved doubt's line from the extraction notes (review pass 2, L5).
+
+        @param params The extraction being applied (`notes` is newline-joined text).
+        @param message The doubt message the user has just resolved.
+        """
+        notes = getattr(params, "notes", None)
+        if isinstance(notes, str) and isinstance(message, str) and message.strip():
+            params.notes = "\n".join(line for line in notes.split("\n")
+                                     if line.strip() != message.strip())
+
+    #: Answers of a geometry-doubt question (`_ask_geometry_doubt`).
+    GEOMETRY_DOUBT_KEEP = "keep"
+    GEOMETRY_DOUBT_SWAP = "swap"
+    GEOMETRY_DOUBT_BACK = "back"
+    #: «Piedini a J»: the body over the lead lands is right because the
+    #: leads bend under it (`body_over_lead_lands` with lead_form unknown).
+    GEOMETRY_DOUBT_J_LEAD = "j_lead"
+    #: Answers that are recorded (a «back» is not a decision on the data).
+    GEOMETRY_DOUBT_ANSWERS = (GEOMETRY_DOUBT_KEEP, GEOMETRY_DOUBT_SWAP, GEOMETRY_DOUBT_J_LEAD)
+
+    def _j_lead_is_an_answer(self, doubt: dict) -> bool:
+        """@brief True when «Piedini a J» explains the doubt: body over SMD lead lands, lead form unknown.
+
+        @param doubt The doubt dict.
+        @note Same condition under which `package_doubts` words the message
+            «se i terminali sono a J è corretto»: the lead form was not
+            declared and every pad involved is SMD (a through-hole lead
+            never bends under the body).
+        """
+        package = self.package_geometry
+        if doubt.get("code") != DOUBT_BODY_OVER_LANDS or package is None \
+                or getattr(package, "lead_form", None) != "unknown":
+            return False
+        involved = {str(number) for number in doubt.get("pins") or ()}
+        pads = [pin for pin in package.pins if str(pin.number) in involved]
+        return bool(pads) and all(pin.pad_type == "smd" for pin in pads)
+
+    @staticmethod
+    def _geometry_doubt_data_key(geometry) -> str:
+        """@brief Identity of the analysed package data a doubt answer belongs to.
+
+        @param geometry The package geometry as the analysis returned it
+            (before any swap the user chose).
+        @return A short hash of every field but the name: the same analysis
+            replayed (cache) gives the same key, any changed value another.
+        """
+        import hashlib
+        data = asdict(geometry)
+        data.pop("name", None)
+        text = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    def _review_geometry_doubts(self, params) -> bool:
+        """@brief Ask about each structural doubt of the analysed package, apply only what the user chose.
+
+        @param params The extraction being applied; its `geometry_doubts`
+            (`core.package_geometry.package_doubts` as dicts) are read, and
+            its top-level body sizes are swapped together with the package's
+            when the user chooses the swap.
+        @return True when the user chose «Torna indietro» on a doubt: the
+            automatic generation must not start.
+        @note Audit 2026-10-15, item 3. `body_pad_mismatch` whose swap removes
+            every violation offers «Scambia lunghezza e larghezza» / «Lascia
+            così»; the other doubts (a mismatch the swap does not clear,
+            clockwise numbering, bottom view also mirrored) are shown to be
+            confirmed or to go back. The geometry is never changed without
+            the answer, and the answer is recorded per doubt and per analysed
+            data (`_geometry_doubt_answers`), so a replay of the same analysis
+            is not asked again; a «back» is not recorded.
+        """
+        doubts = [doubt for doubt in getattr(params, "geometry_doubts", None) or ()
+                  if isinstance(doubt, dict) and isinstance(doubt.get("code"), str)]
+        if not doubts or self.package_geometry is None:
+            return False
+        data_key = self._geometry_doubt_data_key(self.package_geometry)
+        held_back = False
+        for doubt in doubts:
+            key = f"{doubt['code']}:{data_key}"
+            answer = self._geometry_doubt_answers.get(key)
+            if answer is None:
+                answer = self._ask_geometry_doubt(doubt)
+                if answer in self.GEOMETRY_DOUBT_ANSWERS:
+                    self._geometry_doubt_answers[key] = answer
+            else:
+                self._append_log(tx("Dubbio sulla geometria già risolto per questi dati: {message}",
+                                    message=doubt.get("message", doubt["code"])))
+            if answer == self.GEOMETRY_DOUBT_SWAP and doubt["code"] == DOUBT_BODY_PADS \
+                    and doubt.get("swap_clears") is True:
+                self._swap_package_body(params)
+                # Resolved by the user: the «DUBBIO» note would now be false.
+                self._drop_note(params, doubt.get("message"))
+            elif answer == self.GEOMETRY_DOUBT_J_LEAD and self._j_lead_is_an_answer(doubt):
+                self._drop_note(params, doubt.get("message"))
+                # Declared, not deduced: the user saw the J leads.
+                self.package_geometry = replace(self.package_geometry, lead_form="j_lead")
+                self._append_log(tx("Terminali dichiarati a J dall'utente: il corpo sopra le "
+                                    "piazzole è corretto."))
+            elif answer == self.GEOMETRY_DOUBT_BACK:
+                held_back = True
+        return held_back
+
+    def _swap_package_body(self, params) -> None:
+        """@brief Swap body length and width of the package (and of the extraction), as the user chose.
+
+        @param params The extraction being applied: its top-level body sizes
+            follow when they are the package's, so the fields filled from
+            them stay consistent with the package.
+        """
+        package = self.package_geometry
+        length, width = package.body_length_mm, package.body_width_mm
+        self.package_geometry = replace(package, body_length_mm=width, body_width_mm=length)
+        if (getattr(params, "body_length_mm", None), getattr(params, "body_width_mm", None)) \
+                == (length, width):
+            params.body_length_mm, params.body_width_mm = width, length
+        self._append_log(tx("Lunghezza e larghezza del corpo scambiate su scelta dell'utente: "
+                            "{length} x {width} mm.", length=f"{width:g}", width=f"{length:g}"))
+
+    def _ask_geometry_doubt(self, doubt: dict) -> str:
+        """@brief Show one structural doubt of the package geometry and ask what to do.
+
+        @param doubt {"code", "message", "pins", "swap_clears"}.
+        @return GEOMETRY_DOUBT_SWAP or GEOMETRY_DOUBT_KEEP for a body/pad
+            mismatch that the swap clears (Esc: keep); GEOMETRY_DOUBT_KEEP
+            («Confermo i dati») or GEOMETRY_DOUBT_BACK («Torna indietro»,
+            also Esc: nothing is generated) for the others, plus
+            GEOMETRY_DOUBT_J_LEAD («Piedini a J») for a body over SMD lead
+            lands whose lead form is unknown (`_j_lead_is_an_answer`). A body
+            over the lands is never offered a swap: a swapped overall width
+            E would give a wrong body.
+        @note A separate method so tests answer it without opening a window.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(self.i18n.text("Dubbio sulla geometria del package"))
+        box.setText(str(doubt.get("message") or doubt.get("code")))
+        box.setInformativeText(self.i18n.text(
+            "La geometria non viene cambiata senza la tua scelta. Controlla il disegno quotato."))
+        if doubt.get("code") == DOUBT_BODY_PADS and doubt.get("swap_clears") is True:
+            swap = box.addButton(self.i18n.text("Scambia lunghezza e larghezza"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+            keep = box.addButton(self.i18n.text("Lascia così"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(keep)
+            box.setEscapeButton(keep)
+            box.exec()
+            return self.GEOMETRY_DOUBT_SWAP if box.clickedButton() is swap else self.GEOMETRY_DOUBT_KEEP
+        confirm = box.addButton(self.i18n.text("Confermo i dati"), QMessageBox.ButtonRole.AcceptRole)
+        j_lead = (box.addButton(self.i18n.text("Piedini a J"), QMessageBox.ButtonRole.YesRole)
+                  if self._j_lead_is_an_answer(doubt) else None)
+        back = box.addButton(self.i18n.text("Torna indietro"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(back)
+        box.setEscapeButton(back)
+        box.exec()
+        clicked = box.clickedButton()
+        if j_lead is not None and clicked is j_lead:
+            return self.GEOMETRY_DOUBT_J_LEAD
+        return self.GEOMETRY_DOUBT_KEEP if clicked is confirm else self.GEOMETRY_DOUBT_BACK
+
+    #: Answers of the user-pin-names question (`_ask_user_pin_names`).
+    USER_PIN_NAMES_KEEP = "keep"
+    USER_PIN_NAMES_REPLACE = "replace"
+
+    def _note_user_pin_names(self, rows) -> None:
+        """@brief Record as the user's the pin names that differ from the current pinout.
+
+        @param rows Rows about to become `self.pinout` through a user edit
+            (symbol editor «Applica», pinout dialog).
+        @note Judged against the names of the LAST ANALYSIS
+            (`_analysis_pin_names`; the current pinout stands for them in an
+            older project): a name that differs from the analysis's is the
+            user's, a cleared one included; a name typed back to the
+            analysis's clears the provenance (review pass 3, L1: an undo
+            plus «Applica» recorded the analysis name as the user's).
+        """
+        reference = getattr(self, "_analysis_pin_names", None)
+        if reference is None:
+            reference = {_pin_key(row.get("pin")): _pin_name_text(row.get("name"))
+                         for row in self.pinout or () if isinstance(row, dict)}
+        for row in rows or ():
+            if not isinstance(row, dict):
+                continue
+            pin, name = _pin_key(row.get("pin")), _pin_name_text(row.get("name"))
+            if not pin:
+                continue
+            if name != reference.get(pin, ""):
+                self._user_pin_names[pin] = name
+            else:
+                self._user_pin_names.pop(pin, None)
+
+    def _settle_pad_ids(self):
+        """@brief Electrical pad numbers the fields describe now, or None when they cannot be built.
+
+        @return `_symbol_pad_ids()` as stripped text, or None (the footprint
+            the fields describe is not known: no pin is declared vanished).
+        """
+        try:
+            return [_pin_key(number) for number in self._symbol_pad_ids()]
+        except Exception:  # noqa: BLE001 - unknown pads must not stop applying an analysis
+            return None
+
+    def _settle_extracted_pinout(self, candidate) -> None:
+        """@brief Make the pinout of a new analysis current without losing the user's names silently.
+
+        @param candidate Rows the analysis proposes, [] for «no names»
+            (automatic mode resets), or None to keep the current pinout.
+        @note Audit 2026-10-15, item 2: the pinout was reset at the start of
+            every new analysis, saved, and the .kicad_sym rewritten with «~»,
+            discarding names the user had typed. Now, when the candidate
+            would replace or drop a name the USER applied
+            (`_user_pin_names`), the user is asked first
+            (`_ask_user_pin_names`) and nothing changes before the answer.
+        @note Review pass 2, M1/M2: only the NAMES of pins that are still
+            pads of the new footprint are kept. A user name of a pin the new
+            footprint no longer has is dropped (said in the question, or in
+            the log when nothing else is asked) and forgotten, instead of
+            adding a pin the footprint lacks and asking again at every
+            analysis. The user's symbol layout (`symbol_*` keys) is kept only
+            when the pin set is unchanged and the layout still validates
+            (`_keep_symbol_layout`); otherwise every pin goes back to the
+            automatic layout and the log says so -- mixing kept positions with
+            automatic ones put two pins on the same spot.
+        """
+        if candidate is None:
+            return
+        candidate = [dict(row) for row in candidate if isinstance(row, dict)]
+        proposed = {_pin_key(row.get("pin")): _pin_name_text(row.get("name")) for row in candidate}
+        # From now on the user's names are judged against THIS analysis (L1).
+        self._analysis_pin_names = dict(proposed)
+        pads = self._settle_pad_ids()
+        vanished = sorted((pin for pin in self._user_pin_names
+                           if pads is not None and pin not in pads),
+                          key=lambda pin: pin_sort_key({"pin": pin}))
+        live = {pin: name for pin, name in self._user_pin_names.items() if pin not in vanished}
+        conflicts = {pin: name for pin, name in live.items() if proposed.get(pin, "") != name}
+        for pin in vanished:
+            self._user_pin_names.pop(pin, None)
+        if not conflicts:
+            self.pinout = candidate
+            if vanished:
+                self._append_log(tx("Nomi scritti a mano di pin che il nuovo footprint non ha più, "
+                                    "tolti: {pins}.", pins=", ".join(vanished)))
+            return
+        previous = [dict(row) for row in self.pinout or () if isinstance(row, dict)]
+        choice = self._ask_user_pin_names(conflicts, proposed, vanished)
+        if choice == self.USER_PIN_NAMES_REPLACE:
+            self.pinout = candidate
+            self._user_pin_names = {}
+            self._append_log(tx("Nomi dei pin scritti a mano sostituiti dalla nuova analisi: "
+                                "{count}.", count=len(conflicts)))
+            return
+        by_pin = {_pin_key(row.get("pin")): row for row in candidate}
+        for pin, name in live.items():
+            if pin in by_pin:
+                by_pin[pin]["name"] = name
+            else:
+                row = {"pin": pin, "name": name}
+                candidate.append(row)
+                by_pin[pin] = row
+        self.pinout = self._keep_symbol_layout(candidate, previous, pads)
+        self._append_log(tx("Nomi dei pin scritti a mano mantenuti: {count}.", count=len(conflicts)))
+
+    #: Row keys that carry the symbol layout (positions, angles, body, wires,
+    #: property positions...): every key the symbol editor writes as `symbol_*`.
+    SYMBOL_LAYOUT_PREFIX = "symbol_"
+
+    def _keep_symbol_layout(self, rows, previous, pads):
+        """@brief Carry the user's symbol layout onto new rows only when it is still valid.
+
+        @param rows The new rows (names settled), modified in place.
+        @param previous The rows before the analysis (with their layout).
+        @param pads Electrical pad numbers of the new footprint, or None.
+        @return `rows`, with the previous `symbol_*` keys of every pin when the
+            pin set is the same and the layout validates, otherwise with no
+            `symbol_*` key at all (automatic layout, logged when a custom one
+            existed).
+        """
+        prefix = self.SYMBOL_LAYOUT_PREFIX
+
+        def strip(target):
+            for row in target:
+                for key in [key for key in row if key.startswith(prefix)]:
+                    del row[key]
+            return target
+
+        old = {_pin_key(row.get("pin")): row for row in previous}
+        custom = any(key.startswith(prefix) and key != "symbol_side" for row in previous for key in row)
+        if not custom:
+            return strip(rows)
+        target = set(pads) if pads is not None else {_pin_key(row.get("pin")) for row in rows}
+        if target == set(old):
+            # The analysis lists only the pins it names: the others get a row
+            # without a name (what the symbol editor would add), so every pin
+            # can carry its kept position.
+            present = {_pin_key(row.get("pin")) for row in rows}
+            rows.extend({"pin": pin, "name": ""} for pin in sorted(
+                target - present, key=lambda pin: pin_sort_key({"pin": pin})))
+        same_pins = target == set(old) == {_pin_key(row.get("pin")) for row in rows}
+        if same_pins:
+            for row in rows:
+                for key in [key for key in row if key.startswith(prefix)]:
+                    del row[key]
+                row.update({key: deepcopy(value) for key, value in old[_pin_key(row.get("pin"))].items()
+                            if key.startswith(prefix)})
+            try:
+                from ..generators.symbol import layout_symbol, symbol_inputs
+                pins, body = symbol_inputs(rows)
+                if pins:
+                    layout_symbol(pins, body)
+                return rows
+            except (ValueError, TypeError, KeyError):
+                pass
+        self._append_log(tx("Disposizione del simbolo scelta a mano non più valida per i pin della "
+                            "nuova analisi: torna quella automatica."))
+        return strip(rows)
+
+    def _ask_user_pin_names(self, conflicts: dict, proposed: dict, vanished=()) -> str:
+        """@brief Ask whether a new analysis may replace the pin names the user typed.
+
+        @param conflicts {pin: user name} the analysis would replace or drop,
+            for pins that still exist in the new footprint.
+        @param proposed {pin: name} of the new analysis ('' = no name).
+        @param vanished Pins with a user name that the new footprint no
+            longer has: listed, their names are dropped whatever the answer.
+        @return USER_PIN_NAMES_KEEP (also for Esc and the close button: the
+            safe answer, nothing is lost) or USER_PIN_NAMES_REPLACE.
+        @note A separate method so tests answer it without opening a window.
+        """
+        def shown(name):
+            return f"«{name}»" if name else "«~»"
+        lines = [f"{pin}: {shown(name)} → {shown(proposed.get(pin, ''))}"
+                 for pin, name in sorted(conflicts.items(),
+                                         key=lambda item: pin_sort_key({"pin": item[0]}))]
+        details = "\n".join(lines[:20]) + ("\n…" if len(lines) > 20 else "")
+        if vanished:
+            details += "\n\n" + self.i18n.text(
+                "Pin che il nuovo footprint non ha più: i loro nomi verranno tolti: {pins}."
+            ).format(pins=", ".join(vanished))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(self.i18n.text("Nomi dei pin"))
+        box.setText(self.i18n.text(
+            "La nuova analisi sostituirebbe o toglierebbe {count} nomi dei pin scritti da te "
+            "nell'editor del simbolo:").format(count=len(conflicts)))
+        box.setInformativeText(details)
+        keep = box.addButton(self.i18n.text("Mantieni i miei nomi"),
+                             QMessageBox.ButtonRole.AcceptRole)
+        replace_button = box.addButton(self.i18n.text("Usa i nomi della nuova analisi"),
+                                       QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        box.exec()
+        return (self.USER_PIN_NAMES_REPLACE if box.clickedButton() is replace_button
+                else self.USER_PIN_NAMES_KEEP)
 
     def _apply_extracted_result(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
@@ -8596,9 +9551,15 @@ class MainWindow(QMainWindow):
         # Apply the extraction before validating automatic generation. If a
         # pad conflicts with its pitch, the user must see and correct the
         # extracted THT pad/drill values instead of losing the result.
+        # The pinout this analysis proposes, settled at the end of the apply
+        # (`_settle_extracted_pinout`): None keeps the current one. Never
+        # reset here (audit 2026-10-15, item 2): a question may come first,
+        # and its modal loop lets the autosave run.
+        pinout_candidate = None
         if self._auto_after_extraction:
             # A new acquisition must not silently reuse previous pin maps or annotations.
-            self.pinout, self.pin_map = [], None
+            pinout_candidate = []
+            self.pin_map = None
             self.fillet_annotations.clear()
             self.face_text_annotations.clear()
             self.field_body_offset_x.setValue(0)
@@ -8673,12 +9634,21 @@ class MainWindow(QMainWindow):
                     self._append_log(tx("ATTENZIONE: {note}", note=note))
             except (KeyError, TypeError, ValueError) as exc:
                 self._append_log(tx("ATTENZIONE geometria package ignorata: {exc}", exc=exc))
+        # Structural doubts (body over the pads, clockwise numbering, bottom
+        # view also mirrored): asked, never repaired silently (item 3).
+        geometry_held_back = self._review_geometry_doubts(params)
         self._set_regen_busy(False)
 
         # Le due disposizioni riempiono gruppi di campi diversi; tutto il
         # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
         if params.is_castellated():
-            self._apply_extracted_castellated(params)
+            self._extraction_side_pinout = []
+            try:
+                self._apply_extracted_castellated(params)
+            finally:
+                side_pinout, self._extraction_side_pinout = self._extraction_side_pinout, None
+            if side_pinout:
+                pinout_candidate = side_pinout
         else:
             self._set_photo_components(params.components_3d or [], replace_excluded=True)
             self.group_castellated.setChecked(False)
@@ -8706,6 +9676,12 @@ class MainWindow(QMainWindow):
             # A board assembly uses PCB thickness and individual component heights.
             # Missing overall height must neither block it nor reuse an old value.
             self.field_body_height.setValue(params.body_height_mm or self.field_cast_pcb.value())
+        if not params.is_castellated():
+            # The body of a pin matrix is declared only by THIS analysis: an
+            # analysis without body quotes leaves the fields as they were,
+            # and those values (placeholder, or another analysis's) must not
+            # build a body (audit 2026-10-15, item 4).
+            self._body_size_declared = bool(params.has_3d_body())
         if params.has_3d_body() and not params.is_castellated():
             self._enable_3d_group_from_extraction()
             self.field_body_length.setValue(params.body_length_mm)
@@ -8718,8 +9694,18 @@ class MainWindow(QMainWindow):
             if params.pin_length_3d_mm is not None:
                 self.field_pin_length_3d.setValue(params.pin_length_3d_mm)
 
+        # Precedence (item 11): an explicit pinout table, else the names the
+        # analysis read beside each pad of a package, else the side names of
+        # a castellated module (collected above), else nothing new.
         if params.pinout:
-            self.pinout = [dict(entry) for entry in params.pinout]
+            pinout_candidate = [dict(entry) for entry in params.pinout]
+        elif self.package_geometry is not None and not params.is_castellated():
+            named = _package_pinout(self.package_geometry)
+            if named:
+                pinout_candidate = named
+                self._append_log(tx("Nomi dei pin letti accanto ai pad del package: {count}.",
+                                    count=len(named)))
+        self._settle_extracted_pinout(pinout_candidate)
 
         if params.pin_map:
             self.pin_map = {
@@ -8756,7 +9742,13 @@ class MainWindow(QMainWindow):
             if applied_fillets else ""
         )
         if self._auto_after_extraction:
-            self._auto_generation_params = params
+            # «Torna indietro» on a geometry doubt: the fields are applied and
+            # saved so the user can look at them, but nothing is generated.
+            self._auto_generation_params = None if geometry_held_back else params
+            if geometry_held_back:
+                self._append_log(tx("Generazione automatica non avviata: un dubbio sulla geometria "
+                                    "del package è da verificare sul disegno. Correggi i dati o "
+                                    "ripeti l'analisi, poi genera."))
             # Persist the exact extraction before generation can be blocked:
             # the user must be able to correct its geometry and resume without
             # losing pin numbering or the values just reviewed.
@@ -9152,8 +10144,13 @@ class MainWindow(QMainWindow):
 
         # Tabella pinout: se il modello non l'ha compilata a parte, la si
         # ricava dalle sigle serigrafate accanto ai contatti di ogni lato.
+        # During an extraction the names are only proposed: the apply settles
+        # them with the user's own names first (item 2).
         if pinout:
-            self.pinout = pinout
+            if self._extraction_side_pinout is not None:
+                self._extraction_side_pinout[:] = pinout
+            else:
+                self.pinout = pinout
 
         self._set_photo_components(params.components_3d or [], replace_excluded=True)
         if not self.castellated_components:
@@ -9300,9 +10297,9 @@ class MainWindow(QMainWindow):
         # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
         self._freecad_available = freecad_available
         self.group_3d = FlagValue(freecad_available)
-        self.field_body_length = BoundedValue(10.0, MIN_LENGTH_MM, MAX_LENGTH_MM)
-        self.field_body_width = BoundedValue(10.0, MIN_LENGTH_MM, MAX_LENGTH_MM)
-        self.field_body_height = BoundedValue(5.0, MIN_HEIGHT_MM, MAX_LENGTH_MM)
+        self.field_body_length = BoundedValue(PLACEHOLDER_BODY_MM[0], MIN_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_body_width = BoundedValue(PLACEHOLDER_BODY_MM[1], MIN_LENGTH_MM, MAX_LENGTH_MM)
+        self.field_body_height = BoundedValue(PLACEHOLDER_BODY_MM[2], MIN_HEIGHT_MM, MAX_LENGTH_MM)
         #: Bordo del corpo rispetto al pin 1 (X) e alla prima riga (Y).
         self.field_body_offset_x = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
         self.field_body_offset_y = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
@@ -9815,8 +10812,27 @@ class MainWindow(QMainWindow):
             "Esporta il simbolo elettrico applicato in un file .kicad_sym")
         self.btn_export_symbol.clicked.connect(self.symbol_tab.export_requested.emit)
         symbol_row_layout.addWidget(self.btn_export_symbol)
+        # Remedy of a symbol file that does not match the applied symbol
+        # (review pass 3, M1/H1): enabled exactly while that block stands.
+        self.btn_update_symbol_file = self._workflow_tool_button(
+            "wf-regenerate.svg", "Aggiorna il file del simbolo",
+            "Il file del simbolo corrisponde al simbolo applicato.")
+        self.btn_update_symbol_file.clicked.connect(self._update_symbol_file)
+        self.btn_update_symbol_file.setEnabled(False)
+        symbol_row_layout.addWidget(self.btn_update_symbol_file)
         artifacts_form.addRow("Simbolo elettrico:", symbol_row)
-        artifacts_form.addRow("Modello STEP:", self.label_kicad_step)
+        step_row = QWidget()
+        step_row_layout = QHBoxLayout(step_row)
+        step_row_layout.setContentsMargins(0, 0, 0, 0)
+        step_row_layout.setSpacing(8)
+        step_row_layout.addWidget(self.label_kicad_step, 1)
+        # Remedy of a stale STEP that cannot be rebuilt (review pass 3, H2).
+        self.btn_remove_obsolete_model = self._workflow_tool_button(
+            "cancel.svg", "Rimuovi il modello 3D obsoleto", "Nessun modello 3D obsoleto.")
+        self.btn_remove_obsolete_model.clicked.connect(self._remove_obsolete_model)
+        self.btn_remove_obsolete_model.setEnabled(False)
+        step_row_layout.addWidget(self.btn_remove_obsolete_model)
+        artifacts_form.addRow("Modello STEP:", step_row)
         self.file_paths_toggle = QToolButton()
         self.file_paths_toggle.setText(self._file_paths_toggle_text(False))
         self.file_paths_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -10404,6 +11420,9 @@ class MainWindow(QMainWindow):
                 texts.append(path.read_text(encoding="utf-8") if path.is_file() else None)
             except OSError:
                 texts.append(None)
+        # The file checks parse whole files on every metadata keystroke; they
+        # are cached inside klc_checks per text and language (review pass 2,
+        # L2), so this stays the single `check_all` entry point.
         return klc_checks.check_all(self._metadata_dict(), name,
                                     symbol_text=texts[0], footprint_text=texts[1])
 
@@ -10583,11 +11602,14 @@ class MainWindow(QMainWindow):
             while the fields are not yet written into the footprint that
             would be installed (review pass 2, M1; see the block comment
             above `APPLIED_METADATA_KEYS`).
-        @note Only the commands of `INSTALL_ACTION_ATTRS` change, and only
-            while footprint and STEP exist: without them
+        @note The metadata block applies to `INSTALL_ACTION_ATTRS` only, and
+            only while footprint and STEP exist: without them
             `_refresh_output_actions_inner` has already disabled them with the
             «Genera prima…» reason, which stays. The isolated preview and
-            «Applica ai file» are left alone on purpose (user, 2026-10-15).
+            «Applica ai file» are not blocked by the METADATA on purpose
+            (user, 2026-10-15); the preview is blocked, like the
+            installations, by work in progress and by files that do not
+            match the parameters (`_kicad_command_block_reason`).
         @note The install methods check again on their own
             (`_refuse_install_for_metadata`): a disabled button is not the
             only guard, a menu entry, the usage wizard or a direct call must
@@ -10597,11 +11619,12 @@ class MainWindow(QMainWindow):
         complete = self._kicad_output_complete()
         reason = self._install_block_reason(findings) if complete else ""
         if complete:
-            for attr in self.INSTALL_ACTION_ATTRS:
-                action = getattr(self, attr, None)
-                if action is not None:
-                    self._set_output_action_state(
-                        action, not reason, reason or self.OUTPUT_ACTION_TOOLTIPS.get(attr, ""))
+            # CONTRACT CHANGED 2026-10-15 (audit H1/M3): the preview and the
+            # installations are also blocked while work runs or while the
+            # files do not match the parameters; that reason comes first.
+            self._apply_kicad_command_states(complete, reason)
+        # Only the METADATA block opens the box: work in progress or stale
+        # files are not something the metadata fields can fix.
         self._auto_expand_metadata(bool(reason), complete)
         return missing
 
@@ -10671,6 +11694,733 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, self.i18n.text("Metadati del componente"), reason)
         return True
 
+    # ── Files on disk aligned with the parameters (audit 2026-10-15, H1) ──
+    #
+    # After a «No» to the overwrite question (or a blocked automatic
+    # generation) the fields hold new parameters, saved in the project, while
+    # the .kicad_mod and the STEP are still the old ones. Nothing recorded
+    # which parameters produced the files, so the KiCad tab said «ready», the
+    # installation copied the old footprint, the symbol got pins for pads the
+    # file does not have and «Rigenera 3D» built new leads over old pads.
+    #
+    # Footprint: READ BACK from the .kicad_mod and compared with the pads the
+    # current (applied) fields build with the same generator. Chosen over a
+    # recorded fingerprint because the file is exactly what installation and
+    # preview copy: it needs no record, so a project saved before this check
+    # is judged on what it really holds (no forced regeneration), and a lost
+    # project save or a file replaced outside the program cannot fool it.
+    # STEP: cannot be read back (no pads in it), so every STEP write records
+    # the pad records of the parameters it was built from
+    # (`step_source_pads`); a project without the record is «unknown» and is
+    # NOT blocked (requiring a FreeCAD run on every old project would be
+    # needless work; the older-than-footprint warning still applies).
+    # Only the pads are compared: they are what the symbol, the board and the
+    # STEP leads depend on. Text positions, drawings and metadata have their
+    # own trackers. Limit: a change of the body outline alone (F.Fab,
+    # courtyard) is not detected here.
+
+    #: Every KiCad command that copies the files on disk: the isolated
+    #: preview and both installations, buttons and «Strumenti» entries.
+    KICAD_COMMAND_ATTRS = ("btn_test_kicad", "btn_export", "btn_install_global",
+                           "action_test_kicad", "action_export", "action_install_global")
+
+    def _footprint_inputs_now(self):
+        """@brief The parameters a footprint generation started now would use.
+
+        @return (params, host): `params` is what the 3D model is built from,
+            `host` what the .kicad_mod is built from (they differ only for a
+            board mounted with headers, see `_host_footprint_params`).
+        @throws ValueError, TypeError When the fields cannot form parameters.
+        @note Read with the APPLIED footprint (`_applied_footprint_in_memory`):
+            an unapplied footprint draft never makes the files look stale,
+            exactly as it never reaches them.
+        """
+        with self._applied_footprint_in_memory():
+            params = (self.package_geometry if self.package_geometry is not None else
+                      self._current_castellated_params() if self._is_castellated()
+                      else self._current_params())
+            host = self._host_footprint_params(params)
+        return params, host
+
+    @staticmethod
+    def _build_footprint(params):
+        """@brief Build in memory the footprint the generators write for `params`.
+
+        @param params PinHeaderParams, CastellatedModuleParams or PackageGeometry.
+        @return `core.footprint.Footprint`, the same generator GenerateWorker
+            calls (metadata arguments aside, which never change a pad).
+        @throws ValueError, TypeError, ArithmeticError When the generator
+            refuses the parameters.
+        """
+        return (build_package(params) if isinstance(params, PackageGeometry) else
+                build_castellated_module(params) if isinstance(params, CastellatedModuleParams)
+                else build_pin_header(params))
+
+    def _pad_records_of(self, params) -> list[tuple]:
+        """@brief Pad records of the footprint the generators build from `params`.
+
+        @param params PinHeaderParams, CastellatedModuleParams or PackageGeometry.
+        @return `footprint_pad_records` of the built footprint.
+        @throws ValueError, TypeError, ArithmeticError When the generator
+            refuses the parameters.
+        @note Cached by the parameters' repr (dataclasses: every field is in
+            it), because the gate runs on every metadata keystroke.
+        """
+        return self._footprint_signature_of(params)[0]
+
+    def _footprint_signature_of(self, params, drawings=()) -> tuple:
+        """@brief Pads and outline extents of the footprint the generators build from `params`.
+
+        @param params PinHeaderParams, CastellatedModuleParams or PackageGeometry.
+        @param drawings The applied user drawings, added as GenerateWorker
+            adds them (they may lie on F.Fab): () for none.
+        @return (pad records, outline extents), like `footprint_text_signature`
+            but with the pads taken from the built objects (exact values).
+        @throws ValueError, TypeError, ArithmeticError When the generator
+            refuses the parameters.
+        @note Cached because the gate runs on every metadata keystroke
+            (review pass 2, L2). A PackageGeometry is keyed by identity: the
+            window never mutates one, it rebinds a copy
+            (`_rebind_package_pins`), and the cache keeps the object so its id
+            cannot be reused; the other parameters are small and keyed by repr.
+        """
+        cache = getattr(self, "_pad_records_cache", None)
+        if cache is None:
+            # A refresh during window construction, before __init__ set it.
+            cache = self._pad_records_cache = {}
+        drawings_key = repr(drawings) if drawings else ""
+        key = ((type(params).__name__, id(params), drawings_key)
+               if isinstance(params, PackageGeometry)
+               else (type(params).__name__, _geometry_key(params), drawings_key))
+        hit = cache.get(key)
+        if hit is not None and (not isinstance(params, PackageGeometry) or hit[0] is params):
+            return hit[1]
+        footprint = self._build_footprint(params)
+        if drawings:
+            from ..core.footprint import drawing_graphics
+            for item in drawing_graphics(drawings):
+                footprint.add_graphic(item)
+        rendered = footprint_text_signature(footprint.render())
+        signature = (footprint_pad_records(footprint), rendered[1] if rendered else {})
+        if len(cache) >= 8:
+            cache.clear()
+        cache[key] = (params, signature)
+        return signature
+
+    def _records_differ_cached(self, first, second) -> bool:
+        """@brief `_pad_records_differ` memoised on the identity of two cached lists (L2)."""
+        memo = getattr(self, "_differ_memo", None)
+        if not isinstance(memo, dict):
+            memo = self._differ_memo = {}
+        hit = memo.get((id(first), id(second)))
+        # The lists are kept in the entry, so their ids cannot be reused.
+        if hit is not None and hit[0] is first and hit[1] is second:
+            return hit[2]
+        result = _pad_records_differ(first, second)
+        if len(memo) >= 4:
+            memo.clear()
+        memo[(id(first), id(second))] = (first, second, result)
+        return result
+
+    def _footprint_file(self, folder=None) -> Path | None:
+        """@brief The current component's .kicad_mod path, or None without a name.
+
+        @param folder Project folder; None means `_project_dir()`.
+        """
+        name = self._component_name()
+        if not name:
+            return None
+        root = Path(folder) if folder is not None else self._project_dir()
+        return root / f"{name}.pretty" / f"{name}.kicad_mod"
+
+    def _written_footprint_pads(self, folder=None) -> list[tuple] | None:
+        """@brief Pad records of the .kicad_mod on disk, or None when absent or unreadable.
+
+        @param folder Project folder; None means the current one.
+        @note Cached by path, modification time in nanoseconds, size and the
+            inode/file index: an unchanged file is parsed once. Every write of
+            ours drops the cache (`_on_generated`), so a file system with a
+            coarse timestamp cannot serve a stale read-back of our own write
+            (review pass 2, L3); an outside edit of the same size within the
+            same timestamp tick is the remaining, stated limit.
+        """
+        path = self._footprint_file(folder)
+        if path is None:
+            return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        key = (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ino, stat.st_ctime_ns)
+        cached = getattr(self, "_written_pads_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1][0] if cached[1] is not None else None
+        signature = read_footprint_signature(path)
+        self._written_pads_cache = (key, signature)
+        return signature[0] if signature is not None else None
+
+    def _written_footprint_extents(self) -> dict:
+        """@brief Outline extents of the .kicad_mod on disk ({} when unknown); shares the read-back cache."""
+        if self._written_footprint_pads() is None:
+            return {}
+        cached = getattr(self, "_written_pads_cache", None)
+        return cached[1][1] if cached and cached[1] else {}
+
+    def _write_blocking_klc_errors(self) -> list:
+        """@brief The KLC errors in the VALUES «Applica ai file» would write, which make it refuse.
+
+        @return `klc_checks.Finding` list (codes in `klc_checks.WRITE_BLOCKING_CODES`).
+        """
+        from ..services import klc_checks
+        return [f for f in self._klc_findings()
+                if f.severity == "error" and f.code in klc_checks.WRITE_BLOCKING_CODES]
+
+    def _with_apply_prerequisite(self, reason: str) -> str:
+        """@brief Append to a reason whose remedy is «Applica ai file» the fields that command would refuse.
+
+        @param reason A footprint block reason naming «Applica ai file».
+        @return The reason, plus one line naming the KLC errors to correct
+            first when there are any (review pass 4, c: the named remedy
+            would otherwise refuse, and the message must say what to fix).
+        """
+        errors = self._write_blocking_klc_errors()
+        if not errors:
+            return reason
+        return reason + "\n" + self.i18n.text(
+            "«Applica ai file» rifiuterebbe la scrittura: correggi prima {errors}.").format(
+                errors="; ".join(f.message for f in errors))
+
+    def _footprint_alignment_reason(self) -> str:
+        """@brief Text of `_footprint_alignment_block`, '' when the footprint matches."""
+        block = self._footprint_alignment_block()
+        return block[1] if block else ""
+
+    def _footprint_alignment_block(self):
+        """@brief Why the .kicad_mod on disk does not match the current parameters.
+
+        @return (code, translated reason) with code `footprint_invalid`,
+            `footprint_pads` or `footprint_outline`, or None when the pads and
+            the outline match, when there is no footprint, or when the file
+            cannot be read (a damaged .kicad_mod is reported by the KLC checks
+            and refused by KiCad; this check compares geometry, it does not
+            judge the file format).
+        @note Invalid fields block too: a footprint cannot be shown to match
+            parameters the generator refuses. Every code names its remedy in
+            `KICAD_BLOCK_REMEDIES`.
+        """
+        written = self._written_footprint_pads()
+        if written is None:
+            return None
+        try:
+            _params, host = self._footprint_inputs_now()
+            expected, expected_extents = self._footprint_signature_of(
+                host, self._applied_drawings_now())
+        except (ValueError, TypeError, ArithmeticError, KeyError, IndexError) as exc:
+            return ("footprint_invalid", self.i18n.text(
+                "Footprint non verificabile: i parametri attuali non sono validi ({error}). "
+                "Correggili e rigenera il footprint prima di provarlo o installarlo.").format(error=exc))
+        if self._records_differ_cached(written, expected):
+            # Review pass 2, L4: the file may also come from an older version
+            # of the program whose generator has changed since; the message
+            # names both causes instead of blaming the parameters.
+            return ("footprint_pads", self._with_apply_prerequisite(self.i18n.text(
+                "File non aggiornati: il footprint su disco ({written} pad) non corrisponde a "
+                "quello che i parametri attuali generano ({expected} pad): è stato generato con "
+                "altri parametri o da una versione precedente del programma. Rigenera il "
+                "footprint («Applica ai file» o una nuova generazione) prima di provarlo o "
+                "installarlo.").format(written=len(written), expected=len(expected))))
+        if _extents_differ(self._written_footprint_extents(), expected_extents):
+            # Same pads, other body outline or courtyard: the body sizes
+            # changed (a swap, a new length) without a rewrite (review pass 2, L1).
+            return ("footprint_outline", self._with_apply_prerequisite(self.i18n.text(
+                "File non aggiornati: il contorno del corpo o il courtyard del footprint su disco "
+                "non corrisponde a quello che i parametri attuali generano (quote del corpo "
+                "cambiate, o file di una versione precedente). Rigenera il footprint («Applica "
+                "ai file» o una nuova generazione) prima di provarlo o installarlo.")))
+        return None
+
+    def _applied_drawings_now(self) -> list:
+        """@brief The APPLIED user drawings of the footprint (what the .kicad_mod holds).
+
+        @return A copy of `footprint_drawings` read inside
+            `_applied_footprint_in_memory`, so a pending draft is never compared.
+        """
+        with self._applied_footprint_in_memory():
+            return deepcopy(self.footprint_drawings or [])
+
+    def _step_alignment_reason(self) -> str:
+        """@brief Text of `_step_alignment_block`, '' when the STEP matches."""
+        block = self._step_alignment_block()
+        return block[1] if block else ""
+
+    def _step_alignment_block(self):
+        """@brief Why the STEP on disk was not built from the current pads, body and annotations.
+
+        @return (code, translated reason): `step_pads` (other pads),
+            `step_body` (other body, colours or 3D annotations) when a new
+            model CAN be built now, `step_unbuildable` when it cannot (no
+            documented body, or the 3D group off); None when the records
+            match, when no STEP or no record exists (a project saved before
+            the record: unknown, never blocked) or when the parameters are
+            invalid (`_footprint_alignment_block` reports that).
+        @note Compared with the CURRENT parameters, not with the .kicad_mod:
+            the installation also requires the footprint to match them, so
+            both together mean «STEP consistent with the footprint on disk».
+        @note Review pass 3, H2: a stale STEP whose remedy was «Rigenera il
+            modello 3D» while that command was disabled (no body) was a dead
+            end. When no model can be built the reason says so and names two
+            enabled ways out: a new analysis with a dimensioned drawing, or
+            «Rimuovi il modello 3D obsoleto».
+        """
+        recorded = getattr(self, "_step_source_pads", None)
+        name = self._component_name()
+        if recorded is None or not name or not self._step_still_on_disk():
+            return None
+        try:
+            params, _host = self._footprint_inputs_now()
+            expected = self._pad_records_of(params)
+        except (ValueError, TypeError, ArithmeticError, KeyError, IndexError):
+            return None
+        stale_pads = self._records_differ_cached(recorded, expected)
+        body_record = getattr(self, "_step_source_body", None)
+        current_body = self._step_body_fingerprint()
+        if (body_record is not None and current_body is not None
+                and isinstance(body_record.get("body"), dict)):
+            # Records written before the normalisation (pass 4, e) are
+            # normalised here under the SAME decision as the current
+            # fingerprint; the decision itself is not compared, only what
+            # the builder uses.
+            board = bool(current_body.get("board"))
+            body_record = dict(body_record, body=self._normalised_body_record(
+                body_record["body"], board=board))
+            body_record.pop("board", None)
+            current_body = dict(current_body)
+            current_body.pop("board", None)
+        stale_body = body_record is not None and body_record != current_body
+        if not stale_pads and not stale_body:
+            return None
+        if current_body is None:
+            why = (self._missing_body_reason()
+                   or self.i18n.text("il gruppo «Modello 3D» è spento"))
+            return ("step_unbuildable", self.i18n.text(
+                "Modello STEP obsoleto e non ricostruibile: è stato costruito con pad o con un "
+                "corpo diversi da quelli attuali, e ora nessun modello 3D può essere costruito "
+                "({why}). Ripeti l'analisi con un disegno quotato del corpo, oppure premi "
+                "«Rimuovi il modello 3D obsoleto» nella scheda KiCad.").format(why=why))
+        if stale_pads:
+            return ("step_pads", self.i18n.text(
+                "Modello STEP non aggiornato: è stato costruito su pad diversi da quelli dei "
+                "parametri attuali. Rigenera il modello 3D prima di provarlo o installarlo."))
+        return ("step_body", self.i18n.text(
+            "Modello STEP non aggiornato: corpo, colori o annotazioni 3D sono cambiati dopo "
+            "la sua costruzione. Rigenera il modello 3D prima di provarlo o installarlo."))
+
+    def _step_body_fingerprint(self, body=_BODY_OVERRIDE_UNSET, fillets=None, face_texts=None):
+        """@brief JSON-normal fingerprint of what a STEP is built from besides the pads.
+
+        @param body Body3DParams handed to the worker; the sentinel means the
+            current one (`_current_body_params`, applied footprint).
+        @param fillets Fillet annotations; None means the current ones.
+        @param face_texts Face texts; None means the current ones (`_face_texts_for_3d`).
+        @return {"body", "fillets", "texts"} with plain JSON values, or None
+            when no body would be built.
+        @note Review pass 2, L1: a swap of the body sizes, a new height or a
+            colour changed after the STEP was built left «pronti» with the old
+            STEP. The board components (`Body3DParams.components`) are left
+            out on purpose: the generation writes the chosen KiCad models
+            back into them (`_show_generated_mesh`), so they would never match
+            again; the photo review that changes them already asks for a new
+            3D model.
+        """
+        with self._applied_footprint_in_memory():
+            if body is _BODY_OVERRIDE_UNSET:
+                body = self._current_body_params()
+            if body is None:
+                return None
+            fillets = list(self.fillet_annotations) if fillets is None else list(fillets)
+            face_texts = self._face_texts_for_3d() if face_texts is None else list(face_texts)
+        board = bool(body.populated_board or body.components or self._is_castellated())
+        data = self._normalised_body_record(
+            {key: value for key, value in asdict(body).items() if key != "components"}, board=board)
+        # `board` travels with the record so a comparison can normalise an
+        # older record under the SAME decision (`_step_alignment_block`).
+        payload = {"body": data, "board": board, "fillets": [asdict(item) for item in fillets],
+                   "texts": [asdict(item) for item in face_texts]}
+        return json.loads(json.dumps(payload, sort_keys=True, default=str))
+
+    @staticmethod
+    def _normalised_body_record(data: dict, board: bool) -> dict:
+        """@brief Reduce a body record to what the STEP builder really uses.
+
+        @param data The `Body3DParams` fields (components left out).
+        @param board True for a board or castellated module (the pins choice
+            matters), False for a single component.
+        @return A copy with `pcb_thickness_mm` as the builder reads it
+            (`step_generator`: `body.pcb_thickness_mm or 1.6`) and without
+            `show_pins_3d` for a single component, whose leads are always
+            drawn (`_pins_3d_kwargs`).
+        @note Review pass 4, e: a project generated without a component type
+            and reopened with a kind chosen got these two fields from the
+            kind without any change of the model, and read as a stale STEP.
+            Applied to the recorded side too (`_step_alignment_block`), so
+            records written before this normalisation compare the same way.
+        """
+        data = dict(data)
+        data["pcb_thickness_mm"] = data.get("pcb_thickness_mm") or 1.6
+        if not board:
+            data.pop("show_pins_3d", None)
+        return data
+
+    def _symbol_alignment_reason(self) -> str:
+        """@brief Text of `_symbol_alignment_block`, '' when the symbol file matches."""
+        block = self._symbol_alignment_block()
+        return block[1] if block else ""
+
+    def _symbol_alignment_block(self):
+        """@brief Why the .kicad_sym on disk is not the applied symbol beside the footprint on disk.
+
+        @return (code, translated reason): `symbol_pads` when the pin numbers
+            of the written symbol differ from the electrical pads of the
+            written footprint; `symbol_text` when the numbers match but the
+            file differs from the applied symbol as it would be written now
+            (names, electrical types, layout, wires, property positions);
+            None without either file, when one cannot be read, or when the
+            applied rows cannot be rendered (an unapplied draft is not judged).
+        @note Review pass 2, M1 and pass 3, M1: a symbol with 8 pins beside a
+            footprint with 4 pads, and a symbol file with the old names after
+            «Usa i nomi della nuova analisi», both read «pronti». The remedy
+            of both codes is «Aggiorna il file del simbolo» in the KiCad tab,
+            enabled exactly while they stand (`_refresh_kicad_remedies`).
+        @note The metadata properties (Description, ki_keywords, Datasheet,
+            ki_fp_filters, Reference) are left out of the text comparison:
+            they belong to the metadata gate («Applica ai file» rewrites
+            footprint and symbol together), and the isolated preview must not
+            be blocked by a metadata keystroke (user, 2026-10-15).
+        """
+        name = self._component_name()
+        written = self._written_footprint_pads()
+        if not name or written is None:
+            return None
+        path = self._project_dir() / f"{name}.kicad_sym"
+        text = self._written_symbol_text(path)
+        if text is None:
+            return None
+        numbers = set(re.findall(r'\(number\s+"([^"]*)"', text))
+        if not numbers:
+            return None
+        pads = {record[0] for record in written if record[1] != "np_thru_hole" and record[0].strip()}
+        if numbers != pads:
+            return ("symbol_pads", self.i18n.text(
+                "Simbolo non aggiornato: il file .kicad_sym ha {pins} pin, il footprint su disco "
+                "{pads} pad elettrici con numeri diversi. Premi «Aggiorna il file del simbolo» "
+                "nella scheda KiCad (con le modifiche del simbolo applicate).").format(
+                    pins=len(numbers), pads=len(pads)))
+        applied = self._applied_symbol_text()
+        if applied is None:
+            return None
+        if applied != self._written_symbol_text_without_metadata(path, text):
+            return ("symbol_text", self.i18n.text(
+                "Simbolo non aggiornato: il file .kicad_sym non corrisponde al simbolo applicato "
+                "(nomi, tipi elettrici o disposizione dei pin). Premi «Aggiorna il file del "
+                "simbolo» nella scheda KiCad."))
+        return None
+
+    def _written_symbol_text(self, path: Path):
+        """@brief The .kicad_sym text on disk, cached by modification time and size; None when unreadable."""
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        key = (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns)
+        cached = getattr(self, "_written_symbol_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = None
+        self._written_symbol_cache = (key, text)
+        return text
+
+    def _written_symbol_text_without_metadata(self, path: Path, text: str) -> str:
+        """@brief `_symbol_text_without_metadata` of the file text, cached with the file read."""
+        cached = getattr(self, "_written_symbol_cache", None)
+        if cached is not None and len(cached) > 2 and cached[1] is text:
+            return cached[2]
+        stripped = _symbol_text_without_metadata(text)
+        if cached is not None and cached[1] is text:
+            self._written_symbol_cache = (cached[0], text, stripped)
+        return stripped
+
+    def _applied_symbol_text(self):
+        """@brief The applied symbol as `_save_applied_electrical_symbol` would write it, without its metadata lines.
+
+        @return The .kicad_sym text normalised by `_symbol_text_without_metadata`,
+            or None when the applied rows cannot be rendered (no rows, a pad
+            mismatch, an invalid layout).
+        @note Cached by the rendered inputs (rows, footprint link, metadata,
+            name): the gate runs on every keystroke (review pass 2, L2).
+        """
+        from ..generators.symbol import serialize_symbol
+        # Looked up BEFORE the rows are read: the editor's source revision
+        # and the sync token stand for the applied rows, so a metadata
+        # keystroke costs nothing here (the metadata lines are not compared,
+        # see `_symbol_text_without_metadata`; review pass 3, performance).
+        key = (self._component_name(), self.symbol_tab.source_revision(),
+               self.symbol_tab.footprint(), self._symbol_sync_token())
+        cached = getattr(self, "_applied_symbol_text_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            name, pins, kwargs = self._applied_symbol_export_args()
+            text = _symbol_text_without_metadata(serialize_symbol(name, pins, **kwargs))
+        except (ValueError, TypeError, KeyError):
+            text = None
+        # The export args may have refreshed the editor: key on the final state.
+        key = (self._component_name(), self.symbol_tab.source_revision(),
+               self.symbol_tab.footprint(), self._symbol_sync_token())
+        self._applied_symbol_text_cache = (key, text)
+        return text
+
+    def _kicad_files_alignment_reason(self) -> str:
+        """@brief Text of `_kicad_files_alignment_block`, '' when every file matches."""
+        block = self._kicad_files_alignment_block()
+        return block[1] if block else ""
+
+    def _kicad_files_alignment_block(self):
+        """@brief The first (code, reason) of a file on disk not matching the parameters, or None.
+
+        @return The footprint block first (regenerating the footprint is the
+            first step), then the symbol one (review pass 2, M1), then the STEP one.
+        """
+        return (self._footprint_alignment_block() or self._symbol_alignment_block()
+                or self._step_alignment_block())
+
+    def _kicad_work_busy(self) -> bool:
+        """@brief True while background work may be rewriting the files (audit 2026-10-15, M3).
+
+        @return True while a worker runs (generation, 3D, analysis, terminal
+            pass, reconciliation), a review dialog is open or the automatic
+            generation owns the window; the same test as «Applica ai file».
+        """
+        return bool(self._background_work_running()
+                    or getattr(self, "_automatic_generation_active", False))
+
+    #: Every code `_kicad_block` can produce, with the remedy its message
+    #: names: (attribute of the widget that performs it, or None when the
+    #: remedy is editing or waiting). PRINCIPLE (review pass 3): a block
+    #: message always names an action that clears it, and that action is
+    #: enabled in that state; `tests/test_kicad_gate_remedies.py` drives
+    #: every remedy of this table and checks the gate clears.
+    KICAD_BLOCK_REMEDIES = {
+        "busy": None,                               # wait for the work to end
+        "footprint_invalid": None,                  # correct the fields
+        "footprint_pads": "btn_apply_metadata",     # «Applica ai file»
+        "footprint_outline": "btn_apply_metadata",
+        "symbol_pads": "btn_update_symbol_file",    # «Aggiorna il file del simbolo»
+        "symbol_text": "btn_update_symbol_file",
+        "step_pads": "btn_regen_3d",                # «Rigenera 3D»
+        "step_body": "btn_regen_3d",
+        "step_unbuildable": "btn_remove_obsolete_model",  # or a new analysis
+    }
+
+    def _kicad_block(self):
+        """@brief The (code, reason) that stops the KiCad preview and installations now, or None.
+
+        @return Work in progress first (the files may be half written), then
+            a file not matching the parameters (`_kicad_files_alignment_block`).
+        @note The required-metadata block applies to the installations only
+            and is added by `_refresh_install_gate`/`_install_block_reason`.
+        """
+        if self._kicad_work_busy():
+            return ("busy", self.i18n.text(
+                "Comando non disponibile mentre è in corso un lavoro (generazione, modello 3D, "
+                "analisi): i file del componente potrebbero essere a metà. Attendi che finisca."))
+        return self._kicad_files_alignment_block()
+
+    def _kicad_command_block_reason(self) -> str:
+        """@brief Why the KiCad preview and installations must not run now, '' when they may.
+
+        @return The text of `_kicad_block`.
+        """
+        block = self._kicad_block()
+        return block[1] if block else ""
+
+    def _kicad_block_code(self) -> str:
+        """@brief The code of `_kicad_block`, '' when nothing blocks."""
+        block = self._kicad_block()
+        return block[0] if block else ""
+
+    # ── Remedies of the gate (review pass 3) ──
+
+    def _update_symbol_file(self) -> None:
+        """@brief «Aggiorna il file del simbolo»: rewrite `<name>.kicad_sym` from the applied symbol.
+
+        @note The remedy of `symbol_pads`/`symbol_text`. Refused, with the
+            reason, while the editor holds unapplied edits (apply or discard
+            them first: the file always holds the APPLIED symbol) or while
+            the applied rows do not match the footprint pads (then the
+            footprint remedy comes first and the button is disabled).
+        """
+        if self._kicad_work_busy():
+            # Like every command that writes the files (review pass 4, a).
+            QMessageBox.information(self, self.i18n.text("Simbolo elettrico"),
+                                    self.i18n.text("Attendi la fine del lavoro in corso."))
+            return
+        if self.symbol_tab.has_pending_edits():
+            QMessageBox.information(self, self.i18n.text("Simbolo elettrico"), self.i18n.text(
+                "Il file del simbolo non può essere aggiornato: il simbolo ha modifiche non "
+                "applicate. Applicale o annullale nella scheda Simbolo."))
+            return
+        written = self._save_applied_electrical_symbol()
+        if written is not None:
+            self._append_log(tx("File del simbolo aggiornato: {path}", path=written))
+        self._refresh_output_actions()
+
+    def _remove_obsolete_model(self) -> None:
+        """@brief «Rimuovi il modello 3D obsoleto»: delete the STEP, WRL, preview and FCStd after a confirmation.
+
+        @note The remedy of `step_unbuildable` (review pass 3, H2): a STEP
+            built with a body the current analysis does not provide cannot be
+            rebuilt, so the only honest states are «old model, declared
+            obsolete» or «no model». Without a STEP the KiCad commands wait
+            for a generation, as for any project without a 3D model; the
+            model comes back with an analysis that documents the body.
+        """
+        name = self._component_name()
+        if not name:
+            return
+        shapes = self._project_dir() / f"{name}.3dshapes"
+        targets = [shapes / f"{name}{suffix}" for suffix in (".step", ".wrl", ".preview.json", ".FCStd")]
+        existing = [path for path in targets if path.is_file()]
+        if not existing:
+            return
+        answer = QMessageBox.question(
+            self, self.i18n.text("Modello 3D obsoleto"),
+            self.i18n.text("Rimuovere il modello 3D obsoleto? Verranno eliminati:\n{files}\n\n"
+                           "Il componente resterà senza modello 3D finché un'analisi non ne "
+                           "documenta il corpo.").format(files="\n".join(str(p) for p in existing)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        removed = []
+        for path in existing:
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError as exc:
+                QMessageBox.warning(self, self.i18n.text("Modello 3D obsoleto"), self.i18n.text(
+                    "Impossibile eliminare {path}: {error}").format(path=path, error=exc))
+        self._step_source_pads = None
+        self._step_source_body = None
+        self._invalidate_generated_mesh()
+        self._append_log(tx("Modello 3D obsoleto rimosso: {files}.", files=", ".join(removed)))
+        self._refresh_output_actions()
+
+    def _refresh_kicad_remedies(self) -> None:
+        """@brief Enable each remedy button of the KiCad tab exactly while its block stands.
+
+        @note «Aggiorna il file del simbolo» while a symbol block stands and
+            the applied symbol can be written (no unapplied edits, rows
+            matching the pads); «Rimuovi il modello 3D obsoleto» while a STEP
+            block stands (the model is stale: regenerating or removing it are
+            both valid ways out). Tooltips say why a button is off.
+        """
+        update = getattr(self, "btn_update_symbol_file", None)
+        remove = getattr(self, "btn_remove_obsolete_model", None)
+        if update is None or remove is None:
+            return
+        code = self._kicad_block_code() if self._component_name() else ""
+        symbol_block = code in ("symbol_pads", "symbol_text")
+        # Only while a symbol block stands: `has_pending_edits` copies the draft.
+        pending = symbol_block and self.symbol_tab.has_pending_edits()
+        mismatch = symbol_block and not pending and bool(self._symbol_pad_mismatch())
+        can_write = symbol_block and not pending and not mismatch
+        update.setEnabled(can_write)
+        self._set_workflow_detail(update, (
+            "Riscrive il file .kicad_sym dal simbolo applicato, che non corrisponde al file."
+            if can_write else
+            "Il simbolo ha modifiche non applicate: applicale o annullale nella scheda Simbolo."
+            if pending else
+            # Review pass 4, b: the rows cannot be written over these pads.
+            "Le righe del simbolo non corrispondono ai pad del footprint su disco: rigenera "
+            "prima il footprint («Applica ai file»)."
+            if mismatch else
+            "Il file del simbolo corrisponde al simbolo applicato."))
+        stale_step = code.startswith("step_")
+        remove.setEnabled(stale_step)
+        self._set_workflow_detail(remove, (
+            "Elimina STEP, WRL e anteprima del modello 3D, che non corrispondono più ai dati; "
+            "chiede conferma."
+            if stale_step else "Nessun modello 3D obsoleto."))
+
+    def _apply_kicad_command_states(self, complete: bool, metadata_reason: str | None = None) -> None:
+        """@brief Enable or disable the six KiCad commands with the reason in their tooltip.
+
+        @param complete True while footprint and STEP exist on disk.
+        @param metadata_reason The installation block of the metadata
+            (`_install_block_reason`), applied to the installations only;
+            None when not computed here (`_refresh_install_gate` adds it).
+        @note One rule for buttons and menu entries alike, so the isolated
+            preview, the installations and the «Strumenti» entries can never
+            disagree (user, 2026-09-26: same command, same state).
+        """
+        block = self._kicad_command_block_reason() if complete else ""
+        for attr in self.KICAD_COMMAND_ATTRS:
+            action = getattr(self, attr, None)
+            if action is None:
+                continue
+            if not complete:
+                self._set_output_action_state(
+                    action, False, "Genera prima footprint e modello STEP del componente corrente")
+                continue
+            reason = block or (metadata_reason or "" if attr in self.INSTALL_ACTION_ATTRS else "")
+            self._set_output_action_state(
+                action, not reason, reason or self.OUTPUT_ACTION_TOOLTIPS.get(attr, ""))
+
+    def _refresh_kicad_command_gate(self) -> None:
+        """@brief Recompute only the KiCad commands (the «Strumenti» menu is about to open).
+
+        @note The menu can be opened while a field on another tab has just
+            changed: its entries must say what a click would do now.
+        """
+        complete = self._kicad_output_complete()
+        metadata_reason = self._install_block_reason() if complete else ""
+        self._apply_kicad_command_states(complete, metadata_reason)
+        self._refresh_kicad_remedies()
+
+    def _track_background_work(self, worker) -> None:
+        """@brief Switch the KiCad commands off while `worker` runs and back on when it ends.
+
+        @param worker A QThread just started.
+        @note The refresh after `finished` is deferred one event-loop turn,
+            so the worker's own finished handlers (which clear
+            `_automatic_generation_active`) have run and `isRunning()` is
+            false by then.
+        """
+        worker.finished.connect(self._schedule_output_refresh)
+        self._refresh_output_actions()
+
+    def _schedule_output_refresh(self) -> None:
+        """@brief Refresh the output commands on the next event-loop turn (Qt slot)."""
+        QTimer.singleShot(0, self._refresh_output_actions)
+
+    def _refuse_kicad_command(self) -> bool:
+        """@brief Defence in depth: refuse a preview or installation the gate would block.
+
+        @return True when the command must stop (the user was told why).
+        @note Every entry point checks it on its own (buttons, «Strumenti»
+            entries, the usage wizard, a direct call, the common install
+            sink): a disabled button is not the only guard.
+        """
+        reason = self._kicad_command_block_reason()
+        if not reason:
+            return False
+        self._append_log(reason)
+        QMessageBox.warning(self, self.i18n.text("Comando KiCad non disponibile"), reason)
+        return True
+
     def _confirm_klc_errors(self) -> bool:
         """@brief Ask before installing a component whose KLC checks report ERRORS.
 
@@ -10713,8 +12463,7 @@ class MainWindow(QMainWindow):
         # the user here), and symbol/name findings belong to the install-time
         # confirmation. Refusing those made «Applica ai file» unreachable and,
         # since installation waits for it, blocked installation for good.
-        errors = [f for f in self._klc_findings()
-                  if f.severity == "error" and f.code in klc_checks.WRITE_BLOCKING_CODES]
+        errors = self._write_blocking_klc_errors()
         if errors:
             # An error means KiCad or the KLC refuse the value (e.g. a
             # designator with digits): writing it would only move the
@@ -10753,10 +12502,14 @@ class MainWindow(QMainWindow):
                     footprint_pending=self.has_pending_footprint_edits())
         dialog = ComponentCheckDialog(args, self, tx=self.i18n.text)
         self._component_review_dialog = dialog
+        # The open dialog counts as work in progress (`_background_work_running`):
+        # the KiCad commands follow it on opening and on closing (review pass 2, L6).
+        self._refresh_kicad_command_gate()
         try:
             dialog.exec()
         finally:
             self._component_review_dialog = None
+            self._refresh_kicad_command_gate()
             self._retry_footprint_rewrite()
         if getattr(dialog, "ai_review_requested", False):
             self.tabs.setCurrentIndex(TAB_SYMBOL)
@@ -10927,9 +12680,17 @@ class MainWindow(QMainWindow):
             project / f"{name}.3dshapes" / f"{name}.step").is_file()
 
     def _test_in_kicad(self) -> None:
-        """@brief Open an isolated preview board without installing a library."""
+        """@brief Open an isolated preview board without installing a library.
+
+        @note Refused while background work runs or while the files on disk
+            do not match the parameters (`_refuse_kicad_command`, audit
+            2026-10-15 H1/M3): the preview would show an old or half-written
+            footprint/STEP as if it were the current one.
+        """
         if not self._kicad_output_complete():
             self._kicad_outputs_went_missing()
+            return
+        if self._refuse_kicad_command():
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -10959,9 +12720,13 @@ class MainWindow(QMainWindow):
 
         @note Refused while a required metadata field is empty, before any
             folder is asked (`_refuse_install_for_metadata`).
+        @note Refused first while background work runs or while the files
+            on disk do not match the parameters (`_refuse_kicad_command`).
         """
         if not self._kicad_output_complete():
             self._kicad_outputs_went_missing()
+            return
+        if self._refuse_kicad_command():
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -10993,9 +12758,13 @@ class MainWindow(QMainWindow):
 
         @note Refused while a required metadata field is empty, before KiCad
             is looked for or a folder is asked.
+        @note Refused first while background work runs or while the files
+            on disk do not match the parameters (`_refuse_kicad_command`).
         """
         if not self._kicad_output_complete():
             self._kicad_outputs_went_missing()
+            return
+        if self._refuse_kicad_command():
             return
         artifacts = self._current_kicad_artifacts()
         if artifacts is None:
@@ -11039,9 +12808,14 @@ class MainWindow(QMainWindow):
             metadata again, so no caller (button, menu, wizard, test or a
             future one) can bypass the block; only then are the remaining
             KLC errors confirmed.
+        @note The sink also refuses while work runs or while the files do not
+            match the parameters (`_refuse_kicad_command`): the files are
+            copied below, so this is the last point where it can be checked.
         """
         artifacts = artifacts or self._current_kicad_artifacts()
         if artifacts is None:
+            return
+        if self._refuse_kicad_command():
             return
         if self._refuse_install_for_metadata():
             return
@@ -11361,8 +13135,13 @@ class MainWindow(QMainWindow):
             pad_overrides=deepcopy(self.header_pad_overrides),
             populated_pins=self._parse_populated_pins(),
             pin_map=self.pin_map,
-            body_length=self.field_body_length.value() if self.group_3d.isChecked() else None,
-            body_width=self.field_body_width.value() if self.group_3d.isChecked() else None,
+            # Only a DECLARED body draws its outline (F.Fab, silkscreen): the
+            # placeholder would put an invented 10 x 10 mm frame across the
+            # pad rows (audit 2026-10-15, item 4).
+            body_length=(self.field_body_length.value()
+                         if self.group_3d.isChecked() and self._matrix_body_declared() else None),
+            body_width=(self.field_body_width.value()
+                        if self.group_3d.isChecked() and self._matrix_body_declared() else None),
             body_offset_x=self.field_body_offset_x.value(),
             body_offset_y=self.field_body_offset_y.value(),
         )
@@ -11382,6 +13161,11 @@ class MainWindow(QMainWindow):
             `_generate`.
         @note Per un modulo castellated l'ingombro non viene dai campi a mano
             ma dal PCB del modulo, che e' esso stesso il corpo.
+        @note CONTRACT CHANGED 2026-10-15 (audit item 4): None also when the
+            group is ON but the body dimensions are not documented (package
+            without body sizes, pin matrix whose fields hold the placeholder:
+            `_body_size_declared`). `_missing_body_reason` tells the two
+            cases apart for the messages.
         """
         if not self.group_3d.isChecked():
             return None
@@ -11422,6 +13206,11 @@ class MainWindow(QMainWindow):
                 pin_color_hex=self.field_pin_color.text().strip(),
                 **self._pins_3d_kwargs(),
             )
+        if not self._matrix_body_declared():
+            # CONTRACT CHANGED 2026-10-15 (audit item 4): like the package
+            # path above, a pin matrix without documented body dimensions
+            # gets NO body, never the placeholder 10 x 10 x 5 mm block.
+            return None
         return Body3DParams(
             length_mm=self.field_body_length.value(),
             width_mm=self.field_body_width.value(),
@@ -11688,8 +13477,62 @@ class MainWindow(QMainWindow):
             return
         self._generate(automatic=True, body_override=body)
 
+    def _symbol_draft_would_be_displaced(self) -> bool:
+        """@brief True when a generation from the current fields writes other pads than the draft's pins.
+
+        @return True when the pad set the fields generate differs from the
+            pins of the unapplied symbol draft: `SymbolTab.set_data` then
+            keeps the draft as «Recupera bozza», the editor shows the applied
+            rows, and the .kicad_sym is rewritten by `_on_generated`.
+        """
+        tab = getattr(self, "symbol_tab", None)
+        if tab is None or not tab.has_pending_edits():
+            return False
+        try:
+            ids = set(self._symbol_pad_ids())
+        except Exception:  # noqa: BLE001 - unreadable pads: nothing predicted
+            return False
+        return ids != {_pin_key(row.get("pin")) for row in tab.draft_rows()}
+
+    def _reconcile_pinout_with_written_footprint(self) -> None:
+        """@brief Drop the applied pinout rows of pads the footprint just written does not have.
+
+        @note Review pass 3, H1: after a generation with fewer pins the
+            symbol editor held rows of vanished pads, its «Applica» stayed
+            disabled («pin assenti dal footprint») and the .kicad_sym kept
+            the old pins for good. Names of surviving pins (the user's too)
+            are kept; rows for NEW pads are added by `_refresh_symbol_tab`,
+            as always. Dropped pins leave the provenance records too.
+        """
+        written = self._written_footprint_pads()
+        if written is None:
+            return
+        pads = {record[0] for record in written if record[1] != "np_thru_hole" and record[0].strip()}
+        rows = [row for row in self.pinout or () if isinstance(row, dict)]
+        dropped = sorted({_pin_key(row.get("pin")) for row in rows} - pads,
+                         key=lambda pin: pin_sort_key({"pin": pin}))
+        if not dropped:
+            return
+        self.pinout = [row for row in rows if _pin_key(row.get("pin")) in pads]
+        for pin in dropped:
+            self._user_pin_names.pop(pin, None)
+            if self._analysis_pin_names is not None:
+                self._analysis_pin_names.pop(pin, None)
+        self._append_log(tx("Pin tolti dalla piedinatura perché il footprint scritto non ha i loro "
+                            "pad: {pins}.", pins=", ".join(dropped)))
+
     def _confirm_output_overwrite(self, params, project_dir, body):
         targets = [project_dir / f'{params.name}.pretty' / f'{params.name}.kicad_mod']
+        symbol_tab = getattr(self, "symbol_tab", None)
+        if (symbol_tab is None or not symbol_tab.has_pending_edits()
+                or self._symbol_draft_would_be_displaced()):
+            # Rewritten from the applied rows once the footprint is written
+            # (`_on_generated`), unless the editor holds unapplied edits that
+            # survive the generation (same pins: the draft is carried and the
+            # file left alone). A draft of OTHER pins is displaced to
+            # «Recupera bozza» and the file IS rewritten: listed too (review
+            # pass 3, H1 and pass 4, d).
+            targets.append(project_dir / f'{params.name}.kicad_sym')
         if body is not None:
             targets.extend(project_dir / f'{params.name}.3dshapes' / f'{params.name}{suffix}'
                            for suffix in ('.step', '.wrl', '.preview.json'))
@@ -11928,8 +13771,11 @@ class MainWindow(QMainWindow):
             for field, label in required_labels:
                 if extracted is not None:
                     value = getattr(extracted, field, None)
-                else:
+                elif self._matrix_body_declared():
                     value = fields[field].value()
+                else:
+                    # The fields hold the placeholder, not a measure (item 4).
+                    value = None
                 if (isinstance(value, bool) or not isinstance(value, (int, float))
                         or not math.isfinite(value) or value <= 0):
                     missing.append(label)
@@ -11964,6 +13810,11 @@ class MainWindow(QMainWindow):
         # «applied» by `_on_generated` only when the worker reports the file
         # written, so a failed or refused generation applies nothing.
         self._worker.metadata_snapshot = self._metadata_snapshot()
+        # The pads the STEP of this run is built over (H1): recorded by
+        # `_on_cad3d_generated` only when the STEP is really written.
+        self._worker.step_source_pads = self._step_pads_for(params)
+        self._worker.step_source_body = (self._step_body_fingerprint(body)
+                                         if body is not None else None)
         self._worker._model_revision = self._model_revision
         self._worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._worker.done.connect(self._on_generated)
@@ -12016,6 +13867,9 @@ class MainWindow(QMainWindow):
             self._on_error(str(exc))
             self._on_generation_finished()
             return False
+        # Preview and installations off while the files are being written
+        # (audit 2026-10-15, M3), back on when the worker ends.
+        self._track_background_work(self._worker)
         # Every generation writes the .kicad_mod from the data copied into
         # the worker above: a pending footprint rewrite is now covered,
         # whoever started it (see `_schedule_footprint_rewrite`).
@@ -12138,6 +13992,14 @@ class MainWindow(QMainWindow):
         """
         if self._automatic_generation_active:
             self._automatic_footprint_done = True
+        # Our own write: never trust a cached read-back of the previous file,
+        # whatever the file system's timestamp resolution (review pass 2, L3).
+        self._written_pads_cache = None
+        # The applied pinout follows the pads just written (review pass 3,
+        # H1): rows of pads the footprint no longer has are dropped here, so
+        # the symbol below is exported and the editor never shows a state it
+        # cannot leave.
+        self._reconcile_pinout_with_written_footprint()
         # The rows must follow the pads just written, or the quiet save
         # refuses a stale baseline after every first generation (review C, 5).
         self._refresh_symbol_tab()
@@ -12161,11 +14023,44 @@ class MainWindow(QMainWindow):
         if self._automatic_generation_active:
             self._automatic_generation_errors.append(message)
 
+    def _step_pads_for(self, params):
+        """@brief Pad records of the parameters a STEP is about to be built from.
+
+        @param params The parameters handed to the 3D worker.
+        @return `_pad_records_of(params)`, or None when the generator refuses
+            them (the STEP origin is then unknown, never «aligned»).
+        """
+        try:
+            return self._pad_records_of(params)
+        except (ValueError, TypeError, ArithmeticError, KeyError, IndexError):
+            return None
+
+    def _note_step_written(self) -> None:
+        """@brief Record which pads the STEP just written was built over.
+
+        @note `sender()` is the worker that wrote it (GenerateWorker or
+            Cad3DWorker), carrying `step_source_pads` set at its creation. It
+            is recorded even when the result is stale for the window
+            (`_cad_result_is_current`): the file on disk is that worker's
+            output either way. A direct call (no worker) records nothing.
+        """
+        worker = self.sender()
+        if worker is None or not hasattr(worker, "step_source_pads"):
+            return
+        records = worker.step_source_pads
+        self._step_source_pads = list(records) if records else None
+        # Body, colours and annotations of the same write (review pass 2, L1).
+        body = getattr(worker, "step_source_body", None)
+        self._step_source_body = deepcopy(body) if isinstance(body, dict) else None
+
     def _on_cad3d_generated(self, path: str) -> None:
         """@brief Show a finished 3D model, or say why a stale one is not shown.
 
         @param path STEP file written by the worker.
+        @note Records the pads the STEP was built over first
+            (`_note_step_written`, audit 2026-10-15 H1).
         """
+        self._note_step_written()
         if not self._cad_result_is_current():
             self._log_stale_cad_result(path)
             return
@@ -13757,11 +15652,13 @@ class MainWindow(QMainWindow):
             dialog.analysis_started.connect(lambda: account.bind_run_project(project))
             dialog.analysis_finished.connect(account.release_run_project)
         self._component_review_dialog = dialog
+        self._refresh_kicad_command_gate()       # busy while open (review pass 2, L6)
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
                 self.symbol_tab.use_pin_type_suggestions(dialog.selected())
         finally:
             self._component_review_dialog = None
+            self._refresh_kicad_command_gate()
             self._retry_footprint_rewrite()
 
     def _symbol_pad_ids(self):
@@ -13770,11 +15667,11 @@ class MainWindow(QMainWindow):
                   self._current_castellated_params() if self._is_castellated()
                   else self._current_params())
         params = self._host_footprint_params(params)
-        footprint = (build_package(params) if isinstance(params, PackageGeometry) else
-                     build_castellated_module(params) if isinstance(params, CastellatedModuleParams)
-                     else build_pin_header(params))
-        return list(dict.fromkeys(str(p.number) for p in footprint.pads
-                                 if p.pad_type != 'np_thru_hole' and str(p.number).strip()))
+        # Through the pad-record cache (review pass 3): the gate and the
+        # editor refresh ask for the ids on every refresh of a big package.
+        records = self._pad_records_of(params)
+        return list(dict.fromkeys(record[0] for record in records
+                                 if record[1] != 'np_thru_hole' and record[0].strip()))
 
     def _symbol_recovery_path(self) -> Path | None:
         """@brief The symbol recovery file of the OPEN project.
@@ -13792,9 +15689,31 @@ class MainWindow(QMainWindow):
             folder = self._project_dir_or_none()
         return None if folder is None else Path(folder) / '.symbol-draft.json'
 
+    def _symbol_sync_token(self):
+        """@brief What the symbol editor's baseline is derived from: pinout object, name, pads.
+
+        @return A small tuple; equal values mean `_refresh_symbol_tab` would
+            load nothing new. The pinout is identified by object identity
+            and length: every change of the applied pinout assigns a new
+            list (`_apply_symbol_pinout`, `_settle_extracted_pinout`,
+            `_reconcile_pinout_with_written_footprint`, the pinout dialog).
+        """
+        try:
+            pads = tuple(self._symbol_pad_ids())
+        except Exception:  # noqa: BLE001 - unreadable pads: never in sync, refresh decides
+            pads = None
+        pinout = self.pinout
+        return (id(pinout), len(pinout) if pinout is not None else -1, self._component_name(),
+                self._effective_reference(), pads)
+
+    def _symbol_tab_in_sync(self) -> bool:
+        """@brief True when the last `_refresh_symbol_tab` loaded the current pinout and pads."""
+        return getattr(self, "_symbol_synced", None) == self._symbol_sync_token()
+
     def _refresh_symbol_tab(self, force=False):
         if not hasattr(self, 'symbol_tab'):
             return
+        self._symbol_synced = self._symbol_sync_token()
         # The Reference text of the editor («U?») follows the designator the
         # files get (user, 2026-10-13: both visible properties are drawn
         # where KiCad will draw them, and can be moved).
@@ -13832,12 +15751,25 @@ class MainWindow(QMainWindow):
             working folder. A refused write keeps the draft (`reject_apply`).
         """
         folder = getattr(self, "_symbol_apply_folder", None)
+        # CONTRACT CHANGED 2026-10-15 (audit H1): rows whose numbers are not
+        # the pads of the footprint ON DISK are refused here, the draft kept,
+        # instead of being saved with a .kicad_sym that is then not written
+        # (or, before, written with pins the footprint does not have).
+        mismatch = self._written_footprint_symbol_mismatch(
+            [str(row.get('pin', '')).strip() for row in rows], folder)
+        if mismatch:
+            self._append_log(mismatch)
+            self.symbol_tab.reject_apply(mismatch)
+            return
         previous = self.pinout
+        previous_names = dict(self._user_pin_names)
+        self._note_user_pin_names(rows)
         self.pinout = deepcopy(rows)
         saved = (self._save_project_config(force=True) if folder is None
                  else self._write_project_config_at(folder))
         if not saved:
             self.pinout = previous
+            self._user_pin_names = previous_names
             self.symbol_tab.reject_apply(self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
             return
@@ -13862,7 +15794,64 @@ class MainWindow(QMainWindow):
         if len(set(numbers)) != len(numbers) or set(numbers) != set(ids) or not ids:
             return self.i18n.text(
                 "I numeri del simbolo devono corrispondere ai pad elettrici del footprint.")
-        return ""
+        return self._written_footprint_symbol_mismatch(numbers)
+
+    def _written_footprint_symbol_mismatch(self, numbers, folder=None) -> str:
+        """@brief Why symbol pin numbers do not match the pads of the .kicad_mod ON DISK, '' when they do.
+
+        @param numbers Pin numbers of the symbol rows (stripped text).
+        @param folder Project folder holding the footprint; None means the
+            current component's folder (`_footprint_file`).
+        @return Translated message, or '' when the electrical pad numbers of
+            the written footprint are exactly `numbers`, or when there is no
+            readable footprint yet (nothing written to disagree with).
+        @note Audit 2026-10-15, H1: the rows follow the FIELDS
+            (`_symbol_pad_ids`), but the symbol ships next to the footprint
+            that is on disk. After a «No» to the overwrite question the two
+            differ, and a .kicad_sym with 12 pins beside a .kicad_mod with
+            8 pads is a broken component in KiCad.
+        """
+        written = self._written_footprint_pads(folder)
+        if written is None:
+            return ""
+        pads = list(dict.fromkeys(record[0] for record in written
+                                  if record[1] != "np_thru_hole" and record[0].strip()))
+        if set(pads) == set(numbers):
+            return ""
+        return self.i18n.text(
+            "Il footprint su disco ha {pads} pad elettrici, il simbolo {pins} pin con numeri "
+            "diversi: il footprint non è stato rigenerato con i parametri attuali. Rigenera il "
+            "footprint («Applica ai file» o una nuova generazione) prima di applicare o "
+            "esportare il simbolo.").format(pads=len(pads), pins=len(numbers))
+
+    def _applied_symbol_export_args(self):
+        """@brief Name, pins and keyword arguments of the applied symbol as the exporter writes it.
+
+        @return (name, pins, kwargs) for `serialize_symbol`/`export_symbol`.
+        @throws ValueError When the applied rows do not match the footprint
+            pads (`_symbol_pad_mismatch`) or do not form a symbol.
+        @note One builder for the file written beside the artifacts and for
+            the comparison of that file with the applied symbol
+            (`_applied_symbol_text`), so the two can never disagree.
+        """
+        from ..generators.symbol import symbol_inputs, symbol_property_positions
+        from ..generators.symbol_glyphs import symbol_graphics
+        if not self.symbol_tab.has_pending_edits() and not self._symbol_tab_in_sync():
+            # The applied symbol is the PROJECT's pinout completed with the
+            # footprint pads: the editor may lag behind it until its tab is
+            # shown (review pass 3, M1: after «Usa i nomi della nuova
+            # analisi» the editor still held the old names). Refreshed only
+            # when the pinout object or the pads changed since the last
+            # refresh (`_symbol_tab_in_sync`), never over a pending draft.
+            self._refresh_symbol_tab()
+        rows = self.symbol_tab.rows()
+        mismatch = self._symbol_pad_mismatch()
+        if mismatch:
+            raise ValueError(mismatch)
+        pins, body = symbol_inputs(rows)
+        return self._component_name(), pins, dict(
+            footprint=self.symbol_tab.footprint(), body=body, graphics=symbol_graphics(rows),
+            metadata=self._symbol_metadata(), properties=symbol_property_positions(rows))
 
     def _save_applied_electrical_symbol(self, path=None, *, quiet=False):
         """@brief Write the applied electrical symbol beside the component artifacts.
@@ -13871,24 +15860,16 @@ class MainWindow(QMainWindow):
         @param quiet True logs a failure instead of showing it in the symbol tab.
         @return The written path, or None when nothing was written.
         """
-        from ..generators.symbol import symbol_inputs, export_symbol
+        from ..generators.symbol import export_symbol
+        # A write of ours is coming: never serve a cached read of the old file (L3).
+        self._written_symbol_cache = None
         if self.symbol_tab.has_pending_edits():
             return None
         try:
-            rows = self.symbol_tab.rows()
-            mismatch = self._symbol_pad_mismatch()
-            if mismatch:
-                raise ValueError(mismatch)
-            pins, body = symbol_inputs(rows)
-            from ..generators.symbol import symbol_property_positions
-            from ..generators.symbol_glyphs import symbol_graphics
-            graphics = symbol_graphics(rows)
-            properties = symbol_property_positions(rows)
+            name, pins, kwargs = self._applied_symbol_export_args()
             target = Path(path) if path else (
                 self._project_dir() / f'{self._component_name()}.kicad_sym')
-            return export_symbol(target, self._component_name(), pins,
-                                 footprint=self.symbol_tab.footprint(), body=body, graphics=graphics,
-                                 metadata=self._symbol_metadata(), properties=properties)
+            return export_symbol(target, name, pins, **kwargs)
         except (OSError, ValueError, TypeError) as exc:
             # Generator errors carry a translatable text (SymbolError).
             message = self.symbol_tab.error_text(exc)
@@ -13950,9 +15931,12 @@ class MainWindow(QMainWindow):
         if edited == self.pinout:
             return
         previous = self.pinout
+        previous_names = dict(self._user_pin_names)
+        self._note_user_pin_names(edited)
         self.pinout = edited
         if not self._save_project_config(force=True):
             self.pinout = previous
+            self._user_pin_names = previous_names
             QMessageBox.warning(self, self.i18n.text("Errore"), self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
             return
@@ -14377,6 +16361,115 @@ class MainWindow(QMainWindow):
         button.setIcon(self._asset_icon(
             "wf-loading.svg" if busy else button.property("workflow_icon")))
         self._refresh_workflow_tooltips()
+        if not busy:
+            # Idle again: available only with documented body dimensions.
+            self._refresh_regen_3d_availability()
+
+    def _missing_body_reason(self) -> str:
+        """@brief Why no 3D body can be built from documented dimensions, '' when it can.
+
+        @return Translated sentence naming the missing dimensions, or '' when
+            the 3D group is off (a choice, not a missing datum), for a
+            castellated module (its body is the module PCB) or when every
+            dimension is documented.
+        @note Audit 2026-10-15, item 4: the pin-matrix path built the
+            placeholder 10 x 10 x 5 mm block when the documents gave no body;
+            the package path already refused. Both now say the same thing and
+            no body is invented.
+        """
+        if not hasattr(self, "group_3d") or not hasattr(self, "package_geometry"):
+            return ""   # window still being built
+        if not self.group_3d.isChecked() or self._is_castellated():
+            return ""
+        labels = (self.i18n.text("lunghezza"), self.i18n.text("larghezza"),
+                  self.i18n.text("altezza"))
+        package = self.package_geometry
+        if package is not None:
+            values = (package.body_length_mm, package.body_width_mm, package.body_height_mm)
+            missing = [label for label, value in zip(labels, values) if value is None]
+        else:
+            missing = [] if self._matrix_body_declared() else list(labels)
+        if not missing:
+            return ""
+        return self.i18n.text(
+            "Modello 3D non disponibile: mancano le quote documentate del corpo ({fields}). "
+            "Il programma non costruisce un corpo con misure inventate: aggiungi un disegno "
+            "quotato del corpo e ripeti l'analisi.").format(fields=", ".join(missing))
+
+    def _legacy_body_evidence(self, state: dict) -> bool:
+        """@brief Evidence that a project saved before `body_size_declared` had its body built on purpose.
+
+        @param state The project state being applied.
+        @return True when the STEP record of the project (`step_source_body`)
+            or the `.preview.json` of the 3D model on disk carries exactly the
+            body sizes of the fields: a 3D was generated with that body.
+        @note Review pass 3, L4: without this a documented 10 x 10 x 5 mm body
+            read as the placeholder, «File non aggiornati» appeared and one
+            «Applica ai file» dropped its outline. Remaining limit, stated:
+            an old project whose STEP was built from the PLACEHOLDER by the
+            program version that still did so carries the same evidence and
+            reads as declared; nothing new is invented for it (its files
+            stay as they were) and the next analysis sets the flag for real.
+        """
+        fields = (self.field_body_length.value(), self.field_body_width.value(),
+                  self.field_body_height.value())
+        recorded = state.get("step_source_body")
+        if isinstance(recorded, dict) and isinstance(recorded.get("body"), dict):
+            body = recorded["body"]
+            if (body.get("length_mm"), body.get("width_mm"), body.get("height_mm")) == fields:
+                return True
+        name = self._component_name()
+        if not name:
+            return False
+        mesh = self._project_dir() / f"{name}.3dshapes" / f"{name}.preview.json"
+        try:
+            body = json.loads(mesh.read_text(encoding="utf-8")).get("body") or {}
+        except (OSError, ValueError, AttributeError):
+            return False
+        return (body.get("length_mm"), body.get("width_mm"), body.get("height_mm")) == fields
+
+    def _matrix_body_declared(self) -> bool:
+        """@brief True when the pin-matrix body fields may build a body (outline and 3D).
+
+        @return `_body_size_declared` for a pin matrix; for a photographed
+            board (`_photo_inventory_family`), whose body is the board outline,
+            `_board_size_known` (set by an analysis that gave the size or by
+            `_ask_board_size`): its 3D height comes from the PCB thickness and
+            the components, not from these fields.
+        @note Review pass 2, M3: boards were exempted unconditionally, so a
+            board whose analysis gave no size built the 10 x 10 x 5 mm
+            placeholder too.
+        """
+        if self._photo_inventory_family() is True:
+            return bool(getattr(self, "_board_size_known", False))
+        return bool(getattr(self, "_body_size_declared", False))
+
+    #: Tooltip of «Rigenera 3D» while the body is not documented (catalogue
+    #: source: the tooltip is retranslated from it on a language switch).
+    REGEN_3D_NO_BODY_TOOLTIP = (
+        "Non disponibile: mancano le quote documentate del corpo. Il programma non costruisce "
+        "un corpo con misure inventate: aggiungi un disegno quotato del corpo e ripeti l'analisi.")
+
+    def _refresh_regen_3d_availability(self) -> None:
+        """@brief Enable «Rigenera 3D» only when a body with documented dimensions can be built.
+
+        @note Disabled with the reason as its tooltip (`_missing_body_reason`);
+            the command also refuses on its own when called directly. Left
+            alone while a generation runs (`_set_regen_busy` owns it then).
+        """
+        button = getattr(self, "btn_regen_3d", None)
+        if button is None or button.property("workflow_busy"):
+            return
+        idle = button.property("workflow_idle_detail_source")
+        if idle is None:
+            idle = button.property("workflow_detail_source") or ""
+            button.setProperty("workflow_idle_detail_source", idle)
+        reason = self._missing_body_reason()
+        button.setEnabled(not reason)
+        # The catalogue source, not the composed sentence: the tooltip must
+        # follow a later language switch (`_refresh_workflow_tooltips`); the
+        # dialog of a direct call names the missing dimensions.
+        self._set_workflow_detail(button, self.REGEN_3D_NO_BODY_TOOLTIP if reason else idle)
 
     def _set_translated_tooltip(self, widget, source: str) -> None:
         """@brief Set a translated tooltip that later language switches keep translating.
@@ -14664,6 +16757,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "ai_account"):
             self.ai_account.bind_run_project(self._project_dir_or_none())
         worker.start()
+        self._track_background_work(worker)
 
     def _on_terminal_detail_finished(self) -> None:
         """Release the run project of the terminal pass and re-enable its commands."""
@@ -14734,8 +16828,41 @@ class MainWindow(QMainWindow):
         with self._applied_footprint_in_memory():
             self._regenerate_3d_applied()
 
+    def _regen_3d_footprint_conflict(self) -> str:
+        """@brief Why «Rigenera 3D» must not run now, '' when the STEP it builds will match the footprint.
+
+        @return Translated refusal, or ''.
+        @note Audit 2026-10-15, H1: after a «No» to the overwrite question
+            the fields hold new parameters while the .kicad_mod is the old
+            one; a STEP built from the fields would put leads where the
+            footprint has no pads. Refused rather than regenerating the
+            footprint first: «Rigenera 3D» promises to leave the footprint as
+            it is, and the user may just have declined to overwrite it, so
+            rewriting it here would override that explicit decision.
+        @note A footprint rewrite already pending (`_fp_rewrite_dirty`: an
+            applied footprint edit, e.g. a draft applied by the question at
+            the start of this command) is not a conflict: that rewrite writes
+            the .kicad_mod from the same applied fields the STEP is built
+            from, so the two end up consistent (footprint drafts keep working
+            as before).
+        """
+        if getattr(self, "_fp_rewrite_dirty", False):
+            return ""
+        if not self._footprint_alignment_reason():
+            return ""
+        return self.i18n.text(
+            "Modello 3D non rigenerato: il footprint su disco non corrisponde ai parametri "
+            "attuali e un modello costruito su questi parametri non combacerebbe con i suoi pad. "
+            "Rigenera prima il footprint («Applica ai file» o una nuova generazione), poi il "
+            "modello 3D.")
+
     def _regenerate_3d_applied(self) -> None:
-        """@brief Body of `_regenerate_3d`, run with the applied footprint in the fields."""
+        """@brief Body of `_regenerate_3d`, run with the applied footprint in the fields.
+
+        @note CONTRACT CHANGED 2026-10-15 (audit H1): refused, with a message,
+            while the footprint on disk does not match the parameters
+            (`_regen_3d_footprint_conflict`).
+        """
         if self._background_work_running() or self._automatic_generation_active:
             return
         if self._selected_family() == "single_smd" and self.package_geometry is None:
@@ -14746,8 +16873,16 @@ class MainWindow(QMainWindow):
 
         body = self._current_body_params()
         if body is None:
-            QMessageBox.information(
-                self, self.i18n.text("Modello 3D non disponibile"), self._no_3d_status()[0])
+            # Missing documented body dimensions are named (audit item 4):
+            # the generic «compare dopo la generazione» told nothing.
+            missing = self._missing_body_reason()
+            if missing:
+                self._set_3d_status(missing, STATUS_WARNING)
+                self._append_log(missing)
+            if not getattr(self, "_regen_3d_automatic", False):
+                QMessageBox.information(
+                    self, self.i18n.text("Modello 3D non disponibile"),
+                    missing or self._no_3d_status()[0])
             return
 
         try:
@@ -14764,6 +16899,15 @@ class MainWindow(QMainWindow):
             self._set_3d_status(
                 self.i18n.tr("status.parameter_error", error=exc), STATUS_ERROR)
             self._append_log(tx("ERRORE 3D: {exc}", exc=exc))
+            return
+
+        conflict = self._regen_3d_footprint_conflict()
+        if conflict:
+            self._set_3d_status(conflict, STATUS_WARNING)
+            self._append_log(conflict)
+            if not getattr(self, "_regen_3d_automatic", False):
+                QMessageBox.information(
+                    self, self.i18n.text("Modello 3D non disponibile"), conflict)
             return
 
         self._set_regen_busy(True)
@@ -14783,6 +16927,9 @@ class MainWindow(QMainWindow):
             single_component=self._is_single_component_project(),
         )
         self._cad3d_worker._model_revision = self._model_revision
+        # Recorded by `_on_regen_3d_done` when the STEP is written (H1).
+        self._cad3d_worker.step_source_pads = self._step_pads_for(params)
+        self._cad3d_worker.step_source_body = self._step_body_fingerprint(body)
         self._cad3d_worker.photo_scale_px_per_mm = self._photo_scale_px_per_mm()
         self._cad3d_worker.done.connect(self._on_regen_3d_done)
         self._cad3d_worker.progress.connect(self._on_ai_progress)
@@ -14818,6 +16965,9 @@ class MainWindow(QMainWindow):
             self._generation_step_of = {tool: index - 1 for tool, index in GENERATION_STEP_OF.items()
                                         if index > 0}
         self._cad3d_worker.start()
+        # The «Strumenti» entries stay reachable while the tabs are off: the
+        # STEP being rebuilt must not be previewed or installed (M3).
+        self._track_background_work(self._cad3d_worker)
 
     def _on_regen_3d_progress(self, message: str) -> None:
         """Porta sulla modale i messaggi che arrivano durante la generazione."""
@@ -14842,7 +16992,10 @@ class MainWindow(QMainWindow):
         """@brief Show a regenerated 3D model, or say why a stale one is not shown.
 
         @param path STEP file written by the worker.
+        @note Records the pads the STEP was built over first
+            (`_note_step_written`, audit 2026-10-15 H1).
         """
+        self._note_step_written()
         if not self._cad_result_is_current():
             self._log_stale_cad_result(path)
             return

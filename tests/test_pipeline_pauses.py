@@ -760,6 +760,10 @@ def test_the_bottom_row_reads_as_one_pipeline_with_the_price_of_each_step(window
     assert "a pagamento" not in window.btn_component_review.toolTip().lower()
     assert "A PAGAMENTO" in window.btn_relaunch_inventory.toolTip()
     assert "Non avvia la generazione" in window.btn_component_review.toolTip()
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): «gratuito» is the tooltip of the
+    # AVAILABLE command; without documented body sizes it says why it is off.
+    window._body_size_declared = True
+    window._refresh_output_actions()
     assert "gratuito" in window.btn_regen_3d.toolTip()
     assert "A PAGAMENTO" in window.btn_extract_ai.toolTip()
     assert "Passi 1 e 3" in window.btn_component_review.toolTip()

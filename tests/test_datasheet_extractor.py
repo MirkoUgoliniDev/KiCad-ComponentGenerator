@@ -12,6 +12,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
+
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    Document images must be decodable: since 2026-10-15 an upload whose
+    metadata cannot be removed is refused (fail closed), so fake bytes named
+    .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
 from kicadgen.services.datasheet_extractor import (
     MAX_FILES, ExtractionError, extract_pin_header_params, _file_to_content_block,
     _openai_tool, _params_from_tool_arguments, _merge_photo_components,
@@ -119,7 +136,7 @@ def test_content_block_builds_pdf_file_block(tmp_path):
 
 def test_content_block_builds_image_block(tmp_path):
     f = tmp_path / "drawing.png"
-    f.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    f.write_bytes(_TINY_PNG)
     block = _file_to_content_block(f)
     assert block["type"] == "image_url"
     assert block["image_url"]["url"].startswith("data:image/png;base64,")
@@ -264,7 +281,7 @@ def test_valid_optional_side_names_and_boolean_reverse_are_preserved(names):
 def test_discarded_body_dimension_is_reported_in_notes_and_progress(monkeypatch, tmp_path, key):
     from kicadgen.services import datasheet_extractor as ext
     path = tmp_path / "drawing.png"
-    path.write_bytes(b"offline fixture")
+    path.write_bytes(_TINY_PNG)
     monkeypatch.setattr(ext, "api_key", lambda: "offline")
     monkeypatch.setattr(ext, "call_tool", lambda **kw: _matrix_payload(**{key: True}, notes="Original note"))
     messages = []
@@ -289,7 +306,7 @@ def test_castellated_fallback_is_uncertain_generic_without_markings(monkeypatch,
     from unittest.mock import Mock
     from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv
     path = tmp_path / "drawing.png"
-    path.write_bytes(b"offline fixture")
+    path.write_bytes(_TINY_PNG)
     payload = dict(layout="castellated", body_length_mm=40, body_width_mm=20,
         castellated_sides=[dict(edge="left", count=2, pitch_mm=2.54)],
         components_3d=[dict(name="R1", kind="resistor", marking="102", confidence="high",
@@ -326,7 +343,7 @@ def test_invalid_main_response_raises_application_error_before_photo(monkeypatch
     from unittest.mock import Mock
     from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv
     path = tmp_path / "drawing.png"
-    path.write_bytes(b"offline fixture")
+    path.write_bytes(_TINY_PNG)
     monkeypatch.setattr(ext, "api_key", lambda: "offline")
     monkeypatch.setattr(ext, "call_tool", lambda **kw: raw)
     photo = Mock(side_effect=AssertionError("Photo must not run"))
@@ -341,7 +358,7 @@ def test_three_stage_models_and_custom_prompts_reach_services(monkeypatch, tmp_p
     from unittest.mock import Mock
     from kicadgen.services import datasheet_extractor as ext, photo_inventory as inv, photo_terminals
     path = tmp_path / 'drawing.png'
-    path.write_bytes(b'offline fixture')
+    path.write_bytes(_TINY_PNG)
     payload = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
                    castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)])
     component = dict(name='body', kind='generic', x_mm=0, y_mm=0, length_mm=2, width_mm=1, height_mm=.5)
@@ -377,7 +394,7 @@ def test_explicit_document_roles_override_ai_top_selection(monkeypatch, tmp_path
         paths.append(tmp_path / 'random-photo.png')
         roles['random-photo.png'] = 'top'
     for path in paths:
-        path.write_bytes(b'offline fixture')
+        path.write_bytes(_TINY_PNG)
     payload = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
                    top_photo_index=0, castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)])
     call = Mock(return_value=payload)
@@ -586,7 +603,7 @@ def _preflight(tmp_path, monkeypatch, **models):
     """Run extraction until the pre-flight; return which providers were checked."""
     from kicadgen.services import datasheet_extractor as ext, providers
     source = tmp_path / "board.png"
-    source.write_bytes(b"\x89PNG\r\n\x1a\n offline")
+    source.write_bytes(_TINY_PNG)
     checked = []
     monkeypatch.setattr(ext, "api_key", lambda: checked.append("openrouter-key") or "k")
     monkeypatch.setattr(ext, "check_credit", lambda **kw: checked.append("openrouter"))

@@ -13,9 +13,22 @@ def fingerprint(rows):
 
 
 def save_draft(path, baseline, rows):
-    """@brief Atomically persist recovery rows and the applied-baseline fingerprint."""
+    """@brief Atomically persist recovery rows and the applied-baseline fingerprint.
+
+    @param path Recovery file (`<project>/.symbol-draft.json`).
+    @param baseline Applied rows the draft was made on.
+    @param rows Draft rows to keep.
+    @return True when the file was written; False when the project folder
+        does not exist: no folder is ever created for a draft.
+    @throws OSError When the folder exists but the file cannot be written.
+    @note CONTRACT CHANGED (audit L3, 2026-10-15): the folder used to be
+        created. A project renamed or deleted while its editor was still bound
+        to the old path then came back as a ghost folder holding only the
+        draft. Same rule as `services.footprint_draft`.
+    """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.is_dir():
+        return False
     text = json.dumps({'version': 1, 'baseline': fingerprint(baseline), 'rows': rows}, ensure_ascii=False)
     fd, temp = tempfile.mkstemp(prefix='.symbol-recovery-', suffix='.tmp', dir=path.parent)
     try:
@@ -26,6 +39,7 @@ def save_draft(path, baseline, rows):
         replace_file(temp, path)
     finally:
         Path(temp).unlink(missing_ok=True)
+    return True
 
 
 def load_draft(path, baseline):

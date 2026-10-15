@@ -244,7 +244,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8244 passed,
+is 8557 passed,
+12 skipped, 2 expected failures and 19 subtests (2026-10-16 night, after the full-codebase
+audit and the fixes of its 11 medium findings: generated files aligned with the parameters,
+every KiCad block naming an enabled remedy, user pin names kept across analyses, no invented
+3D body, rename carrying the symbol, KiCad library robustness, photos uploaded without
+metadata, package orientation doubts asked; four adversarial review rounds). Before that,
+8244 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15 late evening, after the
 keywords field starting empty and following every extraction). Before that, 8237 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15 evening, after required

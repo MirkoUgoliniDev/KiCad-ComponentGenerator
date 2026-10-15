@@ -614,6 +614,12 @@ def test_the_body_moves_the_whole_drawing_without_a_centre_anchor(preview):
     window, saves, generations = preview
     view = window.preview_view
     view.resize(800, 600)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only a DOCUMENTED body draws
+    # its outline; this scenario was built over a body (the dimension labels
+    # then lie outside it, away from the rectangle drawn below), so the
+    # component stands for one whose analysis declared its body. Without a
+    # body see test_a_drawing_moves_by_its_body_without_a_component_body.
+    window._body_size_declared = True
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     view.set_grid(20.0, (0.0, 0.0), True)
@@ -1021,3 +1027,37 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.RightButton)
     assert menus == [], "no drawing there: no drawing menu"
     view._pan = None
+
+
+def test_a_drawing_moves_by_its_body_without_a_component_body(preview):
+    """Positive without a documented body (no invented outline, audit item 4):
+    the drawing still moves by its body. Drawn clear of the pad-matrix
+    dimension labels, which lie on top of drawings by design."""
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    window, saves, generations = preview
+    assert not window._body_size_declared
+    view = window.preview_view
+    view.resize(800, 600)
+    window.chk_grid.setChecked(True)
+    window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
+    view.set_grid(20.0, (0.0, 0.0), True)
+    _main_grid_snap(window)
+    window.footprint_drawings = validate_footprint_drawings([
+        record("rectangle", ((10, 8), (14, 10)))])
+    window._draw_preview()
+
+    def send(kind, scene_x, scene_y, button=Qt.MouseButton.NoButton):
+        pos = view.mapFromScene(QPointF(scene_x, scene_y))
+        event = QMouseEvent(kind, QPointF(pos), QPointF(view.viewport().mapToGlobal(pos)),
+                            button, button, Qt.KeyboardModifier.NoModifier)
+        {QEvent.Type.MouseButtonPress: view.mousePressEvent,
+         QEvent.Type.MouseMove: view.mouseMoveEvent,
+         QEvent.Type.MouseButtonRelease: view.mouseReleaseEvent}[kind](event)
+
+    send(QEvent.Type.MouseMove, 14 * 20, 9 * 20)
+    send(QEvent.Type.MouseButtonPress, 14 * 20, 9 * 20, Qt.MouseButton.LeftButton)
+    send(QEvent.Type.MouseMove, 15 * 20, 9 * 20, Qt.MouseButton.LeftButton)
+    assert window._fp_handle_drag == (0, -1, (1.0, 0.0))
+    send(QEvent.Type.MouseButtonRelease, 16.2 * 20, 10.1 * 20, Qt.MouseButton.LeftButton)
+    assert window.footprint_drawings[0]["points"] == [[12.0, 9.0], [16.0, 11.0]]

@@ -258,6 +258,9 @@ def test_s3_nothing_is_offered_when_every_draft_is_already_shown(qapp, tmp_path)
 def test_s4_a_moved_project_keeps_its_draft_in_the_editor(qapp, tmp_path):
     pa = tmp_path / "rootA" / "Board" / ".symbol-draft.json"
     pc = tmp_path / "rootC" / "Board" / ".symbol-draft.json"
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    pa.parent.mkdir(parents=True)
     tab = SymbolTab()
     try:
         _flow(tab, pa, _rows(), _ids())
@@ -284,6 +287,9 @@ def test_s4_a_copied_project_is_another_project(qapp, tmp_path):
     """Negative: when the old folder still holds the same id it was copied, not moved."""
     pa = tmp_path / "rootA" / "Board" / ".symbol-draft.json"
     pc = tmp_path / "rootC" / "Board" / ".symbol-draft.json"
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    pa.parent.mkdir(parents=True)
     tab = SymbolTab()
     try:
         _flow(tab, pa, _rows(), _ids())
@@ -492,13 +498,22 @@ def test_s6_kicad_loads_the_new_header(tmp_path):
 
 
 def test_s4_binding_a_project_without_a_folder_creates_nothing(qapp, tmp_path):
-    """The project id is written with the first draft, never by binding alone."""
+    """The project id is written with the first draft, never by binding alone.
+
+    CONTRACT CHANGED (audit L3, 2026-10-15): the first draft does not create
+    the folder either (a renamed or deleted project came back as a ghost
+    folder); once the folder exists, the id is written beside the draft.
+    """
     path = tmp_path / "root" / "Board" / ".symbol-draft.json"
     tab = SymbolTab()
     try:
         _flow(tab, path, _rows(), _ids())
         assert not path.parent.exists(), "binding does not make a folder appear in the workspace"
         tab.table.item(0, 1).setText("EDIT")
+        assert not path.parent.exists(), "nor does a draft"
+        path.parent.mkdir(parents=True)
+        tab.table.item(1, 1).setText("EDIT2")
+        assert path.is_file()
         assert SymbolTab.project_id_path(path).is_file(), "written beside the first draft"
     finally:
         tab.deleteLater()
