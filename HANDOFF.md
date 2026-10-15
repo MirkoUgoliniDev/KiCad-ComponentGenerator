@@ -1,5 +1,13 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 sera — `ADVANCED` (`5427ec3` + handoff `0a3560d`) mergiato in `main` come `309d3a3`, pushato
+
+Su richiesta dell'utente. Si lavora di nuovo su `ADVANCED`. Suite: 8237
+verdi, 11 saltati, 2 xfail, 19 sottotest. DOMANDE APERTE per l'utente, una
+alla volta: (1) parole chiave predefinite «pin header THT» finiscono anche nei
+package (vuoto, raccomandato, o proposta in grigio); (2) etichetta visibile su
+«Applica ai file»; (3) designatore in grigio «U» conta come compilato.
+
 ## 2026-10-15 pomeriggio — FATTO, commit `5427ec3`: «scatena agenti esperti e fixa tutto» (utente)
 
 Richiesta: risolvere tutti i punti aperti, con piu' passaggi fino a
