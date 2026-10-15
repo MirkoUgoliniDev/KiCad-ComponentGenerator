@@ -11,6 +11,7 @@ and a negative one that differ structurally (a draft exists or not, the save
 works or not, the recovery file is bound to this applied state or not).
 """
 import json
+from copy import deepcopy
 
 import pytest
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -578,6 +579,59 @@ def test_applica_on_a_working_folder_change_writes_only_the_open_project(window,
     assert "kicad_mod non contiene" in window.label_kicad_status.text()
     window._on_generated(str(original / "x.kicad_mod"))
     assert not window._fp_file_stale, "a written footprint clears the mark"
+
+
+def _symbol_draft_then_change_working_folder(window, monkeypatch, tmp_path):
+    """A symbol draft, «Applica» answered, then a new «Area di lavoro».
+
+    Returns (open project folder, new working folder, rows applied before, draft rows)."""
+    from tests.test_symbol_integration import setup_board
+    setup_board(window, monkeypatch)
+    monkeypatch.setattr(window, "_refresh_output_actions", lambda: None)
+    assert window._save_project_config(force=True)
+    original = window._project_dir()
+    applied_before = deepcopy(window.pinout)
+    window.symbol_tab.place_pin('1', 50.8, 25.4)
+    assert window.symbol_tab.has_pending_edits()
+    draft_rows = window.symbol_tab.draft_rows()
+    monkeypatch.setattr(window, "_ask_pending_edits_choice",
+                        lambda editors, can_apply: window.PENDING_EDITS_APPLY)
+    other = tmp_path / "otherroot"
+    other.mkdir()
+    window.field_library_root.setText(str(other))
+    window.field_library_root.setModified(True)
+    window._on_library_root_edit_finished()
+    QApplication.processEvents()
+    return original, other, applied_before, draft_rows
+
+
+def test_symbol_applica_on_a_working_folder_change_writes_only_the_open_project(
+        window, monkeypatch, tmp_path):
+    """Before: `_save_project_config` refused (`_project_dir()` already named
+    the new working folder), and showing the symbol tab for the question
+    rebound the editor's recovery file there, dropping the draft from the
+    editor: «Applica» was greyed out and the user was kept."""
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: pytest.fail("no error expected"))
+    original, other, applied_before, draft_rows = _symbol_draft_then_change_working_folder(
+        window, monkeypatch, tmp_path)
+    saved = json.loads((original / PROJECT_CONFIG_NAME).read_text(encoding="utf-8"))["state"]
+    assert saved["pinout"] != applied_before
+    assert saved["pinout"] == draft_rows, "the applied rows are in the open project"
+    assert (original / f"{original.name}.kicad_sym").is_file(), "the .kicad_sym is in the open project"
+    assert list(other.iterdir()) == [], "nothing is written under the new working folder"
+    assert window._open_project_folder != original, "the project was left"
+
+
+def test_symbol_applica_refused_on_a_working_folder_change_keeps_the_draft(
+        window, monkeypatch, tmp_path):
+    """Negative: the open project's file cannot be written -> nothing applied, the user stays."""
+    monkeypatch.setattr(window, "_write_project_config_at", lambda folder: False)
+    original, other, _, _ = _symbol_draft_then_change_working_folder(window, monkeypatch, tmp_path)
+    assert window.symbol_tab.has_pending_edits(), "the draft is kept"
+    assert window._open_project_folder == original, "the project stays open"
+    assert window.field_library_root.text() == str(original.parent), "the working folder goes back"
+    assert not (original / f"{original.name}.kicad_sym").exists()
+    assert list(other.iterdir()) == []
 
 
 def test_leaving_while_the_pipeline_owns_the_output_marks_the_footprint_stale(project):

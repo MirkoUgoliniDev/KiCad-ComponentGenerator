@@ -862,15 +862,32 @@ def _drawing_text_item(record, mm_to_px):
         iiiiii, MMMMMM get worse), so the preview width stays the Qt font's
         own and remains an approximation of KiCad's.
     """
+    return _kicad_size_text_item(record["text"], record.get("size", 1.0),
+                                 _layer_color(record["layer"]), mm_to_px)
+
+
+def _kicad_size_text_item(text, size, colour, mm_to_px):
+    """@brief Unplaced Qt text item whose capitals are `size` mm tall, as KiCad draws them.
+
+    @param text The text (one line).
+    @param size KiCad text size in mm (= cap height).
+    @param colour Brush colour.
+    @param mm_to_px Scene px per mm of the preview.
+    @return A QGraphicsSimpleTextItem at the origin, not in any scene, laid
+        out in a `_FP_TEXT_REFERENCE_PX` px font and SCALED (setScale) so the
+        outline of «H» is size x mm_to_px px tall.
+    @note Shared by the user's text drawings and the Reference/Value
+        properties (user, 2026-10-15: every text at the size the file gives it).
+    """
     from PyQt6.QtWidgets import QGraphicsSimpleTextItem
-    item = QGraphicsSimpleTextItem(record["text"])
-    item.setBrush(QBrush(QColor(_layer_color(record["layer"]))))
+    item = QGraphicsSimpleTextItem(text)
+    item.setBrush(QBrush(QColor(colour)))
     font = item.font()
     font.setPixelSize(_FP_TEXT_REFERENCE_PX)
     item.setFont(font)
     cap = _cap_height_px(font)
     if cap > 0:
-        item.setScale(record.get("size", 1.0) * mm_to_px / cap)
+        item.setScale(size * mm_to_px / cap)
     return item
 
 
@@ -7604,7 +7621,9 @@ class MainWindow(QMainWindow):
             then names a folder of the NEW working folder, so the footprint
             is saved explicitly here and its .kicad_mod is not rewritten
             (it would land in the other working folder); the project is
-            marked stale instead (`_fp_file_stale`). None for a normal leave.
+            marked stale instead (`_fp_file_stale`); the symbol is saved and
+            its .kicad_sym written here too (`_symbol_apply_folder`). None
+            for a normal leave.
         @return True when every pending edit was applied or discarded and the
             caller may go on (close, change project); False to stay.
         @note «Applica» is offered only when every pending edit can be
@@ -7630,7 +7649,13 @@ class MainWindow(QMainWindow):
                 if folder is None:
                     self._finish_footprint_rewrite_now()
             if symbol is not None and symbol.can_apply():
-                symbol.apply()
+                # `_apply_symbol_pinout` runs inside `apply()` (signal): it
+                # reads the folder to write into from here.
+                self._symbol_apply_folder = folder
+                try:
+                    symbol.apply()
+                finally:
+                    self._symbol_apply_folder = None
             if symbol is not None and symbol.has_pending_edits() and footprint:
                 QMessageBox.warning(self, self.i18n.text("Modifiche non applicate"), self.i18n.text(
                     "Il footprint è stato applicato; il simbolo no e resta in bozza."))
@@ -13357,6 +13382,22 @@ class MainWindow(QMainWindow):
         return list(dict.fromkeys(str(p.number) for p in footprint.pads
                                  if p.pad_type != 'np_thru_hole' and str(p.number).strip()))
 
+    def _symbol_recovery_path(self) -> Path | None:
+        """@brief The symbol recovery file of the OPEN project.
+
+        @return `<open project>/.symbol-draft.json`, or None while the
+            component has no name (no project folder to bind).
+        @note `_open_project_folder`, not `_project_dir()`: during the leave
+            question of a working-folder change `_project_dir()` already names
+            the other working folder, and showing the symbol tab (the question
+            shows the editor concerned) would rebind the editor there, which
+            drops the draft from the editor before the user answers.
+        """
+        folder = getattr(self, "_open_project_folder", None)
+        if folder is None:
+            folder = self._project_dir_or_none()
+        return None if folder is None else Path(folder) / '.symbol-draft.json'
+
     def _refresh_symbol_tab(self, force=False):
         if not hasattr(self, 'symbol_tab'):
             return
@@ -13371,10 +13412,9 @@ class MainWindow(QMainWindow):
             # Bind the recovery file on this path too: set_data only shows a
             # carried draft, set_recovery_path settles it (keeps it durable
             # and offerable); without it a kept draft could be lost.
-            try:
-                self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
-            except ValueError:
-                pass  # no component name yet: no project folder to bind
+            recovery = self._symbol_recovery_path()
+            if recovery is not None:  # no component name yet: no project folder to bind
+                self.symbol_tab.set_recovery_path(recovery)
             self.symbol_tab.set_error(str(exc))
             return
         rows = deepcopy(self.pinout)
@@ -13382,12 +13422,27 @@ class MainWindow(QMainWindow):
         rows.extend({'pin': number, 'name': ''} for number in ids if number not in existing)
         self.symbol_tab.set_data(self._component_name(), rows,
             footprint=f'KiCadGen:{self._component_name()}', pad_ids=ids, force=force)
-        self.symbol_tab.set_recovery_path(self._project_dir() / '.symbol-draft.json')
+        recovery = self._symbol_recovery_path()
+        if recovery is not None:  # as above: an unnamed project has no folder
+            self.symbol_tab.set_recovery_path(recovery)
 
     def _apply_symbol_pinout(self, rows):
+        """@brief «Applica» of the symbol editor: save the rows in the project and the .kicad_sym.
+
+        @param rows The applied symbol rows.
+        @note `_symbol_apply_folder` is the open project's folder while the
+            leave question of a working-folder change applies the draft
+            (`_resolve_pending_edits`): `_project_dir()` then names the other
+            working folder, so the project file and the .kicad_sym are
+            written explicitly into the open project, never under the new
+            working folder. A refused write keeps the draft (`reject_apply`).
+        """
+        folder = getattr(self, "_symbol_apply_folder", None)
         previous = self.pinout
         self.pinout = deepcopy(rows)
-        if not self._save_project_config(force=True):
+        saved = (self._save_project_config(force=True) if folder is None
+                 else self._write_project_config_at(folder))
+        if not saved:
             self.pinout = previous
             self.symbol_tab.reject_apply(self.i18n.text(
                 "Pinout non salvato. Le modifiche non sono state applicate."))
@@ -13395,7 +13450,9 @@ class MainWindow(QMainWindow):
         self._draw_preview()
         self._sync_3d_pin_functions()
         self.symbol_tab.accept_apply()
-        self._save_applied_electrical_symbol(quiet=True)
+        self._save_applied_electrical_symbol(
+            None if folder is None else Path(folder) / f'{self._component_name()}.kicad_sym',
+            quiet=True)
 
     def _symbol_pad_mismatch(self) -> str:
         """@brief Why the applied symbol rows do not match the footprint pads, '' when they do.
@@ -15814,7 +15871,7 @@ class MainWindow(QMainWindow):
             and its children carry the key in `TEXT_KEY_ROLE` for the drag.
         """
         from PyQt6.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
-        from ..core.footprint import DEFAULT_TEXT_POSITIONS, TEXT_KEYS
+        from ..core.footprint import DEFAULT_TEXT_POSITIONS, PROPERTY_TEXT_SIZE, TEXT_KEYS
         from .footprint_view import TEXT_KEY_ROLE
         defaults = DEFAULT_TEXT_POSITIONS
         try:
@@ -15832,8 +15889,6 @@ class MainWindow(QMainWindow):
                      "Riferimento (REF**) sulla serigrafia: trascinalo dove deve stare; tasto destro per la posizione predefinita."),
                  "Value": self.i18n.text(
                      "Valore sul layer di fabbricazione: trascinalo dove deve stare; tasto destro per la posizione predefinita.")}
-        font = QFont(self.font())
-        font.setPixelSize(max(1, int(round(1.0 * mm_to_px))))  # 1 mm text, KiCad's default size
         # The anchor cross in the accent colour, wider than the glyphs are
         # tall, so it reads through the text it is centred on.
         arm = 0.75 * mm_to_px
@@ -15841,10 +15896,15 @@ class MainWindow(QMainWindow):
             x_mm, y_mm = self.footprint_text_positions.get(key, defaults[key])
             group = QGraphicsItemGroup()
             self.preview_scene.addItem(group)
-            text = self.preview_scene.addSimpleText(texts[key], font)
-            text.setBrush(QBrush(QColor(colours[key])))
+            # Capitals PROPERTY_TEXT_SIZE mm tall, as in the file (user,
+            # 2026-10-15); centred on the anchor as KiCad centres the text:
+            # half the width to the left, half the cap height above the baseline.
+            text = _kicad_size_text_item(texts[key], PROPERTY_TEXT_SIZE, colours[key], mm_to_px)
+            self.preview_scene.addItem(text)
+            scale = text.scale()
             rect = text.boundingRect()
-            text.setPos(-rect.width() / 2, -rect.height() / 2)
+            centre = _drawing_text_baseline(text) - _cap_height_px(text.font()) / 2
+            text.setPos(-rect.width() * scale / 2, -centre * scale)
             group.addToGroup(text)
             cross_pen = QPen(QColor(BLUE))
             cross_pen.setCosmetic(True)

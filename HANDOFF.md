@@ -1,5 +1,74 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 2026-10-15 — FATTO, commit `c07059c`: testi di proprieta' e pin alla grandezza KiCad (simbolo e footprint)
+
+Richiesta: punto aperto «REF**/Value e testi delle proprieta'/pin disegnati
+piu' piccoli che in KiCad». Misurato: simbolo Reference/Value e nomi dei pin
+a font 12 px (em 1,2 mm, maiuscole ~0,84 contro 1,27 = ~0,66), numeri a 10 px
+(~0,55); footprint REF**/Value a em 1 mm (maiuscole ~0,7 contro 1,0 del file).
+Concordato con l'utente (OK):
+1. stessa regola dei testi disegnati (maiuscole = grandezza del file),
+   riusando `_kicad_text_font`/`_draw_text_primitive` (simbolo) e lo
+   scalamento di `_drawing_text_item` (footprint); grandezza del pin se ce
+   l'ha (`pin_text_size_of`), proprieta' 1,27, REF**/Value del footprint 1,0;
+2. posizioni come KiCad: numero del pin appoggiato sopra la linea (linea di
+   base appena sopra), centrato sulla lunghezza; nome centrato sulla linea a
+   0,508 mm dalla punta (gia' cosi');
+3. nessuno stiramento orizzontale; file KiCad invariati;
+4. test: maiuscole = grandezza entro 3% per ogni tipo, negativo con un pin di
+   grandezza diversa.
+Conseguenza detta all'utente: simboli fitti appaiono piu' fitti (come in KiCad).
+FATTO (non committato): symbol_tab `_kicad_text_item` (posizionamento estratto
+da `_draw_text_primitive`, ora condiviso da testi disegnati, proprieta' e pin),
+`PIN_NUMBER_GAP_MM` = 0,1016 + 0,0762 (margine KiCad + meta' penna del pin:
+approssimazione dichiarata), nome a `PIN_NAME_OFFSET` del generatore;
+main_window `_kicad_size_text_item` (condiviso con `_drawing_text_item`),
+REF**/Value centrati sul punto a meta' delle maiuscole; core/footprint
+`PROPERTY_TEXT_SIZE` = 1,0 usato da `_property_node` (byte del file invariati).
+Test: tests/test_kicad_size_labels.py (3 test, tutti ROSSI sul codice vecchio:
+maiuscole simbolo 0,71 e footprint 0,85 della grandezza con il font di prova);
+CONTRACT CHANGED 2026-10-15 in test_symbol_properties_move (verticale: centro
+delle maiuscole sull'ancoraggio, non centro del riquadro Qt, ~0,12 mm).
+Suite completa sul codice finale: 8092 verdi + 1 rosso (quel contratto, poi
+aggiornato) + i 3 nuovi; 11 saltati, 2 xfail, 19 sottotest. Immagine di
+controllo con font Windows: numeri sopra la linea, nomi centrati, pin in alto
+ruotati come KiCad.
+SEGNALATO, NON AUTORIZZATO (preesistente, ora piu' visibile): con un pin sul
+lato superiore la posizione predefinita del Value (`default_property_positions`)
+cade sulla punta del pin; uguale nel file, quindi anche in KiCad.
+STATO: committato su ADVANCED come `c07059c` (+ handoff) e pushato, su richiesta dell'utente. NON mergiato in main.
+
+## 2026-10-15 — FATTO, commit `9f1a5e7`: «Applica» della bozza del SIMBOLO con cambio di «Area di lavoro»
+
+Richiesta dell'utente (OK alla proposta): oggi, cambiando «Area di lavoro» con
+una bozza del simbolo, «Applica» fallisce («Pinout non salvato...») perche'
+`_save_project_config` rifiuta: `_project_dir()` punta gia' alla cartella
+nuova. Si resta, nulla si perde, ma Applica e' un vicolo cieco.
+Correzione concordata, come il footprint (stessa UX): con `folder` del progetto
+aperto, `_apply_symbol_pinout` salva con `_write_project_config_at(folder)` e
+scrive il `.kicad_sym` in `folder/<nome>.kicad_sym`; mai nulla sotto la nuova
+area di lavoro; se una scrittura fallisce la bozza resta e si resta.
+Test: positivo (simbolo applicato nella cartella aperta, niente nella nuova) e
+negativo (scrittura rifiutata -> bozza intatta, si resta).
+CORREZIONE DELLA DIAGNOSI (la prima, data anche all'utente, era incompleta):
+prima ancora del salvataggio rifiutato, la domanda mostra la scheda Simbolo e
+`_on_tab_changed` -> `_refresh_symbol_tab` legava il file di recupero a
+`_project_dir()/.symbol-draft.json`, cioe' alla cartella NUOVA: per
+`set_recovery_path` e' «un altro progetto», quindi la bozza spariva
+dall'editor (restava solo nel file di recupero del progetto aperto) e
+«Applica» compariva DISATTIVATO, non in errore. Causa radice: il file di
+recupero seguiva la cartella calcolata, non il progetto aperto.
+FATTO (non committato): `_symbol_recovery_path()` usa `_open_project_folder`
+(None senza nome: nessun legame, come prima nel ramo d'errore; prima il ramo
+normale con progetto senza nome sollevava ValueError, raggiungibile solo con
+pad validi senza nome); `_resolve_pending_edits` passa la cartella con
+`_symbol_apply_folder` e `_apply_symbol_pinout` scrive progetto e .kicad_sym
+li'. Due test nuovi in tests/test_footprint_draft.py, entrambi ROSSI sul
+codice vecchio e verdi sul nuovo; 37 verdi nel lotto mirato.
+SUITE COMPLETA (2026-10-15, due meta'): A 3853 verdi, 7 saltati, 19 sottotest;
+B 4240 verdi, 4 saltati, 2 xfail; 0 falliti (totale 8093 = 8091 + i 2 nuovi).
+STATO: committato su ADVANCED come `9f1a5e7` (+ handoff) e pushato, su richiesta dell'utente. NON mergiato in main.
+
 ## FINE SESSIONE 14/10 sera — branch `ADVANCED`, commit `1075897` (+ handoff), mergiato in `main`, PC spento
 
 Committato su richiesta dell'utente («quando hai terminato committa, pusha,
