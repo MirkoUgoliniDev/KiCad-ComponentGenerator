@@ -47,7 +47,12 @@ TOOL={'type':'function','function':{'name':'compare_geometry','description':'Rep
 
 
 def reference_sheet(folder):
-    """@brief Create labelled rotations at the photo pixel scale, without adjusting candidates."""
+    """@brief Create labelled rotations at the photo pixel scale, without adjusting candidates.
+
+    @param folder Folder holding the `<model>-<angle>.png` renders and
+        receiving `references.png`.
+    @return Path of the written reference sheet.
+    """
     sheet=np.full((3*(384+45),4*384,3),240,np.uint8)
     for row,model in enumerate(('SOT-23','SOT-23-5','SOT-23-6')):
         for col,angle in enumerate((0,90,180,270)):
@@ -60,12 +65,20 @@ def reference_sheet(folder):
 
 
 def embedded(path):
-    """@brief Embed a PNG into a portable HTML document."""
+    """@brief Embed a PNG into a portable HTML document.
+
+    @param path Path of the PNG file.
+    @return `data:image/png;base64,...` URI of the file content.
+    """
     return 'data:image/png;base64,'+base64.b64encode(path.read_bytes()).decode('ascii')
 
 
 def main():
-    """@brief Run at most one paid request per uncached crop and build the comparison page."""
+    """@brief Run at most one paid request for each uncached crop and build the comparison page.
+
+    @throws SystemExit When a crop has no cached answer and `--run-paid`
+        was not given.
+    """
     parser=argparse.ArgumentParser()
     parser.add_argument('--folder',type=Path,required=True)
     parser.add_argument('--model',default='deepseek-api/deepseek-flash')

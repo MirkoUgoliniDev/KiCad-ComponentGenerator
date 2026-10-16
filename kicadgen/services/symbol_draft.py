@@ -8,7 +8,11 @@ from ..fsutil import replace_file
 
 
 def fingerprint(rows):
-    """@brief Hash applied row data to bind recovery drafts to an exact baseline."""
+    """@brief Hash applied row data to bind recovery drafts to an exact baseline.
+
+    @param rows JSON-serializable list of applied symbol rows.
+    @return SHA-256 hex digest of their canonical JSON.
+    """
     return hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 
@@ -43,7 +47,14 @@ def save_draft(path, baseline, rows):
 
 
 def load_draft(path, baseline):
-    """@brief Read a bounded recovery file only when its baseline and pin identities match."""
+    """@brief Read a bounded recovery file only when its baseline and pin identities match.
+
+    @param path Recovery file (`<project>/.symbol-draft.json`).
+    @param baseline Applied rows the draft must have been made on.
+    @return The draft rows, or None when the file is missing, larger than
+        2 MB, unreadable, of another version or baseline, with different pin
+        identities, or identical to the baseline.
+    """
     path = Path(path)
     if not path.is_file() or path.stat().st_size > 2000000:
         return None

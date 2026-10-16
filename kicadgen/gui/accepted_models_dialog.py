@@ -52,7 +52,7 @@ def _item(text, *, data=None) -> QTableWidgetItem:
 class ConsolidateDialog(QDialog):
     """@brief Confirm which components to remember, showing why others are excluded."""
 
-    #: Colonna della spunta (e del nome del componente).
+    #: Column of the check mark (and of the component name).
     COLUMN_NAME = 1
 
     def __init__(self, components: list[dict], parent=None, i18n=None):
@@ -107,14 +107,14 @@ class ConsolidateDialog(QDialog):
             name = _item(component.get("name") or "?")
             if ok:
                 name.setFlags(name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                # Una proposta provvisoria (rete SMD o geometria) non e' una
-                # scelta di nessuno: entra nell'archivio solo se la spunti tu
-                # (audit 2026-10-02: altrimenti l'archivio si riempiva da solo).
+                # A provisional proposal (SMD network or geometry) is nobody's
+                # choice: it enters the archive only if you check it yourself
+                # (audit 2026-10-02: otherwise the archive filled itself up).
                 provisional = (component.get("model_match") or {}).get("attachment") == "provisional"
                 name.setCheckState(Qt.CheckState.Unchecked if provisional
                                    else Qt.CheckState.Checked)
             else:
-                # Non spuntabile: non c'e' niente da ricordare, e il motivo lo dice.
+                # Not checkable: there is nothing to remember, and the reason says so.
                 name.setFlags(name.flags() & ~Qt.ItemFlag.ItemIsUserCheckable
                               & ~Qt.ItemFlag.ItemIsEnabled)
             self.table.setItem(row, 1, name)
@@ -126,9 +126,10 @@ class ConsolidateDialog(QDialog):
             status = _item(self._tr("da ricordare") if ok else self._tr(reason))
             status.setToolTip(status.text())
             self.table.setItem(row, 5, status)
-        # Il motivo va letto per intero (utente, 2026-09-25: «nessun modello
-        # KiCad …» troncato): la colonna «Stato» va a capo e la riga si alza,
-        # e il testo completo e' anche nel tooltip della cella.
+        # The reason must be readable in full (user, 2026-09-25: «nessun modello
+        # KiCad …» (no KiCad model …) truncated): the «Stato» (status) column
+        # wraps and the row grows taller, and the full text is also in the
+        # cell tooltip.
         self.table.setWordWrap(True)
         self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -136,8 +137,8 @@ class ConsolidateDialog(QDialog):
         layout.addWidget(self.table, 1)
         self.summary = QLabel()
         self.summary.setWordWrap(True)
-        # Testo composto a runtime e gia' tradotto da `_tr`: il passaggio di
-        # `retranslate_widgets` non deve prenderlo come sorgente.
+        # Text composed at runtime and already translated by `_tr`: the
+        # `retranslate_widgets` pass must not take it as a source.
         self.summary.setProperty("i18n_skip", True)
         layout.addWidget(self.summary)
         self.buttons = QDialogButtonBox(
@@ -223,7 +224,7 @@ class AcceptedModelsDialog(QDialog):
         self.path_label = QLabel()
         self.path_label.setWordWrap(True)
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        # Porta un percorso dell'utente: non si traduce.
+        # Carries a user path: not translated.
         self.path_label.setProperty("i18n_skip", True)
         layout.addWidget(self.path_label)
         self.table = QTableWidget(0, 10)
@@ -290,7 +291,7 @@ class AcceptedModelsDialog(QDialog):
                     "Usate da questa scheda: {count} (in cima, evidenziate).").format(
                         count=len(board))
             self.status_label.setText(text)
-        # Prima le voci di questa scheda, nell'ordine dell'archivio.
+        # First the entries of this tab, in archive order.
         entries.sort(key=lambda entry: entry.get("id") not in board)
         self.table.setRowCount(len(entries))
         for index, entry in enumerate(entries):
@@ -311,8 +312,8 @@ class AcceptedModelsDialog(QDialog):
                 item = _item(value, data=entry.get("id") if column == 0 else None)
                 usage = (self._tr("Usata da questa scheda per: {names}").format(
                     names=", ".join(names)) if names else "")
-                # Il percorso del modello resta nel tooltip della sua colonna,
-                # anche sulle righe evidenziate (prima veniva sovrascritto).
+                # The model path stays in the tooltip of its column, also on
+                # highlighted rows (previously it was overwritten).
                 tip = [str(entry.get("model_ref") or "")] if column == 4 else []
                 tip += [usage] if usage else []
                 if tip:

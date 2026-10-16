@@ -11,11 +11,23 @@ def prepare_observation_views(photo, component, board_length_mm, board_width_mm,
                               long_side_px=1024):
     """@brief Return context/detail BGR arrays and JSON-safe geometry, or None.
 
-    ``context_bgr`` has a magenta target rectangle and 0.6 margins per axis.
+    ``context_bgr`` has a magenta target rectangle and 0.6 margins on each axis.
     ``detail_bgr`` has no overlay and 0.35 margins plus two source pixels.
     Both correct unequal X/Y pixel scales without rotating image axes. Native
     sizes describe source pixels, never the interpolated output resolution.
-    ``clipped_edges`` records photo-boundary clipping per view.
+    ``clipped_edges`` records photo-boundary clipping for each view.
+
+    @param photo BGR photo of the calibrated board crop, as a numpy array.
+    @param component Component dict with x_mm, y_mm, length_mm, width_mm and
+        optional rotation_deg, in the board frame (origin at the centre, Y down).
+    @param board_length_mm Declared board extent along X, in mm.
+    @param board_width_mm Declared board extent along Y, in mm.
+    @param long_side_px Long side of each interpolated output view, in px.
+    @return A dict with ``context_bgr``/``detail_bgr`` (views), ``context_box_px``/
+        ``detail_box_px`` (source rectangles, in px), ``native_target_size_px``,
+        ``target_corners_px`` and ``clipped_edges``; None when the component or
+        board values are missing or not numeric, or a view would be smaller
+        than two pixels.
     """
     import cv2
     import numpy as np

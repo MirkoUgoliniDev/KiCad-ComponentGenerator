@@ -297,6 +297,22 @@ def _soic8(orientation=0.0, offset=(0.0, 0.0)):
 
 #: Half height of the property text box: (size 1.0 + stroke 0.15) / 2, mm.
 _TEXT_HALF = 0.575
+#: Tolerance, mm, on a D1 centre read back from the written anchor: since
+#: 2026-10-16 the default is written as a bottom-left anchor rounded to
+#: 0.1 um (`core.footprint.migrate_centred_positions`), so the centre
+#: `Footprint.text_centres` recovers is within half of that.
+_CENTRE_TOL = 1e-4
+
+
+def _centres(fp):
+    """CONTRACT CHANGED 2026-10-16: the D1 centres of a generated footprint.
+
+    `place_default_texts` now writes bottom-left anchors converted with
+    KiCad's text geometry (user: KiCad stays still, same file form
+    everywhere); the D1 rules below still hold for the CENTRE KiCad draws
+    each text on, read back with `Footprint.text_centres`.
+    """
+    return fp.text_centres()
 
 
 def _pad_boxes(fp):
@@ -323,15 +339,17 @@ D1_CASES = {
 def test_reference_above_and_value_below_the_envelope_clear_of_the_pads(case):
     fp = D1_CASES[case]()
     x0, y0, x1, y1 = core_fp.footprint_envelope(fp)
-    assert fp.reference_at[1] + _TEXT_HALF <= y0 - 0.2 + 1e-9      # above everything
-    assert fp.value_at[1] - _TEXT_HALF >= y1 + 0.2 - 1e-9          # below everything
-    assert _clear_of_pads(fp, fp.reference_at) and _clear_of_pads(fp, fp.value_at)
-    assert fp.reference_at[0] == fp.value_at[0] == pytest.approx((x0 + x1) / 2, abs=core_fp.TEXT_GRID_MM / 2 + 1e-9)
+    ref, value = _centres(fp)["Reference"], _centres(fp)["Value"]
+    assert ref[1] + _TEXT_HALF <= y0 - 0.2 + _CENTRE_TOL            # above everything
+    assert value[1] - _TEXT_HALF >= y1 + 0.2 - _CENTRE_TOL          # below everything
+    assert _clear_of_pads(fp, ref) and _clear_of_pads(fp, value)
+    assert ref[0] == pytest.approx(value[0], abs=_CENTRE_TOL)
+    assert ref[0] == pytest.approx((x0 + x1) / 2, abs=core_fp.TEXT_GRID_MM / 2 + _CENTRE_TOL)
     # On the preview's 0.1 mm text grid, counted from the first numbered pad.
     ox, oy = next(p.at for p in fp.pads if p.number)
-    for x, y in (fp.reference_at, fp.value_at):
-        assert abs((x - ox) / 0.1 - round((x - ox) / 0.1)) < 1e-6
-        assert abs((y - oy) / 0.1 - round((y - oy) / 0.1)) < 1e-6
+    for x, y in (ref, value):
+        assert abs((x - ox) / 0.1 - round((x - ox) / 0.1)) * 0.1 < _CENTRE_TOL
+        assert abs((y - oy) / 0.1 - round((y - oy) / 0.1)) * 0.1 < _CENTRE_TOL
     render = fp.render()
     assert f'(property "Reference" "REF**" (at {fp.reference_at[0]:g} {fp.reference_at[1]:g})' \
         in re.sub(r"\s+", " ", render).replace("( ", "(")
@@ -356,19 +374,25 @@ def test_a_rotated_package_uses_its_real_extent():
 def test_an_asymmetric_pad_field_centres_the_texts_on_it():
     pins = [PinSpec("1", 10.0, 0.0, 1.0, 1.0), PinSpec("2", 14.0, 0.0, 1.0, 1.0)]
     fp = build_package(PackageGeometry(name="A", pins=pins))
-    assert fp.reference_at[0] == pytest.approx(12.0) and fp.value_at[0] == pytest.approx(12.0)
+    centres = _centres(fp)
+    assert centres["Reference"][0] == pytest.approx(12.0, abs=_CENTRE_TOL)
+    assert centres["Value"][0] == pytest.approx(12.0, abs=_CENTRE_TOL)
 
 
 def test_a_user_choice_is_written_unchanged():
     fp = build_package(_soic8()).place_texts({"Reference": (1.23, -7.5)})
     assert fp.reference_at == (1.23, -7.5)
     assert '(at 1.23 -7.5)' in fp.render()
-    assert fp.value_at == core_fp.default_text_positions(build_package(_soic8()))["Value"]
+    # The text not chosen keeps the generator's default (its anchor, on the D1 centre).
+    assert fp.value_at == build_package(_soic8()).value_at
+    assert _centres(fp)["Value"] == pytest.approx(
+        core_fp.default_text_positions(build_package(_soic8()))["Value"], abs=_CENTRE_TOL)
 
 
 def test_an_empty_footprint_falls_back_to_the_fixed_positions():
     assert core_fp.default_text_positions(Footprint(name="E")) == core_fp.DEFAULT_TEXT_POSITIONS
-    assert Footprint(name="E").place_default_texts().reference_at == (0.0, -2.0)
+    assert _centres(Footprint(name="E").place_default_texts())["Reference"] == pytest.approx(
+        (0.0, -2.0), abs=_CENTRE_TOL)
 
 
 def test_user_drawings_added_after_generation_do_not_move_the_default():
@@ -461,9 +485,9 @@ def test_the_preview_grid_origins_are_those_of_head():
 
 
 def _is_node(value, origin):
-    """On the grid to KiCad's resolution (1 nm): anchors are written with 6 decimals."""
+    """On the grid to `_CENTRE_TOL`: a D1 centre read back from its 0.1 um anchor."""
     steps = (value - origin) / core_fp.TEXT_GRID_MM
-    return abs(steps - round(steps)) * core_fp.TEXT_GRID_MM <= 1e-6
+    return abs(steps - round(steps)) * core_fp.TEXT_GRID_MM <= _CENTRE_TOL
 
 
 @pytest.mark.parametrize("case", sorted(GRID_CASES))
@@ -471,13 +495,14 @@ def test_default_anchors_are_nodes_of_the_preview_grid(case):
     build, origin = GRID_CASES[case]
     fp = build()
     ox, oy = origin(fp)
-    for x, y in (fp.reference_at, fp.value_at):
+    ref, value = _centres(fp)["Reference"], _centres(fp)["Value"]
+    for x, y in (ref, value):
         assert _is_node(x, ox) and _is_node(y, oy)
     # Mirror images within one grid step when the geometry is symmetric.
     x0, y0, x1, y1 = core_fp.footprint_envelope(fp)
     if abs(x0 + x1) < 1e-6 and abs(y0 + y1) < 1e-6:
-        assert abs(fp.reference_at[1] + fp.value_at[1]) < core_fp.TEXT_GRID_MM + 1e-9
-        assert abs(fp.reference_at[0]) <= core_fp.TEXT_GRID_MM / 2 + 1e-9
+        assert abs(ref[1] + value[1]) < core_fp.TEXT_GRID_MM + _CENTRE_TOL
+        assert abs(ref[0]) <= core_fp.TEXT_GRID_MM / 2 + _CENTRE_TOL
 
 
 def test_a_grid_symmetric_about_the_part_gives_exact_mirror_texts():
@@ -497,11 +522,12 @@ def test_a_grid_symmetric_about_the_part_gives_exact_mirror_texts():
     fp = quad(2.0)
     x0, y0, x1, y1 = core_fp.footprint_envelope(fp)
     assert (x0 + x1, y0 + y1) == pytest.approx((0.0, 0.0))
-    assert fp.reference_at[0] == 0.0 == fp.value_at[0]
-    assert fp.reference_at[1] == -fp.value_at[1]
-    off_grid = quad(2.03)
-    assert off_grid.reference_at[0] == pytest.approx(-0.03)
-    assert abs(off_grid.reference_at[0]) <= core_fp.TEXT_GRID_MM / 2
+    ref, value = _centres(fp)["Reference"], _centres(fp)["Value"]
+    assert ref[0] == pytest.approx(0.0, abs=_CENTRE_TOL) and value[0] == pytest.approx(0.0, abs=_CENTRE_TOL)
+    assert ref[1] == pytest.approx(-value[1], abs=_CENTRE_TOL)
+    off_grid = _centres(quad(2.03))["Reference"]
+    assert off_grid[0] == pytest.approx(-0.03, abs=_CENTRE_TOL)
+    assert abs(off_grid[0]) <= core_fp.TEXT_GRID_MM / 2
 
 
 @pytest.mark.parametrize("case", ["rs485", "four_sided", "devkit", "soic8"])
@@ -518,15 +544,18 @@ def test_preview_drawers_keep_their_grid_and_show_the_file_texts(window, case):
     assert window._preview_grid_spec["origin"] == pytest.approx(head)
     groups = {i.data(TEXT_KEY_ROLE): i for i in window.preview_scene.items()
               if i.data(TEXT_KEY_ROLE) is not None and i.parentItem() is None}
-    for key, at in (("Reference", fp.reference_at), ("Value", fp.value_at)):
-        assert (groups[key].pos().x() / 20, groups[key].pos().y() / 20) == pytest.approx(at)
+    # CONTRACT CHANGED 2026-10-16: the group is the bottom-left anchor of the
+    # text; since «KiCad fermo» it is the anchor the file itself holds
+    # (converted from the D1 centre with KiCad's text geometry).
+    for key, at in fp.text_anchors().items():
+        assert (groups[key].pos().x() / 20, groups[key].pos().y() / 20) == pytest.approx(at, abs=1e-4)
 
 
 def test_each_text_is_clamped_to_the_limit_on_its_own():
     pins = [PinSpec("1", 0.0, -499.9, 1.0, 1.0), PinSpec("2", 0.0, -497.0, 1.0, 1.0)]
     fp = build_package(PackageGeometry(name="Far", pins=pins))
-    assert fp.reference_at[1] == pytest.approx(-500.0)       # clamped, on a node
-    assert _is_node(fp.reference_at[1], -499.9)
+    assert _centres(fp)["Reference"][1] == pytest.approx(-500.0)       # clamped, on a node
+    assert _is_node(_centres(fp)["Reference"][1], -499.9)
     assert fp.value_at[1] > -497.0                            # below the pads, not the fallback
     assert fp.value_at != core_fp.DEFAULT_TEXT_POSITIONS["Value"]
 

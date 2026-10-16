@@ -4,7 +4,23 @@ from .symbol import PIN_GRID_MM, layout_symbol, symbol_inputs
 
 
 def transform_selection(rows, numbers, primary, operation, values=()):
-    """@brief Return an atomic grid-aligned transform of selected pins."""
+    """@brief Return an atomic grid-aligned transform of selected pins.
+
+    @param rows Project pin rows; never modified (a deep copy is transformed).
+    @param numbers Pin numbers (strings) of the selection.
+    @param primary Pin number of the anchor pin; the first selected pin when
+        it is not among the selection.
+    @param operation One of "move", "rotate", "align_x", "align_y",
+        "distribute_x", "distribute_y".
+    @param values Operation values: (dx, dy) in mm for move, snapped to the
+        grid; (degrees,) for rotate, a multiple of 90; unused otherwise.
+    @return The transformed copy of `rows`, or the untouched copy when the
+        selection is empty.
+    @throws ValueError When the rotation is not a multiple of 90 degrees, a
+        distribution has fewer than three pins, or the operation is unknown.
+    @throws SymbolError When the result does not lay out (`layout_symbol`),
+        so a batch is never accepted half-valid.
+    """
     result = deepcopy(rows)
     chosen = [r for r in result if str(r['pin']) in numbers]
     if not chosen:

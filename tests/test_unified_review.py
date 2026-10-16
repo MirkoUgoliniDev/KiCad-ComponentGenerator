@@ -175,11 +175,31 @@ def test_the_detector_rows_read_as_class_confidence_state_and_size(detector):
                      "Provenienza": "sotto la soglia: da tenere a mano"}
 
 
-def test_editing_a_detector_proposal_marks_it_as_the_reviewers_box(detector):
-    """@brief Positive: a moved weak proposal becomes the reviewer's; negative: the untouched ones stay the detector's."""
-    detector._select_row(1)
-    detector.fields["x_mm"].setValue(3.0)
+def test_editing_a_detector_proposal_marks_it_as_the_reviewers_box(detector, qapp):
+    """@brief Positive: a moved weak proposal becomes the reviewer's; negative: the untouched ones stay the detector's.
+
+    @note A real pointer drag: in the detector stage the side form is hidden,
+          so the outline is the only way a reviewer moves a proposal. The
+          fuller gesture contract lives in test_detector_stage_gestures.py.
+    """
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    detector.show()
+    qapp.processEvents()
+    before = dict(detector.get_components()[1])
+    viewport, button = detector.view.viewport(), Qt.MouseButton.LeftButton
+    start = detector.view.mapFromScene(detector._items[1].scenePos())
+    end = start + QPoint(10, 4)
+    QTest.mousePress(viewport, button, Qt.KeyboardModifier.NoModifier, start)
+    QApplication.sendEvent(viewport, QMouseEvent(
+        QMouseEvent.Type.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+        Qt.MouseButton.NoButton, button, Qt.KeyboardModifier.NoModifier))
+    QTest.mouseRelease(viewport, button, Qt.KeyboardModifier.NoModifier, end)
+    qapp.processEvents()
     moved = detector.get_components()[1]
+    assert moved["x_mm"] != before["x_mm"], "the gesture really moved the outline"
     assert moved["_yolo_manual_box"] is True and moved["_source"] == MANUAL_SOURCE
     assert moved["_yolo_review_only"] is False, "the eye verified it"
     assert moved["_yolo_clipped_sides"] == ["left", "right"], "a move looks at no side"

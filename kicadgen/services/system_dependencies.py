@@ -22,7 +22,10 @@ class ExternalApplications:
 
     @property
     def missing(self) -> tuple[str, ...]:
-        """@brief Return the display names of applications that were not found."""
+        """@brief Return the display names of applications that were not found.
+
+        @return Tuple of names among "KiCad" and "FreeCAD".
+        """
         result = []
         if not self.kicad_cli:
             result.append("KiCad")
@@ -79,7 +82,10 @@ def _find_installed(program: str) -> str | None:
 
 
 def find_kicad_cli() -> str | None:
-    """@brief Find kicad-cli using an override, PATH and common installations."""
+    """@brief Find kicad-cli using an override, PATH and common installations.
+
+    @return Path of the executable (KICAD_CLI_PATH first), or None.
+    """
     override = _existing_file(os.environ.get("KICAD_CLI_PATH"))
     if override:
         return override
@@ -93,7 +99,12 @@ def find_kicad_cli() -> str | None:
 
 
 def find_pcbnew(kicad_cli: str | None = None) -> str | None:
-    """@brief Find the KiCad PCB Editor used for isolated visual previews."""
+    """@brief Find the KiCad PCB Editor used for isolated visual previews.
+
+    @param kicad_cli Path of kicad-cli, whose sibling pcbnew is tried first
+        after the KICAD_PCBNEW_PATH override; None skips that step.
+    @return Path of the pcbnew executable, or None.
+    """
     override = _existing_file(os.environ.get("KICAD_PCBNEW_PATH"))
     if override:
         return override
@@ -113,7 +124,10 @@ def find_pcbnew(kicad_cli: str | None = None) -> str | None:
 
 
 def detect_external_applications() -> ExternalApplications:
-    """@brief Detect KiCad and FreeCAD without starting either application."""
+    """@brief Detect KiCad and FreeCAD without starting either application.
+
+    @return ExternalApplications with the paths found (None when missing).
+    """
     kicad_cli = find_kicad_cli()
     try:
         freecadcmd = find_freecadcmd()

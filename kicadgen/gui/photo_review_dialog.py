@@ -99,8 +99,9 @@ from ..services.component_format import (FORMAT_SOURCE_COLOR, FORMAT_TARGET_COLO
                                          copy_format, paste_format)
 from ..services.smd_component_classifier import drop_classifier_identity
 from ..services.messages import tx
-from ..services.photo_yolo import (MOVE_HANDLE, awaiting_user_keep, box_geometry_mm,
-                                   manual_proposal, mark_manual_box)
+from ..services.photo_yolo import (DETECTOR_REVIEW_ONLY_FIELD, MOVE_HANDLE,
+                                   awaiting_user_keep, box_geometry_mm, detector_review_only,
+                                   manual_proposal, mark_manual_box, set_review_only)
 from .component_state import (height_is_estimated, mark_height_measured,
                               mark_height_placeholder)
 from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
@@ -308,7 +309,10 @@ class _PhotoView(QGraphicsView):
         self.zoom_changed.emit()
 
     def resizeEvent(self, event):
-        """@brief Keep the photo fitted on viewport resizes while auto-fit is on."""
+        """@brief Keep the photo fitted on viewport resizes while auto-fit is on.
+
+        @param event Qt resize event, forwarded to the base class.
+        """
         super().resizeEvent(event)
         if self._auto_fit:
             # Scrollbar visibility can resize the viewport during fitInView;
@@ -328,11 +332,18 @@ class _PhotoView(QGraphicsView):
         self.zoom_changed.emit()
 
     def zoom_percent(self):
-        """@brief Current scale as a percentage of the fitted photo (100 = fitted)."""
+        """@brief Current scale as a percentage of the fitted photo (100 = fitted).
+
+        @return Integer percentage of the fitted scale.
+        """
         return round(self.transform().m11() / self._fit_scale * 100) if self._fit_scale else 100
 
     def wheelEvent(self, event):
-        """@brief Zoom around the pointer with the wheel; other wheel input scrolls."""
+        """@brief Zoom around the pointer with the wheel; other wheel input scrolls.
+
+        @param event Qt wheel event; a vertical angle or pixel delta zooms,
+            anything else is forwarded to the base class.
+        """
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta:
             self.zoom(ZOOM_STEP ** max(-4, min(4, delta / 120)))
@@ -368,7 +379,10 @@ class _PhotoView(QGraphicsView):
         self._apply_draw_cursor()
 
     def lasso_mode(self) -> bool:
-        """@brief Whether the next left drag on the photo selects outlines."""
+        """@brief Whether the next left drag on the photo selects outlines.
+
+        @return True when the lasso gesture is armed.
+        """
         return self._lasso_mode
 
     def _armed(self) -> bool:
@@ -388,7 +402,10 @@ class _PhotoView(QGraphicsView):
             self.viewport().unsetCursor()
 
     def draw_mode(self) -> bool:
-        """@brief Whether the next left drag on the photo traces a new rectangle."""
+        """@brief Whether the next left drag on the photo traces a new rectangle.
+
+        @return True when the drawing gesture is armed.
+        """
         return self._draw_mode
 
     def cancel_draw(self):
@@ -454,6 +471,7 @@ class _PhotoView(QGraphicsView):
     def mousePressEvent(self, event):
         """@brief Start a middle-button pan; other buttons reach the scene items.
 
+        @param event Qt mouse press event (viewport coordinates, px).
         @note While draw mode is armed the left button starts a rectangle
               instead, and only if it goes down inside the photo: outside it
               there is nothing to measure, so the press is swallowed and the
@@ -478,6 +496,7 @@ class _PhotoView(QGraphicsView):
     def mouseDoubleClickEvent(self, event):
         """@brief Keep the left button on the drawing gesture, doubled or not.
 
+        @param event Qt mouse double-click event.
         @note MouseButtonDblClick is a distinct event type from
               MouseButtonPress, so without this override the second press of a
               quick retry would fall through to the outline under the pointer,
@@ -496,6 +515,7 @@ class _PhotoView(QGraphicsView):
     def mouseMoveEvent(self, event):
         """@brief Scroll the viewport by the pointer motion while panning.
 
+        @param event Qt mouse move event (viewport coordinates, px).
         @note A gesture in progress updates its rubber band instead, so the
               user sees the rectangle before committing to it. The gesture is
               only alive while the left button is actually held: a move
@@ -523,6 +543,7 @@ class _PhotoView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         """@brief End a middle-button pan and restore the cursor.
 
+        @param event Qt mouse release event (viewport coordinates, px).
         @note A drawing gesture is completed here: only a stroke that stays
               below DRAW_CLICK_PX on BOTH axes is a click that missed, and
               nothing is reported for it. One axis clearing the threshold is
@@ -567,6 +588,9 @@ class _NumberLabel(QGraphicsSimpleTextItem):
     def paint(self, painter, option, widget=None):
         """@brief Paint a dark rounded backing behind the white text.
 
+        @param painter QPainter already set up by the scene.
+        @param option Style option of the item (QStyleOptionGraphicsItem).
+        @param widget Widget being painted on, or None.
         @note The backing is opaque and darker than both the photograph and
               the neutral board backdrop, so the number stays readable whether
               the photograph is shown, attenuated or taken away.
@@ -731,11 +755,10 @@ PROPOSED_FILTER = "<category proposed>"
 CONFLICT_FILTER = "<category conflict>"
 
 ## Outline of a body the vision model added with no detector proposal and that
-## nobody has kept yet (``_ai_only_excluded`` True, HANDOFF 141). Same tint as
-## the weak proposals of the detector review (yolo_review_dialog.WEAK_COLOR) and
-## dashed like them: the two windows speak one visual language for «shown,
-## but not chosen». Copied rather than imported, so this dialog keeps
-## depending on PyQt6 only. Light enough for the 3:1 floor against
+## nobody has kept yet (``_ai_only_excluded`` True, HANDOFF 141). Dashed and
+## tinted like the weak proposals of the former detector-review window, so the
+## reading stays one visual language for «shown, but not chosen».
+## Light enough for the 3:1 floor against
 ## BOARD_BACKDROP_COLOR, and the dash keeps it distinct for anyone who does not
 ## tell the tints apart.
 AI_ONLY_EXCLUDED_COLOR = "#f9e2af"
@@ -765,12 +788,14 @@ FORMAT_SOURCE_TEXT_COLOR = "#1e1e2e"
 ## «a parte il posizionamento deve copiare ed incollare tutto»): its place on
 ## the photo and its identity -- every proposal keeps its own id, name and
 ## original detector box -- and its PROVENANCE: how the detector found it
-## (origin, low confidence, left out for review, source line), which is a fact
+## (origin, low confidence, left out for review and the detector's own verdict
+## on it, source line), which is a fact
 ## about that box, not a format (adversarial review B4, 2026-10-02).
 ## Everything else comes from the source.
 DETECTOR_TARGET_FIELDS = ("_id", "name", "_yolo_proposal_id", "x_mm", "y_mm", "_box",
                           "_yolo_original_box", "_yolo_origin", "_yolo_low_confidence",
-                          "_yolo_review_only", "_source", "_yolo_source_before_manual")
+                          "_yolo_review_only", DETECTOR_REVIEW_ONLY_FIELD,
+                          "_source", "_yolo_source_before_manual")
 
 ## Stages of the one review window (HANDOFF 162). STAGE_DETECTOR reviews the
 ## local detector's proposals before the paid AI call; STAGE_INVENTORY the
@@ -921,7 +946,7 @@ def detector_row_label(proposal, _tr) -> str:
     else:
         state = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "?"
         if proposal.get("_yolo_low_confidence"):
-            # Sopra un corpo gia' trovato: sicura, ma non un corpo a se'.
+            # Over a body already found: confident, but not a body of its own.
             state += " · " + (_tr("sopra un altro corpo") if proposal.get("_yolo_on_body_of")
                                         else _tr("bassa confidenza")) + " · " + (
                 _tr("non tenuta") if awaiting_user_keep(proposal) else _tr("tenuta"))
@@ -1074,10 +1099,10 @@ def ai_section_lines(component, _tr) -> list[tuple[str, str]]:
         lines.append((_tr("Rotazione KiCad proposta"),
                       f"{angle:g}° · {prediction['rotation_confidence']:.1%}"
                       if angle is not None else _tr("non disponibile")))
-        # Chi ha deciso il tipo (utente, 2026-10-02): la rete, o la riverifica
-        # AI dei ritagli per i soli corpi che la rete non ha riconosciuto.
+        # Who decided the type (user, 2026-10-02): the network, or the AI
+        # re-check of the crops for only the bodies the network did not recognise.
         if component.get('_smd_superseded'):
-            # Modificato a mano dopo la lettura: la rete non decide piu' nulla.
+            # Edited by hand after the reading: the network no longer decides anything.
             verdict = _tr("superato da una modifica manuale")
         elif prediction.get('accepted'):
             verdict = _tr("risolto in locale, nessuna chiamata AI")
@@ -1379,17 +1404,26 @@ class _ResizeHandle(QGraphicsRectItem):
                         Qt.CursorShape.SizeVerCursor, Qt.CursorShape.SizeBDiagCursor)[sector])
 
     def mousePressEvent(self, event):
-        """@brief Start a resize; accepting here keeps the parent from moving."""
+        """@brief Start a resize; accepting here keeps the parent from moving.
+
+        @param event Qt graphics-scene mouse press event; its scene position (px) seeds the stroke.
+        """
         self.item.begin_resize(self.edge, event.scenePos())
         event.accept()
 
     def mouseMoveEvent(self, event):
-        """@brief Follow the pointer, editing the component live."""
+        """@brief Follow the pointer, editing the component live.
+
+        @param event Qt graphics-scene mouse move event; its scene position (px) is the new edge.
+        """
         self.item.resize_to(event.scenePos())
         event.accept()
 
     def mouseReleaseEvent(self, event):
-        """@brief Finish the resize stroke."""
+        """@brief Finish the resize stroke.
+
+        @param event Qt graphics-scene mouse release event, accepted here.
+        """
         self.item.end_resize()
         event.accept()
 
@@ -1560,7 +1594,10 @@ class _ComponentItem(QGraphicsPolygonItem):
         return path
 
     def boundingRect(self):
-        """@brief Envelope covering the enlarged grab area as well as the outline."""
+        """@brief Envelope covering the enlarged grab area as well as the outline.
+
+        @return QRectF in item coordinates (scene px).
+        """
         return super().boundingRect().united(self.shape().boundingRect())
 
     def refresh_grab_area(self):
@@ -1578,6 +1615,7 @@ class _ComponentItem(QGraphicsPolygonItem):
     def mousePressEvent(self, event):
         """@brief Select the clicked outline alone, with or without Ctrl.
 
+        @param event Qt graphics-scene mouse press event.
         @note Qt treats Ctrl-click as "extend the selection", which would
               leave two outlines selected and the editor bound to the lowest
               list index rather than the clicked one. This editor edits one
@@ -1592,6 +1630,7 @@ class _ComponentItem(QGraphicsPolygonItem):
     def mouseReleaseEvent(self, event):
         """@brief Keep the clicked outline selected after a Ctrl-click.
 
+        @param event Qt graphics-scene mouse release event.
         @note Without movement Qt toggles the item on a Ctrl release, which
               would clear the selection of the outline that was just clicked.
         """
@@ -1602,6 +1641,7 @@ class _ComponentItem(QGraphicsPolygonItem):
     def mouseDoubleClickEvent(self, event):
         """@brief Open KiCad alternatives for the clicked photographic component.
 
+        @param event Qt graphics-scene mouse double-click event, accepted here.
         @note The outline is already under the pointer: the view is not
               re-centred on it, that would move the photo under the user.
         """
@@ -1611,6 +1651,10 @@ class _ComponentItem(QGraphicsPolygonItem):
 
     def itemChange(self, change, value):
         """@brief Feed user moves back into the data and show grips only when selected.
+
+        @param change The GraphicsItemChange being notified.
+        @param value The new value Qt proposes for that change (position, selection flag...).
+        @return The value returned by the base class, unchanged.
 
         A position change caused by dragging (not by sync_geometry) updates
         the component's x_mm/y_mm through the editor; a selection change
@@ -1757,10 +1801,10 @@ class PhotoReviewDialog(QDialog):
         self.resize(1120, 740)
         layout = QVBoxLayout(self)
         tr = self._tr
-        # Barra di icone in alto, come «Corpi rilevati» e il tab 3D (scelta
-        # dell'utente, 2026-09-24): nome, scorciatoia e spiegazione nei
-        # tooltip; le istruzioni, che prima occupavano tre righe sopra la
-        # foto, stanno nel popup dell'icona «i».
+        # Icon bar at the top, like «Corpi rilevati» (detected bodies) and the
+        # 3D tab (user's choice, 2026-09-24): name, shortcut and explanation in
+        # the tooltips; the instructions, which used to take three lines above
+        # the photo, are in the popup of the «i» icon.
         # Checkable: adding is a mode, and the user must be able to see that
         # the next drag on the photo will create a body instead of moving one.
         self.add_button = tool_button(
@@ -1770,10 +1814,10 @@ class PhotoReviewDialog(QDialog):
         self.delete_button = tool_button(
             "delete.svg", "Elimina selezionato", "Canc",
             "Toglie il componente scelto dall'inventario.", tr=tr)
-        # Lazo (utente, 2026-10-08): un rettangolo tracciato sulla foto
-        # sceglie insieme tutti i riquadri che vi stanno dentro per intero;
-        # Elimina e Tieni agiscono su tutti. Serve a svuotare in un gesto un
-        # corpo grande pieno di proposte spurie (56 dentro un modulo).
+        # Lasso (user, 2026-10-08): a rectangle traced on the photo selects
+        # together all the boxes lying wholly inside it; Delete and «Tieni»
+        # (keep) act on all of them. It serves to empty in one gesture a large
+        # body full of spurious proposals (56 inside a module).
         self.lasso_button = tool_button(
             "tool-lasso.svg", "Lazo", "L",
             "Accendi, poi trascina sulla foto: i riquadri interamente dentro al rettangolo "
@@ -1782,9 +1826,9 @@ class PhotoReviewDialog(QDialog):
             checkable=True, tr=tr)
         self.lasso_button.toggled.connect(self.set_lasso_mode)
         self._lasso_items = []
-        # Tieni (HANDOFF 141): solo per i corpi aggiunti dal solo modello, che
-        # partono esclusi. Stessa icona, tasto e ruolo del «Tieni» di «Corpi
-        # rilevati»: una scelta, non un disegno.
+        # «Tieni» (keep) (HANDOFF 141): only for the bodies added by the model
+        # alone, which start excluded. Same icon, key and role as the «Tieni» of
+        # «Corpi rilevati» (detected bodies): a choice, not a drawing.
         self.keep_button = tool_button(
             "tool-select.svg", "Tieni o lascia il corpo aggiunto dal solo modello", "T",
             "I corpi aggiunti dal solo modello (gialli tratteggiati) partono esclusi: "
@@ -1805,13 +1849,13 @@ class PhotoReviewDialog(QDialog):
         self.format_button.toggled.connect(self._on_format_toggled)
         self._format_source = None
         self._format_source_component = None
-        # Sorgente e incollati si tengono per OGGETTO, non per riga: cancellare
-        # o aggiungere un corpo rinumera le righe e un indice diventava di un
-        # altro corpo (verifica avversariale B1, 2026-10-02).
+        # Source and pasted bodies are tracked by OBJECT, not by row: deleting
+        # or adding a body renumbers the rows and an index came to belong to
+        # another body (adversarial review B1, 2026-10-02).
         self._format_source_item = None
         self._format_target_items = []
-        # Vero mentre il programma sposta la selezione (cancella, aggiungi):
-        # il pennello incolla solo sui corpi che l'utente sceglie.
+        # True while the program moves the selection (delete, add): the brush
+        # pastes only on the bodies the user chooses.
         self._format_paste_blocked = False
         self.zoom_out_button = tool_button("zoom-out.svg", "Zoom indietro", "-", tr=tr)
         self.zoom_label = QLabel()
@@ -1831,15 +1875,17 @@ class PhotoReviewDialog(QDialog):
         # no longer change the width of the toolbar and zoom the drawing, as
         # the old text button did with Windows fonts.
         self.photo_button = tool_button("photo-full.svg", "", checkable=True, tr=tr)
-        # Dettagli del componente scelto (utente, 2026-09-24): stato del modello
-        # KiCad, avvisi e legenda dei colori stanno in un popup invece che in
-        # colonna. L'icona diventa arancione quando il componente scelto ha
-        # avvisi, cosi' non spariscono alla vista (vedi `_update_details_button`).
+        # Details of the chosen component (user, 2026-09-24): KiCad model
+        # state, warnings and colour legend sit in a popup instead of in a
+        # column. The icon turns orange when the chosen component has
+        # warnings, so they do not vanish from sight (see
+        # `_update_details_button`).
         self.details_button = tool_button("component-details.svg", "", tr=tr)
         self._selected_has_warnings = False
-        # Dubbi dichiarati dal modello: da pulsante in colonna a icona nella
-        # barra (utente, 2026-09-24); apre la stessa finestra modale e, come
-        # prima, esiste solo quando ci sono dubbi. Il numero sta nel tooltip.
+        # Doubts declared by the model: from a button in the column to an icon
+        # in the bar (user, 2026-09-24); it opens the same modal window and, as
+        # before, exists only when there are doubts. The number is in the
+        # tooltip.
         self.uncertainties_button = tool_button("model-doubts.svg", "", tr=tr)
         self.uncertainties_button.hide()
         self.info_button = tool_button(
@@ -1896,8 +1942,8 @@ class PhotoReviewDialog(QDialog):
         count_font.setBold(True)
         self.count_label.setFont(count_font)
         sidebar.addWidget(self.count_label)
-        # Quanti corpi solo-AI restano fuori (HANDOFF 141): visibile solo se
-        # ce ne sono, come il riepilogo di «Corpi rilevati».
+        # How many AI-only bodies stay out (HANDOFF 141): visible only if
+        # there are any, like the summary of «Corpi rilevati» (detected bodies).
         self.ai_only_label = QLabel()
         self.ai_only_label.setWordWrap(True)
         self.ai_only_label.hide()
@@ -1913,12 +1959,12 @@ class PhotoReviewDialog(QDialog):
             "Filtra per categoria la lista e i rettangoli sulla foto.")
         self.category_filter.currentIndexChanged.connect(self._category_filter_changed)
         sidebar.addWidget(self.category_filter)
-        # Le proposte NON tenute (sotto soglia, sopra un altro corpo, solo-AI)
-        # restano nei dati ma per default non si vedono (utente, 2026-10-08:
-        # su un modulo schermato il rilevatore ne proponeva 56 dentro il
-        # corpo, tutte gia' retrocesse, e la revisione era illeggibile).
-        # L'interruttore le riporta in vista; una proposta tenuta a mano e'
-        # visibile comunque.
+        # The proposals NOT kept (below threshold, over another body, AI-only)
+        # stay in the data but are hidden by default (user, 2026-10-08: on a
+        # shielded module the detector proposed 56 of them inside the body,
+        # all already demoted, and the review was unreadable).
+        # The switch brings them back into view; a proposal kept by hand is
+        # visible anyway.
         self.show_unkept = QCheckBox(self._tr("Mostra le proposte non tenute"))
         self.show_unkept.setObjectName("show_unkept")
         self.show_unkept.setChecked(False)
@@ -1937,28 +1983,29 @@ class PhotoReviewDialog(QDialog):
         form = QFormLayout(self.form_widget)
         self._form = form
         self.text_fields = {}
-        # Gli slot sono metodi legati, non closure: se l'applicazione esce
-        # con la finestra ancora aperta, il distruttore C++ non passa da
-        # hideEvent/closeEvent e il QLineEdit a fuoco emette editingFinished
-        # dal proprio distruttore. PyQt scioglie da solo le connessioni a
-        # metodi legati quando il ricevente muore, mentre una lambda con
-        # default gia' smantellati verrebbe chiamata e farebbe abortire il
-        # processo con TypeError. La chiave viene dall'objectName del mittente.
+        # The slots are bound methods, not closures: if the application exits
+        # with the window still open, the C++ destructor does not go through
+        # hideEvent/closeEvent and the focused QLineEdit emits editingFinished
+        # from its own destructor. PyQt drops by itself the connections to
+        # bound methods when the receiver dies, whereas a lambda with
+        # already-dismantled defaults would be called and would abort the
+        # process with TypeError. The key comes from the sender's objectName.
         for key, label in (("name", "Nome"), ("kind", "Tipo"), ("marking", "Marcatura")):
             field = QLineEdit()
             field.setObjectName(key)
             field.editingFinished.connect(self._text_field_finished)
             form.addRow(label, field)
             self.text_fields[key] = field
-        # Cosa ha letto l'AI per il corpo scelto (utente, 2026-09-29, HANDOFF
-        # 157): tipo, package e sigla con le confidenze, esito delle letture
-        # del ritaglio, stato del modello KiCad. Sola lettura, testo
-        # selezionabile; le righe vengono da `component_attribute_lines`.
+        # What the AI read for the chosen body (user, 2026-09-29, HANDOFF
+        # 157): type, package and marking with the confidences, outcome of the
+        # crop readings, KiCad model state. Read-only, selectable text; the
+        # lines come from `component_attribute_lines`.
         self.attributes_label = QLabel()
         self.attributes_label.setObjectName("component_attributes")
         self.attributes_label.setWordWrap(True)
-        # Testo ricco: un paragrafo per riga, con aria fra le righe (utente,
-        # 2026-09-29: «distanzia meglio le voci»); i valori sono escapati.
+        # Rich text: one paragraph per line, with air between the lines (user,
+        # 2026-09-29: «distanzia meglio le voci» (space the entries better));
+        # the values are escaped.
         self.attributes_label.setTextFormat(Qt.TextFormat.RichText)
         self.attributes_label.setContentsMargins(0, 6, 0, 2)
         self.attributes_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1989,11 +2036,12 @@ class PhotoReviewDialog(QDialog):
             field.valueChanged.connect(self._number_field_changed)
             form.addRow(label, field)
             self.fields[key] = field
-            # Nessuna quota si mostra piu' qui (utente, 2026-09-29, HANDOFF
-            # 157/157-bis): centro, lati e rotazione si correggono trascinando
-            # il rettangolo sulla foto, altezza e tutto il resto in «Modifica
-            # componenti…» (Ctrl+E). Le caselle restano, nascoste: sono il
-            # contratto con cui il trascinamento e i test scrivono la geometria.
+            # No dimension is shown here any more (user, 2026-09-29, HANDOFF
+            # 157/157-bis): centre, sides and rotation are corrected by
+            # dragging the rectangle on the photo, height and everything else
+            # in «Modifica componenti…» (edit components) (Ctrl+E). The boxes
+            # stay, hidden: they are the contract through which dragging and
+            # the tests write the geometry.
             field.hide()
             row_label = form.labelForField(field)
             if row_label is not None:
@@ -2037,8 +2085,9 @@ class PhotoReviewDialog(QDialog):
         # Edits are live, so closing the modal by any route is a focus change,
         # not an undo: pending text is committed on OK and on Escape alike.
         self.parameters_dialog.finished.connect(self._commit_pending_text)
-        # Icone con tooltip (utente, 2026-09-24: «icone anche nelle modali
-        # successive»), nella stessa riga sotto la lista.
+        # Icons with tooltips (user, 2026-09-24:
+        # «icone anche nelle modali successive» (icons in the following modals
+        # too)), on the same row below the list.
         self.parameters_button = tool_button(
             "sliders.svg", "Parametri…", "",
             "Nome, tipo e marcatura del componente scelto, e cosa ha letto l'AI: "
@@ -2061,13 +2110,13 @@ class PhotoReviewDialog(QDialog):
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setTextFormat(Qt.TextFormat.PlainText)
-        # La legenda dichiara anche la precedenza, perche' il colore e' un
-        # canale solo: un corpo fuori PCB e senza tipo e' rosso, e il tipo
-        # mancante resta scritto nell'avviso e nel marcatore della lista.
-        # Pallino del colore vero + parola: il colore non e' l'unico canale.
-        # Nel popup dei dettagli insieme a stato del modello e avvisi (utente,
-        # 2026-09-24, che rovescia la scelta del pomeriggio di tenerla sempre
-        # visibile in colonna).
+        # The legend also declares the precedence, because colour is a single
+        # channel: a body outside the PCB and without a type is red, and the
+        # missing type stays written in the warning and in the list marker.
+        # Dot of the real colour + word: colour is not the only channel.
+        # In the details popup together with model state and warnings (user,
+        # 2026-09-24, reversing the afternoon's choice of keeping it always
+        # visible in the column).
         self.legend = QLabel(self._legend_html())
         self.legend.setTextFormat(Qt.TextFormat.RichText)
         self.legend.setWordWrap(True)
@@ -2076,10 +2125,11 @@ class PhotoReviewDialog(QDialog):
             [self.model_status, self.warning_label, self.legend], self)
         self.details_button.clicked.connect(
             lambda: self.details_popup.toggle_under(self.details_button))
-        # I dubbi globali dell'inventario arrivavano solo al log. Qui stanno
-        # dietro un pulsante che compare solo se ce ne sono: sono prosa del
-        # modello, quindi vanno messi a disposizione senza occupare la barra
-        # laterale e senza competere con gli avvisi del componente scelto.
+        # The global doubts of the inventory used to reach only the log. Here
+        # they sit behind a button that appears only if there are any: they
+        # are the model's prose, so they must be made available without taking
+        # up the side bar and without competing with the warnings of the
+        # chosen component.
         self.uncertainties_button.clicked.connect(self.show_uncertainties)
         self._uncertainties = []
         self.uncertainties_dialog = QDialog(self)
@@ -2091,10 +2141,10 @@ class PhotoReviewDialog(QDialog):
         uncertainties_intro.setWordWrap(True)
         uncertainties_intro.setTextFormat(Qt.TextFormat.PlainText)
         uncertainties_layout.addWidget(uncertainties_intro)
-        # QPlainTextEdit e non QLabel/QTextEdit: non interpreta mai il rich
-        # text, quindi una frase del modello che contiene <b> o &amp; resta la
-        # frase del modello. `i18n_skip` perche' il contenuto e' un dato della
-        # corsa, non un testo dell'interfaccia da tradurre.
+        # QPlainTextEdit and not QLabel/QTextEdit: it never interprets rich
+        # text, so a model sentence containing <b> or &amp; stays the model's
+        # sentence. `i18n_skip` because the content is run data, not an
+        # interface text to translate.
         self.uncertainties_view = QPlainTextEdit()
         self.uncertainties_view.setReadOnly(True)
         self.uncertainties_view.setProperty("i18n_skip", True)
@@ -2133,9 +2183,10 @@ class PhotoReviewDialog(QDialog):
             apply_button.setToolTip(self._tr(
                 "Le proposte tenute vanno al modello AI; annulla per non avviare la richiesta."))
             self.model_button.hide()
-            # «Copia formato» c'e' anche qui (utente, 2026-10-02, «copia tutto»):
-            # con la rete SMD questa e' l'ultima occasione per correggere un
-            # riquadro prima che la rete lo legga. Copia misura e classe YOLO.
+            # «Copia formato» (copy format) is here too (user, 2026-10-02,
+            # «copia tutto» (copy everything)): with the SMD network this is the
+            # last chance to correct a box before the network reads it. It
+            # copies size and YOLO class.
             self.model_status.setText(self._tr(
                 "I modelli KiCad si scelgono dopo l'inventario AI, nella stessa finestra."))
 
@@ -2154,7 +2205,7 @@ class PhotoReviewDialog(QDialog):
             lambda: [item.refresh_grab_area() for item in self._items])
         self.photo_button.clicked.connect(self._photo_button_clicked)
         self._bind_shortcuts()
-        # Un combo con il fuoco tiene le sue lettere (revisore 1, difetto 4).
+        # A combo with the focus keeps its letters (reviewer 1, defect 4).
         self._combo_keys = give_combos_their_keys(self)
         self._update_zoom_label()
         self._update_details_button()
@@ -2227,8 +2278,8 @@ class PhotoReviewDialog(QDialog):
               can be reversed in this and in any later review.
         """
         if index is None and self._lasso_items and self._selected_item() is None:
-            # Gruppo del lazo: se anche una sola e' lasciata, si tengono tutte;
-            # altrimenti si lasciano tutte. Una scelta sola per il gesto.
+            # Lasso group: if even one is left out, all are kept; otherwise
+            # all are left out. A single choice for the gesture.
             group = [item for item in self._lasso_items if pending_proposal(item.component)]
             if not group:
                 return None
@@ -2256,7 +2307,7 @@ class PhotoReviewDialog(QDialog):
             # decision of presence (photo_yolo.awaiting_user_keep); leaving
             # it again puts both marks back as the detector wrote them.
             item.component["_yolo_user_kept"] = keep
-            item.component["_yolo_review_only"] = not keep
+            set_review_only(item.component, not keep)
         self._ai_only_changed(item)
 
     def _on_format_toggled(self, checked):
@@ -2287,12 +2338,18 @@ class PhotoReviewDialog(QDialog):
                 self._refresh_item(item)
 
     def format_source_row(self) -> int:
-        """@brief Current row of the body the format was copied from, or -1."""
+        """@brief Current row of the body the format was copied from, or -1.
+
+        @return Row index into the current item list, or -1 when no source is set.
+        """
         return next((index for index, item in enumerate(self._items)
                      if item is self._format_source_item), -1)
 
     def format_target_rows(self) -> list:
-        """@brief Current rows of the bodies the format was pasted on, in paste order."""
+        """@brief Current rows of the bodies the format was pasted on, in paste order.
+
+        @return List of row indices; bodies removed since the paste are left out.
+        """
         rows = {id(item): index for index, item in enumerate(self._items)}
         return [rows[id(item)] for item in self._format_target_items if id(item) in rows]
 
@@ -2321,8 +2378,8 @@ class PhotoReviewDialog(QDialog):
         item = self._items[row]
         if self._format_source is None:
             self._format_source = copy_format(item.component)
-            # Nella revisione delle proposte si copia TUTTO tranne posizione
-            # e identita' (DETECTOR_TARGET_FIELDS): serve la riga intera.
+            # In the proposal review EVERYTHING is copied except position and
+            # identity (DETECTOR_TARGET_FIELDS): the whole row is needed.
             self._format_source_component = deepcopy(item.component)
             self._format_source_item = item
             name = item.component.get("name") or str(row + 1)
@@ -2340,9 +2397,9 @@ class PhotoReviewDialog(QDialog):
                     pasted[key] = deepcopy(item.component[key])
                 else:
                     pasted.pop(key, None)
-            # Il riquadro ora e' quello deciso da chi guarda, come dopo un
-            # trascinamento; tutti i lati sono cambiati, quindi nessuno resta
-            # «appoggiato alla cucitura di una tessera».
+            # The box is now the one decided by the viewer, as after a drag;
+            # all the sides have changed, so none stays
+            # «appoggiato alla cucitura di una tessera» (resting on a tile seam).
             mark_manual_box(pasted)
             pasted.pop("_yolo_clipped_sides", None)
             pasted.pop("_yolo_clipped_recovery", None)
@@ -2380,14 +2437,14 @@ class PhotoReviewDialog(QDialog):
             item.component["_ai_only_excluded"] = False
         else:
             item.component["_yolo_user_kept"] = True
-            item.component["_yolo_review_only"] = False
+            set_review_only(item.component, False)
         self._ai_only_changed(item)
 
     def _ai_only_changed(self, item):
         self._refresh_item(item)
         self._refresh_ai_only_summary()
         self._sync_keep_button()
-        # Tenuta o lasciata: cambia se la vede chi tiene spento l'interruttore.
+        # Kept or left out: changes whether it is seen by whoever keeps the switch off.
         self._apply_filter()
 
     def _sync_keep_button(self):
@@ -2421,11 +2478,17 @@ class PhotoReviewDialog(QDialog):
                     total=total, kept=total - left_out, left_out=left_out))
 
     def _refresh_detector_summary(self):
-        """The detector-stage summary: the same sentence the detector review always showed."""
+        """The detector-stage summary: the same sentence the detector review always showed.
+
+        «sicure/deboli» is the DETECTOR's split (user decision 2026-10-16),
+        read through `photo_yolo.detector_review_only`, so keeping, leaving
+        out, moving or resizing a proposal does not move it; «Ne tieni» and
+        the low-confidence sentence follow the reviewer's choices.
+        """
         rows = self._components
         added = sum(1 for p in rows if p.get("_yolo_origin") == "user_added")
         proposed = [p for p in rows if p.get("_yolo_origin") != "user_added"]
-        strong = sum(1 for p in proposed if not p.get("_yolo_review_only"))
+        strong = sum(1 for p in proposed if not detector_review_only(p))
         weak = len(proposed) - strong
         kept = sum(1 for p in rows if not left_out(p)) - added
         text = self._tr(
@@ -2442,13 +2505,17 @@ class PhotoReviewDialog(QDialog):
         self.ai_only_label.setText(text)
 
     def showEvent(self, event):
-        """@brief Fit the whole photo the first time the editor is shown."""
+        """@brief Fit the whole photo the first time the editor is shown.
+
+        @param event Qt show event, forwarded to the base class.
+        """
         super().showEvent(event)
         self.fit_photo()
 
     def hideEvent(self, event):
         """@brief Take the parameter modal down when the editor itself is dismissed.
 
+        @param event Qt hide event; its spontaneous() flag tells a minimize from a program hide.
         @note Only for hides requested by the program (close, reject, hide):
               the window system also hides the editor on minimize, and a
               modal closed then would not come back with ``showNormal()``.
@@ -2468,7 +2535,10 @@ class PhotoReviewDialog(QDialog):
             self._close_parameters()
 
     def closeEvent(self, event):
-        """@brief Close the parameter modal even when the editor was never shown."""
+        """@brief Close the parameter modal even when the editor was never shown.
+
+        @param event Qt close event, forwarded to the base class.
+        """
         self.view.cancel_draw()
         self._close_parameters()
         super().closeEvent(event)
@@ -2487,8 +2557,8 @@ class PhotoReviewDialog(QDialog):
         if focused is not None:
             focused.clearFocus()
         self.parameters_dialog.hide()
-        # Stessa ragione, nessun testo da salvare: una finestra figlia lasciata
-        # aperta sopra un editor chiuso resta orfana sullo schermo.
+        # Same reason, no text to save: a child window left open over a
+        # closed editor stays orphaned on the screen.
         self.uncertainties_dialog.hide()
 
     def fit_photo(self):
@@ -2584,11 +2654,11 @@ class PhotoReviewDialog(QDialog):
         self.zoom_label.setText(f"{self.view.zoom_percent()}%")
 
     def _update_details_button(self):
-        """Icona e tooltip dei dettagli: arancione quando il componente scelto ha avvisi.
+        """Details icon and tooltip: orange when the chosen component has warnings.
 
-        Gli avvisi stavano sempre sotto gli occhi in colonna; nel popup
-        sparirebbero, quindi l'icona dice che ce ne sono e il tooltip quanti.
-        Un popup aperto si ridimensiona sul testo nuovo.
+        The warnings used to be always in sight in the column; in the popup
+        they would disappear, so the icon says there are some and the tooltip
+        how many. An open popup is resized to the new text.
         """
         warned = self._selected_has_warnings
         self.details_button.setIcon(asset_icon(
@@ -2765,8 +2835,8 @@ class PhotoReviewDialog(QDialog):
             self.uncertainties_button,
             self._tr("Dubbi dichiarati dal modello ({count})…").format(count=len(seen)), "",
             self._tr("Le frasi del modello sulle incertezze dell'inventario, in una finestra."))
-        # Un elenco: numerarlo direbbe una priorita' che il modello non ha
-        # dichiarato, quindi ogni frase sta su una riga con lo stesso segno.
+        # A list: numbering it would state a priority the model did not
+        # declare, so every sentence sits on a line with the same mark.
         self.uncertainties_view.setPlainText("\n\n".join("• " + sentence for sentence in seen))
 
     def show_uncertainties(self):
@@ -2867,8 +2937,8 @@ class PhotoReviewDialog(QDialog):
             self.category_filter.setCurrentIndex(max(0, index))
         # The same vocabulary drives the type field of a newly drawn body.
         self._kind_model.setStringList(categories)
-        # Stesso momento, stessa causa: e' qui che l'insieme dei componenti
-        # cambia (costruzione, aggiunta, eliminazione).
+        # Same moment, same cause: it is here that the set of components
+        # changes (construction, addition, deletion).
         self._refresh_uncertainties()
         self._apply_filter()
 
@@ -2972,11 +3042,11 @@ class PhotoReviewDialog(QDialog):
         with QSignalBlocker(self.scene):
             for index, item in enumerate(self._items):
                 if index == row and not item.isVisible():
-                    # Qt non seleziona un oggetto nascosto: un componente
-                    # appena aggiunto, o scelto dal tab 3D, fuori dal filtro
-                    # attivo restava non scelto e la tipologia scritta dopo
-                    # non andava a nessuno. Il componente su cui si lavora
-                    # resta visibile (vedi _apply_filter).
+                    # Qt does not select a hidden item: a component just
+                    # added, or chosen from the 3D tab, outside the active
+                    # filter stayed unselected and the type typed afterwards
+                    # went to nobody. The component being worked on stays
+                    # visible (see _apply_filter).
                     item.setVisible(True)
                 item.setSelected(index == row)
         self._selection_changed()
@@ -2994,7 +3064,7 @@ class PhotoReviewDialog(QDialog):
             with QSignalBlocker(self.scene):
                 for item in self._items:
                     item.setSelected(item is selected)
-            # Un corpo scelto da solo chiude il gruppo del lazo.
+            # A body chosen on its own closes the lasso group.
             if self._lasso_items:
                 self._lasso_items = []
                 self._sync_lasso_ui()
@@ -3129,7 +3199,11 @@ class PhotoReviewDialog(QDialog):
 
     @staticmethod
     def classification_state(component):
-        """@brief Distinguish unknown category, retained proposal and conflicting evidence."""
+        """@brief Distinguish unknown category, retained proposal and conflicting evidence.
+
+        @param component Inventory row (dict) with class/kind, status and detector fields.
+        @return One of 'conflict', 'proposed', 'unknown' or 'supported'.
+        """
         if component.get('_crop_class_status') == 'conflict' or component.get('_category_status') == 'conflict':
             return 'conflict'
         # Non-string values are missing category evidence, never support.
@@ -3224,10 +3298,11 @@ class PhotoReviewDialog(QDialog):
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
             warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
         if self.type_undetermined(item.component):
-            # L'avviso dice cosa FARE, non che c'e' un dubbio: il dubbio del
-            # modello e' gia' una risposta corretta (il progetto non inventa
-            # identita' elettriche), mentre la scatola generica che ne segue e'
-            # il difetto visibile, e si ripara qui in un doppio clic.
+            # The warning says what to DO, not that there is a doubt: the
+            # model's doubt is already a correct answer (the project does not
+            # invent electrical identities), whereas the generic box that
+            # follows from it is the visible defect, and it is fixed here with
+            # a double click.
             warnings.append(self._tr(
                 "Il modello non ha stabilito il tipo di questo corpo: senza una scelta "
                 "manuale il 3D resta una scatola generica senza terminali. Doppio clic "
@@ -3239,14 +3314,15 @@ class PhotoReviewDialog(QDialog):
         if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
         elif (component.get('model_match') or {}).get('status') == 'library_matched' and selection.get('status') != 'confirmed':
-            # Scelta dell'utente: «preseleziona, tu confermi». Il modello viene
-            # da un abbinamento gia' approvato su un'altra scheda con la stessa
-            # firma geometrica; il verso dipende da questa scheda.
+            # User's choice: «preseleziona, tu confermi» (preselect, you
+            # confirm). The model comes from a match already approved on
+            # another board with the same geometric signature; the
+            # orientation depends on this board.
             warnings.append(self._tr("Modello KiCad preso dall'archivio dei tuoi abbinamenti accettati (stessa forma e misure): verifica il verso; doppio clic per confermarlo o cambiarlo."))
         elif (component.get('model_match') or {}).get('status') == 'provisional_matched' and selection.get('status') != 'confirmed':
-            # Decisione dell'utente (1+3): il provvisorio torna ad agganciare
-            # il modello, ma dichiarato come tale, cosi' chi rivede sa che
-            # l'identita' viene dalla sola geometria e non da una marcatura.
+            # User's decision (1+3): the provisional match hooks the model
+            # again, but declared as such, so the reviewer knows the identity
+            # comes from geometry alone and not from a marking.
             warnings.append(self._tr("Modello KiCad applicato provvisoriamente dalla sola geometria: identità non certificata; doppio clic per confermarlo o cambiarlo."))
         elif selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
@@ -3269,24 +3345,27 @@ class PhotoReviewDialog(QDialog):
         outside = not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds())
         detector = self._stage == STAGE_DETECTOR
         undetermined = not detector and self.type_undetermined(item.component)
-        # Una sola linea porta un solo colore, quindi la precedenza va
-        # dichiarata: fuori PCB prima di tutto, perche' un corpo che non e'
-        # sulla scheda rende accademica ogni altra domanda; poi il tipo non
-        # stabilito, che e' piu' specifico e piu' azionabile del generico «da
-        # verificare»; poi gli altri avvisi. Il testo invece non ha questo
-        # limite: warning_label e tooltip elencano TUTTE le righe che valgono,
-        # quindi un corpo fuori PCB e senza tipo le mostra entrambe.
-        # Un corpo solo-AI escluso non fa parte dell'inventario finche' non lo
-        # si tiene: il suo contorno dice prima di tutto questo (tenue e
-        # tratteggiato), gli altri avvisi restano nel testo.
+        # A single line carries a single colour, so the precedence must be
+        # declared: outside the PCB first of all, because a body that is not
+        # on the board makes every other question academic; then the
+        # undetermined type, which is more specific and more actionable than
+        # the generic «da verificare» (to be checked); then the other
+        # warnings. The text instead has no such limit: warning_label and
+        # tooltip list ALL the lines that apply, so a body outside the PCB
+        # and without a type shows both.
+        # An excluded AI-only body is not part of the inventory until it is
+        # kept: its outline says this first of all (faint and dashed), the
+        # other warnings stay in the text.
         excluded = left_out(item.component)
         color = QColor(AI_ONLY_EXCLUDED_COLOR if excluded else "#ef5350" if outside
                        else UNDETERMINED_TYPE_COLOR if undetermined
                        else "#ffad33" if warnings else "#40dc80")
-        # «Copia formato» acceso: sorgente gialla e incollati verdi, gli stessi
-        # colori del pennello nel tab 3D (utente, 2026-10-02: «l'elemento usato
-        # per copiare deve risultare evidenziato»). Vale solo finche' il
-        # pennello e' acceso: spento, ogni corpo torna al colore del suo stato.
+        # «Copia formato» (copy format) on: yellow source and green pasted
+        # bodies, the same colours as the brush in the 3D tab (user, 2026-10-02:
+        # «l'elemento usato per copiare deve risultare evidenziato» (the element
+        # used for copying must be highlighted)).
+        # It holds only while the brush is on: off, every body goes back to
+        # the colour of its status.
         format_role = (FORMAT_SOURCE_COLOR if item is self._format_source_item
                        else FORMAT_TARGET_COLOR if self._is_format_target(item) else None)
         if format_role is not None:
@@ -3306,13 +3385,14 @@ class PhotoReviewDialog(QDialog):
                       else 60 if item.isSelected() else AI_ONLY_EXCLUDED_FILL_ALPHA if excluded
                       else 15)
         item.setBrush(QBrush(fill))
-        # Fra rettangoli sovrapposti il clic va al PIU' PICCOLO: sopra i piu'
-        # piccoli, a qualunque posto dell'elenco (utente, 2026-09-24: una
-        # proposta spuria dentro un corpo grande non si poteva scegliere).
-        # Solo l'area decide, anche per il rettangolo scelto: prima la scelta
-        # lo portava sopra tutti, e scelto un corpo grande i piccoli dentro
-        # non si prendevano piu' (revisore 1, difetto 2). La scelta si vede
-        # dall'alone, dal tratto e dal riempimento, non dall'ordine.
+        # Among overlapping rectangles the click goes to the SMALLEST: the
+        # smaller ones on top, at any position in the list (user, 2026-09-24:
+        # a spurious proposal inside a large body could not be chosen).
+        # Only the area decides, also for the chosen rectangle: before, the
+        # choice brought it above all, and once a large body was chosen the
+        # small ones inside could no longer be taken (reviewer 1, defect 2).
+        # The choice is seen from the halo, the stroke and the fill, not from
+        # the order.
         bounds = item.photo_bounds()
         smallness = 1.0 / (1.0 + max(0.0, bounds.width() * bounds.height()))
         item.setZValue(1 + smallness)
@@ -3337,9 +3417,10 @@ class PhotoReviewDialog(QDialog):
         self.component_list.item(index).setText(text)
         row_item = self.component_list.item(index)
         if format_role == FORMAT_SOURCE_COLOR:
-            # La sorgente della copia si riconosce a colpo d'occhio: riga piena
-            # gialla con testo scuro (utente, 2026-10-02: «deve essere piu'
-            # evidente quando lo seleziono per fare copie»).
+            # The copy source is recognisable at a glance: a filled yellow row
+            # with dark text (user, 2026-10-02:
+            # «deve essere piu' evidente quando lo seleziono per fare copie»
+            # (it must be more evident when I select it to make copies)).
             row_item.setBackground(QBrush(QColor(FORMAT_SOURCE_COLOR)))
             row_item.setForeground(QColor(FORMAT_SOURCE_TEXT_COLOR))
         else:
@@ -3352,10 +3433,11 @@ class PhotoReviewDialog(QDialog):
         tooltip = "<b>" + escape(text) + "</b>" + "".join(
             "<br>" + escape(warning) for warning in warnings)
         item.setToolTip(tooltip)
-        # Stessa spiegazione sulla riga della lista: il marcatore e' corto per
-        # forza, la frase che dice cosa fare deve restare raggiungibile anche
-        # da chi sta leggendo l'elenco invece della foto. Non e' la correzione
-        # da sola -- il colore e il marcatore si vedono senza puntare nulla.
+        # Same explanation on the list row: the marker is short by necessity,
+        # the sentence saying what to do must stay reachable also for whoever
+        # is reading the list instead of the photo. It is not the fix on its
+        # own -- the colour and the marker are seen without pointing at
+        # anything.
         self.component_list.item(index).setToolTip(tooltip)
         if item.isSelected():
             # A model chosen or a type typed changes what the AI lines say.
@@ -3431,13 +3513,13 @@ class PhotoReviewDialog(QDialog):
         # normalized terminal boxes. Keep package/mating identity, but do not
         # stretch or relocate observed metal as if it had been measured again.
         #
-        # Una rotazione e' l'eccezione: sposta e ridimensiona invalidano cio'
-        # che il rettangolo racchiude, ruotare no. `bbox_basis` risponde a "il
-        # contorno segue il corpo o il corpo coi reofori", e girare lo stesso
-        # contorno non cambia quella risposta; lo stesso vale per la
-        # descrizione della morfologia osservata. Scriverci "unknown" non
-        # significa "non lo so piu'": e' un'affermazione diversa, che manda il
-        # componente sul ramo delle piazzole e gli nega il modello nativo.
+        # A rotation is the exception: moving and resizing invalidate what the
+        # rectangle encloses, rotating does not. `bbox_basis` answers "does the
+        # outline follow the body or the body with its leads", and turning the
+        # same outline does not change that answer; the same holds for the
+        # description of the observed morphology. Writing "unknown" there does
+        # not mean "I no longer know": it is a different statement, which sends
+        # the component down the pads branch and denies it the native model.
         if not rotation_only:
             if "bbox_basis" in item.component:
                 item.component["bbox_basis"] = "unknown"
@@ -3445,8 +3527,8 @@ class PhotoReviewDialog(QDialog):
         item.component.pop("terminal_geometry", None)
         item.component.pop("model_match", None)
         item.component.pop("model_selection", None)
-        # Spostato, ridimensionato o ruotato a mano: la lettura della rete SMD
-        # descrive il riquadro di prima, non questo (audit 2026-10-02).
+        # Moved, resized or rotated by hand: the SMD network's reading
+        # describes the previous box, not this one (audit 2026-10-02).
         drop_classifier_identity(item.component)
         if self._stage == STAGE_DETECTOR:
             # The reviewer's hand is the decision of presence, and the model
@@ -3528,7 +3610,7 @@ class PhotoReviewDialog(QDialog):
         item.component[key] = value
         self._keep_touched(item)
         if key == "height_mm":
-            # Scritta a mano: da qui e' una lettura dell'utente, non una stima.
+            # Typed by hand: from here on it is a user reading, not an estimate.
             mark_height_measured(item.component)
             self._refresh_height_label(item.component)
             self._refresh_item(item)
@@ -3544,8 +3626,8 @@ class PhotoReviewDialog(QDialog):
                 item.component[key] = value
                 self._keep_touched(item)
                 if key in ('kind', 'package'):
-                    # Un tipo o un package scritti a mano sostituiscono quelli
-                    # della rete SMD: la sua identita' non vale piu'.
+                    # A type or a package typed by hand replaces those of
+                    # the SMD network: its identity no longer holds.
                     drop_classifier_identity(item.component)
                 if key == 'kind':
                     item.component.pop('model_match', None)
@@ -3575,11 +3657,11 @@ class PhotoReviewDialog(QDialog):
         # A dismissed editor must not destroy a running measurement thread.
         application = QApplication.instance()
         application.aboutToQuit.connect(worker.wait)
-        # ...ma la promessa vale finche' il thread esiste. Senza scioglierla,
-        # alla chiusura Qt chiamerebbe wait su un oggetto gia' eliminato da
-        # deleteLater e l'uscita finirebbe con RuntimeError: wrapped C/C++
-        # object of type _MatchWorker has been deleted. Sciolta prima della
-        # distruzione, perche' i gestori scattano nell'ordine di connessione.
+        # ...but the promise holds as long as the thread exists. Without
+        # releasing it, on closing Qt would call wait on an object already
+        # deleted by deleteLater and the exit would end with RuntimeError:
+        # wrapped C/C++ object of type _MatchWorker has been deleted. Released
+        # before destruction, because the handlers fire in connection order.
         worker.finished.connect(lambda: application.aboutToQuit.disconnect(worker.wait))
         worker.finished.connect(worker.deleteLater)
         worker.start()
@@ -3723,6 +3805,7 @@ class PhotoReviewDialog(QDialog):
     def keyPressEvent(self, event):
         """@brief Let Escape disarm the drawing mode, and make Return apply.
 
+        @param event Qt key press event.
         @note An armed mode is the innermost thing Escape can cancel: leaving
               the dialog while the user only wanted to give up on the rectangle
               would throw away the whole review. Escape with nothing armed
@@ -3856,7 +3939,7 @@ class PhotoReviewDialog(QDialog):
         component = dict(name=self._tr("Nuovo componente"), kind="generic", x_mm=x_mm, y_mm=y_mm,
                          length_mm=length, width_mm=width, height_mm=1.0, rotation_deg=0.0,
                          confidence="low", _uncertain=True)
-        # 1 mm e' un segnaposto: marcato come stima finche' l'utente non lo scrive.
+        # 1 mm is a placeholder: marked as an estimate until the user types it.
         mark_height_placeholder(component)
         self._components.append(component)
         self._append_item(component)
@@ -3896,7 +3979,7 @@ class PhotoReviewDialog(QDialog):
         horizontal = self.view.horizontalScrollBar().value()
         vertical = self.view.verticalScrollBar().value()
         with QSignalBlocker(self.scene), QSignalBlocker(self.component_list):
-            # Dall'ultimo al primo: gli indici piu' bassi restano validi.
+            # From last to first: the lower indices stay valid.
             for victim in sorted(doomed, key=self._items.index, reverse=True):
                 position = self._items.index(victim)
                 self.scene.removeItem(victim)
@@ -3907,7 +3990,7 @@ class PhotoReviewDialog(QDialog):
         self._sync_lasso_ui()
         self._format_target_items = [t for t in self._format_target_items if t not in doomed]
         if self._format_source_item in doomed:
-            # Cancellata la sorgente non c'e' piu' nulla da incollare.
+            # With the source deleted there is nothing left to paste.
             self.format_button.setChecked(False)
         # A category can disappear with its last component.
         self._refresh_categories()

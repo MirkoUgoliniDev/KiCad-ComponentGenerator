@@ -157,11 +157,19 @@ def flip_y():
     return namespace["_flip_y"]
 
 
+# CONTRACT CHANGED 2026-10-16 (MEDIO 16, attached leads anchored to a body
+# face): this test checks rotation composition with the oracle "foot == rotated
+# observed box". Its former body [.1, .2, .6, .8] touched terminal
+# [.6, .75, .7, 1] at a corner only; such a lead is now anchored to the face it
+# protrudes from most and its root lengthened by the riser footprint, so the
+# raw box is no longer the foot (see test_terminal_render_contract). The body
+# now gives every terminal a face contact or a clear island (the right one),
+# both of which leave the observed foot unchanged.
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 @pytest.mark.parametrize("length,width", [(10, 4), (3, 9)])
 def test_flip_y_builder_and_external_cardinal_rotation_compose(cad, flip_y, rotation, length, width):
     module, _ = cad
-    geometry = observation(body_bbox=[.1, .2, .6, .8])
+    geometry = observation(body_bbox=[.1, .2, .7, .8])
     source = component(x=13, y=7, length_mm=length, width_mm=width,
                        rotation_deg=rotation, terminal_geometry=geometry)
     data = dict(body=dict(offset_y_mm=-10, width_mm=20), components=[copy.deepcopy(source)])

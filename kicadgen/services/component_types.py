@@ -1,20 +1,18 @@
 """@brief Component types declared before the AI extraction, each with its instruction block.
 
-Tipologie di componente da dichiarare prima dell'estrazione AI.
+Knowing in advance *what* is being read completely changes which dimensions
+the model must look for in the datasheet: an SMD component has no holes and
+its pad sizes are read from the "recommended land pattern", a module with
+castellated holes has half-holes on the PCB edge, a THT header has pad and
+drill dimensioned directly.
 
-Sapere in anticipo *che cosa* si sta leggendo cambia completamente quali
-quote il modello deve cercare nel datasheet: un componente SMD non ha
-fori e le dimensioni dei pad si leggono dal "recommended land pattern",
-un modulo con castellated holes ha i semi-fori sul bordo del PCB, un
-header THT ha pad e drill quotati direttamente.
+Every type carries an instruction block that the GUI inserts in the notes of
+the single component ("Progetto" tab): from there it stays freely editable
+before the extraction is launched -- it is a starting point, not a locked
+text.
 
-Ogni tipologia porta con se' un blocco di istruzioni che la GUI inserisce
-nelle note del singolo componente (tab "Progetto"): da li' resta
-liberamente modificabile prima di lanciare l'estrazione -- e' un punto di
-partenza, non un testo bloccato.
-
-Il blocco e' delimitato da due marcatori, cosi' cambiando tipologia si
-sostituisce solo il blocco e non quello che l'utente ha scritto di suo.
+The block is delimited by two markers, so that changing the type replaces
+only the block and not what the user wrote on their own.
 """
 
 from __future__ import annotations
@@ -28,10 +26,7 @@ BLOCK_END = "--- fine tipologia componente ---"
 
 @dataclass(frozen=True)
 class ComponentType:
-    """@brief Selectable component type with the instruction passed to the model.
-
-    Una tipologia selezionabile, con l'istruzione da passare al modello.
-    """
+    """@brief Selectable component type with the instruction passed to the model."""
 
     key: str
     label: str
@@ -218,7 +213,8 @@ def text_digest(text: str) -> str:
 def get(key: Optional[str]) -> Optional[ComponentType]:
     """@brief Return the component type for `key`, or None when unknown or not given.
 
-    Tipologia dal suo `key`, oppure None se sconosciuta o non indicata.
+    @param key Type key as stored in the catalogue; None or empty means no type.
+    @return The matching ComponentType, or None.
     """
     return _BY_KEY.get(key) if key else None
 
@@ -226,7 +222,8 @@ def get(key: Optional[str]) -> Optional[ComponentType]:
 def build_block(component_type: ComponentType) -> str:
     """@brief Return the type instruction wrapped in the block markers, ready for the notes.
 
-    Blocco di testo delimitato dai marcatori, pronto per le note.
+    @param component_type Type whose `prompt` is wrapped.
+    @return BLOCK_START, the instruction and BLOCK_END on separate lines.
     """
     return f"{BLOCK_START}\n{component_type.prompt}\n{BLOCK_END}"
 
@@ -234,19 +231,22 @@ def build_block(component_type: ComponentType) -> str:
 def strip_block(text: str) -> str:
     """@brief Remove the component type block from the notes, keeping the user text.
 
-    Toglie dal testo il blocco tipologia, lasciando intatto il resto.
+    This is what lets the type change without erasing the hand-written notes:
+    the previous block is removed and the new one inserted.
 
-    Serve a cambiare tipologia senza cancellare le note scritte a mano:
-    si rimuove il blocco precedente e si reinserisce quello nuovo.
+    @param text Notes text, possibly holding one marker-delimited block.
+    @return The notes without the block, stripped of surrounding blank lines.
+    @note A block whose closing marker was deleted by the user loses the rest
+        of the block, never the text before it, which is certainly the user's.
     """
     if BLOCK_START not in text:
         return text.strip()
 
     before, _, rest = text.partition(BLOCK_START)
     _, end_found, after = rest.partition(BLOCK_END)
-    # Blocco senza marcatore di chiusura (l'utente potrebbe averlo
-    # cancellato): si butta via tutto il resto del blocco, non il testo
-    # precedente, che e' sicuramente suo.
+    # Block without a closing marker (the user may have deleted it): the
+    # rest of the block is thrown away, not the preceding text, which is
+    # certainly the user's.
     remainder = after if end_found else ""
     return "\n".join(part for part in (before.strip(), remainder.strip()) if part).strip()
 
@@ -254,10 +254,10 @@ def strip_block(text: str) -> str:
 def apply_block(text: str, component_type: Optional[ComponentType]) -> str:
     """@brief Return the notes with the block of the chosen type at the top (only removed when None).
 
-    Testo delle note con il blocco della tipologia scelta in testa.
-
-    Con `component_type=None` (tipologia non indicata) si limita a
-    rimuovere l'eventuale blocco precedente.
+    @param text Current notes text (None is treated as empty).
+    @param component_type Chosen type, or None (no type declared): then the
+        previous block, if any, is only removed.
+    @return The notes with the new block first, then the user text.
     """
     cleaned = strip_block(text or "")
     if component_type is None:

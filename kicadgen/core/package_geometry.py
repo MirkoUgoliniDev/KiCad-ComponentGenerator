@@ -1,10 +1,8 @@
 """@brief Generic package and pad geometry, not limited to pin matrices.
 
-Geometria generica dei package e dei loro pad.
-
-Il modello non presume che i pin siano una matrice: la matrice dei pin header
-e' solo un caso particolare. Le coordinate sono locali al package e viste
-dall'alto, cioe' nello stesso sistema usato da KiCad.
+The model does not assume that the pins form a matrix: the pin header
+matrix is only a special case. Coordinates are local to the package and
+seen from the top, i.e. in the same system KiCad uses.
 """
 
 from __future__ import annotations
@@ -137,8 +135,8 @@ class PackageGeometry:
             value = getattr(self, key)
             if value is not None:
                 _finite(value, key, True)
-        # Il modello esiste per descrivere pad espliciti: senza pad non c'e'
-        # footprint da scrivere, e un .kicad_mod vuoto passerebbe per buono.
+        # The model exists to describe explicit pads: without pads there is no
+        # footprint to write, and an empty .kicad_mod would pass as valid.
         if not self.pins:
             raise ValueError(tx("la geometria package non ha pad"))
         names: dict = {}
@@ -150,9 +148,9 @@ class PackageGeometry:
             if known and name and known.casefold() != name.casefold():
                 raise ValueError(tx("pin duplicato: {number}", number=pin.number))
             names[pin.number] = known or name
-            # Rettangolo ruotato del pad (convenzione KiCad): un controllo su
-            # rettangoli allineati agli assi rifiuterebbe pad di QFN ruotati
-            # che non si toccano e accetterebbe pad ruotati che si toccano.
+            # Rotated rectangle of the pad (KiCad convention): a check on axis-aligned
+            # rectangles would reject rotated QFN pads that do not touch and accept
+            # rotated pads that do touch.
             outline = pad_outline(pin.x_mm, pin.y_mm, pin.pad_length_mm,
                                   pin.pad_width_mm, pin.rotation_deg)
             for other_pin, other in outlines:
@@ -318,7 +316,15 @@ def polygon_separation(first: Sequence, second: Sequence) -> float:
 def package_from_mapping(data: dict) -> PackageGeometry:
     """@brief Build and validate a PackageGeometry from the AI tool JSON; raise ValueError when invalid.
 
-    Costruisce e valida il modello dal JSON restituito dal tool AI.
+    @param data The decoded JSON object returned by the AI tool: package
+        fields plus a `pins` list of pad dicts (number, x_mm, y_mm,
+        pad_length_mm, pad_width_mm and the optional side, name, pad_type,
+        shape, rotation_deg, drill_mm). A null `mirrored` means «not
+        mirrored», a null `lead_form` means «not observed».
+    @return The validated PackageGeometry.
+    @throws ValueError When `data` is not an object or the resulting geometry
+        does not validate (see `PackageGeometry.validate`).
+    @throws KeyError When a pin dict lacks one of its required fields.
     """
     if not isinstance(data, dict):
         raise ValueError(tx("geometria package non strutturata"))
@@ -565,7 +571,7 @@ def package_doubts(geometry: "PackageGeometry") -> list:
       numbering of these families runs counter-clockwise (JEDEC convention).
       A clockwise numbering is the signature of a drawing read with Y up or
       reflected twice; reverse-pinout parts exist, so it is a doubt. Works
-      with two pins per side too (DIP-4, SOIC-4).
+      with two pins on each side too (DIP-4, SOIC-4).
 
     @param geometry The package geometry, validated here.
     @return GeometryDoubt objects in the order above; empty when nothing is
@@ -574,7 +580,7 @@ def package_doubts(geometry: "PackageGeometry") -> list:
     @note Limits, stated so they are not mistaken for guarantees: a body
         transposed so that NEITHER orientation breaks a rule (a TSSOP-8 whose
         length along the rows is shorter than its width) is not detected;
-        with two round through-hole pins per side (DIP-4) the row direction
+        with two round through-hole pins on each side (DIP-4) the row direction
         is unknown and the FACE rule is skipped; families outside
         SIDE_LEAD_FAMILIES are not checked for body/pad or numbering, because
         their terminals may lie under the body by design and their numbering

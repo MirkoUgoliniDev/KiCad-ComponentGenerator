@@ -1,6 +1,6 @@
 """@brief Count the half-hole notches of a castellated module on its calibrated top photo.
 
-The number of contacts per side comes from the AI reading the documents, and
+The number of contacts of each side comes from the AI reading the documents, and
 an answer can be consistent with itself (as many names as contacts, a row that
 fits its edge) and still be wrong: on the RS485 sample the model once counted
 an LED label as a fifth contact (HANDOFF points 132-133). The photo can check
@@ -17,7 +17,7 @@ recounted contacts sit where the photo shows the notches.
 
 How the outline is measured (HANDOFF point 139, G1):
 - the profile of an edge is the signed position of the board outline relative
-  to the crop edge, per position along it (positive inside the crop);
+  to the crop edge, at each position along it (positive inside the crop);
 - the reference is the outline itself between the notches -- the LOWER
   ENVELOPE of the profile, fitted as a line plus a local correction -- not the
   median of the profile: a residual tilt of the photo makes the outline a
@@ -192,8 +192,8 @@ def depth_profiles(background_mask, box, max_depth_px: Union[int, Mapping],
     @param outside_px How far OUT of the box the board is followed when it
         reaches the box edge, in pixels: one number, {edge: pixels}, or None
         (0: the outline is then taken at the box edge, as before point 139).
-    @return {edge: list}: for left/right one value per row of the box, for
-        top/bottom one per column. A value is the position of the first board
+    @return {edge: list}: for left/right one value for each row of the box, for
+        top/bottom one for each column. A value is the position of the first board
         pixel counted from the box edge: positive when background enters the
         box (a notch, or a box wider than the board), negative when the board
         runs past the box edge, capped at max_depth_px; None when the board
@@ -325,8 +325,8 @@ def _outline_baseline(values, known, window):
     x = np.arange(n, dtype=float)
     if known.sum() < 3:
         return None
-    # Rumore del contorno dalle differenze fra posizioni vicine: robusto anche
-    # con le tacche (pochi salti) e indipendente dall'inclinazione.
+    # Contour noise from the differences between neighbouring positions:
+    # robust even with the notches (few jumps) and independent of the tilt.
     pairs = known[1:] & known[:-1]
     diffs = np.diff(values)[pairs]
     sigma_diff = _mad_sigma(diffs) / math.sqrt(2.0) if diffs.size else 0.0
@@ -342,8 +342,8 @@ def _outline_baseline(values, known, window):
         if np.array_equal(new_keep, keep):
             break
         keep = new_keep
-    # La linea dell'inviluppo inferiore sta sotto il contorno di circa il
-    # rumore: la si riporta sul contorno con la mediana dei residui bassi.
+    # The lower envelope line lies below the contour by about the noise: it
+    # is brought back onto the contour with the median of the low residuals.
     residual = values - np.polyval(coef, x)
     band = max(EDGE_UNCERTAINTY_PX, NOISE_BAND_SIGMAS * sigma_diff)
     level = np.median(residual[known & (residual <= np.quantile(residual[known], 0.5))])
@@ -359,7 +359,7 @@ def _outline_baseline(values, known, window):
     coef = np.polyfit(x[outline], values[outline], 1)
     line = np.polyval(coef, x)
     residual = values - line
-    # Correzione locale: mediana mobile del residuo del SOLO contorno.
+    # Local correction: moving median of the residual of the contour ONLY.
     half = max(2, int(window) // 2)
     step = max(1, half // 2)
     anchors, offsets = [], []
@@ -440,19 +440,19 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     residual = np.where(known, filled - baseline, 0.0)
     band = max(EDGE_UNCERTAINTY_PX, NOISE_BAND_SIGMAS * sigma)
     required = NOTCH_SEPARATION * band
-    # Nessuna profondita' minima ricavata dal diametro (punto 140): la tacca e'
-    # profonda quanto il foro sporge dal bordo, che dipende da dove cade il suo
-    # centro, non dalla sua misura. Il diametro letto limita solo la LARGHEZZA.
+    # No minimum depth derived from the diameter (point 140): the notch is as
+    # deep as the hole protrudes from the edge, which depends on where its
+    # centre falls, not on its size. The read diameter limits only the WIDTH.
     widest = (diameter * scale + HOLE_WIDTH_SLACK_PX * EDGE_UNCERTAINTY_PX
               if diameter is not None else None)
     flags = (residual >= band) & known
-    # Corse sopra la banda che toccano un'estremita' del bordo o un tratto
-    # non visto (l'arco di un angolo arrotondato, le colonne di sfondo di un
-    # ritaglio inclinato, una tacca tagliata dall'angolo) non si misurano. Si
-    # mettono da parte PRIMA di unire le corse vicine: unite dopo, una o due
-    # colonne di sfondo all'angolo si fondevano con la prima tacca e la
-    # facevano sparire con loro (punto 139, R-G1). Restano segnate in `flags`:
-    # _row_may_continue non le prende per contorno pulito.
+    # Runs above the band that touch an end of the edge or an unseen stretch
+    # (the arc of a rounded corner, the background columns of a tilted crop,
+    # a notch cut by the corner) are not measured. They are set aside BEFORE
+    # merging nearby runs: merged afterwards, one or two background columns at
+    # the corner fused with the first notch and made it vanish with them
+    # (point 139, R-G1). They stay marked in `flags`: _row_may_continue does
+    # not take them for a clean contour.
     min_width = max(MIN_NOTCH_WIDTH_PX, MIN_NOTCH_WIDTH_MM * scale)
     inner = _away_from_the_ends(_runs(flags.tolist()), known, min_width)
     max_gap = max(MIN_NOTCH_WIDTH_PX, MERGE_GAP_PITCH_FRACTION * pitch * scale
@@ -471,8 +471,8 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
             continue
         peak = float(residual[start:stop].max())
         if widest is not None and width > widest and peak >= required:
-            # Troppo larga per essere il semiforo dichiarato: non si conta
-            # come tale, e non prova nemmeno che non ci sia.
+            # Too wide to be the declared half-hole: it is not counted as
+            # such, and it does not prove there is none either.
             too_wide.append((start, stop))
             continue
         (notches if peak >= required else ambiguous).append((start, stop))
@@ -485,8 +485,8 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     if not notches:
         smallest = MIN_HALF_HOLE_DIAMETER_MM / 2 * across
         if smallest < NOTCH_SEPARATION * band:
-            # Un semiforo cosi' piccolo non si distinguerebbe dal rumore: il
-            # bordo dritto non prova che le tacche non ci sono.
+            # A half-hole this small would not stand out from the noise: the
+            # straight edge does not prove that the notches are absent.
             return EdgeCount("", None, tolerance_mm=tolerance_mm, reason=tx(
                 "foto troppo poco definita o contorno troppo irregolare per vedere i semi-fori"))
         return EdgeCount("", None, reason=tx("nessuna tacca visibile sul bordo"), no_notch=True,
@@ -494,9 +494,9 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
     centres_px = [(start + stop) / 2 for start, stop in notches]
     centres = [round(c / scale, 3) for c in centres_px]
     if pitch is not None and len(notches) < 2 and declared_count != 1:
-        # Una sola tacca non e' una fila: la piazzola di un foro intero, un
-        # segno di fresatura o un foro di fissaggio la fanno uguale. Vale solo
-        # se il lato dichiara proprio un contatto (punto 139, R-M2).
+        # A single notch is not a row: the pad of a full hole, a milling mark
+        # or a mounting hole look the same. It counts only if the side
+        # declares exactly one contact (point 139, R-M2).
         return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
                          reason=tx("una sola tacca: non basta per riconoscere una fila di "
                                    "contatti"))
@@ -527,16 +527,16 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
             return EdgeCount("", None, centres_mm=centres, tolerance_mm=tolerance_mm,
                              reason=tx("tacche di larghezze diverse"))
     if missing:
-        # Un buco nella fila e' una tacca che manca o che non si vede (una
-        # freccia di quota, polvere, un'ombra): il numero e' solo un minimo e
-        # non puo' smentire ne' correggere il conteggio dichiarato.
+        # A gap in the row is a notch that is missing or not visible (a
+        # dimension arrow, dust, a shadow): the number is only a minimum and
+        # can neither contradict nor correct the declared count.
         return EdgeCount("", None, centres_mm=centres, at_least=len(centres),
                          tolerance_mm=tolerance_mm, reason=tx(
                              "manca una tacca nella fila, forse nascosta: sulla foto se ne "
                              "contano almeno {found}", found=len(centres)))
     if unit is not None and _row_may_continue(notches, centres_px, multiples, unit * scale,
                                               known & ~flags):
-        # Lo stesso vale in testa e in coda alla fila (punto 139, R-G1/R-M3).
+        # The same holds at the head and tail of the row (point 139, R-G1/R-M3).
         return EdgeCount("", None, centres_mm=centres, at_least=len(centres),
                          tolerance_mm=tolerance_mm, reason=tx(
                              "la fila puo' continuare in un tratto del bordo non misurabile "
@@ -587,7 +587,7 @@ def _row_may_continue(notches, centres_px, multiples, unit_px, clean) -> bool:
             lo = max(0, int(math.ceil(slot - core)))
             hi = min(n, int(math.floor(slot + core)) + 1)
             if lo >= hi:
-                continue   # oltre la fine del bordo: li' non c'e' un semiforo di questo lato
+                continue   # beyond the end of the edge: no half-hole of this side there
             if not clean[lo:hi].any():
                 return True
             continue
@@ -770,12 +770,12 @@ def _count_side(profile, scales, side, edge_length_mm=None, shift_bound_mm=None)
     counted = count_notches(profile, along, side.get("pitch_mm"), across_px_per_mm=across,
                             hole_diameter_mm=side.get("hole_diameter_mm"),
                             declared_count=side.get("count"))
-    # Nessuna ipotesi di semifori nascosti su contorno misurato liscio (punto
-    # 142): count_notches da' un numero valido solo dopo aver visto liscio il
-    # posto successivo al primo e all'ultimo semiforo, e presumerli coperti
-    # impediva di smentire un modello che contava troppo (6 dichiarati per 4
-    # semifori veri). Un semiforo davvero coperto diventa un disaccordo: un
-    # ricontrollo e, se il modello conferma, un avviso; mai un dato sbagliato.
+    # No assumption of hidden half-holes on a contour measured smooth (point
+    # 142): count_notches gives a valid number only after seeing smooth the
+    # spot after the first and the last half-hole, and presuming them covered
+    # prevented contradicting a model that counted too many (6 declared for
+    # 4 real half-holes). A truly covered half-hole becomes a disagreement: a
+    # recheck and, if the model confirms, a warning; never a wrong datum.
     return counted
 
 
@@ -840,10 +840,10 @@ def count_disagreements(profiles, crop_shape, length_mm: float, width_mm: float,
                                     no_notch=True, tolerance_mm=counted.tolerance_mm,
                                     shift_bound_mm=bound))
         elif counted.found is None:
-            # Solo un bordo di cui la foto non ha letto NULLA (nessun centro
-            # misurato) va rivisto dal modello; una fila che e' un limite
-            # inferiore, o una tacca sola (centro misurato, non una fila:
-            # resta il solo log), non chiede una chiamata a pagamento.
+            # Only an edge of which the photo read NOTHING (no measured
+            # centre) is reviewed by the model; a row that is a lower bound,
+            # or a single notch (measured centre, not a row: only the log
+            # remains), does not ask for a paid call.
             if counted.at_least is None and not counted.centres_mm:
                 result.append(EdgeCount(edge, None, side["count"], [], reason=counted.reason,
                                         tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))

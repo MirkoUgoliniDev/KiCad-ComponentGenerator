@@ -48,8 +48,8 @@ inventory and the crop goes to review, never adopted. So:
 - the program derives class and package family from the answers and the
   inventory class (derive_reading), with the size family checked against
   the measured envelope like the chip size codes of the previous version;
-- two independent observations per body; the derivation is adopted only when
-  both derive the same class, package family and leads per side; an
+- two independent observations of each body; the derivation is adopted only when
+  both derive the same class, package family and leads on each side; an
   inconclusive observation (several bodies in the frame, «two terminals» with
   three or more contacts, a terminal count contradicting the inventory) is
   never adopted;
@@ -957,9 +957,9 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
           (one inventory box covered two LEDs and a via: error upstream, not
           readable here);
         - `two_end_terminals_only` with three or more contacts and no
-          per-side count at all -> inconclusive 'contacts_contradict_terminals'
+          side count at all -> inconclusive 'contacts_contradict_terminals'
           (coherence check on the model's own answers, agent A proposal 2;
-          per-side counts, when given, are the more specific observation
+          side counts, when given, are the more specific observation
           and decide by themselves);
         - the NUMBER of terminals contradicting the inventory, in both
           directions -> inconclusive 'terminals_contradict_inventory': the
@@ -1176,10 +1176,15 @@ def agreed_reading(first, second):
 def class_supported_by_readings(first, second):
     """@brief Whether both derived observations support the same informative category.
 
-    A generic semiconductor family establishes neither an IC nor a transistor.
-    This is physical observation support, not a verified electrical identity.
-    Conflicting confident visual labels cannot support the derived category.
-    The caller additionally requires an adopted/agreed overall result.
+    @param first First derived reading of the body (derive_reading dict).
+    @param second Second derived reading of the same body.
+    @return True when both readings decided the class themselves, agree on it,
+        the class is informative and their visual labels do not conflict.
+    @note A generic semiconductor family establishes neither an IC nor a
+        transistor. This is physical observation support, not a verified
+        electrical identity. Conflicting confident visual labels cannot
+        support the derived category. The caller additionally requires an
+        adopted/agreed overall result.
     """
     return bool(first and second and first.get('class_decided') and second.get('class_decided')
                 and first.get('class') == second.get('class')
@@ -1231,8 +1236,13 @@ def _compact(observation):
 def crop_envelope_text(component):
     """@brief Describe the measured rectangle in image axes, without processing pixels.
 
-    Return None for unusable geometry. The stated extent follows bbox_basis;
-    unknown measurement bases never imply that all terminals are included.
+    @param component Inventory row with length_mm, width_mm, optional
+        rotation_deg (degrees) and bbox_basis ('body' or 'total').
+    @return English text stating the axis-aligned envelope in mm (and the
+        oblique body sides and angle when rotated), or None for unusable
+        geometry.
+    @note The stated extent follows bbox_basis; unknown measurement bases
+        never imply that all terminals are included.
     """
     try:
         body_l = float(component['length_mm'])
@@ -1261,8 +1271,16 @@ def crop_envelope_text(component):
 def body_crop(photo, component, length_mm, width_mm, long_side_px=CROP_LONG_SIDE_PX):
     """@brief Compatibility wrapper returning the framed context and envelope text.
 
-    Geometry, square-pixel correction and framing share the implementation used
-    by the paired context/detail requests. Image axes are never rotated.
+    @param photo Calibrated BGR photograph of the board.
+    @param component Inventory row with its position and size in mm.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @param long_side_px Target length of the crop's long side, in px.
+    @return (context BGR image, envelope text of crop_envelope_text), or None
+        when the geometry is unusable or no view could be prepared.
+    @note Geometry, square-pixel correction and framing share the
+        implementation used by the paired context/detail requests. Image
+        axes are never rotated.
     """
     from .crop_observation_images import prepare_observation_views
     text = crop_envelope_text(component)
@@ -1584,7 +1602,7 @@ def _reconcile_declared_package(component, envelope, tab, crop_count=None):
     (_inventory_lead_count). The row's `lead_count_complete` alone cannot
     tell the two apart, since the inventory sets it too: hence the explicit
     argument.
-    @note Invariant: after this call, with `crop_count` given, a non-empty
+    @note Invariant: after this call, with `crop_count` given, a nonempty
     package of a family with a known lead count (_family_lead_count) never
     contradicts the row's lead count.
     """
@@ -1721,8 +1739,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     @param call Logged paid call of extract_inventory: every request goes
         through it, so costs, cancellation and the AI log behave like every
         other call.
-    @param log Progress callback: one summary line; per-body lines have the
-        per-item form (header: field=value; ...) that keeps them in the AI log
+    @param log Progress callback: one summary line; the lines of each body have
+        the item form (header: field=value; ...) that keeps them in the AI log
         and out of the progress modal (main_window.per_item_detail).
     @param cache_dir Photo cache folder, or None for no cache.
     @param system_prompt Instructions of the reading: the profile field
@@ -1737,8 +1755,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     @note Each answer is an observation (observation_tool) turned into a
         reading by derive_reading with the body's measured envelope and the
         inventory row's class and lead count.
-        Agreement = same derived class, same package family, same leads per
-        side. Agreed readings set class (unless uninformative, or a mere
+        Agreement = same derived class, same package family, same leads on
+        each side. Agreed readings set class (unless uninformative, or a mere
         generalisation of the inventory class), package with
         package_confidence 'medium', lead_count / lead_count_complete /
         lead_count_confidence 'medium' / pins_by_side / pin_count and, with a
@@ -1813,8 +1831,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
     from .photo_inventory import image_block
     from .crop_observation_images import prepare_observation_views
     summary = CropReadingSummary()
-    # Avanzamento per corpo (HANDOFF 156): i corpi leggibili contati una volta
-    # all'inizio, cosi' il totale non cambia mentre la barra avanza.
+    # Progress per body (HANDOFF 156): the readable bodies counted once at
+    # the start, so the total does not change while the bar advances.
     eligible_total = sum(1 for component in components if _eligible(component))
     eligible_done = 0
 
@@ -1940,9 +1958,9 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                 inconclusive = sorted(set(inconclusive))
             reasons = disagreements(first, second)
             if inconclusive:
-                # Osservazioni valide ma non adottabili (piu' corpi nella
-                # cornice, contatti che smentiscono «due terminali»): la riga
-                # resta quella dell'inventario e va rivista.
+                # Valid but not adoptable observations (several bodies in the
+                # frame, contacts that contradict «due terminali» (two
+                # terminals)): the row stays the inventory's and must be reviewed.
                 summary.disagreed += 1
                 summary.inconclusive += 1
                 reasons = inconclusive
@@ -1984,10 +2002,10 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                 _flag(component, first, second, reasons, reason)
                 status = 'inconclusive'
             elif first['outvoted'] and second['outvoted']:
-                # Il ritaglio dice «due terminali» ma inventario E rilevatore
-                # locale dicono package a piedini (HANDOFF 149): il ritaglio
-                # e' in minoranza, la riga resta e la nota lo dice; il nome
-                # dichiarato viene confrontato con la misura.
+                # The crop says «due terminali» (two terminals) but inventory
+                # AND local detector say a leaded package (HANDOFF 149): the
+                # crop is in the minority, the row stays and the note says so;
+                # the declared name is compared with the measurement.
                 summary.outvoted += 1
                 evidence = detector_evidence(component) or {}
                 try:
@@ -2002,8 +2020,8 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                     yolo=evidence.get('class') or '-', conf=confidence,
                     cls=component.get('class') or '-',
                     leads='-' if component.get('lead_count') is None else component['lead_count']))
-                # La linguetta del ritaglio non viene usata: e' la stessa
-                # osservazione dei terminali appena messa in minoranza.
+                # The crop's tab is not used: it is the same observation as
+                # the terminals just put in the minority.
                 # Outvoted readings adopted nothing: the inventory count stays
                 # the source (no crop_count, decision D3).
                 _reconcile_declared_package(component, envelope, None)
@@ -2026,19 +2044,19 @@ def read_bodies(photo, components, length_mm, width_mm, model, call, log, cache_
                                        for observation in observations)
                 if complete_leads or complete_endcaps:
                     component.pop('_crop_terminal_review_required', None)
-                # Nomi respinti dalla misura: riga da rivedere; il testo dice se
-                # il package e' vuoto o resta quello dell'inventario. Non per le
-                # classi senza package (module, connector...): il ritaglio non
-                # tenta di dar loro un package.
+                # Names rejected by the measurement: row to review; the text
+                # says whether the package is empty or stays the inventory's.
+                # Not for the classes without a package (module, connector...):
+                # the crop does not try to give them a package.
                 notes = agreed['notes'] if reclassable_class(component.get('class')) else []
                 for note in notes:
                     component['package_confidence'] = 'low'
                     _add_review_reason(component, _note_text(note, envelope,
                                                              component.get('package') or ''))
-                # Nessuna famiglia dal ritaglio (conteggio per lato incompleto):
-                # il nome dell'inventario resta, ma se la misura lo esclude
-                # decade a favore della famiglia da conteggio + misura
-                # (HANDOFF 149). La linguetta solo se le due letture concordano.
+                # No family from the crop (incomplete per-side count): the
+                # inventory's name stays, but if the measurement excludes it,
+                # it gives way to the family from count + measurement
+                # (HANDOFF 149). The tab only if the two readings agree.
                 # Decision D3 (2026-10-14): a complete count both readings
                 # agreed on, already adopted by _adopt, is the count the
                 # family comes from; otherwise the inventory's.

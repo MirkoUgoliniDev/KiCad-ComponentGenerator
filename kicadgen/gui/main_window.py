@@ -58,7 +58,7 @@ from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, Pac
                                      package_from_mapping)
 from ..services import component_types, recent_projects
 from ..services.analysis_profiles import ProfileStore, ProfileError
-from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, LANGUAGES
+from ..services.i18n import DEFAULT_TRANSLATIONS, I18n, ITEM_SOURCE_ROLE, LANGUAGES
 from ..services.document_roles import DocumentSet, MANIFEST, SUFFIXES
 from ..services.datasheet_extractor import (
     DEFAULT_SYSTEM_PROMPT, ExtractedParams,
@@ -81,9 +81,9 @@ from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, 
 from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, SMD_MODELS_DIR, YOLO_MODELS_DIR,
                          smd_model_path as smd_weights_path,
                          yolo_model_path as yolo_weights_path)
-# Solo la validazione dei parametri (libreria standard): onnxruntime e PyTorch
-# restano caricati al bisogno. Legata qui, all'import, e non al clic: i test
-# che sostituiscono il modulo con un finto non devono cambiarne il contratto.
+# Only the parameter validation (standard library): onnxruntime and PyTorch
+# stay loaded on demand. Bound here, at import time, and not on click: tests
+# that replace the module with a fake must not change its contract.
 from ..services.photo_yolo import yolo_settings as validate_yolo_settings
 from .component_editor_dialog import ComponentEditorDialog
 from .workflow_bar import WorkflowBar
@@ -136,9 +136,10 @@ class _ModulePreloader(QObject):
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from .theme import BASE, BLUE, GREEN, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .kicad_text_item import REFERENCE_PX as _KICAD_TEXT_REFERENCE_PX, cap_height_px as _kicad_cap_height_px, kicad_text_item as _kicad_text_item, text_baseline_px as _kicad_text_baseline_px
 from .tooltips import install_tooltip_filter
-# Worker e aiutanti del contratto di chiamata: spostati in gui/workers.py
-# (HANDOFF 130, T6/G5) e ri-esportati qui, dove chiamanti e test li cercano.
+# Workers and call-contract helpers: moved to gui/workers.py
+# (HANDOFF 130, T6/G5) and re-exported here, where callers and tests look for them.
 from .workers import (
     Cad3DWorker, ExtractWorker, GenerateWorker, ReconcileWorker, TerminalDetailWorker,
     UpdateCheckWorker, YoloPretestWorker, _announce_freecad_measuring, _photo_scale_kwargs,
@@ -147,8 +148,8 @@ from .workers import (
 )
 from ..services.messages import tx
 
-#: Icona di ogni scheda, nell'ordine delle schede: SVG a linea nello stile
-#: delle barre di icone.
+#: Icon of every tab, in tab order: line SVGs in the style of the
+#: icon bars.
 TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-symbol.svg", "tab-model3d.svg", "tab-kicad.svg",
              "tab-exports.svg")
 
@@ -157,34 +158,34 @@ TAB_ICONS = ("tab-project.svg", "tab-preview.svg", "tab-symbol.svg", "tab-model3
 #: live in `component_state` values, not in widgets.
 TAB_PROJECT, TAB_PREVIEW, TAB_SYMBOL, TAB_MODEL_3D, TAB_KICAD, TAB_EXPORTS = range(6)
 
-#: I tre passi di una generazione, come li mostra la modale (utente,
-#: 2026-09-26). Chi lavora in ciascuno lo dice l'intestazione: vedi
+#: The three steps of a generation, as the modal shows them (user,
+#: 2026-09-26). Who works in each one is stated by the header: see
 #: `analysis_overlay.TOOLS`.
 GENERATION_STEPS = ("Footprint 2D (KiCadGen)", "Confronto con i consolidati", "Modelli dalla libreria KiCad",
                     "Solido 3D con FreeCAD")
-#: Passo di ogni fase annunciata dai worker. Le misure di FreeCAD appartengono
-#: alla scelta dei modelli: servono a confrontare i candidati.
+#: Step of every phase announced by the workers. FreeCAD's measurements belong
+#: to the model choice: they serve to compare the candidates.
 GENERATION_STEP_OF = {"footprint": 0, "consolidated": 1, "kicad": 2, "freecad_measure": 2, "freecad": 3}
 
-#: Cartella del programma (sola lettura una volta installato) e cartella di
-#: lavoro predefinita dei progetti: vedi `kicadgen.app_paths`.
+#: Program folder (read-only once installed) and default working folder
+#: of the projects: see `kicadgen.app_paths`.
 APP_DIR = install_dir()
 # Generated working files stay separate from installed KiCad libraries.
 DEFAULT_LIBRARY_ROOT = default_projects_dir()
 DOCS_SUBDIR = "docs"
-#: Link della finestra About (utente, 2026-09-24): repository del progetto e
-#: sviluppatore, dal remoto su cui il branch viene pubblicato.
+#: Links of the About window (user, 2026-09-24): project repository and
+#: developer, from the remote the branch is published to.
 REPOSITORY_URL = "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator"
 DEVELOPER_URL = "https://github.com/MirkoUgoliniDev"
 DEVELOPER_NAME = "Mirko Ugolini"
 
-#: Campi che appartengono al PROGETTO e finiscono in `project_config.json`
-#: (decisione dell'utente del 2026-09-24). Nell'ordine in cui si riapplicano:
-#: la tipologia prima di tutto, perche' cambiandola cambiano altri campi, e i
-#: gruppi attivabili prima dei loro campi. Restano fuori, di proposito:
-#: lingua, cartella di lavoro, nome del progetto (e' la cartella stessa), i
-#: campi di sola immissione dell'editor delle annotazioni e la griglia
-#: dell'anteprima, che sono modi di guardare.
+#: Fields that belong to the PROJECT and end up in `project_config.json`
+#: (user decision of 2026-09-24). In the order they are re-applied:
+#: the component type first of all, because changing it changes other fields,
+#: and the toggleable groups before their fields. Left out, on purpose:
+#: language, working folder, project name (it is the folder itself), the
+#: input-only fields of the annotation editor and the preview grid, which
+#: are ways of looking.
 #: `group_3d` is not saved: since 2026-09-26 it follows FreeCAD's availability
 #: only, and an old file with it off would silently disable every 3D model.
 PROJECT_WIDGETS = (
@@ -201,32 +202,33 @@ PROJECT_WIDGETS = (
     "field_cast_inset", "field_cast_hole", "field_cast_hole_inset",
     "field_cast_thru_drill", "field_cast_thru_pad", "field_cast_thru_offset",
 )
-#: Campi dei file di pesi locali: vuoto = il predefinito. Un progetto che non
-#: li dichiara li riporta vuoti invece di ereditare quelli del precedente.
+#: Fields of the local weight files: empty = the default. A project that does
+#: not declare them brings them back empty instead of inheriting the previous ones.
 MODEL_FILE_WIDGETS = ("field_yolo_model", "field_smd_model")
-#: Pausa prima di riattivare «Estrai parametri con AI» dopo una preparazione
-#: interrotta (documenti mancanti, rilevatore non disponibile...): i clic
-#: arrivati mentre l'interfaccia era ferma vengono consegnati prima e trovano il
-#: pulsante ancora spento. Tempo d'interfaccia, non una misura di nulla.
+#: Pause before re-enabling «Estrai parametri con AI» (extract parameters with
+#: AI) after an interrupted preparation (missing documents, detector not
+#: available...): clicks that arrived while the interface was frozen are
+#: delivered first and find the button still disabled. Interface timing, not a
+#: measurement of anything.
 EXTRACT_REENABLE_DELAY_MS = 300
-#: Margine, in pixel, fra il bordo della finestra e il contenuto delle schede:
-#: la riga della lingua sopra le schede usa lo stesso, cosi' i bordi combaciano.
+#: Margin, in pixels, between the window border and the tab content: the
+#: language row above the tabs uses the same one, so the borders line up.
 CONTENT_MARGIN_PX = 10
-#: Opzioni di Configurazione -> Opzioni di generazione che seguono il progetto.
+#: Options of Configurazione -> Opzioni di generazione (generation options) that follow the project.
 PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory",
                    "show_pins_3d", "pin_numbers_3d")
-#: Ogni quanto, in millisecondi, si controlla se il progetto e' cambiato. Una
-#: scelta: abbastanza spesso da non perdere nulla chiudendo di colpo, abbastanza
-#: di rado da non scrivere a ogni tasto. Un file si scrive solo se lo stato e'
-#: davvero diverso da quello salvato.
+#: How often, in milliseconds, the program checks whether the project changed. A
+#: choice: often enough not to lose anything on an abrupt close, rarely enough
+#: not to write on every keystroke. A file is written only if the state is
+#: really different from the saved one.
 PROJECT_AUTOSAVE_MS = 2000
 
-#: Tipologie che dichiarano UN SOLO componente discreto (vedi
-#: `services/component_types.py`). Non sono schede con corpi montati sopra,
-#: quindi l'estrattore non guarda la fotografia per inventariarli: niente
-#: rilevatore locale, niente revisione «Corpi rilevati», niente componenti in
-#: tabella. E' un attributo dichiarato della tipologia scelta, non il nome del
-#: pezzo: vale per qualunque componente di quella famiglia.
+#: Component types that declare ONE SINGLE discrete component (see
+#: `services/component_types.py`). They are not boards with bodies mounted on
+#: them, so the extractor does not look at the photograph to inventory them: no
+#: local detector, no «Corpi rilevati» (detected bodies) review, no components
+#: in the table. It is a declared attribute of the chosen type, not the part
+#: name: it holds for any component of that family.
 _SINGLE_COMPONENT_FAMILIES = ("single_tht", "single_smd")
 _BODY_OVERRIDE_UNSET = object()
 _PROJECT_KIND_BOARD = "board_module"
@@ -272,25 +274,25 @@ def proposed_reference(type_family: str, package_family: str | None = None) -> s
         return REFERENCE_BY_PACKAGE_FAMILY[package_family]
     return REFERENCE_BY_TYPE_FAMILY.get(type_family or "", DEFAULT_REFERENCE)
 
-#: Tipo di contatto di un lato castellated, nel caso in cui il generatore
-#: installato non esponga ancora le proprie costanti. I valori sono quelli
-#: fissati dal contratto di `castellated_module` (CONTACT_HALF_HOLE,
-#: CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH): la GUI e il generatore
-#: vengono modificati separatamente e nessuno dei due deve rompersi se
-#: l'altro arriva prima.
+#: Contact type of a castellated side, in case the installed generator does
+#: not expose its own constants yet. The values are the ones fixed by the
+#: contract of `castellated_module` (CONTACT_HALF_HOLE,
+#: CONTACT_THROUGH_HOLE, CONTACT_HALF_AND_THROUGH): the GUI and the generator
+#: are changed separately and neither must break if the other one arrives
+#: first.
 _CONTACT_STYLES_FALLBACK = ("half_hole", "through_hole", "half_and_through")
 
-#: Etichette in italiano semplice: chi sceglie guarda la scheda, non il
-#: datasheet, quindi il nome descrive cio' che si vede.
+#: Labels in plain Italian: whoever chooses looks at the board, not at the
+#: datasheet, so the name describes what is seen.
 CONTACT_STYLE_LABELS = {
     "half_hole": "Mezzo foro sul bordo",
     "through_hole": "Foro passante",
     "half_and_through": "Mezzo foro + foro passante",
 }
 
-#: Come distinguere i tre tipi guardando la scheda. Il criterio e' strutturale
-#: (il bordo taglia il foro oppure no), non una misura: e' l'unico che regge
-#: su qualunque modulo, qualunque passo abbia.
+#: How to tell the three types apart by looking at the board. The criterion is
+#: structural (the edge cuts the hole or not), not a measurement: it is the only
+#: one that holds on any module, whatever its pitch.
 CONTACT_STYLE_TOOLTIP = (
     "Come riconoscere il tipo di contatto guardando la scheda:\n"
     "- Mezzo foro sul bordo: il foro metallizzato e' tagliato dal bordo della "
@@ -302,17 +304,17 @@ CONTACT_STYLE_TOOLTIP = (
     "Cambiarlo non richiede nessuna analisi AI: basta rigenerare."
 )
 
-#: Voce informativa del selettore «tutti i lati» quando i lati differiscono.
+#: Informational entry of the «tutti i lati» (all sides) selector when the sides differ.
 CONTACT_STYLE_MIXED_LABEL = "Diverso per lato"
-#: Voce informativa del selettore quando almeno un lato non ha un tipo di
-#: contatto: la foto non lo mostrava e nessuno lo ha scelto (2026-09-26).
+#: Informational entry of the selector when at least one side has no contact
+#: type: the photo did not show it and nobody chose it (2026-09-26).
 CONTACT_STYLE_UNKNOWN_LABEL = "Da scegliere"
 
-#: Spessore di una scheda quando i documenti non lo quotano, in mm: 1.6 mm e'
-#: lo spessore standard delle schede FR-4 (decisione dell'utente, 26/09: per
-#: TUTTE le disposizioni, dichiarato nel log). E' lo stesso valore che il
-#: generatore 3D usa per una scheda a fori passanti senza spessore
-#: (`step_generator`, ramo `pcb_thickness_mm is None`).
+#: Thickness of a board when the documents do not dimension it, in mm: 1.6 mm
+#: is the standard thickness of FR-4 boards (user decision, 26/09: for ALL
+#: layouts, declared in the log). It is the same value the 3D generator uses
+#: for a through-hole board without a thickness (`step_generator`, branch
+#: `pcb_thickness_mm is None`).
 STANDARD_PCB_THICKNESS_MM = 1.6
 #: Where the PCB thickness shown on the Component page comes from (HANDOFF
 #: point 132), as the Italian text of its label. "read"/"derived"/"estimated"
@@ -329,19 +331,19 @@ PCB_THICKNESS_SOURCE_LABELS = {
     "user": "impostato da te",
     "project": "salvato nel progetto",
 }
-#: Colore di una scheda quando l'analisi non lo dichiara e la foto non si puo'
-#: campionare: il solder mask verde standard, il preset «Green» dello stackup
-#: di KiCad (RGB 20, 51, 36). Dichiarato nel log ogni volta che si usa.
+#: Colour of a board when the analysis does not declare it and the photo cannot
+#: be sampled: the standard green solder mask, the «Green» preset of KiCad's
+#: stackup (RGB 20, 51, 36). Declared in the log every time it is used.
 STANDARD_SOLDER_MASK_HEX = "#143324"
-#: Colore del corpo di un componente singolo quando l'analisi non lo dichiara:
-#: il valore iniziale del campo (plastica nera), dichiarato nel log.
+#: Body colour of a single component when the analysis does not declare it:
+#: the initial value of the field (black plastic), declared in the log.
 DEFAULT_BODY_COLOR_HEX = "#1a1a1a"
-#: Intervallo PLAUSIBILE del passo e dell'interasse, in mm. Euristica
-#: dichiarata, non un limite: dal passo fine piu' stretto dei package comuni
-#: (0.3 mm) al pollice dei morsetti di potenza (25.4 mm). Fuori da qui il
-#: valore si applica comunque e il log avvisa, perche' e' piu' probabile un
-#: errore di lettura (per esempio pollici letti come mm) che un pezzo reale;
-#: lo renderebbe superfluo un controllo di coerenza con il land pattern.
+#: PLAUSIBLE range of pitch and row spacing, in mm. Declared heuristic, not a
+#: limit: from the narrowest fine pitch of common packages (0.3 mm) to the inch
+#: of power terminal blocks (25.4 mm). Outside it the value is applied anyway
+#: and the log warns, because a reading error (for example inches read as mm)
+#: is more likely than a real part; a consistency check against the land
+#: pattern would make it unnecessary.
 PLAUSIBLE_PITCH_MM = (0.3, 25.4)
 
 
@@ -377,8 +379,8 @@ class _ToolTipFollower(QObject):
             try:
                 self._callback()
             except RuntimeError:
-                # La copia e' gia' stata distrutta (chiusura della finestra):
-                # non c'e' piu' nulla da allineare.
+                # The copy has already been destroyed (window closed):
+                # there is nothing left to align.
                 pass
         return False
 
@@ -493,7 +495,7 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
                        "Leer: dasselbe KI-Modell wie die Extraktion."},
     "browse": {"it": "Sfoglia…", "en": "Browse…",
                "fr": "Parcourir…", "de": "Durchsuchen…"},
-    # .onnx con onnxruntime, .pt con PyTorch/Ultralytics (utente, 2026-09-25).
+    # .onnx with onnxruntime, .pt with PyTorch/Ultralytics (user, 2026-09-25).
     "picker": {"it": "Seleziona modello YOLO (ONNX o PyTorch) per questa sessione",
                "en": "Select a YOLO model (ONNX or PyTorch) for this session",
                "fr": "Choisir un modèle YOLO (ONNX ou PyTorch) pour cette session",
@@ -577,11 +579,11 @@ _GRID_ITEM = 0
 
 
 def _side_pinout(side: dict) -> list[dict]:
-    """Numero pin -> sigla serigrafata, per un lato del modulo.
+    """Pin number -> silkscreen label, for one side of the module.
 
-    Le sigle arrivano nell'ordine in cui si incontrano lungo il bordo, la
-    stessa convenzione con cui il generatore numera i pad: basta appaiarle
-    ai numeri, rispettando l'eventuale numerazione inversa.
+    The labels arrive in the order in which they are met along the edge,
+    the same convention with which the generator numbers the pads: it is
+    enough to pair them with the numbers, respecting any reversed numbering.
     """
     first = int(side.get("first_pin", 1))
     numbers = list(range(first, first + int(side["count"])))
@@ -705,35 +707,35 @@ def _package_pinout(geometry) -> list[dict]:
 
 
 def _castellated_body_available(params) -> bool:
-    """@brief Dice se l'estrazione ha stabilito il solido di un modulo castellato.
+    """@brief Tell whether the extraction established the solid of a castellated module.
 
-    @param params Parametri estratti (`ExtractedParams`) del componente.
-    @return True quando l'ingombro della scheda del modulo e' noto.
-    @note Per un modulo castellato il corpo 3D *e'* il suo PCB: il solido lo
-        descrivono lunghezza e larghezza del modulo, con lo spessore della
-        scheda al posto di un'altezza complessiva -- che infatti puo' mancare
-        anche quando il modulo c'e' (un assemblaggio somma spessore PCB e
-        altezze dei singoli componenti). Per questo la condizione non e'
-        `has_3d_body()`, che pretende anche `body_height_mm`. Senza contorno
-        non c'e' niente da costruire e il gruppo 3D non va acceso.
+    @param params Extracted parameters (`ExtractedParams`) of the component.
+    @return True when the outline of the module board is known.
+    @note For a castellated module the 3D body *is* its PCB: the solid is
+        described by the module length and width, with the board thickness in
+        place of an overall height -- which can in fact be missing even when
+        the module is there (an assembly adds PCB thickness and the heights of
+        the individual components). That is why the condition is not
+        `has_3d_body()`, which also requires `body_height_mm`. Without an
+        outline there is nothing to build and the 3D group must not be enabled.
     """
     return bool(params.body_length_mm) and bool(params.body_width_mm)
 
 
 def _generation_target(params):
-    """@brief Il generatore 3D che costruira' DAVVERO questo componente.
+    """@brief The 3D generator that will REALLY build this component.
 
-    @param params Parametri del componente (matrice/package o modulo castellated).
-    @return La funzione di `step_generator` che verra' chiamata.
-    @note Esiste per una ragione sola: `_generate_3d` e' un involucro, e chi
-        vuole sapere se la corsa e' interrompibile deve guardare la funzione
-        vera. L'involucro accetta `cancel` per costruzione, quindi
-        interrogarlo risponderebbe sempre di si' -- anche quando il
-        generatore sotto non conosce il canale e il pulsante «Interrompi»
-        non fermerebbe nulla.
-    @note Si legge dal modulo al momento della chiamata (non si cattura alla
-        definizione) cosi' una sostituzione -- prove, strumenti -- riguarda
-        introspezione e chiamata insieme.
+    @param params Component parameters (matrix/package or castellated module).
+    @return The `step_generator` function that will be called.
+    @note It exists for one reason only: `_generate_3d` is a wrapper, and
+        whoever wants to know whether the run can be interrupted must look at
+        the real function. The wrapper accepts `cancel` by construction, so
+        asking it would always answer yes -- even when the generator beneath
+        does not know the channel and the «Interrompi» button would stop
+        nothing.
+    @note It is read from the module at call time (not captured at
+        definition) so that a substitution -- tests, tools -- affects
+        introspection and call together.
     """
     if isinstance(params, PackageGeometry):
         return generate_single_package_3d_model
@@ -742,15 +744,15 @@ def _generation_target(params):
 
 
 def generation_accepts_cancel(generator, params) -> bool:
-    """@brief Dice se l'ordine di fermarsi arriva al lavoro vero, non solo all'involucro.
+    """@brief Tell whether the stop order reaches the real work, not just the wrapper.
 
-    @param generator Funzione che il worker sta per chiamare.
-    @param params Parametri del componente, che scelgono il generatore reale.
-    @return True solo quando chi costruisce il solido conosce il canale.
-    @note Con `generator is _generate_3d` la domanda si gira al generatore
-        reale: l'involucro accetta `cancel` sempre, quindi da solo direbbe
-        «interrompibile» anche su un generatore che non lo e'. Per un
-        generatore sostituito (prove, strumenti) vale la sua stessa firma.
+    @param generator Function the worker is about to call.
+    @param params Component parameters, which select the real generator.
+    @return True only when whoever builds the solid knows the channel.
+    @note With `generator is _generate_3d` the question is forwarded to the
+        real generator: the wrapper always accepts `cancel`, so on its own it
+        would say "interruptible" even for a generator that is not. For a
+        substituted generator (tests, tools) its own signature applies.
     """
     if not accepts_keyword(generator, "cancel"):
         return False
@@ -761,24 +763,25 @@ def generation_accepts_cancel(generator, params) -> bool:
 
 def _generate_3d(params, body: Body3DParams, project_dir: Path, fillets, face_texts,
                  progress=None, model_progress=None, cancel=None, photo_scale_px_per_mm=None):
-    """Genera il 3D con il generatore adatto al tipo di componente.
+    """Generate the 3D model with the generator suited to the component type.
 
-    I due modelli sono diversi in modo sostanziale: il pin header e' un
-    corpo con pin cilindrici che sporgono sotto, il modulo castellated e'
-    un PCB con i semi-fori tagliati sul bordo e i componenti sopra.
+    The two models differ substantially: the pin header is a body with
+    cylindrical pins protruding below, the castellated module is a PCB with
+    the half-holes cut on the edge and the components on top.
 
-    `cancel` e' il canale con cui il pulsante «Interrompi» della modale
-    chiede la fine del lavoro: oggi il processo FreeCAD figlio (vedi
-    step_generator), e l'abbinamento dei modelli KiCad appena `cad3d/` gli
-    dara' un canale. Qui viene inoltrato in modo DIFENSIVO -- `cancel_kwargs`
-    e `matching_cancel_kwargs` guardano la firma installata -- perche' questo
-    involucro e i generatori evolvono separatamente e una funzionalita'
-    accessoria non deve far cadere una generazione buona con un TypeError.
+    `cancel` is the channel through which the «Interrompi» button of the
+    modal asks for the work to end: today the child FreeCAD process (see
+    step_generator), and KiCad model matching as soon as `cad3d/` gives it a
+    channel. Here it is forwarded DEFENSIVELY -- `cancel_kwargs` and
+    `matching_cancel_kwargs` look at the installed signature -- because this
+    wrapper and the generators evolve separately and an accessory feature
+    must not bring down a good generation with a TypeError.
 
-    `photo_scale_px_per_mm` e' la scala della foto calibrata (pixel per mm
-    lungo la lunghezza della scheda), o None senza foto: il generatore ne
-    ricava l'incertezza di misura dei corpi (`cad3d.measurement_uncertainty`).
-    Stessa disciplina: passata solo se la firma installata la dichiara.
+    `photo_scale_px_per_mm` is the scale of the calibrated photo (pixels per
+    mm along the board length), or None without a photo: the generator
+    derives from it the measurement uncertainty of the bodies
+    (`cad3d.measurement_uncertainty`). Same discipline: passed only if the
+    installed signature declares it.
     """
     generator = _generation_target(params)
     scale = ({"photo_scale_px_per_mm": photo_scale_px_per_mm}
@@ -808,79 +811,79 @@ _WORKER_COMPATIBILITY = (
 )
 
 
-#: Livelli della riga di stato del 3D (`MainWindow._set_3d_status`): solo gli
-#: ultimi due vengono mostrati sotto il modello.
+#: Levels of the 3D status line (`MainWindow._set_3d_status`): only the
+#: last two are shown below the model.
 STATUS_INFO = "info"
 STATUS_WARNING = "warning"
 STATUS_ERROR = "error"
 
 
-#: Campo macchina scritto in minuscolo_con_underscore (review_required,
-#: auto_matched): non e' una frase per chi guarda, e' il valore di un campo
-#: dell'esito di UN elemento.
+#: Machine field written in lower_case_with_underscores (review_required,
+#: auto_matched): it is not a sentence for the viewer, it is the value of a
+#: field of the outcome of ONE element.
 _ITEM_STATUS_FIELD = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
-#: Assegnazione macchina senza spazi (parts=1, local_rotation_deg=0,
-#: package=R_0603): stessa natura del token di stato, scritta come coppia.
-#: Nessuna prosa entra qui, perche' una frase contiene spazi e la
-#: corrispondenza e' sull'intera clausola.
+#: Machine assignment without spaces (parts=1, local_rotation_deg=0,
+#: package=R_0603): same nature as the status token, written as a pair.
+#: No prose gets in here, because a sentence contains spaces and the
+#: match is on the whole clause.
 _ITEM_FIELD_ASSIGNMENT = re.compile(r"[a-z][a-z0-9_]*=\S*")
-#: Punto di fine frase: un punto seguito da spazio o dalla fine del testo.
-#: `C_0603_1608Metric.step` o `photo-review/x.json` NON lo contengono, quindi
-#: un nome di file nell'intestazione non la trasforma in una frase.
+#: End-of-sentence full stop: a full stop followed by a space or by the end of
+#: the text. `C_0603_1608Metric.step` or `photo-review/x.json` do NOT contain it,
+#: so a file name in the header does not turn it into a sentence.
 _SENTENCE_END = re.compile(r"\.(?:\s|$)")
 
 
 def _item_field_clause(clause: str) -> bool:
-    """@brief Dice se la clausola e' un campo macchina e non un pezzo di prosa.
+    """@brief Tell whether the clause is a machine field and not a piece of prose.
 
-    @param clause Clausola gia' ripulita, cioe' senza spazi ai bordi ne' punto finale.
-    @return True per `review_required`, `parts=1`, `local_rotation_deg=0`.
+    @param clause Clause already cleaned, i.e. without surrounding spaces or final full stop.
+    @return True for `review_required`, `parts=1`, `local_rotation_deg=0`.
     """
     return bool(_ITEM_STATUS_FIELD.fullmatch(clause)
                 or _ITEM_FIELD_ASSIGNMENT.fullmatch(clause))
 
 
 def per_item_detail(message: str) -> bool:
-    """@brief Dice se la riga e' il rendiconto di UN elemento fra i tanti in corso.
+    """@brief Tell whether the line is the report of ONE item among the many in progress.
 
-    @param message Riga di avanzamento, come arriva dai worker.
-    @return True se e' dettaglio per-elemento da tenere fuori dalla modale.
-    @note Richiesta dell'utente: «evitare di mettere il log dei componenti, non
-        servirebbe a nulla». Durante l'abbinamento dei modelli la modale
-        mostrava righe come «SOT-23-6 / …, 6 leads: 3 dimensional candidates;
-        review_required; identity not verified.»: cambiavano a ogni componente
-        e non dicevano nulla in piu' del contatore «7/41 componenti» che sta
-        appena sopra. Nel log invece servono a ricostruire la corsa, e li'
-        restano: questo filtro riguarda solo la modale.
-    @note Forma riconosciuta: «intestazione dell'elemento: campo; campo; campo».
-        L'intestazione e' cio' che precede l'ULTIMO «: », non il primo: una
-        frase che contiene due punti a meta' («Estrazione completata.
-        Confidenza: low. CONTATTI CASTELLATED: …») spezzava sul primo e
-        finiva classificata come rendiconto. L'intestazione deve poi essere
-        un'etichetta, cioe' non contenere una fine di frase: e' questo che
-        distingue «QFN-24» da «Estrazione completata. Confidenza».
-    @note EURISTICA DICHIARATA, unico criterio sul corpo: almeno una clausola
-        deve essere un campo macchina (`_item_field_clause`). Prima bastavano
-        tre clausole qualsiasi, e quel conteggio ha cancellato dalla modale
-        righe vere e importanti, verificate sui log di due corse reali: la
-        conferma di fine estrazione, l'avviso di credito OpenRouter residuo,
-        gli inventari globali parziali e il riepilogo del rilevatore YOLO.
-        Contare i punti e virgola non distingue un rendiconto da una frase con
-        tre incisi, quindi il conteggio e' stato rimosso invece di essere
-        tarato. Il prezzo dichiarato del cambio: restano fuori dal filtro le
-        righe per-elemento fatte di sola prosa (le catene «<package>:
-        rejected N family/terminal-incompatible candidates; …» e «<package>:
-        topologia contatti sconosciuta; …»), che ora arrivano in modale. E' il
-        verso sbagliato meno dannoso: mostrare una riga in piu' costa
-        un'occhiata, cancellare l'avviso di spesa o di fallimento parziale
-        costa una diagnosi. Cio' che renderebbe superfluo il filtro e' un
-        marcatore esplicito sulle righe per-elemento alla sorgente (in
-        `kicad_models.attach_models`), non una regola piu' fine qui.
-    @note Nessun tetto sulla lunghezza dell'intestazione: il vecchio
-        `len(head) > 120` non aveva derivazione. Il controllo di fine frase
-        respinge gia' le righe lunghe di prosa, e una riga di diagnostica
-        (`AI_CALL_PROMPT_*`) non e' un rendiconto per-elemento -- va filtrata
-        dove si decide cosa e' diagnostica, non qui.
+    @param message Progress line, as it arrives from the workers.
+    @return True if it is per-item detail to keep out of the modal.
+    @note User request: «evitare di mettere il log dei componenti, non
+        servirebbe a nulla» (do not put the per-component log there, it
+        would serve no purpose). During model matching the modal showed lines
+        such as «SOT-23-6 / …, 6 leads: 3 dimensional candidates;
+        review_required; identity not verified.»: they changed at every
+        component and said nothing more than the «7/41 componenti» counter
+        just above. In the log, instead, they serve to reconstruct the run,
+        and there they stay: this filter concerns the modal only.
+    @note Recognised shape: «item header: field; field; field». The header is
+        what precedes the LAST «: », not the first: a sentence containing a
+        colon in the middle («Estrazione completata. Confidenza: low.
+        CONTATTI CASTELLATED: …») split on the first one and ended up
+        classified as a report. The header must then be a label, i.e. it must
+        not contain a sentence end: that is what distinguishes «QFN-24» from
+        «Estrazione completata. Confidenza».
+    @note DECLARED HEURISTIC, the only criterion on the body: at least one
+        clause must be a machine field (`_item_field_clause`). Before, any
+        three clauses were enough, and that count removed from the modal real
+        and important lines, verified on the logs of two real runs: the
+        end-of-extraction confirmation, the remaining OpenRouter credit
+        warning, the partial global inventories and the YOLO detector
+        summary. Counting semicolons does not distinguish a report from a
+        sentence with three asides, so the count was removed instead of being
+        tuned. The declared price of the change: per-item lines made of prose
+        only (the chains «<package>: rejected N family/terminal-incompatible
+        candidates; …» and «<package>: topologia contatti sconosciuta; …»)
+        stay outside the filter and now reach the modal. It is the least
+        harmful wrong direction: showing one more line costs a glance,
+        removing the spending or partial-failure warning costs a diagnosis.
+        What would make the filter unnecessary is an explicit marker on the
+        per-item lines at the source (in `kicad_models.attach_models`), not a
+        finer rule here.
+    @note No cap on the header length: the old `len(head) > 120` had no
+        derivation. The sentence-end check already rejects long prose lines,
+        and a diagnostic line (`AI_CALL_PROMPT_*`) is not a per-item report
+        -- it must be filtered where diagnostics are decided, not here.
     """
     text = " ".join(str(message or "").split())
     if "crop_reading=" in text:
@@ -888,9 +891,9 @@ def per_item_detail(message: str) -> bool:
     head, separator, body = text.rpartition(": ")
     if not separator or ";" not in body:
         return False
-    # Un'intestazione vuota resta valida: «: 3 dimensional candidates;
-    # review_required; …» e' la stessa riga senza etichetta, e prima le due
-    # forme ricevevano verdetti opposti.
+    # An empty header stays valid: «: 3 dimensional candidates;
+    # review_required; …» is the same line without a label, and before the two
+    # forms received opposite verdicts.
     if _SENTENCE_END.search(head):
         return False
     clauses = [clause.strip().rstrip(".") for clause in body.split(";")]
@@ -940,8 +943,9 @@ _FP_PREVIEW_MM_TO_PX = 20.0
 
 
 #: Pixel size of the reference font a user text is laid out in before the
-#: item is scaled to KiCad's size (see `_drawing_text_item`).
-_FP_TEXT_REFERENCE_PX = 100
+#: item is scaled to KiCad's size (shared with the symbol editor, see
+#: `kicad_text_item.REFERENCE_PX`).
+_FP_TEXT_REFERENCE_PX = _KICAD_TEXT_REFERENCE_PX
 
 
 def _cap_height_px(font):
@@ -950,57 +954,72 @@ def _cap_height_px(font):
     @param font The font to measure.
     @return Height of the QPainterPath outline of "H" (independent of the
         platform's capHeight metric, and real glyph geometry, not hinted
-        integer metrics).
+        integer metrics); `kicad_text_item.cap_height_px`, cached per font.
     """
-    path = QPainterPath()
-    path.addText(0.0, 0.0, font, "H")
-    return path.boundingRect().height()
+    return _kicad_cap_height_px(font)
+
+
+def _drawn_text_thickness():
+    """@brief Stroke thickness, mm, KiCad draws a user text drawing with.
+
+    @return The thickness `core.footprint.FpText` writes by default, which
+        `user_drawing_items` keeps for every text drawing (records carry no
+        thickness of their own).
+    """
+    import dataclasses
+    from ..core.footprint import FpText
+    return next(f.default for f in dataclasses.fields(FpText) if f.name == "thickness")
 
 
 def _drawing_text_item(record, mm_to_px):
-    """@brief Unplaced Qt item of a user text drawing, drawn at KiCad's size.
+    """@brief Qt item of a user text drawing, drawn as KiCad draws it and placed on its point.
 
-    @param record Validated text record (text, size, layer).
+    @param record Validated text record (text, size, layer, points, optional anchor).
     @param mm_to_px Scene px per mm of the preview.
-    @return A QGraphicsSimpleTextItem at the origin, not in any scene, with
-        the layer colour, laid out in a `_FP_TEXT_REFERENCE_PX` px font and
-        SCALED (setScale) so the outline of «H» is size x mm_to_px px tall:
-        KiCad's text size is the cap height. Scaling the item, not choosing
-        an integer font size, avoids a rounding error of up to 3 %.
-    @note Same definition as the symbol editor (user, 2026-10-14: same UX in
-        every tab). No horizontal stretch: measured against kicad-cli 10,
-        no single factor brings the widths of KiCad's stroke font within
-        5 % (mean error 13.6 %, 8 % with 1.117, while strings like GND,
-        iiiiii, MMMMMM get worse), so the preview width stays the Qt font's
-        own and remains an approximation of KiCad's.
+    @return A QGraphicsSimpleTextItem not in any scene, in the layer colour,
+        built by `kicad_text_item.kicad_text_item`: capitals size mm tall
+        (KiCad's text size is the cap height), stretched to KiCad's width
+        for that text and pen, and placed as KiCad places it: an anchored
+        record (`USER_TEXT_ANCHOR`, written ``(justify left bottom)``) from
+        its bottom-left anchor, a legacy record (no justify written)
+        centred on its point.
+    @note CONTRACT CHANGED 2026-10-16 (user, «ok procedi»: KiCad's width,
+        text by text, same helper as the symbol editor): before, the width
+        was the desktop font's own and the baseline sat on the anchor; now
+        the width is KiCad's and the baseline 0.125 x size above a bottom
+        anchor, as KiCad draws it.
     """
-    return _kicad_size_text_item(record["text"], record.get("size", 1.0),
-                                 _layer_color(record["layer"]), mm_to_px)
+    from ..core.footprint import USER_TEXT_ANCHOR
+    anchored = record.get("anchor") == USER_TEXT_ANCHOR
+    x, y = (v * mm_to_px for v in record["points"][0])
+    return _kicad_text_item(record["text"], record.get("size", 1.0), x, y, base_font=QFont(),
+                            mm_to_px=mm_to_px, thickness=_drawn_text_thickness(),
+                            justify="left" if anchored else "center",
+                            vjustify="bottom" if anchored else "center",
+                            colour=_layer_color(record["layer"]))
 
 
-def _kicad_size_text_item(text, size, colour, mm_to_px):
-    """@brief Unplaced Qt text item whose capitals are `size` mm tall, as KiCad draws them.
+def _kicad_size_text_item(text, size, colour, mm_to_px, thickness=None):
+    """@brief Qt text item drawn as KiCad draws a bottom-left anchored text whose anchor is the origin.
 
     @param text The text (one line).
     @param size KiCad text size in mm (= cap height).
     @param colour Brush colour.
     @param mm_to_px Scene px per mm of the preview.
-    @return A QGraphicsSimpleTextItem at the origin, not in any scene, laid
-        out in a `_FP_TEXT_REFERENCE_PX` px font and SCALED (setScale) so the
-        outline of «H» is size x mm_to_px px tall.
-    @note Shared by the user's text drawings and the Reference/Value
-        properties (user, 2026-10-15: every text at the size the file gives it).
+    @param thickness Stroke thickness, mm; None means the Reference/Value
+        properties' `core.footprint.PROPERTY_TEXT_THICKNESS`.
+    @return A QGraphicsSimpleTextItem not in any scene, built by
+        `kicad_text_item.kicad_text_item` with ``(justify left bottom)`` at
+        scene (0, 0): capitals `size` mm tall, KiCad's width, cells and
+        baseline where KiCad lays them out from that anchor.
+    @note Used for the Reference/Value properties, which are written
+        ``(justify left bottom)`` at their anchor (user, 2026-10-16).
     """
-    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
-    item = QGraphicsSimpleTextItem(text)
-    item.setBrush(QBrush(QColor(colour)))
-    font = item.font()
-    font.setPixelSize(_FP_TEXT_REFERENCE_PX)
-    item.setFont(font)
-    cap = _cap_height_px(font)
-    if cap > 0:
-        item.setScale(size * mm_to_px / cap)
-    return item
+    if thickness is None:
+        from ..core.footprint import PROPERTY_TEXT_THICKNESS
+        thickness = PROPERTY_TEXT_THICKNESS
+    return _kicad_text_item(text, size, 0.0, 0.0, base_font=QFont(), mm_to_px=mm_to_px,
+                            thickness=thickness, justify="left", vjustify="bottom", colour=colour)
 
 
 def _legacy_drawing_text_item(record, mm_to_px):
@@ -1028,35 +1047,10 @@ def _drawing_text_baseline(item):
     @return The ascent of the single line QTextLayout lays out from y = 0,
         which is where the item draws its baseline (fallback fonts included);
         the font's ascent when no line can be laid out.
-    @note Same definition as the symbol editor's `_text_baseline` (user rule:
-        same UX in every tab), duplicated to keep the two tabs uncoupled.
+    @note The symbol editor's definition (`kicad_text_item.text_baseline_px`,
+        shared and cached: same UX in every tab).
     """
-    from PyQt6.QtGui import QFontMetricsF, QTextLayout
-    layout = QTextLayout(item.text(), item.font())
-    layout.beginLayout()
-    line = layout.createLine()
-    layout.endLayout()
-    return line.ascent() if line.isValid() else QFontMetricsF(item.font()).ascent()
-
-
-def _drawing_text_position(record, mm_to_px, item):
-    """@brief Scene position (px) of a text drawing's Qt item.
-
-    @param record Validated text record.
-    @param mm_to_px Scene px per mm of the preview.
-    @param item The text item built by `_drawing_text_item`.
-    @return (x, y) for setPos: an anchored record (`USER_TEXT_ANCHOR`) puts
-        the left edge of the drawn box and the text BASELINE on its point, so
-        the text grows right and up with descenders below, as KiCad's
-        ``(justify left bottom)`` and the symbol editor's bottom-left texts;
-        a legacy record (no anchor) is centred on its point, as before.
-    """
-    from ..core.footprint import USER_TEXT_ANCHOR
-    rect, scale = item.boundingRect(), item.scale()
-    x, y = (v * mm_to_px for v in record["points"][0])
-    if record.get("anchor") == USER_TEXT_ANCHOR:
-        return x - rect.left() * scale, y - _drawing_text_baseline(item) * scale
-    return x - rect.width() * scale / 2, y - rect.height() * scale / 2
+    return _kicad_text_baseline_px(item.text(), item.font())
 
 
 def _migrate_drawing_texts(records):
@@ -1089,6 +1083,25 @@ def _migrate_drawing_texts(records):
         else:
             result.append(deepcopy(record))
     return result
+
+
+def _property_text_corner_offset(text):
+    """@brief Offset, mm, from a centred Reference/Value text's anchor to its bottom-left anchor in KiCad.
+
+    @param text The text KiCad shows for the property («REF**», the
+        component name for the Value).
+    @return (dx, dy) mm (y down) of `core.footprint.property_corner_offset`:
+        minus half the width KiCad centres the text on, 0.585 x size down.
+    @note CONTRACT CHANGED 2026-10-16 (user decision «KiCad fermo» in both
+        tabs, like the symbol): KiCad's stroke-font geometry, no longer the
+        preview's Qt metrics, so a converted text stays where KiCad drew it
+        centred. Since the later 2026-10-16 change the preview also draws
+        it at KiCad's width and baseline (`_kicad_size_text_item`), so it
+        stays put on screen too, within the glyph side bearings. The drawn
+        texts of 2026-10-14 (`_migrate_drawing_texts`) keep their own rule.
+    """
+    from ..core.footprint import property_corner_offset
+    return property_corner_offset(text)
 
 
 def _arc_path(start, mid, end):
@@ -1560,40 +1573,40 @@ class MainWindow(QMainWindow):
         self._terminal_worker: TerminalDetailWorker | None = None
         self._reconcile_worker: ReconcileWorker | None = None
         self._last_params: PinHeaderParams | CastellatedModuleParams | PackageGeometry | None = None
-        #: Ultimo risultato dell'estrazione applicato ai campi. Serve a
-        #: rilanciare l'inventario sulle proposte salvate: le quote con cui la
-        #: foto fu calibrata e i lati dichiarati stanno qui, non nei campi,
-        #: che nel frattempo l'utente puo' aver ritoccato.
+        #: Last extraction result applied to the fields. It serves to
+        #: re-run the inventory on the saved proposals: the dimensions the
+        #: photo was calibrated with and the declared sides live here, not in
+        #: the fields, which the user may have retouched in the meantime.
         self._last_extracted: ExtractedParams | None = None
-        #: Marca temporale (stesso formato dei file di evidenza) dell'ultima
-        #: estrazione avviata: le proposte salvate valgono solo se sono nate
-        #: da quella: la cartella photo-cache del progetto conserva anche le
-        #: evidenze delle estrazioni precedenti.
+        #: Timestamp (same format as the evidence files) of the last
+        #: extraction started: the saved proposals are valid only if they
+        #: came from that one: the project's photo-cache folder also keeps the
+        #: evidence of the previous extractions.
         self._extraction_started_stamp: str | None = None
-        #: Vero quando la finestra di revisione ha gia' scritto il bundle
-        #: photo-review per l'estrazione in corso: allora _on_extracted non
-        #: deve sovrascriverlo con le righe pre-revisione della cache.
+        #: True when the review window has already written the photo-review
+        #: bundle for the running extraction: then _on_extracted must not
+        #: overwrite it with the pre-review rows of the cache.
         self._reviewed_this_extraction = False
-        # Rilevatore dell'ultima estrazione (vedi _start: pacchetti di ripiego).
+        # Detector of the last extraction (see _start: fallback packages).
         self._extraction_detector = 'yolo'
-        #: Vero quando la base dell'ultimo rilancio inventario e' stata
-        #: sintetizzata dai campi (dopo un riavvio) e non estratta davvero:
-        #: su quella base non si genera automaticamente.
+        #: True when the base of the last inventory re-run was synthesised
+        #: from the fields (after a restart) and not really extracted:
+        #: nothing is generated automatically on that base.
         self._relaunch_base_synthesized = False
         self.package_geometry: PackageGeometry | None = None
         self.fillet_annotations: list[EdgeFilletAnnotation] = []
         self.face_text_annotations: list[FaceTextAnnotation] = []
         self.pinout: list[dict] = []
-        # Componenti del modulo letti dalla foto: alimentano il 3D, non il
-        # footprint (vedi `_photo_rows`, che ne tiene anche i metadati).
+        # Module components read from the photo: they feed the 3D, not the
+        # footprint (see `_photo_rows`, which also keeps their metadata).
         self.castellated_components: list[ComponentBox] = []
-        #: Componenti della foto come dict (geometria + metadati del
-        #: rilevamento): la fonte di verita' dei corpi, vedi `_photo_row`.
+        #: Photo components as dicts (geometry + detection metadata): the
+        #: source of truth of the bodies, see `_photo_row`.
         self._photo_rows: list[dict] = []
-        #: Corpi aggiunti dal solo modello e non (ancora) tenuti
-        #: (`_ai_only_excluded` True, HANDOFF 141): fuori dalla tabella e dal
-        #: 3D, ma conservati qui -- e nel progetto salvato -- perche' la
-        #: revisione fotografica li possa riproporre.
+        #: Bodies added by the model alone and not (yet) kept
+        #: (`_ai_only_excluded` True, HANDOFF 141): out of the table and of the
+        #: 3D, but kept here -- and in the saved project -- so that the
+        #: photo review can propose them again.
         self._photo_excluded_rows: list[dict] = []
         self._extracted_pcb_thickness = None
         #: Provenance of the PCB thickness in use (PCB_THICKNESS_SOURCE_LABELS).
@@ -1619,6 +1632,9 @@ class MainWindow(QMainWindow):
         self._fp_draw_hover: tuple | None = None
         #: Index of the drawing whose handles are shown (-1: none).
         self._fp_hovered_drawing: int = -1
+        #: Key of the REF**/Value text whose anchor square is shown ("": none),
+        #: as reported by the view (`FootprintView.text_hovered`).
+        self._fp_hovered_text: str = ""
         #: (drawing index, point index, snapped point mm) of the handle being
         #: dragged; point index -1 = the whole drawing, and the third item is
         #: then the (dx, dy) translation in mm.
@@ -1716,12 +1732,12 @@ class MainWindow(QMainWindow):
         self._fp_draft_was_pending: bool = False
         self._last_mesh_path: Path | None = None
         self._model_revision = 0
-        #: Revisione dell'analisi AI, gemella di `_model_revision` per i
-        #: risultati CAD tardivi. Una chiamata HTTP gia' partita non si puo'
-        #: interrompere (urllib bloccante): interromperla vuol dire
-        #: ABBANDONARLA, e il suo risultato -- che arrivera' comunque -- va
-        #: riconosciuto come scaduto e buttato. Il worker viene marchiato con
-        #: il valore corrente alla partenza; l'interruzione lo incrementa.
+        #: Revision of the AI analysis, twin of `_model_revision` for late
+        #: CAD results. An HTTP call already started cannot be
+        #: interrupted (blocking urllib): interrupting it means
+        #: ABANDONING it, and its result -- which will arrive anyway -- must be
+        #: recognised as stale and thrown away. The worker is stamped with
+        #: the current value at start; the interruption increments it.
         self._analysis_revision = 0
         #: `_analysis_revision` of the last run whose result started being
         #: applied to the fields (`_on_extracted`), None when none did. Read
@@ -1740,26 +1756,26 @@ class MainWindow(QMainWindow):
         #: `_background_work_running()` first; `_forget_abandoned_worker`
         #: frees the slot when the worker finally emits `finished`.
         self._abandoned_workers: list = []
-        #: Vero fra la conferma dell'interruzione e la fine effettiva del
-        #: lavoro che si sta fermando: impedisce che un secondo clic riapra la
-        #: domanda o mandi un secondo ordine.
+        #: True between the confirmation of the interruption and the actual end of
+        #: the work being stopped: it prevents a second click from reopening the
+        #: question or sending a second order.
         self._abort_pending = False
         self._acquisition_completed = False
-        #: Vero quando l'analisi appena conclusa ha prodotto un inventario
-        #: fotografico da far rivedere: e' cio' che rende dovuta la pausa fra
-        #: l'inventario a pagamento e l'abbinamento modelli/3D. Si consuma
-        #: nella pausa stessa, cosi' una seconda `finished` non la ripropone.
+        #: True when the analysis just finished has produced a photographic
+        #: inventory to be reviewed: it is what makes the pause between the
+        #: paid inventory and the model/3D matching due. It is consumed
+        #: in the pause itself, so a second `finished` does not propose it again.
         self._inventory_pause_pending = False
-        #: Vero mentre la pausa e' aperta: la revisione gira in un event loop
-        #: annidato e da li' si puo' rientrare in questa finestra.
+        #: True while the pause is open: the review runs in a nested event loop
+        #: and from there this window can be re-entered.
         self._inventory_pause_active = False
-        #: Vero mentre una generazione manuale sta mostrando la modale: e' la
-        #: finestra ad averla aperta, quindi e' lei a doverla chiudere.
+        #: True while a manual generation is showing the modal: it is the
+        #: window that opened it, so it is the window that must close it.
         self._manual_cad_overlay = False
-        #: Vero dall'avvio di un'estrazione, di un rilancio o di un pretest
-        #: fino alla loro fine (o all'abbandono): finche' e' vero, testo e
-        #: suggerimento del pulsante di estrazione e i comandi YOLO non si
-        #: toccano (audit 25/09, B6). An explicit flag and not
+        #: True from the start of an extraction, a re-run or a pretest
+        #: until their end (or abandonment): while it is true, text and
+        #: tooltip of the extraction button and the YOLO commands are not
+        #: touched (audit 25/09, B6). An explicit flag and not
         #: QThread.isRunning, because the run's lifetime is not the lifetime
         #: of any one thread: it goes on after the extraction thread into the
         #: automatic generation (cleared in `_on_generation_finished`), and
@@ -1768,19 +1784,19 @@ class MainWindow(QMainWindow):
         #: older justification -- isRunning still true inside a queued
         #: `finished` slot -- was wrong: measured, it is already False there.)
         self._extraction_busy = False
-        # La rotellina scorre la pagina e non cambia tendine o numeri non
-        # cliccati (2026-09-26: la tipologia cambiata scorrendo la scheda).
+        # The wheel scrolls the page and does not change unclicked combo boxes
+        # or numbers (2026-09-26: the component type changed while scrolling the tab).
         from .wheel_guard import install as install_wheel_guard
         install_wheel_guard()
-        #: Quale insieme di campi del corpo descrive la scheda della foto in
-        #: `_photo_png`: "cast" (castellated) o "matrix". Se ne leggono i
-        #: valori attuali, cosi' una correzione delle quote vale e un cambio di
-        #: tipologia non sposta la scala. None = ignoto.
+        #: Which set of body fields describes the board of the photo in
+        #: `_photo_png`: "cast" (castellated) or "matrix". Their current values
+        #: are read, so a correction of the dimensions applies and a change of
+        #: type does not shift the scale. None = unknown.
         self._photo_body_fields = None
-        #: Vero quando le quote della scheda sono NOTE (da un'analisi o scritte
-        #: dall'utente). Prima valevano sempre i valori iniziali dei campi
-        #: (42.8 x 15.2 mm, un modulo di prova), e il pretest calibrava la foto
-        #: su quelli: sull'ESP32 la scala usciva del 32% sbagliata (26/09).
+        #: True when the board dimensions are KNOWN (from an analysis or written
+        #: by the user). Before, the initial field values always applied
+        #: (42.8 x 15.2 mm, a test module), and the pretest calibrated the photo
+        #: on those: on the ESP32 the scale came out 32% wrong (26/09).
         self._board_size_known = False
         self._config = load_config()
         #: Problems found reading config.json, (template, values) pairs:
@@ -1789,66 +1805,66 @@ class MainWindow(QMainWindow):
         self._config_load_notes: list = take_load_problems()
         self.profile_store = profile_store or ProfileStore(legacy_config=self._config, legacy_path=config_path())
         self.i18n = I18n(self.profile_store, self._config.get("language", "it"))
-        # Log, avanzamento ed errori passano da `messages.tx`: da qui in avanti
-        # si scrivono nella lingua scelta (utente, 2026-09-24).
+        # Log, progress and errors go through `messages.tx`: from here on
+        # they are written in the chosen language (user, 2026-09-24).
         from ..services.messages import set_translator
         set_translator(self.i18n.raw)
-        # Anche i testi propri di Qt (Si'/No/Annulla dei QMessageBox, menu
-        # contestuali) nella lingua scelta, non in inglese (26/09).
+        # Qt's own texts too (Si'/No/Annulla (yes/no/cancel) of the QMessageBox,
+        # context menus) in the chosen language, not in English (26/09).
         from .qt_translations import install_qt_translations
         install_qt_translations(self.i18n.language)
-        # Modello scelto solo per questa sessione (datasheet difficile): non
-        # viene salvato in config.json e si perde alla chiusura, per scelta.
+        # Model chosen for this session only (difficult datasheet): it is not
+        # saved in config.json and is lost on close, by choice.
         self._session_model: str | None = None
-        #: Scelta di sessione per il modello che guarda la fotografia. None
-        #: significa «quello configurato nel profilo»: all'avvio non si impone
-        #: un modello deciso qui dentro, perche' una costante nel codice della
-        #: finestra vince in silenzio sulle impostazioni dell'utente e manda la
-        #: chiamata a pagamento a un modello che lui non ha scelto.
+        #: Session choice for the model that looks at the photograph. None
+        #: means «the one configured in the profile»: at start-up no model
+        #: decided in here is imposed, because a constant in the window code
+        #: silently wins over the user's settings and sends the paid call to a
+        #: model the user did not choose.
         self._vlm_model: str | None = None
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._applying_extraction = False
         self._extract_finish_pending = False
         self._automatic_generation_active = False
-        # Rigenerazione 3D chiesta da un «Applica» e non ancora partita
-        # (vedi `_run_pending_regen_3d`).
+        # 3D regeneration requested by an «Applica» (apply) and not started yet
+        # (see `_run_pending_regen_3d`).
         self._regen_3d_pending = False
         self._automatic_footprint_done = False
         self._automatic_3d_done = False
-        #: True quando la corsa automatica in atto ha chiesto anche il modello
-        #: 3D. Falso = generazione di solo footprint, che e' un esito completo.
+        #: True when the running automatic run also requested the 3D
+        #: model. False = footprint-only generation, which is a complete outcome.
         self._automatic_3d_expected = True
         self._automatic_3d_deferred_reason = ""
         self._automatic_generation_errors = []
         self._startup_dependencies_checked = False
-        #: Messaggi del log della sessione, in ordine (vedi `_log_plain_text`).
+        #: Messages of the session log, in order (see `_log_plain_text`).
         self._log_lines: list[str] = []
-        #: True/False appena `_init_parameters` ha interrogato il sistema; None
-        #: prima. Va ricordato: `find_freecadcmd()` e' una
-        #: ricerca su disco e l'estrazione non deve rifarla per sapere se il
-        #: modello 3D e' generabile.
+        #: True/False as soon as `_init_parameters` has queried the system; None
+        #: before. It must be remembered: `find_freecadcmd()` is a
+        #: disk search and the extraction must not repeat it to know whether the
+        #: 3D model can be generated.
         self._freecad_available: bool | None = None
-        #: Coppie (copia nella scheda Modello 3D, originale nella scheda
-        #: Progetto), per allinearne la visibilita' a genitore acquisito.
+        #: Pairs (copy in the Modello 3D (3D model) tab, original in the Progetto
+        #: (project) tab), to align their visibility to the adopted parent.
         self._project_action_mirrors: list = []
-        #: Comandi a sola icona della barra 3D con testi propri (rigenera,
-        #: accetta): i loro tooltip si ricompongono a ogni cambio di lingua.
+        #: Icon-only commands of the 3D bar with their own texts (regenerate,
+        #: accept): their tooltips are recomposed on every language change.
         self._workflow_buttons: list = []
-        #: Rendering del modello 3D rimandato all'ingresso nella scheda:
-        #: (revisione del modello, percorso della mesh) finche' la chiamata
-        #: differita non e' partita, None altrimenti. Vedi `_enter_3d_tab`.
+        #: Rendering of the 3D model postponed to entering the tab:
+        #: (model revision, mesh path) until the deferred call has
+        #: started, None otherwise. See `_enter_3d_tab`.
         self._pending_3d_render = None
-        #: True mentre `render_mesh` sta lavorando: un secondo ingresso nella
-        #: scheda in quel momento non deve accodare un altro rendering.
+        #: True while `render_mesh` is working: a second entry into the tab
+        #: at that moment must not queue another rendering.
         self._rendering_3d = False
-        #: Preparazione della mesh in corso fuori dal thread GUI
-        #: (`Preview3DVtk.prepare_mesh`): (token, revisione del modello, cosa
-        #: fare a mesh pronta, cosa fare in errore), None altrimenti. Solo la
-        #: richiesta piu' recente viene servita. Vedi `_prepare_mesh_then`.
+        #: Mesh preparation running off the GUI thread
+        #: (`Preview3DVtk.prepare_mesh`): (token, model revision, what to do
+        #: when the mesh is ready, what to do on error), None otherwise. Only
+        #: the most recent request is served. See `_prepare_mesh_then`.
         self._mesh_request = None
-        #: True finche' il cursore di attesa messo dall'indicatore e' attivo:
-        #: `restoreOverrideCursor` va chiamato una volta per ogni `set`.
+        #: True while the wait cursor set by the indicator is active:
+        #: `restoreOverrideCursor` must be called once for every `set`.
         self._loading_cursor_set = False
 
         self._build_menu()
@@ -1859,8 +1875,8 @@ class MainWindow(QMainWindow):
             self._selected_family() == "aggregate_castellated"
         )
         self._refresh_docs_list()
-        # Il campo nasce vuoto, quindi nessun segnale di modifica lo annuncia:
-        # il blocco va applicato una volta all'avvio.
+        # The field starts empty, so no change signal announces it:
+        # the block must be applied once at start-up.
         self._apply_component_name_gate()
 
         # Connect after initialization so construction does not invalidate a worker.
@@ -1897,9 +1913,9 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menu_file = self.menuBar().addMenu(self.i18n.tr("app.file"))
-        # Il progetto E' la sua cartella (utente, 2026-09-24): si crea o si
-        # apre esplicitamente, non scrivendo un nome che per caso coincide con
-        # una cartella esistente.
+        # The project IS its folder (user, 2026-09-24): it is created or
+        # opened explicitly, not by writing a name that happens to match an
+        # existing folder.
         self.action_new_project = file_menu.addAction(
             self.i18n.text("Nuovo progetto..."), self._new_project)
         self.action_new_project.setShortcut(QKeySequence.StandardKey.New)
@@ -1908,13 +1924,14 @@ class MainWindow(QMainWindow):
         self.action_open_project.setShortcut(QKeySequence.StandardKey.Open)
         self.action_rename_project = file_menu.addAction(
             self.i18n.text("Rinomina progetto..."), self._rename_project)
-        # Progetti recenti (PIANO-FIX 1): riempito a ogni apertura, cosi'
-        # elenca solo le cartelle che sono ancora progetti.
+        # Recent projects (PIANO-FIX 1): filled on every opening, so it
+        # lists only the folders that are still projects.
         self.menu_recent = file_menu.addMenu(self.i18n.text("Progetti recenti"))
         self.menu_recent.setToolTipsVisible(True)
         self.menu_recent.aboutToShow.connect(self._fill_recent_menu)
-        # «Apri cartella componente» e i comandi KiCad, tolti da qui il
-        # 2026-09-25, stanno nel menu «Strumenti» (decisione del 2026-09-26).
+        # «Apri cartella componente» (open component folder) and the KiCad commands,
+        # removed from here on 2026-09-25, are in the «Strumenti» (tools) menu
+        # (decision of 2026-09-26).
         file_menu.addSeparator()
         self.action_exit = file_menu.addAction(self.i18n.text("Esci"), self.close)
 
@@ -1925,24 +1942,25 @@ class MainWindow(QMainWindow):
             self.i18n.text("Gestione tipologie e profili AI..."), self._edit_profiles)
         self.action_defaults = config_menu.addAction(
             self.i18n.text("Default generali AI..."), self._edit_llm_settings)
-        # Chiave OpenRouter nel Gestore credenziali di Windows (PIANO-FIX 2).
+        # OpenRouter and DeepSeek keys in the Windows Credential Manager
+        # (PIANO-FIX 2, HANDOFF 129).
         self.action_ai_account = config_menu.addAction(
             self.i18n.text("Account AI..."), self._open_ai_account)
         self.action_ai_account.setToolTip(self.i18n.text(
-            "Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel "
-            "Gestore credenziali di Windows."))
+            "Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le "
+            "chiavi nel Gestore credenziali di Windows."))
         config_menu.addSeparator()
 
         self.action_generation_options = config_menu.addAction(
             self.i18n.text("Opzioni di generazione..."), self._edit_generation_options)
         self.action_accepted_models = config_menu.addAction(
             self.i18n.text("Archivio abbinamenti accettati..."), self._show_accepted_models)
-        # «Apri config.json» e' nel menu «Strumenti» (decisione del 2026-09-26).
+        # «Apri config.json» (open config.json) is in the «Strumenti» (tools) menu (decision of 2026-09-26).
 
-        # Strumenti (utente, 2026-09-26): le sei voci tolte il 25/09 dai menu
-        # File, Configurazione e «?». I comandi KiCad restano anche nella
-        # scheda KiCad; voci e pulsanti si accendono insieme
-        # (`_refresh_output_actions_inner` gestisce entrambi per nome).
+        # Tools (user, 2026-09-26): the six entries removed on 25/09 from the
+        # File, Configurazione (configuration) and «?» menus. The KiCad commands
+        # also stay in the KiCad tab; entries and buttons are enabled together
+        # (`_refresh_output_actions_inner` handles both by name).
         tools_menu = self.menu_tools = self.menuBar().addMenu(self.i18n.tr("app.tools"))
         tools_menu.setToolTipsVisible(True)
         self.action_open_output = tools_menu.addAction(
@@ -1959,8 +1977,8 @@ class MainWindow(QMainWindow):
         # last refresh changes it, so the gate is recomputed on opening.
         tools_menu.aboutToShow.connect(self._refresh_kicad_command_gate)
         tools_menu.addSeparator()
-        # Installato, la cartella scrivibile (config, database) e' quella
-        # dell'utente, non quella del programma.
+        # Once installed, the writable folder (config, database) is the user's
+        # one, not the program's.
         self.action_open_tool_dir = tools_menu.addAction(
             self.i18n.text("Apri cartella progetto tool"),
             lambda: webbrowser.open(user_data_dir().as_uri()))
@@ -1968,10 +1986,10 @@ class MainWindow(QMainWindow):
             self.i18n.text("Apri config.json"), self._open_config_file)
 
         help_menu = self.menu_help = self.menuBar().addMenu(self.i18n.tr("app.help"))
-        # «Apri cartella progetto tool» tolta dall'utente il 2026-09-25.
-        # Aiuto e assistenza (PIANO-FIX 5 e 6, 2026-09-26): guida, log,
-        # segnalazione su GitHub, aggiornamenti solo a richiesta (nessuna
-        # chiamata di rete all'avvio senza una decisione dell'utente).
+        # «Apri cartella progetto tool» (open tool project folder) removed by the
+        # user on 2026-09-25. Help and support (PIANO-FIX 5 and 6, 2026-09-26):
+        # guide, log, report on GitHub, updates only on request (no network
+        # call at start-up without a user decision).
         self.action_user_guide = help_menu.addAction(
             self.i18n.text("Guida d'uso"), self._open_user_guide)
         self.action_user_guide.setShortcut(QKeySequence.StandardKey.HelpContents)
@@ -1982,7 +2000,7 @@ class MainWindow(QMainWindow):
         self.action_check_updates = help_menu.addAction(
             self.i18n.text("Controlla aggiornamenti..."), self._check_for_updates)
         help_menu.addSeparator()
-        # Licenza del programma e componenti di terze parti (utente, 2026-09-25).
+        # Licence of the program and third-party components (user, 2026-09-25).
         self.action_licenses = help_menu.addAction(self.i18n.text("Licenze"), self._show_licenses)
         self.action_about = help_menu.addAction(
             self.i18n.text("Informazioni su KiCadGen"), self._show_about)
@@ -2047,29 +2065,29 @@ class MainWindow(QMainWindow):
                default_model=self._default_model()))
 
     def _project_option(self, key: str, default):
-        """@brief Valore di un'opzione che segue il progetto (`PROJECT_OPTIONS`).
+        """@brief Value of an option that follows the project (`PROJECT_OPTIONS`).
 
-        @param key Nome dell'opzione.
-        @param default Valore quando ne' il progetto ne' config.json la dicono.
-        @return Il valore del progetto aperto se lo dichiara, altrimenti
-            quello generale di config.json.
-        @note Le opzioni di un progetto stanno in `_project_options`, NON in
-            `self._config`: prima l'apertura di un progetto le scriveva in
-            `self._config`, e il primo `save_config` per qualunque altro
-            motivo le rendeva generali, cosi' dopo un riavvio i progetti nuovi
-            partivano dall'ultimo progetto aperto (revisore 2, difetto 8).
+        @param key Option name.
+        @param default Value when neither the project nor config.json states it.
+        @return The value of the open project if it declares one, otherwise
+            the general one from config.json.
+        @note The options of a project live in `_project_options`, NOT in
+            `self._config`: before, opening a project wrote them into
+            `self._config`, and the first `save_config` for any other reason
+            made them general, so after a restart new projects started from
+            the last project opened (reviewer 2, defect 8).
         """
         options = getattr(self, "_project_options", None) or {}
         return options[key] if key in options else self._config.get(key, default)
 
     def _set_project_option(self, key: str, value: bool) -> None:
-        """@brief Scelta dell'utente da Opzioni di generazione: vale per il progetto E come generale.
+        """@brief User choice from «Opzioni di generazione...»: it applies to the project AND as the general value.
 
-        @param key Nome dell'opzione (`PROJECT_OPTIONS`).
-        @param value Valore scelto.
-        @note Il chiamante salva config.json. Anche la fotografia generale da
-            cui partono i progetti nuovi si aggiorna, cosi' in questa sessione
-            e dopo un riavvio un progetto nuovo parte dallo stesso valore.
+        @param key Option name (`PROJECT_OPTIONS`).
+        @param value Chosen value.
+        @note The caller saves config.json. The general snapshot from which
+            new projects start is updated too, so in this session and after a
+            restart a new project starts from the same value.
         """
         self._config[key] = bool(value)
         self._project_options = dict(getattr(self, "_project_options", None) or {})
@@ -2079,63 +2097,62 @@ class MainWindow(QMainWindow):
             general.setdefault("options", {})[key] = bool(value)
 
     def _include_nc_pins(self) -> bool:
-        """@brief Dice se i pin NC fisicamente presenti vanno generati (predefinito si')."""
+        """@brief Tell whether the physically present NC pins are generated (default yes)."""
         return bool(self._project_option("include_nc_pins", True))
 
     def _inventory_pause_enabled(self) -> bool:
-        """@brief Dice se dopo l'inventario a pagamento ci si ferma a rivederlo.
+        """@brief Tell whether the run stops to review the paid inventory after it.
 
-        @return True finche' qualcuno non ha chiesto esplicitamente di non
-            fermarsi piu'.
-        @note Predefinito ACCESO: la pausa e'
-            cio' che l'utente ha chiesto («dopo l'elaborazione AI stessa cosa,
-            non ho visto la pausa»), e un impianto che comincia a correre da
-            solo verso l'abbinamento modelli e FreeCAD gli toglie l'unico
-            momento in cui puo' correggere la disposizione dei corpi prima che
-            qualcosa venga costruito su di essa. Chi non la vuole la spegne una
-            volta, dalla pausa stessa, e la scelta resta in config.json.
-        @note `is not False` e non `get(..., True)`: un valore scritto a mano
-            che non sia un booleano (una stringa, un numero) non deve valere
-            come «spenta» per caso.
+        @return True until someone has explicitly asked not to stop any more.
+        @note Default ON: the pause is what the user asked for («dopo
+            l'elaborazione AI stessa cosa, non ho visto la pausa»: after the
+            AI processing, same thing, I did not see the pause), and a
+            pipeline that starts running on its own towards model matching
+            and FreeCAD takes away the only moment in which the layout of the
+            bodies can be corrected before something is built on it. Whoever
+            does not want it switches it off once, from the pause itself, and
+            the choice stays in config.json.
+        @note `is not False` and not `get(..., True)`: a hand-written value
+            that is not a boolean (a string, a number) must not count as
+            "off" by accident.
         """
         return self._project_option('pause_after_inventory', True) is not False
 
     def _remember_inventory_pause(self, enabled: bool) -> None:
-        """@brief Ricorda in config.json se la pausa dell'inventario va offerta.
+        """@brief Remember in config.json whether the inventory pause is offered.
 
-        @param enabled False quando l'utente ha chiesto di non essere piu' fermato.
-        @note Stesso deposito delle altre opzioni di generazione: la scelta
-            vale per le corse successive, non solo per questa sessione.
+        @param enabled False when the user asked not to be stopped any more.
+        @note Same store as the other generation options: the choice applies
+            to the following runs, not only to this session.
         """
         self._set_project_option('pause_after_inventory', enabled)
         self._save_config_safely()
 
     def _photo_inventory_family(self) -> bool | None:
-        """@brief Prevede se l'analisi passera' dall'inventario fotografico.
+        """@brief Predict whether the analysis will go through the photo inventory.
 
-        @return True quando la tipologia dichiara una scheda POPOLATA (modulo
-            castellated o aggregato a fori passanti), False quando dichiara UN
-            SOLO componente discreto, None quando la tipologia non basta a
-            deciderlo.
-        @note Condizione dell'estrattore (`datasheet_extractor`, variabile
+        @return True when the component type declares a POPULATED board
+            (castellated module or through-hole aggregate), False when it
+            declares ONE single discrete component, None when the type is not
+            enough to decide.
+        @note Condition of the extractor (`datasheet_extractor`, variable
             `populated_board`: `layout == 'castellated' or component_family ==
-            'aggregate_tht'`), qui ripetuta perche' e' l'unica cosa che la
-            finestra sa PRIMA di spendere. Da essa dipendono a cascata il
-            rilevatore locale dei corpi, la revisione «Corpi rilevati», i
-            componenti della tabella e la pausa dopo l'inventario: per un
-            componente singolo nulla di tutto cio' viene eseguito.
-        @note I tre valori non sono un vezzo. La disposizione `castellated` la
-            decide il MODELLO leggendo i documenti, e qui non e' ancora nota:
-            con la tipologia «(non specificata)» o con una tipologia
-            personalizzata l'inventario puo' benissimo partire, quindi si
-            risponde None e non si annuncia nulla. Rispondere False in quel
-            caso cancellerebbe dal log la dichiarazione della chiamata a
-            pagamento sulla fotografia -- cioe' proprio l'informazione che non
-            deve mai mancare.
-        @note Il criterio non e' il NOME del componente ma l'attributo
-            dichiarato dalla tipologia scelta: un componente discreto singolo
-            non e' una scheda con corpi montati sopra, per costruzione, e
-            questo vale per qualunque pezzo di quella famiglia.
+            'aggregate_tht'`), repeated here because it is the only thing the
+            window knows BEFORE spending. On it depend, in cascade, the local
+            body detector, the «Corpi rilevati» review, the components of the
+            table and the pause after the inventory: for a single component
+            none of that is executed.
+        @note The three values are not a whim. The `castellated` layout is
+            decided by the MODEL reading the documents, and here it is not yet
+            known: with the type «(non specificata)» or with a custom type
+            the inventory may well start, so the answer is None and nothing is
+            announced. Answering False in that case would remove from the log
+            the declaration of the paid call on the photo -- i.e. exactly the
+            information that must never be missing.
+        @note The criterion is not the NAME of the component but the attribute
+            declared by the chosen type: a single discrete component is not a
+            board with bodies mounted on it, by construction, and this holds
+            for any part of that family.
         """
         # The project wizard's explicit choice takes precedence over a stale
         # component profile. Old projects can carry a profile from the prior
@@ -2197,8 +2214,8 @@ class MainWindow(QMainWindow):
         area = screen.availableGeometry()
         frame = self.frameGeometry()
         frame.moveCenter(area.center())
-        # Mai oltre l'angolo in alto a sinistra: una finestra piu' grande
-        # dell'area resterebbe con la barra del titolo fuori schermo.
+        # Never beyond the top-left corner: a window larger than the area
+        # would be left with its title bar off screen.
         self.move(max(frame.left(), area.left()), max(frame.top(), area.top()))
 
     def closeEvent(self, event):
@@ -2213,8 +2230,8 @@ class MainWindow(QMainWindow):
             the 3D viewer is closed explicitly (VTK render window finalized);
             a refused close touches neither.
         """
-        # Il worker terminali segnala l'attesa nella barra di stato 3D, senza
-        # dialogo modale: comportamento su cui si appoggiano i test esistenti.
+        # The terminals worker reports the wait in the 3D status bar, without
+        # a modal dialog: behaviour the existing tests rely on.
         if self._terminal_worker is not None and self._terminal_worker.isRunning():
             self._set_3d_status(self.i18n.text(
                 "Attendi la fine dell'analisi terminali prima di chiudere."), STATUS_WARNING)
@@ -2226,36 +2243,36 @@ class MainWindow(QMainWindow):
                 self.i18n.text('Attendi la conclusione dell’operazione prima di chiudere.'))
             event.ignore()
         else:
-            # Le ultime modifiche non aspettano il prossimo giro del salvataggio.
+            # The latest changes do not wait for the next round of the autosave.
             if not self._can_leave_project():
                 event.ignore()
                 return
             self._window_closed = True
             self.ai_account.detach()
-            # Una finestra chiusa davvero sta solo per essere distrutta, e
-            # distruggendola Qt svuota elenchi, testi e schede: i figli
-            # emettono rowsRemoved, modelReset, textChanged, currentChanged, e
-            # gli slot Python collegati girerebbero su widget a meta'
-            # distruzione. Segfault 139 intermittente all'uscita, 2026-09-25:
-            # prima corretto solo per il cambio di scheda, poi riprodotto in
-            # modo deterministico distruggendo il «Log analisi AI»
-            # (`_refresh_ai_copy_buttons`). Si blocca l'intera classe: tutti i
-            # segnali di tutti gli oggetti figli, non un collegamento alla volta.
+            # A window really closed is only about to be destroyed, and while
+            # destroying it Qt empties lists, texts and tabs: the children
+            # emit rowsRemoved, modelReset, textChanged, currentChanged, and
+            # the connected Python slots would run on half-destroyed
+            # widgets. Intermittent segfault 139 on exit, 2026-09-25:
+            # first fixed only for the tab change, then reproduced
+            # deterministically by destroying the «Log analisi AI» (AI analysis log)
+            # (`_refresh_ai_copy_buttons`). The whole class is blocked: all the
+            # signals of all the child objects, not one connection at a time.
             for child in self.findChildren(QObject):
                 try:
                     child.blockSignals(True)
                 except RuntimeError:
-                    pass  # oggetto C++ gia' distrutto
+                    pass  # C++ object already destroyed
             self._close_log_handle()
-            # G9 (HANDOFF 130): pyvistaqt finalizza la render window VTK in
-            # close(); lasciarla al distruttore della finestra e' una fonte nota
-            # di crash nativi all'uscita su Windows. Solo a chiusura accettata.
+            # G9 (HANDOFF 130): pyvistaqt finalises the VTK render window in
+            # close(); leaving it to the window destructor is a known source
+            # of native crashes on exit on Windows. Only when closing is accepted.
             preview = getattr(self, "preview_3d", None)
             if preview is not None:
                 try:
                     preview.close()
                 except RuntimeError:
-                    pass  # oggetto C++ gia' distrutto
+                    pass  # C++ object already destroyed
             super().closeEvent(event)
 
     def _edit_profiles(self):
@@ -2317,17 +2334,17 @@ class MainWindow(QMainWindow):
         return (getattr(self, "project_kind", None) == _PROJECT_KIND_SINGLE
                 or self._selected_family() in _SINGLE_COMPONENT_FAMILIES)
 
-    # ── Modello LLM ─────────────────────────────────────────────────
+    # ── LLM model ───────────────────────────────────────────────────
 
     def _default_model(self) -> str:
         """Resolved profile default; session selection remains separate."""
         return self._profile_values()['model']
 
     def _effective_model(self) -> str:
-        """Modello da usare per la prossima estrazione.
+        """Model to use for the next extraction.
 
-        E' il modello di sessione, se ne e' stato scelto uno dal tab
-        "Progetto" per questo componente; altrimenti il default globale.
+        It is the session model, if one was chosen from the "Progetto" tab
+        for this component; otherwise the global default.
         """
         return self._session_model or self._default_model()
 
@@ -2336,20 +2353,20 @@ class MainWindow(QMainWindow):
         return self._effective_model()
 
     def _photo_detector_model(self) -> str:
-        """@brief Modello che guarda la fotografia nella prossima estrazione.
+        """@brief Model that looks at the photo in the next extraction.
 
-        @return Identificatore del modello: la scelta di sessione se c'e',
-            altrimenti quella configurata nel profilo.
-        @note E' la chiamata a pagamento del percorso fotografico -- con 'vlm'
-            rileva ed elenca i corpi, con 'yolo' riconcilia le proposte
-            locali -- e finisce nel worker come `verification_model`.
-        @note All'avvio segue il modello configurato per l'estrazione, non una
-            costante scritta qui. Prima il valore iniziale era un modello
-            fissato nel codice della finestra: chi apriva l'app trovava gia'
-            scelto un modello che non aveva configurato, e la chiamata a
-            pagamento sulla fotografia ci andava senza che nulla lo dicesse.
-            Chi vuole un modello diverso, magari piu' economico, lo sceglie dal
-            pannello e vale per la sessione.
+        @return Model identifier: the session choice if there is one,
+            otherwise the one configured in the profile.
+        @note It is the paid call of the photo path -- with 'vlm' it detects
+            and lists the bodies, with 'yolo' it reconciles the local
+            proposals -- and it reaches the worker as `verification_model`.
+        @note At start-up it follows the model configured for extraction, not
+            a constant written here. Before, the initial value was a model
+            fixed in the window code: whoever opened the app found a model
+            already chosen that they had not configured, and the paid call on
+            the photo went to it without anything saying so. Whoever wants a
+            different model, perhaps a cheaper one, chooses it from the panel
+            and it applies to the session.
         """
         return self._vlm_model or self._effective_model()
 
@@ -2358,7 +2375,11 @@ class MainWindow(QMainWindow):
         return self._effective_model()
 
     def _refresh_model_combo(self) -> None:
-        """Riallinea la tendina del tab Progetto a default + scelta di sessione."""
+        """Realign the drop-down of the Progetto tab to default + session choice.
+
+        Also refreshes the summary of «Strumenti AI», which quotes the model
+        and detector texts this rewrites.
+        """
         if not hasattr(self, "combo_model"):
             return
         blocked = self.combo_model.blockSignals(True)
@@ -2374,14 +2395,19 @@ class MainWindow(QMainWindow):
         else:
             self.combo_model.setCurrentIndex(0)
         self.combo_model.blockSignals(blocked)
-        # Ogni strada che cambia il modello passa di qui (ripristino del
-        # progetto, finestra dei modelli, profilo): il saldo mostrato segue il
-        # fornitore del modello in uso (utente, 27/09: restava OpenRouter dopo
-        # aver riaperto un progetto con un modello DeepSeek).
+        # Every path that changes the model goes through here (project
+        # restore, models window, profile): the balance shown follows the
+        # provider of the model in use (user, 27/09: it stayed OpenRouter after
+        # reopening a project with a DeepSeek model).
         self._sync_balance_provider()
 
         if hasattr(self, "combo_photo_detector"):
             self._refresh_photo_detector_controls()
+        # The refill runs with signals blocked and rewrites both texts the
+        # summary quotes: refresh it here, after them (review 2026-10-16,
+        # R2I3: after a language switch it showed the previous language).
+        if hasattr(self, "group_ai_tools"):
+            self._refresh_ai_tools_summary()
 
     def _photo_detector_text(self, key: str, **values: object) -> str:
         """Resolve local fallbacks through the existing translation mechanism."""
@@ -2424,9 +2450,9 @@ class MainWindow(QMainWindow):
         self.btn_yolo_settings.setAccessibleName(self._photo_detector_text("settings"))
         self.btn_yolo_settings.setToolTip(
             self._photo_detector_text("settings") + "\n" + self._photo_detector_text("settings_help"))
-        # Icona, non testo (utente, 2026-09-24): nome «Sfoglia…» come prima riga
-        # del tooltip, spiegazione sotto; il nome accessibile resta quello del
-        # dialogo che apre.
+        # Icon, not text (user, 2026-09-24): name «Sfoglia…» (browse) as the first
+        # line of the tooltip, explanation below; the accessible name stays the one
+        # of the dialog it opens.
         self.btn_pick_yolo_model.setAccessibleName(self._photo_detector_text("picker"))
         self.btn_pick_yolo_model.setToolTip(
             self._photo_detector_text("browse") + "\n" + self._photo_detector_text("picker"))
@@ -2444,11 +2470,11 @@ class MainWindow(QMainWindow):
         self._on_photo_detector_changed()
 
     def _on_photo_detector_changed(self) -> None:
-        """@brief Mostra i pesi locali o il modello di visione, secondo il rilevatore.
+        """@brief Show the local weights or the vision model, according to the detector.
 
-        @note Una riga per volta: i pesi ONNX non c'entrano nulla quando a
-            guardare la fotografia e' un modello remoto, e il contrario. La
-            riga che resta e' quella su cui si puo' davvero intervenire.
+        @note One row at a time: the ONNX weights are irrelevant when a remote
+            model is looking at the photo, and vice versa. The row that stays
+            is the one that can really be acted on.
         """
         single = self._is_single_component_project()
         detector = "ai" if single else self.combo_photo_detector.currentData()
@@ -2458,8 +2484,8 @@ class MainWindow(QMainWindow):
         default_path = self._default_yolo_weights(detector)
         self.field_yolo_model.setPlaceholderText(self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(self._photo_detector_text("path_help", path=default_path))
-        # Durante una corsa (audit 25/09, B6) non si riaccendono i comandi
-        # YOLO e non si riscrive il pulsante: ci pensa la fine della corsa.
+        # During a run (audit 25/09, B6) the YOLO commands are not re-enabled
+        # and the button is not rewritten: the end of the run takes care of it.
         busy = getattr(self, "_extraction_busy", False)
         if not busy:
             self._refresh_extract_button()
@@ -2468,8 +2494,8 @@ class MainWindow(QMainWindow):
             self.field_smd_model.setEnabled(smd)
             self.btn_pick_smd_model.setEnabled(smd)
             self.btn_yolo_settings.setEnabled(local)
-            # La riga della revisione dipende dal rilevatore: con «Solo YOLO
-            # locale» riapre il pretest (vedi _refresh_reopen_review_button).
+            # The review row depends on the detector: with «Solo YOLO locale» (local
+            # YOLO only) it reopens the pretest (see _refresh_reopen_review_button).
             if hasattr(self, "btn_component_review") and not self._background_work_running():
                 self._refresh_reopen_review_button()
         if hasattr(self, "_models_form"):
@@ -2477,17 +2503,17 @@ class MainWindow(QMainWindow):
             self._models_form.setRowVisible(self._row_yolo_model, local and not single)
             self._models_form.setRowVisible(self._row_smd_model, smd and not single)
             self._models_form.setRowVisible(self._row_yolo_params, local and not single)
-            # Il modello di visione serve nei due percorsi fotografici, ma di
-            # norma coincide con «Modello AI». Mostra la riga solo quando e'
-            # stato scelto un override diverso, evitando di ripetere lo stesso
-            # nome due volte. Con yolo_only nessun modello AI lavora.
+            # The vision model is used in both photographic paths, but it normally
+            # coincides with «Modello AI» (AI model). The row is shown only when a
+            # different override has been chosen, avoiding repeating the same
+            # name twice. With yolo_only no AI model works.
             vision_override = bool(
                 self._vlm_model and self._vlm_model != self._effective_model())
             self._models_form.setRowVisible(
                 self._row_vlm_model,
                 not single and detector in ("yolo", "vlm") and vision_override)
             self._models_form.setRowVisible(self._row_ai_model, detector != "yolo_only")
-            # Anche il credito (utente, 2026-09-25): il pretest non spende nulla.
+            # The credit too (user, 2026-09-25): the pretest spends nothing.
             if hasattr(self, "_row_ai_account"):
                 self._models_form.setRowVisible(self._row_ai_account, detector != "yolo_only")
 
@@ -2552,14 +2578,14 @@ class MainWindow(QMainWindow):
                                  default=default, tr=self.i18n.text, parent=self)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         selected = dialog.selected_path()
-        # Chiusa per davvero e rilasciata subito: tenuta in vita dalla finestra
-        # avviava controlli del modello quando il garbage collector la
-        # distruggeva, in un momento qualsiasi (HANDOFF 131).
+        # Really closed and released at once: kept alive by the window, it
+        # started model checks when the garbage collector destroyed it, at
+        # any moment (HANDOFF 131).
         dialog.shutdown()
         dialog.deleteLater()
         if accepted and selected:
-            # Il predefinito del rilevatore resta il campo vuoto, come per la
-            # rete SMD: cambiando rilevatore cambia anche il predefinito.
+            # The detector default stays the empty field, as for the SMD
+            # network: changing detector also changes the default.
             self.field_yolo_model.setText(
                 "" if os.path.normcase(os.path.abspath(selected))
                 == os.path.normcase(os.path.abspath(default)) else selected)
@@ -2583,12 +2609,12 @@ class MainWindow(QMainWindow):
         return yolo_weights_path(DEFAULT_YOLO_PT if detector == "yolo_smd" else DEFAULT_YOLO_ONNX)
 
     def _pick_session_vlm_model(self) -> None:
-        """@brief Sceglie il modello che guarda la fotografia, solo per questa sessione.
+        """@brief Choose the model that looks at the photo, for this session only.
 
-        @note Chiede le capacita' del lavoro fotografico -- risposta strutturata
-            e lettura di immagini -- non quelle dei datasheet: pretendere anche
-            i PDF nasconderebbe i modelli di sola visione, che sono proprio
-            quelli che si vogliono provare qui.
+        @note It asks for the capabilities of the photo work -- structured
+            answer and image reading -- not those of the datasheets: also
+            requiring PDFs would hide the vision-only models, which are
+            exactly the ones one wants to try here.
         """
         chosen = pick_model(self._photo_detector_model(), self,
                             title=self._photo_detector_text("vlm_model"),
@@ -2616,7 +2642,7 @@ class MainWindow(QMainWindow):
         dialog.shutdown()
         dialog.deleteLater()
         if accepted and selected:
-            # Il predefinito resta «campo vuoto»: cosi' segue la cartella.
+            # The default stays «campo vuoto» (empty field): so it follows the folder.
             self.field_smd_model.setText(
                 "" if os.path.normcase(os.path.abspath(selected))
                 == os.path.normcase(os.path.abspath(str(smd_weights_path()))) else selected)
@@ -2659,10 +2685,11 @@ class MainWindow(QMainWindow):
                                 default_model=self._default_model()))
 
     def _pick_session_model(self) -> None:
-        """Sceglie un modello valido solo per le estrazioni di questa sessione.
+        """Choose a model valid only for the extractions of this session.
 
-        Serve per i datasheet difficili: si passa a un modello piu' capace
-        (e piu' costoso) senza cambiare il default salvato nel profilo SQLite.
+        Useful for difficult datasheets: switch to a more capable (and more
+        expensive) model without changing the default saved in the SQLite
+        profile.
         """
         chosen = pick_model(
             self._effective_model(), self, title="Modello solo per questa sessione"
@@ -2682,7 +2709,7 @@ class MainWindow(QMainWindow):
         webbrowser.open(config_path().as_uri())
 
     def _about_html(self) -> str:
-        """@brief Testo della finestra About: descrizione e link a repository e sviluppatore."""
+        """@brief Text of the About window: description and links to the repository and the developer."""
         description = "<br>".join(escape(line) for line in
                                   self.i18n.tr("about.description").split("\n"))
         from .. import __version__
@@ -2694,11 +2721,11 @@ class MainWindow(QMainWindow):
                 f"<a href='{DEVELOPER_URL}'>{escape(DEVELOPER_NAME)}</a></p>")
 
     def _show_about(self) -> None:
-        """@brief Finestra About con i link al repository GitHub e allo sviluppatore.
+        """@brief About window with the links to the GitHub repository and to the developer.
 
-        @note I link si aprono nel browser (QMessageBox apre i link esterni
-            della sua etichetta); per questo il testo e' rich text, con le
-            parti tradotte escapate.
+        @note The links open in the browser (QMessageBox opens the external
+            links of its label); that is why the text is rich text, with the
+            translated parts escaped.
         """
         box = QMessageBox(self)
         box.setWindowTitle(self.i18n.text("Informazioni su KiCadGen"))
@@ -2727,10 +2754,10 @@ class MainWindow(QMainWindow):
                 texts.append(self.i18n.text("File non trovato:") + f" {name}")
         return texts[0], texts[1]
 
-    #: Scorciatoie da tastiera (PIANO-FIX 7, 2026-09-26): una sola tabella da
-    #: cui nascono i tasti E l'elenco del menu «?», cosi' non possono divergere.
-    #: (tasto, descrizione italiana, nome del metodo). Nessuna scorciatoia avvia
-    #: l'analisi AI: e' a pagamento e un tasto premuto per errore costa.
+    #: Keyboard shortcuts (PIANO-FIX 7, 2026-09-26): a single table from
+    #: which both the keys AND the list in the «?» menu are built, so they cannot
+    #: diverge. (key, Italian description, method name). No shortcut starts
+    #: the AI analysis: it is paid and a key pressed by mistake costs money.
     SHORTCUTS = (
         ("Ctrl+N", "Nuovo progetto", "_new_project"),
         ("Ctrl+O", "Apri progetto", "_open_project"),
@@ -2881,8 +2908,8 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Ok:
             return
         self._open_log_folder()
-        # Con un progetto aperto la cartella dei log e' la sua: i rapporti di
-        # crash stanno altrove e si aprono a parte.
+        # With a project open the log folder is the project's: crash reports
+        # live elsewhere and are opened separately.
         try:
             folder = self._log_folder()
         except OSError:
@@ -3036,7 +3063,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # I parametri esistono prima di ogni scheda: le schede li leggono.
+        # The parameters exist before any tab: the tabs read them.
         self._init_parameters()
         project_tab = self._build_project_tab()
         preview_tab = self._build_preview_tab()
@@ -3047,19 +3074,19 @@ class MainWindow(QMainWindow):
 
         language_row = QHBoxLayout()
         language_row.setSpacing(10)
-        # Stesso margine laterale del contenuto delle schede (10 px): il
-        # layout centrale non ne ha, e la tendina stava incollata al bordo
-        # destro della finestra (utente, 2026-09-24).
+        # Same side margin as the tab content (10 px): the central layout
+        # has none, and the combo box was stuck to the right border of the
+        # window (user, 2026-09-24).
         language_row.setContentsMargins(0, 6, CONTENT_MARGIN_PX, 6)
-        # Barra dei passi del flusso (PIANO-FIX 4): a sinistra della lingua,
-        # sulla stessa riga, per non togliere altezza alle schede.
+        # Workflow step bar (PIANO-FIX 4): to the left of the language,
+        # on the same row, so as not to take height away from the tabs.
         self.workflow_bar = WorkflowBar(self.i18n.text)
         self.workflow_bar.step_clicked.connect(self._on_workflow_step_clicked)
         language_row.addWidget(self.workflow_bar)
         language_row.addStretch()
-        # Un globo al posto della scritta «Lingua:» (utente, 2026-09-24), come
-        # le altre icone: il nome sta nel tooltip e nel nome accessibile della
-        # tendina, e si ritraduce con la lingua (`_refresh_language_texts`).
+        # A globe instead of the «Lingua:» (language) label (user, 2026-09-24), like
+        # the other icons: the name is in the tooltip and in the accessible name of
+        # the combo box, and is re-translated with the language (`_refresh_language_texts`).
         self.language_label = QLabel()
         self.language_label.setPixmap(self._asset_icon("language.svg").pixmap(QSize(20, 20)))
         self.language_label.setProperty("i18n_skip", True)
@@ -3085,15 +3112,15 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(model_3d_tab, self.i18n.tr("tab.model3d.name"))
         self.tabs.addTab(kicad_tab, self.i18n.tr("tab.kicad.name"))
         self.tabs.addTab(exports_tab, self.i18n.tr("tab.exports.name"))
-        # Icone a linea nello stile delle barre, al posto delle emoji a colori
-        # che stavano nel titolo (utente, 2026-09-24: «stonata con il resto»).
+        # Line icons in the style of the bars, instead of the colour emoji that
+        # were in the title (user, 2026-09-24: «stonata con il resto» (out of tune with the rest)).
         for index, asset in enumerate(TAB_ICONS):
             self.tabs.setTabIcon(index, self._asset_icon(asset))
         self._set_acquisition_tabs_enabled(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        # Pagina iniziale (PIANO-FIX 1): al posto delle schede finche' non c'e'
-        # un progetto aperto (`_refresh_start_page`). Le schede senza progetto
-        # erano riquadri vuoti e un pulsante inutilizzabile.
+        # Start page (PIANO-FIX 1): instead of the tabs until a project is
+        # open (`_refresh_start_page`). The tabs without a project were empty
+        # boxes and an unusable button.
         self.start_page = StartPage(tr=self.i18n.text, type_label=self.i18n.component_type)
         self.start_page.new_requested.connect(self._new_project)
         self.start_page.open_requested.connect(self._open_project)
@@ -3103,8 +3130,8 @@ class MainWindow(QMainWindow):
         self.start_page.set_library_root(self._library_root())
         self.field_library_root.textChanged.connect(
             lambda _text: self.start_page.set_library_root(self._library_root()))
-        # «Apri progetto…» solo se c'e' qualcosa da aprire (HANDOFF 170): la
-        # cartella di lavoro decide, e viene riletta a ogni suo cambio.
+        # «Apri progetto…» (open project) only if there is something to open
+        # (HANDOFF 170): the working folder decides, and it is re-read on every change.
         self.field_library_root.textChanged.connect(
             lambda _text: self._refresh_open_project_commands())
         self._refresh_open_project_commands()
@@ -3118,14 +3145,14 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.log_requested.connect(self.ai_log_dialog.exec)
         self.analysis_overlay.abort_requested.connect(self._request_abort)
         self.analysis_overlay.closed.connect(self._on_completed_overlay_closed)
-        # Barra di stato: progetto aperto. Il costo dell'analisi compare nella
-        # modale AI, accanto allo stato del lavoro.
+        # Status bar: open project. The cost of the analysis appears in the
+        # AI modal, next to the work status.
         self.status_project = QLabel()
         self.status_project.setProperty("i18n_skip", True)
-        # Solo il testo del costo, che la modale AI copia (set_cost): non sta in
-        # nessuna barra e non si mostra mai. Un QLabel senza genitore reso
-        # visibile diventava una finestrella «python» a se' (utente,
-        # 2026-10-02): ha la finestra come genitore e resta nascosto.
+        # Only the cost text, which the AI modal copies (set_cost): it is in no
+        # bar and is never shown. A parentless QLabel made visible became a
+        # little «python» window of its own (user, 2026-10-02): it has the window
+        # as parent and stays hidden.
         self.status_cost = QLabel(self)
         self.status_cost.setProperty("i18n_skip", True)
         self.status_cost.hide()
@@ -3166,7 +3193,7 @@ class MainWindow(QMainWindow):
             _align_form_labels(form, widths[panel])
 
     def _refresh_language_texts(self) -> None:
-        """@brief Nome dell'icona e della tendina della lingua, nella lingua in uso."""
+        """@brief Name of the language icon and drop-down, in the current language."""
         name = self.i18n.tr("language.name")
         self.language_label.setToolTip(name)
         self.language_label.setAccessibleName(name)
@@ -3194,8 +3221,11 @@ class MainWindow(QMainWindow):
         self.i18n.retranslate_widgets(self)
         self._realign_form_labels()
         self._refresh_metadata_help_tooltips()
+        if hasattr(self, "guided_docs"):
+            # Status line and role badges are composed texts (`i18n_skip`):
+            # only a refresh writes them in the new language.
+            self.guided_docs.refresh()
         self.project_wizard.retranslate()
-        self._refresh_ai_tools_summary()
         if hasattr(self, "workflow_bar"):
             self.workflow_bar.retranslate()
             self._refresh_workflow_state()
@@ -3213,8 +3243,8 @@ class MainWindow(QMainWindow):
         self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
         self.action_open_config.setText(self.i18n.text("Apri config.json"))
         self.action_exit.setText(self.i18n.text("Esci"))
-        # Voci del menu File aggiunte il 2026-09-24: prima restavano nella
-        # lingua dell'avvio (verifica «testi cablati» dell'utente).
+        # File menu entries added on 2026-09-24: before they stayed in the
+        # start-up language (the user's «testi cablati» (hard-wired texts) check).
         self.action_new_project.setText(self.i18n.text("Nuovo progetto..."))
         self.action_open_project.setText(self.i18n.text("Apri progetto..."))
         self.action_rename_project.setText(self.i18n.text("Rinomina progetto..."))
@@ -3224,8 +3254,8 @@ class MainWindow(QMainWindow):
         self.action_defaults.setText(self.i18n.text("Default generali AI..."))
         self.action_ai_account.setText(self.i18n.text("Account AI..."))
         self.action_ai_account.setToolTip(self.i18n.text(
-            "Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel "
-            "Gestore credenziali di Windows."))
+            "Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le "
+            "chiavi nel Gestore credenziali di Windows."))
         self.action_generation_options.setText(self.i18n.text("Opzioni di generazione..."))
         self.action_accepted_models.setText(
             self.i18n.text("Archivio abbinamenti accettati..."))
@@ -3241,18 +3271,18 @@ class MainWindow(QMainWindow):
         self._refresh_model_combo()
         self._refresh_output_actions()
         self._apply_view_cube_labels()
-        # Testi che la ripassata generica non copre: voci dei selettori del
-        # tipo di contatto, tooltip composti delle icone della barra 3D e
-        # quote disegnate nell'anteprima 2D (nota 8 dell'utente).
+        # Texts the generic pass does not cover: entries of the contact-type
+        # selectors, composed tooltips of the 3D bar icons and dimensions drawn
+        # in the 2D preview (user's note 8).
         self._retranslate_contact_style_combos()
-        # Etichetta della provenienza dello spessore: testo composto, escluso
-        # dalla ripassata generica (i18n_skip).
+        # Label of the thickness provenance: composed text, excluded from the
+        # generic pass (i18n_skip).
         self._refresh_pcb_thickness_row()
         self._refresh_workflow_tooltips()
         # Full-paths toggle of the KiCad tab: state-dependent text, i18n_skip.
         self.file_paths_toggle.setText(
             self._file_paths_toggle_text(self.file_paths_toggle.isChecked()))
-        # Icone della modale di avanzamento: tooltip composti, non chiavi.
+        # Icons of the progress modal: composed tooltips, not keys.
         self.analysis_overlay.refresh_command_texts()
         self._draw_preview()
 
@@ -3318,7 +3348,8 @@ class MainWindow(QMainWindow):
         """@brief Reload the calibrated photo of a reopened project from its review bundle.
 
         @note The photo lived only in memory after an extraction: reopening a
-            project left it None, and «Modifica la revisione», the double click
+            project left it None, and «Modifica la revisione» (today the
+            «Revisione componenti…» button), the double click
             on a body and «Cambia modello KiCad...» had nothing to open (user,
             2026-09-26). The extraction's bundle keeps the calibrated photo the
             bodies are measured on, the same frame the photo review uses. A
@@ -3341,7 +3372,7 @@ class MainWindow(QMainWindow):
         self._photo_source = Path(path).name
         self._refresh_component_review_button()
 
-    # ── Tab 1: Progetto ────────────────────────────────────────────
+    # ── Tab 1: Progetto (project) ──────────────────────────────────
 
     def _build_project_tab(self) -> QWidget:
         tab = QWidget()
@@ -3349,8 +3380,8 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
-        # Barra di icone in alto (utente, 2026-09-24), riempita a fine
-        # costruzione della scheda, quando i comandi esistono.
+        # Icon bar at the top (user, 2026-09-24), filled at the end of the
+        # tab construction, when the commands exist.
         self.project_action_bar = QHBoxLayout()
         self.project_action_bar.setContentsMargins(0, 0, 0, 0)
         self.project_action_bar.setSpacing(4)
@@ -3359,17 +3390,18 @@ class MainWindow(QMainWindow):
         folder_group = QGroupBox("Cartella componente")
         folder_layout = QFormLayout(folder_group)
 
-        # Vuoto all'avvio, per scelta: un nome scritto qui dal programma
-        # diventa il nome della cartella, del footprint, del simbolo e del
-        # modello 3D. Un esempio lasciato nel campo si ritrova stampato su
-        # tutto cio' che viene generato, e chi lavora non se ne accorge finche'
-        # non apre KiCad. Finche' il campo e' vuoto non si caricano documenti e
-        # non si estrae nulla: vedi `_apply_component_name_gate`.
+        # Empty at start-up, by choice: a name written here by the program
+        # becomes the name of the folder, of the footprint, of the symbol and of
+        # the 3D model. An example left in the field ends up printed on
+        # everything that is generated, and whoever works does not notice until
+        # opening KiCad. While the field is empty no documents are loaded and
+        # nothing is extracted: see `_apply_component_name_gate`.
         self.field_name = QLineEdit()
-        # Sola lettura (utente, 2026-09-24): il nome si sceglie con «Nuovo
-        # progetto…», «Apri progetto…» o «Rinomina progetto…» del menu File.
-        # Scritto qui a mano, il nome di una cartella esistente la apriva di
-        # nascosto e l'analisi scriveva nel progetto di qualcun altro.
+        # Read-only (user, 2026-09-24): the name is chosen with
+        # «Nuovo progetto…» (new project), «Apri progetto…» (open project) or
+        # «Rinomina progetto…» (rename project) of the File menu. Written here by
+        # hand, the name of an existing folder silently opened it and the analysis
+        # wrote into someone else's project.
         self.field_name.setReadOnly(True)
         self.field_name.setPlaceholderText(
             "Crea o apri un progetto dal menu File: il suo nome e' quello di cartella, "
@@ -3379,10 +3411,10 @@ class MainWindow(QMainWindow):
         self.field_name.textChanged.connect(self._on_name_changed)
         folder_layout.addRow("Nome componente:", self.field_name)
 
-        # Niente piu' riga «L'analisi propone: … / Usa questo nome» (utente,
-        # 2026-09-24): il nome si cambia solo da File > Rinomina progetto, e
-        # il nome proposto dall'analisi resta scritto nel Log AI
-        # (`_log_proposed_name`).
+        # No more «L'analisi propone: … / Usa questo nome» (the analysis proposes:
+        # … / use this name) row (user, 2026-09-24): the name is changed only from
+        # File > Rinomina progetto (rename project), and the name proposed by the
+        # analysis stays written in the AI log (`_log_proposed_name`).
 
         self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
         self.field_library_root.textChanged.connect(self._update_project_path_label)
@@ -3508,8 +3540,8 @@ class MainWindow(QMainWindow):
         self.group_single_tht_pads.hide()
         self._sync_single_tht_pad_controls()
         analysis_layout.addWidget(self.group_single_tht_pads)
-        # Solo modello 3D: gli strip non cambiano ne' l'analisi ne' il
-        # footprint (utente, 2026-09-26). Spenti di default.
+        # 3D model only: the strips change neither the analysis nor the
+        # footprint (user, 2026-09-26). Off by default.
         self.chk_header_pins = QCheckBox("Mostra gli header nel modello 3D")
         self.chk_header_pins.setToolTip(
             "Aggiunge sotto la scheda gli strip maschi a pin quadrati, come una scheda "
@@ -3519,9 +3551,12 @@ class MainWindow(QMainWindow):
         self.group_mounting = QGroupBox("Montaggio sulla scheda principale")
         mounting_layout = QVBoxLayout(self.group_mounting)
         self.combo_mounting = QComboBox()
-        self.combo_mounting.addItem("Saldatura diretta / piazzole del modulo", "direct")
-        self.combo_mounting.addItem("Strip header / pad circolari con foro", "headers")
-        self.combo_mounting.addItem("Strip header / pad quadrati con foro", "headers_square")
+        # Entries registered with their catalogue source: translated at
+        # once (an interface started in English showed them Italian) and
+        # again on every language switch (audit 2026-10-15, medium 12).
+        self.i18n.add_item(self.combo_mounting, "Saldatura diretta / piazzole del modulo", "direct")
+        self.i18n.add_item(self.combo_mounting, "Strip header / pad circolari con foro", "headers")
+        self.i18n.add_item(self.combo_mounting, "Strip header / pad quadrati con foro", "headers_square")
         mounting_layout.addWidget(self.combo_mounting)
         mounting_note = QLabel(
             "La scelta cambia solo il footprint della scheda ospitante. "
@@ -3558,23 +3593,23 @@ class MainWindow(QMainWindow):
         self.btn_update_host_footprint.clicked.connect(lambda: self._generate(footprint_only=True))
         mounting_layout.addWidget(self.btn_update_host_footprint)
         self.combo_mounting.currentIndexChanged.connect(self._on_mounting_changed)
-        # Spessore della scheda (utente, 27/09, punto 132): per le sole schede,
-        # accanto ai pin quadrati perche' anche lui cambia soltanto il 3D.
+        # Board thickness (user, 27/09, point 132): for boards only, next to
+        # the square pins because it too changes only the 3D.
         self.spin_pcb_thickness = QDoubleSpinBox()
-        # Una lastra di spessore nullo non esiste; 10 mm e' il limite del campo.
+        # A plate of zero thickness does not exist; 10 mm is the field limit.
         self.spin_pcb_thickness.setRange(0.1, 10.0)
         self.spin_pcb_thickness.setDecimals(2)
         self.spin_pcb_thickness.setSingleStep(0.1)
         self.spin_pcb_thickness.setSuffix(" mm")
-        # Il valore vale quando si conferma, non a ogni cifra digitata.
+        # The value applies on confirmation, not on every digit typed.
         self.spin_pcb_thickness.setKeyboardTracking(False)
         self.spin_pcb_thickness.setToolTip(
             "Spessore della sola scheda, senza componenti. Un valore scritto qui vale per "
             "il progetto e una nuova analisi non lo cambia. Basta rigenerare il 3D.")
         self.spin_pcb_thickness.valueChanged.connect(self._on_pcb_thickness_edited)
         self.label_pcb_thickness_source = QLabel()
-        # Testo gia' tradotto da _refresh_pcb_thickness_row: la ripassata
-        # generica lo userebbe come chiave.
+        # Text already translated by _refresh_pcb_thickness_row: the generic
+        # pass would use it as a key.
         self.label_pcb_thickness_source.setProperty("i18n_skip", True)
         self.btn_pcb_thickness_reset = QPushButton("Ripristina")
         self.btn_pcb_thickness_reset.setAutoDefault(False)
@@ -3587,15 +3622,19 @@ class MainWindow(QMainWindow):
         pcb_row.addWidget(self.spin_pcb_thickness)
         pcb_row.addWidget(self.label_pcb_thickness_source, 1)
         pcb_row.addWidget(self.btn_pcb_thickness_reset)
-        # Etichetta collegata al campo (audit 138, C6): con un layout come
-        # campo QFormLayout non imposta il «buddy», e un lettore di schermo non
-        # annunciava lo spessore con il suo nome.
+        # Label bound to the field (audit 138, C6): with a layout as a
+        # QFormLayout field it does not set the «buddy», and a screen reader did
+        # not announce the thickness with its name.
         self.label_pcb_thickness = QLabel("Spessore PCB:")
         self.label_pcb_thickness.setBuddy(self.spin_pcb_thickness)
         self.spin_pcb_thickness.setAccessibleName("Spessore PCB")
         ai_form.addRow(self.label_pcb_thickness, pcb_row)
         self._ai_form = ai_form
         self._row_pcb_thickness = ai_form.rowCount() - 1
+        # Value and provenance from the start (review 2026-10-16, R2I5): the
+        # spin box showed its 0.10 mm minimum and no provenance until the
+        # first refresh, which with no project open was a language switch.
+        self._refresh_pcb_thickness_row()
         self._align_form(ai_form, "project")
         models_form = QFormLayout()
 
@@ -3618,8 +3657,8 @@ class MainWindow(QMainWindow):
         )
         self.btn_pick_model.clicked.connect(self._pick_session_model)
         model_row = QHBoxLayout()
-        # La casella «Ragionamento DeepSeek» (HANDOFF 161) e' stata tolta
-        # dall'utente il 2026-10-02: il ragionamento resta sempre spento.
+        # The «Ragionamento DeepSeek» (DeepSeek reasoning) checkbox (HANDOFF 161)
+        # was removed by the user on 2026-10-02: reasoning always stays off.
         model_row.addWidget(self.combo_model, 1)
         model_row.addWidget(self.btn_pick_model)
         self.label_photo_detector = QLabel()
@@ -3627,19 +3666,19 @@ class MainWindow(QMainWindow):
         self.combo_photo_detector.addItem("", "ai")
         self.combo_photo_detector.addItem("", "yolo")
         self.combo_photo_detector.addItem("", "vlm")
-        # In coda, non in mezzo (utente, 2026-09-25): le tre voci esistenti
-        # restano nella loro posizione. I progetti salvati ricordano la voce
-        # per valore (project_state.widget_value), non per posizione.
+        # At the end, not in the middle (user, 2026-09-25): the three existing
+        # entries stay in their position. Saved projects remember the entry
+        # by value (project_state.widget_value), not by position.
         self.combo_photo_detector.addItem("", "yolo_only")
         self.combo_photo_detector.addItem("", "yolo_smd")
-        # Default dell'utente (2026-10-02): la rete SMD locale classifica e solo
-        # cio' che non risolve va all'AI. Nel binario frozen la rete non c'e'
-        # (niente PyTorch ne' pesi): li' resta YOLO con la riconciliazione AI.
+        # User default (2026-10-02): the local SMD network classifies and only
+        # what it does not resolve goes to the AI. In the frozen binary the network
+        # is not there (no PyTorch nor weights): there YOLO with AI reconciliation stays.
         self.combo_photo_detector.setCurrentIndex(
             self.combo_photo_detector.findData("yolo" if is_frozen() else "yolo_smd"))
         self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
-        # Prima riga del riquadro (utente, 2026-09-25): la scelta del
-        # rilevatore decide quali delle righe sotto servono.
+        # First row of the box (user, 2026-09-25): the choice of the
+        # detector decides which of the rows below are needed.
         models_form.addRow(self.label_photo_detector, self.combo_photo_detector)
         self._row_photo_detector = models_form.rowCount() - 1
         models_form.addRow("Modello AI:", model_row)
@@ -3647,8 +3686,8 @@ class MainWindow(QMainWindow):
         self.label_yolo_model = QLabel()
         self.field_yolo_model = QLineEdit()
         self.field_yolo_model.setClearButtonEnabled(True)
-        # Stessa cartella e stessa misura del pulsante accanto ad «Area di
-        # lavoro», che fa la stessa cosa: scegliere un file o una cartella.
+        # Same folder and same size as the button next to «Area di
+        # lavoro» (work area), which does the same thing: choose a file or a folder.
         self.btn_pick_yolo_model = QPushButton()
         self.btn_pick_yolo_model.setAutoDefault(False)
         self.btn_pick_yolo_model.setIcon(self._asset_icon("docs-open.svg"))
@@ -3660,8 +3699,8 @@ class MainWindow(QMainWindow):
         yolo_row.addWidget(self.btn_pick_yolo_model)
         models_form.addRow(self.label_yolo_model, yolo_row)
         self._row_yolo_model = models_form.rowCount() - 1
-        # «Modello rete SMD» (utente, 2026-10-02): come «Modello YOLO», per
-        # la rete che classifica i corpi; si vede solo con la rete SMD.
+        # «Modello rete SMD» (SMD network model) (user, 2026-10-02): like «Modello
+        # YOLO», for the network that classifies the bodies; shown only with the SMD network.
         self.label_smd_model = QLabel()
         self.field_smd_model = QLineEdit()
         self.field_smd_model.setClearButtonEnabled(True)
@@ -3676,10 +3715,10 @@ class MainWindow(QMainWindow):
         smd_row.addWidget(self.btn_pick_smd_model)
         models_form.addRow(self.label_smd_model, smd_row)
         self._row_smd_model = models_form.rowCount() - 1
-        # Parametri del rilevatore (utente, 2026-09-25): soglia, doppioni e
-        # tessere si scelgono SOLO nella modale «Parametri YOLO»; qui un
-        # riepilogo in sola lettura e il pulsante, stessa misura e stile di
-        # quello del modello. La soglia dipende dal modello, come su Roboflow.
+        # Detector parameters (user, 2026-09-25): threshold, duplicates and
+        # tiles are chosen ONLY in the «Parametri YOLO» (YOLO parameters) modal;
+        # here a read-only summary and the button, same size and style as the
+        # model one. The threshold depends on the model, as on Roboflow.
         self.label_yolo_params = QLabel()
         self.label_yolo_summary = QLabel()
         self.btn_yolo_settings = QPushButton()
@@ -3696,9 +3735,10 @@ class MainWindow(QMainWindow):
         self.label_vlm_model = QLabel()
         self.field_vlm_model = QLineEdit()
         self.field_vlm_model.setReadOnly(True)
-        # Stessa icona e stessa misura del pulsante accanto a «Modello AI»
-        # (utente, 2026-09-24: «uniforma questo per scegliere il modello»);
-        # il nome sta nel tooltip e nel nome accessibile.
+        # Same icon and same size as the button next to «Modello AI» (AI model)
+        # (user, 2026-09-24: «uniforma questo per scegliere il modello» (make this
+        # uniform for choosing the model)); the name is in the tooltip and in the
+        # accessible name.
         self.btn_pick_vlm_model = QPushButton()
         self.btn_pick_vlm_model.setIcon(self._asset_icon("model-edit.svg"))
         self.btn_pick_vlm_model.setIconSize(QSize(20, 20))
@@ -3710,15 +3750,15 @@ class MainWindow(QMainWindow):
         vlm_row.addWidget(self.btn_pick_vlm_model)
         models_form.addRow(self.label_vlm_model, vlm_row)
         self._row_vlm_model = models_form.rowCount() - 1
-        # Saldo dell'account e costo TOTALE del progetto, tutti i passaggi
-        # compresi (`ai_account`): ultima riga di «Strumenti AI» (utente,
-        # 2026-09-24), accanto ai modelli che quel credito lo spendono. Non e'
-        # il consuntivo dell'ULTIMA analisi, tolto dalla scheda: quello resta
-        # nella modale e nel Log AI (`_show_ai_cost`).
+        # Account balance and TOTAL cost of the project, all passes included
+        # (`ai_account`): last row of «Strumenti AI» (AI tools) (user,
+        # 2026-09-24), next to the models that spend that credit. It is not
+        # the final account of the LAST analysis, removed from the tab: that one
+        # stays in the modal and in the AI log (`_show_ai_cost`).
         from .ai_account import AiAccountLine
         self.ai_account = AiAccountLine(self._project_dir_or_none, self._append_log)
-        # Il saldo mostrato e' quello del fornitore del modello in uso, letto
-        # a ogni aggiornamento (utente, 27/09).
+        # The balance shown is the one of the provider of the model in use, read
+        # on every update (user, 27/09).
         self.ai_account.provider_source = self._balance_provider
         self.label_ai_account = QLabel("Credito AI:")
         models_form.addRow(self.label_ai_account, self.ai_account)
@@ -3753,27 +3793,30 @@ class MainWindow(QMainWindow):
         self.btn_extract_ai.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "extract-ai.svg")))
         self.btn_extract_ai.setIconSize(QSize(24, 24))
         self.btn_extract_ai.setMinimumHeight(46)
-        # Il costo sta nel suggerimento perche' questo e' l'unico comando della
-        # scheda che spende da solo: la regola della riga in fondo («ogni
-        # comando che spende lo dice prima, ogni comando gratuito si riconosce»)
-        # comincia da qui, non dalla riga dei rientri.
+        # The cost is in the tooltip because this is the only command of the
+        # tab that spends on its own: the rule of the bottom row
+        # «ogni comando che spende lo dice prima, ogni comando gratuito si riconosce»
+        # (every command that spends says so first, every free command is
+        # recognisable) starts here, not from the row of re-entries.
         self.btn_extract_ai.setToolTip(
             "Avvia l'estrazione dai documenti e dalle foto selezionati. "
             "Analisi A PAGAMENTO: consuma credito OpenRouter. I modelli usati e la "
             "spesa vengono scritti nel log prima di partire.")
         self.btn_extract_ai.clicked.connect(self._extract_with_ai)
-        # Testo e suggerimento seguono il rilevatore: con «Solo YOLO locale» il
-        # comando e' un pretest gratuito, non un'analisi a pagamento.
+        # Text and tooltip follow the detector: with «Solo YOLO locale» (local YOLO
+        # only) the command is a free pretest, not a paid analysis.
         self._refresh_extract_button()
-        # UNA revisione dei componenti (utente, 2026-09-30, HANDOFF 162): la
-        # stessa finestra mostra le proposte del rilevatore locale salvate in
-        # photo-review/ (prima dell'inventario AI: all'OK le risalva li') e,
-        # dopo l'inventario, i corpi riconciliati con la lettura del
-        # rilevatore accanto. Lo stadio lo sceglie `_open_component_review`.
-        # Decisione dell'utente (2026-09-24): «se il file json esiste nella
-        # cartella deve essere possibile aprire la revisione bypassando
-        # interrogazione AI»; e (2026-09-30): «non ha senso che ci siano due
-        # viste separate».
+        # ONE review of the components (user, 2026-09-30, HANDOFF 162): the
+        # same window shows the local detector's proposals saved in
+        # photo-review/ (before the AI inventory: on OK it saves them there again)
+        # and, after the inventory, the reconciled bodies with the detector's
+        # reading next to them. The stage is chosen by `_open_component_review`.
+        # User decision (2026-09-24):
+        # «se il file json esiste nella cartella deve essere possibile aprire la revisione bypassando interrogazione AI»
+        # (if the json file exists in the folder it must be possible to open the
+        # review bypassing the AI query); and (2026-09-30):
+        # «non ha senso che ci siano due viste separate» (it makes no sense to have
+        # two separate views).
         self.btn_component_review = QPushButton("Revisione componenti…")
         self.btn_component_review.setToolTip(
             "Passi 1 e 3 della pipeline — Apre la revisione dei componenti: prima "
@@ -3786,8 +3829,8 @@ class MainWindow(QMainWindow):
         )
         self.btn_component_review.setEnabled(False)
         self.btn_component_review.clicked.connect(self._open_component_review)
-        # La spesa sta in un pulsante a parte: chi vuole solo rivedere non
-        # deve poter pagare per sbaglio con lo stesso OK.
+        # The spending is in a separate button: whoever only wants to review
+        # must not be able to pay by mistake with the same OK.
         self.btn_relaunch_inventory = QPushButton("Rilancia inventario AI (a pagamento)…")
         self.btn_relaunch_inventory.setToolTip(
             "Passo 2 della pipeline — Rilancia solo l'inventario AI sulle proposte "
@@ -3797,20 +3840,20 @@ class MainWindow(QMainWindow):
         )
         self.btn_relaunch_inventory.setEnabled(False)
         self.btn_relaunch_inventory.clicked.connect(self._relaunch_inventory)
-        # `btn_photo_comparison` non e' un secondo widget: e' l'altro nome
-        # dello stesso comando, cosi' i percorsi che aprivano il confronto
-        # fotografico puntano al comando vero e non a un doppione nascosto.
+        # `btn_photo_comparison` is not a second widget: it is the other name
+        # of the same command, so the paths that opened the photographic
+        # comparison point to the real command and not to a hidden duplicate.
         self.btn_photo_comparison = self.btn_component_review
-        # Vero quando c'e' un pacchetto di proposte del rilevatore da riaprire
-        # (cartella del componente o cache di sessione): lo stadio «rilevatore»
-        # della revisione. Scritto da `_set_review_buttons_available`.
+        # True when there is a package of detector proposals to reopen
+        # (component folder or session cache): the «rilevatore» (detector) stage
+        # of the review. Written by `_set_review_buttons_available`.
         self._review_bundle_available = False
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
         self._photo_source = ""
-        # Icona nella barra in alto della scheda (utente, 2026-09-24): nome e
-        # spiegazione nel tooltip, come le altre barre di icone.
+        # Icon in the top bar of the tab (user, 2026-09-24): name and
+        # explanation in the tooltip, like the other icon bars.
         self.btn_ai_log = self._workflow_tool_button(
             "ai-log.svg", "Log AI",
             "Apri il log completo dell'analisi AI, aggiornato in tempo reale")
@@ -3869,11 +3912,11 @@ class MainWindow(QMainWindow):
             "Modifica le istruzioni AI specifiche di questo componente")
         analysis_layout.addSpacing(10)
         analysis_layout.addWidget(self.btn_extract_ai, alignment=Qt.AlignmentFlag.AlignHCenter)
-        # Nessun consuntivo sotto il pulsante (utente, 2026-09-24): saldo e
-        # costo del progetto stanno nel riquadro «Strumenti AI».
+        # No final account below the button (user, 2026-09-24): balance and
+        # project cost are in the «Strumenti AI» (AI tools) box.
         self.field_name.textChanged.connect(self.ai_account.refresh)
-        # La barra di stato segue ogni scrittura del file dei costi, non solo
-        # i cambi di progetto: prima restava indietro durante un'analisi (B4).
+        # The status bar follows every write of the cost file, not only
+        # project changes: before it lagged behind during an analysis (B4).
         self.ai_account.costs_changed.connect(self._on_costs_changed)
         self.field_library_root.textChanged.connect(self.ai_account.refresh)
         self.component_prompt_dialog = QDialog(self)
@@ -3910,25 +3953,26 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self.group_component_analysis)
         outer.addStretch()
-        # La pausa dopo l'inventario sta in Configurazione -> Opzioni di
-        # generazione, e la riga di testo che elencava i rientri e' stata tolta
-        # (utente, 2026-09-24): ordine e costo di ogni passo sono nel tooltip
-        # del suo pulsante («Passo 1 della pipeline — …»).
-        # Richiesta dell'utente: «un pulsante in basso nella scheda
-        # principale» per riaprire la revisione dopo averla salvata. Sta
-        # sotto tutto, non nella riga degli strumenti dell'analisi, cosi' si
-        # trova anche a estrazione chiusa e senza cercarlo fra le opzioni.
-        # L'ordine dei tre comandi e' quello della pipeline (rilevatore ->
-        # inventario a pagamento -> revisione dei componenti), non quello in
-        # cui sono stati aggiunti: e' l'ordine a dire che sono passi di una
-        # stessa catena e non tre azioni scorrelate.
-        # Dal 2026-09-24 (utente) la riga di pulsanti in fondo non c'e' piu':
-        # i tre comandi sono icone nella barra in alto (`project_action_bar`),
-        # copie costruite con lo stesso meccanismo della scheda Modello 3D.
-        # I pulsanti originali restano la FONTE di testo, tooltip e stato, in
-        # un contenitore sempre nascosto: le copie li leggono, i percorsi che
-        # li usano restano gli stessi, e una `setVisible(True)` su di loro non
-        # puo' aprire una finestra a se' perche' hanno un genitore.
+        # The pause after the inventory is in Configurazione -> Opzioni di
+        # generazione (generation options), and the text row that listed the
+        # re-entries has been removed (user, 2026-09-24): order and cost of every
+        # step are in the tooltip of its button («Passo 1 della pipeline — …»
+        # (pipeline step 1)).
+        # User request: «un pulsante in basso nella scheda principale» (a button
+        # at the bottom of the main tab) to reopen the review after saving it. It
+        # is below everything, not in the row of the analysis tools, so it is
+        # found even with the extraction closed and without searching among the
+        # options. The order of the three commands is the pipeline's (detector ->
+        # paid inventory -> component review), not the one in which they were
+        # added: it is the order that says they are steps of one chain and not
+        # three unrelated actions.
+        # Since 2026-09-24 (user) the row of buttons at the bottom is gone:
+        # the three commands are icons in the top bar (`project_action_bar`),
+        # copies built with the same mechanism as the Modello 3D (3D model) tab.
+        # The original buttons stay the SOURCE of text, tooltip and state, in
+        # an always hidden container: the copies read them, the paths that
+        # use them stay the same, and a `setVisible(True)` on them cannot
+        # open a window of its own because they have a parent.
         self._project_action_sources = QWidget(tab)
         sources_layout = QHBoxLayout(self._project_action_sources)
         for source in (self.btn_component_review, self.btn_relaunch_inventory):
@@ -3936,9 +3980,9 @@ class MainWindow(QMainWindow):
         self._project_action_sources.hide()
         bar = self.project_action_bar
         from .review_tools import toolbar_divider
-        # Nuovo e Apri progetto in testa alla barra (utente, 2026-09-25): gli
-        # stessi comandi del menu File, con le stesse guardie (nessun cambio di
-        # progetto mentre un lavoro scrive nella cartella in uso).
+        # New and Open project at the head of the bar (user, 2026-09-25): the
+        # same commands as the File menu, with the same guards (no project
+        # change while a job writes into the folder in use).
         self.btn_new_project_top = self._workflow_tool_button(
             "project-new.svg", "Nuovo progetto",
             "Crea la cartella di un nuovo componente nella cartella di lavoro (Ctrl+N)")
@@ -3954,15 +3998,15 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_component_prompt)
         self._project_bar_divider = toolbar_divider()
         bar.addWidget(self._project_bar_divider)
-        # Stesso ordine della pipeline e stesse icone della scheda Modello 3D:
-        # UNA revisione (gratuita), poi il rilancio (a pagamento).
+        # Same order as the pipeline and same icons as the Modello 3D (3D model)
+        # tab: ONE review (free), then the re-run (paid).
         self.btn_component_review_top = self._mirror_project_action(
             self.btn_component_review, self._open_component_review, bar, "wf-review.svg")
         self.btn_relaunch_inventory_top = self._mirror_project_action(
             self.btn_relaunch_inventory, self._relaunch_inventory, bar, "wf-relaunch-ai.svg")
         bar.addStretch()
-        # Stato iniziale coerente con la disciplina della riga: cio' che non
-        # puo' agire non si vede, invece di stare acceso a vuoto.
+        # Initial state consistent with the discipline of the row: what cannot
+        # act is not seen, instead of staying enabled with nothing to do.
         self._set_review_buttons_enabled(False)
         self._refresh_ai_log_button()
 
@@ -4010,7 +4054,7 @@ class MainWindow(QMainWindow):
         self._switch_project("", self._general_project_state)
 
     def _refresh_ai_tools_summary(self) -> None:
-        """@brief Riassume solo gli strumenti pertinenti al tipo di progetto."""
+        """@brief Summarise only the tools relevant to the project type."""
         model = self.combo_model.currentText()
         if self._is_single_component_project():
             summary = self.i18n.tr(
@@ -4148,7 +4192,7 @@ class MainWindow(QMainWindow):
         self._set_mounting_error("")
         self._sync_preview_mounting()
 
-    # ── Tipologia componente ────────────────────────────────────────
+    # ── Component type ──────────────────────────────────────────────
 
     def _edit_component_prompt(self) -> None:
         original = self.field_component_prompt.toPlainText()
@@ -4157,17 +4201,17 @@ class MainWindow(QMainWindow):
             self.field_component_prompt.setPlainText(original)
 
     def _restore_component_type(self) -> None:
-        """Ripropone l'ultima tipologia usata, inserendone il testo nel prompt."""
+        """Propose again the last type used, inserting its text into the prompt."""
         saved = (self._config.get("component_type") or "").strip()
         index = self.combo_component_type.findData(saved) if saved else 0
         self.combo_component_type.setCurrentIndex(max(index, 0))
 
     def _on_component_type_changed(self) -> None:
-        """Sostituisce nel prompt specifico il blocco della tipologia scelta.
+        """Replace the block of the chosen type in the specific prompt.
 
-        Il blocco e' delimitato da marcatori: cambiando tipologia si riscrive
-        solo quello, mentre le note aggiunte a mano restano al loro posto. Da
-        qui in avanti il testo e' liberamente modificabile.
+        The block is delimited by markers: changing type rewrites only that
+        block, while the notes added by hand stay in place. From here on the
+        text is freely editable.
         """
         key = self.combo_component_type.currentData() or ""
         row = self.profile_store.get_type(key)
@@ -4177,7 +4221,7 @@ class MainWindow(QMainWindow):
         # leaves the kind unknown, so `_photo_inventory_family` answers None
         # and the paid photo call stays declared (test contract of 2026-10-02).
         self.project_kind = self._project_kind_for_family(row['family'] if row else "")
-        # La tipologia sblocca (o blocca) l'analisi: vedi _extract_block_reason.
+        # The component type unlocks (or locks) the analysis: see _extract_block_reason.
         if hasattr(self, "btn_extract_ai") and not self._background_work_running():
             self._apply_component_name_gate()
 
@@ -4187,14 +4231,14 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # La tipologia decide anche quali parametri del footprint si usano:
-        # i moduli castellated non stanno in una matrice.
+        # The component type also decides which footprint parameters are used:
+        # castellated modules do not fit in a matrix.
         if key and hasattr(self, "group_castellated"):
             self.group_castellated.setChecked(self._selected_family() == "aggregate_castellated")
 
-        # La tipologia riapplicata aprendo un progetto e' del progetto, non una
-        # scelta generale: scriverla in config.json farebbe partire i progetti
-        # nuovi dall'ultimo aperto (revisore 2, difetto 8).
+        # The component type re-applied when opening a project belongs to the
+        # project, not a general choice: writing it to config.json would start new
+        # projects from the last opened one (reviewer 2, defect 8).
         if not getattr(self, "_restoring_project", False):
             self._config["component_type"] = key
             self._save_config_safely()
@@ -4218,8 +4262,8 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "group_single_tht_pads", None) is not None:
             self.group_single_tht_pads.setVisible(self._selected_family() == "single_tht")
-        # Senza tipologia la disposizione rimasta dalla scelta precedente non
-        # dice nulla su che cosa si sta analizzando.
+        # Without a component type the layout left over from the previous choice
+        # says nothing about what is being analysed.
         board = self._photo_inventory_family() if self._selected_family() else None
         blocked = self.chk_header_pins.blockSignals(True)
         self.chk_header_pins.setChecked(self._show_pins_3d())
@@ -4338,17 +4382,17 @@ class MainWindow(QMainWindow):
             return None
 
     def _project_dir(self) -> Path:
-        """@brief Cartella del componente in area di lavoro.
+        """@brief Folder of the component in the work area.
 
-        @return Percorso della cartella, che porta il nome scelto.
-        @throws ValueError quando il componente non ha ancora un nome.
-        @note Prima qui c'era un nome di ripiego, `NUOVO_COMPONENTE`. Un
-            ripiego in un percorso non resta un percorso: prima o poi qualcuno
-            ci scrive, e in area di lavoro compare una cartella che nessuno ha
-            chiesto, accanto a quelle vere. E' successo con il diario
-            dell'analisi. Meglio che non esista affatto un percorso da usare
-            senza nome: chi ha bisogno della cartella prima che il nome ci sia
-            deve accorgersene qui, non dopo, guardando l'area di lavoro.
+        @return Path of the folder, which carries the chosen name.
+        @throws ValueError when the component has no name yet.
+        @note Before, there was a fallback name here, `NUOVO_COMPONENTE`. A
+            fallback in a path does not stay a path: sooner or later someone
+            writes into it, and a folder nobody asked for appears in the work
+            area, next to the real ones. It happened with the analysis diary.
+            Better that no path usable without a name exists at all: whoever
+            needs the folder before the name is there must notice it here, not
+            later, by looking at the work area.
         """
         name = self._component_name()
         if not name:
@@ -4357,46 +4401,46 @@ class MainWindow(QMainWindow):
         return self._library_root() / name
 
     def _docs_dir(self) -> Path:
-        """@brief Cartella dei documenti del componente.
+        """@brief Folder of the component documents.
 
-        @throws ValueError quando il componente non ha ancora un nome.
+        @throws ValueError when the component has no name yet.
         """
         return self._project_dir() / DOCS_SUBDIR
 
     def _update_project_path_label(self) -> None:
-        # Senza nome non c'e' una cartella: mostrarne una inventata farebbe
-        # credere che i documenti finiranno li'.
+        # Without a name there is no folder: showing an invented one would
+        # make one believe that the documents will end up there.
         self.label_project_path.setText(
             str(self._project_dir()) if self._component_name() else "")
         self._refresh_output_actions()
         self._refresh_docs_list()
-        # La radice della libreria entra in `_project_dir()` esattamente come
-        # il nome del componente: cambiandola cambiano il file del diario e la
-        # cartella `photo-review/`, quindi i due comandi che dipendono da
-        # quei file vanno ricalcolati qui. Prima solo `_on_name_changed` li
-        # aggiornava, e spostare la cartella di lavoro lasciava «Log AI»
-        # nascosto su un log che esisteva, oppure visibile su uno che non
-        # c'era piu'. Guardia `hasattr` come in `_apply_component_name_gate`:
-        # questo metodo gira anche durante la costruzione della finestra,
-        # prima che i pulsanti esistano.
+        # The library root enters `_project_dir()` exactly like the
+        # component name: changing it changes the journal file and the
+        # `photo-review/` folder, so the two commands that depend on
+        # those files must be recomputed here. Before, only `_on_name_changed`
+        # updated them, and moving the working folder left «Log AI» (AI log)
+        # hidden on a log that existed, or visible on one that was no
+        # longer there. `hasattr` guard as in `_apply_component_name_gate`:
+        # this method also runs during the window construction,
+        # before the buttons exist.
         if hasattr(self, "btn_ai_log"):
             self._refresh_ai_log_button()
-        # Come in `_apply_component_name_gate`: durante un'analisi i comandi di
-        # revisione restano spenti fino alla fine del worker, e ricalcolarli
-        # qui li riaccenderebbe a meta' corsa.
+        # As in `_apply_component_name_gate`: during an analysis the review
+        # commands stay off until the end of the worker, and recomputing them
+        # here would re-enable them mid-run.
         if hasattr(self, "btn_component_review") and not self._background_work_running():
             self._refresh_reopen_review_button()
 
     def _named(self) -> bool:
-        """@brief Vero quando esiste una cartella del componente da guardare."""
+        """@brief True when a component folder to look at exists."""
         return bool(self._component_name())
 
     def _project_dir_text(self) -> str:
-        """@brief La cartella del componente da mostrare, o un trattino.
+        """@brief The component folder to show, or a dash.
 
-        @note Serve ai riepiloghi, che si aggiornano anche prima che il nome
-            esista: senza nome non c'e' una cartella, e scriverne una inventata
-            sarebbe una promessa falsa su dove finiranno i file.
+        @note It serves the summaries, which are refreshed even before the
+            name exists: without a name there is no folder, and writing an
+            invented one would be a false promise about where the files will go.
         """
         return str(self._project_dir()) if self._named() else "—"
 
@@ -4465,7 +4509,7 @@ class MainWindow(QMainWindow):
                 overlay.set_cost(self.status_cost.text())
                 if self.status_cost.toolTip():
                     overlay.cost.setToolTip(self.status_cost.toolTip())
-        except Exception as exc:  # noqa: BLE001 - informativo, mai fatale
+        except Exception as exc:  # noqa: BLE001 - informational, never fatal
             self._append_log(tx("Costo dell'analisi non aggiornato: {exc}", exc=exc))
 
     def _refresh_status_bar(self, named: bool) -> None:
@@ -4487,18 +4531,18 @@ class MainWindow(QMainWindow):
         try:
             from ..services.project_costs import load_project_costs
             folder = self._project_dir()
-            # La stessa analisi che mostra la riga «Credito AI» (audit 138, B4).
+            # The same analysis that the «Credito AI» (AI credit) row shows (audit 138, B4).
             account = getattr(self, "ai_account", None)
             costs = load_project_costs(folder, account.shown_run(folder) if account else None)
-        except Exception:  # noqa: BLE001 - il costo e' informativo
+        except Exception:  # noqa: BLE001 - the cost is informational
             costs = None
         start_queued, waiting = (account.queued_for(folder) if costs is not None and account
                                  else (False, 0))
         if costs is not None and (start_queued or waiting):
-            # Come la riga del credito (audit 139, revisione finale): con
-            # chiamate ancora da scrivere il numero del file e' solo un minimo,
-            # e con l'inizio dell'analisi in coda l'analisi mostrata dal file e'
-            # ancora la precedente.
+            # Like the credit row (audit 139, final review): with calls still
+            # to be written the number in the file is only a minimum, and with the
+            # start of the analysis queued the analysis shown by the file is
+            # still the previous one.
             from .ai_account import format_usd
             shown = 0.0 if start_queued else costs.run_usd
             self.status_cost.setText(self.i18n.tr(
@@ -4511,8 +4555,8 @@ class MainWindow(QMainWindow):
             self.status_cost.setText("")
             return
         if costs.run:
-            # Stesso formato della riga del credito: sotto 1 USD quattro
-            # decimali, non «0.00» per un'analisi che costa millesimi (B4).
+            # Same format as the credit row: below 1 USD four decimals, not
+            # «0.00» for an analysis that costs thousandths (B4).
             from .ai_account import format_usd
             text = self.i18n.tr("status.analysis_cost", total=format_usd(costs.run_usd),
                                 calls=costs.run_calls)
@@ -4545,8 +4589,8 @@ class MainWindow(QMainWindow):
             footprint_available = footprint.is_file()
             complete_available = footprint_available and step.is_file()
         else:
-            # Senza nome non c'e' una cartella, quindi niente da aprire ne' da
-            # installare: nessun percorso da mostrare e nessun file da cercare.
+            # Without a name there is no folder, so nothing to open or to
+            # install: no path to show and no file to look for.
             footprint = step = symbol = None
             footprint_available = complete_available = False
         for attr in ("btn_open_output", "action_open_output"):
@@ -4586,15 +4630,16 @@ class MainWindow(QMainWindow):
                 str(symbol) if symbol is not None else self.i18n.text(
                     "Imposta il nome del componente per preparare il simbolo."))
             if hasattr(self, "label_kicad_footprint_path"):
-                footprint_path_text = ("Percorso footprint: " + str(footprint)
-                                        if footprint_available else "Percorso footprint: —")
-                step_path_text = ("Percorso modello STEP: " + str(step)
-                                  if step_available else "Percorso modello STEP: —")
-                symbol_path_text = ("Percorso simbolo elettrico: " + str(symbol)
+                tx = self.i18n.text
+                footprint_path_text = (tx("Percorso footprint: {path}").format(path=footprint)
+                                        if footprint_available else tx("Percorso footprint: —"))
+                step_path_text = (tx("Percorso modello STEP: {path}").format(path=step)
+                                  if step_available else tx("Percorso modello STEP: —"))
+                symbol_path_text = (tx("Percorso simbolo elettrico: {path}").format(path=symbol)
                                     if symbol_available else
-                                    "Percorso simbolo elettrico previsto: " + str(symbol)
+                                    tx("Percorso simbolo elettrico previsto: {path}").format(path=symbol)
                                     if symbol is not None else
-                                    "Percorso simbolo elettrico: —")
+                                    tx("Percorso simbolo elettrico: —"))
                 self.label_kicad_footprint_path.setText(footprint_path_text)
                 self.label_kicad_step_path.setText(step_path_text)
                 self.label_kicad_symbol_path.setText(symbol_path_text)
@@ -4655,7 +4700,7 @@ class MainWindow(QMainWindow):
         """
         action.setEnabled(enabled)
         if isinstance(action, QWidget) and action.property("workflow_title_source"):
-            # Icona: prima riga il nome, poi la spiegazione o il motivo.
+            # Icon: first line the name, then the explanation or the reason.
             self._set_workflow_detail(action, source)
             return
         rendered = self.i18n.text(source) if source else ""
@@ -4683,12 +4728,12 @@ class MainWindow(QMainWindow):
             "Disponibile quando il progetto ha un footprint generato."))
 
     def _on_name_changed(self, text: str) -> None:
-        """@brief Il nome e' la cartella: da qui in avanti il progetto aperto e' quella.
+        """@brief The name is the folder: from here on the open project is that folder.
 
-        @param text Nome nuovo.
-        @note Solo il nome definisce `_open_project_folder`, non la cartella di
-            lavoro: cambiare quella non sposta il progetto aperto, lo chiude
-            (`_on_library_root_changed`).
+        @param text New name.
+        @note Only the name defines `_open_project_folder`, not the working
+            folder: changing the latter does not move the open project, it
+            closes it (`_on_library_root_changed`).
         """
         if hasattr(self, "_open_project_folder"):
             previous = self._open_project_folder
@@ -4799,8 +4844,8 @@ class MainWindow(QMainWindow):
             return
         folder = Path(path)
         if not recent_projects.is_project(folder):
-            # Elencato un attimo fa ma sparito (disco scollegato, cartella
-            # tolta): resta nell'elenco, come fa `load`, e si spiega il motivo.
+            # Listed a moment ago but gone (disk unplugged, folder removed): it
+            # stays in the list, as `load` does, and the reason is explained.
             QMessageBox.information(self, self.i18n.text("Progetti recenti"),
                                     tx("Il progetto {path} non e' raggiungibile.", path=folder))
             self._refresh_start_page()
@@ -4832,19 +4877,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{name} \u2014 {product}" if name else product)
 
     def _apply_component_name_gate(self) -> None:
-        """@brief Senza nome non si carica nulla e non si estrae nulla.
+        """@brief Without a name nothing is loaded and nothing is extracted.
 
-        @note Il nome non e' un'etichetta: e' la cartella in cui finiscono i
-            documenti e il nome con cui nascono footprint, simbolo e modello
-            3D. Lasciar caricare le immagini prima vorrebbe dire scriverle in
-            una cartella scelta dal programma, e poi doverle spostare quando il
-            nome arriva -- che e' esattamente il pasticcio che questo blocco
-            evita. Meglio un pulsante spento con scritto perche'.
+        @note The name is not a label: it is the folder where the documents
+            end up and the name with which footprint, symbol and 3D model are
+            born. Letting images be loaded first would mean writing them into
+            a folder chosen by the program, and then having to move them when
+            the name arrives -- which is exactly the mess this gate avoids.
+            Better a disabled button that says why.
         """
         named = bool(self._component_name())
         reason = "" if named else "Crea o apri prima un progetto (menu File)."
-        # Cambiare nome mentre un worker gira non deve riaccendere i pulsanti
-        # che lanciano un'altra analisi: li riabilita la fine del worker.
+        # Changing the name while a worker runs must not re-enable the buttons
+        # that launch another analysis: the end of the worker re-enables them.
         busy = self._background_work_running()
         for attr in ("guided_docs", "docs_list", "btn_extract_ai"):
             widget = getattr(self, attr, None)
@@ -4853,25 +4898,24 @@ class MainWindow(QMainWindow):
             if attr == "btn_extract_ai":
                 blocked = self._extract_block_reason()
                 widget.setEnabled(not blocked and not busy)
-                # Stesso testo del costruttore, letterale in entrambi i posti:
-                # e' cosi' che il controllo del catalogo (tests/test_i18n.py)
-                # lo vede. Se cambia qui deve cambiare la' -- il costo
-                # dichiarato e' la parte che non puo' divergere.
-                # Tradotti qui E ricordati come sorgente: scritti in italiano
-                # restavano tali in en/fr/de fino al cambio di lingua
-                # successivo (revisore 3, difetto 10).
+                # Same text as the constructor, literal in both places: that is how
+                # the catalogue check (tests/test_i18n.py) sees it. If it changes
+                # here it must change there -- the declared cost is the part that
+                # cannot diverge. Translated here AND remembered as source: written
+                # in Italian they stayed so in en/fr/de until the next language
+                # change (reviewer 3, defect 10).
                 self._set_translated_tooltip(
                     widget, blocked or self._extract_button_sources()[1])
             else:
                 widget.setEnabled(named)
                 self._set_translated_tooltip(widget, reason)
-        # Il nome decide anche la cartella in cui cercare le proposte salvate:
-        # cambiato il nome, i pulsanti della revisione vanno ricalcolati --
-        # ma non durante un'analisi, dove restano spenti fino alla fine.
+        # The name also decides the folder in which to look for the saved
+        # proposals: once the name changes, the review buttons must be
+        # recomputed -- but not during an analysis, where they stay off until the end.
         if hasattr(self, "btn_component_review") and not busy:
             self._refresh_reopen_review_button()
-        # Il nome decide anche la cartella del diario: cambiandolo, il log
-        # apribile e' un altro (o non c'e').
+        # The name also decides the journal folder: changing it, the log that
+        # can be opened is another one (or there is none).
         if hasattr(self, "btn_ai_log"):
             self._refresh_ai_log_button()
 
@@ -4911,10 +4955,10 @@ class MainWindow(QMainWindow):
             self._on_library_root_changed()
 
     def _body_size(self):
-        """Quote correnti del corpo, per giudicare le viste dall'alto.
+        """Current body dimensions, to judge the top views.
 
-        None finche' non sono note: senza di esse non si puo' dire se una
-        foto sia calibrabile, e dichiararlo comunque sarebbe una supposizione.
+        None until they are known: without them one cannot tell whether a
+        photo can be calibrated, and declaring it anyway would be a guess.
         """
         if not getattr(self, "_board_size_known", False):
             return None
@@ -4947,7 +4991,7 @@ class MainWindow(QMainWindow):
         fields = []
         for label in ("Lunghezza (mm)", "Larghezza (mm)"):
             field = QDoubleSpinBox()
-            # Stessi limiti fisici dei campi che ricevono i valori.
+            # Same physical limits as the fields that receive the values.
             field.setRange(MIN_LENGTH_MM, MAX_LENGTH_MM)
             field.setDecimals(2)
             field.setValue(MIN_LENGTH_MM)
@@ -4978,9 +5022,9 @@ class MainWindow(QMainWindow):
             return
         self.docs_list.clear()
         if not self._named():
-            # Senza nome non c'e' una cartella da leggere: la lista resta vuota
-            # e il riquadro guidato non va interrogato, altrimenti chiederebbe
-            # un percorso che non esiste.
+            # Without a name there is no folder to read: the list stays empty
+            # and the guided box must not be queried, otherwise it would ask for
+            # a path that does not exist.
             return
         docs_dir = self._docs_dir()
         if docs_dir.is_dir():
@@ -4990,16 +5034,16 @@ class MainWindow(QMainWindow):
                     item.setFlags(
                         item.flags() | Qt.ItemFlag.ItemIsUserCheckable
                     )
-                    # La documentazione appena caricata deve essere inclusa
-                    # nell'estrazione senza richiedere anche una selezione
-                    # temporanea della riga.
+                    # The documentation just loaded must be included in the
+                    # extraction without also requiring a temporary selection
+                    # of the row.
                     item.setCheckState(Qt.CheckState.Checked)
                     self.docs_list.addItem(item)
         if hasattr(self, 'guided_docs'):
             self.guided_docs.refresh()
             if hasattr(self, 'i18n'):
                 self.i18n.retranslate_widgets(self.guided_docs)
-        # Il passo «Documenti» segue l'elenco appena riletto.
+        # The «Documenti» (documents) step follows the list just re-read.
         self._refresh_workflow_state()
 
     def _selected_documents(self):
@@ -5036,8 +5080,8 @@ class MainWindow(QMainWindow):
         self._set_extract_button_text("Preparazione…")
         self._keep_extract_button_visible()
         button.repaint()
-        # Ridisegno subito, senza consegnare clic o tasti: quelli arrivati
-        # durante la preparazione non devono far ripartire nulla.
+        # Repaint at once, without delivering clicks or keys: those that arrived
+        # during the preparation must not restart anything.
         QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _restore_extract_button_icon(self) -> None:
@@ -5074,9 +5118,9 @@ class MainWindow(QMainWindow):
                                     self.i18n.text(blocked))
             return
         if not self._component_name():
-            # I pulsanti sono gia' spenti; questo vale per le scorciatoie e per
-            # chi arriva qui da un'automazione. Senza nome i documenti non
-            # hanno una cartella e cio' che verrebbe generato non ha un nome.
+            # The buttons are already off; this holds for the shortcuts and for
+            # whoever gets here from an automation. Without a name the documents
+            # have no folder and what would be generated has no name.
             QMessageBox.information(
                 self, self.i18n.text("Nome componente"),
                 self.i18n.text("Crea o apri prima un progetto dal menu File: il suo nome e' "
@@ -5126,8 +5170,8 @@ class MainWindow(QMainWindow):
             return
 
         if photo_detector == "yolo_only":
-            # Pretest (utente, 2026-09-25): solo i riquadri di YOLO sulla
-            # foto, nessuna chiamata AI, nessun campo modificato.
+            # Pretest (user, 2026-09-25): only the YOLO boxes on the
+            # photo, no AI call, no field modified.
             self._start_yolo_pretest(doc_paths, document_roles, yolo_model_path)
             return
         if not self._ensure_api_key():
@@ -5142,20 +5186,21 @@ class MainWindow(QMainWindow):
                 self, self.i18n.text('Profilo AI non disponibile'), str(exc))
             return
 
-        # Solo «Estrai parametri con AI» apre un'analisi nuova per il costo
-        # mostrato (utente, 28/09): _begin_ai_run serve anche al «Rilancio
-        # inventario», che si somma all'analisi in corso (audit 138, B1).
+        # Only «Estrai parametri con AI» (extract parameters with AI) opens a new
+        # analysis for the cost shown (user, 28/09): _begin_ai_run also serves the
+        # «Rilancio inventario» (inventory re-run), which adds up to the running
+        # analysis (audit 138, B1).
         if hasattr(self, "ai_account"):
             self.ai_account.start_analysis(self._project_dir_or_none())
         self._begin_ai_run("Analisi AI")
-        # Da qui in poi lo stato "analisi in corso" e' gia' esposto all'utente:
-        # qualunque eccezione prima di worker.start() deve ripristinarlo, non
-        # lasciare i tab spenti e la modale ferma.
+        # From here on the "analysis running" state is already exposed to the user:
+        # any exception before worker.start() must restore it, not leave the
+        # tabs off and the modal stuck.
         try:
             self._start_extract_worker(doc_paths, document_roles, profile,
                                        photo_detector, yolo_model_path,
                                        chosen_detector=chosen_detector)
-        except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
+        except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             self._on_extract_finished()
             self._on_extract_error(str(exc))
 
@@ -5226,17 +5271,17 @@ class MainWindow(QMainWindow):
             caller restores the idle UI state.
         """
         self._extraction_started_stamp = time.strftime('%Y%m%d-%H%M%S')
-        # Una quota della scheda precedente non vale per quella nuova.
+        # A dimension of the previous board does not hold for the new one.
         self._declared_row_spacing = None
-        # Ogni estrazione nuova riparte senza revisione registrata e senza base
-        # sintetizzata: questi flag riguardano solo l'analisi che sta partendo.
+        # Every new extraction starts again without a recorded review and without a
+        # synthesised base: these flags concern only the analysis being started.
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
         self._last_extracted = None
-        # Le foto si azzerano PRIMA di ricalcolare i pulsanti: la modifica
-        # della revisione dipende dalla foto in memoria, e spegnerla mentre la
-        # vecchia foto e' ancora li' la lascerebbe accesa su dati appena
-        # invalidati.
+        # The photos are reset BEFORE recomputing the buttons: the edit of the
+        # review depends on the photo in memory, and turning it off while the
+        # old photo is still there would leave it on over data just
+        # invalidated.
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
@@ -5245,10 +5290,10 @@ class MainWindow(QMainWindow):
 
         model = self._session_model or profile['model']
         photo_model = model
-        # E' questo modello a guardare la fotografia: con 'vlm' rileva ed
-        # elenca i corpi, con 'yolo' riconcilia le proposte locali. In
-        # entrambi i casi e' una chiamata sola, e non e' detto che debba
-        # costare quanto il modello che legge i datasheet.
+        # It is this model that looks at the photograph: with 'vlm' it detects and
+        # lists the bodies, with 'yolo' it reconciles the local proposals. In
+        # both cases it is a single call, and it need not cost as much as the
+        # model that reads the datasheets.
         verification_model = (self._photo_detector_model()
                               if photo_detector in ('yolo', 'vlm') else model)
         self._append_log(
@@ -5265,24 +5310,24 @@ class MainWindow(QMainWindow):
         except (ProfileError, sqlite3.Error, OSError):
             ignored = {}
         if ignored:
-            # Modello unico (utente, 2026-10-02): un modello salvato su questa
-            # tipologia prima della modifica non vale piu', e va detto.
+            # Single model (user, 2026-10-02): a model saved on this component type
+            # before the change is no longer valid, and that must be said.
             self._on_ai_progress(tx(
                 "La tipologia aveva un modello suo ({models}): ignorato, il modello e' unico "
                 "e si sceglie nel tab «Modello» delle impostazioni LLM.",
                 models=", ".join(sorted(set(ignored.values())))))
         if ((chosen_detector or photo_detector) in ('yolo', 'vlm', 'yolo_smd')
                 and self._photo_inventory_family() is False):
-            # Difetto visto dall'utente: con «YOLO locale + verifica AI» e una
-            # tipologia da COMPONENTE SINGOLO il rilevatore non parte, la
-            # revisione dei corpi rilevati non si apre e nessun corpo entra
-            # nella tabella -- perche' l'estrattore guarda la fotografia solo
-            # per le schede popolate (vedi `_photo_inventory_family`). Prima si
-            # annunciava lo stesso «chiamata sulla fotografia affidata a …»:
-            # una fase promessa che non sarebbe mai avvenuta, e chi aspettava
-            # la pausa la aspettava per sempre. Qui si dice cosa succede
-            # davvero, senza bloccare nulla: la scelta della tipologia resta
-            # dell'utente, e l'estrazione dai documenti ha comunque senso.
+            # Defect seen by the user: with «YOLO locale + verifica AI» (local YOLO +
+            # AI check) and a SINGLE-COMPONENT type the detector does not start, the
+            # review of the detected bodies does not open and no body enters
+            # the table -- because the extractor looks at the photograph only
+            # for populated boards (see `_photo_inventory_family`). Before, the same
+            # «chiamata sulla fotografia affidata a …» (photograph call entrusted to …)
+            # was announced: a promised phase that would never happen, and whoever
+            # waited for the pause waited for ever. Here what really happens is
+            # said, without blocking anything: the choice of the type stays the
+            # user's, and the extraction from the documents makes sense anyway.
             self._on_ai_progress(
                 tx("Tipologia «{currentText}»: l'analisi NON passa dall'inventario "
                    "fotografico, quindi il rilevatore dei corpi e la revisione «Corpi "
@@ -5296,9 +5341,9 @@ class MainWindow(QMainWindow):
                                     "riverifica AI dei ritagli. L'estrazione dai documenti "
                                     "usa il modello AI configurato."))
         elif photo_detector in ('yolo', 'vlm'):
-            # Detto sempre, non solo quando differisce dal modello principale:
-            # e' la chiamata a pagamento che guarda la fotografia, e va scritta
-            # nel log prima di partire, non dedotta dopo dalla fattura.
+            # Always said, not only when it differs from the main model: it is
+            # the paid call that looks at the photograph, and it must be written
+            # in the log before starting, not deduced afterwards from the invoice.
             self._on_ai_progress(
                 f"Chiamata sulla fotografia affidata a {verification_model}"
                 + (tx(" (scelto per questa sessione).") if self._vlm_model else tx(" (da impostazioni).")))
@@ -5320,8 +5365,9 @@ class MainWindow(QMainWindow):
             photo_detector=photo_detector,
             yolo_model_path=yolo_model_path,
             smd_model_path=self._smd_model_option() if photo_detector == "yolo_smd" else None,
-            # Stessi parametri del pretest (utente, 2026-09-25: «la scelta dei
-            # parametri rimane quando scelgo la modalità YOLO + AI»).
+            # Same parameters as the pretest (user, 2026-09-25:
+            # «la scelta dei parametri rimane quando scelgo la modalità YOLO + AI»
+            # (the choice of parameters stays when I choose the YOLO + AI mode)).
             yolo_settings=(self._chosen_yolo_settings() if photo_detector in ("yolo", "yolo_smd") else None),
             # The datasheet prompt follows the family of the type: one part reads
             # its drawing pad by pad, a board reads its contacts and its photo.
@@ -5332,8 +5378,8 @@ class MainWindow(QMainWindow):
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
         )
-        # Risposte in cache ed evidenze nella cartella del progetto (utente,
-        # 2026-09-24). Qui il nome c'e' sempre: senza nome non si estrae.
+        # Cached answers and evidence in the project folder (user,
+        # 2026-09-24). Here the name is always there: without a name nothing is extracted.
         self._extract_worker.photo_cache_dir = self._photo_cache_dir()
         self._extract_worker.done.connect(self._on_extracted)
         self._extract_worker.error.connect(self._on_extract_error)
@@ -5341,26 +5387,26 @@ class MainWindow(QMainWindow):
         self._extract_worker.phase.connect(self._on_phase)
         self._extract_worker.review_requested.connect(self._on_review_requested)
         self._extract_worker.finished.connect(self._on_extract_finished)
-        # Marchio della corsa: da qui in poi il risultato di questo worker vale
-        # solo finche' la finestra non dichiara scaduta la corsa (interruzione).
+        # Run stamp: from here on the result of this worker is valid only
+        # until the window declares the run expired (interruption).
         self._extract_worker._analysis_revision = self._analysis_revision
         # A new run has applied nothing yet (see `_on_extract_finished`).
         self._extraction_applied_revision = None
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self.analysis_overlay.start(abortable=True)
-        # Il rilevatore di QUESTA estrazione: i pacchetti di ripiego scritti
-        # dopo lo devono ricordare (audit 2026-10-02: tornava 'yolo' e il
-        # rilancio pagava l'inventario globale). Solo quando la corsa parte
-        # davvero: un clic fermato dai controlli non deve cambiare quello
-        # della corsa precedente (verifica avversariale B6).
+        # The detector of THIS extraction: the fallback packages written
+        # after it must remember it (audit 2026-10-02: it went back to 'yolo' and the
+        # re-run paid for the global inventory). Only when the run really
+        # starts: a click stopped by the checks must not change the one of the
+        # previous run (adversarial check B6).
         self._extraction_detector = photo_detector
         self._extract_worker.start()
         # KiCad commands off while the analysis runs (audit 2026-10-15, M3).
         self._track_background_work(self._extract_worker)
 
-    #: Estensioni delle foto che l'inventario prova come vista dall'alto
-    #: (stesso filtro di `photo_inventory.extract_inventory`).
+    #: Photo extensions that the inventory tries as the top view
+    #: (same filter as `photo_inventory.extract_inventory`).
     _PRETEST_PHOTO_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
     @classmethod
@@ -5382,8 +5428,8 @@ class MainWindow(QMainWindow):
                   if Path(path).suffix.lower() in cls._PRETEST_PHOTO_SUFFIXES]
         if document_roles is None:
             return images
-        # Stessa scelta del worker e dell'estrattore (`photo_document_indices`
-        # quando c'e'): solo i file con il ruolo foto.
+        # Same choice as the worker and the extractor (`photo_document_indices`
+        # when present): only the files with the photo role.
         from ..services import datasheet_extractor
         indices = getattr(datasheet_extractor, "photo_document_indices", None)
         from ..services.document_roles import photo_paths
@@ -5392,9 +5438,9 @@ class MainWindow(QMainWindow):
             paths = [Path(path) for path in doc_paths]
             try:
                 chosen = {paths[i] for i in (indices(paths, document_roles) or []) if i >= 0}
-            except Exception:  # noqa: BLE001 - ExtractionError non e' un ValueError
-                # Ruoli che l'estrattore rifiuterebbe: lo dira' l'analisi; qui
-                # vale la lettura diretta dei ruoli, mai un'eccezione da uno slot.
+            except Exception:  # noqa: BLE001 - ExtractionError is not a ValueError
+                # Roles the extractor would reject: the analysis will say so; here
+                # the direct reading of the roles applies, never an exception from a slot.
                 pass
         return [path for path in images if path in chosen]
 
@@ -5405,7 +5451,8 @@ class MainWindow(QMainWindow):
         @param document_roles Roles of the documents (None when not assigned).
         @param yolo_model_path Session weights path, or None for the default.
         @note No AI call of any kind (user, 2026-09-25: «un pretest di come
-            vengono individuati i componenti senza fare altro»). The board
+            vengono individuati i componenti senza fare altro», a pretest of
+            how the components are found, without doing anything else). The board
             extents come from the «Lunghezza/Larghezza corpo» fields: without
             the document analysis there is no other source, and the photo
             calibration needs them. They are read through `_body_size()`, the
@@ -5440,8 +5487,8 @@ class MainWindow(QMainWindow):
             self._start_log_session("Pretest YOLO")
             self.ai_progress_text.clear()
             self.ai_elements_list.clear()
-            # Il consuntivo dell'ultima analisi a pagamento non riguarda il
-            # pretest, che non spende nulla (audit 25/09, B4).
+            # The final account of the last paid analysis does not concern the
+            # pretest, which spends nothing (audit 25/09, B4).
             self.analysis_overlay.clear_cost()
             self._on_ai_progress(
                 tx("Pretest solo YOLO locale: nessuna chiamata AI. Quote della scheda dai campi "
@@ -5460,12 +5507,12 @@ class MainWindow(QMainWindow):
             worker._analysis_revision = self._analysis_revision
             self._analysis_tabs_enabled = self.tabs.isEnabled()
             self.tabs.setEnabled(False)
-            # Titolo proprio: «Analisi AI in corso» direbbe il falso (nessuna AI).
+            # Own title: «Analisi AI in corso» (AI analysis running) would be false (no AI).
             self.analysis_overlay.start("Pretest YOLO in corso",
                                         "Rilevamento dei componenti sulla foto…", abortable=True)
             worker.start()
             self._track_background_work(worker)
-        except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
+        except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             self._on_yolo_pretest_finished()
             self._on_yolo_pretest_error(str(exc))
 
@@ -5586,8 +5633,8 @@ class MainWindow(QMainWindow):
         """@brief Put the idle text and tooltip of the extraction button in line with the detector.
 
         @note Does nothing while `_extraction_busy` is set: the detector combo
-            is not the only way here -- a model change from Configurazione ->
-            Default generali AI goes through `_refresh_model_combo` and
+            is not the only way here -- a model change from «Configurazione» ->
+            «Default generali AI...» goes through `_refresh_model_combo` and
             `_on_photo_detector_changed` in the middle of a run, and used to
             put the idle text back over «Analisi in corso...» (audit 25/09,
             B6). The run's end clears the flag and calls this again through
@@ -5598,14 +5645,18 @@ class MainWindow(QMainWindow):
             has ended.
             Both properties are recorded as catalogue sources, so a later
             language switch translates them instead of freezing the rendered text.
+            While `_extract_block_reason` gives a reason, the tooltip is that
+            reason, as `_apply_component_name_gate` writes it.
         """
         button = getattr(self, "btn_extract_ai", None)
         if button is None or getattr(self, "_extraction_busy", False):
             return
         text, tooltip = self._extract_button_sources()
         self._set_extract_button_text(text)
-        if self._component_name():
-            self._set_translated_tooltip(button, tooltip)
+        # A blocked button explains why (no project, no component type); the
+        # idle tooltip would describe an analysis that cannot start (review
+        # 2026-10-16, R2I4: a language switch put it back over the reason).
+        self._set_translated_tooltip(button, self._extract_block_reason() or tooltip)
 
     def _set_extract_button_text(self, text: str) -> None:
         """@brief Show `text` (Italian catalogue source) on the extraction button, translated.
@@ -5622,36 +5673,36 @@ class MainWindow(QMainWindow):
         button.setProperty("i18n_rendered", rendered)
 
     def _begin_ai_run(self, title: str) -> None:
-        """@brief Prepara log, consuntivo e pulsanti per un'analisi AI che sta per partire.
+        """@brief Prepare log, cost summary and buttons for an AI analysis about to start.
 
-        @param title Titolo della sezione nel diario.
-        @note Condiviso fra l'estrazione completa e il rilancio dell'inventario:
-            entrambi finiscono in _on_extracted/_on_extract_finished, quindi
-            devono partire dallo stesso stato. Il consuntivo si azzera qui,
-            all'inizio di una NUOVA analisi: farlo quando la modale riparte lo
-            cancellava subito dopo averlo mostrato, perche' la modale riparte
-            anche per la generazione FreeCAD.
+        @param title Title of the section in the diary.
+        @note Shared between the full extraction and the inventory relaunch:
+            both end in _on_extracted/_on_extract_finished, so they must start
+            from the same state. The cost summary is reset here, at the start
+            of a NEW analysis: doing it when the modal restarts cleared it
+            right after showing it, because the modal also restarts for the
+            FreeCAD generation.
         """
         self.btn_extract_ai.setEnabled(False)
-        # Sempre automatica: la modalita' manuale e' stata tolta (utente, 2026-09-26).
+        # Always automatic: the manual mode has been removed (user, 2026-09-26).
         self._auto_after_extraction = True
         self._auto_generation_params = None
         self._extract_finish_pending = False
         self.analysis_overlay.clear_cost()
-        # Ogni chiamata di questa corsa si addebita al progetto di adesso, anche
-        # se nel frattempo se ne apre un altro (verifica del 25/09, D7). Si
-        # rilascia quando il worker finisce davvero (_on_extract_finished).
+        # Every call of this run is charged to the current project, even
+        # if another one is opened in the meantime (check of 25/09, D7). It is
+        # released when the worker really finishes (_on_extract_finished).
         if hasattr(self, "ai_account"):
             self.ai_account.bind_run_project(self._project_dir_or_none())
         self._set_extract_button_text("Analisi in corso...")
-        # Dopo il testo: da qui fino alla fine della corsa il pulsante e i
-        # comandi YOLO non si toccano piu' (vedi _refresh_extract_button).
+        # After the text: from here until the end of the run the button and the
+        # YOLO commands are no longer touched (see _refresh_extract_button).
         self._extraction_busy = True
         self._start_log_session(title)
         self.ai_progress_text.clear()
         self.ai_elements_list.clear()
-        # Log e contatori svuotati cambiano l'altezza della pagina: il
-        # pulsante con la clessidra resta in vista, ora e al prossimo giro.
+        # Emptied log and counters change the height of the page: the
+        # button with the hourglass stays in view, now and on the next round.
         self._keep_extract_button_visible()
         QTimer.singleShot(0, self._keep_extract_button_visible)
 
@@ -5670,35 +5721,34 @@ class MainWindow(QMainWindow):
             scroll.ensureWidgetVisible(button, 0, 24)
 
     def _photo_cache_dir(self) -> Path:
-        """@brief Cartella in cui l'inventario fotografico salva cache ed evidenza.
+        """@brief Folder in which the photo inventory saves cache and evidence.
 
-        @return `<cartella del progetto>/photo-cache`: risposte AI in cache,
-            `detector-*.json`, `inventory-*-photo.png` e `yolo-audit/` del
-            progetto corrente (decisione dell'utente del 2026-09-24: ogni
-            interrogazione AI e' specifica del progetto).
-        @throws ValueError quando il componente non ha ancora un nome.
-        @note Nello stesso progetto possono esserci le evidenze di piu'
-            estrazioni: le proposte salvate si accettano solo se nate
-            dall'ultima (vedi _saved_detector_proposals).
+        @return `<project folder>/photo-cache`: cached AI answers,
+            `detector-*.json`, `inventory-*-photo.png` and `yolo-audit/` of
+            the current project (user decision of 2026-09-24: every AI query
+            is specific to the project).
+        @throws ValueError when the component has no name yet.
+        @note The same project can hold the evidence of several extractions:
+            the saved proposals are accepted only if they come from the last
+            one (see _saved_detector_proposals).
         """
         from ..services.photo_inventory import photo_cache_dir
         return photo_cache_dir(self._project_dir())
 
     def _saved_detector_proposals(self):
-        """@brief Le proposte del rilevatore salvate dall'ultima estrazione, se ci sono.
+        """@brief The detector proposals saved by the last extraction, if any.
 
-        @return SavedDetectorProposals, oppure None quando non c'e' nulla di
-            riutilizzabile: nessun file, oppure un file piu' vecchio
-            dell'ultima estrazione avviata in questa sessione, che potrebbe
-            appartenere a un altro componente.
-        @note Residuo noto: dopo un riavvio `_extraction_started_stamp` e'
-            None e il filtro temporale non scatta, quindi il ripiego accetta
-            il detector JSON piu' recente della cache comune qualunque sia il
-            componente da cui e' nato. Il ramo si raggiunge solo quando il
-            pacchetto `photo-review/` del componente manca (con il pacchetto
-            presente comanda quello, che sta nella cartella del componente).
-            La cache non registra il componente di origine: finche' non lo
-            fara', questo ripiego resta un'euristica dichiarata.
+        @return SavedDetectorProposals, or None when there is nothing
+            reusable: no file, or a file older than the last extraction
+            started in this session, which could belong to another component.
+        @note Known residue: after a restart `_extraction_started_stamp` is
+            None and the time filter does not trigger, so the fallback accepts
+            the most recent detector JSON of the common cache whatever the
+            component it came from. The branch is reached only when the
+            `photo-review/` bundle of the component is missing (with the
+            bundle present, that one rules, and it lives in the component
+            folder). The cache does not record the originating component:
+            until it does, this fallback remains a declared heuristic.
         """
         from ..services.photo_inventory import load_saved_detector_proposals
         try:
@@ -5713,11 +5763,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _calibrated_extents(params) -> bool:
-        """@brief Vero quando i parametri portano quote della scheda finite e positive.
+        """@brief True when the parameters carry finite, positive board dimensions.
 
-        @note Sono le quote con cui la foto fu calibrata: senza, i riquadri
-            normalizzati non hanno scala e non si possono ne' rivedere ne'
-            rilanciare.
+        @note They are the dimensions with which the photo was calibrated:
+            without them the normalised boxes have no scale and can be
+            neither reviewed nor relaunched.
         """
         return (params is not None
                 and all(isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -5725,30 +5775,30 @@ class MainWindow(QMainWindow):
                         for v in (params.body_length_mm, params.body_width_mm)))
 
     def _review_bundle(self):
-        """@brief Il pacchetto di revisione DELL'ESTRAZIONE salvato nella cartella del componente.
+        """@brief The review bundle OF THE EXTRACTION saved in the component folder.
 
-        @return ReviewBundle, oppure None: senza nome non c'e' cartella, e un
-            pacchetto assente o corrotto vale come nessun pacchetto.
-        @note E' l'unica fonte che sopravvive al riavvio: sta nella cartella
-            del componente, non nella cache comune, quindi con il solo nome
-            digitato si sa gia' se c'e' qualcosa da riaprire.
-        @note Un pacchetto il cui rilevatore dichiarato e' `yolo_only` non e'
-            dell'estrazione: e' un pretest scritto qui prima che i pretest
-            avessero la loro cartella (audit 25/09, B2). Non vale come base
-            per il rilancio a pagamento; si riapre gratis come pretest
-            (`_pretest_bundle`). La regola guarda l'attributo registrato nel
-            pacchetto, non il nome di un file.
+        @return ReviewBundle, or None: without a name there is no folder, and
+            a missing or corrupted bundle counts as no bundle.
+        @note It is the only source that survives a restart: it lives in the
+            component folder, not in the common cache, so with just the name
+            typed one already knows whether there is something to reopen.
+        @note A bundle whose declared detector is `yolo_only` does not belong
+            to the extraction: it is a pretest written here before pretests
+            had their own folder (audit 25/09, B2). It is not a base for the
+            paid relaunch; it is reopened for free as a pretest
+            (`_pretest_bundle`). The rule looks at the attribute recorded in
+            the bundle, not at a file name.
         """
         bundle = self._load_bundle(None)
         if bundle is not None and bundle.detector == self._PRETEST_DETECTOR:
             return None
         return bundle
 
-    #: Rilevatore registrato nei pacchetti del pretest solo YOLO.
+    #: Detector recorded in the packages of the YOLO-only pretest.
     _PRETEST_DETECTOR = "yolo_only"
-    #: Sotto-cartella del progetto riservata al pretest: contiene il suo
-    #: `photo-review/` e la sua `photo-cache/`, separati da quelli
-    #: dell'estrazione (audit 25/09, B2).
+    #: Sub-folder of the project reserved for the pretest: it holds its
+    #: `photo-review/` and its `photo-cache/`, separate from those
+    #: of the extraction (audit 25/09, B2).
     PRETEST_SUBDIR = "yolo-pretest"
 
     def _pretest_root(self) -> Path:
@@ -5778,7 +5828,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _load_bundle(self, root):
-        """Legge il pacchetto sotto `root` (None = cartella del componente); None se inutilizzabile."""
+        """Read the bundle under `root` (None = component folder); None if unusable."""
         from ..services.photo_inventory import load_review_bundle
         if not self._named():
             return None
@@ -5789,13 +5839,13 @@ class MainWindow(QMainWindow):
 
     def _write_review_bundle(self, proposals, photo_png, length, width, *,
                              source_json='', detector='yolo', root=None, reviewed=True):
-        """@brief Scrive il pacchetto di revisione nella cartella del componente.
+        """@brief Write the review bundle into the component folder.
 
-        @param root Cartella che fa da cartella del componente: None per il
-            pacchetto dell'estrazione, `_pretest_root()` per quello del pretest.
-        @return Percorso di `proposals.json`, oppure None se non c'e' un nome
-            o la scrittura fallisce (annotato nel log, senza fermare nulla).
-        @note Operazione offline e gratuita: nessuna chiamata a modelli.
+        @param root Folder acting as the component folder: None for the
+            extraction bundle, `_pretest_root()` for the pretest one.
+        @return Path of `proposals.json`, or None if there is no name or the
+            write fails (noted in the log, without stopping anything).
+        @note Offline, free operation: no model calls.
         """
         from ..services.photo_inventory import save_review_bundle
         if not self._named():
@@ -5810,11 +5860,11 @@ class MainWindow(QMainWindow):
             return None
 
     def _fresh_cache_evidence(self):
-        """@brief Ripiego di sessione: proposte fresche in cache + quote dell'ultima estrazione.
+        """@brief Session fallback: fresh proposals in cache + dimensions of the last extraction.
 
-        @return (SavedDetectorProposals, ExtractedParams) oppure None.
-        @note Vale solo finche' il pacchetto nella cartella del componente
-            non esiste: appena c'e', comanda quello.
+        @return (SavedDetectorProposals, ExtractedParams) or None.
+        @note Valid only while the bundle in the component folder does not
+            exist: as soon as it does, that one rules.
         """
         params = self._last_extracted
         if not self._calibrated_extents(params):
@@ -5823,13 +5873,13 @@ class MainWindow(QMainWindow):
         return (saved, params) if saved is not None else None
 
     def _ensure_review_bundle(self):
-        """@brief Il pacchetto da riaprire, scrivendolo prima dalla cache se manca.
+        """@brief The bundle to reopen, writing it first from the cache if missing.
 
-        @return ReviewBundle oppure None.
-        @note Decisione dell'utente: il percorso dalla cache comune resta
-            solo come ripiego, e anche in quel caso il pacchetto va scritto
-            PRIMA, cosi' il prossimo avvio lo trova nella cartella del
-            componente senza dipendere dalla cache.
+        @return ReviewBundle or None.
+        @note User decision: the path from the common cache stays only as a
+            fallback, and even in that case the bundle is written FIRST, so
+            the next start-up finds it in the component folder without
+            depending on the cache.
         """
         bundle = self._review_bundle()
         if bundle is not None:
@@ -5854,18 +5904,18 @@ class MainWindow(QMainWindow):
         return self._review_bundle()
 
     def _store_extraction_review_bundle(self) -> None:
-        """@brief Dopo un'estrazione, copia le proposte fresche della cache nella cartella del componente.
+        """@brief After an extraction, copy the fresh cache proposals into the component folder.
 
-        @note Scrive solo quando l'estrazione ha lasciato proposte in cache con
-            quote valide, e solo se il pacchetto manca o e' PIU' VECCHIO
-            dell'estrazione appena avviata. Il secondo vincolo conta: anche il
-            rilancio dell'inventario rientra da `_on_extracted`, e senza di
-            esso le proposte ORIGINALI della cache tornerebbero a coprire
-            quelle tenute dalla revisione, che stanno nel pacchetto con una
-            marca piu' recente. Quando la finestra di revisione ha gia'
-            scritto il pacchetto durante l'estrazione
-            (`_reviewed_this_extraction`) questo ripiego non fa nulla: resta
-            per le analisi senza revisione (rilevatore senza dialogo).
+        @note It writes only when the extraction left proposals in cache with
+            valid dimensions, and only if the bundle is missing or OLDER than
+            the extraction just started. The second constraint matters: the
+            inventory relaunch also comes back through `_on_extracted`, and
+            without it the ORIGINAL cache proposals would again cover those
+            kept by the review, which are in the bundle with a more recent
+            stamp. When the review window has already written the bundle
+            during the extraction (`_reviewed_this_extraction`) this fallback
+            does nothing: it stays for analyses without review (detector
+            without dialog).
         """
         if self._reviewed_this_extraction:
             return
@@ -5894,28 +5944,28 @@ class MainWindow(QMainWindow):
                                 n_proposals=len(saved.proposals)))
 
     def _refresh_reopen_review_button(self) -> None:
-        """@brief Abilita revisione (gratuita) e rilancio (a pagamento) quando c'e' cosa riaprire.
+        """@brief Enable review (free) and relaunch (paid) when there is something to reopen.
 
-        @note La revisione richiede un pacchetto valido nella
-            cartella del componente (anche svuotato esplicitamente),
-            oppure -- ripiego di sessione -- proposte fresche in cache con le
-            quote dell'ultima estrazione. Senza nome non c'e' cartella, quindi
-            entrambi spenti. Non serve un'estrazione in questa sessione:
-            appena il nome punta a una cartella con il pacchetto, si riapre.
-            Il rilancio a pagamento richiede anche almeno una proposta.
+        @note The review requires a valid bundle in the component folder (even
+            one explicitly emptied), or -- session fallback -- fresh proposals
+            in cache with the dimensions of the last extraction. Without a
+            name there is no folder, so both are off. An extraction in this
+            session is not needed: as soon as the name points to a folder with
+            the bundle, it reopens. The paid relaunch also requires at least
+            one proposal.
         """
         if self._pretest_mode():
-            # Con «Solo YOLO locale» la riga riguarda il pretest (audit 25/09,
-            # B2): si riapre gratis il suo pacchetto, e il rilancio A
-            # PAGAMENTO sparisce come spariscono modelli AI e credito.
+            # With «Solo YOLO locale» (local YOLO only) the row concerns the pretest
+            # (audit 25/09, B2): its package is reopened for free, and the PAID
+            # re-run disappears as the AI models and the credit disappear.
             bundle = self._pretest_bundle()
             self._set_review_buttons_available(
                 bundle is not None and bundle.photo_path is not None, False)
             return
         bundle = self._review_bundle()
         if bundle is not None:
-            # Senza foto calibrata i riquadri non si possono ne' vedere ne'
-            # riconciliare: pulsanti spenti invece di un avviso al clic.
+            # Without a calibrated photo the boxes can be neither seen nor
+            # reconciled: buttons off instead of a warning on click.
             available = bundle.photo_path is not None or bool(self._photo_png)
             relaunch = available and bool(bundle.proposals)
         else:
@@ -5929,25 +5979,25 @@ class MainWindow(QMainWindow):
         return combo is not None and combo.currentData() == self._PRETEST_DETECTOR
 
     def _set_action_available(self, name: str, available: bool) -> None:
-        """@brief Un comando che non puo' agire si nasconde, non resta acceso a vuoto.
+        """@brief A command that cannot act is hidden, it does not stay enabled for nothing.
 
-        @param name Nome dell'attributo del pulsante; assente = niente da fare.
-        @param available True quando l'azione e' davvero possibile adesso.
-        @note Richiesta dell'utente: «se il log non è presente il pulsante non
-            si deve vedere». Vale per ogni comando della riga: un pulsante
-            spento che resta visibile e' una promessa che l'interfaccia non
-            puo' mantenere, e in una riga di cinque pulsanti e' solo confusione.
-            Lo stato abilitato resta allineato alla visibilita' cosi' che i
-            controlli che lo leggono (e i test) vedano una cosa sola.
-        @note L'allineamento vale per cio' che questo metodo imposta, non per
-            cio' che Qt calcola. Su una COPIA nella scheda Modello 3D --
+        @param name Name of the button attribute; absent = nothing to do.
+        @param available True when the action is really possible now.
+        @note User request: «se il log non è presente il pulsante non si deve
+            vedere» (if the log is not there the button must not be visible).
+            It applies to every command of the row: a disabled button that
+            stays visible is a promise the interface cannot keep, and in a row
+            of five buttons it is only confusion. The enabled state stays
+            aligned with the visibility so that the checks reading it (and the
+            tests) see one thing only.
+        @note The alignment applies to what this method sets, not to what Qt
+            computes. On a COPY in the Modello 3D tab --
             `btn_component_review_3d`, `btn_relaunch_inventory_3d` --
-            `isEnabled()` e' in AND con lo
-            stato della scheda, che resta spenta fino alla prima acquisizione:
-            li' `isEnabled()` puo' essere falso mentre
-            `isVisibleTo(parentWidget())` e' vero, e non e' un difetto. Un
-            controllo sulla visibilita' propria della copia deve usare
-            `isVisibleTo(...)`, non `isEnabled()`.
+            `isEnabled()` is ANDed with the state of the tab, which stays
+            disabled until the first acquisition: there `isEnabled()` can be
+            false while `isVisibleTo(parentWidget())` is true, and it is not a
+            defect. A check on the copy's own visibility must use
+            `isVisibleTo(...)`, not `isEnabled()`.
         """
         button = getattr(self, name, None)
         if button is None:
@@ -5957,11 +6007,12 @@ class MainWindow(QMainWindow):
         self._refresh_project_bar_divider()
 
     def _refresh_project_bar_divider(self) -> None:
-        """Il separatore della barra in alto si vede solo se separa qualcosa.
+        """The separator of the top bar is shown only if it separates something.
 
-        A sinistra stanno sempre le icone dell'analisi; a destra i comandi della
-        pipeline, che compaiono solo quando c'e' cosa riaprire: senza di loro un
-        separatore da solo in coda alla barra sembra un difetto.
+        On the left there are always the analysis icons; on the right the
+        pipeline commands, which appear only when there is something to
+        reopen: without them a lone separator at the end of the bar looks like
+        a defect.
         """
         divider = getattr(self, "_project_bar_divider", None)
         if divider is None:
@@ -5985,31 +6036,31 @@ class MainWindow(QMainWindow):
             self._refresh_output_actions()
 
     def _mirror_project_action(self, source, slot, row, asset: str):
-        """@brief Crea in una barra di icone (scheda Progetto o Modello 3D) la copia di un comando.
+        """@brief Create in an icon bar (Progetto or Modello 3D tab) the copy of a command.
 
-        @param source Pulsante originale: unica fonte di testo, suggerimento e stato.
-        @param slot Slot da collegare -- e' lo STESSO comando, non una variante.
-        @param row Layout della barra in cui inserire la copia.
-        @param asset Icona SVG della copia, in `gui/assets`.
-        @return Il pulsante copia, gia' inserito nella barra.
-        @note Le tre copie passano tutte da qui. Prima due copiavano solo
-            `setEnabled(...)` e la terza anche `isVisibleTo(...)`: partivano in
-            stati diversi pur essendo lo stesso comando, e bastava che il
-            primo ricalcolo arrivasse dopo per far vedere un pulsante che
-            l'originale aveva gia' nascosto.
-        @note Scelta dell'utente (2026-09-23): nella scheda Modello 3D la copia
-            e' un'icona senza testo; il testo dell'originale diventa la prima
-            riga del tooltip e il nome accessibile, il tooltip dell'originale
-            la spiegazione. Un `_ToolTipFollower` ricompone il tooltip a ogni
-            cambio del tooltip dell'originale -- anche quello del cambio di
-            lingua -- quindi la copia segue l'originale per costruzione. Lo
-            stato abilitato/visibile resta quello impostato insieme da
-            `_set_action_available`.
-        @note La visibilita' NON si applica qui: `_apply_project_action_mirror_visibility()`
-            la allinea dopo che la barra e' montata. Oggi la barra ha gia' il
-            suo widget quando le copie nascono, ma l'ordine resta quello
-            sicuro: `setVisible(True)` su un widget senza genitore lo
-            mostrerebbe come finestra a se' stante.
+        @param source Original button: the only source of text, tooltip and state.
+        @param slot Slot to connect -- it is the SAME command, not a variant.
+        @param row Layout of the bar in which to insert the copy.
+        @param asset SVG icon of the copy, in `gui/assets`.
+        @return The copy button, already inserted in the bar.
+        @note All three copies go through here. Before, two copied only
+            `setEnabled(...)` and the third also `isVisibleTo(...)`: they
+            started in different states while being the same command, and it
+            was enough for the first recomputation to arrive later to show a
+            button the original had already hidden.
+        @note User choice (2026-09-23): in the Modello 3D tab the copy is an
+            icon without text; the text of the original becomes the first
+            line of the tooltip and the accessible name, the tooltip of the
+            original the explanation. A `_ToolTipFollower` recomposes the
+            tooltip at every change of the original's tooltip -- including
+            the one of a language change -- so the copy follows the original
+            by construction. The enabled/visible state stays the one set
+            together by `_set_action_available`.
+        @note The visibility is NOT applied here:
+            `_apply_project_action_mirror_visibility()` aligns it after the bar
+            is mounted. Today the bar already has its widget when the copies
+            are born, but the order stays the safe one: `setVisible(True)` on
+            a widget without a parent would show it as a stand-alone window.
         """
         mirror = self._icon_only_button(asset)
         mirror.setEnabled(source.isEnabled())
@@ -6022,25 +6073,27 @@ class MainWindow(QMainWindow):
         return mirror
 
     def _apply_project_action_mirror_visibility(self) -> None:
-        """@brief Allinea la visibilita' delle copie agli originali, a genitore acquisito."""
+        """@brief Align the visibility of the copies to the originals, once parented."""
         for mirror, source in self._project_action_mirrors:
             mirror.setVisible(source.isVisibleTo(source.parentWidget()))
 
     def _set_review_buttons_enabled(self, enabled: bool) -> None:
-        """@brief Accende o spegne insieme tutte le copie dei pulsanti di revisione/rilancio.
+        """@brief Enable or disable together all the copies of the review/relaunch buttons.
 
-        @param enabled True quando c'e' un pacchetto di proposte da riaprire.
-        @note Richiesta dell'utente: «dovrebbe sempre essere possibile
-            ripartire anche da li'» -- i pulsanti stanno in fondo alla scheda
-            Progetto e in fondo alla scheda Modello 3D, dove si guarda il
-            risultato e ci si accorge che manca qualcosa. Sono lo stesso
-            comando, quindi hanno sempre lo stesso stato.
-        @note La modifica della revisione sta nella stessa riga ma ha una
-            condizione propria: le serve la fotografia calibrata in memoria,
-            che e' cio' che `_show_photo_comparison` apre. Il pacchetto
-            salvato non basta -- dopo un riavvio, senza foto, quel comando non
-            potrebbe fare nulla. Sta qui e non in un metodo a parte perche' le
-            copie devono restare per costruzione nello stesso stato.
+        @param enabled True when there is a proposal bundle to reopen.
+        @note User request: «dovrebbe sempre essere possibile
+            ripartire anche da li'» (it should always be possible to
+            restart from there too) -- the
+            buttons are at the bottom of the Progetto tab and at the bottom of
+            the Modello 3D tab, where one looks at the result and notices that
+            something is missing. They are the same command, so they always
+            have the same state.
+        @note The review edit is in the same row but has its own condition:
+            it needs the calibrated photo in memory, which is what
+            `_show_photo_comparison` opens. The saved bundle is not enough --
+            after a restart, without a photo, that command could do nothing.
+            It is here and not in a separate method because the copies must
+            stay in the same state by construction.
         """
         self._set_review_buttons_available(bool(enabled), bool(enabled))
 
@@ -6084,15 +6137,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _refresh_component_review_button(self) -> None:
-        """@brief Allinea le copie di «Revisione componenti…» a cio' che il comando puo' aprire.
+        """@brief Align the copies of «Revisione componenti…» to what the command can open.
 
-        @note Il comando apre uno stadio o l'altro della stessa finestra
-            (`_component_review_stage`): senza fotografia, senza pacchetto e
-            senza sovrapposizione non puo' fare nulla e sparisce, secondo la
-            disciplina di `_set_action_available`.
-        @note Metodo unico perche' le copie (scheda Progetto e scheda Modello
-            3D) sono lo stesso comando: devono restare per costruzione nello
-            stesso stato, da qualunque percorso si arrivi.
+        @note The command opens one stage or the other of the same window
+            (`_component_review_stage`): without a photo, without a bundle and
+            without an overlay it can do nothing and disappears, following the
+            discipline of `_set_action_available`.
+        @note A single method because the copies (Progetto tab and Modello 3D
+            tab) are the same command: they must stay in the same state by
+            construction, whatever the path that leads here.
         """
         available = self._component_review_stage() is not None
         for name in ("btn_component_review", "btn_component_review_top",
@@ -6118,12 +6171,13 @@ class MainWindow(QMainWindow):
         self._show_photo_comparison()
 
     def _on_inventory_pause_toggled(self, checked: bool) -> None:
-        """@brief Ricorda la scelta sulla pausa e la scrive nel diario.
+        """@brief Remember the pause choice and write it in the diary.
 
-        @param checked True quando l'utente vuole essere fermato dopo l'inventario.
-        @note Chiamato da Configurazione -> Opzioni di generazione quando la
-            scelta cambia (dal 2026-09-24 la casella non sta piu' nel tab
-            Progetto): quello e' l'unico posto da cui si accende e si spegne.
+        @param checked True when the user wants to be stopped after the inventory.
+        @note Called from «Configurazione» -> «Opzioni di generazione...» when the
+            choice changes (since 2026-09-24 the check box is no longer in the
+            Progetto tab): that is the only place from which it is switched on
+            and off.
         """
         self._remember_inventory_pause(checked)
         self._append_log(
@@ -6135,24 +6189,23 @@ class MainWindow(QMainWindow):
                "pulsanti in basso."))
 
     def _ai_log_available(self) -> bool:
-        """@brief Dice se esiste davvero un log dell'analisi da aprire.
+        """@brief Tell whether an analysis log to open really exists.
 
-        @return True quando il diario del componente ha righe, su disco o in
-            attesa di una cartella, oppure quando la sessione ha gia' scritto
-            qualcosa a schermo.
-        @note E' la condizione del pulsante «Log AI»: si guarda il file scritto
-            da `_write_log_line` (`_log_file()`) e il testo in memoria, non il
-            fatto che un'analisi sia stata avviata. Senza nome del componente
-            non c'e' cartella e le righe restano nel buffer: anche quelle sono
-            un log apribile.
-        @note Si conta anche l'elenco degli elementi, non solo il testo:
-            `_on_ai_progress` manda le righe che cominciano con `#<numero>` in
-            `ai_elements_list`, e `_append_log` le tiene fuori da
-            `ai_progress_text`. Con una radice della libreria che
-            non e' una cartella (il file del diario non si puo' scrivere ne'
-            leggere) quelle righe erano l'unico contenuto della finestra del
-            log, e il pulsante si nascondeva su un log che aveva davvero
-            qualcosa da mostrare.
+        @return True when the component diary has lines, on disk or waiting
+            for a folder, or when the session has already written something on
+            screen.
+        @note It is the condition of the «Log AI» button: it looks at the file
+            written by `_write_log_line` (`_log_file()`) and at the text in
+            memory, not at the fact that an analysis was started. Without a
+            component name there is no folder and the lines stay in the
+            buffer: those too are an openable log.
+        @note The list of items counts too, not just the text:
+            `_on_ai_progress` sends the lines starting with `#<number>` to
+            `ai_elements_list`, and `_append_log` keeps them out of
+            `ai_progress_text`. With a library root that is not a folder (the
+            diary file can be neither written nor read) those lines were the
+            only content of the log window, and the button was hidden on a log
+            that really had something to show.
         """
         text = getattr(self, "ai_progress_text", None)
         if text is not None and text.toPlainText().strip():
@@ -6168,24 +6221,24 @@ class MainWindow(QMainWindow):
             path = self._log_file()
             return path.is_file() and path.stat().st_size > 0
         except (OSError, AttributeError):
-            # Un diario illeggibile non e' un diario apribile.
+            # An unreadable journal is not a journal that can be opened.
             return False
 
     def _refresh_ai_log_button(self) -> None:
-        """@brief Mostra «Log AI» solo quando c'e' un log, e appena c'e'.
+        """@brief Show «Log AI» only when there is a log, and as soon as there is one.
 
-        @note Chiamato dove il log o il nome del componente cambiano -- la
-            modifica del testo dell'analisi (`_refresh_ai_copy_buttons`) e il
-            controllo del nome (`_apply_component_name_gate`) -- e non da un
-            timer: un pulsante che appare per un giro di orologio invece che
-            per un fatto avvenuto e' peggio di uno spento.
+        @note Called where the log or the component name change -- the edit
+            of the analysis text (`_refresh_ai_copy_buttons`) and the name
+            check (`_apply_component_name_gate`) -- and not from a timer: a
+            button that appears for a clock tick instead of for an event that
+            happened is worse than a disabled one.
         """
         self._set_action_available("btn_ai_log", self._ai_log_available())
 
     def _review_photo(self, bundle):
-        """@brief La foto calibrata del pacchetto, o quella in memoria come ripiego.
+        """@brief The calibrated photo of the bundle, or the one in memory as a fallback.
 
-        @return PNG in byte, oppure None (gia' segnalato con un avviso).
+        @return PNG bytes, or None (already reported with a warning).
         """
         photo_png = None
         if bundle.photo_path is not None:
@@ -6198,8 +6251,8 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Foto calibrata assente in photo-review/: uso quella dell'estrazione "
                                 "in memoria."))
         if not photo_png:
-            # Testo neutro: arriva sia dal rilancio a pagamento sia dalla
-            # riapertura gratuita, e nessuno dei due e' "il rilancio".
+            # Neutral text: it comes both from the paid re-run and from the free
+            # reopening, and neither of the two is "the re-run".
             QMessageBox.warning(
                 self, self.i18n.text("Foto calibrata mancante"),
                 self.i18n.text("Manca la foto calibrata delle proposte salvate: senza non si "
@@ -6208,22 +6261,22 @@ class MainWindow(QMainWindow):
         return photo_png
 
     def _reopen_detector_review(self) -> None:
-        """@brief Riapre la revisione (stadio rilevatore) sul pacchetto salvato e, all'OK, lo risalva. Gratis.
+        """@brief Reopen the review (detector stage) on the saved bundle and, on OK, save it again. Free.
 
-        @note Nessuna chiamata AI in nessun ramo: la revisione e' sul thread
-            GUI e l'OK scrive soltanto `photo-review/proposals.json` con le
-            proposte tenute -- comprese le disegnate a mano (`_yolo_manual_box`)
-            e tutti i campi cosi' come sono. Chi vuole ripagare l'inventario
-            ha il pulsante accanto (`_relaunch_inventory`). Annullare non
-            tocca il file.
-        @note Con «Solo YOLO locale» scelto il pacchetto riaperto e risalvato
-            e' quello del pretest (`<progetto>/yolo-pretest/photo-review/`),
-            e il rilancio a pagamento non e' offerto (audit 25/09, B2).
+        @note No AI call in any branch: the review is on the GUI thread and
+            the OK only writes `photo-review/proposals.json` with the kept
+            proposals -- including the hand-drawn ones (`_yolo_manual_box`)
+            and all the fields as they are. Whoever wants to pay for the
+            inventory again has the button next to it (`_relaunch_inventory`).
+            Cancelling does not touch the file.
+        @note With «Solo YOLO locale» selected, the bundle reopened and saved
+            again is the pretest one (`<project>/yolo-pretest/photo-review/`),
+            and the paid relaunch is not offered (audit 25/09, B2).
         """
         if self._background_work_running() or self._automatic_generation_active:
             return
-        # Con «Solo YOLO locale» si riapre il pacchetto del pretest, che si
-        # risalva nella sua cartella: mai in quella dell'estrazione.
+        # With «Solo YOLO locale» (local YOLO only) the pretest package is reopened,
+        # and it is saved again in its own folder: never in the extraction's one.
         pretest = self._pretest_mode()
         bundle = self._pretest_bundle() if pretest else self._ensure_review_bundle()
         if bundle is None:
@@ -6237,8 +6290,8 @@ class MainWindow(QMainWindow):
                             json_path=bundle.json_path,
                             n_proposals=len(bundle.proposals)))
         try:
-            # Letto dal modulo a ogni chiamata, cosi' una prova puo' sostituire
-            # la finestra; stadio «rilevatore» della revisione unificata.
+            # Read from the module on every call, so a test can replace the
+            # window; «rilevatore» (detector) stage of the unified review.
             from . import photo_review_dialog as review_module
             dialog = review_module.PhotoReviewDialog(
                 photo_png, [dict(p) for p in bundle.proposals],
@@ -6247,7 +6300,7 @@ class MainWindow(QMainWindow):
             self.i18n.retranslate_widgets(dialog)
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
             kept = list(dialog.kept_components()) if accepted else None
-        except Exception as exc:  # noqa: BLE001 - la vista non deve far cadere la finestra
+        except Exception as exc:  # noqa: BLE001 - the view must not bring the window down
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
             return
         if kept is None:
@@ -6258,8 +6311,8 @@ class MainWindow(QMainWindow):
                                          source_json=bundle.source_json, detector=bundle.detector,
                                          root=self._pretest_root() if pretest else None)
         if path is not None and pretest:
-            # Il pretest non ha rilancio: non si indica un comando a pagamento
-            # che in questa modalita' non c'e'.
+            # The pretest has no re-run: no paid command is pointed to that
+            # does not exist in this mode.
             self._append_log(tx("Revisione del pretest YOLO salvata offline in {path}: {n_kept} "
                                 "proposte tenute, nessuna richiesta AI (gratuito).",
                                 path=path, n_kept=len(kept)))
@@ -6272,16 +6325,16 @@ class MainWindow(QMainWindow):
         self._refresh_reopen_review_button()
 
     def _relaunch_base_params(self, bundle):
-        """@brief I parametri su cui innestare l'inventario rilanciato.
+        """@brief The parameters onto which the relaunched inventory is grafted.
 
-        @return L'ultima estrazione della sessione, oppure -- dopo un riavvio,
-            quando non ce n'e' una -- una base ricavata dal pacchetto e dai
-            campi correnti, con la disposizione che la finestra mostra ora:
-            castellated (lati della tabella) oppure matrice (righe, colonne,
-            passo, distanza righe, pad, foro), cosi' `_apply_extracted_result`
-            ritrova campi valorizzati e non `None` da assegnare agli spin box.
-        @note Le quote vengono dal pacchetto, non dai campi: sono quelle con
-            cui i riquadri furono calibrati.
+        @return The last extraction of the session, or -- after a restart,
+            when there is none -- a base derived from the bundle and from the
+            current fields, with the layout the window shows now: castellated
+            (sides of the table) or matrix (rows, columns, pitch, row spacing,
+            pad, drill), so that `_apply_extracted_result` finds filled fields
+            and not `None` to assign to the spin boxes.
+        @note The dimensions come from the bundle, not from the fields: they
+            are the ones with which the boxes were calibrated.
         """
         if self._last_extracted is not None:
             return self._last_extracted
@@ -6291,14 +6344,14 @@ class MainWindow(QMainWindow):
             body_length_mm=bundle.body_length_mm, body_width_mm=bundle.body_width_mm,
             photo_png=None, photo_source=str(bundle.photo_path or ''))
         if self._is_castellated():
-            # Il tipo di contatto viaggia con i lati: il risultato del rilancio
-            # rientra da `_apply_extracted_castellated`, che senza la chiave
-            # rimetterebbe il valore predefinito sopra la scelta dell'utente.
+            # The contact type travels with the sides: the result of the re-run
+            # comes back through `_apply_extracted_castellated`, which without the key
+            # would put the default value back over the user's choice.
             sides = self._serialised_sides()
             spacing = getattr(self, "_declared_row_spacing", None)
             if spacing is not None:
-                # Senza, il rilancio rientrerebbe da _apply_extracted_castellated
-                # senza quota e i fori passanti tornerebbero alla stima.
+                # Without it, the re-run would come back through _apply_extracted_castellated
+                # without a dimension and the through holes would go back to the estimate.
                 common = dict(common, row_spacing_mm=spacing)
             return ExtractedParams(layout='castellated', castellated_sides=sides, **common)
         return ExtractedParams(
@@ -6309,18 +6362,18 @@ class MainWindow(QMainWindow):
             **common)
 
     def _relaunch_inventory(self) -> None:
-        """@brief Ripaga la sola riconciliazione sulle proposte del pacchetto salvato.
+        """@brief Pay again for the reconciliation only, on the proposals of the saved bundle.
 
-        @note Solo il pacchetto dell'ESTRAZIONE (`_ensure_review_bundle`):
-            i riquadri di un pretest solo YOLO non vengono mai riconciliati a
-            pagamento da qui (audit 25/09, B2).
+        @note Only the EXTRACTION bundle (`_ensure_review_bundle`): the boxes
+            of a YOLO-only pretest are never reconciled for a fee from here
+            (audit 25/09, B2).
 
-        @note E' l'unica spesa di questo percorso e viene dichiarata PRIMA
-            di partire, nel log e nella modale. Le proposte arrivano dal file
-            cosi' come furono salvate dalla revisione (gia' filtrate e
-            misurate; le disegnate a mano incluse) e vanno alla
-            riconciliazione senza altre trasformazioni. Il risultato rientra
-            per `_on_reconciled` come dopo un'estrazione.
+        @note It is the only expense of this path and it is declared BEFORE
+            starting, in the log and in the modal. The proposals come from the
+            file as they were saved by the review (already filtered and
+            measured; the hand-drawn ones included) and go to the
+            reconciliation without further transformations. The result comes
+            back through `_on_reconciled` as after an extraction.
         """
         if self._background_work_running() or self._automatic_generation_active:
             return
@@ -6334,10 +6387,10 @@ class MainWindow(QMainWindow):
         # The reconciliation ends in a generation: settle a footprint draft first.
         if not self._settle_footprint_draft_before_start():
             return
-        # La base sintetizzata finisce in _last_extracted per far rientrare il
-        # risultato da _on_reconciled: da li' in poi `_last_extracted is None`
-        # non basta piu' a riconoscerla, serve il flag esplicito, che solo una
-        # estrazione vera azzera.
+        # The synthesised base ends up in _last_extracted so that the result
+        # comes back through _on_reconciled: from there on `_last_extracted is None`
+        # is no longer enough to recognise it, the explicit flag is needed, which
+        # only a real extraction resets.
         synthesized = self._last_extracted is None or self._relaunch_base_synthesized
         params = self._relaunch_base_params(bundle)
         model = self._photo_detector_model()
@@ -6351,7 +6404,7 @@ class MainWindow(QMainWindow):
         self._begin_ai_run("Rilancio inventario")
         try:
             self._start_reconcile_worker(bundle, photo_png, params, model, profile, synthesized)
-        except Exception as exc:  # noqa: BLE001 - qualunque guasto riporta la UI in quiete
+        except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
             self._on_extract_finished()
             self._on_extract_error(str(exc))
 
@@ -6372,18 +6425,18 @@ class MainWindow(QMainWindow):
             caller restores the idle UI state.
         """
         if synthesized:
-            # Senza un'estrazione in questa sessione la base viene dai campi
-            # correnti, che possono essere vuoti: l'inventario va applicato
-            # ai campi, non usato per far partire da solo footprint e 3D.
+            # Without an extraction in this session the base comes from the current
+            # fields, which may be empty: the inventory must be applied to the
+            # fields, not used to start footprint and 3D on its own.
             self._relaunch_base_synthesized = True
             self._auto_after_extraction = False
             self._append_log(tx("Nessuna estrazione in questa sessione: l'inventario rilanciato "
                                 "aggiorna i componenti senza avviare la generazione automatica."))
         self._set_review_buttons_enabled(False)
-        # Dichiarata PRIMA di partire, nel log e nella modale: chi preme deve
-        # sapere prima, non dopo, che cosa si paga. Oltre alla richiesta
-        # sull'inventario il rilancio rilegge ogni corpo dal suo ritaglio e le
-        # sigle, come l'estrazione (HANDOFF 146 V2).
+        # Declared BEFORE starting, in the log and in the modal: whoever presses must
+        # know before, not after, what is being paid for. Besides the request on
+        # the inventory the re-run re-reads every body from its crop and the
+        # markings, like the extraction (HANDOFF 146 V2).
         announcement = (tx("Rilancio dell'inventario su {n_proposals} proposte da {name}: rete "
                            "SMD locale, gratuita; solo i corpi che non riconosce passano alle "
                            "letture a pagamento dei ritagli con il modello {model} (riprese "
@@ -6410,8 +6463,8 @@ class MainWindow(QMainWindow):
             crop_prompt=profile['crop_prompt'],
             crop_model=profile['crop_model'],
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
-            # Il nome del rilevatore e' quello con cui i riquadri sono nati,
-            # registrato nel pacchetto, qualunque cosa dica ora la tendina.
+            # The detector name is the one the boxes were born with, recorded in
+            # the package, whatever the combo box says now.
             detector=bundle.detector, reviewed=bundle.reviewed,
             smd_model_path=self._smd_model_option())
         self._reconcile_worker.done.connect(self._on_reconciled)
@@ -6419,7 +6472,7 @@ class MainWindow(QMainWindow):
         self._reconcile_worker.progress.connect(self._on_ai_progress)
         self._reconcile_worker.phase.connect(self._on_phase)
         self._reconcile_worker.finished.connect(self._on_extract_finished)
-        # Vedi _start_extract_worker: marchio della corsa per i risultati tardivi.
+        # See _start_extract_worker: run stamp for late results.
         self._reconcile_worker._analysis_revision = self._analysis_revision
         # A new run has applied nothing yet (see `_on_extract_finished`).
         self._extraction_applied_revision = None
@@ -6431,15 +6484,15 @@ class MainWindow(QMainWindow):
         self._track_background_work(self._reconcile_worker)
 
     def _on_reconciled(self, report) -> None:
-        """@brief Sostituisce i componenti e rientra nella via di un'estrazione normale.
+        """@brief Replace the components and rejoin the path of a normal extraction.
 
-        @param report InventoryResult di reconcile_saved_proposals.
-        @note I nuovi componenti prendono il posto di `components_3d` negli
-            ultimi parametri estratti, e il resto (nome, quote, lati) resta
-            quello. Da qui in poi e' _on_extracted: stessi campi, stesso
-            ripristino delle scelte KiCad, e -- se la modalita' lo prevede --
-            la generazione automatica con abbinamento modelli e 3D parte da
-            _on_extract_finished come dopo l'estrazione.
+        @param report InventoryResult of reconcile_saved_proposals.
+        @note The new components take the place of `components_3d` in the
+            last extracted parameters, and the rest (name, dimensions, sides)
+            stays as it was. From here on it is _on_extracted: same fields,
+            same restoration of the KiCad choices, and -- if the mode provides
+            for it -- the automatic generation with model matching and 3D
+            starts from _on_extract_finished as after the extraction.
         """
         from dataclasses import replace
         if not self._analysis_result_is_current():
@@ -6458,11 +6511,11 @@ class MainWindow(QMainWindow):
                      get=report.calibration.get('proposal_count', 0)))
         if report.warnings:
             suffix += "\n" + "\n".join(report.warnings[:6])
-        # Il rilancio ripaga l'inventario, non la lettura dei contatti: un tipo
-        # di contatto corretto a mano dopo l'estrazione deve sopravvivergli.
-        # Stessa normalizzazione dell'estrazione (tipi fuori elenco -> generico,
-        # corpi senza ingombro scartati): prima il rilancio la saltava e un
-        # tipo grezzo come 'fuse' arrivava al 3D (audit 2026-10-02, D7).
+        # The re-run pays for the inventory again, not for the contact reading: a
+        # contact type corrected by hand after the extraction must survive it.
+        # Same normalisation as the extraction (types out of the list -> generic,
+        # bodies without an envelope discarded): before the re-run skipped it and a
+        # raw type such as 'fuse' reached the 3D (audit 2026-10-02, D7).
         from ..services.datasheet_extractor import _components_3d
         normalized_notes = []
         normalized = _components_3d([dict(c) for c in report.components], normalized_notes,
@@ -6506,42 +6559,43 @@ class MainWindow(QMainWindow):
             # A regeneration asked while this work ran: its turn now.
             QTimer.singleShot(0, self._run_pending_regen_3d)
 
-    # ── Interruzione dell'operazione in corso ──────────────────────
+    # ── Interruption of the running operation ──────────────────────
 
-    #: Le quattro vie che aprono la modale, con cio' che di ciascuna si puo'
-    #: DAVVERO fermare. La distinzione non e' un dettaglio interno: e' quello
-    #: che si promette a chi preme il pulsante.
+    #: The four ways that open the modal, with what of each one can
+    #: REALLY be stopped. The distinction is not an internal detail: it is what
+    #: is promised to whoever presses the button.
     #:
-    #: * `cad` -- il lavoro sta in un processo figlio (freecadcmd) avviato da
-    #:   questo programma, che lo sa uccidere: interrompere vuol dire ucciderlo.
-    #: * `ai` -- il lavoro e' una richiesta HTTP gia' partita verso OpenRouter,
-    #:   fatta con `urllib` bloccante (`kicadgen/services/openrouter.py`).
-    #:   Nessuno la puo' annullare dall'esterno del thread che la sta
-    #:   aspettando, e soprattutto ANNULLARE NON RIMBORSA: il modello sta gia'
-    #:   elaborando cio' che e' stato inviato. Interrompere vuol dire
-    #:   abbandonare la corsa, restituire subito la finestra e scartare il
-    #:   risultato quando arrivera'. Fingere di "fermarla" sarebbe una bugia
-    #:   sul denaro speso.
+    #: * `cad` -- the work is in a child process (freecadcmd) started by
+    #:   this program, which knows how to kill it: interrupting means killing it.
+    #: * `ai` -- the work is an HTTP request already sent to OpenRouter,
+    #:   made with blocking `urllib` (`kicadgen/services/openrouter.py`).
+    #:   Nobody can cancel it from outside the thread that is
+    #:   waiting for it, and above all CANCELLING DOES NOT REFUND: the model is
+    #:   already processing what was sent. Interrupting means
+    #:   abandoning the run, giving the window back at once and discarding the
+    #:   result when it arrives. Pretending to "stop it" would be a lie
+    #:   about the money spent.
     _ABORTABLE_OPERATIONS = (
         ("cad", "_worker", "Generazione di footprint e modello 3D"),
         ("cad", "_cad3d_worker", "Rigenerazione del modello 3D"),
         ("ai", "_extract_worker", "Analisi AI dei documenti"),
         ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
     )
-    #: Nome dell'operazione quando nello slot dell'estrazione gira il pretest
-    #: solo YOLO (vedi _abortable_operation).
+    #: Name of the operation when the YOLO-only pretest runs in the extraction
+    #: slot (see _abortable_operation).
     _PRETEST_LABEL = "Pretest YOLO locale"
 
     def _abortable_operation(self):
-        """@brief L'operazione in corso che «Interrompi» puo' fermare, se c'e'.
+        """@brief The running operation that «Interrompi» can stop, if any.
 
-        @return (natura, worker, fase) con natura in {'cad', 'ai', 'local'},
-            oppure None quando non c'e' nulla da fermare. 'local' e' il
-            pretest solo YOLO: si abbandona come una corsa AI, ma non costa,
-            e la fase e' `_PRETEST_LABEL`, non l'etichetta dello slot.
-        @note Un worker gia' abbandonato NON e' piu' un candidato: continua a
-            girare (e a contare per la guardia di chiusura) ma la finestra e'
-            gia' tornata all'utente, quindi non c'e' piu' niente da chiedergli.
+        @return (kind, worker, phase) with kind in {'cad', 'ai', 'local'}, or
+            None when there is nothing to stop. 'local' is the YOLO-only
+            pretest: it is abandoned like an AI run, but it costs nothing, and
+            the phase is `_PRETEST_LABEL`, not the label of the slot.
+        @note A worker already abandoned is NO longer a candidate: it keeps
+            running (and counting for the close guard) but the window has
+            already been handed back to the user, so there is nothing left to
+            ask them.
         """
         for kind, attribute, label in self._ABORTABLE_OPERATIONS:
             worker = getattr(self, attribute, None)
@@ -6550,21 +6604,21 @@ class MainWindow(QMainWindow):
             if any(worker is abandoned for abandoned in self._abandoned_workers):
                 continue
             if isinstance(worker, YoloPretestWorker):
-                # Lo slot e' quello dell'estrazione, ma il lavoro no: la
-                # domanda di conferma e il log devono nominare il pretest,
-                # non un'«Analisi AI» che non e' mai partita.
+                # The slot is the extraction's, but the work is not: the
+                # confirmation question and the log must name the pretest,
+                # not an «Analisi AI» (AI analysis) that never started.
                 return "local", worker, self._PRETEST_LABEL
             return kind, worker, label
         return None
 
     def _abort_phase_text(self, label: str) -> str:
-        """@brief La fase da scrivere nel log e nella domanda di conferma.
+        """@brief The phase to write in the log and in the confirmation question.
 
-        @param label Nome dell'operazione (vedi _ABORTABLE_OPERATIONS).
-        @return Operazione e, quando la modale lo dichiara, strumento al lavoro.
-        @note «A che punto era» e' l'unica cosa che rende utile la riga nel
-            log: due mesi dopo, «interrotta» da sola non dice se si stavano
-            abbinando modelli o costruendo il solido.
+        @param label Name of the operation (see _ABORTABLE_OPERATIONS).
+        @return Operation and, when the modal declares it, the tool at work.
+        @note "Where it was" is the only thing that makes the log line useful:
+            two months later, "interrupted" on its own does not say whether
+            models were being matched or the solid was being built.
         """
         tool = ""
         label_widget = getattr(self.analysis_overlay, "tool", None)
@@ -6573,19 +6627,20 @@ class MainWindow(QMainWindow):
         return f"{label} — {tool}" if tool else label
 
     def _confirm_abort(self, kind: str, phase: str) -> bool:
-        """@brief Chiede conferma dicendo che cosa si perde, senza addolcirlo.
+        """@brief Ask for confirmation, saying what is lost, without sugar-coating it.
 
-        @param kind 'cad' o 'ai' (vedi _ABORTABLE_OPERATIONS).
-        @param phase Fase in corso, come la scrive _abort_phase_text.
-        @return True solo se l'utente ha risposto di si'.
-        @note Una domanda sola, con la risposta prudente preselezionata:
-            interrompere butta via minuti di attesa o denaro gia' speso, e chi
-            preme il pulsante puo' averlo fatto per sbaglio.
-        @note Nel caso `ai` la spesa va detta QUI, prima del danno: la
-            richiesta e' gia' partita e nessuna interfaccia la puo' richiamare.
+        @param kind 'cad' or 'ai' (see _ABORTABLE_OPERATIONS).
+        @param phase Current phase, as written by _abort_phase_text.
+        @return True only if the user answered yes.
+        @note A single question, with the prudent answer preselected:
+            interrupting throws away minutes of waiting or money already
+            spent, and whoever pressed the button may have done it by mistake.
+        @note In the `ai` case the expense must be stated HERE, before the
+            damage: the request has already left and no interface can recall
+            it.
         """
         if kind == "local":
-            # Pretest solo YOLO: nessuna richiesta a pagamento da dichiarare.
+            # YOLO-only pretest: no paid request to declare.
             detail = self.i18n.text(
                 "Il rilevamento YOLO locale viene abbandonato: nessun costo, la "
                 "finestra torna subito utilizzabile e il risultato, se arriverà, "
@@ -6612,29 +6667,29 @@ class MainWindow(QMainWindow):
         return answer == QMessageBox.StandardButton.Yes
 
     def _request_abort(self) -> None:
-        """@brief Slot del pulsante «Interrompi» della modale.
+        """@brief Slot of the «Interrompi» button of the modal.
 
-        @note Due clic non fanno due interruzioni: `_abort_pending` copre
-            l'intervallo fra la conferma e la fine effettiva del lavoro, che
-            per il CAD non e' istantanea (il figlio deve morire e il worker
-            deve uscire dalla sua via d'errore).
-        @note La domanda gira un event loop annidato: fra la domanda e la
-            risposta il lavoro puo' finire da solo. Si ricontrolla dopo, e in
-            quel caso non si ordina niente a nessuno.
+        @note Two clicks do not make two interruptions: `_abort_pending` covers
+            the interval between the confirmation and the actual end of the
+            work, which for CAD is not instantaneous (the child must die and
+            the worker must leave through its error path).
+        @note The question runs a nested event loop: between the question and
+            the answer the work may finish by itself. It is checked again
+            afterwards, and in that case nobody is ordered anything.
         """
         if self._abort_pending:
             return
         operation = self._abortable_operation()
         if operation is None:
-            # Il lavoro e' finito fra il clic e questo slot: la finestra sta
-            # gia' tornando da sola e il pulsante non ha piu' un oggetto.
+            # The work finished between the click and this slot: the window is
+            # already returning on its own and the button no longer has an object.
             self.analysis_overlay.set_abortable(False)
             return
         kind, worker, label = operation
         phase = self._abort_phase_text(label)
         if not self._confirm_abort(kind, phase):
-            # Rifiutare non tocca nulla: il lavoro continua e il pulsante
-            # resta dov'era, per ripensarci.
+            # Refusing touches nothing: the work goes on and the button
+            # stays where it was, to think it over.
             return
         if self._abort_pending or not worker.isRunning():
             self._append_log(
@@ -6651,17 +6706,18 @@ class MainWindow(QMainWindow):
             self._abort_ai_run(worker, phase, paid=kind == "ai")
 
     def _on_cad_cancellable(self, cancellable: bool) -> None:
-        """@brief Toglie «Interrompi» quando il generatore in uso non sa fermarsi.
+        """@brief Remove «Interrompi» when the generator in use cannot stop.
 
-        @param cancellable False quando il canale di rinuncia non e' accettato.
-        @note Richiesta dell'utente: «la possibilità di stoppare deve essere
-            presente in ogni step». Dove non c'e', non si finge: il comando
-            sparisce e il log dice perche'. Un pulsante «Interrompi» che non
-            interrompe e' una promessa peggiore della sua assenza -- chi lo
-            preme smette di guardare e crede che il lavoro si stia fermando.
-        @note Il segnale arriva dal thread del worker: Qt lo consegna qui in
-            coda sul thread della finestra, che e' l'unico che puo' toccare la
-            modale.
+        @param cancellable False when the cancellation channel is not accepted.
+        @note User request: «la possibilità di stoppare deve essere presente
+            in ogni step» (stopping must be possible at every step). Where it
+            is not possible, it is not faked: the command disappears and the
+            log says why. An «Interrompi» button that does not interrupt is a
+            worse promise than its absence -- whoever presses it stops
+            watching and believes the work is stopping.
+        @note The signal comes from the worker thread: Qt delivers it here,
+            queued on the window thread, which is the only one that can touch
+            the modal.
         """
         if cancellable:
             return
@@ -6673,15 +6729,15 @@ class MainWindow(QMainWindow):
                "programma."))
 
     def _abort_cad_run(self, worker, phase: str) -> None:
-        """@brief Uccide il processo FreeCAD e lascia che il worker finisca da se'.
+        """@brief Kill the FreeCAD process and let the worker finish by itself.
 
-        @param worker GenerateWorker o Cad3DWorker in corso.
-        @param phase Fase in corso, per il log.
-        @note La modale resta finche' il worker non emette `finished`: e' quel
-            segnale a rimettere in piedi schede, pulsanti e testo del comando,
-            ed e' la via che esiste gia' per ogni altro modo in cui il 3D non
-            si completa. Anticiparla a mano vorrebbe dire avere due percorsi di
-            ripristino da tenere allineati per sempre.
+        @param worker GenerateWorker or Cad3DWorker in progress.
+        @param phase Current phase, for the log.
+        @note The modal stays until the worker emits `finished`: it is that
+            signal that restores tabs, buttons and command text, and it is the
+            path that already exists for every other way in which the 3D does
+            not complete. Anticipating it by hand would mean having two
+            restoration paths to keep aligned forever.
         """
         self._on_ai_progress(
             tx("INTERRUZIONE chiesta dall'utente durante: {phase}. Il processo "
@@ -6692,29 +6748,31 @@ class MainWindow(QMainWindow):
         worker.request_abort()
 
     def _abort_ai_run(self, worker, phase: str, *, paid: bool = True) -> None:
-        """@brief Abbandona la corsa AI: la finestra torna subito, il risultato si scarta.
+        """@brief Abandon the AI run: the window comes back at once, the result is discarded.
 
-        @param worker ExtractWorker, ReconcileWorker o YoloPretestWorker in corso.
-        @param phase Fase in corso, per il log.
-        @param paid False per il pretest solo YOLO: stesso abbandono, ma il
-            log non parla di una spesa che non c'e' e non c'e' consuntivo.
-        @note Non si finge di aver fermato la chiamata: il thread resta vivo
-            finche' `urllib` non restituisce, e per questo il worker continua a
-            contare per la guardia di `closeEvent` -- chiudere la finestra con
-            un QThread vivo abbatte il processo.
-        @note Cio' che cambia e' la VALIDITA' del suo risultato: si incrementa
-            `_analysis_revision`, esattamente come `_invalidate_generated_mesh`
-            fa con i risultati CAD tardivi, e i segnali che arrivano dopo
-            vengono riconosciuti come scaduti e scartati.
-        @note I comandi che spendono altro denaro (estrazione, rilancio) NON
-            vengono riaccesi qui: finche' la richiesta abbandonata e' in volo
-            `_background_work_running()` e' vero, e riaccenderli prometterebbe
-            un'operazione che partirebbe subito con un rifiuto silenzioso. Li
-            riaccende la fine della corsa fantasma, in `_on_extract_finished`.
+        @param worker ExtractWorker, ReconcileWorker or YoloPretestWorker in progress.
+        @param phase Current phase, for the log.
+        @param paid False for the YOLO-only pretest: same abandonment, but the
+            log does not speak of an expense that does not exist and there is
+            no cost summary.
+        @note It does not pretend to have stopped the call: the thread stays
+            alive until `urllib` returns, and for this reason the worker keeps
+            counting for the `closeEvent` guard -- closing the window with a
+            live QThread brings the process down.
+        @note What changes is the VALIDITY of its result: `_analysis_revision`
+            is incremented, exactly as `_invalidate_generated_mesh` does with
+            late CAD results, and the signals arriving afterwards are
+            recognised as stale and discarded.
+        @note The commands that spend more money (extraction, relaunch) are
+            NOT re-enabled here: while the abandoned request is in flight
+            `_background_work_running()` is true, and re-enabling them would
+            promise an operation that would immediately start with a silent
+            refusal. They are re-enabled by the end of the ghost run, in
+            `_on_extract_finished`.
         """
         self._analysis_revision += 1
         self._abandoned_workers.append(worker)
-        # Le chiamate a pagamento non ancora partite non partono piu'.
+        # The paid calls not yet started no longer start.
         cancel_event = getattr(worker, "cancel_event", None)
         if cancel_event is not None:
             cancel_event.set()
@@ -6730,33 +6788,33 @@ class MainWindow(QMainWindow):
         self._auto_after_extraction = False
         self._auto_generation_params = None
         self._extract_finish_pending = False
-        # Una corsa abbandonata non produce l'inventario su cui fermarsi: la
-        # pausa non deve sopravviverle e riaprirsi sui dati di prima.
+        # An abandoned run does not produce the inventory to stop on: the
+        # pause must not outlive it and reopen on the previous data.
         self._inventory_pause_pending = False
-        # Il consuntivo di cio' che e' gia' stato fatturato resta sotto il
-        # pulsante: dopo un'interruzione e' l'informazione piu' utile che ci
-        # sia. Non comprende la richiesta ancora in volo, che verra' pagata
-        # lo stesso ma non ha ancora restituito i propri conteggi: e' scritto
-        # nella riga di log qui sopra.
+        # The final account of what has already been billed stays below the
+        # button: after an interruption it is the most useful information there
+        # is. It does not include the request still in flight, which will be paid
+        # anyway but has not returned its counts yet: that is written
+        # in the log line above.
         if paid:
             self._show_ai_cost()
         self._hide_analysis_overlay()
-        # La finestra torna all'utente: il pulsante torna a riposo.
+        # The window goes back to the user: the button goes back to rest.
         self._end_extraction_busy()
         self._apply_component_name_gate()
         self._refresh_ai_log_button()
-        # Niente da attendere: la finestra e' gia' tornata all'utente.
+        # Nothing to wait for: the window has already gone back to the user.
         self._abort_pending = False
 
     def _analysis_result_is_current(self) -> bool:
-        """@brief Dice se il risultato che sta arrivando appartiene alla corsa valida.
+        """@brief Tell whether the arriving result belongs to the valid run.
 
-        @return False per i segnali di una corsa abbandonata con «Interrompi».
-        @note Gemello di `_cad_result_is_current`: stesso meccanismo (un
-            numero di revisione impresso sul worker alla partenza, confrontato
-            con quello della finestra) applicato ai worker dell'analisi AI.
-            Una chiamata diretta -- non via segnale -- non ha mittente e vale
-            sempre: e' il caso di `_on_extracted` chiamato da `_on_reconciled`.
+        @return False for the signals of a run abandoned with «Interrompi».
+        @note Twin of `_cad_result_is_current`: same mechanism (a revision
+            number stamped on the worker at start, compared with the window's)
+            applied to the AI analysis workers. A direct call -- not via a
+            signal -- has no sender and is always valid: it is the case of
+            `_on_extracted` called by `_on_reconciled`.
         """
         worker = self.sender()
         if worker is None:
@@ -6765,12 +6823,12 @@ class MainWindow(QMainWindow):
                        self._analysis_revision) == self._analysis_revision
 
     def _forget_abandoned_worker(self, worker) -> None:
-        """@brief Lascia andare un worker abbandonato che ha finalmente finito.
+        """@brief Let go of an abandoned worker that has finally finished.
 
-        @param worker Worker che ha appena emesso `finished`.
-        @note Si libera lo slot solo se e' ancora lui: nel frattempo l'utente
-            puo' aver avviato un'altra analisi, e azzerare lo slot di quella
-            nuova la renderebbe invisibile alla guardia di chiusura.
+        @param worker Worker that has just emitted `finished`.
+        @note The slot is freed only if it is still that worker: meanwhile
+            the user may have started another analysis, and clearing the slot
+            of the new one would make it invisible to the close guard.
         """
         self._abandoned_workers = [
             other for other in self._abandoned_workers if other is not worker]
@@ -6796,23 +6854,23 @@ class MainWindow(QMainWindow):
             `_pipeline_owns_output`). A result that raised half way through
             being applied counts as applied: some fields may be new.
         """
-        # Il worker ha finito, anche se abbandonato: le sue chiamate sono
-        # tutte registrate, il progetto della corsa si puo' rilasciare.
+        # The worker has finished, even if abandoned: its calls are
+        # all recorded, the project of the run can be released.
         if hasattr(self, "ai_account"):
             self.ai_account.release_run_project()
         if not self._analysis_result_is_current():
-            # Corsa abbandonata con «Interrompi»: la finestra e' gia' tornata
-            # all'utente da un pezzo. Qui si prende atto che la chiamata a
-            # pagamento e' finalmente rientrata, si lascia andare il worker e
-            # si riaccendono i comandi che erano spenti perche' girava.
+            # Run abandoned with «Interrompi» (interrupt): the window went back to
+            # the user a while ago. Here we acknowledge that the paid call has
+            # finally returned, let the worker go and re-enable the commands that
+            # were off because it was running.
             worker = self.sender()
             self._forget_abandoned_worker(worker)
             self._retry_footprint_rewrite()
             self._append_log(
                 tx("La corsa interrotta dall'utente è terminata adesso: il suo risultato "
                    "è stato scartato, i comandi tornano disponibili."))
-            # Rete di sicurezza (audit 25/09, B1): una modale rimasta aperta
-            # senza piu' nessuna operazione che la possa chiudere.
+            # Safety net (audit 25/09, B1): a modal left open with no operation
+            # left that could close it.
             self._release_orphan_overlay()
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
@@ -6833,9 +6891,9 @@ class MainWindow(QMainWindow):
         self._extraction_applied_revision = None
         if applied:
             self._clear_footprint_rewrite()
-        # Il consuntivo riguarda l'analisi AI, che a questo punto e' conclusa:
-        # va mostrato anche quando parte subito la generazione automatica, che
-        # non fa alcuna chiamata al modello e uscirebbe da qui senza dirlo.
+        # The final account concerns the AI analysis, which at this point is over:
+        # it must be shown also when the automatic generation starts at once, which
+        # makes no call to the model and would leave here without saying so.
         self._show_ai_cost()
         if self._automatic_generation_active:
             return
@@ -6845,13 +6903,13 @@ class MainWindow(QMainWindow):
         params = self._auto_generation_params
         self._auto_generation_params = None
         self._auto_after_extraction = False
-        # La pausa sta QUI e non dentro _on_extracted: i campi e la tabella dei
-        # componenti sono gia' pieni (quindi la revisione mostra cio' che l'AI
-        # ha davvero prodotto) e l'abbinamento dei modelli con la generazione
-        # 3D non e' ancora partito, quindi le correzioni fanno ancora in tempo
-        # a entrarci. Vale per entrambe le modalita': in quella standard
-        # precede la generazione automatica, in quella avanzata e' comunque il
-        # momento in cui il risultato va guardato.
+        # The pause is HERE and not inside _on_extracted: the fields and the
+        # component table are already filled (so the review shows what the AI
+        # really produced) and the model matching with the 3D generation has
+        # not started yet, so the corrections are still in time to get
+        # into it. It holds for both modes: in the standard one it
+        # precedes the automatic generation, in the advanced one it is anyway the
+        # moment when the result must be looked at.
         self._offer_inventory_review()
         if params is not None:
             self._start_automatic_generation(params)
@@ -6881,16 +6939,16 @@ class MainWindow(QMainWindow):
             if not totals.complete:
                 text = self.i18n.tr("analysis.cost.partial", summary=text,
                                     missing=totals.calls_without_cost)
-        # La label sotto il pulsante e' stata tolta (utente, 2026-09-24): lo
-        # storico del costo resta nel Log AI -- anche dopo un'interruzione,
-        # quando e' l'informazione piu' utile -- e il dato va nella modale
-        # dell'ANALISI, dove l'utente sta gia' guardando. Non in quella della
-        # generazione: vedi
-        # `_clear_cost_for_generation` (decisione dell'utente, 2026-09-23).
-        # Il caso conta davvero: nella corsa automatica `finished`
-        # dell'estrazione arriva quando la generazione e' gia' partita.
+        # The label below the button has been removed (user, 2026-09-24): the
+        # cost history stays in the AI log -- even after an interruption,
+        # when it is the most useful information -- and the figure goes into the
+        # modal of the ANALYSIS, where the user is already looking. Not into the
+        # generation one: see
+        # `_clear_cost_for_generation` (user decision, 2026-09-23).
+        # The case really matters: in the automatic run the extraction's `finished`
+        # arrives when the generation has already started.
         self._append_log(text)
-        # Il saldo e' cambiato: si rilegge (gratuito, in background).
+        # The balance has changed: it is re-read (free, in the background).
         self.ai_account.refresh_balance()
         if self._generation_phase_active():
             return
@@ -6925,36 +6983,38 @@ class MainWindow(QMainWindow):
         self.analysis_overlay.clear_cost()
 
     def _offer_inventory_review(self) -> bool:
-        """@brief Pausa fra l'inventario a pagamento e tutto cio' che ne discende.
+        """@brief Pause between the paid inventory and everything that follows from it.
 
-        @return True quando la revisione dei componenti e' stata davvero aperta.
-        @note Richiesta dell'utente: «dopo l'elaborazione AI stessa cosa, non ho
-            visto la pausa». La revisione dei corpi esisteva gia' (lo stesso
-            `PhotoReviewDialog` del comando «Modifica la revisione dei
-            componenti…»), ma bisognava sapere di doverla cercare: l'analisi
-            proseguiva da sola verso l'abbinamento dei modelli e FreeCAD, cioe'
-            costruiva tutto sulla disposizione dell'AI senza che nessuno
-            l'avesse guardata. Qui ci si ferma PRIMA, dove le correzioni
-            contano ancora.
-        @note Applicare prosegue con le correzioni: la revisione le scrive
-            nella tabella dei componenti (`_apply_photo_review`), ed e' da li'
-            che `_current_body_params()` prende i corpi per la generazione.
-            Rifiutare (o annullare la revisione) prosegue con il risultato
-            dell'AI cosi' com'e': non si tocca nulla.
-        @note La pausa e' GRATUITA in ogni ramo: nessuna richiesta al modello,
-            ne' per aprirla ne' per applicarla. Va detto nella domanda, perche'
-            e' esattamente la paura dell'utente («devo poter tornare sui miei
-            passi senza fare intervenire AI»).
-        @note Si consuma `_inventory_pause_pending` all'ingresso: `finished`
-            puo' arrivare due volte (vedi `_extract_finish_pending`) e la stessa
-            pausa non va offerta due volte. `_inventory_pause_active` copre
-            l'event loop annidato della revisione, da cui si puo' rientrare in
-            questa finestra.
-        @note Disciplina della modale identica a `_on_review_requested`: si
-            nasconde solo se era visibile e si rimette esattamente com'era. Il
-            tempo passato nascosta non viene contato come attesa del modello
-            (`AnalysisOverlay.hideEvent/showEvent`), quindi l'orologio misura
-            il lavoro e non il revisore.
+        @return True when the component review was really opened.
+        @note User request: «dopo l'elaborazione AI stessa cosa, non ho visto
+            la pausa» (after the AI processing, same thing, I did not see the
+            pause). The body review already existed (the same
+            `PhotoReviewDialog` of the command then called «Modifica la revisione dei
+            componenti…», today the «Revisione componenti…» button), but one had to know to look for it: the
+            analysis went on by itself towards model matching and FreeCAD,
+            i.e. it built everything on the AI layout without anyone having
+            looked at it. Here it stops BEFORE, where the corrections still
+            matter.
+        @note Applying continues with the corrections: the review writes them
+            into the components table (`_apply_photo_review`), and it is from
+            there that `_current_body_params()` takes the bodies for the
+            generation. Declining (or cancelling the review) continues with
+            the AI result as it is: nothing is touched.
+        @note The pause is FREE in every branch: no request to the model,
+            neither to open it nor to apply it. It must be said in the
+            question, because it is exactly the user's fear («devo poter tornare
+            sui miei passi senza fare intervenire AI», I must be able to
+            retrace my steps without involving the AI).
+        @note `_inventory_pause_pending` is consumed on entry: `finished` can
+            arrive twice (see `_extract_finish_pending`) and the same pause
+            must not be offered twice. `_inventory_pause_active` covers the
+            nested event loop of the review, from which this window can be
+            re-entered.
+        @note Discipline of the modal identical to `_on_review_requested`: it
+            is hidden only if it was visible and put back exactly as it was.
+            The time spent hidden is not counted as waiting for the model
+            (`AnalysisOverlay.hideEvent/showEvent`), so the clock measures the
+            work and not the reviewer.
         """
         pending, self._inventory_pause_pending = self._inventory_pause_pending, False
         if not pending or self._inventory_pause_active:
@@ -6965,29 +7025,20 @@ class MainWindow(QMainWindow):
                    "prosegue con i corpi come li ha proposti l'AI."))
             return False
         components = self._photo_components_from_table()
-        # Anche con i soli corpi esclusi c'e' qualcosa da rivedere: sono
-        # proprio quelli che solo la revisione puo' tenere (HANDOFF 141).
+        # Even with only excluded bodies there is something to review: they are
+        # exactly the ones only the review can keep (HANDOFF 141).
         if not components and not self._photo_excluded_rows:
             return False
         if not (self._photo_png or self._photo_overlay_png):
-            # Senza immagine la revisione non ha su cosa disegnare: fermare la
-            # corsa per una finestra che non si aprirebbe sarebbe una pausa a
-            # vuoto (stessa disciplina di `_refresh_component_review_button`).
+            # Without an image the review has nothing to draw on: stopping the
+            # run for a window that would not open would be an empty
+            # pause (same discipline as `_refresh_component_review_button`).
             self._append_log(tx("Pausa dopo l'inventario AI non offerta: manca la fotografia calibrata "
                                 "su cui mostrare i corpi."))
             return False
         answer = QMessageBox.question(
             self, self.i18n.text("Inventario AI completato"),
-            self.i18n.tr(
-                "inventory_pause.question", count=len(components),
-                default=(
-                    "L'inventario AI ha prodotto {count} ingombri.\n\n"
-                    "Vuoi rivederli adesso (sposta, ridimensiona, aggiungi, elimina, "
-                    "cambia tipo e modello KiCad) PRIMA dell'abbinamento dei modelli e "
-                    "della generazione 3D?\n\n"
-                    "La revisione è gratuita: nessuna chiamata AI. Rispondendo No si "
-                    "prosegue con i corpi come li ha proposti l'AI; puoi comunque "
-                    "riaprirla dopo con «Modifica la revisione dei componenti…»."),
+            self.i18n.tr("inventory_pause.question", count=len(components),
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes)
@@ -7006,10 +7057,10 @@ class MainWindow(QMainWindow):
                 self.analysis_overlay.hide()
             self._consult_consolidated_before_review()
             self._show_photo_comparison()
-        except Exception as exc:  # noqa: BLE001 - vedi _on_review_requested
-            # Un guasto della revisione non deve buttare via l'analisi appena
-            # pagata: si annota e si prosegue con i corpi dell'AI, che e' lo
-            # stesso esito del rifiuto.
+        except Exception as exc:  # noqa: BLE001 - see _on_review_requested
+            # A failure of the review must not throw away the analysis just
+            # paid for: it is noted and we continue with the AI's bodies, which is
+            # the same outcome as a refusal.
             self._append_log(tx("ATTENZIONE revisione dei componenti non disponibile: {exc}", exc=exc))
         finally:
             self._inventory_pause_active = False
@@ -7048,7 +7099,7 @@ class MainWindow(QMainWindow):
         try:
             attached, _count = self._attach_accepted_component_images(rows)
             results = kicad_models._archive_prepass(attached, None, self._append_log, None)
-        except Exception as exc:  # noqa: BLE001 - l'archivio aiuta, non blocca
+        except Exception as exc:  # noqa: BLE001 - the archive helps, it does not block
             self._append_log(tx("Consolidati prima della revisione non disponibili: {exc}", exc=exc))
             return
         applied = proposed = 0
@@ -7086,31 +7137,31 @@ class MainWindow(QMainWindow):
                             applied=applied, proposed=proposed, total=len(rows)))
 
     def _on_review_requested(self, photo_png, proposals, length_mm, width_mm) -> None:
-        """@brief Mostra le proposte del rilevatore (revisione unificata, stadio rilevatore) e restituisce al worker quelle da tenere.
+        """@brief Show the detector proposals (unified review, detector stage) and return to the worker those to keep.
 
-        @param photo_png Fotografia calibrata, codificata in PNG.
-        @param proposals Proposte del rilevatore locale.
-        @param length_mm Estensione della scheda lungo X, in mm.
-        @param width_mm Estensione lungo Y, in mm.
-        @note Il worker e' fermo in attesa: qualunque cosa succeda qui, la
-            risposta va consegnata, altrimenti l'estrazione non finisce piu'.
-            Annullare consegna None, e l'estrazione si ferma senza pagare la
-            riconciliazione -- che e' il motivo per cui questa vista sta prima
-            di quella chiamata e non dopo. Se invece la vista non si apre
-            affatto si prosegue con tutte le proposte: un difetto della
-            revisione non deve buttare via l'analisi gia' pagata fin qui.
-        @note La risposta va al MITTENTE del segnale, non allo slot
-            `_extract_worker`: dopo «Interrompi» lo slot puo' gia' ospitare
-            un'altra corsa (o nessuna), e sbloccare quella sbagliata lascerebbe
-            il worker vero appeso per sempre.
-        @note Una corsa abbandonata con «Interrompi» riceve None SENZA che si
-            apra nulla (audit 25/09, B1): prima la vista si apriva lo stesso,
-            l'OK sovrascriveva `photo-review/proposals.json`, rimostrava la
-            modale -- che nessuna fine di corsa scaduta avrebbe piu' nascosto
-            -- e con il rilevatore 'yolo' la corsa abbandonata proseguiva fino
-            alla riconciliazione A PAGAMENTO. None la ferma prima di spendere.
-        @note Il pretest solo YOLO salva nel proprio pacchetto
-            (`_pretest_root`), mai in quello dell'estrazione: vedi
+        @param photo_png Calibrated photo, encoded as PNG.
+        @param proposals Proposals of the local detector.
+        @param length_mm Extent of the board along X, in mm.
+        @param width_mm Extent along Y, in mm.
+        @note The worker is blocked waiting: whatever happens here, the answer
+            must be delivered, otherwise the extraction never ends.
+            Cancelling delivers None, and the extraction stops without paying
+            for the reconciliation -- which is why this view comes before that
+            call and not after. If instead the view does not open at all, the
+            run goes on with all the proposals: a defect of the review must
+            not throw away the analysis already paid for so far.
+        @note The answer goes to the SENDER of the signal, not to the
+            `_extract_worker` slot: after «Interrompi» the slot may already
+            host another run (or none), and unblocking the wrong one would
+            leave the real worker hanging forever.
+        @note A run abandoned with «Interrompi» receives None WITHOUT anything
+            being opened (audit 25/09, B1): before, the view opened anyway,
+            the OK overwrote `photo-review/proposals.json`, showed the modal
+            again -- which no stale end of run would hide any more -- and with
+            the 'yolo' detector the abandoned run went on up to the PAID
+            reconciliation. None stops it before spending.
+        @note The YOLO-only pretest saves into its own bundle
+            (`_pretest_root`), never into the extraction one: see
             `_store_reviewed_proposals`.
         """
         worker = self.sender() or self._extract_worker
@@ -7125,8 +7176,8 @@ class MainWindow(QMainWindow):
         try:
             from . import photo_review_dialog as review_module
             self.analysis_overlay.hide()
-            # Stadio «rilevatore» della revisione unificata (HANDOFF 162): le
-            # proposte tenute all'OK sono quelle che vanno alla chiamata.
+            # «rilevatore» (detector) stage of the unified review (HANDOFF 162): the
+            # proposals kept on OK are the ones that go to the call.
             dialog = review_module.PhotoReviewDialog(
                 photo_png, proposals, length_mm, width_mm, self,
                 stage=review_module.STAGE_DETECTOR)
@@ -7143,22 +7194,22 @@ class MainWindow(QMainWindow):
                    n_kept=len(kept),
                    n_proposals=len(proposals))
                 if kept is not None else tx("Revisione dei corpi rilevati annullata."))
-        except Exception as exc:  # noqa: BLE001 - un errore qui non deve appendere il worker
+        except Exception as exc:  # noqa: BLE001 - an error here must not hang the worker
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
         finally:
-            # La vista gira un event loop annidato: se nel frattempo la corsa
-            # e' stata dichiarata scaduta, non si salva e non si riapre la
-            # modale -- vale lo stesso ragionamento dell'inizio.
+            # The view runs a nested event loop: if in the meantime the run
+            # has been declared expired, nothing is saved and the modal is not
+            # reopened -- the same reasoning as at the start holds.
             if kept is not None and self._review_request_is_stale(worker):
                 kept = None
             if worker is not None:
                 worker.deliver_review(kept)
             if kept is not None:
-                # Il pacchetto nella cartella del componente deve contenere le
-                # proposte TENUTE, non quelle grezze: il detector-*.json in cache
-                # viene scritto prima della revisione, quindi copiarlo dopo
-                # riporterebbe i falsi positivi cancellati e perderebbe i
-                # riquadri corretti. Si scrive qui, e _on_extracted non lo tocca.
+                # The package in the component folder must contain the KEPT
+                # proposals, not the raw ones: the detector-*.json in the cache
+                # is written before the review, so copying it afterwards
+                # would bring back the deleted false positives and lose the
+                # corrected boxes. It is written here, and _on_extracted does not touch it.
                 self._store_reviewed_proposals(
                     kept, photo_png, length_mm, width_mm,
                     detector=getattr(worker, 'photo_detector', 'yolo'), pretest=pretest)
@@ -7211,14 +7262,14 @@ class MainWindow(QMainWindow):
                                 n_kept=len(kept)))
 
     def _on_phase(self, tool: str, detail: str, done: int, total: int) -> None:
-        """@brief Porta in modale lo strumento al lavoro e il suo avanzamento.
+        """@brief Bring the tool at work and its progress into the modal.
 
-        @param tool Chiave in analysis_overlay.TOOLS.
-        @param detail Testo libero accanto al nome, es. il modello usato.
-        @param done Elementi completati.
-        @param total Elementi previsti; non positivo significa nessun conteggio.
-        @note Il testo integrale continua ad andare nel log: qui arriva solo
-            cio' che si legge a colpo d'occhio mentre si aspetta.
+        @param tool Key in analysis_overlay.TOOLS.
+        @param detail Free text next to the name, e.g. the model used.
+        @param done Completed items.
+        @param total Expected items; non-positive means no count.
+        @note The full text keeps going to the log: here arrives only what can
+            be read at a glance while waiting.
         """
         if tool == 'headers':
             self.analysis_overlay.set_steps(GENERATION_STEPS[-1:])
@@ -7227,37 +7278,36 @@ class MainWindow(QMainWindow):
             tool = 'freecad'
         self.analysis_overlay.set_tool(tool, detail)
         self.analysis_overlay.set_progress(done, total, tx("componenti"))
-        # Fuori da una generazione la mappa non c'e' (o la modale non ha passi):
-        # `set_current_step` allora non fa nulla.
+        # Outside a generation the map is not there (or the modal has no steps):
+        # `set_current_step` then does nothing.
         step = (getattr(self, "_generation_step_of", None) or {}).get(tool)
         if tool == 'consolidated' and step is not None:
             self.analysis_overlay.set_step_result(step, detail)
         if step is not None and step != self.analysis_overlay._step_current:
             self.analysis_overlay.set_current_step(step)
-            # Nel log con l'ora: dice quando la finestra e' passata al passo,
-            # cioe' quando e' cominciato il lavoro di chi lo esegue.
+            # In the log with the time: it says when the window moved to the step,
+            # that is when the work of whoever performs it began.
             if self.analysis_overlay._step_current == step:
                 self._append_log(tx("Passo {n} di {total}: {label}", n=step + 1,
                                     total=len(self.analysis_overlay._step_labels),
                                     label=self.analysis_overlay._step_labels[step]))
 
     def _overlay_header_detail(self) -> str:
-        """@brief Il dettaglio che l'intestazione della modale sta gia' mostrando.
+        """@brief The detail the modal header is already showing.
 
-        @return Il dettaglio dichiarato con l'ultimo `set_tool`, es. il modello
-            in uso; stringa vuota quando nessuno strumento e' dichiarato.
-        @note Si preferisce il valore memorizzato dalla modale
-            (`AnalysisOverlay.tool_detail`) alla lettura dell'etichetta
-            dipinta. L'etichetta e' presentazione: se un giorno viene mandata a
-            capo o accorciata con i puntini, un confronto sul testo dipinto
-            comincerebbe a mentire senza che nulla segnali il guasto. La
-            vecchia giustificazione («`start()` azzera l'intestazione, una
-            copia sopravviverebbe») era sbagliata: `start()` azzera passando da
-            `set_tool(None)`, che e' esattamente il punto in cui anche il
-            valore memorizzato viene azzerato.
-        @note Ripiego sull'analisi dell'etichetta finche' la modale non espone
-            l'attributo: l'accessorio e l'etichetta accorciata arrivano da due
-            modifiche diverse e devono poter atterrare in qualunque ordine.
+        @return The detail declared with the last `set_tool`, e.g. the model
+            in use; empty string when no tool is declared.
+        @note The value stored by the modal (`AnalysisOverlay.tool_detail`) is
+            preferred to reading the painted label. The label is
+            presentation: if one day it is wrapped or shortened with an
+            ellipsis, a comparison on the painted text would start lying
+            without anything signalling the fault. The old justification
+            ("`start()` clears the header, a copy would survive") was wrong:
+            `start()` clears it through `set_tool(None)`, which is exactly the
+            point where the stored value is cleared too.
+        @note Fallback on parsing the label until the modal exposes the
+            attribute: the accessor and the shortened label come from two
+            different changes and must be able to land in any order.
         """
         stored = getattr(self.analysis_overlay, "tool_detail", None)
         if stored is not None:
@@ -7268,32 +7318,33 @@ class MainWindow(QMainWindow):
         return " ".join(detail.split()) if separator else ""
 
     def _restates_overlay_header(self, message: str) -> bool:
-        """@brief Dice se la riga non aggiunge nulla all'intestazione della modale.
+        """@brief Tell whether the line adds nothing to the modal header.
 
-        @param message Riga di avanzamento.
-        @return True solo quando la riga INTERA e' il dettaglio che
-            l'intestazione mostra gia'.
-        @note Richiesta dell'utente: «non ripetere sotto il modello lo hai
-            scritto sopra, ma spiega cosa stai facendo». L'intestazione dice
-            «Modello AI (remoto, a consumo) · anthropic/claude-opus-5» e la
-            riga sotto ripeteva lo stesso identificatore, sprecando l'unico
-            posto in cui si puo' dire cosa sta accadendo.
-        @note Il confronto e' sull'intera riga. La versione precedente
-            scartava anche la forma «testa: <dettaglio>» buttando via la
-            testa, che e' la meta' informativa: «Fallita la chiamata a:
-            anthropic/claude-opus-5.» spariva dalla modale proprio perche'
-            finiva col nome del modello, cioe' un avviso di fallimento
-            cancellato dall'unico posto in cui si guardava. Distinguere
-            un'etichetta («Modello AI unico») da un evento («Estrazione
-            fallita») richiede di sapere se la testa contiene un verbo:
-            l'italiano non si analizza con un'espressione regolare, e ogni
-            criterio ortografico provato (numero di parole, parole funzione,
-            maiuscole) separava l'esemplare osservato e non la classe. Meglio
-            far passare una riga in parte ridondante che cancellare un avviso.
-        @note Il punto finale si toglie da ENTRAMBI i lati. Prima veniva
-            tolto solo alla riga: un dettaglio che finisce con un punto --
-            e' il caso di ogni frase messa come dettaglio di fase -- rendeva il
-            confronto sempre falso, cioe' spegneva il filtro in silenzio.
+        @param message Progress line.
+        @return True only when the WHOLE line is the detail the header already
+            shows.
+        @note User request: «non ripetere sotto il modello lo hai scritto
+            sopra, ma spiega cosa stai facendo» (do not repeat the model below,
+            you wrote it above, but explain what you are doing). The header
+            says «Modello AI (remoto, a consumo) · anthropic/claude-opus-5» and
+            the line below repeated the same identifier, wasting the only
+            place where one can say what is happening.
+        @note The comparison is on the whole line. The previous version also
+            discarded the form «head: <detail>» throwing away the head, which
+            is the informative half: «Fallita la chiamata a:
+            anthropic/claude-opus-5.» disappeared from the modal precisely
+            because it ended with the model name, i.e. a failure warning
+            removed from the only place one was looking. Distinguishing a
+            label («Modello AI unico») from an event («Estrazione fallita»)
+            requires knowing whether the head contains a verb: Italian cannot
+            be parsed with a regular expression, and every orthographic
+            criterion tried (number of words, function words, capitals)
+            separated the observed specimen and not the class. Better to let
+            a partly redundant line through than to remove a warning.
+        @note The final full stop is removed from BOTH sides. Before, it was
+            removed only from the line: a detail ending with a full stop --
+            the case of every sentence used as a phase detail -- made the
+            comparison always false, i.e. it silently switched off the filter.
         """
         detail = self._overlay_header_detail().rstrip(".")
         if not detail:
@@ -7302,28 +7353,28 @@ class MainWindow(QMainWindow):
         return text == detail
 
     def _on_ai_progress(self, message: str) -> None:
-        """@brief Porta la riga nel log e, se e' leggibile a colpo d'occhio, in modale.
+        """@brief Bring the line into the log and, if it can be read at a glance, into the modal.
 
-        @param message Riga di avanzamento di un worker.
-        @note Il log riceve SEMPRE il testo integrale: la modale e' l'unico
-            posto filtrato, perche' ha una riga sola e serve a dire quale fase
-            e' in corso. Restano fuori il dettaglio per-elemento, che il
-            contatore riassume gia' (vedi per_item_detail), e la ripetizione
-            del dettaglio dell'intestazione.
+        @param message Progress line of a worker.
+        @note The log ALWAYS receives the full text: the modal is the only
+            filtered place, because it has a single line and serves to say
+            which phase is in progress. Left out are the per-item detail,
+            which the counter already summarises (see per_item_detail), and
+            the repetition of the header detail.
         """
         if not (per_item_detail(message) or self._restates_overlay_header(message)):
             self.analysis_overlay.set_status(message)
-        # Testo del modello: inserimento letterale, mai interpretato come HTML.
+        # Model text: literal insertion, never interpreted as HTML.
         if re.match(r"^#\d+", message.strip()):
             self.ai_elements_list.addItem(message)
         self._append_log(message)
 
     def _refresh_ai_copy_buttons(self, *args) -> None:
-        """@brief Riallinea i comandi che dipendono dal contenuto del log.
+        """@brief Realign the commands that depend on the content of the log.
 
-        @note Collegato ai cambi del testo dell'analisi e dell'elenco degli
-            elementi: e' il punto in cui il log passa da assente a presente,
-            quindi anche il punto in cui «Log AI» deve comparire.
+        @note Connected to the changes of the analysis text and of the item
+            list: it is the point where the log goes from absent to present,
+            hence also the point where «Log AI» must appear.
         """
         self.btn_copy_ai_log.setEnabled(bool(self.ai_progress_text.toPlainText()))
         self.btn_copy_ai_elements.setEnabled(self.ai_elements_list.count() > 0)
@@ -7337,8 +7388,9 @@ class MainWindow(QMainWindow):
 
     def _show_photo_comparison(self, _checked=False, *, component_row=None) -> None:
         if component_row is not None and not self._photo_png:
-            # Dal 3D (doppio clic o «Cambia modello KiCad...»): senza foto la
-            # revisione non si apre, e prima il clic restava muto.
+            # From the 3D (double click or «Cambia modello KiCad...» (change KiCad
+            # model)): without a photo the review does not open, and before the click
+            # stayed silent.
             QMessageBox.information(
                 self, self.i18n.text("Foto non disponibile"),
                 self.i18n.text("La scelta del modello KiCad passa dalla revisione fotografica, "
@@ -7348,10 +7400,10 @@ class MainWindow(QMainWindow):
             return
         if self._photo_png:
             length, width = self._photo_review_frame()
-            # I corpi solo-AI esclusi tornano in coda, dopo quelli della
-            # tabella: le righe della tabella restano gli stessi indici
-            # (`component_row`), e la revisione e' l'unico posto dove si
-            # possono tenere (HANDOFF 141).
+            # The excluded AI-only bodies come back at the end, after those of the
+            # table: the table rows keep the same indices
+            # (`component_row`), and the review is the only place where they
+            # can be kept (HANDOFF 141).
             try:
                 dialog = PhotoReviewDialog(
                     self._photo_png,
@@ -7365,8 +7417,8 @@ class MainWindow(QMainWindow):
             dialog.setWindowTitle(
                 self.i18n.tr("photo_review.title")
             )
-            # «Applica» emette solo i corpi tenuti; quelli lasciati fuori si
-            # leggono dalla finestra nello stesso istante e restano da parte.
+            # «Applica» (apply) emits only the kept bodies; those left out are
+            # read from the window at the same instant and stay aside.
             dialog.components_applied.connect(
                 lambda components: self._apply_photo_review(
                     components, left_out=dialog.left_out_components()))
@@ -7498,8 +7550,8 @@ class MainWindow(QMainWindow):
                                 "rigenerazione automatica del modello 3D.",
                                 n_components=len(components)))
             self._regen_3d_pending = True
-            # Dopo la chiusura della finestra di revisione, che emette le
-            # correzioni mentre e' ancora aperta.
+            # After the review window closes, which emits the
+            # corrections while it is still open.
             QTimer.singleShot(0, self._run_pending_regen_3d)
             return
         self._set_3d_status(self.i18n.text(
@@ -7556,7 +7608,7 @@ class MainWindow(QMainWindow):
         self._model_revision += 1
         self._last_mesh_path = None
         self._drop_mesh_request()
-        # Il solido che si stava per accettare non corrisponde piu' ai dati.
+        # The solid that was about to be accepted no longer matches the data.
         self._set_accept_models_ready(False)
         self.preview_3d.clear_preview()
         self._set_3d_status(
@@ -7567,12 +7619,12 @@ class MainWindow(QMainWindow):
         return worker is None or worker._model_revision == self._model_revision
 
     def _log_proposed_name(self, name) -> None:
-        """@brief Scrive nel Log AI il nome che l'analisi propone, se diverso.
+        """@brief Write into the AI log the name the analysis proposes, if different.
 
-        @param name Nome proposto dall'estrazione.
-        @note Solo una riga di log (utente, 2026-09-24): la riga con «Usa
-            questo nome» e' stata tolta, il nome del progetto si cambia da
-            File > Rinomina progetto. La proposta non tocca nulla.
+        @param name Name proposed by the extraction.
+        @note Only a log line (user, 2026-09-24): the line with «Usa questo
+            nome» was removed, the project name is changed from File >
+            Rinomina progetto. The proposal touches nothing.
         """
         proposed = " ".join(str(name or "").split())
         if proposed and proposed != self._component_name():
@@ -7580,11 +7632,11 @@ class MainWindow(QMainWindow):
                                 "Rinomina progetto…", name=proposed))
 
     def _init_project_settings(self) -> None:
-        """@brief Fotografa le impostazioni generali e avvia il salvataggio automatico.
+        """@brief Snapshot the general settings and start the autosave.
 
-        @note La fotografia e' presa a finestra costruita e prima di qualunque
-            progetto: e' lo stato da cui parte un progetto NUOVO (decisione
-            dell'utente del 2026-09-24).
+        @note The snapshot is taken once the window is built and before any
+            project: it is the state from which a NEW project starts (user
+            decision of 2026-09-24).
         """
         self._restoring_project = False
         self._project_config_refused = None
@@ -7595,8 +7647,8 @@ class MainWindow(QMainWindow):
         # window without a project is not a choice, so a new project starts
         # without the key and gets the component name (review C, 1).
         self._general_project_state.pop("top_text", None)
-        # Collegato qui e non alla costruzione del campo: prima della
-        # fotografia generale non c'e' un progetto da salvare e chiudere.
+        # Connected here and not at the construction of the field: before the
+        # general photograph there is no project to save and close.
         # Typed text is committed only by Enter (returnPressed): a keystroke
         # is not a decision, and neither is leaving the field (Alt+Tab, a
         # click on «Sfoglia»), which restores the committed folder. A text
@@ -7613,13 +7665,14 @@ class MainWindow(QMainWindow):
         self._project_autosave.start()
 
     def _project_state(self) -> dict:
-        """@brief Tutte le impostazioni del progetto aperto, come oggetti JSON.
+        """@brief All the settings of the open project, as JSON objects.
 
-        @return Dizionario con campi, modelli di sessione, tabelle, annotazioni,
-            pinout e opzioni. Mai chiavi API: non stanno in nessun campo e le
-            impostazioni del profilo AI restano nel database.
+        @return Dictionary with fields, session models, tables, annotations,
+            pinout and options. Never API keys: they are in no field and the
+            AI profile settings stay in the database.
         """
         from dataclasses import asdict
+        from ..core.footprint import text_positions_json
         from .project_state import widget_value
         widgets = {}
         for name in PROJECT_WIDGETS:
@@ -7640,14 +7693,14 @@ class MainWindow(QMainWindow):
             "widgets": widgets,
             "package_geometry": package,
             "host_mounting": self._mounting_state(),
-            "footprint_texts": {key: list(value) for key, value in applied["texts"].items()},
+            "footprint_texts": text_positions_json(applied["texts"]),
             "footprint_drawings": deepcopy(applied["drawings"]),
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
             "sides": self._serialised_sides(),
-            # Con i corpi solo-AI esclusi in coda, marcati: riaprendo il
-            # progetto tornano da parte, non in tabella (HANDOFF 141).
+            # With the excluded AI-only bodies at the end, marked: on reopening the
+            # project they come back aside, not in the table (HANDOFF 141).
             "components": (self._photo_components_from_table()
                            + deepcopy(getattr(self, "_photo_excluded_rows", []))),
             "annotations": {"convention": ANNOTATION_CONVENTION,
@@ -7699,17 +7752,17 @@ class MainWindow(QMainWindow):
         return state
 
     def _apply_project_state(self, state: dict) -> None:
-        """@brief Rimette nella finestra le impostazioni salvate di un progetto.
+        """@brief Put back into the window the saved settings of a project.
 
-        @param state Oggetto prodotto da `_project_state` (letto dal file o
-            fotografato all'avvio). Chiavi mancanti o valori che non entrano in
-            un campo lasciano il campo com'e', con una riga di log; fanno
-            eccezione i file di pesi (MODEL_FILE_WIDGETS), che tornano al
-            predefinito.
-        @note Le opzioni vanno in `_project_options`, mai in `self._config`:
-            config.json resta il default dei progetti nuovi finche' l'utente
-            non le cambia dalle Opzioni di generazione. Un'opzione che lo
-            stato non dichiara torna al valore generale.
+        @param state Object produced by `_project_state` (read from the file or
+            snapshotted at start-up). Missing keys or values that do not fit
+            in a field leave the field as it is, with a log line; the
+            exception is the weight files (MODEL_FILE_WIDGETS), which go back
+            to the default.
+        @note The options go into `_project_options`, never into
+            `self._config`: config.json stays the default of new projects
+            until the user changes them from «Opzioni di generazione...». An
+            option the state does not declare goes back to the general value.
         """
         from .project_state import set_widget_value, saved_package_geometry
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
@@ -7726,25 +7779,25 @@ class MainWindow(QMainWindow):
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
             elif widget is not None and name not in values and name in MODEL_FILE_WIDGETS:
-                # Un file di pesi non dichiarato dal progetto (salvato prima del
-                # campo) e' il predefinito, non quello del progetto aperto prima
-                # (verifica avversariale B3, 2026-10-02).
+                # A weight file not declared by the project (saved before the
+                # field) is the default, not the one of the project opened before
+                # (adversarial check B3, 2026-10-02).
                 widget.clear()
         saved_kind = state.get("project_kind")
         family_kind = self._project_kind_for_family(self._selected_family())
         self.project_kind = (saved_kind if isinstance(saved_kind, str)
                              and saved_kind in _PROJECT_KINDS else family_kind)
-        # Parametri YOLO del progetto; assenti (progetti precedenti) = predefiniti.
+        # YOLO parameters of the project; absent (older projects) = defaults.
         raw_yolo = state.get("yolo_settings")
         if raw_yolo is None:
             saved_yolo = {}
         elif isinstance(raw_yolo, dict):
             saved_yolo = dict(raw_yolo)
         else:
-            # Prima veniva scartato in silenzio (audit 25/09, B10).
+            # Before it was silently discarded (audit 25/09, B10).
             saved_yolo = {}
             skipped.append(f"yolo_settings ({type(raw_yolo).__name__})")
-        # Salvati il 25/09 prima di questa versione: la soglia stava in un campo.
+        # Saved on 25/09 before this version: the threshold was in a field.
         legacy_threshold = (state.get("widgets") or {}).get("field_yolo_confidence") \
             if isinstance(state.get("widgets"), dict) else None
         if "confidence" not in saved_yolo and isinstance(legacy_threshold, (int, float)) \
@@ -7762,11 +7815,11 @@ class MainWindow(QMainWindow):
         self._sides.clear()
         for side in _project_list(state, "sides", skipped):
             if isinstance(side, dict):
-                # Un progetto salvato prima della chiave e' stato generato con
-                # lo stile di allora: lo si conserva, non e' una deduzione.
+                # A project saved before the key was generated with the style of
+                # that time: it is kept, it is not a deduction.
                 self._add_side_row(side, missing_style=default_contact_style())
-        # Anche senza lati salvati: la barra del tipo contatto non deve restare
-        # quella del progetto precedente.
+        # Even without saved sides: the contact-type bar must not stay
+        # the one of the previous project.
         self._sync_contact_style_bar()
         components = [c for c in _project_list(state, "components", skipped) if isinstance(c, dict)]
         try:
@@ -7777,9 +7830,9 @@ class MainWindow(QMainWindow):
         annotations = state.get("annotations") if isinstance(state.get("annotations"), dict) else {}
         self.fillet_annotations.clear()
         self.face_text_annotations.clear()
-        # Progetti salvati prima del 2026-09-25 (convenzione 1 o assente):
-        # front era il lato in alto della vista dall'alto. Il lato fisico
-        # resta quello, cambia solo il nome: si converte una volta, lo si dice.
+        # Projects saved before 2026-09-25 (convention 1 or absent):
+        # front was the top side of the top view. The physical side
+        # stays the same, only the name changes: it is converted once, and that is said.
         legacy = annotations.get("convention") != ANNOTATION_CONVENTION
         converted = 0
         for kind, target, values, key in ((EdgeFilletAnnotation, self.fillet_annotations,
@@ -7845,8 +7898,8 @@ class MainWindow(QMainWindow):
              self.field_body_height.value()) != PLACEHOLDER_BODY_MM
             or self._legacy_body_evidence(state))
         known = state.get("board_size_known")
-        # Progetti salvati prima del 26/09: le quote sono note se il progetto
-        # ha gia' un footprint, cioe' se un'analisi le ha scritte.
+        # Projects saved before 26/09: the dimensions are known if the project
+        # already has a footprint, that is if an analysis wrote them.
         self._board_size_known = (known if isinstance(known, bool)
                                   else self._project_has_footprint())
         options = state.get("options") if isinstance(state.get("options"), dict) else {}
@@ -7856,8 +7909,11 @@ class MainWindow(QMainWindow):
         self._pcb_thickness_source, self._analysis_pcb_thickness = _saved_pcb_thickness(
             state.get("pcb_thickness"))
         self._restore_mounting_state(state.get("host_mounting"))
-        from ..core.footprint import validate_text_positions, validate_footprint_drawings
-        self.footprint_text_positions = validate_text_positions(state.get("footprint_texts"))
+        from ..core.footprint import validate_footprint_drawings
+        # Positions saved before 2026-10-16 are text centres: converted once
+        # to bottom-left anchors (marked when the project is saved again).
+        self.footprint_text_positions = self._load_footprint_text_positions(
+            state.get("footprint_texts"))
         # Texts saved before 2026-10-14 are centred on their point: move the
         # point once to the bottom-left corner the preview drew, so they stay
         # where the user sees them (saved with the project's next save).
@@ -7919,7 +7975,7 @@ class MainWindow(QMainWindow):
         return validate_yolo_settings(accepted)
 
     def _switch_project(self, name: str, state: dict) -> None:
-        """@brief Apre `name` con le impostazioni `state`, senza salvarle a meta'."""
+        """@brief Open `name` with the settings `state`, without saving them half-way."""
         self._restoring_project = True
         try:
             self._reset_project_runtime_state()
@@ -7929,10 +7985,10 @@ class MainWindow(QMainWindow):
             self._restore_saved_photo()
         finally:
             self._restoring_project = False
-        # La selezione della tipologia e il prompt sono ripristinati da widget
-        # separati; i segnali del combo possono essere bloccati durante il
-        # ripristino. Risincronizzare il blocco generato evita, per esempio,
-        # che un progetto THT singolo invii ancora istruzioni castellated.
+        # The component type selection and the prompt are restored by separate
+        # widgets; the combo signals may be blocked during the
+        # restore. Re-synchronising the generated block avoids, for example,
+        # a single THT project still sending castellated instructions.
         selected_key = self.combo_component_type.currentData() or ""
         selected_row = self.profile_store.get_type(selected_key)
         selected_type = (component_types.ComponentType(
@@ -7949,27 +8005,27 @@ class MainWindow(QMainWindow):
             restored_prompt = old_prompt
         prompt_was_normalized = restored_prompt != old_prompt
         self.field_component_prompt.setPlainText(restored_prompt)
-        # Ripristinare i widget non emette sempre il segnale del tipo
-        # componente. Aggiornare esplicitamente i gruppi dipendenti evita di
-        # lasciare nel progetto singolo i controlli di montaggio della board
-        # aperta prima (anteprima footprint, analisi e toolbar 3D).
+        # Restoring the widgets does not always emit the component type
+        # signal. Explicitly updating the dependent groups avoids
+        # leaving in the single project the mounting controls of the board
+        # opened before (footprint preview, analysis and 3D toolbar).
         self._refresh_type_effect()
         if hasattr(self, "combo_photo_detector"):
             self._refresh_photo_detector_controls()
             self._refresh_ai_tools_summary()
-        # Le schede di anteprima seguono cio' che il progetto aperto contiene.
+        # The preview tabs follow what the open project contains.
         self._refresh_output_actions()
-        # Il simbolo applicato fa parte degli artefatti del componente. Nei
-        # progetti gia' generati lo creiamo se manca, senza toccare un file
-        # .kicad_sym eventualmente gia' esportato o personalizzato.
+        # The applied symbol is part of the component artefacts. In
+        # already generated projects we create it if missing, without touching a
+        # .kicad_sym file possibly already exported or customised.
         # The symbol is written by a generation or by the user's export, never
         # on open (review C, 5: an unreviewed .kicad_sym with default rows
         # bypassed the export review), and the footprint is never rebuilt on
         # open (review C, 4: every open overwrote the .kicad_mod).
         self._refresh_symbol_tab(force=True)
-        # La scheda aperta mostra il progetto nuovo, non quello chiuso: senza,
-        # restava il disegno del precedente e il 3D non si ridisegnava (audit
-        # 25/09). Le altre schede si ridisegnano all'ingresso, come sempre.
+        # The open tab shows the new project, not the closed one: without this,
+        # the drawing of the previous one stayed and the 3D was not redrawn (audit
+        # 25/09). The other tabs are redrawn on entry, as always.
         self.project_wizard.set_page(1 if self._project_has_footprint() else 0)
         self.project_details.setExpanded(False)
         self.group_ai_tools.setExpanded(False)
@@ -7983,28 +8039,29 @@ class MainWindow(QMainWindow):
             self._refresh_symbol_tab(force=True)
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
-        # Lo stato appena applicato e' quello salvato: non va riscritto.
+        # The state just applied is the saved one: it must not be rewritten.
         self._last_saved_project_state = self._project_state_text()
         # A footprint draft left by a crash is offered, never applied.
         self._offer_footprint_recovery()
         if prompt_was_normalized:
             self._save_project_config(force=True)
-        # Dopo il nome e dopo lo stato: i pulsanti di revisione guardano la
-        # cartella del progetto appena aperto, non piu' la foto del precedente.
+        # After the name and after the state: the review buttons look at the
+        # folder of the project just opened, no longer at the photo of the previous one.
         if hasattr(self, "btn_component_review") and not self._background_work_running():
             self._refresh_reopen_review_button()
 
     def _reset_project_runtime_state(self) -> None:
-        """@brief Dimentica cio' che resta in memoria del progetto chiuso.
+        """@brief Forget what stays in memory of the closed project.
 
-        @note Revisore 2, difetto 5: aprendo o creando un progetto restavano
-            la foto calibrata, la sovrapposizione, l'ultima estrazione, la mesh
-            e i flag di revisione del progetto PRECEDENTE, e «Modifica la
-            revisione» del nuovo lavorava sulla foto del vecchio scrivendo
-            nella cartella del nuovo. Si azzera la stessa lista dell'inizio di
-            un'estrazione, piu' cio' che solo l'estrazione produce e che il
-            file di progetto non conserva (geometria del package, spessore
-            PCB estratto): un progetto riaperto riparte dai suoi campi.
+        @note Reviewer 2, defect 5: when opening or creating a project, the
+            calibrated photo, the overlay, the last extraction, the mesh and
+            the review flags of the PREVIOUS project remained, and «Modifica
+            la revisione» of the new one worked on the photo of the old one
+            while writing into the folder of the new one. The same list as at
+            the start of an extraction is cleared, plus what only the
+            extraction produces and the project file does not keep (package
+            geometry, extracted PCB thickness): a reopened project starts
+            again from its fields.
         """
         self._extraction_started_stamp = None
         self.project_kind = None
@@ -8018,31 +8075,31 @@ class MainWindow(QMainWindow):
         self._photo_source = ""
         self.package_geometry = None
         self._extracted_pcb_thickness = None
-        # La provenienza dello spessore torna dal file del progetto aperto
-        # (_apply_project_state); qui non resta quella del progetto chiuso.
+        # The thickness provenance comes back from the file of the open project
+        # (_apply_project_state); the closed project's one does not remain here.
         self._pcb_thickness_source = "standard"
         self._analysis_pcb_thickness = None
-        # Una rigenerazione chiesta nel progetto chiuso non riguarda il nuovo.
+        # A regeneration requested in the closed project does not concern the new one.
         self._regen_3d_pending = False
-        # L'estrazione fatta nella sessione era del progetto chiuso.
+        # The extraction done in the session belonged to the closed project.
         self._acquisition_completed = False
-        # Anche l'ultima generazione: l'anteprima 2D non deve mostrare il
-        # footprint del progetto precedente (`_preview_params`).
+        # The last generation too: the 2D preview must not show the
+        # footprint of the previous project (`_preview_params`).
         self._last_params = None
         self._invalidate_generated_mesh()
         self._set_review_buttons_enabled(False)
 
     def _project_state_text(self) -> str | None:
-        """Stato del progetto come testo confrontabile, o None se non si puo' leggere.
+        """Project state as comparable text, or None if it cannot be read.
 
-        Gira anche dal timer del salvataggio automatico: in PyQt6 un'eccezione
-        che esce da uno slot chiude il programma, quindi qui si assorbe tutto
-        e lo si dice una volta nel log.
+        It also runs from the autosave timer: in PyQt6 an exception escaping
+        a slot closes the program, so here everything is absorbed and stated
+        once in the log.
         """
         try:
             text = json.dumps(self._project_state(), sort_keys=True, allow_nan=False,
                               ensure_ascii=False, default=str)
-        except Exception as exc:  # noqa: BLE001 - il salvataggio non deve far cadere la finestra
+        except Exception as exc:  # noqa: BLE001 - saving must not bring the window down
             if not getattr(self, "_project_state_error_logged", False):
                 self._project_state_error_logged = True
                 self._append_log(tx("Impostazioni del progetto non leggibili: {exc}", exc=exc))
@@ -8051,22 +8108,22 @@ class MainWindow(QMainWindow):
         return text
 
     def _save_project_config(self, force: bool = False) -> bool:
-        """@brief Scrive `project_config.json` se le impostazioni sono cambiate.
+        """@brief Write `project_config.json` if the settings have changed.
 
-        @param force Scrive anche se lo stato non e' cambiato (progetto nuovo).
-        @return True quando il file e' stato scritto.
-        @note Mai senza progetto, mai durante un cambio di progetto, mai sopra
-            un file che all'apertura non si e' potuto applicare, mai fuori
-            dalla cartella del progetto aperto (`_open_project_folder`).
+        @param force Write even if the state has not changed (new project).
+        @return True when the file was written.
+        @note Never without a project, never during a project change, never
+            over a file that could not be applied on opening, never outside
+            the folder of the open project (`_open_project_folder`).
         """
         if getattr(self, "_restoring_project", True) or not self._named():
             return False
         folder = getattr(self, "_open_project_folder", None)
-        # Il file va nella cartella del progetto APERTO. Se la cartella di
-        # lavoro e' cambiata, `_project_dir()` punta a un progetto omonimo di
-        # un'altra cartella, che non si deve sovrascrivere (revisore 2,
-        # difetto 7): finche' `_on_library_root_changed` non chiude il
-        # progetto, qui non si scrive.
+        # The file goes into the folder of the OPEN project. If the working
+        # folder has changed, `_project_dir()` points to a project with the same
+        # name in another folder, which must not be overwritten (reviewer 2,
+        # defect 7): until `_on_library_root_changed` closes the
+        # project, nothing is written here.
         if folder is None or folder != self._project_dir():
             return False
         if self._project_config_refused is not None and folder == self._project_config_refused:
@@ -8084,7 +8141,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _flush_project_config(self) -> None:
-        """@brief Salva subito le impostazioni del progetto aperto (cambio progetto, chiusura)."""
+        """@brief Save the settings of the open project at once (project change, closing)."""
         if hasattr(self, "_project_autosave"):
             self._save_project_config()
 
@@ -8291,15 +8348,15 @@ class MainWindow(QMainWindow):
         field.setText(committed)
 
     def _on_library_root_changed(self, _text: str = "") -> None:
-        """@brief Cambiare la cartella di lavoro salva e chiude il progetto aperto.
+        """@brief Changing the working folder saves and closes the open project.
 
-        @note Revisore 2, difetto 7: prima il nome restava e il salvataggio
-            automatico scriveva nel progetto OMONIMO dell'altra cartella di
-            lavoro, sovrascrivendolo. Ora il progetto aperto e' una cartella
-            (`_open_project_folder`): le sue impostazioni si salvano li' e poi
-            il progetto si chiude; come per «Nuovo» restano le impostazioni
-            generali. Un lavoro in corso scrive nella cartella del progetto:
-            in quel caso la cartella di lavoro torna com'era.
+        @note Reviewer 2, defect 7: before, the name stayed and the autosave
+            wrote into the project WITH THE SAME NAME in the other working
+            folder, overwriting it. Now the open project is a folder
+            (`_open_project_folder`): its settings are saved there and then
+            the project is closed; as for «Nuovo», the general settings stay.
+            A running job writes into the project folder: in that case the
+            working folder goes back to what it was.
         """
         folder = getattr(self, "_open_project_folder", None)
         if folder is None or getattr(self, "_restoring_project", False):
@@ -8319,8 +8376,8 @@ class MainWindow(QMainWindow):
             self.ai_account.refresh()
             self._project_change_blocked()
             return
-        # Il salvataggio normale guarda `_project_dir()`, che adesso punta
-        # all'altra cartella: si scrive esplicitamente in quella del progetto.
+        # The normal save looks at `_project_dir()`, which now points to
+        # the other folder: it is written explicitly into the project's one.
         if not self._can_leave_project(folder):
             previous = self.field_library_root.blockSignals(True)
             self.field_library_root.setText(str(folder.parent))
@@ -8336,7 +8393,7 @@ class MainWindow(QMainWindow):
                             folder=folder))
 
     def _write_open_project_config(self, folder: Path) -> None:
-        """Salva le impostazioni correnti nella cartella del progetto aperto, se cambiate."""
+        """Save the current settings into the open project folder, if changed."""
         if self._project_config_refused is not None and folder == self._project_config_refused:
             return
         text = self._project_state_text()
@@ -8376,7 +8433,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _library_root(self) -> Path:
-        """@brief Cartella di lavoro in cui stanno i progetti.
+        """@brief Working folder holding the projects.
 
         @return The COMMITTED working folder: while the user is typing a
             new path in «Area di lavoro» (text modified, not yet confirmed
@@ -8394,10 +8451,11 @@ class MainWindow(QMainWindow):
         return Path(text.strip() or str(DEFAULT_LIBRARY_ROOT))
 
     def _project_change_blocked(self) -> bool:
-        """@brief Vero, con un avviso, quando un lavoro in corso impedisce di cambiare progetto.
+        """@brief True, with a warning, when a running job prevents changing project.
 
-        @note Un'analisi o una generazione scrive nella cartella del progetto
-            in uso: cambiarlo a meta' manderebbe i risultati nel posto sbagliato.
+        @note An analysis or a generation writes into the folder of the
+            project in use: changing it half-way would send the results to the
+            wrong place.
         """
         if not (self._background_work_running() or self._automatic_generation_active):
             return False
@@ -8407,13 +8465,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _new_project(self) -> None:
-        """@brief «Nuovo progetto…»: chiede un nome libero e crea la cartella.
+        """@brief «Nuovo progetto…»: ask for a free name and create the folder.
 
-        @note Il nome di una cartella esistente e' rifiutato nel dialogo
-            (`project_dialogs.name_problem`): un progetto nuovo non puo'
-            diventare, per un nome uguale, un progetto vecchio.
-        @note La cartella nasce subito con `docs/`, cosi' il nome e' occupato
-            e compare in «Apri progetto…» anche prima di caricare documenti.
+        @note The name of an existing folder is refused in the dialog
+            (`project_dialogs.name_problem`): a new project cannot become, by
+            an identical name, an old project.
+        @note The folder is created at once with `docs/`, so the name is taken
+            and appears in «Apri progetto…» even before documents are loaded.
         """
         if self._project_change_blocked():
             return
@@ -8430,8 +8488,8 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         name = dialog.project_name()
-        # La creazione di docs/ non basta a rifiutare un nome gia' usato: una
-        # cartella di progetto senza docs/ verrebbe riusata (audit 25/09).
+        # Creating docs/ is not enough to reject a name already in use: a
+        # project folder without docs/ would be reused (audit 25/09).
         from .project_dialogs import name_problem
         problem = name_problem(self._library_root(), name)
         if problem:
@@ -8444,8 +8502,8 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
             return
-        # Un progetto nuovo parte dalle impostazioni generali, non da quelle
-        # del progetto aperto prima (decisione dell'utente del 2026-09-24).
+        # A new project starts from the general settings, not from those
+        # of the project opened before (user decision of 2026-09-24).
         try:
             initial_state = self._state_for_project_type(self._general_project_state, selected_type)
         except ValueError as exc:
@@ -8456,11 +8514,11 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Nuovo progetto: {project_dir}", project_dir=self._project_dir()))
 
     def _open_project(self) -> None:
-        """@brief «Apri progetto…»: sceglie una cartella esistente della cartella di lavoro.
+        """@brief «Apri progetto…»: choose an existing folder of the working folder.
 
-        @note Torna cio' che il programma sa gia' ricostruire dalla cartella
-            (scelta dell'utente del 2026-09-24): documenti, corpi rivisti,
-            scelte dei modelli 3D, footprint e 3D generati.
+        @note What the program already knows how to rebuild from the folder
+            comes back (user choice of 2026-09-24): documents, reviewed
+            bodies, 3D model choices, generated footprint and 3D.
         """
         if self._project_change_blocked():
             return
@@ -8494,7 +8552,7 @@ class MainWindow(QMainWindow):
                                  + ", ".join(non_finite) + ".")
         except ProjectConfigError as exc:
             saved = None
-            # Ne' applicato ne' sovrascritto: resta com'e' finche' qualcuno lo guarda.
+            # Neither applied nor overwritten: it stays as it is until someone looks at it.
             self._project_config_refused = folder
             self._append_log(tx("ATTENZIONE impostazioni del progetto non applicate: {exc}", exc=exc))
         config_loaded = isinstance(saved, dict)
@@ -8516,12 +8574,12 @@ class MainWindow(QMainWindow):
                 # open with what the project carries (review C, 11).
                 self._append_log(tx("ATTENZIONE tipologia non applicata: {exc}", exc=exc))
                 saved = base_state
-        # Senza file (progetto nato prima di project_config.json) valgono le
-        # impostazioni generali, non quelle del progetto aperto prima.
+        # Without a file (project born before project_config.json) the general
+        # settings apply, not those of the project opened before.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
         if (not config_loaded or kind_migrated) and self._project_config_refused is None:
-            # Progetto nato prima di project_config.json: il file nasce subito,
-            # non alla prima modifica, cosi' ogni progetto aperto ha il suo.
+            # Project born before project_config.json: the file is created at once,
+            # not at the first change, so every open project has its own.
             self._save_project_config(force=True)
         self._append_log(tx("Progetto aperto: {folder}", folder=self._project_dir())
                          + (tx(" (impostazioni del progetto applicate).") if config_loaded else ""))
@@ -8569,11 +8627,11 @@ class MainWindow(QMainWindow):
         return result
 
     def _rename_project(self) -> None:
-        """@brief «Rinomina progetto…»: nome nuovo, mai quello di un altro progetto.
+        """@brief «Rinomina progetto…»: new name, never that of another project.
 
-        @note Stesso spostamento del nome proposto dall'analisi
-            (`_migrate_docs_to_new_name`): documenti, diario, `photo-cache/` e
-            `photo-review/` seguono il nome.
+        @note Same move as for the name proposed by the analysis
+            (`_migrate_docs_to_new_name`): documents, diary, `photo-cache/` and
+            `photo-review/` follow the name.
         """
         if self._project_change_blocked():
             return
@@ -8587,8 +8645,8 @@ class MainWindow(QMainWindow):
                                    tr=self.i18n.text, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        # Controllo anche qui, non solo nel pulsante OK della finestra: il
-        # nome di un altro progetto fonderebbe due progetti (audit 25/09).
+        # Check here too, not only in the OK button of the window: the
+        # name of another project would merge two projects (audit 25/09).
         from .project_dialogs import name_problem
         problem = name_problem(self._library_root(), dialog.project_name(), current)
         if problem:
@@ -8640,31 +8698,31 @@ class MainWindow(QMainWindow):
         self._refresh_symbol_tab()
 
     def _migrate_docs_to_new_name(self, new_name: str) -> str:
-        """Sposta i documenti nella cartella del nuovo nome componente.
+        """Move the documents into the folder of the new component name.
 
-        La cartella docs/ vive dentro la cartella del componente, che prende il
-        nome dal campo "Nome": quando l'estrazione AI propone un nome diverso,
-        senza questo spostamento i file caricati prima resterebbero nella
-        vecchia cartella e sparirebbero dalla lista (e non sarebbero piu'
-        selezionabili per una nuova estrazione). Restituisce il nome effettivo:
-        rinomina rifiutata o documenti in conflitto mantengono il progetto corrente,
-        senza scartare il risultato AI e senza interrompere la generazione.
+        The docs/ folder lives inside the component folder, which takes its
+        name from the "Nome" field: when the AI extraction proposes a
+        different name, without this move the files loaded before would stay
+        in the old folder and disappear from the list (and could no longer be
+        selected for a new extraction). Returns the effective name: a refused
+        rename or conflicting documents keep the current project, without
+        discarding the AI result and without interrupting the generation.
         """
         old_name = self._component_name()
         if not old_name:
-            # Senza nome non esiste una cartella del componente (`_project_dir`
-            # lo rifiuta apposta, dalle 21:55) e il blocco sul nome impedisce
-            # di caricare documenti: non c'e' nulla da spostare, la proposta
-            # si prende cosi' com'e'. Le righe di log bufferizzate le
-            # scarica il primo scrittore con il nome nuovo.
+            # Without a name there is no component folder (`_project_dir`
+            # rejects it on purpose, since 21:55) and the block on the name prevents
+            # loading documents: there is nothing to move, the proposal
+            # is taken as it is. The buffered log lines are
+            # flushed by the first writer with the new name.
             return new_name
         old_docs = self._docs_dir()
         new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
         if new_docs.resolve() == old_docs.resolve():
             if new_name != old_name:
-                # Cambiano solo le maiuscole: su un disco che non le distingue
-                # (Windows) e' la stessa cartella, e prima la rinomina non
-                # faceva nulla, senza dirlo (revisore 2, difetto 9).
+                # Only the capitalisation changes: on a disk that does not distinguish it
+                # (Windows) it is the same folder, and before the rename did
+                # nothing, without saying so (reviewer 2, defect 9).
                 return self._rename_folder_case(old_docs.parent, new_docs.parent,
                                                 old_name, new_name)
             return old_name
@@ -8675,9 +8733,9 @@ class MainWindow(QMainWindow):
             self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
             return new_name
 
-        # La rinomina non chiede conferma: interrompeva l'analisi a meta' con
-        # una modale, proprio mentre il worker stava ancora lavorando. Resta
-        # tracciata nel Log AI, cosi' si sa sempre quale cartella e' in uso.
+        # The rename asks for no confirmation: it interrupted the analysis midway
+        # with a modal, right while the worker was still working. It stays
+        # traced in the AI log, so it is always known which folder is in use.
         self._on_ai_progress(
             tx("Rinomina automatica: il progetto {old_name} diventa {new_name}; "
                "{n_files} documenti spostati nella nuova cartella.",
@@ -8686,9 +8744,9 @@ class MainWindow(QMainWindow):
                n_files=len(files)))
 
         if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
-            # Avviso, non domanda: non c'e' nulla da decidere e nulla e' stato
-            # toccato. Una modale qui interrompeva l'analisi e copriva il
-            # consuntivo appena mostrato.
+            # A notice, not a question: there is nothing to decide and nothing has been
+            # touched. A modal here interrupted the analysis and covered the
+            # final account just shown.
             message = self.i18n.tr(
                 'component.rename_conflict', new_name=new_name, old_name=old_name)
             self._on_ai_progress(message)
@@ -9043,32 +9101,32 @@ class MainWindow(QMainWindow):
         return self._rename_project_folder(new_name)
 
     def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
-        """@brief Porta nella cartella rinominata tutto cio' che l'analisi ha prodotto.
+        """@brief Bring into the renamed folder everything the analysis produced.
 
-        @param old_project Cartella del progetto prima della rinomina.
-        @param new_project Cartella del progetto con il nome nuovo.
-        @note Il progetto e' la sua cartella (decisione dell'utente del
-            2026-09-24): con `docs/` e il diario si spostano anche la cache
-            delle risposte AI e le evidenze (`photo-cache/`) e le proposte
-            riviste (`photo-review/`). Prima si spostavano solo documenti e
-            diario, e la revisione restava nella cartella vecchia: «Rivedi
-            corpi» non la trovava piu' sotto il nome nuovo.
-        @note Mai sovrascrivere: un file che esiste gia' nella destinazione
-            resta com'e' e quello vecchio resta dov'era, con una riga di log.
-            Le risposte in cache hanno il nome dato dal loro contenuto e le
-            evidenze una marca temporale, quindi un conflitto vero e' raro.
+        @param old_project Project folder before the rename.
+        @param new_project Project folder with the new name.
+        @note The project is its folder (user decision of 2026-09-24): with
+            `docs/` and the diary, the AI answer cache and the evidence
+            (`photo-cache/`) and the reviewed proposals (`photo-review/`) are
+            moved too. Before, only documents and diary were moved, and the
+            review stayed in the old folder: «Rivedi corpi» no longer found it
+            under the new name.
+        @note Never overwrite: a file that already exists at the destination
+            stays as it is and the old one stays where it was, with a log
+            line. The cached answers are named after their content and the
+            evidence carries a timestamp, so a real conflict is rare.
         """
         import shutil
         from ..services.photo_inventory import PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR
         from .project_state import PROJECT_CONFIG_NAME
-        # Un file rifiutato all'apertura resta rifiutato anche dopo la
-        # rinomina: il blocco segue la cartella (revisore 2, difetto 6).
-        # Prima restava sulla cartella vecchia e il salvataggio automatico
-        # riscriveva in versione 1 il file spostato.
+        # A file rejected on opening stays rejected even after the
+        # rename: the block follows the folder (reviewer 2, defect 6).
+        # Before it stayed on the old folder and the autosave
+        # rewrote the moved file in version 1.
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
-        # Le impostazioni del progetto e il suo costo AI seguono il nome come
-        # il resto (il costo restava nella vecchia cartella: audit 25/09).
+        # The project settings and its AI cost follow the name like
+        # the rest (the cost stayed in the old folder: audit 25/09).
         from ..services.project_costs import COSTS_FILE
         for file_name in (PROJECT_CONFIG_NAME, COSTS_FILE):
             settings = old_project / file_name
@@ -9119,17 +9177,17 @@ class MainWindow(QMainWindow):
                        source=source))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
-        """@brief Applica i parametri estratti, se sono ancora quelli attesi.
+        """@brief Apply the extracted parameters, if they are still the expected ones.
 
-        @param params Parametri estratti dal worker.
-        @note Un risultato che arriva da una corsa interrotta con «Interrompi»
-            viene scartato qui: l'utente ha gia' ripreso in mano la finestra e
-            puo' aver cambiato campi, nome o componente. Vedi
+        @param params Parameters extracted by the worker.
+        @note A result coming from a run interrupted with «Interrompi» is
+            discarded here: the user has already taken back the window and may
+            have changed fields, name or component. See
             `_analysis_result_is_current`.
-        @note Qui si segna che c'e' un inventario da far rivedere: la pausa
-            vera arriva a `finished` (vedi `_offer_inventory_review`), quando
-            l'applicazione dei campi e' conclusa. Un risultato senza corpi non
-            segna nulla -- non ci sarebbe niente da correggere.
+        @note Here it is marked that there is an inventory to review: the
+            actual pause comes at `finished` (see `_offer_inventory_review`),
+            when the application of the fields is complete. A result without
+            bodies marks nothing -- there would be nothing to correct.
         """
         if not self._analysis_result_is_current():
             self._append_log(tx("Risultato di un'analisi interrotta dall'utente: scartato, i campi "
@@ -9148,9 +9206,9 @@ class MainWindow(QMainWindow):
                 self._apply_extracted_result(params)
         except Exception as exc:
             self._auto_generation_params = None
-            # Campi applicati a meta': non c'e' un inventario coerente da far
-            # rivedere, e fermarsi per una revisione su dati incerti non
-            # aiuterebbe nessuno.
+            # Fields applied halfway: there is no consistent inventory to have
+            # reviewed, and stopping for a review on uncertain data would
+            # help nobody.
             self._inventory_pause_pending = False
             self._on_extract_error(tx("Impossibile applicare i dati estratti: {exc}", exc=exc))
         finally:
@@ -9569,12 +9627,12 @@ class MainWindow(QMainWindow):
         self._set_acquisition_tabs_enabled(True)
         self._invalidate_generated_mesh()
         self._photo_png = getattr(params, "photo_png", None)
-        # Le quote della scheda vengono dall'analisi: da qui sono note.
+        # The board dimensions come from the analysis: from here on they are known.
         if _positive_frame(getattr(params, "body_length_mm", None),
                            getattr(params, "body_width_mm", None)) is not None:
             self._board_size_known = True
-        # Stesso criterio con cui l'estrazione sceglie i campi da riempire (piu'
-        # sotto): qui i campi non sono ancora stati applicati.
+        # Same criterion with which the extraction chooses the fields to fill (further
+        # below): here the fields have not been applied yet.
         is_castellated = getattr(params, "is_castellated", None)
         self._photo_body_fields = ("cast" if callable(is_castellated) and is_castellated()
                                    else "matrix")
@@ -9582,22 +9640,22 @@ class MainWindow(QMainWindow):
         self._photo_source = params.photo_source
         self._refresh_component_review_button()
         self._last_extracted = params
-        # Il nome lo decide chi lavora, non l'estrazione: la proposta va solo
-        # nel log, e si adotta con File > Rinomina progetto, che e' anche il
-        # momento in cui i documenti la seguono. Riscriverlo da soli
-        # significava spostare docs/ a ogni analisi e lasciare in area di
-        # lavoro una cartella per ogni nome mai proposto.
+        # The name is decided by whoever works, not by the extraction: the proposal
+        # goes only into the log, and is adopted with File > Rinomina progetto
+        # (rename project), which is also the moment the documents follow it.
+        # Rewriting it on our own meant moving docs/ on every analysis and leaving in
+        # the work area a folder for every name ever proposed.
         self._log_proposed_name(params.name)
         if params.name and not self._component_name():
-            # Nessun nome scelto: non c'e' niente da rispettare e la proposta
-            # e' meglio di "NUOVO_COMPONENTE".
+            # No name chosen: there is nothing to respect and the proposal
+            # is better than "NUOVO_COMPONENTE".
             params.name = self._migrate_docs_to_new_name(params.name)
             self.field_name.setText(params.name)
         else:
-            # Tutto cio' che viene generato porta il nome scelto: footprint,
-            # modello e cartelle devono restare d'accordo fra loro.
+            # Everything that is generated carries the chosen name: footprint,
+            # model and folders must stay in agreement with each other.
             params.name = self._component_name() or params.name
-        # Dopo il nome, perche' il pacchetto vive nella cartella del componente.
+        # After the name, because the package lives in the component folder.
         self._store_extraction_review_bundle()
         self._refresh_reopen_review_button()
         if self._photo_png and params.components_3d:
@@ -9628,8 +9686,8 @@ class MainWindow(QMainWindow):
                     f"Geometria package acquisita: {self.package_geometry.family}, "
                     f"{len(self.package_geometry.pins)} pad espliciti."
                 )
-                # Un'origine diversa dal centro del corpo viene stimata dal
-                # campo dei pad: la stima va detta, mai silenziosa.
+                # An origin other than the body centre is estimated from the
+                # pad field: the estimate must be stated, never silent.
                 for note in self.package_geometry.frame_notes():
                     self._append_log(tx("ATTENZIONE: {note}", note=note))
             except (KeyError, TypeError, ValueError) as exc:
@@ -9639,8 +9697,8 @@ class MainWindow(QMainWindow):
         geometry_held_back = self._review_geometry_doubts(params)
         self._set_regen_busy(False)
 
-        # Le due disposizioni riempiono gruppi di campi diversi; tutto il
-        # resto (corpo 3D, pinout, colori, fillet, riepilogo) e' comune.
+        # The two layouts fill different groups of fields; everything
+        # else (3D body, pinout, colours, fillet, summary) is shared.
         if params.is_castellated():
             self._extraction_side_pinout = []
             try:
@@ -9652,10 +9710,10 @@ class MainWindow(QMainWindow):
         else:
             self._set_photo_components(params.components_3d or [], replace_excluded=True)
             self.group_castellated.setChecked(False)
-            # Dal 26/09 l'estrazione lascia None cio' che la risposta non ha:
-            # il passo per una sola colonna, l'interasse per una sola fila, la
-            # griglia intera per un componente a pad espliciti (SMD). Si scrive
-            # solo cio' che c'e'; il resto resta com'era e non viene usato.
+            # Since 26/09 the extraction leaves None whatever the answer lacks:
+            # the pitch for a single column, the row spacing for a single row, the
+            # whole grid for a component with explicit pads (SMD). Only what is
+            # there is written; the rest stays as it was and is not used.
             for widget, value in ((self.field_rows, params.rows), (self.field_cols, params.cols),
                                   (self.field_pitch, params.pitch_mm),
                                   (self.field_row_spacing, params.row_spacing_mm),
@@ -9759,9 +9817,9 @@ class MainWindow(QMainWindow):
                                     fillet_note=fillet_note))
             return
         if self._relaunch_base_synthesized:
-            # Nessuna estrazione e' avvenuta: la base viene dai campi e la
-            # "confidenza low" che porta con se' non descrive alcuna analisi.
-            # Va detto cio' che e' successo davvero: un inventario rilanciato.
+            # No extraction took place: the base comes from the fields and the
+            # "confidenza low" (low confidence) it carries describes no analysis.
+            # What really happened must be said: an inventory re-run.
             QMessageBox.information(
                 self, self.i18n.text("Inventario rilanciato"),
                 self.i18n.text("Inventario fotografico aggiornato sulle proposte salvate. "
@@ -9800,8 +9858,8 @@ class MainWindow(QMainWindow):
             1.6 mm for THT boards.
         """
         if self._relaunch_base_synthesized:
-            # Inventario rilanciato su una base costruita dai campi: nessuna
-            # nuova lettura dei documenti, lo spessore resta quello del progetto.
+            # Inventory re-run on a base built from the fields: no new
+            # reading of the documents, the thickness stays the project's one.
             return
         value = getattr(params, "pcb_thickness_mm", None)
         declared = (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -9877,7 +9935,7 @@ class MainWindow(QMainWindow):
             if crop is None:
                 return None, tx("foto calibrata non leggibile")
             colour = sampler(crop)
-        except Exception as exc:  # noqa: BLE001 - un campionamento fallito non ferma l'analisi
+        except Exception as exc:  # noqa: BLE001 - a failed sampling does not stop the analysis
             return None, str(exc)
         if not isinstance(colour, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", colour.strip()):
             return None, tx("colore campionato non valido")
@@ -9896,7 +9954,7 @@ class MainWindow(QMainWindow):
             project's colour never survives.
         """
         if self._relaunch_base_synthesized:
-            # Come lo spessore: senza una nuova analisi il colore del progetto resta.
+            # Like the thickness: without a new analysis the project colour stays.
             return
         declared = str(getattr(params, "body_color_hex", "") or "").strip()
         if re.fullmatch(r"#[0-9a-fA-F]{6}", declared):
@@ -9933,7 +9991,7 @@ class MainWindow(QMainWindow):
             return
         try:
             keys = list(review())
-        except Exception:  # noqa: BLE001 - informativo: non deve fermare l'applicazione
+        except Exception:  # noqa: BLE001 - informational: it must not stop the application
             return
         if keys:
             self._append_log(tx("Valori stimati o non dichiarati nei documenti, da verificare: "
@@ -10079,27 +10137,27 @@ class MainWindow(QMainWindow):
                                   for side in missing))
 
     def _apply_extracted_castellated(self, params: ExtractedParams) -> None:
-        """Riempie il gruppo "Modulo castellated" con i lati estratti.
+        """Fill the "Modulo castellated" group with the extracted sides.
 
-        Le quote del corpo arrivano dagli stessi campi body_* della matrice
-        (li' descrivono l'ingombro del case, qui il contorno del modulo).
-        Le misure delle piazzole restano LATO PER LATO, con la loro
-        provenienza (28/09): lette o ricavate dai documenti sono dichiarate,
-        stimate o senza provenienza restano stime che il generatore riduce
-        se fanno toccare due contatti (e lo scrive nelle note). Prima
-        venivano copiate nei campi unici del modulo: vinceva l'ultimo lato,
-        per tutti i lati, e come misura dichiarata. I campi del modulo
-        tornano al land pattern di riferimento a ogni estrazione e valgono
-        solo per i lati senza misura propria.
+        The body dimensions come from the same body_* fields of the matrix
+        (there they describe the case outline, here the module outline). The
+        pad sizes stay PER SIDE, with their provenance (28/09): read from
+        or derived from the documents they are declared; estimated or without
+        provenance they stay estimates that the generator reduces if they make
+        two contacts touch (and writes so in the notes). Before, they were
+        copied into the single fields of the module: the last side won, for
+        all the sides, and as a declared measure. The module fields go back
+        to the reference land pattern at every extraction and apply only to
+        the sides without their own measure.
         """
         self.group_castellated.setChecked(True)
-        # Distanza fra le file dichiarata dall'estrazione: e' la quota da cui
-        # il generatore ricava dove stanno i fori passanti rispetto al bordo,
-        # (larghezza - distanza) / 2. Senza, per i contatti a foro passante
-        # restano solo una stima per difetto e una riga di log che lo dice.
-        # Si azzera a ogni estrazione: una quota di un'altra scheda non vale.
-        # L'estrazione la consegna solo se LETTA in un documento (HANDOFF
-        # 167): una derivata o stimata arriva qui gia' a None, con la nota.
+        # Distance between the rows declared by the extraction: it is the dimension
+        # from which the generator derives where the through holes are relative to
+        # the edge, (width - distance) / 2. Without it, for through-hole contacts
+        # only a lower-bound estimate and a log line saying so remain.
+        # It is reset on every extraction: a dimension of another board does not hold.
+        # The extraction delivers it only if READ in a document (HANDOFF
+        # 167): a derived or estimated one arrives here already as None, with the note.
         spacing = getattr(params, "row_spacing_mm", None)
         self._declared_row_spacing = (
             float(spacing) if isinstance(spacing, (int, float)) and not isinstance(spacing, bool)
@@ -10109,10 +10167,10 @@ class MainWindow(QMainWindow):
             self.field_cast_body_length.setValue(params.body_length_mm)
         if params.body_width_mm:
             self.field_cast_body_width.setValue(params.body_width_mm)
-        # Come la distanza fra le file: una misura di un'altra scheda (o
-        # quella che un progetto salvato prima del 28/09 vi aveva copiato da
-        # un solo lato) non vale per questa. Il riferimento arriva al
-        # generatore come stima (vedi `_current_castellated_params`).
+        # Like the distance between the rows: a measurement of another board (or
+        # the one that a project saved before 28/09 had copied there from a
+        # single side) does not hold for this one. The reference reaches the
+        # generator as an estimate (see `_current_castellated_params`).
         self.field_cast_pad_length.setValue(_reference_pad("pad_length"))
         self.field_cast_pad_width.setValue(_reference_pad("pad_width"))
 
@@ -10122,14 +10180,14 @@ class MainWindow(QMainWindow):
         sources = getattr(params, "value_sources", None) or {}
         for side in params.castellated_sides or ():
             side = dict(side)
-            # Diametri dei fori (26/09) e piazzole del lato (28/09): dichiarati
-            # solo se letti, ricavati o misurati; stimati o senza provenienza
-            # restano stime. Senza la voce di provenienza (lati rientrati da
-            # `_serialised_sides`, che la portano gia' nel lato, es. il
-            # rilancio dopo un riavvio) vale quella del lato; se manca anche
-            # quella, la misura resta una stima. Prima i fori non avevano il
-            # ripiego: un foro dichiarato tornava stima e veniva ridotto
-            # (verifica avversariale del 2026-10-02, C-M3).
+            # Hole diameters (26/09) and side pads (28/09): declared
+            # only if read, derived or measured; estimated or without provenance
+            # they stay estimates. Without the provenance entry (sides coming back from
+            # `_serialised_sides`, which already carry it in the side, e.g. the
+            # re-run after a restart) the side's one applies; if that is missing
+            # too, the measurement stays an estimate. Before, the holes had no
+            # fallback: a declared hole went back to an estimate and was reduced
+            # (adversarial check of 2026-10-02, C-M3).
             for field in ("half_hole_diameter_mm", "through_hole_drill_mm",
                           "pad_length_mm", "pad_width_mm"):
                 key = f"castellated_sides.{side.get('edge')}.{field}"
@@ -10142,8 +10200,8 @@ class MainWindow(QMainWindow):
                 names.append(f"{label}: {', '.join(side['pin_names'])}")
                 pinout.extend(_side_pinout(side))
 
-        # Tabella pinout: se il modello non l'ha compilata a parte, la si
-        # ricava dalle sigle serigrafate accanto ai contatti di ogni lato.
+        # Pinout table: if the model has not filled it separately, it is
+        # derived from the silkscreen labels next to the contacts of every side.
         # During an extraction the names are only proposed: the apply settles
         # them with the user's own names first (item 2).
         if pinout:
@@ -10167,10 +10225,10 @@ class MainWindow(QMainWindow):
                    n_castellated_components=len(self.castellated_components))
             )
 
-        # Il tipo di contatto non osservato si chiede, non si indovina
-        # (decisione dell'utente, 26/09); poi e' scritto accanto a ogni lato con
-        # la sua provenienza: letto dall'estrazione, scelto dall'utente o
-        # ancora da scegliere.
+        # The unobserved contact type is asked, not guessed
+        # (user decision, 26/09); then it is written next to every side with
+        # its provenance: read by the extraction, chosen by the user or
+        # still to be chosen.
         self._resolve_unknown_contact_styles()
         styles = self._table_contact_styles()
         described = []
@@ -10192,13 +10250,13 @@ class MainWindow(QMainWindow):
             self._append_log(tx("Sigle serigrafate {line}", line=line))
 
     def _on_extract_error(self, message: str) -> None:
-        """@brief Riporta la finestra in quiete e dice perche' l'analisi e' fallita.
+        """@brief Bring the window back to rest and say why the analysis failed.
 
-        @param message Testo dell'errore, come arriva dal worker.
-        @note L'errore di una corsa abbandonata con «Interrompi» non apre
-            nessuna finestra: l'utente ha gia' deciso di lasciarla perdere, e
-            un avviso di guasto su cio' che ha interrotto lui sarebbe un
-            rimprovero per una sua scelta. Resta nel log, dove serve.
+        @param message Error text, as it arrives from the worker.
+        @note The error of a run abandoned with «Interrompi» opens no window:
+            the user has already decided to let it go, and a failure warning
+            about what they interrupted themselves would be a reproach for
+            their own choice. It stays in the log, where it is useful.
         """
         if not self._analysis_result_is_current():
             self._append_log(tx("Errore di un'analisi interrotta dall'utente: {message}", message=message))
@@ -10206,14 +10264,14 @@ class MainWindow(QMainWindow):
         self._auto_generation_params = None
         self._auto_after_extraction = False
         self._hide_analysis_overlay()
-        # Un rilancio fallito lascia validi i parametri e le proposte salvate:
-        # il pulsante torna disponibile per riprovare, o resta spento se non
-        # c'era nulla.
+        # A failed re-run leaves the parameters and the saved proposals valid:
+        # the button becomes available again to retry, or stays off if there
+        # was nothing.
         self._refresh_reopen_review_button()
         self._on_ai_progress(tx("Estrazione fallita: {message}", message=message))
         QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
 
-    # ── Parametri del footprint e del corpo 3D (dati, nessun widget) ──
+    # ── Footprint and 3D body parameters (data, no widget) ──
 
     def _init_parameters(self) -> None:
         """@brief Create the footprint and 3D parameters the generation reads.
@@ -10227,7 +10285,7 @@ class MainWindow(QMainWindow):
             range is rejected by `_validate_automatic_input`; an unusual one is
             applied and reported by `_plausibility_warnings`.
         """
-        # Dati del componente e matrice THT.
+        # Component data and THT matrix.
         self.field_description = TextValue()
         # Keywords start EMPTY (user decision 2026-10-15, option 1): the old
         # default «pin header THT» described one kind of part and reached the
@@ -10238,12 +10296,12 @@ class MainWindow(QMainWindow):
         # cannot be told apart from a value the user chose, so it is restored
         # as saved and never rewritten here.
         self.field_tags = TextValue("")
-        # Righe e colonne: nessun tetto proprio; quante ne stanno lo dicono il
-        # passo e le quote (`_validate_automatic_input`). Il massimo qui tiene
-        # solo il numero memorizzabile.
+        # Rows and columns: no cap of their own; how many fit is said by the
+        # pitch and the dimensions (`_validate_automatic_input`). The maximum here
+        # only bounds the storable number.
         self.field_rows = BoundedValue(2, 1, 10000, decimals=0, integer=True)
         self.field_cols = BoundedValue(4, 1, 10000, decimals=0, integer=True)
-        # Passo e interasse: maggiori di zero (0.01 mm e' la risoluzione).
+        # Pitch and row spacing: greater than zero (0.01 mm is the resolution).
         self.field_pitch = BoundedValue(2.54, 0.01, MAX_LENGTH_MM)
         self.field_row_spacing = BoundedValue(2.54, 0.01, MAX_LENGTH_MM)
         self.field_populated_pins = TextValue()
@@ -10254,53 +10312,53 @@ class MainWindow(QMainWindow):
         self.field_pad.on_change(lambda _value: self._sync_single_tht_pad_controls())
         self.field_drill.on_change(lambda _value: self._sync_single_tht_pad_controls())
 
-        # Modulo castellated. La matrice e i moduli castellated si escludono:
-        # in un modulo ogni lato ha il suo numero di contatti e il suo passo,
-        # che una griglia a passo unico non sa descrivere.
+        # Castellated module. The matrix and the castellated modules exclude each
+        # other: in a module every side has its own number of contacts and its own
+        # pitch, which a single-pitch grid cannot describe.
         self.group_castellated = FlagValue(False)
         self.field_cast_body_length = BoundedValue(42.8, 0.0, MAX_LENGTH_MM)
         self.field_cast_body_width = BoundedValue(15.2, 0.0, MAX_LENGTH_MM)
         self.field_cast_pad_length = BoundedValue(3.6, 0.0, MAX_LENGTH_MM)
         self.field_cast_pad_width = BoundedValue(1.8, 0.0, MAX_LENGTH_MM)
-        #: Sporgenza della piazzola oltre il bordo (menisco ispezionabile).
+        #: Overhang of the pad beyond the edge (inspectable meniscus).
         self.field_cast_overhang = BoundedValue(1.4, 0.0, 5.0)
-        #: Diametro del semi-foro metallizzato: i semi-fori si tagliano nel 3D.
+        #: Diameter of the plated half-hole: the half-holes are cut in the 3D.
         self.field_cast_hole = BoundedValue(1.7, 0.0, 10.0)
-        #: Spessore della scheda; senza quota, lo standard dichiarato (vedi
+        #: Board thickness; without a dimension, the declared standard (see
         #: `_apply_extracted_pcb_thickness`).
-        # Stesso minimo del campo visibile (0.1 mm): prima 0.0 era accettato qui
-        # e mostrato come 0.10, mentre il 3D usava 0.0 (audit 138, C5).
+        # Same minimum as the visible field (0.1 mm): before, 0.0 was accepted here
+        # and shown as 0.10, while the 3D used 0.0 (audit 138, C5).
         self.field_cast_pcb = BoundedValue(STANDARD_PCB_THICKNESS_MM, 0.1, 10.0)
         self.field_cast_pcb.on_change(lambda _value: self._refresh_pcb_thickness_row())
-        #: Rientro del blocco componenti dal bordo del PCB.
+        #: Inset of the component block from the PCB edge.
         self.field_cast_inset = BoundedValue(1.0, 0.0, 20.0)
-        #: Foro passante chiuso accanto al semi-foro (0 = nessuno): ci si
-        #: salda uno strip; generando solo il semi-foro il bordo restava aperto.
+        #: Closed through hole next to the half-hole (0 = none): a strip is
+        #: soldered into it; generating only the half-hole left the edge open.
         self.field_cast_thru_drill = BoundedValue(1.0, 0.0, 10.0)
         self.field_cast_thru_pad = BoundedValue(1.7, 0.0, 10.0)
-        #: Distanza del foro passante dal bordo (0 = la calcola il generatore).
+        #: Distance of the through hole from the edge (0 = computed by the generator).
         self.field_cast_thru_offset = BoundedValue(0.0, 0.0, 20.0)
-        #: Quanto il centro del semi-foro sta dentro il bordo (0 = convenzione).
+        #: How far the half-hole centre lies inside the edge (0 = convention).
         self.field_cast_hole_inset = BoundedValue(0.0, 0.0, 10.0)
-        #: Lati del modulo, uno per contatti con passo proprio (vedi
+        #: Sides of the module, one per group of contacts with its own pitch (see
         #: `component_state.normalised_side`).
         self._sides: list[dict] = []
 
-        # Corpo 3D. Acceso di default se FreeCAD c'e': chi lo ha installato
-        # vuole il 3D; senza FreeCAD resta spento e la generazione non fallisce.
+        # 3D body. On by default if FreeCAD is there: whoever installed it
+        # wants the 3D; without FreeCAD it stays off and the generation does not fail.
         try:
             find_freecadcmd()
             freecad_available = True
         except Cad3DError:
             freecad_available = False
-        # Ricordato perche' l'estrazione deve poterlo consultare senza rifare
-        # la ricerca su disco: vedi `_enable_3d_group_from_extraction`.
+        # Remembered because the extraction must be able to consult it without
+        # repeating the disk search: see `_enable_3d_group_from_extraction`.
         self._freecad_available = freecad_available
         self.group_3d = FlagValue(freecad_available)
         self.field_body_length = BoundedValue(PLACEHOLDER_BODY_MM[0], MIN_LENGTH_MM, MAX_LENGTH_MM)
         self.field_body_width = BoundedValue(PLACEHOLDER_BODY_MM[1], MIN_LENGTH_MM, MAX_LENGTH_MM)
         self.field_body_height = BoundedValue(PLACEHOLDER_BODY_MM[2], MIN_HEIGHT_MM, MAX_LENGTH_MM)
-        #: Bordo del corpo rispetto al pin 1 (X) e alla prima riga (Y).
+        #: Body edge relative to pin 1 (X) and to the first row (Y).
         self.field_body_offset_x = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
         self.field_body_offset_y = BoundedValue(0.0, -MAX_LENGTH_MM, MAX_LENGTH_MM)
         self.field_pin_length_3d = BoundedValue(3.0, 0.01, MAX_LENGTH_MM)
@@ -10317,12 +10375,12 @@ class MainWindow(QMainWindow):
     # ── Modulo castellated ──────────────────────────────────────────
 
     def _on_castellated_toggled(self, checked: bool) -> None:
-        """La matrice e i moduli castellated sono alternativi, mai insieme."""
+        """The matrix and the castellated modules are alternatives, never together."""
         if checked and not self._sides:
-            # Due lati opposti sono la configurazione di gran lunga piu' comune.
-            # Segnaposto di chi accende il modulo a mano, prima di ogni analisi:
-            # un'estrazione li sostituisce tutti (e chiede lo stile che la foto
-            # non mostra). Lo stile qui e' quello del selettore del tab 3D.
+            # Two opposite sides are by far the most common configuration.
+            # Placeholder for whoever enables the module by hand, before any analysis:
+            # an extraction replaces them all (and asks for the style the photo
+            # does not show). The style here is the one of the 3D tab selector.
             style = default_contact_style()
             self._add_side_row({"edge": "left", "count": 3, "pitch_mm": 2.54, "first_pin": 1,
                                 "contact_style": style})
@@ -10333,10 +10391,10 @@ class MainWindow(QMainWindow):
         self._draw_preview()
 
     def _sync_3d_fields_for_castellated(self, castellated: bool) -> None:
-        """Nei moduli castellated il corpo 3D viene dal modulo, non dai campi 3D.
+        """In castellated modules the 3D body comes from the module, not from the 3D fields.
 
-        I contatti dei moduli sono quasi sempre dorati (ENIG): se il colore
-        pin e' ancora quello di default dei piedini stagnati, si passa all'oro.
+        The contacts of modules are almost always gold-plated (ENIG): if the
+        pin colour is still the default of tinned pins, it switches to gold.
         """
         if castellated and self.field_pin_color.text().strip().lower() == "#b0b0b0":
             self.field_pin_color.setText("#c9a227")
@@ -10428,12 +10486,12 @@ class MainWindow(QMainWindow):
         """@brief A user edit of the sides table: refresh views and drop the old 3D.
 
         @param _args Signal payload (index, value, checked), unused.
-        @note Stessa disciplina delle modifiche alla tabella componenti e ai
-            campi numerici: il solido gia' generato descrive l'input di prima,
-            quindi l'anteprima va tolta e un risultato CAD tardivo, marchiato
-            con la revisione vecchia, non deve poterla ripristinare. Prima i
-            lati cambiavano footprint e anteprima 2D ma lasciavano a video il
-            vecchio 3D, che sembrava gia' aggiornato.
+        @note Same discipline as the edits to the components table and to the
+            numeric fields: the solid already generated describes the previous
+            input, so the preview must be removed and a late CAD result,
+            stamped with the old revision, must not be able to restore it.
+            Before, the sides changed footprint and 2D preview but left the old
+            3D on screen, which looked already updated.
         """
         self._on_sides_changed()
         self._invalidate_generated_mesh()
@@ -10442,8 +10500,8 @@ class MainWindow(QMainWindow):
         """@brief The contact style of one side was changed in the table.
 
         @param _args Signal payload (combo index), unused.
-        @note Nessuna chiamata AI: il tipo di contatto e' un dato che l'utente
-            vede sulla scheda e corregge qui; basta rigenerare footprint e 3D.
+        @note No AI call: the contact type is a fact the user sees on the
+            board and corrects here; regenerating footprint and 3D is enough.
         """
         self._warn_if_contact_style_unsupported()
         self._on_side_edited()
@@ -10478,10 +10536,10 @@ class MainWindow(QMainWindow):
         """@brief The castellated sides as the table describes them now.
 
         @return One `CastellatedSide` per row, in row order.
-        @note `contact_style` e' passato solo se la classe installata lo
-            accetta (stessa introspezione di `phase_kwargs`/`cancel_kwargs`):
-            GUI e generatore evolvono separatamente e un TypeError qui
-            bloccherebbe ogni generazione per un campo accessorio.
+        @note `contact_style` is passed only if the installed class accepts
+            it (same introspection as `phase_kwargs`/`cancel_kwargs`): GUI and
+            generator evolve separately and a TypeError here would block every
+            generation for an accessory field.
         """
         style_supported = self._contact_style_supported()
         sizes_supported = accepts_keyword(CastellatedSide, "hole_diameter")
@@ -10489,9 +10547,9 @@ class MainWindow(QMainWindow):
         for side in self._sides:
             extra = {"contact_style": side["contact_style"]} if style_supported else {}
             if sizes_supported:
-                # Diametri del lato: una misura dichiarata si passa com'e' (il
-                # generatore la rispetta o la rifiuta), una stima come
-                # AssumedSize (il generatore la riduce se non sta e lo annota).
+                # Side diameters: a declared measurement is passed as it is (the
+                # generator respects it or rejects it), an estimate as
+                # AssumedSize (the generator reduces it if it does not fit and notes it).
                 extra.update(
                     hole_diameter=_side_size(side, "half_hole_diameter"),
                     thru_hole_drill=_side_size(side, "through_hole_drill"))
@@ -10499,8 +10557,8 @@ class MainWindow(QMainWindow):
                 edge=side["edge"], count=side["count"], pitch=side["pitch_mm"],
                 offset=side["offset_mm"], first_pin=side["first_pin"],
                 reverse=side["reverse"],
-                # Piazzole del lato (28/09), stessa regola dei fori: None = si
-                # usa il campo del modulo; stima = AssumedSize.
+                # Side pads (28/09), same rule as the holes: None = the module
+                # field is used; estimate = AssumedSize.
                 pad_length=_side_size(side, "pad_length"),
                 pad_width=_side_size(side, "pad_width"), **extra,
             ))
@@ -10510,9 +10568,9 @@ class MainWindow(QMainWindow):
         """@brief The table's sides as extraction-shaped dicts, style included.
 
         @return Dicts with the keys `_apply_extracted_castellated` reads back.
-        @note Lo stile viene dalla tabella e non dal `CastellatedSide`: e' la
-            scelta dell'utente e va conservata anche quando il generatore
-            installato non la conosce ancora.
+        @note The style comes from the table and not from the
+            `CastellatedSide`: it is the user's choice and must be kept even
+            when the installed generator does not know it yet.
         """
         return [dict(edge=s.edge, count=s.count, pitch_mm=s.pitch, offset_mm=s.offset,
                      first_pin=s.first_pin, reverse=s.reverse, contact_style=style,
@@ -10564,12 +10622,12 @@ class MainWindow(QMainWindow):
         unique = set(styles)
         blocked = combo.blockSignals(True)
         if None in unique:
-            # Almeno un lato senza tipo: la voce «Da scegliere» (ultima).
+            # At least one side without a type: the «Da scegliere» (to be chosen) entry (last).
             combo.setCurrentIndex(combo.count() - 1)
         elif len(unique) == 1:
             combo.setCurrentIndex(max(combo.findData(styles[0]), 0))
         else:
-            # Lati diversi: la voce «Diverso per lato» (penultima).
+            # Different sides: the «Diverso per lato» (different per side) entry (second to last).
             combo.setCurrentIndex(combo.count() - 2)
         combo.blockSignals(blocked)
 
@@ -10577,13 +10635,13 @@ class MainWindow(QMainWindow):
         """@brief Apply the 3D-tab contact style to every side of the table.
 
         @param index Chosen combo index; the «mixed» entry is informative only.
-        @note E' l'unica via per cambiarlo: i difetti dei contatti si
-            scoprono guardando il 3D. Il cambio segue la stessa strada di ogni
-            modifica ai lati: anteprima invalidata, nessuna chiamata AI.
+        @note It is the only way to change it: the contact defects are
+            discovered by looking at the 3D. The change follows the same path
+            as every edit to the sides: preview invalidated, no AI call.
         """
         style = self.combo_contact_style_3d.itemData(index)
         if not style:
-            # «Diverso per lato» e «Da scegliere» sono solo informative.
+            # «Diverso per lato» and «Da scegliere» are informational only.
             return
         for side in self._sides:
             side["contact_style"] = style
@@ -10597,17 +10655,17 @@ class MainWindow(QMainWindow):
             datasheet=self._effective_datasheet(),
             body_length=self.field_cast_body_length.value(),
             body_width=self.field_cast_body_width.value(),
-            # Default dei lati senza misura propria: il land pattern di
-            # riferimento arriva come stima (None -> AssumedSize), un valore
-            # diverso (progetto salvato, utente) come misura dichiarata.
+            # Default of the sides without their own measurement: the reference land
+            # pattern arrives as an estimate (None -> AssumedSize), a different value
+            # (saved project, user) as a declared measurement.
             pad_length=_declared_size(self.field_cast_pad_length.value(),
                                       _reference_pad("pad_length")),
             pad_width=_declared_size(self.field_cast_pad_width.value(),
                                      _reference_pad("pad_width")),
             pad_overhang=self.field_cast_overhang.value(),
-            # Un valore di riferimento non e' una misura: passato come None il
-            # generatore lo usa come stima e, se non sta nel passo di un lato,
-            # lo riduce e lo scrive nelle note invece di rifiutare (26/09).
+            # A reference value is not a measurement: passed as None the
+            # generator uses it as an estimate and, if it does not fit in a side's pitch,
+            # reduces it and writes it in the notes instead of rejecting it (26/09).
             hole_diameter=_declared_size(self.field_cast_hole.value(), 1.7),
             thru_hole_drill=_declared_size(self.field_cast_thru_drill.value(), 1.0),
             thru_pad_diameter=_declared_size(self.field_cast_thru_pad.value(), 1.7),
@@ -10615,8 +10673,8 @@ class MainWindow(QMainWindow):
             hole_inset=(self.field_cast_hole_inset.value() or None),
             pcb_thickness=self.field_cast_pcb.value(),
             component_inset=self.field_cast_inset.value(),
-            # Volutamente NON il colore del corpo: il blocco di ripiego (senza
-            # componenti dalla foto) deve distinguersi dal PCB, non sparirci sopra.
+            # Deliberately NOT the body colour: the fallback block (without
+            # components from the photo) must stand out from the PCB, not vanish on it.
             component_color_hex="#3a3a3a",
             components=self._components_from_table(),
             silk_labels=self._silk_labels(),
@@ -10625,14 +10683,14 @@ class MainWindow(QMainWindow):
         )
 
     def _declared_row_spacing_kwargs(self) -> dict:
-        """@brief La distanza fra le file dichiarata, se c'e' e il generatore la accetta.
+        """@brief The declared row spacing, if there is one and the generator accepts it.
 
-        @return {"row_spacing": mm} oppure {}.
-        @note Serve ai contatti a foro passante: dalla distanza fra le file e
-            dalla larghezza del corpo il generatore ricava a che distanza dal
-            bordo stanno i fori. Sulla scheda dell'utente (25,4 mm, file a
-            22,86 mm) sono 1,27 mm; senza questa quota il generatore ripiega su
-            una stima per difetto (1,05 mm) e lo scrive nel log.
+        @return {"row_spacing": mm} or {}.
+        @note It serves the through-hole contacts: from the row spacing and
+            the body width the generator derives how far from the edge the
+            holes are. On the user's board (25.4 mm, rows at 22.86 mm) that is
+            1.27 mm; without this dimension the generator falls back to a
+            low estimate (1.05 mm) and writes so in the log.
         """
         spacing = getattr(self, "_declared_row_spacing", None)
         if spacing is None or not accepts_keyword(CastellatedModuleParams, "row_spacing"):
@@ -10734,13 +10792,14 @@ class MainWindow(QMainWindow):
         return self._project_option('silk_pin_labels', False) is True
 
     def _silk_labels(self) -> dict[str, str]:
-        """Sigla serigrafata per ogni pad, dalla tabella pinout.
+        """Silkscreen label for each pad, from the pinout table.
 
-        Sul modulo accanto al contatto c'e' la sigla corta (PE, B-, A+, G...),
-        non la descrizione: si tiene la prima parola, senza parentesi.
+        On the module next to the contact there is the short label (PE, B-,
+        A+, G...), not the description: the first word is kept, without
+        parentheses.
 
-        Vuoto quando l'opzione e' spenta: su un modulo a passo fitto le sigle
-        si sovrappongono fra loro e finiscono sopra i componenti.
+        Empty when the option is off: on a fine-pitch module the labels
+        overlap each other and end up over the components.
         """
         if not self._silk_pin_labels():
             return {}
@@ -10756,12 +10815,12 @@ class MainWindow(QMainWindow):
         return hasattr(self, "group_castellated") and self.group_castellated.isChecked()
 
     def _enable_3d_group_from_extraction(self) -> None:
-        """@brief Accende il gruppo «Modello 3D» quando l'estrazione porta un solido.
+        """@brief Enable the «Modello 3D» group when the extraction carries a solid.
 
-        @note Senza FreeCAD non si accende affatto: riaccenderlo faceva finire
-            ogni generazione con un `cad3d_error`. Dal 2026-09-26 l'interruttore
-            non e' piu' a disposizione dell'utente (il tab Footprint 2D e' stato
-            tolto), quindi il 3D si chiede sempre quando FreeCAD c'e'.
+        @note Without FreeCAD it is not enabled at all: enabling it made every
+            generation end with a `cad3d_error`. Since 2026-09-26 the switch is
+            no longer available to the user (the Footprint 2D tab was
+            removed), so the 3D is always requested when FreeCAD is present.
         """
         if self._freecad_available is False:
             return
@@ -10845,9 +10904,9 @@ class MainWindow(QMainWindow):
         paths_layout = QVBoxLayout(self.file_paths_detail)
         paths_layout.setContentsMargins(18, 2, 4, 4)
         paths_layout.setSpacing(3)
-        self.label_kicad_footprint_path = QLabel("Percorso footprint: —")
-        self.label_kicad_symbol_path = QLabel("Percorso simbolo elettrico: —")
-        self.label_kicad_step_path = QLabel("Percorso modello STEP: —")
+        self.label_kicad_footprint_path = QLabel(self.i18n.text("Percorso footprint: —"))
+        self.label_kicad_symbol_path = QLabel(self.i18n.text("Percorso simbolo elettrico: —"))
+        self.label_kicad_step_path = QLabel(self.i18n.text("Percorso modello STEP: —"))
         for path_label in (self.label_kicad_footprint_path, self.label_kicad_symbol_path,
                            self.label_kicad_step_path):
             path_label.setWordWrap(True)
@@ -10868,9 +10927,9 @@ class MainWindow(QMainWindow):
             "Crea un piccolo progetto temporaneo con il footprint e il modello 3D, "
             "quindi lo apre nel PCB Editor. In KiCad premi Alt+3 per la vista 3D.")
         review_note.setWordWrap(True)
-        # Icone al posto dei pulsanti di testo, nome e spiegazione nel tooltip
-        # (utente, 2026-09-24), con lo stesso stile delle altre barre: la
-        # spiegazione della sezione resta scritta accanto all'icona.
+        # Icons instead of text buttons, name and explanation in the tooltip
+        # (user, 2026-09-24), with the same style as the other bars: the
+        # explanation of the section stays written next to the icon.
         self.btn_test_kicad = self._workflow_tool_button(
             "kicad-test.svg", "Prova in KiCad...",
             "Apre un progetto temporaneo: non installa e non modifica librerie KiCad")
@@ -10906,9 +10965,9 @@ class MainWindow(QMainWindow):
             self._note_with_icons(install_note, self.btn_export, self.btn_install_global))
         outer.addWidget(install_group)
 
-        # La riga in fondo sta in un riquadro come le altre (utente,
-        # 2026-09-24). Lo stato resta TESTO: e' un esito da leggere subito, non
-        # il nome di un comando da scoprire passando col mouse.
+        # The bottom row is in a box like the others (user,
+        # 2026-09-24). The state stays TEXT: it is an outcome to read at once, not
+        # the name of a command to discover by hovering with the mouse.
         folder_group = QGroupBox("Cartella del componente")
         folder_layout = QVBoxLayout(folder_group)
         self.label_kicad_status = QLabel()
@@ -10965,7 +11024,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(history_group, 1)
         return tab
 
-    # ── Metadati del componente (scheda KiCad) ──────────────────────
+    # ── Component metadata (KiCad tab) ──────────────────────────────
 
     def _build_metadata_group(self) -> QGroupBox:
         """@brief Build «Metadati del componente»: library metadata and the live KLC list.
@@ -12089,8 +12148,8 @@ class MainWindow(QMainWindow):
         @note Review pass 2, M1 and pass 3, M1: a symbol with 8 pins beside a
             footprint with 4 pads, and a symbol file with the old names after
             «Usa i nomi della nuova analisi», both read «pronti». The remedy
-            of both codes is «Aggiorna il file del simbolo» in the KiCad tab,
-            enabled exactly while they stand (`_refresh_kicad_remedies`).
+            of both codes is «Aggiorna il file del simbolo» (update the symbol
+            file) in the KiCad tab, enabled exactly while they stand (`_refresh_kicad_remedies`).
         @note The metadata properties (Description, ki_keywords, Datasheet,
             ki_fp_filters, Reference) are left out of the text comparison:
             they belong to the metadata gate («Applica ai file» rewrites
@@ -12849,10 +12908,10 @@ class MainWindow(QMainWindow):
                 )
                 break
             except KiCadLibraryError as exc:
-                # La voce «KiCadGen» della tabella punta gia' a un'altra
-                # cartella: ripuntarla toglierebbe a ogni progetto i componenti
-                # installati la'. Nulla e' stato scritto; si chiede, nominando
-                # la cartella vecchia e quella nuova (verifica del 25/09, F2).
+                # The «KiCadGen» entry of the table already points to another
+                # folder: re-pointing it would take away from every project the components
+                # installed there. Nothing has been written; the user is asked, naming
+                # the old folder and the new one (check of 25/09, F2).
                 if (getattr(exc, "code", None) == "library_entry_conflict"
                         and not replace_entry):
                     answer = QMessageBox.question(
@@ -12891,10 +12950,10 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, self.i18n.text("Installazione KiCad completata"), message)
 
-    #: Nome del diario scritto nella cartella del componente. Sta li' e non in
-    #: una cartella di sistema perche' appartiene al componente: chi apre quella
-    #: cartella trova accanto ai file generati il racconto di come sono stati
-    #: prodotti, senza doverlo ricopiare dall'interfaccia.
+    #: Name of the journal written in the component folder. It is there and not
+    #: in a system folder because it belongs to the component: whoever opens that
+    #: folder finds next to the generated files the account of how they were
+    #: produced, without having to copy it from the interface.
     LOG_FILENAME = "analisi-ai.log"
 
     def _log_file(self) -> Path:
@@ -12902,25 +12961,25 @@ class MainWindow(QMainWindow):
         return self._project_dir() / self.LOG_FILENAME
 
     def _write_log_line(self, message: str) -> None:
-        """Aggiunge una riga al diario del componente.
+        """Append a line to the component diary.
 
-        Scrive subito invece di accumulare in memoria: se l'analisi si
-        interrompe a meta', quello che e' successo fino a quel punto resta
-        leggibile. Un errore di scrittura non ferma l'analisi -- il diario e'
-        un aiuto, non un requisito.
+        It writes at once instead of accumulating in memory: if the analysis
+        stops half-way, what happened up to that point stays readable. A write
+        error does not stop the analysis -- the diary is an aid, not a
+        requirement.
 
-        @note Finche' il componente non ha un nome non c'e' una cartella dove
-            scrivere, e il diario resta solo a schermo. Prima il diario creava
-            da solo la cartella di ripiego: bastava aprire l'applicazione per
-            ritrovarsi in area di lavoro una cartella che nessuno aveva chiesto,
-            con dentro il log dell'avvio. Le righe si accumulano e finiscono su
-            disco appena un nome c'e'.
+        @note Until the component has a name there is no folder to write in,
+            and the diary stays on screen only. Before, the diary created the
+            fallback folder by itself: just opening the application was enough
+            to find in the work area a folder nobody had asked for, with the
+            start-up log inside. The lines accumulate and go to disk as soon as
+            a name exists.
         """
         if not self._component_name():
             buffer = getattr(self, "_pending_log_lines", None)
             if buffer is None:
                 buffer = self._pending_log_lines = []
-            # Il diario di un avvio non vale una crescita senza fine.
+            # The journal of one start-up is not worth endless growth.
             if len(buffer) < 500:
                 buffer.append(str(message).rstrip())
             return
@@ -12937,15 +12996,15 @@ class MainWindow(QMainWindow):
             handle.flush()
             self._release_log_handle_when_idle()
         except (OSError, AttributeError, ValueError) as exc:
-            # Un file rimasto aperto su un errore non va riusato: la riga dopo
-            # riapre da capo (anche la cartella, se e' sparita).
+            # A file left open on an error must not be reused: the next line
+            # reopens from scratch (the folder too, if it has disappeared).
             self._close_log_handle()
             # Startup can emit messages before project widgets exist.
             if not getattr(self, "_log_write_failed", False):
                 self._log_write_failed = True
-                # Stessa frase (a capo compreso) della voce di catalogo.
-                # NON nel pannello del Log AI: quello e' il log dell'analisi, e
-                # una riga di servizio lo farebbe comparire vuoto di analisi
+                # Same sentence (line break included) as the catalogue entry.
+                # NOT in the AI log panel: that is the log of the analysis, and
+                # a service line would make it appear empty of analysis
                 # (test_ai_log_button_counts_the_elements_list_too).
                 self._log_lines.append(
                     tx("Log file non disponibile: {exc}\n", exc=exc).rstrip("\n"))
@@ -13018,12 +13077,12 @@ class MainWindow(QMainWindow):
             try:
                 timer.stop()
             except RuntimeError:
-                pass  # oggetto C++ gia' distrutto
+                pass  # C++ object already destroyed
         if handle is not None:
             try:
                 handle.close()
             except OSError:
-                pass  # il contenuto e' gia' stato scritto con flush a ogni riga
+                pass  # the content has already been written with a flush on every line
 
     def _start_log_session(self, title: str) -> None:
         """@brief Open a dated section so separate runs stay distinguishable."""
@@ -13035,13 +13094,13 @@ class MainWindow(QMainWindow):
         self._write_log_line("=" * 78)
 
     def _move_log_to(self, destination: Path) -> bool:
-        """Porta il diario nella nuova cartella quando il componente e' rinominato.
+        """Bring the diary into the new folder when the component is renamed.
 
-        Senza, il racconto di una stessa analisi resterebbe spezzato fra la
-        cartella vecchia e quella nuova.
+        Without it, the account of the same analysis would stay split between
+        the old folder and the new one.
         """
         import shutil
-        # Un file aperto non si sposta su Windows.
+        # An open file cannot be moved on Windows.
         self._close_log_handle()
         try:
             source = self._log_file()
@@ -13095,8 +13154,8 @@ class MainWindow(QMainWindow):
             self.ai_progress_text.moveCursor(QTextCursor.MoveOperation.End)
             self.ai_progress_text.insertPlainText(msg + "\n")
             self.ai_progress_text.ensureCursorVisible()
-        # Copia in memoria del log della sessione (il tab «Genera» che lo
-        # mostrava e' stato tolto il 2026-09-26): la legge `_log_plain_text`.
+        # In-memory copy of the session log (the «Genera» (generate) tab that
+        # showed it was removed on 2026-09-26): `_log_plain_text` reads it.
         self._log_lines.append(msg)
 
     def _log_plain_text(self) -> str:
@@ -13147,20 +13206,20 @@ class MainWindow(QMainWindow):
         )
 
     def _current_body_params(self) -> Body3DParams | None:
-        """@brief I parametri del solido da costruire, o None se non ne va costruito uno.
+        """@brief The parameters of the solid to build, or None if none must be built.
 
-        @return Body3DParams dai campi correnti; None quando il gruppo
-            «Modello 3D» e' spento.
-        @note None NON significa «dati mancanti»: significa «nessun modello 3D
-            richiesto». Il gruppo spento e' una scelta -- dell'utente col clic,
-            o del programma quando FreeCAD non c'e' -- e chi chiama deve
-            trattare i due casi diversamente: un None con il gruppo ACCESO e'
-            un guasto da segnalare, un None con il gruppo spento e' la
-            generazione di solo footprint, che deve andare a termine. Questa
-            distinzione e' il fulcro di `_start_automatic_generation` e di
-            `_generate`.
-        @note Per un modulo castellated l'ingombro non viene dai campi a mano
-            ma dal PCB del modulo, che e' esso stesso il corpo.
+        @return Body3DParams from the current fields; None when the «Modello
+            3D» group is off.
+        @note None does NOT mean "missing data": it means "no 3D model
+            requested". The group being off is a choice -- of the user with
+            the click, or of the program when FreeCAD is absent -- and the
+            caller must treat the two cases differently: a None with the group
+            ON is a fault to report, a None with the group off is a
+            footprint-only generation, which must complete. This distinction
+            is the core of `_start_automatic_generation` and of `_generate`.
+        @note For a castellated module the outline does not come from the
+            hand-entered fields but from the module PCB, which is itself the
+            body.
         @note CONTRACT CHANGED 2026-10-15 (audit item 4): None also when the
             group is ON but the body dimensions are not documented (package
             without body sizes, pin matrix whose fields hold the placeholder:
@@ -13191,8 +13250,8 @@ class MainWindow(QMainWindow):
                 pin_numbers_3d=self._pin_numbers_3d(),
             )
         if self._is_castellated():
-            # Il PCB del modulo e' centrato sull'origine come il footprint:
-            # ingombro e offset si ricavano da li', non dai campi a mano.
+            # The module PCB is centred on the origin like the footprint:
+            # envelope and offset are derived from there, not from the hand-typed fields.
             module = self._current_castellated_params()
             return Body3DParams(
                 length_mm=module.body_length,
@@ -13327,14 +13386,14 @@ class MainWindow(QMainWindow):
                         raise ValueError(tx("Contatti del modulo incompleti: {field}.", field=field))
                 if side['count'] != int(side['count']):
                     raise ValueError(tx("Numero di contatti non intero: {value}.", value=side['count']))
-                # Quanti contatti stanno sul lato lo decide il generatore dalle
-                # quote della scheda; qui si rifiuta solo cio' che non puo'
-                # esistere: una fila piu' lunga della scheda piu' grande.
+                # How many contacts fit on the side is decided by the generator from the
+                # board dimensions; here only what cannot exist is rejected: a row
+                # longer than the largest board.
                 self._require_extent(side['count'], side['pitch_mm'],
                                      tx("lato {edge}", edge=EDGE_LABELS.get(side['edge'], side['edge'])))
         else:
-            # Griglia di pin passanti: passo solo con piu' colonne, interasse
-            # solo con piu' file (stesso contratto dell'estrattore dal 26/09).
+            # Grid of through-hole pins: pitch only with more columns, row spacing
+            # only with more rows (same contract as the extractor since 26/09).
             required = ['rows', 'cols', 'pad_diameter_mm', 'drill_mm']
             if isinstance(params.cols, (int, float)) and params.cols > 1:
                 required.append('pitch_mm')
@@ -13433,16 +13492,16 @@ class MainWindow(QMainWindow):
                                 extent=f"{extent:.2f}", maximum=f"{MAX_LENGTH_MM:g}"))
 
     def _start_automatic_generation(self, extracted):
-        """@brief Avvia la generazione automatica dopo un'estrazione, se i dati la permettono.
+        """@brief Start the automatic generation after an extraction, if the data allow it.
 
-        @param extracted Parametri estratti, gia' applicati ai campi.
-        @note Il modello 3D e' opzionale, il footprint no. Con il gruppo
-            «Modello 3D» spento `_current_body_params()` restituisce None per
-            scelta, non per un dato mancante: trattarlo come errore fatale
-            bloccava TUTTA la generazione automatica -- avviso e nessun
-            `.kicad_mod` -- a chi aveva spento il 3D di proposito. Quindi il
-            corpo si pretende solo quando il gruppo e' acceso, e i controlli
-            sulle quote si fanno solo se c'e' un corpo da controllare.
+        @param extracted Extracted parameters, already applied to the fields.
+        @note The 3D model is optional, the footprint is not. With the
+            «Modello 3D» group off, `_current_body_params()` returns None by
+            choice, not because of missing data: treating it as a fatal error
+            blocked the WHOLE automatic generation -- a warning and no
+            `.kicad_mod` -- for whoever had switched the 3D off on purpose. So
+            the body is required only when the group is on, and the checks on
+            the dimensions are made only if there is a body to check.
         """
         try:
             self._validate_automatic_input(extracted, require_body_dimensions=False)
@@ -13685,10 +13744,10 @@ class MainWindow(QMainWindow):
                     self._current_body_params())
             if body is not None:
                 body.validate()
-            # Il corpo si pretende solo se il 3D e' stato chiesto. Un gruppo
-            # «Modello 3D» spento e' una scelta, non un dato mancante: la
-            # generazione automatica deve comunque scrivere il footprint.
-            # Vedi `_current_body_params` e `_start_automatic_generation`.
+            # The body is required only if the 3D has been requested. A disabled
+            # «Modello 3D» (3D model) group is a choice, not missing data: the
+            # automatic generation must write the footprint anyway.
+            # See `_current_body_params` and `_start_automatic_generation`.
             required_body_fields = ("body_length_mm", "body_width_mm")
             if not isinstance(params, CastellatedModuleParams):
                 required_body_fields += ("body_height_mm",)
@@ -13794,7 +13853,10 @@ class MainWindow(QMainWindow):
             single_component=self._is_single_component_project(),
         )
         self._worker.footprint_params = host_params
-        self._worker.text_positions = deepcopy(self.footprint_text_positions)
+        # Both texts as bottom-left anchors, the defaults converted as the
+        # preview shows them: the file writes what the preview draws.
+        self._worker.text_positions = self._footprint_text_anchors(
+            lambda: self._build_footprint(host_params if host_params is not None else params))
         self._worker.drawings = deepcopy(self.footprint_drawings)
         # PackageGeometry carries no datasheet: the worker passes it to
         # build_package itself (the other generators read it from params).
@@ -13827,17 +13889,17 @@ class MainWindow(QMainWindow):
         self._worker.cancellable.connect(self._on_cad_cancellable)
         self._worker.finished.connect(self._on_generation_finished)
         if not automatic and body is not None:
-            # Richiesta dell'utente: «la possibilità di stoppare deve essere
-            # presente in ogni step». La generazione manuale con modello 3D
-            # passa dalle stesse due fasi lunghe della corsa automatica --
-            # abbinamento dei modelli KiCad e costruzione del solido in
-            # FreeCAD, minuti su una scheda popolata -- ma non apriva la
-            # modale, quindi restava l'unica strada senza «Interrompi». Il
-            # criterio e' la presenza del corpo 3D, cioe' del lavoro lungo:
-            # il solo footprint 2D si scrive in un istante e una modale li'
-            # sarebbe solo un lampo. Schede e menu NON si spengono come nella
-            # corsa automatica: qui l'utente ha avviato lui il lavoro e il
-            # resto della finestra non e' in mezzo alla catena.
+            # User request: «la possibilità di stoppare deve essere presente in ogni step»
+            # (the possibility to stop must be present in every step). The manual
+            # generation with a 3D model goes through the same two long phases as the
+            # automatic run -- matching of the KiCad models and construction of the
+            # solid in FreeCAD, minutes on a populated board -- but did not open the
+            # modal, so it remained the only path without «Interrompi» (interrupt). The
+            # criterion is the presence of the 3D body, that is of the long work:
+            # the 2D footprint alone is written in an instant and a modal there
+            # would only be a flash. Tabs and menus are NOT turned off as in the
+            # automatic run: here the user started the work personally and the
+            # rest of the window is not in the middle of the chain.
             self._manual_cad_overlay = True
             self._clear_cost_for_generation()
             self.analysis_overlay.start('Generazione footprint e modello 3D',
@@ -13846,10 +13908,11 @@ class MainWindow(QMainWindow):
         if automatic:
             self._automatic_generation_active = True
             self._automatic_footprint_done = self._automatic_3d_done = False
-            # Un modello 3D che non e' stato chiesto non puo' mancare: senza
-            # questo, una corsa di solo footprint finiva con «Generazione
-            # incompleta -- modello 3D non completato», cioe' un guasto
-            # annunciato per un risultato corretto e completo.
+            # A 3D model that has not been requested cannot be missing: without
+            # this, a footprint-only run ended with
+            # «Generazione incompleta -- modello 3D non completato» (incomplete
+            # generation -- 3D model not completed), that is a failure announced for a
+            # correct and complete result.
             self._automatic_3d_expected = body is not None
             self._automatic_generation_errors = []
             self._analysis_tabs_enabled = self.tabs.isEnabled()
@@ -13913,13 +13976,13 @@ class MainWindow(QMainWindow):
         self._generation_step_of = step_of
 
     def _on_generation_finished(self):
-        """@brief Riporta la finestra in quiete alla fine della generazione.
+        """@brief Bring the window back to rest at the end of the generation.
 
-        @note E' la stessa via per l'esito buono, per il guasto e per
-            l'interruzione chiesta dall'utente: il worker emette `finished` in
-            tutti e tre i casi. L'interruzione si riconosce da
-            `_abort_pending`, che viene azzerato qui perche' qui finisce
-            davvero il lavoro che si stava fermando.
+        @note It is the same path for the good outcome, for the fault and for
+            the interruption requested by the user: the worker emits
+            `finished` in all three cases. The interruption is recognised from
+            `_abort_pending`, which is cleared here because this is where the
+            work being stopped really ends.
         @note A footprint edit saved while this worker ran is rewritten now
             (`_retry_footprint_rewrite`).
         """
@@ -13928,9 +13991,9 @@ class MainWindow(QMainWindow):
         aborted = self._abort_pending
         self._abort_pending = False
         if self._manual_cad_overlay:
-            # La modale della generazione manuale la chiude chi l'ha aperta:
-            # la corsa automatica ha la sua chiusura piu' sotto, insieme a
-            # schede, menu e consuntivo, che qui non sono stati toccati.
+            # The modal of the manual generation is closed by whoever opened it:
+            # the automatic run has its own closing further below, together with
+            # tabs, menus and final account, which have not been touched here.
             self._manual_cad_overlay = False
             self._hide_analysis_overlay()
         if not self._automatic_generation_active:
@@ -13944,19 +14007,19 @@ class MainWindow(QMainWindow):
         self.menuBar().setEnabled(self._generation_menu_enabled)
         self._refresh_extract_enabled()
         if self._extraction_busy:
-            # L'estrazione e' finita con la generazione automatica gia'
-            # attiva (_on_extract_finished esce prima): il pulsante torna a
-            # riposo solo adesso.
+            # The extraction ended with the automatic generation already
+            # active (_on_extract_finished leaves earlier): the button goes back to
+            # rest only now.
             self._end_extraction_busy()
         if self._automatic_3d_done:
             self.tabs.setCurrentIndex(TAB_MODEL_3D)
         elif self._automatic_footprint_done:
             self.tabs.setCurrentIndex(TAB_PREVIEW)
         if aborted:
-            # Nessun avviso di «generazione incompleta»: l'incompletezza e'
-            # esattamente cio' che l'utente ha chiesto, e restituirgliela come
-            # un guasto sarebbe rimproverargli la sua decisione. Il consuntivo
-            # va comunque scritto, perche' dice che cosa e' rimasto sul disco.
+            # No «generazione incompleta» (incomplete generation) warning: the
+            # incompleteness is exactly what the user asked for, and returning it as
+            # a failure would reproach the user for that decision. The final account
+            # must be written anyway, because it says what was left on disk.
             self._on_ai_progress(
                 tx("Generazione interrotta dall’utente. ")
                 + (tx("Il footprint scritto prima dell’interruzione resta sul disco; ")
@@ -13980,7 +14043,7 @@ class MainWindow(QMainWindow):
                 self._on_ai_progress(message)
                 self._hold_completed_overlay("Footprint generato; modello 3D da completare.")
             else:
-                # Consuntivo fedele: il modello 3D non e' stato chiesto.
+                # Faithful final account: the 3D model was not requested.
                 self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
                                         "prima dell’utilizzo."))
                 self._hold_completed_overlay("Completato: footprint generato.")
@@ -14074,13 +14137,13 @@ class MainWindow(QMainWindow):
         self._set_accept_models_ready(True)
 
     def _on_cad3d_error(self, message: str) -> None:
-        """@brief Registra il mancato completamento del modello 3D.
+        """@brief Record that the 3D model was not completed.
 
-        @param message Testo dell'esito, come arriva dal worker.
-        @note L'interruzione chiesta dall'utente passa da qui -- e' la via
-            d'uscita che esisteva gia' -- ma non si chiama «ERRORE»: nessun
-            guasto e' avvenuto, e non entra nell'elenco dei guasti da
-            riportare a fine corsa.
+        @param message Outcome text, as it arrives from the worker.
+        @note The interruption requested by the user goes through here -- it
+            is the exit path that already existed -- but it is not called
+            «ERRORE»: no fault occurred, and it does not enter the list of
+            faults to report at the end of the run.
         """
         self._realign_after_3d_failure()
         if not self._cad_result_is_current():
@@ -14119,12 +14182,12 @@ class MainWindow(QMainWindow):
         self._refresh_output_actions()
 
     def _on_cad3d_warning(self, message: str) -> None:
-        """Annotazione non applicata: il modello c'e' comunque, ma va detto."""
+        """Annotation not applied: the model exists anyway, but it must be said."""
         if not self._cad_result_is_current():
             return
         self._append_log(tx("ATTENZIONE 3D: {message}", message=message))
 
-    # ── Tab 4: Anteprima ───────────────────────────────────────────
+    # ── Tab 4: Anteprima (preview) ─────────────────────────────────
 
     def _build_preview_tab(self) -> QWidget:
         tab = QWidget()
@@ -14136,7 +14199,6 @@ class MainWindow(QMainWindow):
         header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, con quote):"))
         self.preview_pad_hint = QLabel(self.i18n.text(
             "Tasto destro su un pad per modificarne forma e dimensioni."))
-        self.preview_pad_hint.setProperty("i18n_skip", True)
         header.addWidget(self.preview_pad_hint)
         header.addStretch()
         for asset, tooltip, callback in (
@@ -14181,8 +14243,8 @@ class MainWindow(QMainWindow):
         for button in (self.btn_fp_cancel, self.btn_fp_apply, self.btn_fp_recover):
             header.addWidget(button)
         self._refresh_footprint_undo_buttons()
-        # Stessa icona e stesso tooltip della barra 3D (utente, 2026-09-24):
-        # e' lo stesso comando, deve riconoscersi uguale nelle due schede.
+        # Same icon and same tooltip as the 3D bar (user, 2026-09-24):
+        # it is the same command, it must be recognisable as the same in both tabs.
         self.btn_pinout_2d = self._view_tool_button(
             "pinout-table.svg", "Tabella pinout: numero, nome e funzione di ogni piedino.")
         self.btn_pinout_2d.clicked.connect(self._show_pinout_dialog)
@@ -14193,8 +14255,8 @@ class MainWindow(QMainWindow):
         header.addWidget(self.chk_grid)
 
         self.combo_grid_unit = QComboBox()
-        # Il passo da 0.1" (2.54mm) e' quello dei componenti THT standard: con
-        # quella griglia i pad cadono esattamente sulle intersezioni.
+        # The 0.1" (2.54mm) pitch is the one of standard THT components: with
+        # that grid the pads fall exactly on the intersections.
         self.combo_grid_unit.addItem("1 mm", "mm")
         self.combo_grid_unit.addItem("0.1 in (2.54 mm)", "inch")
         index = self.combo_grid_unit.findData(self._config.get("grid_unit", "mm"))
@@ -14209,7 +14271,6 @@ class MainWindow(QMainWindow):
         self.combo_fine_grid = QComboBox()
         for divisor in self.FOOTPRINT_FINE_GRID_DIVISORS:
             self.combo_fine_grid.addItem(f"1/{divisor}", divisor)
-        self.combo_fine_grid.setProperty("i18n_skip", True)
         self.combo_fine_grid.setToolTip(self.i18n.text(
             "Passo della griglia del disegno, frazione della griglia principale: "
             "disegni e testi si agganciano ai suoi punti, piazzole e fori restano sulla griglia principale."))
@@ -14240,13 +14301,17 @@ class MainWindow(QMainWindow):
         mounting_row = QHBoxLayout()
         self.combo_preview_mounting = QComboBox()
         for index in range(self.combo_mounting.count()):
-            self.combo_preview_mounting.addItem(self.combo_mounting.itemText(index),
-                                               self.combo_mounting.itemData(index))
+            # Same catalogue sources as the original: the copy follows the
+            # language by itself (`I18n.retranslate_widgets`).
+            self.i18n.add_item(self.combo_preview_mounting,
+                               self.combo_mounting.itemData(index, ITEM_SOURCE_ROLE),
+                               self.combo_mounting.itemData(index))
         self.combo_preview_mounting.currentIndexChanged.connect(
             lambda: self.combo_mounting.setCurrentIndex(self.combo_mounting.findData(
                 self.combo_preview_mounting.currentData())))
-        # Combo al contenuto, non a tutta la riga; Pad/Foro alla sua destra
-        # (utente, 2026-10-13: «accorcia la combo, i fori a destra»).
+        # Combo box sized to its content, not to the whole row; Pad/Foro (pad/hole)
+        # to its right (user, 2026-10-13: «accorcia la combo, i fori a destra»
+        # (shorten the combo, the holes on the right)).
         self.combo_preview_mounting.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToContents)
         mounting_row.addWidget(self.combo_preview_mounting)
@@ -14289,8 +14354,8 @@ class MainWindow(QMainWindow):
         canvas_row = QHBoxLayout()
         canvas_row.setSpacing(4)
         canvas_row.addWidget(self.preview_view, 1)
-        # Palette minima di disegno, a destra come nell'editor del simbolo
-        # (utente, 2026-10-13): soli strumenti liberi, niente pad numerati.
+        # Minimal drawing palette, on the right as in the symbol editor
+        # (user, 2026-10-13): free tools only, no numbered pads.
         canvas_row.addWidget(self._build_footprint_palette())
         outer.addLayout(canvas_row, 1)
         self.preview_view.draw_clicked.connect(self._on_footprint_draw_clicked)
@@ -14299,6 +14364,7 @@ class MainWindow(QMainWindow):
         self.preview_view.draw_hovered.connect(self._on_footprint_draw_hovered)
         self.preview_view.draw_hover_left.connect(self._on_footprint_draw_hover_left)
         self.preview_view.drawing_hovered.connect(self._on_footprint_drawing_hovered)
+        self.preview_view.text_hovered.connect(self._on_footprint_text_hovered)
         from PyQt6.QtGui import QShortcut
         for keys, slot in (('Ctrl+Z', self._undo_footprint_drawing),
                            ('Ctrl+Y', self._redo_footprint_drawing),
@@ -14342,8 +14408,8 @@ class MainWindow(QMainWindow):
         self.combo_fp_draw_layer = QComboBox()
         for layer, label in self.FOOTPRINT_DRAW_LAYERS:
             # The colour square tells which colour the drawing will take.
-            self.combo_fp_draw_layer.addItem(_layer_swatch(_layer_color(layer)),
-                                             self.i18n.text(label), layer)
+            self.i18n.add_item(self.combo_fp_draw_layer, label, layer,
+                               icon=_layer_swatch(_layer_color(layer)))
         self.combo_fp_draw_layer.setToolTip(self.i18n.text(
             "Layer del disegno: la serigrafia viene stampata sulla scheda, "
             "la fabbricazione documenta il montaggio, i commenti restano nel progetto."))
@@ -14359,7 +14425,8 @@ class MainWindow(QMainWindow):
             button.setFixedSize(34, 34)
             button.setCheckable(True)
             button.setAutoRaise(True)
-            button.setProperty("i18n_skip", True)
+            # No `i18n_skip`: the generic pass keeps tooltip and accessible
+            # name in the current language (they were set once, in Italian).
             button.setAccessibleName(self.i18n.text(glyph.label))
             button.setToolTip(self.i18n.text(TOOL_HINTS.get(glyph.key, glyph.label)))
             button.clicked.connect(lambda _checked=False, k=glyph.key:
@@ -14895,10 +14962,11 @@ class MainWindow(QMainWindow):
         @throws ValueError When a value cannot be written as JSON (NaN).
         """
         from dataclasses import asdict
+        from ..core.footprint import text_positions_json
         pins = state.get("package_pins")
         return json.loads(json.dumps({
             "drawings": state["drawings"],
-            "texts": {key: list(value) for key, value in state["texts"].items()},
+            "texts": text_positions_json(state["texts"]),
             "pad_overrides": state["pad_overrides"],
             "package_pins": [asdict(pin) for pin in pins] if pins is not None else None,
         }, ensure_ascii=False, allow_nan=False))
@@ -14913,7 +14981,7 @@ class MainWindow(QMainWindow):
             pad numbers, else the open package's pads stay.
         """
         from dataclasses import asdict
-        from ..core.footprint import validate_footprint_drawings, validate_text_positions
+        from ..core.footprint import validate_footprint_drawings
         package = self.package_geometry
         pins = list(package.pins) if package is not None else None
         raw_pins = data.get("package_pins")
@@ -14925,7 +14993,7 @@ class MainWindow(QMainWindow):
             if rebuilt is not None and [p.number for p in rebuilt.pins] == [p.number for p in package.pins]:
                 pins = list(rebuilt.pins)
         return {"drawings": validate_footprint_drawings(data.get("drawings")),
-                "texts": validate_text_positions(data.get("texts")),
+                "texts": self._load_footprint_text_positions(data.get("texts")),
                 "pad_overrides": self._valid_pad_overrides(data.get("pad_overrides")),
                 "package_pins": pins}
 
@@ -15385,10 +15453,9 @@ class MainWindow(QMainWindow):
             elif kind == "text":
                 # Anchored texts grow right and up from their point (its
                 # handle sits on the bottom-left corner); legacy ones are
-                # centred on it (see _drawing_text_position).
+                # centred on it, as KiCad draws each (see _drawing_text_item).
                 text_item = _drawing_text_item(record, mm_to_px)
                 self.preview_scene.addItem(text_item)
-                text_item.setPos(*_drawing_text_position(record, mm_to_px, text_item))
                 items = [text_item]
             hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
             for item in items:
@@ -15535,6 +15602,33 @@ class MainWindow(QMainWindow):
             handle = _screen_handle(scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
             handle.setData(HANDLE_KEY_ROLE, f"{index}:{point_index}")
             handle.setToolTip(hint)
+
+    def _on_footprint_text_hovered(self, key: str) -> None:
+        """@brief The pointer came near a REF**/Value text (its key) or left them (""): squares follow.
+
+        @param key Text key whose anchor square shows, or "" to hide them all.
+        @note Same rule as the symbol editor's property anchors: the square
+            shows while the pointer is within `HOVER_KEEP_MARGIN_PX` screen px
+            of the text and its anchor, and while the text is dragged.
+        """
+        self._fp_hovered_text = key
+        self._refresh_text_anchor_squares()
+
+    def _refresh_text_anchor_squares(self) -> None:
+        """@brief Show only the anchor square of the hovered REF**/Value text.
+
+        @note The squares are children of the text groups and are not
+            tagged as drawing handles, so `_refresh_drawing_handles` never
+            removes them; their visibility is set here only.
+        """
+        from .footprint_view import TEXT_ANCHOR_ROLE, TEXT_KEY_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        for item in scene.items():
+            if item.data(TEXT_ANCHOR_ROLE) is not None:
+                item.setVisible(bool(self._fp_hovered_text)
+                                and item.data(TEXT_KEY_ROLE) == self._fp_hovered_text)
 
     def _on_footprint_drawing_hovered(self, index: int) -> None:
         """@brief The pointer entered (index >= 0) or left (-1) a drawing: handles follow."""
@@ -15944,7 +16038,7 @@ class MainWindow(QMainWindow):
         self._sync_3d_pin_functions()
         self._refresh_symbol_tab()
 
-    # ── Tab 5: Modello 3D ──────────────────────────────────────────
+    # ── Tab 5: Modello 3D (3D model) ───────────────────────────────
 
     def _build_3d_tab(self) -> QWidget:
         """@brief Build the 3D tab: one icon toolbar, the preview, the status line.
@@ -15963,16 +16057,16 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(*(CONTENT_MARGIN_PX,) * 4)
         outer.setSpacing(8)
 
-        # Una sola barra di icone (scelta dell'utente, 2026-09-23): a sinistra
-        # gli strumenti di vista, poi un divisore, poi i comandi del flusso
-        # di lavoro. Niente testo fisso sopra il modello: i nomi stanno nei
-        # tooltip, tradotti come ogni altro testo dell'interfaccia. Il widget
-        # conserva il nome `model_3d_action_bar`: e' ancora la barra delle
-        # azioni della scheda, solo spostata in alto.
+        # A single icon bar (user's choice, 2026-09-23): on the left the
+        # view tools, then a divider, then the workflow commands. No fixed
+        # text above the model: the names are in the tooltips, translated like
+        # every other interface text. The widget keeps the name
+        # `model_3d_action_bar`: it is still the tab's action bar, only
+        # moved to the top.
         self.model_3d_action_bar = QWidget()
         toolbar = QHBoxLayout(self.model_3d_action_bar)
-        # Stessi margini laterali della scheda sotto: le icone restano in
-        # colonna con il bordo del modello.
+        # Same side margins as the tab below: the icons stay in
+        # column with the model's edge.
         toolbar.setContentsMargins(10, 8, 10, 0)
         toolbar.setSpacing(4)
         self.chk_pin_numbers = self._view_tool_button(
@@ -15983,45 +16077,46 @@ class MainWindow(QMainWindow):
         self.chk_pin_numbers.setChecked(bool(self._config.get("show_pin_numbers_3d", True)))
         self.chk_pin_numbers.toggled.connect(self._on_pin_numbers_toggled)
         toolbar.addWidget(self.chk_pin_numbers)
-        # Sempre disponibile: nella barra un'icona che compare e scompare
-        # sposterebbe le altre sotto il mouse.
+        # Always available: in the bar an icon that appears and disappears
+        # would move the others under the mouse.
         self.btn_pinout_3d = self._view_tool_button(
             "pinout-table.svg", "Tabella pinout: numero, nome e funzione di ogni piedino.")
         self.btn_pinout_3d.clicked.connect(self._show_pinout_dialog)
         toolbar.addWidget(self.btn_pinout_3d)
-        # «Inquadra» sta accanto al cubo di navigazione, con gli altri comandi
-        # di vista (utente, 27/09), non piu' nella barra.
+        # «Inquadra» (fit view) is next to the navigation cube, with the other view
+        # commands (user, 27/09), no longer in the bar.
         self.btn_open_3dshapes = self._view_tool_button(
             "folder-3d.svg", "Apri la cartella 3dshapes con i file STEP generati.")
         self.btn_open_3dshapes.clicked.connect(self._open_3dshapes_dir)
         toolbar.addWidget(self.btn_open_3dshapes)
 
-        # Divisore verticale fra la vista (non cambia nulla) e il flusso di
-        # lavoro (rigenera, accetta, torna alla revisione).
-        # Lo stesso divisore delle barre delle revisioni: una barra uniforme.
+        # Vertical divider between the view (changes nothing) and the workflow
+        # (regenerate, accept, back to the review).
+        # The same divider as the review bars: a uniform bar.
         from .review_tools import toolbar_divider
         self.toolbar_3d_divider = toolbar_divider()
         toolbar.addWidget(self.toolbar_3d_divider)
 
-        # Comando principale della scheda: l'ultimo passo gratuito della pipeline.
+        # Main command of the tab: the last free step of the pipeline.
         self.btn_regen_3d = self._workflow_tool_button(
             "wf-regenerate.svg",
             "Rigenera modello 3D (STEP) con queste annotazioni",
             "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
             "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
             "revisione dei componenti. Nessuna richiesta AI: gratuito.")
-        # Nessuna enfasi propria (utente, 2026-09-24: «deve essere una cosa
-        # uniforme»): la cornice blu fissa lo faceva sembrare un interruttore
-        # acceso. Si distingue per la posizione, ultimo della barra.
+        # No emphasis of its own (user, 2026-09-24:
+        # «deve essere una cosa uniforme» (it must be uniform)): the fixed blue frame
+        # made it look like a switch turned on. It stands out by its position, last
+        # in the bar.
         self.btn_regen_3d.clicked.connect(self._regenerate_3d)
-        # Aggiunto alla barra PER ULTIMO, dopo il tipo di contatto (scelta
-        # dell'utente, 2026-09-24): prima si correggono corpi e contatti, poi
-        # si rigenera, e la barra si legge nello stesso ordine.
-        # «Accetto, mi piace»: dopo aver guardato il solido, i modelli KiCad
-        # agganciati diventano abbinamenti accettati che le schede future
-        # riusano subito (come proposta da confermare). Acceso solo quando
-        # c'e' un solido generato sui dati correnti: si accetta cio' che si e'
-        # visto, non dati cambiati dopo.
+        # Added to the bar LAST, after the contact type (user's choice,
+        # 2026-09-24): first bodies and contacts are corrected, then the model is
+        # regenerated, and the bar reads in the same order.
+        # «Accetto, mi piace» (I accept, I like it): after looking at the solid, the
+        # attached KiCad models become accepted matches that future boards
+        # reuse at once (as a proposal to confirm). Enabled only when
+        # there is a solid generated on the current data: one accepts what one has
+        # seen, not data changed afterwards.
         self.btn_accept_models = self._workflow_tool_button(
             "wf-accept.svg",
             "Accetto, mi piace — ricorda questi modelli…",
@@ -16033,9 +16128,9 @@ class MainWindow(QMainWindow):
         self.btn_accept_models.clicked.connect(self._accept_models)
         self.btn_accept_models.setEnabled(False)
         toolbar.addWidget(self.btn_accept_models)
-        # Accanto a chi lo riempie, l'archivio si rivede (utente, 2026-09-24):
-        # prima stava solo nel menu Configurazione, che resta. Sempre attivo:
-        # consultare l'archivio non chiede un solido generato.
+        # Next to whoever fills it, the archive can be reviewed (user, 2026-09-24):
+        # before it was only in the Configurazione (configuration) menu, where it
+        # stays. Always active: consulting the archive needs no generated solid.
         self.btn_accepted_archive = self._workflow_tool_button(
             "wf-archive.svg",
             "Archivio abbinamenti accettati…",
@@ -16044,30 +16139,30 @@ class MainWindow(QMainWindow):
             "questa scheda. Nessuna richiesta AI: gratuito.")
         self.btn_accepted_archive.clicked.connect(self._show_accepted_models_for_board)
         toolbar.addWidget(self.btn_accepted_archive)
-        # Copie dei pulsanti della scheda Progetto: da qui si vede il solido
-        # e si capisce se mancano corpi, quindi da qui si deve poter tornare
-        # alle proposte annotate e ripartire (revisione gratuita; rilancio a
-        # pagamento, dichiarato -- anche dall'icona, che porta una moneta).
-        # Stesso stato delle copie in Progetto.
-        # UNA icona per la revisione (utente, 2026-09-30, HANDOFF 162): e'
-        # guardando il solido che si scopre un corpo sbagliato, e la stessa
-        # finestra mostra proposte del rilevatore o inventario AI a seconda
-        # dello stadio raggiunto.
+        # Copies of the buttons of the Progetto (project) tab: from here the solid
+        # is seen and one understands whether bodies are missing, so from here it
+        # must be possible to go back to the annotated proposals and start again
+        # (free review; paid re-run, declared -- also by the icon, which carries a
+        # coin). Same state as the copies in Progetto.
+        # ONE icon for the review (user, 2026-09-30, HANDOFF 162): it is by
+        # looking at the solid that a wrong body is discovered, and the same
+        # window shows detector proposals or AI inventory depending on the
+        # stage reached.
         self.btn_component_review_3d = self._mirror_project_action(
             self.btn_component_review, self._open_component_review, toolbar,
             "wf-review.svg")
         self.btn_relaunch_inventory_3d = self._mirror_project_action(
             self.btn_relaunch_inventory, self._relaunch_inventory, toolbar,
             "wf-relaunch-ai.svg")
-        # Modifica a mano dei corpi (utente, 2026-09-26): la tabella sotto il
-        # 3D e' stata tolta, i dati no. Serve anche senza la foto in memoria,
-        # che la revisione fotografica invece richiede. Il suo pulsante nella
-        # barra e' stato tolto (utente, 2026-09-29, HANDOFF 152): l'editor si
-        # apre con Ctrl+E (`_shortcut_edit_components`) o dal menu del tasto
-        # destro sul corpo nella vista 3D («Modifica componente...»).
-        # «Copia formato» (utente, 2026-09-27): accanto al tipo di contatto,
-        # dove l'utente l'ha indicata. Interruttore: acceso copia e incolla,
-        # spento rigenera una volta sola.
+        # Manual editing of the bodies (user, 2026-09-26): the table below the
+        # 3D was removed, the data were not. It works even without the photo in
+        # memory, which the photographic review instead requires. Its button in the
+        # bar was removed (user, 2026-09-29, HANDOFF 152): the editor
+        # opens with Ctrl+E (`_shortcut_edit_components`) or from the right-click
+        # menu on the body in the 3D view («Modifica componente...» (edit component)).
+        # «Copia formato» (copy format) (user, 2026-09-27): next to the contact type,
+        # where the user pointed it. A toggle: on, it copies and pastes;
+        # off, it regenerates only once.
         self.btn_format_painter_3d = self._workflow_tool_button(
             "format-painter.svg", "Copia formato",
             "Accendi, poi clic sul componente giusto per copiarne misure, altezza, "
@@ -16086,11 +16181,11 @@ class MainWindow(QMainWindow):
         self._format_targets = []
         self._refresh_components_editor_button()
 
-        # Il tipo di contatto va correggibile da qui: e' guardando il solido
-        # che si vede un mezzo foro dove la scheda ha un foro passante, e la
-        # tabella dei lati sta in un tab che non si mostra. Subito prima di «Rigenera»
-        # perche' la correzione e la rigenerazione gratuita sono un unico
-        # gesto. L'etichetta testuale e' diventata un'icona con tooltip.
+        # The contact type must be correctable from here: it is by looking at the
+        # solid that one sees a half hole where the board has a through hole, and the
+        # side table is in a tab that is not shown. Right before «Rigenera» (regenerate)
+        # because the correction and the free regeneration are a single
+        # gesture. The text label has become an icon with a tooltip.
         self.contact_style_bar_3d = QWidget()
         style_layout = QHBoxLayout(self.contact_style_bar_3d)
         style_layout.setContentsMargins(6, 0, 0, 0)
@@ -16104,8 +16199,8 @@ class MainWindow(QMainWindow):
         self.combo_contact_style_3d = self._contact_style_combo(default_contact_style())
         self.combo_contact_style_3d.addItem(self.i18n.text(CONTACT_STYLE_MIXED_LABEL), None)
         self.combo_contact_style_3d.addItem(self.i18n.text(CONTACT_STYLE_UNKNOWN_LABEL), "")
-        # Solo informative: si sceglie un tipo per tutti i lati; «diverso» e
-        # «da scegliere» descrivono lo stato, non sono una scelta.
+        # Informational only: one type is chosen for all the sides; «diverso» and
+        # «da scegliere» (different, to be chosen) describe the state, they are not a choice.
         for index in (self.combo_contact_style_3d.count() - 2,
                       self.combo_contact_style_3d.count() - 1):
             self.combo_contact_style_3d.model().item(index).setEnabled(False)
@@ -16118,16 +16213,16 @@ class MainWindow(QMainWindow):
             self._on_contact_style_all_changed)
         style_layout.addWidget(self.combo_contact_style_3d)
         toolbar.addWidget(self.contact_style_bar_3d)
-        # Nascosta finche' il modulo non e' castellated con almeno un lato:
-        # la accende `_sync_contact_style_bar`, che la tiene allineata ai lati.
+        # Hidden until the module is castellated with at least one side:
+        # `_sync_contact_style_bar` turns it on and keeps it aligned with the sides.
         self.contact_style_bar_3d.hide()
         self.chk_header_pins_3d = QCheckBox("Mostra gli header nel modello 3D")
         self.chk_header_pins_3d.setToolTip(self.chk_header_pins.toolTip())
         self.chk_header_pins_3d.toggled.connect(self.chk_header_pins.setChecked)
         toolbar.addWidget(self.chk_header_pins_3d)
-        # Componente singolo (utente, 2026-10-10): scritta sulla faccia
-        # superiore e numeri dei pin sulla faccia inferiore, accanto ai
-        # reofori. Serigrafia del solido, non geometria: basta rigenerare il 3D.
+        # Single component (user, 2026-10-10): marking on the top face and pin
+        # numbers on the bottom face, next to the leads. Silkscreen of the
+        # solid, not geometry: regenerating the 3D is enough.
         self.top_text_bar_3d = QWidget()
         top_text_layout = QHBoxLayout(self.top_text_bar_3d)
         top_text_layout.setContentsMargins(0, 0, 0, 0)
@@ -16160,8 +16255,8 @@ class MainWindow(QMainWindow):
         # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
         # actions, keeping handlers and the automatic extraction unchanged.
         self.btn_terminal_detail.hide()
-        # Stessa decisione (MEMORY.md, 2026-09-13): nascosto, non rimosso. Stava
-        # sotto la tabella componenti, tolta il 2026-09-26 con il suo pannello.
+        # Same decision (MEMORY.md, 2026-09-13): hidden, not removed. It was
+        # below the component table, removed on 2026-09-26 with its panel.
         self.btn_lead_refinement = QPushButton("Affina reofori / saldature...")
         self.btn_lead_refinement.setToolTip(
             "Passaggio AI facoltativo: conserva corpi e conteggio, separa solo i reofori distinguibili.")
@@ -16170,13 +16265,12 @@ class MainWindow(QMainWindow):
         self.btn_lead_refinement.hide()
         toolbar.addStretch()
 
-        # Indicatore di caricamento (nota 10 dell'utente, 2026-09-23): entrare
-        # nella scheda con una mesh grande bloccava la finestra per secondi
-        # senza alcun segno. Sta nella barra, a destra, e non sopra il
-        # disegno: il visore VTK e' una superficie OpenGL nativa su cui un
-        # widget figlio non si compone in modo affidabile, e un banner
-        # inserito sopra l'anteprima la ridimensionerebbe proprio mentre la si
-        # disegna. Il cursore di attesa copre l'area del modello.
+        # Loading indicator (user's note 10, 2026-09-23): entering the tab with
+        # a large mesh froze the window for seconds without any sign. It is in
+        # the bar, on the right, and not over the drawing: the VTK viewer is a
+        # native OpenGL surface on which a child widget does not compose
+        # reliably, and a banner inserted above the preview would resize it right
+        # while it is being drawn. The wait cursor covers the model area.
         self.loading_3d_indicator = QWidget()
         loading_layout = QHBoxLayout(self.loading_3d_indicator)
         loading_layout.setContentsMargins(0, 0, 0, 0)
@@ -16190,8 +16284,8 @@ class MainWindow(QMainWindow):
         loading_layout.addWidget(self.label_3d_loading)
         toolbar.addWidget(self.loading_3d_indicator)
         self.loading_3d_indicator.hide()
-        # Adesso le copie hanno un genitore: prima di qui `setVisible(True)`
-        # avrebbe aperto finestre a se' stanti.
+        # Now the copies have a parent: before this point `setVisible(True)`
+        # would have opened stand-alone windows.
         self._apply_project_action_mirror_visibility()
 
         # The viewer is built now only when its class is already at hand (a
@@ -16207,13 +16301,13 @@ class MainWindow(QMainWindow):
         self._wire_preview_3d()
         self.preview_3d.setMinimumHeight(120)
         outer.addWidget(self.preview_3d, 1)
-        # Le viste standard si scelgono dal cubo dentro l'anteprima, che ha
-        # preso il posto della riga «Vista: Iso, Sopra, …».
+        # The standard views are chosen from the cube inside the preview, which
+        # took the place of the «Vista: Iso, Sopra, …» (view: iso, top, …) row.
         self._apply_view_cube_labels()
 
-        # Riga di stato del 3D: visibile SOLO per errori e avvisi (scelta
-        # dell'utente). Gli esiti normali restano nel testo -- e nel log -- ma
-        # non occupano lo spazio sotto il modello. Vedi `_set_3d_status`.
+        # 3D status line: visible ONLY for errors and warnings (user's
+        # choice). The normal outcomes stay in the text -- and in the log -- but
+        # do not take up the space below the model. See `_set_3d_status`.
         self.label_3d_status = QLabel()
         self.label_3d_status.setWordWrap(True)
         outer.addWidget(self.label_3d_status)
@@ -16223,7 +16317,7 @@ class MainWindow(QMainWindow):
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
-        # La barra sta sopra l'anteprima: e' la prima cosa che l'occhio incontra.
+        # The bar is above the preview: it is the first thing the eye meets.
         container_layout.addWidget(self.model_3d_action_bar)
         container_layout.addWidget(tab, 1)
         self.model_3d_page = container
@@ -16507,7 +16601,11 @@ class MainWindow(QMainWindow):
         viewer.show_pin_numbers = self.chk_pin_numbers.isChecked()
 
     def preview_3d_loaded(self) -> bool:
-        """@brief True when the real viewer (or a test stub) is in the 3D tab, not the placeholder."""
+        """@brief Tell whether the real 3D viewer is in place.
+
+        @return True when the real viewer (or a test stub) is in the 3D tab,
+            not the placeholder.
+        """
         return not isinstance(self.preview_3d, Preview3DPending)
 
     def _ensure_preview_3d(self) -> bool:
@@ -16668,13 +16766,13 @@ class MainWindow(QMainWindow):
         self._config["show_pin_numbers_3d"] = checked
         self._save_config_safely()
         self.preview_3d.set_pin_numbers(checked)
-        # Ridisegna la vista corrente: mesh generata se c'e', altrimenti
-        # l'approssimazione dai parametri.
+        # Redraw the current view: generated mesh if there is one, otherwise
+        # the approximation from the parameters.
         if self._last_mesh_path and Path(self._last_mesh_path).is_file():
             try:
                 self.preview_3d.render_mesh(self._last_mesh_path)
                 return
-            except Exception as exc:  # noqa: BLE001 - si ricade sull'anteprima parametrica
+            except Exception as exc:  # noqa: BLE001 - it falls back on the parametric preview
                 self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
         self._draw_preview_3d()
 
@@ -16706,8 +16804,8 @@ class MainWindow(QMainWindow):
         """
         if self._background_work_running() or any(
                 worker.isRunning() for worker in getattr(self, "_abandoned_workers", ())):
-            # Una sola corsa alla volta puo' essere legata a un progetto per i
-            # costi: si dice perche' il passo non parte, invece di tacere.
+            # Only one run at a time can be bound to a project for the
+            # costs: the reason the step does not start is stated, instead of keeping silent.
             self._append_log(tx("Dettaglio terminali non avviato: un altro lavoro e' ancora "
                                 "in corso; riprova quando e' finito."))
             return
@@ -16811,7 +16909,7 @@ class MainWindow(QMainWindow):
         return self.i18n.text(pending), STATUS_INFO
 
     def _regenerate_3d(self) -> None:
-        """@brief Rigenera solo lo STEP con le annotazioni correnti (il footprint resta com'e').
+        """@brief Regenerate only the STEP with the current annotations (the footprint stays as it is).
 
         @note Footprint draft (review, 2026-10-14): the solid is built from
             the package pads (drill, pad size), so a pending footprint draft
@@ -16940,23 +17038,23 @@ class MainWindow(QMainWindow):
         self._cad3d_worker.cancellable.connect(self._on_cad_cancellable)
         self._cad3d_worker.error.connect(self._on_regen_3d_error)
         self._cad3d_worker.finished.connect(self._on_regen_3d_finished)
-        # FreeCAD gira nel worker, quindi la GUI resta viva: lo spinner si
-        # anima davvero e il tempo trascorso scorre. Le schede si bloccano
-        # come nella generazione completa, per non cambiare i parametri
-        # mentre il solido viene costruito su quelli vecchi.
+        # FreeCAD runs in the worker, so the GUI stays alive: the spinner really
+        # animates and the elapsed time runs. The tabs are locked
+        # as in the full generation, so as not to change the parameters
+        # while the solid is being built on the old ones.
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
         self._start_log_session(tx("Rigenerazione modello 3D"))
-        # Questa e' un'operazione a se', e non chiama il modello AI: lasciare
-        # il consuntivo dell'ultima analisi dentro la modale lo farebbe
-        # leggere come il costo di cio' che sta accadendo adesso. Resta nel
-        # Log AI, che dice esplicitamente "ultima analisi".
-        # Vale per OGNI generazione, anche quella automatica: vedi
+        # This is an operation of its own, and does not call the AI model: leaving
+        # the final account of the last analysis inside the modal would make it
+        # read as the cost of what is happening now. It stays in the
+        # AI log, which explicitly says "last analysis".
+        # It holds for EVERY generation, the automatic one too: see
         # `_clear_cost_for_generation`.
         self._clear_cost_for_generation()
         self.analysis_overlay.start('Generazione modello 3D',
                                     'Avvio di FreeCAD…', abortable=True)
-        # Il footprint non si riscrive: restano i due passi del 3D.
+        # The footprint is not rewritten: the two 3D steps remain.
         if self._is_single_component_project():
             self.analysis_overlay.set_steps(("Corpo e terminali FreeCAD",))
             self._generation_step_of = {"freecad": 0}
@@ -16970,14 +17068,14 @@ class MainWindow(QMainWindow):
         self._track_background_work(self._cad3d_worker)
 
     def _on_regen_3d_progress(self, message: str) -> None:
-        """Porta sulla modale i messaggi che arrivano durante la generazione."""
+        """Bring to the modal the messages that arrive during the generation."""
         self.analysis_overlay.set_status(message)
 
     def _on_regen_3d_finished(self) -> None:
-        """@brief Chiude la modale e riabilita il comando, in ogni esito.
+        """@brief Close the modal and re-enable the command, whatever the outcome.
 
-        @note Vale anche per l'interruzione: `finished` scatta comunque, ed e'
-            qui che si chiude la richiesta di fermarsi (`_abort_pending`).
+        @note It applies to the interruption too: `finished` fires anyway, and
+            it is here that the stop request is closed (`_abort_pending`).
         """
         self._retry_footprint_rewrite()
         aborted, self._abort_pending = self._abort_pending, False
@@ -17090,7 +17188,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _show_generated_mesh(self, step_path: Path) -> None:
-        """Mostra in anteprima la mesh del solido appena generato (fillet e testo inclusi)."""
+        """Show in the preview the mesh of the solid just generated (fillets and text included)."""
         report_path = step_path.parent.parent / 'kicad-model-candidates.json'
         if report_path.is_file():
             try:
@@ -17127,8 +17225,8 @@ class MainWindow(QMainWindow):
         previous = self._last_mesh_path
         if self._prepare_mesh_then(mesh_path, partial(self._apply_generated_mesh, mesh_path),
                                    partial(self._generated_mesh_unavailable, mesh_path, previous)):
-            # Il solido e' scritto e si sta preparando: per il resto della
-            # finestra (rigenerazione automatica, ingresso nella scheda) c'e'.
+            # The solid is written and being prepared: for the rest of the
+            # window (automatic regeneration, entering the tab) it exists.
             self._last_mesh_path = mesh_path
             return
         self._apply_generated_mesh(mesh_path)
@@ -17148,7 +17246,7 @@ class MainWindow(QMainWindow):
                 f"{self.label_3d_status.text()}\n"
                 + self.i18n.text(
                     "Anteprima aggiornata con la geometria reale esportata (fillet e testo inclusi)."), STATUS_INFO)
-        except Exception as exc:  # noqa: BLE001 - anteprima non critica
+        except Exception as exc:  # noqa: BLE001 - non-critical preview
             self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
 
     def _generated_mesh_unavailable(self, mesh_path: Path, previous, error: str) -> None:
@@ -17163,20 +17261,20 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=error))
 
     def _on_regen_3d_error(self, message: str) -> None:
-        """@brief Scrive nel log e sulla barra 3D perche' lo STEP non c'e'.
+        """@brief Write in the log and on the 3D bar why the STEP is missing.
 
-        @param message Testo dell'esito, come arriva dal worker.
-        @note Come `_on_cad3d_error`: l'interruzione chiesta dall'utente non e'
-            un guasto, quindi non viene annunciata come tale ne' nel log ne'
-            sulla barra di stato.
+        @param message Outcome text, as it arrives from the worker.
+        @note As in `_on_cad3d_error`: the interruption requested by the user
+            is not a fault, so it is announced as such neither in the log nor
+            on the status bar.
         """
         self._realign_after_3d_failure()
         if not self._cad_result_is_current():
             return
         if CAD_ABORT_MESSAGE in message:
             self._append_log(tx("INTERROTTO 3D: {message}", message=message))
-            # Interrotta dopo l'avvio di FreeCAD, la corsa ha tolto il modello
-            # precedente: dirlo, invece di lasciar credere che sia ancora li'.
+            # Interrupted after FreeCAD started, the run removed the previous
+            # model: say so, instead of letting one believe it is still there.
             self._set_3d_status(self.i18n.text(
                 "Generazione interrotta dall'utente: il modello 3D non è stato "
                 "aggiornato.") if self._step_still_on_disk() else self.i18n.text(
@@ -17187,14 +17285,14 @@ class MainWindow(QMainWindow):
         self._set_3d_status(self.i18n.tr(
             "status.step_failed", error=message.splitlines()[0]), STATUS_ERROR)
 
-    # ── Componenti del modulo (3D) ─────────────────────────────────
+    # ── Module components (3D) ─────────────────────────────────────
 
     #: Keys of a photo component carried into `ComponentBox.match_evidence`.
-    #: Campi strutturali che il 3D legge al posto del nome (verifica del 25/09,
-    #: E11): chi e' solo un'ipotesi del rilevatore, chi e' stato visto
-    #: dall'utente, il conteggio completo dei reofori per il caso «tre piu'
-    #: linguetta», e il riferimento asimmetrico che il costruttore confronta col
-    #: baricentro del modello nativo per stabilire il verso.
+    #: Structural fields that the 3D reads instead of the name (check of 25/09,
+    #: E11): which is only a detector hypothesis, which has been seen by the
+    #: user, the full lead count for the «tre piu' linguetta» (three plus tab)
+    #: case, and the asymmetric reference that the builder compares with the
+    #: centroid of the native model to establish the orientation.
     _MATCH_EVIDENCE_KEYS = (
         '_smd_class', '_smd_rotation_deg', '_smd_rotation_confidence', '_smd_accepted',
         '_smd_body', '_smd_rotation_kind', '_smd_views_agree', '_smd_terminal_count',
@@ -17208,8 +17306,8 @@ class MainWindow(QMainWindow):
         '_crop_class_status', '_category_source', '_category_status',
         '_ai_class_proposal', '_ai_class_confidence', '_terminal_status',
         '_crop_terminal_review_required',
-        # Scala della foto (o incertezza dichiarata): il 3D ne ricava in mm
-        # l'incertezza di misura per sporgenze e archivio degli abbinamenti.
+        # Photo scale (or declared uncertainty): the 3D derives from it in mm
+        # the measurement uncertainty for overhangs and the match archive.
         'measurement_uncertainty_mm', 'photo_scale_px_per_mm')
 
     @classmethod
@@ -17259,8 +17357,8 @@ class MainWindow(QMainWindow):
         row = deepcopy(photo or {})
         for key, value in (component.match_evidence or {}).items():
             row.setdefault(key, deepcopy(value))
-        # Copie, non riferimenti: chi legge o modifica la riga non deve poter
-        # toccare il componente da cui e' nata, e viceversa.
+        # Copies, not references: whoever reads or edits the row must not be able
+        # to touch the component it came from, and vice versa.
         row.update(pin_count=component.pin_count, pins_by_side=deepcopy(component.pins_by_side),
                    pin_count_confidence=component.pin_count_confidence,
                    pin_count_source=component.pin_count_source,
@@ -17287,8 +17385,8 @@ class MainWindow(QMainWindow):
             row["render_3d_override"] = component.render_3d_override
         else:
             row.pop("render_3d_override", None)
-        # Sei decimali come l'editor che ha preceduto questi dati: le correzioni
-        # fotografiche conservano la precisione dei piccoli package.
+        # Six decimals like the editor that preceded these data: the photographic
+        # corrections keep the precision of the small packages.
         row.update(name=component.name, kind=component.kind,
                    x_mm=round(float(component.x), 6), y_mm=round(float(component.y), 6),
                    length_mm=round(float(component.length), 6),
@@ -17319,8 +17417,8 @@ class MainWindow(QMainWindow):
         excluded = [deepcopy(c) for c in components if ai_only_excluded(c)]
         boxes = [self._component_from_photo(c) for c in kept]
         for component in excluded:
-            # Stessa validazione della geometria dei corpi tenuti: un corpo
-            # escluso malformato non deve far fallire dopo la revisione.
+            # Same validation as the geometry of the kept bodies: a malformed
+            # excluded body must not make things fail after the review.
             self._component_from_photo(component)
         self.castellated_components = boxes
         self._photo_rows = [self._photo_row(box, c) for box, c in zip(boxes, kept)]
@@ -17342,8 +17440,8 @@ class MainWindow(QMainWindow):
         """
         self._append_log(tx(
             "{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano "
-            "fuori dalla tabella e dal 3D: per tenerli riapri «Modifica la revisione dei "
-            "componenti…» e premi T su ciascuno.", count=len(self._photo_excluded_rows)))
+            "fuori dalla tabella e dal 3D: per tenerli riapri «Revisione componenti…» e "
+            "premi T su ciascuno.", count=len(self._photo_excluded_rows)))
 
     def _refresh_components_editor_button(self) -> None:
         """@brief Offer «Copia formato» only when there are bodies to edit.
@@ -17474,19 +17572,20 @@ class MainWindow(QMainWindow):
         if callable(highlight):
             highlight(self._format_source_row, list(self._format_target_rows))
 
-    #: Correzioni di orientamento offerte dal menu contestuale. Solo multipli
-    #: di un quarto di giro: i modelli della libreria KiCad seguono la
-    #: convenzione del footprint, quindi uno mal orientato lo e' sempre di
-    #: 90, 180 o 270 gradi, mai di un angolo qualsiasi.
+    #: Orientation corrections offered by the context menu. Only multiples
+    #: of a quarter turn: the models of the KiCad library follow the
+    #: footprint convention, so a badly oriented one is always off by
+    #: 90, 180 or 270 degrees, never by an arbitrary angle.
     MENU_ROTATIONS_DEG = (90, 180, 270)
 
     def _show_component_menu(self, row: int, position) -> None:
-        """@brief Menu del tasto destro su un componente della vista 3D.
+        """@brief Right-click menu on a component of the 3D view.
 
-        La vista 3D serve solo a indicare quale riga: le voci agiscono sui
-        metadati dei componenti salvati (`_photo_rows`), che restano la fonte di verita'.
-        Ogni scelta viene scritta nel JSON delle scelte e ha effetto dalla
-        rigenerazione FreeCAD successiva, senza ripassare dal modello AI.
+        The 3D view only serves to indicate which row: the entries act on the
+        metadata of the saved components (`_photo_rows`), which stay the
+        source of truth. Every choice is written into the choices JSON and
+        takes effect from the next FreeCAD regeneration, without going
+        through the AI model again.
         """
         if not 0 <= row < len(self._photo_rows):
             return
@@ -17526,21 +17625,21 @@ class MainWindow(QMainWindow):
         menu.exec(position)
 
     def _set_component_visibility(self, row: int, visible: bool) -> None:
-        """@brief Includi o escludi un componente dal solido, senza perderlo.
+        """@brief Include or exclude a component from the solid, without losing it.
 
-        La riga resta in tabella e nel JSON: un falso positivo tolto dal 3D
-        va comunque documentato, altrimenti alla corsa successiva nessuno
-        saprebbe che era stato proposto ed e' stato scartato a ragion veduta.
+        The row stays in the table and in the JSON: a false positive removed
+        from the 3D must still be documented, otherwise at the next run nobody
+        would know that it was proposed and discarded on purpose.
         """
         self._update_component_metadata(row, {"render_3d_override": visible})
 
     def _rotate_component_model(self, row: int, degrees) -> None:
-        """@brief Somma una correzione d'orientamento, o la azzera con None.
+        """@brief Add an orientation correction, or reset it with None.
 
-        Si somma invece di sostituire perche' l'angolo di partenza lo deduce
-        FreeCAD confrontando il modello nativo con la misura fotografica:
-        qui quell'angolo non e' noto, e "ruota di 90 gradi" e' comunque cio'
-        che si intende guardando il solido storto.
+        It is added instead of replaced because the starting angle is deduced
+        by FreeCAD by comparing the native model with the photo measurement:
+        here that angle is not known, and "rotate by 90 degrees" is anyway
+        what is meant when looking at the crooked solid.
         """
         if degrees is None:
             self._update_component_metadata(row, {"model_rotation_delta_deg": None})
@@ -17552,10 +17651,10 @@ class MainWindow(QMainWindow):
             row, {"model_rotation_delta_deg": total or None})
 
     def _update_component_metadata(self, row: int, changes: dict) -> None:
-        """@brief Scrivi i metadati di una riga e propaga la modifica.
+        """@brief Write the metadata of a row and propagate the change.
 
-        Un valore None toglie la chiave: significa "torna all'automatismo",
-        che non e' la stessa cosa di una scelta esplicita dal valore neutro.
+        A None value removes the key: it means "back to automatic", which is
+        not the same thing as an explicit choice of the neutral value.
         """
         if not 0 <= row < len(self._photo_rows):
             return
@@ -17568,9 +17667,9 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"Componente '{str(metadata.get('name') or '').strip() or row}': "
             + ", ".join(f"{k}={metadata.get(k, 'automatico')}" for k in changes))
-        # Stesso percorso della revisione fotografica: salva il JSON delle
-        # scelte e marca il 3D da rigenerare. La rigenerazione e' FreeCAD e
-        # basta -- nessuna chiamata al modello AI.
+        # Same path as the photographic review: it saves the JSON of the
+        # choices and marks the 3D to be regenerated. The regeneration is FreeCAD and
+        # nothing else -- no call to the AI model.
         self._apply_photo_review(self._photo_components_from_table())
 
     def _components_from_table(self) -> list[ComponentBox]:
@@ -17605,7 +17704,7 @@ class MainWindow(QMainWindow):
                             describe_crop(crop))
                         box.match_evidence = evidence
                     except (KeyError, TypeError, ValueError, cv2.error):
-                        # Una foto/box non utilizzabile non blocca la generazione 3D.
+                        # An unusable photo/box does not block the 3D generation.
                         continue
         return components
 
@@ -17714,19 +17813,19 @@ class MainWindow(QMainWindow):
             self._draw_grid(**spec)
 
     def _fit_preview(self, force: bool = False) -> None:
-        """@brief Inquadra il footprint, ignorando la griglia, se la camera lo segue.
+        """@brief Frame the footprint, ignoring the grid, if the camera follows it.
 
-        La griglia si estende oltre il componente: includendola
-        nell'inquadratura, attivarla e disattivarla cambiava la dimensione
-        del disegno a parita' di footprint -- confondente proprio quando la
-        griglia serve a valutare le distanze.
+        The grid extends beyond the component: by including it in the framing,
+        switching it on and off changed the size of the drawing for the same
+        footprint -- confusing precisely when the grid serves to judge the
+        distances.
 
-        @param force True per «Adatta alla vista»: inquadra comunque e
-            torna a seguire il footprint.
-        @note Dopo uno zoom o uno spostamento dell'utente
-            (`FootprintView.auto_fit` False) i ridisegni lasciano la camera
-            dov'e': modificare un disegno, un testo o un pad non deve
-            cambiare lo zoom (utente, 2026-10-13), come nell'editor del simbolo.
+        @param force True for «Adatta alla vista»: frame anyway and go back to
+            following the footprint.
+        @note After a zoom or a pan by the user (`FootprintView.auto_fit`
+            False) the redraws leave the camera where it is: editing a
+            drawing, a text or a pad must not change the zoom (user,
+            2026-10-13), as in the symbol editor.
         """
         rect = None
         for item in self.preview_scene.items():
@@ -17753,14 +17852,14 @@ class MainWindow(QMainWindow):
         x0: float = 0.0, y0: float = 0.0,
         origin: tuple = (0.0, 0.0),
     ) -> None:
-        """Griglia di riferimento, con passo in mm o in decimi di pollice.
+        """Reference grid, with a pitch in mm or in tenths of an inch.
 
-        Una linea marcata ogni 5 passi fa da riferimento grosso (5mm oppure
-        mezzo pollice), le altre sono sottili.
+        A line marked every 5 steps acts as a coarse reference (5 mm or half
+        an inch), the others are thin.
 
-        (x0, y0) e' l'angolo da cui parte l'area da coprire: zero per il
-        footprint a matrice, che ha il pin 1 nell'origine, negativo per i
-        moduli castellated, centrati sull'origine.
+        (x0, y0) is the corner from which the area to cover starts: zero for
+        the matrix footprint, which has pin 1 at the origin, negative for the
+        castellated modules, centred on the origin.
         """
         self._preview_grid_spec = dict(mm_to_px=mm_to_px, width=width, height=height,
                                        margin=margin, x0=x0, y0=y0, origin=origin)
@@ -17787,7 +17886,7 @@ class MainWindow(QMainWindow):
             line = self.preview_scene.addLine(
                 x, (oy + j_min * step) * mm_to_px, x, (oy + j_max * step) * mm_to_px, pen
             )
-            line.setZValue(-10)  # dietro pad, silkscreen e quote
+            line.setZValue(-10)  # behind pads, silkscreen and dimensions
             line.setData(_GRID_ITEM, True)
             line.setVisible(self.chk_grid.isChecked())
         for j in range(j_min, j_max + 1):
@@ -17857,12 +17956,13 @@ class MainWindow(QMainWindow):
         label.setZValue(5)
 
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
-        """Anteprima del modulo castellated: corpo, piazzole e quote d'ingombro.
+        """Preview of the castellated module: body, pads and outline dimensions.
 
-        Disegno separato da quello a matrice perche' la geometria e' diversa
-        (origine al centro del corpo, pad rettangolari su piu' lati con passi
-        indipendenti), ma come la' i pad vengono da pad_positions(): l'anteprima
-        non puo' divergere dal footprint che verra' scritto.
+        A drawing separate from the matrix one because the geometry is
+        different (origin at the body centre, rectangular pads on several
+        sides with independent pitches), but as there the pads come from
+        pad_positions(): the preview cannot diverge from the footprint that
+        will be written.
         """
         self.preview_scene.clear()
         mm_to_px = 20.0
@@ -17959,9 +18059,9 @@ class MainWindow(QMainWindow):
             path.addRoundedRect(QRectF(x - w / 2, y - h / 2, w, h), radius, radius)
             copper = self.preview_scene.addPath(path, pen, brush)
             copper.setZValue(1)
-            # Solo il foro passante: il footprint e' la piazzola sulla scheda
-            # che ospita il modulo, e li' il mezzo foro non esiste (e' una
-            # lavorazione del bordo del MODULO, che vive nel modello 3D).
+            # Only the through hole: the footprint is the pad on the board
+            # that hosts the module, and there the half hole does not exist (it is
+            # a machining of the MODULE's edge, which lives in the 3D model).
             if pad.drill and pad.drill > 0:
                 d = pad.drill * mm_to_px
                 hole = self.preview_scene.addEllipse(
@@ -17976,7 +18076,7 @@ class MainWindow(QMainWindow):
         if placement.style == CONTACT_THROUGH_HOLE:
             ring = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h, pen, brush)
             ring.setZValue(1)
-            # Foro del lato di questo contatto (i lati possono avere fori diversi).
+            # Hole of this contact's side (the sides may have different holes).
             geometry = getattr(p, "contact_geometry", None)
             drill = geometry(placement).drill if callable(geometry) else p.thru_hole_drill
             d = drill * mm_to_px
@@ -18025,15 +18125,15 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError) as exc:
             if self.combo_mounting.currentData() in {"headers", "headers_square"}:
                 self._set_mounting_error(str(exc))
-            # Campi incompleti o stato di progetto non coerente: nessun
-            # disegno, mai un'eccezione fuori da un gestore Qt.
+            # Incomplete fields or inconsistent project state: no
+            # drawing, never an exception out of a Qt handler.
             return None
         return params
 
     def _draw_preview(self) -> None:
-        # I parametri nascono prima delle schede (`_init_parameters`): la
-        # tipologia scelta mentre si costruisce il tab Progetto li cambia
-        # quando l'anteprima non esiste ancora, e non c'e' nulla da ridisegnare.
+        # The parameters are created before the tabs (`_init_parameters`): the
+        # component type chosen while the Progetto (project) tab is being built
+        # changes them when the preview does not exist yet, and there is nothing to redraw.
         if not hasattr(self, "preview_scene"):
             return
         params = self._preview_params()
@@ -18090,9 +18190,9 @@ class MainWindow(QMainWindow):
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
 
-        # Stessa funzione usata dal generatore 2D e da quello 3D: l'anteprima non
-        # deve poter divergere dal footprint realmente prodotto (e cosi' rispetta
-        # anche la mappa esplicita dei pin letta dal datasheet).
+        # Same function used by the 2D generator and by the 3D one: the preview must
+        # not be able to diverge from the footprint really produced (and so it also
+        # respects the explicit pin map read from the datasheet).
         xs_px, ys_px, label_bounds = [], [], []
         r = (p.pad_diameter / 2) * mm_to_px
         for pin, x_mm, y_mm in pin_positions(p):
@@ -18143,7 +18243,7 @@ class MainWindow(QMainWindow):
         left, right = x0 * mm_to_px, x1 * mm_to_px
         top, bottom = y0 * mm_to_px, y1 * mm_to_px
 
-        # Quota vicina al componente: passo (in alto) e distanza righe (a sinistra)
+        # Dimension close to the component: pitch (at the top) and row spacing (on the left)
         labels_top = min((rect.top() for rect in label_bounds), default=top)
         labels_bottom = max((rect.bottom() for rect in label_bounds), default=bottom)
         if p.cols >= 2:
@@ -18152,7 +18252,7 @@ class MainWindow(QMainWindow):
         if p.rows >= 2:
             self._add_dim_v(0, row_spacing * mm_to_px, left - 40, self._dim_label("dim.row_spacing", row_spacing))
 
-        # Catena di quote: margine sinistro / span pin / margine destro (sotto)
+        # Dimension chain: left margin / pin span / right margin (below)
         def chain_fits(start, end):
             from PyQt6.QtWidgets import QGraphicsSimpleTextItem
             label = QGraphicsSimpleTextItem(f"{(end - start) / mm_to_px:.2f} mm")
@@ -18168,7 +18268,7 @@ class MainWindow(QMainWindow):
             if chain_fits(rightmost_x, right):
                 self._add_dim_h(rightmost_x, right, chain_y, f"{(right - rightmost_x) / mm_to_px:.2f} mm")
 
-        # Catena di quote: margine superiore / span pin / margine inferiore (a destra)
+        # Dimension chain: top margin / pin span / bottom margin (on the right)
         if ys_px:
             topmost_y, bottommost_y = min(ys_px), max(ys_px)
             chain_x = right + 25
@@ -18399,68 +18499,128 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError, OverflowError, ArithmeticError):
             return None
 
+    def _footprint_property_texts(self) -> dict:
+        """@brief The Reference and Value texts the footprint preview draws, by key.
+
+        @return {"Reference": "REF**", "Value": component name, or the
+            placeholder «Value» while the project has no name}.
+        """
+        # An unnamed project still shows (and can drag) its Value text.
+        return {"Reference": "REF**", "Value": self._component_name() or "Value"}
+
+    def _load_footprint_text_positions(self, raw) -> dict:
+        """@brief Chosen Reference/Value positions from a saved mapping, as bottom-left anchors.
+
+        @param raw The ``footprint_texts`` of the project file, or the
+            ``texts`` of a footprint recovery file.
+        @return {key: (x, y)} mm: the validated entries of a marked mapping
+            (`core.footprint.text_positions_anchored`) as they are; the
+            entries of an unmarked (pre-2026-10-16, centred) mapping moved to
+            the bottom-left anchor at which KiCad draws the text where it
+            drew it centred (`_property_text_corner_offset`), so nothing moves
+            in KiCad; the preview may shift it once by a few tenths of a mm.
+        @note Converted once: the next save writes the mark
+            (`core.footprint.text_positions_json`).
+        """
+        from ..core.footprint import (
+            migrate_centred_positions, text_positions_anchored, validate_text_positions)
+        positions = validate_text_positions(raw)
+        if not positions or text_positions_anchored(raw):
+            return positions
+        texts = self._footprint_property_texts()
+        return migrate_centred_positions(
+            positions, {key: _property_text_corner_offset(texts[key]) for key in positions})
+
+    def _footprint_text_anchors(self, footprint=None) -> dict:
+        """@brief Bottom-left anchors, mm, of the Reference and Value texts as the preview draws them.
+
+        @param footprint The footprint the generator writes for this preview,
+            or a callable building it; its default anchors are the
+            bottom-left anchors `core.footprint.Footprint.place_default_texts`
+            converts from the D1 centres with KiCad's text geometry. None, or
+            a build that fails, converts `core.footprint.DEFAULT_TEXT_POSITIONS`
+            the same way.
+        @return {key: (x, y)} for every key of `TEXT_KEYS`: the chosen anchor
+            when there is one, else the footprint's own default anchor
+            (`Footprint.text_anchors`), so the preview shows the anchor the
+            file holds and KiCad draws the default where the centred default
+            was (2026-10-16, «KiCad fermo»).
+        @note The generation worker receives this mapping (`_generate`), so
+            the .kicad_mod writes both texts with ``(justify left bottom)`` at
+            the anchor the preview shows. A default anchor is NOT snapped to
+            the grid: snapping would move the text in KiCad; a drag snaps it.
+        """
+        from ..core.footprint import (
+            DEFAULT_TEXT_POSITIONS, TEXT_KEYS, migrate_centred_positions)
+        anchors = None
+        try:
+            built = footprint() if callable(footprint) else footprint
+            if built is not None:
+                anchors = built.text_anchors()
+        except (ValueError, TypeError, OverflowError, ArithmeticError):
+            # The drawer already reported an invalid geometry; the texts
+            # still show, at the fallback places.
+            pass
+        if anchors is None:
+            texts = self._footprint_property_texts()
+            anchors = migrate_centred_positions(
+                {key: DEFAULT_TEXT_POSITIONS[key] for key in TEXT_KEYS},
+                {key: _property_text_corner_offset(texts[key]) for key in TEXT_KEYS})
+        anchors.update(self.footprint_text_positions)
+        return anchors
+
     def _draw_footprint_texts(self, mm_to_px: float, footprint=None) -> None:
         """@brief Draw «REF**» and the footprint name where the file puts them, draggable.
 
         @param mm_to_px Scene scale of the drawer that calls this.
         @param footprint The footprint the generator writes for this preview,
-            or a callable building it; its default Reference/Value anchors
-            (placed by the generator on this drawer's grid, decision D1) are
-            shown as they are, so the preview equals the file. None, or a
-            build that fails, falls back to `core.footprint.DEFAULT_TEXT_POSITIONS`.
+            or a callable building it (see `_footprint_text_anchors`).
         @note Called by the three 2D drawers after the geometry: the texts
             are the footprint's own Reference (silkscreen) and Value
             (fabrication layer) properties, at their chosen or default
-            position. Each text is
-            a group whose position IS the KiCad anchor (`at`, the centre of
-            the text): a small cross marks it, because a centred text alone
-            does not show where it is anchored (user, 2026-10-13). The group
-            and its children carry the key in `TEXT_KEY_ROLE` for the drag.
+            position. Each text is a group whose position IS its KiCad
+            anchor: the BOTTOM-LEFT corner of the text (left edge, baseline),
+            from which it grows right and up, written with
+            ``(justify left bottom)`` (user, 2026-10-16, same anchor as the
+            drawn texts of 2026-10-14, replacing the centre cross of
+            2026-10-13). The anchor shows the drawn texts' handle square
+            only while the pointer is near the text or the text is dragged,
+            as the symbol editor's property anchors
+            (`_refresh_text_anchor_squares`). The group and its children
+            carry the key in `TEXT_KEY_ROLE` for the drag.
         """
-        from PyQt6.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
-        from ..core.footprint import DEFAULT_TEXT_POSITIONS, PROPERTY_TEXT_SIZE, TEXT_KEYS
-        from .footprint_view import TEXT_KEY_ROLE
-        defaults = DEFAULT_TEXT_POSITIONS
-        try:
-            built = footprint() if callable(footprint) else footprint
-            if built is not None:
-                defaults = {"Reference": built.reference_at, "Value": built.value_at}
-        except (ValueError, TypeError, OverflowError, ArithmeticError):
-            # The drawer already reported an invalid geometry; the texts
-            # still show, at the fallback places.
-            pass
-        # An unnamed project still shows (and can drag) its Value text.
-        texts = {"Reference": "REF**", "Value": self._component_name() or "Value"}
+        from PyQt6.QtWidgets import QGraphicsItemGroup
+        from ..core.footprint import PROPERTY_TEXT_SIZE, TEXT_KEYS
+        from .footprint_view import TEXT_ANCHOR_ROLE, TEXT_KEY_ROLE
+        anchors = self._footprint_text_anchors(footprint)
+        texts = self._footprint_property_texts()
         colours = {"Reference": TEXT, "Value": SUBTEXT}
         hints = {"Reference": self.i18n.text(
                      "Riferimento (REF**) sulla serigrafia: trascinalo dove deve stare; tasto destro per la posizione predefinita."),
                  "Value": self.i18n.text(
                      "Valore sul layer di fabbricazione: trascinalo dove deve stare; tasto destro per la posizione predefinita.")}
-        # The anchor cross in the accent colour, wider than the glyphs are
-        # tall, so it reads through the text it is centred on.
-        arm = 0.75 * mm_to_px
         for key in TEXT_KEYS:
-            x_mm, y_mm = self.footprint_text_positions.get(key, defaults[key])
+            x_mm, y_mm = anchors[key]
             group = QGraphicsItemGroup()
             self.preview_scene.addItem(group)
             # Capitals PROPERTY_TEXT_SIZE mm tall, as in the file (user,
-            # 2026-10-15); centred on the anchor as KiCad centres the text:
-            # half the width to the left, half the cap height above the baseline.
+            # 2026-10-15), at KiCad's width and placed as KiCad draws a
+            # ``(justify left bottom)`` text from the group origin (user,
+            # 2026-10-16), like an anchored drawn text.
             text = _kicad_size_text_item(texts[key], PROPERTY_TEXT_SIZE, colours[key], mm_to_px)
             self.preview_scene.addItem(text)
-            scale = text.scale()
-            rect = text.boundingRect()
-            centre = _drawing_text_baseline(text) - _cap_height_px(text.font()) / 2
-            text.setPos(-rect.width() * scale / 2, -centre * scale)
             group.addToGroup(text)
-            cross_pen = QPen(QColor(BLUE))
-            cross_pen.setCosmetic(True)
-            cross_pen.setWidthF(1.2)
-            # Lines only: the preview tests count ellipses and paths as pads
-            # and drills, and the anchor mark is neither.
-            for mark in (QGraphicsLineItem(-arm, 0, arm, 0), QGraphicsLineItem(0, -arm, 0, arm)):
-                mark.setPen(cross_pen)
-                group.addToGroup(mark)
+            # The drawn texts' handle square (a rect: the preview tests count
+            # ellipses and paths as pads and drills), on top of the glyphs.
+            # Untagged as a drawing handle: the drawing handles' refresh must
+            # not remove it, and it belongs to the text group. Hidden unless
+            # its text is the hovered or dragged one, so a redraw under the
+            # pointer keeps it shown.
+            square = _screen_handle(self.preview_scene, 0.0, 0.0, 6, solid=False)
+            square.setData(0x48474F, None)
+            square.setData(TEXT_ANCHOR_ROLE, True)
+            square.setVisible(key == self._fp_hovered_text)
+            group.addToGroup(square)
             group.setPos(x_mm * mm_to_px, y_mm * mm_to_px)
             tooltip = hints[key] + "\n" + self.i18n.text("Ancoraggio: {x} mm, {y} mm").format(
                 x=f"{x_mm:g}", y=f"{y_mm:g}")
@@ -18503,8 +18663,9 @@ class MainWindow(QMainWindow):
         """@brief Slot of the view: a text was dropped at a scene point; snap it and keep it.
 
         @param key Text key.
-        @param x_scene Drop centre, scene units (20 px/mm in every drawer).
-        @param y_scene Drop centre, scene units.
+        @param x_scene Dropped anchor (the bottom-left corner of the text),
+            scene units (20 px/mm in every drawer).
+        @param y_scene Dropped anchor, scene units.
         """
         # Same snap as the drawings: the drawing grid passes through the
         # first pad, so a text and a drawing dropped at the same point land
@@ -18632,7 +18793,7 @@ class MainWindow(QMainWindow):
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
-        """Disegna una linea di quota orizzontale con tacche e testo centrato."""
+        """Draw a horizontal dimension line with ticks and centred text."""
         pen = QPen(QColor(YELLOW))
         pen.setWidthF(1.0)
         tick = 5
@@ -18644,11 +18805,11 @@ class MainWindow(QMainWindow):
         label.setPos((x1 + x2) / 2 - label.boundingRect().width() / 2, y - 18)
 
     def _add_dim_v(self, y1: float, y2: float, x: float, text: str) -> None:
-        """Disegna una linea di quota verticale con tacche e testo ruotato.
+        """Draw a vertical dimension line with ticks and rotated text.
 
-        Il testo corre lungo la quota (come nei disegni tecnici): scritto in
-        orizzontale, le etichette di quote verticali vicine tra loro -- catena
-        dei margini e quota totale -- finivano una sopra l'altra.
+        The text runs along the dimension (as in technical drawings): written
+        horizontally, the labels of nearby vertical dimensions -- margin chain
+        and overall dimension -- ended up on top of each other.
         """
         pen = QPen(QColor(YELLOW))
         pen.setWidthF(1.0)
@@ -18660,8 +18821,8 @@ class MainWindow(QMainWindow):
         label = self.preview_scene.addSimpleText(text)
         label.setBrush(QBrush(QColor(YELLOW)))
         label.setRotation(-90)
-        # Ruotando di -90 attorno all'origine, il testo si estende verso l'alto
-        # (altezza -> larghezza): si riposiziona per centrarlo sulla quota.
+        # Rotating by -90 around the origin, the text extends upwards
+        # (height -> width): it is repositioned to centre it on the dimension.
         rect = label.boundingRect()
         label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
 
@@ -18697,9 +18858,9 @@ class MainWindow(QMainWindow):
                 self._set_3d_status(*self._no_3d_status())
             return
         if self._is_castellated():
-            # Per i moduli non esiste un'approssimazione parametrica da
-            # disegnare al volo (il solido nasce dal taglio dei semi-fori):
-            # si mostra la geometria reale appena generata, se c'e'.
+            # For modules there is no parametric approximation to draw on the
+            # fly (the solid comes from cutting the half-holes): the real
+            # geometry just generated is shown, if there is any.
             if (not mesh_failed and self._last_mesh_path
                     and Path(self._last_mesh_path).is_file()):
                 try:
@@ -18709,7 +18870,7 @@ class MainWindow(QMainWindow):
                         "e blocco dei componenti)."
                     ), STATUS_INFO)
                     return
-                except Exception as exc:  # noqa: BLE001 - anteprima best-effort
+                except Exception as exc:  # noqa: BLE001 - best-effort preview
                     self._append_log(tx("Anteprima mesh non disponibile: {exc}", exc=exc))
             self.preview_3d.clear_preview()
             self._set_3d_status(*self._no_3d_status(
@@ -18742,9 +18903,9 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int) -> None:
         self._refresh_output_actions()
-        # Il riallineamento puo' aver spento questa scheda e spostato la
-        # finestra altrove (currentChanged annidato): il lavoro di una scheda
-        # che non si vede piu' non si fa (audit 25/09).
+        # The realignment may have turned this tab off and moved the
+        # window elsewhere (nested currentChanged): the work of a tab
+        # that is no longer visible is not done (audit 25/09).
         if index != self.tabs.currentIndex():
             return
         if index == TAB_PROJECT:
@@ -18756,7 +18917,7 @@ class MainWindow(QMainWindow):
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
 
-    # ── Ingresso nella scheda 3D: caricamento con indicatore ───────
+    # ── Entering the 3D tab: loading with an indicator ─────────────
 
     def _mesh_already_showing(self, path) -> bool:
         """@brief Ask the viewer whether that exact, unchanged mesh is on screen.
@@ -18772,7 +18933,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             return bool(is_showing(path))
-        except Exception:  # noqa: BLE001 - la risposta e' solo un'ottimizzazione
+        except Exception:  # noqa: BLE001 - the answer is only an optimisation
             return False
 
     def _enter_3d_tab(self) -> None:
@@ -18799,8 +18960,8 @@ class MainWindow(QMainWindow):
             return
         if (self._rendering_3d or self._pending_3d_render is not None
                 or self._mesh_request is not None):
-            # Gia' in corso o gia' accodato: un secondo rendering della stessa
-            # scena non aggiunge nulla, e accodarlo lo farebbe partire due volte.
+            # Already running or already queued: a second rendering of the same
+            # scene adds nothing, and queuing it would start it twice.
             return
         self._pending_3d_render = (self._model_revision, Path(path))
         self._show_3d_loading(True)
@@ -18827,7 +18988,7 @@ class MainWindow(QMainWindow):
                 return
             if self._prepare_mesh_then(path, partial(self._finish_prepared_3d_render, path),
                                        partial(self._prepared_3d_render_failed, path)):
-                return  # l'indicatore resta finche' la mesh non e' pronta
+                return  # the indicator stays until the mesh is ready
             self._rendering_3d = True
             self._draw_preview_3d()
         finally:
@@ -18965,11 +19126,11 @@ def main(splash=None) -> None:
         first entry in the 3D tab does not pay for them.
     """
     app = QApplication.instance() or QApplication(sys.argv)
-    # Icona del programma: finestra e barra delle applicazioni (anche da sorgente).
+    # Program icon: window and taskbar (also when run from source).
     app.setWindowIcon(QIcon(str(resource_path("kicadgen", "gui", "assets", "app-icon.svg"))))
     app.setStyleSheet(APP_QSS)
-    # Tooltip a capo e dentro la finestra, per tutta l'applicazione: con le
-    # barre di sole icone il tooltip e' l'unico testo di un comando.
+    # Tooltips wrapped and inside the window, for the whole application: with
+    # icon-only bars the tooltip is the only text of a command.
     install_tooltip_filter(app)
     try:
         window = MainWindow()
@@ -18997,8 +19158,8 @@ def main(splash=None) -> None:
         window._warn_missing_external_applications()
     QTimer.singleShot(SPLASH_HANDOVER_MS if splash is not None else 0, hand_over)
     window.schedule_preview_3d_preload()
-    # Solo l'applicazione vera legge il saldo: i test e le finestre costruite
-    # altrove non toccano la rete.
+    # Only the real application reads the balance: the tests and the windows
+    # built elsewhere do not touch the network.
     window.ai_account.balance_enabled = True
     window._sync_balance_provider()
     window.ai_account.refresh_balance()

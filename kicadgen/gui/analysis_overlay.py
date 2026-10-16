@@ -12,34 +12,37 @@ from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPainterPath, Q
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                              QVBoxLayout, QWidget)
 
-#: Gli strumenti che possono lavorare durante un'analisi, ognuno col proprio
-#: segno grafico. La distinzione che conta per chi guarda non e' estetica: il
-#: rilevatore locale non costa nulla e dura poco, la chiamata al modello si
-#: paga, il CAD tiene occupata la macchina per minuti. Il colore da solo non
-#: basta a dirlo, quindi ogni strumento ha anche una forma diversa.
+#: The tools that can work during an analysis, each with its own graphic
+#: mark. The distinction that matters to the viewer is not aesthetic: the
+#: local detector costs nothing and is quick, the model call is paid for,
+#: the CAD keeps the machine busy for minutes. Colour alone is not enough to
+#: say it, so every tool also has a different shape.
 #:
-#: La generazione ha tre passi e ognuno dice CHI lavora (utente, 2026-09-26:
-#: «voglio vedere bene quando entra in azione FreeCAD o KiCad»): il footprint
-#: lo scrive il codice di questo programma (KiCad non e' in esecuzione); la
-#: scelta dei modelli legge i FILE della libreria 3D di KiCad e, per i
-#: candidati non ancora misurati, avvia FreeCAD (`freecad_measure`, stesso
-#: colore di FreeCAD, segno del calibro); il solido lo costruisce FreeCAD.
+#: Generation has three steps and each one says WHO is working (user,
+#: 2026-09-26: «voglio vedere bene quando entra in azione FreeCAD o KiCad»
+#: (I want to see clearly when FreeCAD or KiCad steps in)): the footprint is
+#: written by this program's own code (KiCad is not running); the model
+#: selection reads the FILES of KiCad's 3D library and, for candidates not
+#: yet measured, starts FreeCAD (`freecad_measure`, same colour as FreeCAD,
+#: caliper mark); the solid is built by FreeCAD.
 #:
-#: OpenCV (utente, 2026-09-27: «hai evidenziato lo step OpenCV?») lavora in
-#: locale sulla fotografia: trova e calibra la scheda, poi misura i bordi dei
-#: corpi proposti. Prima questi passi non erano annunciati e la modale restava
-#: sulla fase precedente mentre giravano.
+#: OpenCV (user, 2026-09-27: «hai evidenziato lo step OpenCV?» (did you
+#: highlight the OpenCV step?)) works locally on the photograph: it finds and
+#: calibrates the board, then measures the edges of the proposed bodies.
+#: Before, these steps were not announced and the modal stayed on the
+#: previous phase while they ran.
 TOOLS = {
     "llm": ("Modello AI", "#f9e2af", "cloud"),
-    # Le due fasi a pagamento che seguono l'inventario globale, con un nome
-    # proprio (utente, 2026-09-29, HANDOFF 156): «Modello AI — in corso» per
-    # due minuti non diceva che cosa si stava pagando.
+    # The two paid phases that follow the global inventory, with a name of
+    # their own (user, 2026-09-29, HANDOFF 156): «Modello AI — in corso» (AI
+    # model — running) for two minutes did not say what was being paid for.
     "llm_crops": ("Lettura ritagli", "#f9e2af", "crop"),
     "llm_markings": ("Lettura sigle", "#f9e2af", "tag"),
     "yolo": ("YOLO", "#a6e3a1", "frame"),
-    # La rete neurale che classifica i corpi tenuti (utente, 2026-10-02: «devi
-    # anche darne contezza nella modale»). Era un alias di YOLO, quindi la
-    # classificazione locale si presentava come un secondo rilevamento.
+    # The neural network that classifies the kept bodies (user, 2026-10-02:
+    # «devi anche darne contezza nella modale» (you must also account for it
+    # in the modal)). It was an alias of YOLO, so the local classification
+    # presented itself as a second detection.
     "smd": ("Rete SMD locale", "#f5c2e7", "network"),
     "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
     "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
@@ -49,24 +52,24 @@ TOOLS = {
     "opencv": ("OpenCV", "#fab387", "aperture"),
 }
 
-#: Glifi delle fasi che chiamano un modello remoto a pagamento: la nuvola e
-#: le sue due specializzazioni (ritaglio, sigla). Sono le sole fasi che
-#: spediscono dati (TRANSFER_SOURCES) e che si interrompono con la conferma
-#: della spesa.
+#: Glyphs of the phases that call a paid remote model: the cloud and its two
+#: specialisations (crop, marking). They are the only phases that send data
+#: (TRANSFER_SOURCES) and that are interrupted with the spending
+#: confirmation.
 REMOTE_GLYPHS = frozenset({"cloud", "crop", "tag"})
 
-#: Fasi che sono la *stessa* chiamata remota di una voce di TOOLS (stesso nome,
-#: colore e segno) ma partono da dati diversi. Restano fuori da TOOLS perche'
-#: la', per contratto, ogni strumento ha una forma sua: qui cambia solo cio'
-#: che viene spedito, non chi lavora.
+#: Phases that are the *same* remote call as a TOOLS entry (same name,
+#: colour and mark) but start from different data. They stay out of TOOLS
+#: because there, by contract, every tool has a shape of its own: here only
+#: what is sent changes, not who is working.
 TOOL_ALIASES = {
     "llm_inventory": "llm",
 }
 
-#: Cosa parte dalla macchina verso il modello remoto, per le fasi che spediscono
-#: dati: "documents" sono i documenti dell'estrazione, "board" la fotografia
-#: della scheda con i corpi proposti dal rilevatore (inventario globale). Una
-#: fase assente da qui non spedisce nulla e mostra solo l'anello.
+#: What leaves the machine for the remote model, for the phases that send
+#: data: "documents" are the extraction documents, "board" the photograph of
+#: the board with the bodies proposed by the detector (global inventory). A
+#: phase absent from here sends nothing and shows only the ring.
 TRANSFER_SOURCES = {
     "llm": "documents",
     "llm_inventory": "board",
@@ -74,125 +77,127 @@ TRANSFER_SOURCES = {
     "llm_markings": "board",
 }
 
-#: Righe che il programma scrive per se' stesso: marcatori delle chiamate AI,
-#: esiti di importazione, impronte sha256. Vanno nel log, dove servono a
-#: ricostruire una corsa, non sulla scheda, dove occupano il posto di cio' che
-#: sta accadendo senza dirlo a nessuno.
+#: Lines the program writes for itself: AI call markers, import outcomes,
+#: sha256 fingerprints. They belong in the log, where they help reconstruct a
+#: run, not on the card, where they take the place of what is happening
+#: without telling anyone.
 #:
-#: Il marcatore si cerca in TESTA alla riga, dopo l'eventuale prefisso di
-#: inoltro ("FreeCAD: ") con cui chi rilancia l'uscita di freecadcmd marca la
-#: provenienza. Serve almeno un underscore fra maiuscole, cosi' una parola sola
-#: come "ATTENZIONE:" resta una frase per chi guarda.
+#: The marker is searched at the START of the line, after the optional
+#: forwarding prefix ("FreeCAD: ") with which whoever relays freecadcmd's
+#: output marks its origin. At least one underscore between capitals is
+#: required, so a single word such as "ATTENZIONE:" stays a sentence for the
+#: viewer.
 #:
-#: L'ancora non e' un dettaglio: UPPER_SNAKE e' in questo dominio anche la
-#: convenzione dei reference designator e dei nomi di libreria (U1_MODULE,
-#: J_HEADER_BLK, RX_TX, SW_BOOT). Cercando il marcatore *ovunque* nella riga la
-#: regola diventava di fatto una regola sui nomi dei componenti dell'utente e
-#: scartava esiti veri («Componente J_HEADER_BLK non riconosciuto: geometria
-#: generica.», «ATTENZIONE 3D: componente U1_MODULE (rf_module): geometria
-#: approssimata»). In una frase il designator non e' mai la prima parola,
-#: perche' la frase nomina prima la cosa; in una riga di servizio il marcatore
-#: apre la riga perche' e' l'intestazione del record.
+#: The anchor is not a detail: in this domain UPPER_SNAKE is also the
+#: convention of reference designators and library names (U1_MODULE,
+#: J_HEADER_BLK, RX_TX, SW_BOOT). Searching for the marker *anywhere* in the
+#: line turned the rule, in practice, into a rule on the names of the user's
+#: components and discarded real outcomes («Componente J_HEADER_BLK non
+#: riconosciuto: geometria generica.», «ATTENZIONE 3D: componente U1_MODULE
+#: (rf_module): geometria approssimata»). In a sentence the designator is
+#: never the first word, because the sentence names the thing first; in a
+#: service line the marker opens the line because it is the record header.
 #:
-#: Dopo il marcatore si accetta ":"/"=" (forma forte, priva di ambiguita'),
-#: la fine della riga, oppure uno spazio. L'ultima alternativa e' un'euristica
-#: DICHIARATA: serve per i dump che questo programma scrive di se'
-#: ("AI_CALL_PROMPT_SYSTEM <testo del prompt>", "AI_CALL_START id=1 ...") e si
-#: appoggia solo alla posizione, quindi scarterebbe anche un'ipotetica frase
-#: che *inizi* con un designator. Diventerebbe superflua il giorno in cui
-#: ai_diagnostics separasse marcatore e payload con ":" come fanno i marcatori
-#: KICADGEN_*.
+#: After the marker, ":"/"=" is accepted (strong form, free of ambiguity),
+#: the end of the line, or a space. The last alternative is a DECLARED
+#: heuristic: it serves the dumps this program writes about itself
+#: ("AI_CALL_PROMPT_SYSTEM <prompt text>", "AI_CALL_START id=1 ...") and
+#: relies only on position, so it would also discard a hypothetical sentence
+#: that *starts* with a designator. It would become unnecessary the day
+#: ai_diagnostics separated marker and payload with ":" as the KICADGEN_*
+#: markers do.
 _MACHINE_MARKER = re.compile(
     r"^(?:\w+:\s+)?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?:\s*[:=]|\s|$)")
 
-#: Il marcatore sopra riconosce solo cio' che *questo* programma stampa per se'.
-#: Sulla scheda arrivavano anche le righe che i programmi esterni scrivono sul
-#: proprio stdout (esiti di scrittura file, intestazioni di sessione, conteggi
-#: di entita'): non hanno un marcatore, quindi vanno riconosciute dalla *forma*.
-#: Le regole qui sotto non nominano nessun prodotto e nessuna frase precisa --
-#: agganciarle a "FreeCAD" o all'elenco delle frasi viste in una corsa vorrebbe
-#: dire rifare il lavoro alla prossima versione dello stesso strumento.
+#: The marker above recognises only what *this* program prints for itself.
+#: The card also received the lines external programs write on their own
+#: stdout (file-write outcomes, session headers, entity counts): they have no
+#: marker, so they must be recognised by their *shape*.
+#: The rules below name no product and no exact sentence -- tying them to
+#: "FreeCAD" or to the list of sentences seen in one run would mean redoing
+#: the work at the next version of the same tool.
 #:
-#: Ogni regola e' un'euristica tipografica, tarata su come scrive una macchina
-#: e su come scrive una persona; sono dichiarate tali perche' nessuna e' una
-#: verita' generale, e diventerebbero superflue se gli strumenti esterni
-#: marcassero le proprie righe come fa questo programma.
+#: Every rule is a typographic heuristic, calibrated on how a machine writes
+#: and on how a person writes; they are declared as such because none is a
+#: general truth, and they would become unnecessary if external tools marked
+#: their own lines as this program does.
 
-#: Decorazione: tre o piu' ripetizioni dello stesso segno di interpunzione
-#: ("******", "=====", "-----"). Sono esclusi il punto, il punto esclamativo e
-#: il punto di domanda: i puntini di sospensione e la punteggiatura enfatica
-#: ("Attenzione!!! il modello non ha risposto") sono normalissimi in una frase
-#: scritta per chi guarda, e una decorazione da tracciato non e' mai fatta di
-#: segni che in prosa portano intonazione.
+#: Decoration: three or more repetitions of the same punctuation sign
+#: ("******", "=====", "-----"). The full stop, the exclamation mark and the
+#: question mark are excluded: ellipses and emphatic punctuation
+#: ("Attenzione!!! il modello non ha risposto") are perfectly normal in a
+#: sentence written for the viewer, and a trace decoration is never made of
+#: signs that carry intonation in prose.
 _DECORATION_RUN = re.compile(r"([^\w\s.!?])\1{2,}")
 
-#: Il punto escluso sopra va comunque distinto dalla sospensione: l'ellissi in
-#: prosa e' esattamente "..." o "…", mentre "Recompute......" e' il riempimento
-#: di una barra di avanzamento testuale. Quattro punti o piu' non sono
-#: punteggiatura in nessuna delle due lingue usate qui.
+#: The full stop excluded above must still be told apart from an ellipsis:
+#: the ellipsis in prose is exactly "..." or "…", whereas "Recompute......"
+#: is the filler of a textual progress bar. Four or more dots are not
+#: punctuation in either of the two languages used here.
 _DOT_FILL_RUN = re.compile(r"\.{4,}")
 
-#: Chiave e valore separati da spazio-due punti-spazio ("Step File Name : C:/…",
-#: "WorkSession : Sending all data"). In prosa italiana o inglese i due punti
-#: stanno attaccati alla parola che precede, quindi lo spazio davanti e' il
-#: segno che la riga e' un campo di un tracciato, non una frase.
+#: Key and value separated by space-colon-space ("Step File Name : C:/…",
+#: "WorkSession : Sending all data"). In Italian or English prose the colon
+#: sticks to the preceding word, so the space before it is the sign that the
+#: line is a field of a trace, not a sentence.
 _SPACED_KEY_VALUE = re.compile(r"\S\s+:\s+\S")
 
-#: Record "chiave=valore": un'etichetta breve e poi SOLO coppie, fino a fine
-#: riga ("FreeCAD exit=0, timeout=False", "Inventario globale: prompt=…;
+#: "key=value" record: a short label and then ONLY pairs, up to the end of
+#: the line ("FreeCAD exit=0, timeout=False", "Inventario globale: prompt=…;
 #: schema=…; sha256=…", "AI_CALL_END id=1 elapsed=65.664s tokens_in=16765").
-#: L'uguale attaccato al nome del campo e' come una macchina serializza un
-#: record, mentre in prosa l'uguale porta gli spazi ("drill_mm = 0 e
-#: pad_diameter_mm = larghezza stimata"). Rende vera la promessa del docstring
-#: di set_status: le righe con sha256 restano nel log.
+#: An equals sign attached to the field name is how a machine serialises a
+#: record, whereas in prose the equals sign carries spaces ("drill_mm = 0 e
+#: pad_diameter_mm = larghezza stimata"). It makes the promise of
+#: set_status's docstring true: lines with sha256 stay in the log.
 #:
-#: EURISTICA DICHIARATA sull'etichetta: al massimo due parole prima della prima
-#: coppia. Un record e' il NOME di cio' che si registra piu' i suoi campi; se
-#: fra il nome e i campi compare gia' un dato scritto per chi guarda la riga e'
-#: una frase, non un record. E' il solo criterio che separa «Inventario
-#: globale: prompt=…; schema=…» (record) da «Generazione TEST: 2x22,
-#: pitch=2.54mm, row_spacing=22.86mm, pad=1.7mm, drill=1.0mm» (riepilogo di
-#: cio' che si sta generando, da mostrare): le due forme sono per il resto
-#: identiche, quindi la separazione e' fragile e va pinzata da test in
-#: entrambi i versi. Diventerebbe superflua se i record portassero un
-#: marcatore come quelli KICADGEN_*.
+#: DECLARED HEURISTIC on the label: at most two words before the first pair.
+#: A record is the NAME of what is being recorded plus its fields; if a datum
+#: written for the viewer already appears between the name and the fields,
+#: the line is a sentence, not a record. It is the only criterion that
+#: separates «Inventario globale: prompt=…; schema=…» (record) from
+#: «Generazione TEST: 2x22, pitch=2.54mm, row_spacing=22.86mm, pad=1.7mm,
+#: drill=1.0mm» (summary of what is being generated, to be shown): the two
+#: forms are otherwise identical, so the separation is fragile and must be
+#: pinned by tests in both directions. It would become unnecessary if the
+#: records carried a marker like the KICADGEN_* ones.
 _KEY_VALUE_RECORD = re.compile(r"^(?:\S+\s+){0,2}\w+=\S+(?:[;,]?\s+\w+=\S+)+$")
 
-#: Percentuale nuda, senza soggetto ("(47 %)", "FreeCAD: (100 %)"). Non dice a
-#: cosa si riferisce ne' quanto manca, e resta appesa per tutta la fase del CAD
-#: al posto delle righe che dicono quale componente si sta costruendo. E' lo
-#: stesso motivo per cui set_progress rifiuta le stime sul tempo: un numero
-#: senza referente sembra un'informazione e non lo e'. La barra vera, quando un
-#: conteggio esiste, ha una riga propria.
+#: Bare percentage, without a subject ("(47 %)", "FreeCAD: (100 %)"). It
+#: says neither what it refers to nor how much is left, and it hangs there
+#: for the whole CAD phase in place of the lines saying which component is
+#: being built. It is the same reason set_progress rejects time-based
+#: estimates: a number without a referent looks like information and is not.
+#: The real bar, when a count exists, has a line of its own.
 _BARE_PERCENT = re.compile(r"^(?:\w+:\s+)?\(?\s*\d+(?:[.,]\d+)?\s*%\s*\)?\.?$")
 
-#: Intestazioni di avvio di un programma esterno: nome piu' versione
-#: semantica ("FreeCAD 1.1.1, Libs: 1.1.1R20260414") e riga di copyright
-#: ("(C) 2001-2026 …"). Entrambe sono ancorate in testa, quindi non possono
-#: agganciare una quota o un anno citati dentro una frase.
+#: Start-up headers of an external program: name plus semantic version
+#: ("FreeCAD 1.1.1, Libs: 1.1.1R20260414") and copyright line
+#: ("(C) 2001-2026 …"). Both are anchored at the start, so they cannot catch
+#: a dimension or a year quoted inside a sentence.
 _VERSION_BANNER = re.compile(r"^(?:\w+:\s+)?\S+ \d+\.\d+\.\d+\b")
 _COPYRIGHT_BANNER = re.compile(r"^(?:\w+:\s+)?(?:\(c\)|©)\s*\d{4}", re.IGNORECASE)
 
-#: Marca temporale in testa alla riga, con o senza parentesi quadre
+#: Timestamp at the start of the line, with or without square brackets
 #: ("[2026-09-21T00:08:36+02:00] FreeCAD start", "2026-09-21 00:04:13 Analisi
-#: AI"). Una riga che si auto-datifica e' un record di sessione: l'orologio
-#: della scheda dice gia' da quanto si aspetta.
+#: AI"). A line that dates itself is a session record: the card's clock
+#: already says how long the wait has been.
 _TIMESTAMP_HEAD = re.compile(r"^\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
-#: Conteggio di entita' fra parentesi: numero grande seguito da un'abbreviazione
-#: corta e NON dentro una frase conclusa ("…/Test.step(134238 ents) Write Done",
-#: "Shapes written (98211 ents)").
+#: Entity count in parentheses: a large number followed by a short
+#: abbreviation and NOT inside a finished sentence ("…/Test.step(134238 ents)
+#: Write Done", "Shapes written (98211 ents)").
 #:
-#: SEPARAZIONE DICHIARATA FRAGILE. Dal solo conteggio non si distingue
-#: "(134238 ents)" da "(12345 pezzi)": "pezzi", "test", "corpi", "righe",
-#: "fori" stanno tutti nelle sei lettere dell'abbreviazione, quindi il numero di
-#: cifre sarebbe l'unico criterio, e un criterio solo su due non basta (vedi
-#: CLAUDE.md). Il secondo criterio e' tipografico: la prosa chiude con un segno
-#: di fine frase, il record no. Cosi' "Importati (12345 pezzi) dal modello
-#: STEP." e "Suite locale: (1061 test) superati." restano sulla scheda. Anche
-#: questo resta un ripiego: una riga di prosa senza punto finale e con un
-#: conteggio a quattro cifre verrebbe scartata. Diventerebbe superflua se
-#: freecadcmd marcasse le proprie righe come fa questo programma.
+#: SEPARATION DECLARED FRAGILE. From the count alone "(134238 ents)" cannot
+#: be told from "(12345 pezzi)": "pezzi", "test", "corpi", "righe", "fori"
+#: all fit within the six letters of the abbreviation, so the number of
+#: digits would be the only criterion, and one criterion out of two is not
+#: enough (see CLAUDE.md). The second criterion is typographic: prose ends
+#: with a sentence-ending sign, the record does not. So
+#: "Importati (12345 pezzi) dal modello STEP." and
+#: "Suite locale: (1061 test) superati." stay on the card. This too remains
+#: a fallback: a prose line without a final
+#: full stop and with a four-digit count would be discarded. It would become
+#: unnecessary if freecadcmd marked its own lines as this program does.
 _ENTITY_COUNT = re.compile(r"\(\s*\d{4,}\s+\w{1,6}\.?\s*\)(?![^.!?…]*[.!?…]\s*$)")
 
 _MACHINE_LINE_RULES = (_MACHINE_MARKER, _DECORATION_RUN, _DOT_FILL_RUN,
@@ -200,24 +205,24 @@ _MACHINE_LINE_RULES = (_MACHINE_MARKER, _DECORATION_RUN, _DOT_FILL_RUN,
                        _VERSION_BANNER, _COPYRIGHT_BANNER, _TIMESTAMP_HEAD,
                        _ENTITY_COUNT)
 
-#: Percorso assoluto del filesystem: lettera di unita' ("C:/…", "D:\\…"),
-#: percorso UNC, o percorso POSIX con almeno due livelli ("/home/x/…").
+#: Absolute filesystem path: drive letter ("C:/…", "D:\\…"), UNC path, or
+#: POSIX path with at least two levels ("/home/x/…").
 #:
-#: Il percorso NON e' piu' un motivo per scartare la riga. Questo e' uno
-#: strumento il cui prodotto SONO file: «Inventario salvato: …», «Proposte del
-#: rilevatore salvate: …» e soprattutto «Inventario non salvato su disco:
-#: [Errno 28] No space left on device: '…'» sono esiti che l'utente deve
-#: leggere, e la vecchia regola li nascondeva tutti, compreso un errore di
-#: scrittura, perche' il testo dell'OSError porta un percorso. Fra le due
-#: soluzioni proposte si sceglie di ACCORCIARE il percorso e tenere la riga: il
-#: criterio "quasi solo percorso" avrebbe scartato proprio «Inventario salvato:
-#: <tre percorsi>», che e' la riga da mostrare. Del percorso resta il nome del
-#: file, che e' l'unica parte che l'utente riconosce; il testo integrale e' nel
-#: log, a un clic di distanza.
+#: The path is NO LONGER a reason to discard the line. This is a tool whose
+#: product IS files: «Inventario salvato: …» (inventory saved),
+#: «Proposte del rilevatore salvate: …» (detector proposals saved) and above all
+#: «Inventario non salvato su disco: [Errno 28] No space left on device: '…'»
+#: (inventory not saved to disk) are outcomes the user must read, and the old
+#: rule hid them all, including a write error, because the OSError text
+#: carries a path. Of the two proposed solutions, SHORTENING the path and
+#: keeping the line is chosen: the "almost only a path" criterion would have
+#: discarded precisely «Inventario salvato: <three paths>», which is the line
+#: to show. What remains of the path is the file name, which is the only part
+#: the user recognises; the full text is in the log, one click away.
 #:
-#: Il lookbehind su "/" evita di accorciare l'interno di una URL, e il secondo
-#: livello obbligatorio lascia intatti gli slug dei modelli
-#: ("anthropic/claude-opus-5") e i nomi di file senza separatori.
+#: The lookbehind on "/" avoids shortening the inside of a URL, and the
+#: mandatory second level leaves model slugs ("anthropic/claude-opus-5") and
+#: file names without separators untouched.
 _DRIVE_PATH = re.compile(r"(?<![\w])[A-Za-z]:[\\/][^\s;,'\")]*")
 _UNC_PATH = re.compile(r"\\\\[\w.$-]+\\[^\s;,'\")]*")
 _POSIX_PATH = re.compile(
@@ -225,96 +230,100 @@ _POSIX_PATH = re.compile(
 
 _PATH_RULES = (_DRIVE_PATH, _UNC_PATH, _POSIX_PATH)
 
-#: Lo stato viene troncato: oltre questa lunghezza la riga non si legge a colpo
-#: d'occhio e il testo integrale e' comunque nel log.
+#: The status is truncated: beyond this length the line cannot be read at a
+#: glance, and the full text is in the log anyway.
 _STATUS_CHAR_LIMIT = 220
 
-#: Separatore con cui questo programma elenca piu' VOCI dentro una sola riga di
-#: avanzamento: i documenti che partono nella chiamata a pagamento
-#: (`datasheet_extractor._files_sent_message`), i motivi di un inventario
-#: parziale (`photo_global_inventory._DETAIL_SEPARATOR`).
+#: Separator with which this program lists several ITEMS inside a single
+#: progress line: the documents leaving in the paid call
+#: (`datasheet_extractor._files_sent_message`), the reasons for a partial
+#: inventory (`photo_global_inventory._DETAIL_SEPARATOR`).
 #:
-#: La riga resta una: il log vive di un evento per riga, con una marca
-#: temporale sola, e spezzarla li' renderebbe una corsa illeggibile a ritroso.
-#: La scheda invece ha bisogno dell'elenco -- richiesta dell'utente: «i nomi
-#: dei file uno sotto l'altro» -- quindi e' QUI che la riga si rimpagina, senza
-#: che la sorgente sappia nulla della scheda.
+#: The line stays one: the log lives on one event per line, with a single
+#: timestamp, and splitting it there would make a run unreadable backwards.
+#: The card instead needs the list -- user request:
+#: «i nomi dei file uno sotto l'altro» (the file names one below the other)
+#: -- so it is HERE that
+#: the line is re-laid out, without the source knowing anything about the
+#: card.
 #:
-#: Il punto mediano non e' un vezzo: in italiano e in inglese non e' un segno
-#: di punteggiatura, quindi in una frase scritta per chi guarda non compare, e
-#: le due sorgenti sopra lo usavano gia' per elencare senza ricorrere al punto
-#: e virgola, che i filtri della modale contano. Riconoscere l'elenco da questo
-#: separatore e' quindi una regola sulla FORMA, valida per qualunque riga che
-#: elenchi, non una regola sul messaggio dei documenti.
+#: The middle dot is not a whim: in Italian and in English it is not a
+#: punctuation sign, so it does not appear in a sentence written for the
+#: viewer, and the two sources above already used it to list without
+#: resorting to the semicolon, which the modal's filters count. Recognising
+#: the list from this separator is therefore a rule on the SHAPE, valid for
+#: any line that lists, not a rule on the documents message.
 _LIST_SEPARATOR = " · "
 
-#: Separatore fra il TERMINE di una voce e la sua descrizione: «pinout.png —
-#: Pinout / disposizione contatti». E' la convenzione tipografica della voce di
-#: un elenco di definizioni (termine, lineetta, spiegazione), e la scheda la
-#: rende come tale: il termine in grassetto, la lineetta spaziata che lo stacca
-#: dal resto. Richiesta dell'utente: «i nomi dei file non sono evidenziati,
-#: troppo attaccati al testo».
+#: Separator between the TERM of an item and its description: «pinout.png —
+#: Pinout / disposizione contatti». It is the typographic convention of a
+#: definition-list item (term, dash, explanation), and the card renders it as
+#: such: the term in bold, the spaced dash setting it apart from the rest.
+#: User request:
+#: «i nomi dei file non sono evidenziati, troppo attaccati al testo»
+#: (the file names are not highlighted, too close to the text).
 #:
-#: Regola sulla FORMA, come le due precedenti: non guarda se il termine
-#: "sembra" un nome di file (un nome puo' avere spazi, nessuna estensione,
-#: maiuscole e underscore), guarda solo se la voce DICHIARA un termine con
-#: questo segno. La sorgente dei documenti lo scrive apposta
-#: (`datasheet_extractor._files_sent_message`); una voce che non lo porta -- i
-#: motivi di un inventario parziale, «component J2: …» -- resta testo semplice.
+#: A rule on the SHAPE, like the two previous ones: it does not look at
+#: whether the term "looks like" a file name (a name can have spaces, no
+#: extension, capitals and underscores), it only looks at whether the item
+#: DECLARES a term with this sign. The documents source writes it on purpose
+#: (`datasheet_extractor._files_sent_message`); an item that does not carry
+#: it -- the reasons for a partial inventory, «component J2: …» -- stays
+#: plain text.
 #:
-#: SEPARAZIONE DICHIARATA FRAGILE: il segno non e' riservato. Un nome di file
-#: che contenga esso stesso " — " verrebbe diviso li' (grassetto solo sulla
-#: prima parte; il testo resta tutto, cambia solo il peso), e un testo altrui
-#: interpolato in una voce (l'errore di un'API) che lo contenga avrebbe la
-#: prima parte in grassetto. Si divide sulla PRIMA occorrenza perche' il
-#: termine sta in testa per definizione. Diventerebbe superflua se lo stato
-#: arrivasse alla scheda come dato strutturato invece che come stringa.
+#: SEPARATION DECLARED FRAGILE: the sign is not reserved. A file name that
+#: itself contains " — " would be split there (bold only on the first part;
+#: all the text stays, only the weight changes), and third-party text
+#: interpolated into an item (an API error) containing it would have its
+#: first part in bold. The split is on the FIRST occurrence because the term
+#: is at the start by definition. It would become unnecessary if the status
+#: reached the card as structured data instead of as a string.
 _TERM_SEPARATOR = " — "
 
-#: Righe di testo riservate allo stato. La scheda e' dimensionata su questo
-#: numero, non sulla frase che passa in quel momento: una scheda che cambia
-#: altezza a ogni messaggio e' piu' fastidiosa di una scheda un po' piu' alta.
+#: Text lines reserved for the status. The card is sized on this number, not
+#: on the sentence passing at that moment: a card that changes height at
+#: every message is more annoying than a card that is a little taller.
 _STATUS_LINES = 3
-#: Righe su cui lo stato troncato viene DISTRIBUITO per ricavare la larghezza
-#: della scheda: meno righe = scheda piu' larga. Erano 2,5 (tre righe con
-#: mezza riga di margine); l'utente (2026-09-30, HANDOFF 173) la voleva piu'
-#: larga, cosi' le righe delle fasi si troncano piu' tardi: due righe, quindi
-#: circa un quarto in piu', sempre entro la larghezza che la finestra concede.
-#: Le tre righe riservate restano: una intera di margine per le lettere larghe.
+#: Lines over which the truncated status is SPREAD to derive the card width:
+#: fewer lines = wider card. It was 2.5 (three lines with half a line of
+#: margin); the user (2026-09-30, HANDOFF 173) wanted it wider, so the phase
+#: lines get truncated later: two lines, hence about a quarter more, always
+#: within the width the window allows.
+#: The three reserved lines stay: one whole line of margin for wide letters.
 _STATUS_WRAP_LINES = 2.0
 #: Completed phases listed on the card (HANDOFF point 135): the most recent
 #: ones, one row each. Bounded so the card cannot outgrow a small window.
 PHASE_HISTORY_ROWS = 4
 
-#: Margine interno orizzontale della scheda (per lato), usato sia dal layout sia
-#: dal calcolo della larghezza: vanno d'accordo per costruzione.
+#: Horizontal inner margin of the card (per side), used both by the layout
+#: and by the width computation: they agree by construction.
 _CARD_PADDING = 28
 
-#: Margine fra il bordo della finestra e la scheda (per lato). E' lo stesso
-#: valore dei contentsMargins dell'overlay, e serve anche a dedurre quanta
-#: larghezza la scheda puo' davvero occupare.
+#: Margin between the window edge and the card (per side). It is the same
+#: value as the overlay's contentsMargins, and it is also used to deduce how
+#: much width the card can really take.
 _OVERLAY_MARGIN = 24
 
-#: Larghezza minima desiderata: evita una scheda smilza con caratteri molto
-#: stretti. NON esiste piu' un massimo costante: il tetto si deduce dalla
-#: finestra che ospita l'overlay (vedi _available_card_width). Un tetto fisso
-#: (760 px) annullava la derivazione dal font e TAGLIAVA il testo dai 14 pt in
-#: su, cioe' proprio nel caso -- font grande, ipovisione -- in cui la scheda
-#: serve di piu'.
+#: Desired minimum width: avoids a skinny card with very narrow characters.
+#: There is NO LONGER a constant maximum: the ceiling is deduced from the
+#: window hosting the overlay (see _available_card_width). A fixed ceiling
+#: (760 px) cancelled the derivation from the font and CUT the text from
+#: 14 pt upwards, that is precisely in the case -- large font, low vision --
+#: where the card is needed most.
 _CARD_MIN_WIDTH = 480
 
-#: Larghezza da usare quando la finestra non ha ancora una dimensione (primo
-#: layout): e' un ripiego temporaneo, il primo resize la sostituisce.
+#: Width to use when the window does not have a size yet (first layout): it
+#: is a temporary fallback, the first resize replaces it.
 _CARD_FALLBACK_WIDTH = 960
 
-#: Gemella della precedente per l'altezza: serve a decidere quante righe di
-#: elenco la finestra concede quando la finestra (e lo schermo) non hanno
-#: ancora una dimensione. Stesso ripiego temporaneo, stessa vita breve.
+#: Twin of the previous one for the height: it is used to decide how many
+#: list lines the window allows when the window (and the screen) do not have
+#: a size yet. Same temporary fallback, same short life.
 _CARD_FALLBACK_HEIGHT = 720
 
-#: Frase peggiore possibile della lunghezza massima consentita, fatta di parole
-#: di lettere larghe: serve a contare le righe che lo stato occupa DAVVERO alla
-#: larghezza scelta, invece di fidarsi della larghezza media dei caratteri.
+#: Worst possible sentence of the maximum allowed length, made of words of
+#: wide letters: it is used to count the lines the status REALLY takes at the
+#: chosen width, instead of trusting the average character width.
 _WORST_CASE_STATUS = " ".join(["M" * 8] * 30)[:_STATUS_CHAR_LIMIT]
 
 
@@ -350,14 +359,15 @@ def enumeration_lines(text):
         happens to carry a middle dot into a list; the colon alone is ordinary
         punctuation. Two items are enough to be a list: with a single document
         there is nothing to line up, and the line stays as it is.
-    @note EURISTICA DICHIARATA sul taglio della testa: si usa il PRIMO ": "
-        della riga, non l'ultimo. L'elenco comincia dove il testo lo annuncia,
-        mentre i due punti che compaiono dopo appartengono alla voce che li
-        contiene: gli esiti di questo programma scrivono voci come «component
-        U1: merged box excludes…», e tagliando sull'ultimo ": " la prima voce
-        perderebbe proprio il soggetto. Sarebbe superflua il giorno in cui le
-        righe portassero l'elenco in forma strutturata invece che punteggiata;
-        finche' il canale e' una stringa sola, la punteggiatura e' il canale.
+    @note DECLARED HEURISTIC on the cut of the lead-in: the FIRST ": " of the
+        line is used, not the last. The list begins where the text announces
+        it, while the colons that appear later belong to the item containing
+        them: the outcomes of this program write items such as «component
+        U1: merged box excludes…», and cutting on the last ": " the first item
+        would lose precisely its subject. It would become superfluous the day
+        the lines carried the list in structured form instead of punctuated;
+        as long as the channel is a single string, the punctuation is the
+        channel.
     @note Separators in a row count as one: an item can carry a text that is
         not ours (the reason an API gave for failing) and that came back empty,
         and the alternative is a blank row, or a stray middle dot opening the
@@ -400,29 +410,29 @@ def enumeration_term(item):
 
 
 def _elide_row(line, width, regular, bold, is_item):
-    """Accorcia UNA riga dell'elenco alla larghezza vera, sul testo semplice.
+    """Shorten ONE list row to the real width, on the plain text.
 
-    Restituisce (termine, testo): il termine e' None per le righe senza
-    termine dichiarato. Si accorcia PRIMA di costruire il markup, cosi' il taglio
-    non puo' cadere dentro un tag o dentro un'entita' HTML, e si misura il
-    termine col font in grassetto con cui verra' disegnato: misurato col peso
-    normale, il grassetto sborderebbe di qualche pixel.
+    Returns (term, text): the term is None for rows without a declared term.
+    The row is shortened BEFORE the markup is built, so the cut cannot fall
+    inside a tag or an HTML entity, and the term is measured with the bold
+    font it will be drawn with: measured with the regular weight, the bold
+    would overflow by a few pixels.
 
-    Quando la riga non sta, si accorcia prima il TERMINE nel mezzo (restano
-    l'inizio e la fine, cioe' l'estensione di un nome di file) e la
-    descrizione resta intera, purche' la descrizione col separatore occupi al
-    massimo meta' della riga. Il termine e' un dato lungo quanto vuole chi lo
-    ha scritto; la descrizione, nelle righe che la portano (il ruolo di un
-    documento), e' un'etichetta breve che dice la cosa da sapere. Prima si
-    tagliava la descrizione: con i caratteri di Windows un nome gia'
-    accorciato a 40 caratteri dal mittente lasciava «Foto ad alta risoluzio…».
+    When the row does not fit, the TERM is shortened first, in the middle
+    (the beginning and the end remain, that is the extension of a file name)
+    and the description stays whole, provided the description with its
+    separator takes at most half the row. The term is a datum as long as its
+    author wanted; the description, in the rows that carry one (the role of a
+    document), is a short label saying the thing to know. The description
+    used to be cut first: with Windows fonts a name already shortened to 40
+    characters by the sender left «Foto ad alta risoluzio…».
 
-    La meta' e' una scelta dichiarata, non una misura: nessuna delle due parti
-    toglie all'altra piu' dello spazio che lascia. Non e' tarata su nessun
-    caso; sarebbe superflua se le righe dell'elenco potessero andare a capo.
-    Oltre quella soglia vale la regola di `ElideRight`: si tiene la TESTA, si
-    accorcia la descrizione; se non resta posto neppure per l'ellissi dopo il
-    termine, si accorcia il termine e la descrizione sparisce.
+    The half is a declared choice, not a measurement: neither part takes
+    from the other more than the room it leaves. It is not tuned on any
+    case; it would be superfluous if list rows could wrap. Beyond that
+    threshold the `ElideRight` rule applies: the HEAD is kept, the
+    description is shortened; if there is no room even for the ellipsis after
+    the term, the term is shortened and the description disappears.
     """
     parts = enumeration_term(line) if is_item else None
     if parts is None:
@@ -441,7 +451,7 @@ def _elide_row(line, width, regular, bold, is_item):
 
 
 def _row_width(row, font):
-    """Larghezza di UNA riga come la disegna il documento della label."""
+    """Width in px of ONE row as the label's document draws it."""
     document = QTextDocument()
     document.setDefaultFont(font)
     document.setDocumentMargin(0)
@@ -450,14 +460,14 @@ def _row_width(row, font):
 
 
 def _fit_row(line, width, font, is_item):
-    """Accorcia una riga finche' il documento che la disegna sta in `width`.
+    """Shorten a row until the document that draws it fits in `width` px.
 
-    Le metriche del font sommate pezzo per pezzo (termine in grassetto, poi il
-    resto) possono differire di una frazione di pixel dal layout del documento,
-    che posiziona i glifi a modo suo. Invece di un margine scelto a occhio si
-    MISURA la riga come verra' disegnata e, se sborda, si riaccorcia togliendo
-    esattamente l'eccesso. Il ciclo e' corto per costruzione: ogni giro riduce
-    lo spazio di almeno un pixel, e l'eccesso e' una frazione di glifo.
+    The font metrics summed piece by piece (bold term, then the rest) can
+    differ by a fraction of a pixel from the document layout, which places
+    the glyphs its own way. Instead of a margin chosen by eye the row is
+    MEASURED as it will be drawn and, if it overflows, shortened again by
+    exactly the excess. The loop is short by construction: every turn reduces
+    the room by at least one pixel, and the excess is a fraction of a glyph.
     """
     regular = QFontMetricsF(font)
     bold_font = QFont(font)
@@ -475,14 +485,14 @@ def _fit_row(line, width, font, is_item):
 
 
 def _enumeration_markup(rows):
-    """Markup dell'elenco: una riga per voce, termine in grassetto, nulla a capo.
+    """List markup: one row per item, bold term, no wrapping.
 
-    Tutto cio' che arriva dalle righe e' ESCAPATO: nomi di file e testi altrui
-    sono dati, e un nome come «<b>x</b>.png» deve leggersi com'e', non
-    cambiare il peso del resto. `white-space: pre` vieta l'a capo: ogni riga e'
-    gia' stata accorciata alla larghezza vera, quindi il numero di righe
-    disegnate e' ESATTAMENTE il numero di voci, ed e' su quel numero che la
-    scheda si dimensiona.
+    Everything coming from the rows is ESCAPED: file names and other people's
+    texts are data, and a name such as «<b>x</b>.png» must read as it is, not
+    change the weight of the rest. `white-space: pre` forbids wrapping: every
+    row has already been shortened to the real width, so the number of drawn
+    rows is EXACTLY the number of items, and the card is sized on that
+    number.
     """
     shown = []
     for term, text in rows:
@@ -540,14 +550,17 @@ class ElidedLabel(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        #: Colore dell'inchiostro. Il foglio di stile di questa scheda cambia il
-        #: colore per strumento, e qui si dipinge a mano: si tiene il valore
-        #: invece di dedurlo dalla palette, che con un foglio di stile puo' non
-        #: essere aggiornata.
+        #: Ink colour. This card's style sheet changes the colour per tool,
+        #: and here the painting is done by hand: the value is kept instead
+        #: of deducing it from the palette, which with a style sheet may not
+        #: be up to date.
         self.ink = None
 
     def paintEvent(self, event):
-        """@brief Paint the text elided to the available width."""
+        """@brief Paint the text elided to the available width.
+
+        @param event Qt paint event.
+        """
         painter = QPainter(self)
         rect = self.contentsRect()
         text = self.fontMetrics().elidedText(
@@ -578,7 +591,10 @@ class AnalysisSpinner(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        """@brief Paint the ring, its moving arc and the tool mark."""
+        """@brief Paint the ring, its moving arc and the tool mark.
+
+        @param event Qt paint event.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(7, 7, 42, 42)
@@ -603,9 +619,9 @@ class AnalysisSpinner(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self.glyph == "cloud":
-            # Nuvola: la chiamata esce dalla macchina e si paga. I tre cerchi
-            # vanno *uniti*, non sovrapposti: gli archi interni si leggevano
-            # come tre bolle, cioe' come nessuna forma riconoscibile.
+            # Cloud: the call leaves the machine and is paid for. The three
+            # circles must be *united*, not overlapped: the inner arcs read
+            # as three bubbles, that is as no recognisable shape.
             path = QPainterPath()
             for box in (QRectF(18, 27, 12, 11), QRectF(25, 22, 15, 15),
                         QRectF(22, 30, 15, 8)):
@@ -614,10 +630,10 @@ class AnalysisSpinner(QWidget):
                 path = path.united(blob)
             painter.drawPath(path.simplified())
         elif self.glyph == "crop":
-            # Ritaglio: il riquadro ritagliato dalla foto, con dentro il corpo
-            # pieno che il modello guarda da vicino. Stesso colore della
-            # nuvola (si paga), forma diversa (test: due strumenti non si
-            # disegnano mai uguali).
+            # Crop: the frame cropped from the photo, with inside it the
+            # solid body the model looks at closely. Same colour as the
+            # cloud (it is paid for), different shape (test: two tools are
+            # never drawn the same).
             painter.drawRect(QRectF(17, 17, 22, 22))
             painter.setBrush(QColor(self.color))
             painter.drawRoundedRect(QRectF(24, 24, 8, 8), 1.5, 1.5)
@@ -627,17 +643,17 @@ class AnalysisSpinner(QWidget):
             for y in (20.0, 36.0):
                 painter.drawLine(QPointF(28, y), QPointF(28, y + 2))
         elif self.glyph == "tag":
-            # Sigla: un'etichetta con due righe di testo, cio' che e' stampato
-            # sul corpo e che il modello rilegge dal ritaglio ingrandito.
+            # Marking: a label with two lines of text, what is printed on the
+            # body and what the model reads again from the enlarged crop.
             painter.drawRoundedRect(QRectF(16, 20, 24, 16), 2, 2)
             painter.drawLine(QPointF(20, 26), QPointF(36, 26))
             painter.drawLine(QPointF(20, 31), QPointF(30, 31))
         elif self.glyph == "frame":
-            # Mirino: quattro squadrette d'angolo piu' il bersaglio al centro.
-            # Un riquadro chiuso si confondeva col footprint e col cubo alla
-            # dimensione a cui viene disegnato; le squadrette staccate sono il
-            # segno con cui un rilevatore marca un corpo, e il puntino pieno
-            # dice che il riquadro e' *misurato*, non disegnato a mano.
+            # Viewfinder: four corner brackets plus the target at the centre.
+            # A closed frame was confused with the footprint and the cube at
+            # the size it is drawn at; the detached brackets are the mark
+            # with which a detector marks a body, and the solid dot says the
+            # frame is *measured*, not drawn by hand.
             arm = 7.0
             for x, y, dx, dy in ((17, 17, 1, 1), (39, 17, -1, 1),
                                  (17, 39, 1, -1), (39, 39, -1, -1)):
@@ -651,7 +667,7 @@ class AnalysisSpinner(QWidget):
             painter.drawEllipse(QRectF(26, 26, 4, 4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
         elif self.glyph == "cube":
-            # Cubo isometrico: si sta costruendo un solido.
+            # Isometric cube: a solid is being built.
             top, left, right = QPointF(28, 17), QPointF(18, 23), QPointF(38, 23)
             low_l, low_r, bottom = QPointF(18, 34), QPointF(38, 34), QPointF(28, 40)
             centre = QPointF(28, 28)
@@ -660,15 +676,15 @@ class AnalysisSpinner(QWidget):
                                (left, centre), (right, centre), (top, centre)):
                 painter.drawLine(start, end)
         elif self.glyph == "library":
-            # Libreria: tre dorsi di libro su uno scaffale, uno inclinato. Si
-            # sceglie un file gia' esistente, non si costruisce nulla.
+            # Library: three book spines on a shelf, one tilted. An existing
+            # file is chosen, nothing is built.
             for x, top in ((17.0, 19.0), (22.0, 17.0), (27.0, 20.0)):
                 painter.drawRoundedRect(QRectF(x, top, 4, 38 - top), 1, 1)
             painter.drawLine(QPointF(33, 21), QPointF(38, 37))
             painter.drawLine(QPointF(15, 38), QPointF(41, 38))
         elif self.glyph == "lens":
-            # Lente d'ingrandimento con una griglia di pixel dentro: OpenCV
-            # guarda la fotografia e la misura, non rileva ne' costruisce.
+            # Magnifying glass with a grid of pixels inside: OpenCV looks at
+            # the photograph and measures it, it neither detects nor builds.
             painter.drawEllipse(QRectF(17, 17, 16, 16))
             painter.drawLine(QPointF(31, 31), QPointF(39, 39))
             painter.drawLine(QPointF(25, 20), QPointF(25, 30))
@@ -689,8 +705,8 @@ class AnalysisSpinner(QWidget):
                         QPointF(22, 28)):
                 painter.drawLine(QPointF(28, 28), end)
         elif self.glyph == "caliper":
-            # Calibro: asta con due becchi, uno fisso e uno scorrevole. FreeCAD
-            # qui MISURA dei modelli esistenti, non costruisce il solido.
+            # Caliper: a beam with two jaws, one fixed and one sliding. Here
+            # FreeCAD MEASURES existing models, it does not build the solid.
             painter.drawLine(QPointF(16, 22), QPointF(40, 22))
             painter.drawLine(QPointF(18, 22), QPointF(18, 36))
             painter.drawLine(QPointF(18, 36), QPointF(21, 33))
@@ -698,8 +714,8 @@ class AnalysisSpinner(QWidget):
             painter.drawLine(QPointF(30.5, 25), QPointF(30.5, 36))
             painter.drawLine(QPointF(30.5, 36), QPointF(27.5, 33))
         elif self.glyph == "network":
-            # Rete neurale: tre strati di nodi pieni collegati. Classifica in
-            # locale cio' che il rilevatore ha trovato, senza spedire nulla.
+            # Neural network: three layers of connected solid nodes. It
+            # classifies locally what the detector found, sending nothing.
             layers = ((19.0, (22.0, 34.0)), (28.0, (19.0, 28.0, 37.0)), (37.0, (24.0, 32.0)))
             for (x0, ys0), (x1, ys1) in zip(layers, layers[1:]):
                 for y0 in ys0:
@@ -711,21 +727,21 @@ class AnalysisSpinner(QWidget):
                     painter.drawEllipse(QRectF(x - 2.2, y - 2.2, 4.4, 4.4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
         elif self.glyph == "pads":
-            # Footprint: due file di piazzole *piene* attorno al contorno del
-            # corpo. Le piazzole vuote si leggevano come un altro riquadro; il
-            # pieno del rame contro il filo di contorno distingue subito questo
-            # segno dal solido del CAD, che e' tutto wireframe.
-            # Tre piazzole per fila, larghe 4 px e distanti 4: il tratto del
-            # contorno (1.6 px) ne mangia 1.6 per ogni vuoto, quindi con lo
-            # stacco precedente di 1 px le tre si saldavano in una barra unica e
-            # il segno si leggeva come due barre invece di sei piazzole.
+            # Footprint: two rows of *solid* pads around the body outline.
+            # Hollow pads read as another frame; the solid copper against the
+            # outline stroke immediately tells this mark apart from the CAD
+            # solid, which is all wireframe.
+            # Three pads per row, 4 px wide and 4 apart: the outline stroke
+            # (1.6 px) eats 1.6 of every gap, so with the previous 1 px gap
+            # the three fused into a single bar and the mark read as two
+            # bars instead of six pads.
             painter.setBrush(QColor(self.color))
             for row in (17.0, 35.0):
                 for column in (18.0, 26.0, 34.0):
                     painter.drawRoundedRect(QRectF(column, row, 4, 4), 1.2, 1.2)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            # Contorno del corpo fra le due file, staccato dalle piazzole, col
-            # segno del pin 1 a sinistra: e' come si legge un footprint.
+            # Body outline between the two rows, detached from the pads, with
+            # the pin 1 mark on the left: it is how a footprint is read.
             painter.drawRect(QRectF(20, 24, 16, 8))
             painter.drawLine(QPointF(20, 27), QPointF(24, 27))
 
@@ -776,7 +792,10 @@ class TransferAnimation(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        """@brief Paint the source icon and the packets moving to the right."""
+        """@brief Paint the source icon and the packets moving to the right.
+
+        @param event Qt paint event.
+        """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         pen = QPen(QColor("#cdd6f4"), 1.6)
@@ -787,7 +806,7 @@ class TransferAnimation(QWidget):
             self._paint_board(painter)
         else:
             self._paint_documents(painter)
-        # Binario tratteggiato fra i dati e la nuvola, poi i pacchetti.
+        # Dashed track between the data and the cloud, then the packets.
         start, end, y = 56.0, float(self.width() - 8), 28.0
         rail = QPen(QColor("#45475a"), 1.4, Qt.PenStyle.DashLine)
         painter.setPen(rail)
@@ -796,7 +815,7 @@ class TransferAnimation(QWidget):
         for index in range(self.PACKETS):
             t = (self.offset + index / self.PACKETS) % 1.0
             color = QColor(self.color)
-            # Compaiono e svaniscono agli estremi invece di saltare.
+            # They appear and fade at the ends instead of jumping.
             color.setAlphaF(max(0.0, min(1.0, 4 * t, 4 * (1 - t))))
             painter.setBrush(color)
             x = start + t * (end - start)
@@ -829,25 +848,26 @@ OVERLAY_ICON_PX = 30
 class AnalysisOverlay(QWidget):
     """@brief Present analysis progress and expose the AI log and abort actions.
 
-    @note La scheda copre tutta la finestra e le schede sotto sono spente
-        mentre si lavora: senza un comando che esca da qui l'unica via d'uscita
-        era chiudere il programma. Il pulsante sta accanto a «Apri log AI»
-        perche' quella riga e' l'unica parte della scheda su cui si puo'
-        agire; cio' che l'interruzione *fa* dipende dal lavoro in corso e lo
-        decide la finestra, non questa scheda (vedi `abort_requested`).
+    @note The card covers the whole window and the tabs beneath are disabled
+        while work runs: without a command leaving from here the only way out
+        was closing the program. The button sits next to «Apri log AI»
+        because that row is the only part of the card one can act on; what
+        the abort *does* depends on the job in progress and is decided by the
+        window, not by this card (see `abort_requested`).
     """
     log_requested = pyqtSignal()
-    #: Emesso al clic su «Interrompi». La scheda non sa che cosa stia
-    #: lavorando -- un processo FreeCAD si uccide, una richiesta HTTP gia'
-    #: partita no -- quindi non decide nulla: chiede, e chi ha avviato il
-    #: lavoro sceglie. E' anche il motivo per cui questo modulo non importa
-    #: main_window: la dipendenza va in un verso solo.
+    #: Emitted on a click on «Interrompi» (Stop). The card does not know what
+    #: is working -- a FreeCAD process can be killed, an HTTP request already
+    #: sent cannot -- so it decides nothing: it asks, and whoever started the
+    #: work chooses. It is also why this module does not import main_window:
+    #: the dependency goes one way only.
     abort_requested = pyqtSignal()
-    #: Emesso quando l'utente chiude una scheda rimasta aperta a lavoro finito
-    #: (`show_completed`): chi l'ha lasciata aperta riprende da li'.
+    #: Emitted when the user closes a card left open after the work finished
+    #: (`show_completed`): whoever left it open resumes from there.
     closed = pyqtSignal()
-    #: Emesso all'inizio di un'operazione con il titolo gia' tradotto, e alla
-    #: fine: la barra di stato della finestra dice «Pronto» o cosa e' in corso.
+    #: Emitted at the start of an operation with the title already translated,
+    #: and at the end: the window status bar says «Pronto» (Ready) or what is
+    #: in progress.
     operation_started = pyqtSignal(str)
     operation_finished = pyqtSignal()
 
@@ -874,10 +894,10 @@ class AnalysisOverlay(QWidget):
         content.setContentsMargins(_CARD_PADDING, 24, _CARD_PADDING, 24)
         content.setSpacing(16)
         self.spinner = AnalysisSpinner()
-        # Per le chiamate remote i dati locali stanno a sinistra dell'anello con
-        # la nuvola, e i pacchetti vanno verso di essa (utente, 2026-09-26). La
-        # riga ha l'altezza dell'anello: comparire o sparire non fa sobbalzare
-        # la scheda.
+        # For remote calls the local data sit to the left of the ring with
+        # the cloud, and the packets travel towards it (user, 2026-09-26).
+        # The row has the ring's height: appearing or disappearing does not
+        # make the card jump.
         self.transfer = TransferAnimation()
         self.transfer.hide()
         header = QHBoxLayout()
@@ -894,23 +914,23 @@ class AnalysisOverlay(QWidget):
         title.setStyleSheet("font-size: 18pt; font-weight: 600;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         content.addWidget(title)
-        # Chi sta lavorando, in chiaro e accanto al suo segno. Senza questa
-        # riga l'unico indizio erano i messaggi di servizio che scorrevano al
-        # posto dello stato, che e' esattamente cio' che non si doveva leggere.
-        # Una QLabel normale, centrata e senza a capo, veniva tagliata sui due
-        # lati gia' al font predefinito (526 px disponibili contro 638
-        # necessari): si perdeva la parola iniziale, quindi l'intestazione
-        # diventava illeggibile proprio mentre altre righe vengono scartate
-        # "perche' l'intestazione lo dice gia'".
+        # Who is working, in plain words and next to its mark. Without this
+        # line the only clue was the service messages scrolling in place of
+        # the status, which is exactly what was not supposed to be read.
+        # A normal QLabel, centred and without wrapping, was cut on both
+        # sides already at the default font (526 px available against 638
+        # needed): the initial word was lost, so the header became
+        # unreadable precisely while other lines are discarded "because the
+        # header already says it".
         self.tool = ElidedLabel()
         self.tool.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.tool.setProperty("i18n_skip", True)
         self.tool.setStyleSheet("font-weight: 600;")
         self.tool.hide()
         content.addWidget(self.tool)
-        # I passi di un lavoro in piu' fasi (generazione): quello in corso in
-        # evidenza, quelli fatti spuntati, quelli non disponibili barrati con
-        # il motivo. Nascosta per le operazioni di una fase sola.
+        # The steps of a multi-phase job (generation): the running one
+        # highlighted, the done ones ticked, the unavailable ones struck
+        # through with the reason. Hidden for single-phase operations.
         self.steps = QLabel()
         self.steps.setObjectName("analysisSteps")
         self.steps.setTextFormat(Qt.TextFormat.RichText)
@@ -919,9 +939,9 @@ class AnalysisOverlay(QWidget):
         self.steps.setProperty("i18n_skip", True)
         self.steps.hide()
         content.addWidget(self.steps)
-        # Le fasi gia' concluse di questa operazione, con il loro esito
-        # (utente, 2026-09-28): una fase locale come OpenCV dura meno di un
-        # secondo e senza questo elenco non si vedeva nemmeno passare.
+        # The phases of this operation already finished, with their outcome
+        # (user, 2026-09-28): a local phase such as OpenCV lasts less than a
+        # second and without this list it was not even seen passing.
         self.phases = QLabel()
         self.phases.setObjectName("analysisPhases")
         self.phases.setTextFormat(Qt.TextFormat.RichText)
@@ -929,28 +949,28 @@ class AnalysisOverlay(QWidget):
         self.phases.setProperty("i18n_skip", True)
         self.phases.hide()
         content.addWidget(self.phases)
-        #: Fasi concluse: (nome dello strumento, esito, e' un avviso), come
-        #: SORGENTI italiane. Si traducono quando si disegnano, cosi' un cambio
-        #: di lingua a meta' corsa ridisegna l'elenco nella lingua nuova
-        #: (HANDOFF 138, C7; vedi `refresh_command_texts`).
+        #: Finished phases: (tool name, outcome, is a warning), as Italian
+        #: SOURCES. They are translated when drawn, so a language change in
+        #: mid-run redraws the list in the new language (HANDOFF 138, C7; see
+        #: `refresh_command_texts`).
         self._phase_history: list[tuple[str, str, bool]] = []
-        #: Vero dall'avvio di un'operazione finche' non dichiara dei passi:
-        #: le righe dell'elenco sono riservate da subito (`_size_the_card`),
-        #: come le altre righe facoltative, cosi' la scheda non cresce quando
-        #: la prima fase finisce.
+        #: True from the start of an operation until it declares steps: the
+        #: list lines are reserved right away (`_size_the_card`), like the
+        #: other optional lines, so the card does not grow when the first
+        #: phase ends.
         self._phases_reserved = False
-        #: Fase in corso: chiave, nome sorgente, primo stato mostrato (il suo
-        #: esito) e ultimo avviso, che lo sostituisce; testi sorgente anche qui.
+        #: Running phase: key, source name, first status shown (its outcome)
+        #: and last warning, which replaces it; source texts here too.
         self._phase_key = ""
         self._phase_name = ""
         #: Tick counter of the pulse of the running phase's «●» (before any render).
         self._pulse_tick = 0
         self._phase_last_status = ""
         self._phase_warning = ""
-        #: Conteggio della fase in corso (fatti, totale, unita' tradotta), o
-        #: None: lo mostra la riga «●» dell'elenco e lo stato centrale.
+        #: Count of the running phase (done, total, translated unit), or
+        #: None: shown by the «●» row of the list and by the central status.
         self._phase_progress = None
-        #: Testi (gia' tradotti) dei passi, passo corrente, motivi di chi non c'e'.
+        #: Texts (already translated) of the steps, current step, reasons of the absent ones.
         self._step_labels: list[str] = []
         self._step_current = -1
         self._step_unavailable: dict[int, str] = {}
@@ -959,9 +979,9 @@ class AnalysisOverlay(QWidget):
         self.status.setWordWrap(True)
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         content.addWidget(self.status)
-        # La barra compare solo quando esiste un conteggio vero da mostrare.
-        # Una percentuale stimata sul tempo si ferma al 90% e resta li': dice
-        # meno del nulla, perche' sembra un'informazione.
+        # The bar appears only when a real count exists to show. A
+        # percentage estimated on time stops at 90% and stays there: it says
+        # less than nothing, because it looks like information.
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
         progress_row.setSpacing(10)
@@ -981,32 +1001,32 @@ class AnalysisOverlay(QWidget):
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.elapsed.setStyleSheet("color: #a6adc8;")
         content.addWidget(self.elapsed)
-        # Il consuntivo dell'analisi AI resta qui finche' la modale e' aperta.
-        # Sta in una riga propria, non nello stato, perche' i messaggi di
-        # avanzamento della generazione lo sovrascriverebbero subito: e' il
-        # motivo per cui il costo non si riusciva a leggere.
-        # Una riga sola che si accorcia da sola, come l'intestazione: con l'a
-        # capo la riga del costo passava da una riga a due nel momento in cui il
-        # consuntivo arriva, e la scheda cambiava altezza sotto gli occhi --
-        # esattamente cio' che il dimensionamento deve evitare. Il numero sta in
-        # testa alla frase, quindi resta leggibile anche accorciata, e il testo
-        # integrale e' nel suggerimento e nel Log AI.
+        # The AI analysis summary stays here while the modal is open. It is
+        # on a line of its own, not in the status, because the generation
+        # progress messages would overwrite it at once: that is why the cost
+        # could not be read.
+        # A single line that shortens itself, like the header: with wrapping
+        # the cost line went from one line to two the moment the summary
+        # arrived, and the card changed height before one's eyes -- exactly
+        # what the sizing must avoid. The number is at the start of the
+        # sentence, so it stays readable even when shortened, and the full
+        # text is in the tooltip and in the AI Log.
         self.cost = ElidedLabel()
         self.cost.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cost.setTextFormat(Qt.TextFormat.PlainText)
         self.cost.setStyleSheet("color: #a6e3a1;")
         self.cost.setProperty('i18n_skip', True)
         self.cost.hide()
-        # Il costo resta vicino allo stato dell'inventario, dove c'e' spazio,
-        # invece di finire sotto il tempo trascorso.
+        # The cost stays close to the inventory status, where there is room,
+        # instead of ending up below the elapsed time.
         content.insertWidget(content.indexOf(self.elapsed), self.cost)
-        # I due comandi stanno sulla stessa riga, nell'ordine in cui l'utente
-        # li ha chiesti: il log a sinistra, l'interruzione subito alla sua
-        # destra. La riga resta centrata come lo era il solo pulsante del log.
-        # Icone con nome e spiegazione nel tooltip (utente, 2026-09-24), come
-        # le barre delle altre finestre. I testi li compone
-        # `refresh_command_texts`, anche al cambio di lingua: i pulsanti sono
-        # `i18n_skip` perche' il tooltip composto non e' una chiave.
+        # The two commands are on the same row, in the order the user asked
+        # for them: the log on the left, the stop right to its right. The
+        # row stays centred as the log button alone was.
+        # Icons with name and explanation in the tooltip (user, 2026-09-24),
+        # like the toolbars of the other windows. The texts are composed by
+        # `refresh_command_texts`, also on a language change: the buttons are
+        # `i18n_skip` because the composed tooltip is not a key.
         from .review_tools import tool_button
         self.log_button = tool_button("ai-log.svg", "Apri log AI")
         self.log_button.setObjectName("analysisLogButton")
@@ -1014,9 +1034,9 @@ class AnalysisOverlay(QWidget):
         self.abort_button = tool_button("stop.svg", "Interrompi")
         self.abort_button.setObjectName("analysisAbortButton")
         self.abort_button.clicked.connect(self.abort_requested.emit)
-        # Piu' grandi delle icone delle barre (utente, 2026-09-24): nella card
-        # larga, con il titolo a 18pt, la misura delle barre sembrava piccola.
-        # Solo qui: `tool_button` resta uguale per tutte le altre finestre.
+        # Larger than the toolbar icons (user, 2026-09-24): in the wide card,
+        # with the title at 18pt, the toolbar size looked small.
+        # Only here: `tool_button` stays the same for all the other windows.
         for button in (self.log_button, self.abort_button):
             button.setIconSize(QSize(OVERLAY_ICON_PX, OVERLAY_ICON_PX))
         self.refresh_command_texts()
@@ -1026,9 +1046,9 @@ class AnalysisOverlay(QWidget):
         buttons.addStretch()
         buttons.addWidget(self.log_button)
         buttons.addWidget(self.abort_button)
-        # A lavoro finito la scheda resta aperta con tutti i passi spuntati e
-        # si chiude solo da qui (utente, 2026-09-26: il passo FreeCAD non si
-        # vedeva mai concluso, la scheda spariva appena finiva).
+        # When the work is finished the card stays open with all the steps
+        # ticked and closes only from here (user, 2026-09-26: the FreeCAD step
+        # was never seen finished, the card vanished as soon as it ended).
         self.close_button = QPushButton("Chiudi")
         self.close_button.setObjectName("analysisCloseButton")
         self.close_button.clicked.connect(self._close_completed)
@@ -1038,27 +1058,26 @@ class AnalysisOverlay(QWidget):
         self.button_row = QWidget()
         self.button_row.setLayout(buttons)
         content.addWidget(self.button_row)
-        #: Vero solo mentre esiste un lavoro che ha senso interrompere. Nasce
-        #: falso: una scheda ferma non deve offrire di fermare nulla.
+        #: True only while there is a job that makes sense to stop. It starts
+        #: false: an idle card must not offer to stop anything.
         self._abortable = False
         self.set_abortable(False)
-        #: Altezza (px) che lo stato occupa con le righe riservate d'ufficio, e
-        #: supplemento concesso a un elenco piu' alto di quelle. Il supplemento
-        #: e' MONOTONO dentro una corsa e si azzera solo in `start()`: un elenco
-        #: di otto documenti compare una volta sola, e far rimpicciolire la
-        #: scheda al messaggio successivo sarebbe lo stesso sobbalzo che il
-        #: dimensionamento esiste per evitare.
+        #: Height (px) the status takes with the lines reserved by default,
+        #: and the extra allowed to a list taller than those. The extra is
+        #: MONOTONIC within a run and is reset only in `start()`: a list of
+        #: eight documents appears only once, and shrinking the card at the
+        #: next message would be the same jump the sizing exists to avoid.
         self._status_base_height = 0
         self._status_extra = 0
-        #: Stato da mostrare, gia' tradotto e coi percorsi accorciati ma NON
-        #: ancora impaginato. Si conserva perche' l'impaginazione dipende dalla
-        #: geometria: se la finestra o il font cambiano mentre un elenco e' sulla
-        #: scheda, l'elenco va riaccorciato e rimisurato sulla larghezza nuova,
-        #: altrimenti le righe accorciate per la larghezza vecchia sbordano.
+        #: Status to show, already translated and with shortened paths but
+        #: NOT yet laid out. It is kept because the layout depends on the
+        #: geometry: if the window or the font change while a list is on the
+        #: card, the list must be shortened and measured again on the new
+        #: width, otherwise the lines shortened for the old width overflow.
         self._status_source = ""
-        # La scheda entra nell'overlay PRIMA di essere misurata: il bordo di 1 px
-        # che il foglio di stile dell'overlay le da' restringe lo spazio del
-        # testo, e una scheda non ancora figlia dell'overlay non lo conosce.
+        # The card enters the overlay BEFORE being measured: the 1 px border
+        # the overlay's style sheet gives it narrows the text space, and a
+        # card that is not yet a child of the overlay does not know it.
         outer.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
         self._size_the_card()
         self.status.installEventFilter(self)
@@ -1067,8 +1086,8 @@ class AnalysisOverlay(QWidget):
         self.timer.setInterval(40)
         self.timer.timeout.connect(self._tick)
         self.started_at = 0.0
-        #: Istante in cui l'overlay e' stato nascosto a operazione in corso
-        #: (revisione dei corpi): al ritorno l'orologio salta quel tempo.
+        #: Instant at which the overlay was hidden with an operation running
+        #: (body review): on return the clock skips that time.
         self._hidden_at = None
         parent.installEventFilter(self)
         if self.i18n is not None:
@@ -1096,11 +1115,11 @@ class AnalysisOverlay(QWidget):
         """@brief Widest card the hosting window can show without clipping.
 
         @return Maximum card width in pixels, margins already subtracted.
-        @note Il tetto va dedotto, non scelto: una costante (760 px) era insieme
-            troppo bassa -- annullava la derivazione dal font e tagliava il testo
-            dai 14 pt in su -- e troppo alta, perche' 760 px di minimo piu' i
-            margini non stanno in una finestra da 640 px e la scheda finiva
-            tagliata di lato.
+        @note The ceiling must be derived, not chosen: a constant (760 px) was
+            at once too low -- it cancelled the derivation from the font and
+            clipped the text from 14 pt upwards -- and too high, because a
+            760 px minimum plus the margins does not fit in a 640 px window
+            and the card ended up clipped at the side.
         """
         parent = self.parentWidget()
         room = parent.width() if parent is not None else 0
@@ -1115,10 +1134,10 @@ class AnalysisOverlay(QWidget):
         """@brief Tallest card the hosting window can show without clipping.
 
         @return Maximum card height in pixels, margins already subtracted.
-        @note Gemella di `_available_card_width`, e per lo stesso motivo: un
-            elenco lungo deve poter allungare la scheda, ma non oltre la
-            finestra che la ospita, altrimenti la parte in fondo -- pulsanti
-            compresi -- finirebbe fuori dallo schermo.
+        @note Twin of `_available_card_width`, and for the same reason: a long
+            list must be able to lengthen the card, but not beyond the window
+            hosting it, otherwise the bottom part -- buttons included -- would
+            end up off screen.
         """
         parent = self.parentWidget()
         room = parent.height() if parent is not None else 0
@@ -1134,9 +1153,9 @@ class AnalysisOverlay(QWidget):
 
         @return Height in pixels available to the status label, its currently
             reserved height included.
-        @note Si misura sulla scheda VERA (`sizeHint`), non su una stima delle
-            righe: la scheda porta anche titolo, anello, barra, costo e
-            pulsanti, e quanto spazio resta allo stato dipende da tutti loro.
+        @note Measured on the REAL card (`sizeHint`), not on an estimate of the
+            rows: the card also carries title, ring, bar, cost and buttons, and
+            how much room is left to the status depends on all of them.
         """
         spare = self._available_card_height() - self.card.sizeHint().height()
         return self.status.minimumHeight() + max(0, spare)
@@ -1147,19 +1166,18 @@ class AnalysisOverlay(QWidget):
         @return Card width minus the card's own contents margins (they include
             the 1 px style-sheet border of the QFrame), the layout padding, and
             the label's contents margins and margin.
-        @note CAUSA del difetto «ultima riga tagliata a meta'»: prima si usava
-            `larghezza della scheda - 2 * _CARD_PADDING`, cioe' 2 px in piu'
-            della label vera (il bordo della scheda). Le righe dell'elenco
-            venivano accorciate a QUELLA larghezza, e `elidedText` riempie la
-            riga fino al limite: una riga accorciata cadeva facilmente negli
-            ultimi 2 px, la label vera la mandava a capo, e l'elenco occupava una
-            riga in piu' di quella misurata e riservata. Dove la finestra non
-            concedeva altro spazio, la label restava piu' bassa del suo testo e
-            l'ultima riga si vedeva a meta'. La misura ora e' quella dello spazio
-            in cui il testo viene davvero disegnato.
+        @note CAUSE of the «last row cut in half» defect: before, `card width
+            - 2 * _CARD_PADDING` was used, that is 2 px more than the real
+            label (the card border). The list rows were shortened to THAT
+            width, and `elidedText` fills the row up to the limit: a shortened
+            row easily fell in the last 2 px, the real label wrapped it, and
+            the list took one row more than the one measured and reserved.
+            Where the window granted no further room, the label stayed lower
+            than its text and the last row showed in half. The measure is now
+            that of the space in which the text is really drawn.
         """
-        # Il foglio di stile applica bordo e font solo alla lucidatura: misurare
-        # prima darebbe la larghezza di una scheda senza bordo.
+        # The style sheet applies border and font only on polishing: measuring
+        # earlier would give the width of a card without border.
         self.card.ensurePolished()
         card = self.card.contentsMargins()
         padding = self.card.layout().contentsMargins()
@@ -1170,53 +1188,55 @@ class AnalysisOverlay(QWidget):
                    - label.left() - label.right() - 2 * self.status.margin())
 
     def _status_height(self):
-        """Altezza che il testo attuale dello stato occupa alla larghezza vera della label."""
+        """Height in px the current status text takes at the label's real width."""
         return self.status.heightForWidth(self._status_text_width())
 
     def _size_the_card(self):
         """@brief Size the card on its content, not on the texts of one run.
 
-        La scheda era troppo bassa e strozzata: lo stato andava a capo male e
-        le righe che compaiono a meta' operazione (strumento, barra, costo) la
-        facevano crescere e rimpicciolire sotto gli occhi.
+        The card was too low and cramped: the status wrapped badly and the
+        rows that appear mid-operation (tool, bar, cost) made it grow and
+        shrink before one's eyes.
 
-        Larghezza: lo stato e' troncato a `_STATUS_CHAR_LIMIT` caratteri, quindi
-        la larghezza che serve e' quella che li distribuisce su `_STATUS_LINES`
-        righe, misurata con le metriche del font effettivo (`averageCharWidth`),
-        non con un numero di pixel scelto a occhio su una frase. Il minimo
-        `_CARD_MIN_WIDTH` tiene leggibile un font molto stretto; il massimo NON
-        e' una costante ma la larghezza che la finestra concede davvero.
+        Width: the status is truncated to `_STATUS_CHAR_LIMIT` characters, so
+        the width needed is the one that spreads them over `_STATUS_LINES`
+        rows, measured with the metrics of the effective font
+        (`averageCharWidth`), not with a number of pixels chosen by eye on one
+        sentence. The minimum `_CARD_MIN_WIDTH` keeps a very narrow font
+        readable; the maximum is NOT a constant but the width the window
+        really grants.
 
-        Altezza: quando il tetto della finestra morde, la larghezza voluta non
-        c'e' e le righe dello stato non sono piu' tre. Si CONTANO alla larghezza
-        sopravvissuta, misurando l'ingombro della frase peggiore possibile
-        (`_WORST_CASE_STATUS`, lettere larghe) con le metriche vere: e' la
-        differenza fra un testo che va a capo e un testo tagliato a meta' di una
-        riga. `_STATUS_LINES` resta il minimo, cosi' la scheda non si abbassa
-        quando il font e' minuscolo.
+        Height: when the window ceiling bites, the wanted width is not there
+        and the status rows are no longer three. They are COUNTED at the
+        surviving width, measuring the extent of the worst possible sentence
+        (`_WORST_CASE_STATUS`, wide letters) with the real metrics: it is the
+        difference between a text that wraps and a text cut in the middle of a
+        row. `_STATUS_LINES` remains the minimum, so the card does not lower
+        when the font is tiny.
 
-        Le tre righe facoltative mantengono il proprio spazio anche da nascoste,
-        cosi' l'altezza complessiva e' quella di una scheda piena dall'inizio.
+        The three optional rows keep their own room even when hidden, so the
+        overall height is that of a card full from the start.
 
-        @note L'intestazione dello strumento si accorcia da sola (ElidedLabel),
-            quindi una riga le basta a qualunque font e non entra nel conteggio.
+        @note The tool header shortens itself (ElidedLabel), so one row is
+            enough for it at any font and it does not enter the count.
         """
-        # Prima di leggere le metriche: la lucidatura puo' cambiare il font della
-        # label (foglio di stile dell'applicazione), e misurare col font vecchio
-        # darebbe righe e larghezze di un altro testo.
+        # Before reading the metrics: polishing can change the label font
+        # (application style sheet), and measuring with the old font would
+        # give lines and widths of another text.
         self.card.ensurePolished()
         metrics = self.status.fontMetrics()
-        # Una riga di margine: `averageCharWidth` e' una media, e con una frase
-        # di lettere larghe il testo troncato sborderebbe sulla riga dopo
-        # facendo crescere la scheda. Dimensionando la larghezza su due righe
-        # (_STATUS_WRAP_LINES), le tre riservate bastano anche nel caso peggiore.
+        # One line of margin: `averageCharWidth` is an average, and with a
+        # sentence of wide letters the truncated text would overflow onto the
+        # next line, making the card grow. Sizing the width on two lines
+        # (_STATUS_WRAP_LINES), the three reserved ones suffice even in the
+        # worst case.
         chars_per_line = math.ceil(_STATUS_CHAR_LIMIT / _STATUS_WRAP_LINES)
         wanted = 2 * _CARD_PADDING + metrics.averageCharWidth() * chars_per_line
         width = min(self._available_card_width(), max(_CARD_MIN_WIDTH, wanted))
         self.card.setMinimumWidth(width)
         self.card.setMaximumWidth(width)
-        # Le righe si contano alla larghezza in cui la label disegna davvero,
-        # bordo della scheda escluso (vedi `_status_text_width`).
+        # The lines are counted at the width at which the label really draws,
+        # card border excluded (see `_status_text_width`).
         usable = self._status_text_width()
         wrapped = metrics.boundingRect(QRect(0, 0, usable, 0),
                                        int(Qt.TextFlag.TextWordWrap),
@@ -1224,66 +1244,69 @@ class AnalysisOverlay(QWidget):
         lines = max(_STATUS_LINES,
                     math.ceil(wrapped.height() / max(1, metrics.lineSpacing())))
         self._status_base_height = lines * metrics.lineSpacing() + metrics.descent()
-        # Il supplemento dell'elenco si somma alle righe riservate: le righe
-        # d'ufficio restano il pavimento (una scheda che si abbassa quando
-        # l'elenco finisce e' lo stesso sobbalzo di una che si alza).
+        # The list extra is added to the reserved lines: the default lines
+        # stay the floor (a card that shrinks when the list ends is the same
+        # jump as one that grows).
         self.status.setMinimumHeight(self._status_base_height + self._status_extra)
         self.tool.setMinimumHeight(self.tool.fontMetrics().lineSpacing())
-        # Una riga per passo (uno sotto l'altro, utente 2026-09-26), ma solo
-        # quando ci sono: le operazioni di una fase sola non pagano quello
-        # spazio (una finestra bassa non lo ha).
+        # One line per step (one below the other, user 2026-09-26), but only
+        # when there are steps: single-phase operations do not pay for that
+        # space (a low window does not have it).
         self.steps.setMinimumHeight(
             (len(self._step_labels) + len(getattr(self, '_step_results', {}))) * self.steps.fontMetrics().lineSpacing()
             + self.steps.fontMetrics().lineSpacing() // 2 if self._step_labels else 0)
         self.cost.setMinimumHeight(self.cost.fontMetrics().lineSpacing())
         self.phases.setMinimumHeight(0)
-        # Anche il tempo trascorso: nasce vuoto e riceve il primo testo in
-        # `start`, DOPO questo calcolo. Una label vuota e una con testo non
-        # chiedono la stessa altezza (14 e 12 px su una piattaforma di prova),
-        # quindi la prima operazione aveva una scheda di 2 px diversa dalle
-        # successive. Una riga intera riservata la rende indipendente dal testo.
+        # The elapsed time too: it starts empty and receives its first text
+        # in `start`, AFTER this computation. An empty label and one with
+        # text do not ask for the same height (14 and 12 px on a test
+        # platform), so the first operation had a card 2 px different from
+        # the following ones. A whole reserved line makes it text-independent.
         self.elapsed.setMinimumHeight(self.elapsed.fontMetrics().lineSpacing())
-        # Spazio riservato anche quando la riga e' nascosta: evita che la scheda
-        # salti quando lo strumento, la barra o il costo compaiono a operazione
-        # avviata. La visibilita' logica non cambia (isVisibleTo resta falso).
+        # Space reserved even when the line is hidden: it keeps the card from
+        # jumping when the tool, the bar or the cost appear with the operation
+        # running. The logical visibility does not change (isVisibleTo stays
+        # false).
         for row in (self.tool, self.progress_row, self.cost, self.phases):
             policy = row.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             row.setSizePolicy(policy)
-        # Le righe delle fasi concluse prendono solo lo spazio che la finestra
-        # avanza DOPO tutto il resto, fino a PHASE_HISTORY_ROWS: una finestra
-        # bassa ne mostra meno (o nessuna) invece di far uscire la scheda.
-        # Il resto si misura SENZA l'elenco: a corsa avviata la label contiene
-        # gia' le sue righe e `card.sizeHint` le conta, quindi sottrarle di
-        # nuovo le toglieva due volte e ogni ridimensionamento a meta' corsa
-        # riduceva l'elenco (HANDOFF 138, C2: 4 righe -> 1). La sua altezza
-        # minima e' appena tornata a zero, quindi il suo contributo e' il suo
-        # `sizeHint`, che si toglie.
+        # The finished-phase lines take only the space the window has left
+        # AFTER everything else, up to PHASE_HISTORY_ROWS: a low window shows
+        # fewer (or none) instead of pushing the card out.
+        # The rest is measured WITHOUT the list: with a run under way the
+        # label already holds its lines and `card.sizeHint` counts them, so
+        # subtracting them again removed them twice and every mid-run resize
+        # shrank the list (HANDOFF 138, C2: 4 lines -> 1). Its minimum height
+        # has just gone back to zero, so its contribution is its `sizeHint`,
+        # which is subtracted.
         spare = (self._available_card_height() - self.card.sizeHint().height()
                  + self.phases.sizeHint().height())
         rows = 0
         if getattr(self, "_phases_reserved", False):
-            # Altezza misurata sul testo vero (righe della tabella comprese),
-            # non stimata: una stima corta faceva crescere la scheda di qualche
-            # pixel a ogni fase.
+            # Height measured on the real text (table rows included), not
+            # estimated: a short estimate made the card grow by a few pixels
+            # at every phase.
             while rows < PHASE_HISTORY_ROWS and self._phase_rows_height(rows + 1) <= spare:
                 rows += 1
         self._phase_rows = rows
         self.phases.setMinimumHeight(self._phase_rows_height(rows) if rows else 0)
-        # Le righe riservate possono essere cambiate (finestra ridimensionata,
-        # elenco dello stato piu' alto): l'elenco si ridisegna PRIMA di fissare
-        # l'altezza della scheda, cosi' mostra quante righe ci stanno adesso e
-        # un testo rimasto dalla misura vecchia non entra nel `sizeHint`.
+        # The reserved lines may have changed (window resized, taller status
+        # list): the list is redrawn BEFORE fixing the card height, so it
+        # shows how many lines fit now and a text left from the old
+        # measurement does not enter the `sizeHint`.
         self._render_phases()
         self.card.setMinimumHeight(self.card.sizeHint().height())
 
     def changeEvent(self, event):
         """@brief Re-derive the card size when the font or the style changes.
 
-        @note Il calcolo stava solo in `__init__`: un cambio di tema o del font
-            di accessibilita' a programma avviato lasciava la scheda dimensionata
-            sulle metriche vecchie, cioe' col testo tagliato -- proprio il
-            difetto che il calcolo doveva evitare.
+        @param event Qt change event; only font, style and application font
+            changes trigger the refit.
+        @note The computation lived only in `__init__`: a change of theme or
+            of the accessibility font with the program running left the card
+            sized on the old metrics, that is with clipped text -- precisely
+            the defect the computation was meant to avoid.
         """
         super().changeEvent(event)
         if getattr(self, "card", None) is None:
@@ -1295,19 +1318,18 @@ class AnalysisOverlay(QWidget):
     def _refit(self):
         """@brief Re-derive the card AND re-lay the current status on new geometry.
 
-        @note Un elenco sulla scheda e' accorciato e misurato per una larghezza e
-            un font precisi. Ridimensionare solo la scheda lasciava le righe
-            accorciate per la geometria vecchia: su una scheda piu' stretta
-            andavano a capo (o sbordavano) e l'ultima riga finiva fuori
-            dall'altezza riservata.
-        @note Il supplemento d'altezza, monotono fra un messaggio e l'altro,
-            qui si RIDERIVA da zero: e' stato misurato su una geometria che non
-            esiste piu', e tenerlo farebbe restare la scheda piu' alta della
-            finestra appena rimpicciolita. Il sobbalzo che la monotonia evita e'
-            quello fra due messaggi; un ridimensionamento cambia gia' la scheda.
-        @note Anche le righe delle fasi si riderivano qui (`_size_the_card` le
-            ridisegna): una finestra ingrandita a meta' corsa mostra righe che
-            all'avvio non ci stavano, una rimpicciolita ne toglie.
+        @note A list on the card is shortened and measured for a precise width
+            and font. Resizing only the card left the rows shortened for the
+            old geometry: on a narrower card they wrapped (or overflowed) and
+            the last row ended up outside the reserved height.
+        @note The height supplement, monotonic between one message and the
+            next, is RE-DERIVED from zero here: it was measured on a geometry
+            that no longer exists, and keeping it would leave the card taller
+            than the window just shrunk. The jump the monotonicity avoids is
+            the one between two messages; a resize already changes the card.
+        @note The phase rows are re-derived here too (`_size_the_card` redraws
+            them): a window enlarged mid-run shows rows that did not fit at
+            start, a shrunk one removes some.
         """
         self._status_extra = 0
         self._size_the_card()
@@ -1317,14 +1339,18 @@ class AnalysisOverlay(QWidget):
     def eventFilter(self, watched, event):
         """@brief Keep the overlay covering its parent and sized on its metrics.
 
-        @note Il tetto della larghezza dipende dalla finestra, quindi si
-            ricalcola al resize: rimpicciolendo la finestra una scheda
-            dimensionata per la vecchia larghezza resterebbe tagliata di lato.
-        @note Il cambio di font si intercetta SULLA label dello stato, non
-            sull'overlay: il foglio di stile di questa scheda fissa il font dei
-            propri figli, quindi un nuovo font di sistema arriva alla label
-            (quando il tema viene riapplicato) senza passare da qui. Sizing e
-            metriche misurate devono restare la stessa cosa.
+        @param watched Object the event is for: the parent widget (resize) or
+            the status label (font change).
+        @param event Qt event being filtered.
+        @return The base class result: the event is never consumed here.
+        @note The width ceiling depends on the window, so it is recomputed on
+            resize: shrinking the window, a card sized for the old width would
+            stay clipped at the side.
+        @note The font change is intercepted ON the status label, not on the
+            overlay: the style sheet of this card fixes the font of its own
+            children, so a new system font reaches the label (when the theme
+            is reapplied) without passing through here. Sizing and measured
+            metrics must remain the same thing.
         """
         if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
             self.setGeometry(watched.rect())
@@ -1337,20 +1363,23 @@ class AnalysisOverlay(QWidget):
         """@brief Offer the abort action only while something can actually be stopped.
 
         @param abortable True while an operation that the window can abort runs.
-        @note Spento E nascosto insieme, secondo la stessa disciplina degli
-            altri comandi di questo programma: un pulsante acceso su nessun
-            lavoro e' una promessa che non si puo' mantenere, e uno visibile ma
-            spento occupa il posto senza dire perche'.
-        @note Chi avvia il lavoro deve dichiararlo (`start(..., abortable=True)`):
-            il valore predefinito e' falso, cosi' un percorso nuovo che non ha
-            pensato all'interruzione non offre un pulsante che non farebbe nulla.
+        @note Disabled AND hidden together, by the same discipline as the
+            other commands of this program: an enabled button on no job is a
+            promise that cannot be kept, and a visible but disabled one takes
+            the place without saying why.
+        @note Whoever starts the job must declare it (`start(..., abortable=True)`):
+            the default is False, so a new path that has not thought about
+            interruption does not offer a button that would do nothing.
         """
         self._abortable = bool(abortable)
         self.abort_button.setEnabled(self._abortable)
         self.abort_button.setVisible(self._abortable)
 
     def is_abortable(self):
-        """@brief Tell whether the card is currently offering the abort action."""
+        """@brief Tell whether the card is currently offering the abort action.
+
+        @return True while `set_abortable(True)` is in force.
+        """
         return self._abortable
 
     def start(self, title='Analisi AI in corso', status='Preparazione dei documenti…',
@@ -1371,10 +1400,10 @@ class AnalysisOverlay(QWidget):
         self.set_tool(None)
         self.clear_steps()
         self.close_button.hide()
-        # Nuova operazione, nuovo ingombro: il supplemento concesso all'elenco
-        # della corsa precedente si azzera QUI e in nessun altro punto. Si
-        # svuota prima la label perche' il suo testo vecchio, se era un elenco,
-        # terrebbe alto il `sizeHint` su cui la scheda si ridimensiona.
+        # New operation, new footprint: the extra allowed to the previous
+        # run's list is reset HERE and nowhere else. The label is emptied
+        # first because its old text, if it was a list, would keep high the
+        # `sizeHint` the card resizes on.
         self._status_extra = 0
         self._status_source = ""
         self.status.clear()
@@ -1403,12 +1432,12 @@ class AnalysisOverlay(QWidget):
         """
         key = str(tool or "")
         source_name, color, glyph = TOOLS.get(TOOL_ALIASES.get(key, key), ("", "#89b4fa", ""))
-        # La label e' `i18n_skip` (porta un dettaglio che non e' testo nostro):
-        # il nome dello strumento si traduce qui, prima di comporla. L'elenco
-        # delle fasi conserva invece la sorgente (vedi `_phase_history`).
+        # The label is `i18n_skip` (it carries a detail that is not our own
+        # text): the tool name is translated here, before composing it. The
+        # phase list instead keeps the source (see `_phase_history`).
         name = self._translate(source_name) if source_name else ""
         if key != self._phase_key:
-            # Un altro strumento: la fase di prima e' conclusa (vedi _end_phase).
+            # Another tool: the previous phase is finished (see _end_phase).
             self._end_phase()
             self._phase_key, self._phase_name = (key, source_name) if source_name else ("", "")
             self._phase_last_status = self._phase_warning = ""
@@ -1436,8 +1465,8 @@ class AnalysisOverlay(QWidget):
             (e.g. FreeCAD missing), drawn struck through with the reason.
         """
         translate = self.i18n.text if self.i18n is not None else (lambda text: text)
-        # Un lavoro a passi spunta i suoi passi: l'elenco delle fasi non serve
-        # e il suo spazio torna allo stato (il ridimensionamento e' qui sotto).
+        # A stepped job ticks its steps: the phase list is not needed and
+        # its space goes back to the status (the resize is just below).
         self._phases_reserved = False
         self.clear_phases()
         self._step_labels = [translate(str(label)) for label in labels]
@@ -1446,12 +1475,17 @@ class AnalysisOverlay(QWidget):
                                   for index, reason in (unavailable or {}).items()}
         self._step_current = -1
         self._render_steps()
-        # Chiamata subito dopo `start`, prima del primo disegno: la scheda
-        # prende adesso l'altezza che terra' per tutta la generazione.
+        # Called right after `start`, before the first paint: the card takes
+        # now the height it will keep for the whole generation.
         self._size_the_card()
 
     def set_step_result(self, index, result):
-        """@brief Keep a phase result visible while subsequent steps run."""
+        """@brief Keep a phase result visible while subsequent steps run.
+
+        @param index Position in the list given to `set_steps`; out of range,
+            or no steps shown, is ignored rather than raising.
+        @param result Outcome text shown under that step's label.
+        """
         if not self._step_labels or not 0 <= int(index) < len(self._step_labels):
             return
         self._step_results[int(index)] = str(result)
@@ -1490,7 +1524,10 @@ class AnalysisOverlay(QWidget):
         self.operation_finished.emit()
 
     def is_holding_completed(self):
-        """@brief Tell whether the card is open on a finished job, waiting for «Chiudi»."""
+        """@brief Tell whether the card is open on a finished job, waiting for «Chiudi».
+
+        @return True while the overlay is shown with the close button visible.
+        """
         return not self.isHidden() and not self.close_button.isHidden()
 
     def _close_completed(self):
@@ -1626,8 +1663,9 @@ class AnalysisOverlay(QWidget):
                                              Qt.TextElideMode.ElideRight, width),
                           "warning" if warned else "done"))
         if running and rows_room:
-            # Con un conteggio vero la riga dice a che punto e' (HANDOFF 156):
-            # «17 di 42 componenti» invece di un «in corso» che dura minuti.
+            # With a real count the row says how far along it is (HANDOFF
+            # 156): «17 di 42 componenti» (17 of 42 components) instead of an
+            # «in corso» (running) that lasts minutes.
             text = "● " + self._translate(self._phase_name) + " — " + (
                 self._progress_text() if self._phase_progress else self._translate("in corso"))
             lines.append((metrics.elidedText(text, Qt.TextElideMode.ElideRight, width),
@@ -1643,7 +1681,11 @@ class AnalysisOverlay(QWidget):
         self.steps.hide()
 
     def steps_plain_text(self):
-        """@brief The step row as plain text, marks included (for logs and tests)."""
+        """@brief The step row as plain text, marks included (for logs and tests).
+
+        @return The text of the rich document the label draws, one line per
+            step; "" when no steps are shown.
+        """
         document = QTextDocument()
         document.setHtml(self.steps.text())
         return document.toPlainText()
@@ -1667,9 +1709,9 @@ class AnalysisOverlay(QWidget):
                              f'<span style="color:{self._pulse_color()}">&#9679;</span> {text}</span>')
             else:
                 parts.append(f'<span style="color:#a6adc8">&#9675; {text}</span>')
-        # Uno sotto l'altro (utente, 2026-09-26): in fila andavano a capo a
-        # meta' di un passo. Una colonna centrata come blocco, righe allineate
-        # a sinistra, cosi' i segni ✓ ● ○ stanno in colonna.
+        # One below the other (user, 2026-09-26): in a row they wrapped in
+        # the middle of a step. A column centred as a block, lines aligned
+        # left, so the marks ✓ ● ○ stand in a column.
         rows = "".join(f"<tr><td style='padding:1px 0'>{part}</td></tr>" for part in parts)
         self.steps.setText(f"<table align='center' cellspacing='0'>{rows}</table>"
                            if parts else "")
@@ -1712,7 +1754,11 @@ class AnalysisOverlay(QWidget):
             self._render_status()
 
     def _progress_text(self):
-        """«17 di 42 componenti» for the running phase, in the current language."""
+        """«17 di 42 componenti» for the running phase, in the current language.
+
+        @return The formatted count; the untranslated template when the
+            translated one cannot be formatted.
+        """
         done, total, unit = self._phase_progress
         template = self._translate("{done} di {total} {unit}")
         try:
@@ -1723,11 +1769,11 @@ class AnalysisOverlay(QWidget):
     def clear_cost(self):
         """@brief Clear and hide the AI cost summary at the start of a new AI analysis.
 
-        Azzera il consuntivo all'inizio di una NUOVA analisi AI.
+        Resets the summary at the start of a NEW AI analysis.
 
-        Non in start(): la modale riparte anche per la generazione FreeCAD,
-        che non fa chiamate al modello. Azzerare li' faceva sparire il costo
-        un attimo dopo averlo mostrato.
+        Not in start(): the modal restarts for the FreeCAD generation too,
+        which makes no calls to the model. Resetting there made the cost
+        disappear a moment after showing it.
         """
         self.cost.clear()
         self.cost.hide()
@@ -1735,11 +1781,13 @@ class AnalysisOverlay(QWidget):
     def set_cost(self, text):
         """@brief Show the AI analysis cost summary inside the overlay; an empty text hides it.
 
-        Mostra il consuntivo dell'analisi AI dentro la modale.
+        Shows the AI analysis cost summary inside the modal.
 
-        Il costo dell'ultima analisi non ha piu' una label sotto il pulsante
-        (utente, 2026-09-24): resta qui, nella modale che si sta guardando, e
-        nel Log AI.
+        The cost of the last analysis no longer has a label under the button
+        (user, 2026-09-24): it stays here, in the modal being looked at, and
+        in the AI log.
+
+        @param text Cost summary, already formatted; "" or None hides the row.
         """
         self.cost.setText(str(text or ""))
         self.cost.setToolTip(self.cost.text())
@@ -1751,33 +1799,33 @@ class AnalysisOverlay(QWidget):
         @param message Status line; machine bookkeeping is dropped, not shown.
             One line in, one line shown -- unless the line enumerates, and then
             it is laid out as a list (see the last note).
-        @note Le righe che il programma scrive per se' (AI_CALL_... in testa
-            alla riga, record "chiave=valore" con le impronte sha256) e quelle
-            che gli strumenti esterni scrivono sul proprio stdout (campi
-            "chiave : valore", conteggi di entita', decorazioni, intestazioni di
-            versione e copyright, righe auto-datate, percentuali senza soggetto)
-            restano nel log e non arrivano qui: sulla scheda occupavano il posto
-            di cio' che stava accadendo senza dirlo. Il pulsante del log resta a
-            un clic di distanza.
-        @note Un percorso NON fa scartare la riga: viene accorciato al nome del
-            file (vedi elide_paths). Il prodotto di questo strumento sono file,
-            quindi «Inventario salvato: …» e «Inventario non salvato su disco:
-            [Errno 28] …» sono esiti, non contabilita' interna.
-        @note Quando una riga viene scartata l'ultimo stato leggibile *resta*
-            scritto: azzerare la label farebbe sembrare l'operazione bloccata,
-            che e' il difetto che questo filtro deve evitare, non causare.
-        @note Una riga che ELENCA (lead-in coi due punti e voci separate dal
-            punto mediano: i documenti inviati al modello, i motivi di un
-            inventario parziale) viene rimpaginata a una voce per riga, e la
-            scheda si allunga per contenerle. La riga che va nel log resta una
-            sola, con una marca temporale sola: la divisione fra il log e la
-            scheda avviene qui, non alla sorgente (vedi `enumeration_lines`).
-        @note In un elenco, la voce che dichiara un termine («nome — ruolo»,
-            vedi `enumeration_term`) mostra il termine in grassetto, staccato
-            dalla descrizione. E' l'unico caso in cui la label passa al testo
-            ricco, e tutto il testo che arriva dal messaggio viene escapato: un
-            nome di file non puo' diventare markup. Ogni altra riga resta
-            `PlainText`, letterale com'era.
+        @note The lines the program writes for itself (AI_CALL_... at the head
+            of the line, "key=value" records with sha256 fingerprints) and
+            those external tools write on their own stdout ("key : value"
+            fields, entity counts, decorations, version and copyright
+            headers, self-dated lines, percentages without a subject) stay in
+            the log and do not arrive here: on the card they took the place of
+            what was happening without saying it. The log button stays one
+            click away.
+        @note A path does NOT make the line dropped: it is shortened to the
+            file name (see elide_paths). The product of this tool is files, so
+            «Inventario salvato: …» and «Inventario non salvato su disco:
+            [Errno 28] …» are outcomes, not internal bookkeeping.
+        @note When a line is dropped the last readable status *stays* written:
+            clearing the label would make the operation look stuck, which is
+            the defect this filter must avoid, not cause.
+        @note A line that ENUMERATES (lead-in with a colon and items separated
+            by the middle dot: the documents sent to the model, the reasons of
+            a partial inventory) is laid out one item per row, and the card
+            lengthens to hold them. The line going to the log stays one, with
+            one timestamp: the split between the log and the card happens
+            here, not at the source (see `enumeration_lines`).
+        @note In a list, the item declaring a term («name — role», see
+            `enumeration_term`) shows the term in bold, detached from the
+            description. It is the only case in which the label switches to
+            rich text, and all the text coming from the message is escaped: a
+            file name cannot become markup. Every other line stays
+            `PlainText`, literal as it was.
         """
         # Full messages stay in the log; keep the card stable for long replies.
         warned = kind_of(message) == WARNING
@@ -1787,10 +1835,11 @@ class AnalysisOverlay(QWidget):
         text = self.i18n.text(source) if self.i18n is not None else source
         self._status_source = elide_paths(text)
         if self._phase_name:
-            # Esito della fase: il PRIMO stato dopo il suo annuncio; un avviso
-            # (l'ultimo) lo sostituisce, perche' e' cio' che va guardato. Si
-            # conserva la SORGENTE: la traduzione si fa quando l'elenco si
-            # disegna (`_phase_outcome_text`), anche dopo un cambio di lingua.
+            # Phase outcome: the FIRST status after its announcement; a
+            # warning (the last one) replaces it, because it is what must be
+            # looked at. The SOURCE is kept: translation happens when the
+            # list is drawn (`_phase_outcome_text`), even after a language
+            # change.
             transient_crop_progress = re.match(
                 r"^(?:Analisi componente|Componente|Analysing component|Component|"
                 r"Analyse du composant|Composant|Bauteil) \d+ (?:di|of|sur|von) \d+", source)
@@ -1817,7 +1866,7 @@ class AnalysisOverlay(QWidget):
         return document.toPlainText()
 
     def _render_status(self):
-        """Impagina lo stato conservato: elenco se elenca e ci sta, riga sola altrimenti."""
+        """Lay out the kept status: a list when it enumerates and fits, one line otherwise."""
         text = self._status_source
         lines = enumeration_lines(text)
         if lines is not None and self._show_enumeration(lines):
@@ -1834,26 +1883,26 @@ class AnalysisOverlay(QWidget):
         @return True when the list is on the card; False when there is not even
             room for two lines, and the caller must fall back to the one-line
             form -- a list that does not fit is not an improvement.
-        @note Ogni riga viene accorciata alla larghezza in cui la label disegna
-            DAVVERO (`_status_text_width`, bordo della scheda escluso) invece di
-            essere mandata a capo, e il markup vieta l'a capo: cosi' una voce
-            occupa una riga e una sola, il conteggio delle righe e' esatto e il
-            nome del file resta allineato sotto il precedente, che e' cio' che
-            l'utente ha chiesto. Il testo integrale e' nel log.
-        @note L'altezza si misura sul documento che la label disegna
-            (`heightForWidth` del testo ricco), non su `lineSpacing` moltiplicato
-            per le righe: interlinea, grassetto e font di ripiego sono gia'
-            dentro la misura, perche' misura e disegno sono lo stesso layout.
-        @note Se le voci non ci stanno in altezza si TAGLIA l'elenco, non lo si
-            lascia debordare: si tolgono le ultime voci e il taglio si dichiara
-            con un'ellissi su una riga propria -- lo stesso segno con cui
-            questa scheda dichiara ogni altro accorciamento. Meglio un elenco
-            dichiaratamente parziale che una scheda piu' alta della finestra,
-            con i pulsanti fuori dallo schermo.
-        @note L'elenco e' allineato a sinistra: centrato, i nomi dei file
-            partirebbero da colonne diverse a ogni riga, cioe' esattamente il
-            difetto («più chiaro») che l'elenco deve togliere. Le righe non
-            elencate restano centrate come prima.
+        @note Every row is shortened to the width in which the label REALLY
+            draws (`_status_text_width`, card border excluded) instead of
+            being wrapped, and the markup forbids wrapping: so an item takes
+            one row and one only, the row count is exact and the file name
+            stays aligned under the previous one, which is what the user
+            asked for. The full text is in the log.
+        @note The height is measured on the document the label draws
+            (`heightForWidth` of the rich text), not on `lineSpacing` times
+            the rows: line spacing, bold and fallback fonts are already inside
+            the measure, because measure and drawing are the same layout.
+        @note If the items do not fit in height the list is CUT, not left to
+            overflow: the last items are removed and the cut is declared with
+            an ellipsis on a row of its own -- the same sign with which this
+            card declares every other shortening. Better a declaredly partial
+            list than a card taller than the window, with the buttons off
+            screen.
+        @note The list is left-aligned: centred, the file names would start
+            from different columns on every row, that is exactly the defect
+            («più chiaro») the list must remove. Non-list lines stay centred
+            as before.
         """
         metrics = self.status.fontMetrics()
         width = self._status_text_width()
@@ -1868,10 +1917,10 @@ class AnalysisOverlay(QWidget):
                                  | Qt.AlignmentFlag.AlignVCenter)
         self.status.setText(_enumeration_markup(shown))
         while len(shown) > 2 and self._status_height() > room:
-            # La prima potatura sostituisce l'ultima voce con l'ellissi (stesso
-            # numero di righe, una voce in meno); dalla seconda in poi si toglie
-            # anche l'ellissi, quindi ogni giro perde una riga e il ciclo
-            # termina sempre, al piu' sulle due righe del limite.
+            # The first pruning replaces the last item with the ellipsis (same
+            # number of lines, one item fewer); from the second on the
+            # ellipsis is removed too, so every round loses a line and the
+            # loop always ends, at worst on the two lines of the limit.
             del shown[-2 if shown[-1] == ellipsis else -1:]
             shown.append(ellipsis)
             self.status.setText(_enumeration_markup(shown))
@@ -1882,10 +1931,10 @@ class AnalysisOverlay(QWidget):
         """@brief Grow the reserved status height so a list is never clipped.
 
         @param needed Height in pixels the status text occupies right now.
-        @note Solo in aumento e solo dentro una corsa: `start()` riporta il
-            supplemento a zero. Una scheda che si rialza e si riabbassa a ogni
-            messaggio e' piu' fastidiosa di una scheda un po' piu' alta, che e'
-            la stessa ragione per cui l'altezza si riserva d'ufficio.
+        @note Only upwards and only within a run: `start()` brings the
+            supplement back to zero. A card that rises and lowers at every
+            message is more annoying than a slightly taller card, which is
+            the same reason the height is reserved by default.
         """
         extra = max(0, needed - self._status_base_height)
         if extra > self._status_extra:
@@ -1914,11 +1963,11 @@ class AnalysisOverlay(QWidget):
     def stop(self):
         """@brief Hide the overlay and stop the animation.
 
-        @note Toglie anche l'interruzione: il lavoro e' finito (da solo o
-            perche' e' stato fermato), quindi da qui in poi non c'e' piu'
-            niente da fermare. `hide()` da solo non basta -- la scheda viene
-            nascosta anche a operazione in corso, durante la revisione dei
-            corpi, e li' il comando deve restare valido.
+        @note It also removes the abort action: the job is over (on its own or
+            because it was stopped), so from here on there is nothing left to
+            stop. `hide()` alone is not enough -- the card is hidden also with
+            the operation in progress, during the review of the bodies, and
+            there the command must stay valid.
         """
         self.timer.stop()
         self.set_progress(None, None)
@@ -1929,6 +1978,7 @@ class AnalysisOverlay(QWidget):
     def hideEvent(self, event):
         """@brief Stop the animation whenever the overlay goes away.
 
+        @param event Qt hide event.
         @note Records when it went away: the overlay is hidden mid-operation
             while the reviewer edits the detected bodies, and the clock must
             not count that time as waiting for the model.
@@ -1940,6 +1990,7 @@ class AnalysisOverlay(QWidget):
     def showEvent(self, event):
         """@brief Resume the animation when the overlay comes back mid-operation.
 
+        @param event Qt show event.
         @note `hideEvent` stops the timer; a plain `show()` after the review
             used to leave the spinner and the clock frozen at the value they
             had when hidden (seen by the user as a crash). The time spent

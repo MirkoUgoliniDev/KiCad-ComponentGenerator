@@ -4,12 +4,12 @@ User request (2026-09-27): read the codes printed on the components better.
 The global inventory already reads them, but on the whole photograph and its
 detail tiles, which the model receives downscaled (photo_grounding:
 MODEL_IMAGE_LONG_SIDE_PX, DETAIL_TARGET_PX). When the calibrated photograph
-has more pixels per millimetre than the model saw, one extra paid request
+has a higher pixel density (px/mm) than the model saw, one extra paid request
 sends ONLY the bodies that carry a marking, each cropped at native resolution,
 made square-pixelled and turned with its long axis horizontal, with the single
 task of reading the text. When the model already saw every pixel the request
 would add nothing and is skipped, with the reason in the log -- but only for a
-model that does not gain from enlargement: the limits are per provider
+model that does not gain from enlargement: the limits depend on the provider
 (photo_grounding.model_image_limits, HANDOFF 144), and a coarse-token model
 billed by area always reads an enlarged crop with more detail.
 
@@ -125,13 +125,13 @@ def _crop(photo, component, length_mm, width_mm):
     if right - left < 2 or bottom - top < 2:
         return None
     crop = photo[top:bottom, left:right]
-    # Pixel quadrati: la foto calibrata puo' avere scale X e Y diverse.
+    # Square pixels: the calibrated photo may have different X and Y scales.
     scale = max(sx, sy)
     crop = cv2.resize(crop, (max(1, round((right - left) * scale / sx)),
                              max(1, round((bottom - top) * scale / sy))),
                       interpolation=cv2.INTER_CUBIC)
-    # Asse lungo orizzontale, al quarto di giro piu' vicino: la scritta segue
-    # quasi sempre il corpo, e il modello legge comunque ogni orientamento.
+    # Long axis horizontal, to the nearest quarter turn: the text almost
+    # always follows the body, and the model reads every orientation anyway.
     quarter = int(round(float(component.get('rotation_deg') or 0.0) / 90.0)) % 4
     if quarter % 2:
         crop = cv2.rotate(crop, cv2.ROTATE_90_COUNTERCLOCKWISE if quarter == 1
@@ -180,10 +180,10 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     if not marked:
         log(tx("Lettura delle sigle: nessun corpo con una scritta, nessuna richiesta."))
         return 0
-    # Il salto vale solo per un modello che non guadagna dall'ingrandimento
-    # (HANDOFF 144): uno a token grossi, fatturato per area, spende su un
-    # ritaglio ingrandito piu' token di quanti ne dedichi allo stesso corpo
-    # nella vista della scheda, anche quando ha gia' «visto» ogni pixel.
+    # The skip applies only to a model that gains nothing from enlargement
+    # (HANDOFF 144): one with coarse tokens, billed by area, spends more tokens
+    # on an enlarged crop than it devotes to the same body in the board view,
+    # even when it has already «visto» (seen) every pixel.
     if not limits.enlarges and native <= seen * (1 + RESOLUTION_EPSILON):
         log(tx("Lettura delle sigle saltata: il modello ha gia' visto la foto alla sua "
                "risoluzione piena ({native:.1f} px/mm); ritagli ingranditi non "
@@ -217,7 +217,7 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     try:
         data = cached_call(call, kwargs, cache_dir, tx("Lettura delle sigle"), log,
                            expected_ids=expected)
-    except Exception as exc:  # noqa: BLE001 - passo facoltativo: l'inventario resta valido
+    except Exception as exc:  # noqa: BLE001 - optional step: the inventory stays valid
         log(tx("Lettura delle sigle non riuscita ({exc}): restano le sigle dell'inventario.",
                exc=exc))
         return 0

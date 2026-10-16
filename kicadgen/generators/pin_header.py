@@ -1,19 +1,18 @@
 """@brief Generate a parametric through-hole header or module on a pin grid.
 
-Usato sia da examples/generate_pin_header.py sia dalla GUI
-(kicadgen.gui.main_window) per costruire footprint THT a matrice di pin
-a partire da parametri (righe, colonne, passo, distanza tra righe,
-diametro pad, drill).
+Used both by examples/generate_pin_header.py and by the GUI
+(kicadgen.gui.main_window) to build THT pin-matrix footprints from
+parameters (rows, columns, pitch, row spacing, pad diameter, drill).
 
-`pitch` e `row_spacing` sono volutamente separati: nei connettori/moduli
-in stile DIP (es. convertitori DC/DC come TRACO TEL8WI) il passo tra pin
-adiacenti sulla stessa riga (tipicamente 2.54mm) e' molto piu' piccolo
-della distanza tra le due file di pin (es. 10.16mm) -- usare lo stesso
-valore per entrambi produce una griglia quadrata errata.
+`pitch` and `row_spacing` are deliberately separate: in DIP-style
+connectors/modules (e.g. DC/DC converters such as the TRACO TEL8WI) the
+pitch between adjacent pins on the same row (typically 2.54 mm) is much
+smaller than the spacing between the two rows of pins (e.g. 10.16 mm) --
+using the same value for both produces a wrong square grid.
 
-`populated_pins` gestisce i moduli con pinout parziale (non tutte le
-posizioni della matrice RxC hanno un pin fisico): se None, tutte le
-posizioni vengono generate (comportamento di un normale pin header).
+`populated_pins` handles modules with a partial pinout (not every position
+of the RxC matrix has a physical pin): when None, every position is
+generated (the behaviour of an ordinary pin header).
 """
 
 from __future__ import annotations
@@ -27,15 +26,15 @@ from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
 
-#: Rame libero minimo fra due piazzole adiacenti, in mm.
+#: Minimum free copper between two adjacent lands, in mm.
 #:
-#: E' lo stesso minimo del generatore castellated (`MIN_HOLE_WALL_MM`, 0.2
-#: mm), riusato di proposito: vale come limite inferiore anche fra due
-#: piazzole di rame, perche' 0.2 mm e' la distanza di isolamento predefinita
-#: di un progetto KiCad (classe Default) e sta sopra il minimo di spaziatura
-#: dei produttori di PCB standard (tipicamente 0.1-0.15 mm). Un footprint che
-#: non la rispetta ha piazzole che si toccano o che il DRC segnala subito. E'
-#: un LIMITE INFERIORE di fabbricabilita', non una distanza consigliata.
+#: It is the same minimum as the castellated generator (`MIN_HOLE_WALL_MM`, 0.2
+#: mm), reused on purpose: it holds as a lower bound between two copper lands
+#: too, because 0.2 mm is the default clearance of a KiCad project (Default
+#: class) and sits above the minimum spacing of standard PCB manufacturers
+#: (typically 0.1-0.15 mm). A footprint that does not respect it has lands
+#: that touch or that the DRC flags at once. It is a LOWER BOUND of
+#: manufacturability, not a recommended distance.
 MIN_PAD_GAP_MM = MIN_HOLE_WALL_MM
 
 
@@ -67,9 +66,9 @@ class PinHeaderParams:
     pad_overrides: Optional[dict] = field(default=None)
     margin: float = 1.0
     populated_pins: Optional[set] = field(default=None)
-    # Posizione esplicita dei pin: {numero_pin: (riga, colonna)}. Serve quando la
-    # numerazione non e' quella colonna-per-colonna dei pin header, per esempio
-    # nei package DIP-style che numerano a U. Se None si usa l'ordine automatico.
+    # Explicit pin positions: {pin_number: (row, column)}. Needed when the
+    # numbering is not the column-by-column one of pin headers, for example
+    # in DIP-style packages numbered in a U. If None the automatic order is used.
     pin_map: Optional[dict] = field(default=None)
     body_length: Optional[float] = None
     body_width: Optional[float] = None
@@ -77,7 +76,11 @@ class PinHeaderParams:
     body_offset_y: float = 0.0
 
     def effective_row_spacing(self) -> float:
-        """@brief Return row spacing in mm, defaulting to the pin pitch."""
+        """@brief Return row spacing in mm, defaulting to the pin pitch.
+
+        @return `row_spacing` when declared, otherwise `pitch` (a single-row
+            header or a square grid).
+        """
         return self.row_spacing if self.row_spacing is not None else self.pitch
 
     def validate(self) -> None:
@@ -149,11 +152,11 @@ class PinHeaderParams:
                     raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
                                         number=number))
         if self.populated_pins is not None:
-            # Senza mappa i numeri sono quelli automatici colonna per colonna,
-            # quindi stanno in 1..righe*colonne. Con una mappa esplicita la
-            # numerazione e' una convenzione del disegno (DIP numerato a U con
-            # posizioni vuote: pin 16 su una griglia 2x3) e il solo criterio
-            # e' che la mappa dia una posizione al pin.
+            # Without a map the numbers are the automatic column-by-column ones,
+            # so they lie in 1..rows*columns. With an explicit map the numbering is a
+            # convention of the drawing (DIP numbered in a U with empty positions:
+            # pin 16 on a 2x3 grid) and the only criterion is that the map gives the
+            # pin a position.
             if not self.pin_map:
                 max_pin = self.rows * self.cols
                 for p in self.populated_pins:
@@ -162,9 +165,9 @@ class PinHeaderParams:
                             tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
                                pin=p, max_pin=max_pin)
                         )
-            # Con una mappa esplicita un pin popolato senza posizione verrebbe
-            # scartato in silenzio (pin_positions itera solo la mappa): il
-            # footprint perderebbe un pin del pinout sorgente.
+            # With an explicit map a populated pin without a position would be
+            # dropped silently (pin_positions iterates only the map): the footprint
+            # would lose a pin of the source pinout.
             if self.pin_map:
                 missing = sorted(set(self.populated_pins) - set(self.pin_map))
                 if missing:
@@ -284,12 +287,16 @@ def pad_copper_gap(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> floa
 def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]:
     """@brief Yield (pin number, x_mm, y_mm) for each populated pin.
 
-    Stessa geometria usata da build_pin_header() per il footprint 2D e dal
-    generatore 3D (kicadgen.cad3d) per posizionare i pin cilindrici -- unica
-    fonte di verita' per righe/colonne/pitch/row_spacing/populated_pins.
+    The same geometry used by build_pin_header() for the 2D footprint and by
+    the 3D generator (kicadgen.cad3d) to place the cylindrical pins -- the
+    single source of truth for rows/columns/pitch/row_spacing/populated_pins.
 
-    Con `pin_map` valorizzata le posizioni sono quelle indicate; altrimenti i
-    numeri seguono l'ordine colonna per colonna (1,2 poi 3,4...) dei pin header.
+    With `pin_map` set the positions are the given ones; otherwise the
+    numbers follow the column-by-column order (1,2 then 3,4...) of pin headers.
+
+    @param params Header parameters (not validated here).
+    @return An iterator of (pin number, x_mm, y_mm): X along the pitch, Y
+        along the row spacing.
     """
     row_spacing = params.effective_row_spacing()
 
@@ -338,7 +345,8 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     @param params Grid, pad and optional body dimensions in mm.
     @return Footprint with unchanged pin coordinates and numbering and a
         ``${REFERENCE}`` text on F.Fab (see core.footprint.fab_reference_text);
-        Reference/Value at core.footprint.default_text_positions.
+        Reference/Value anchored bottom-left at the KiCad corner of
+        core.footprint.default_text_positions (place_default_texts).
     @throws ValueError If params contain invalid geometry.
     """
     params.validate()

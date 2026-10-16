@@ -1,4 +1,4 @@
-"""@brief Explicit document roles per project, with recoverable local copies.
+"""@brief Explicit document roles of each project, with recoverable local copies.
 
 @details Since 2026-09-26 (manifest version 2) one file can carry SEVERAL
 roles: a datasheet PDF often holds the pinout, the dimensioned top view and
@@ -13,7 +13,7 @@ Only the files declared as a photograph (`PHOTO_ROLE`) reach the photo
 inventory, the YOLO detector and the photo calibration: a dimensioned drawing
 is read for its dimensions, never searched for component bodies.
 
-Version 1 manifests (one file per role, `{"roles": {role: {"filename": ...}}}`)
+Version 1 manifests (one file for each role, `{"roles": {role: {"filename": ...}}}`)
 are migrated on read: every file gets its role, and when the project has a
 'top' file and NO 'hires' file the 'top' file also gets 'hires', because
 under version 1 the top view doubled as the photograph when no photograph was
@@ -387,9 +387,9 @@ class DocumentSet:
         if PHOTO_ROLE in new_roles and suffix not in PHOTO_SUFFIXES:
             raise DocumentError(tx("Una foto deve essere un’immagine, non un PDF."))
         if suffix == '.pdf':
-            # Un PDF ha un solo ruolo possibile: lo riceve subito, invece di
-            # bloccare l'analisi finche' l'utente non spunta l'unica casella.
-            # Un'immagine sostituita da un PDF perde i ruoli di contenuto.
+            # A PDF has only one possible role: it receives it at once,
+            # instead of blocking the analysis until the user ticks the only
+            # box. An image replaced by a PDF loses its content roles.
             new_roles = [DATASHEET_ROLE]
         target_name = self._free_name(_local_name(source.name), data, keep=replace)
         target = self.directory / target_name

@@ -1,10 +1,8 @@
 """@brief Orchestrate 3D generation by running freecadcmd headless on a JSON job.
 
-Orchestrazione della generazione 3D: chiama freecadcmd in headless.
-
-Costruisce un JSON con corpo+pin, lo passa a freecad_build_body.py (che gira
-dentro l'interprete Python embedded di FreeCAD) via subprocess, e verifica
-che i file di output siano stati effettivamente scritti.
+Builds a JSON with body+pins, passes it to freecad_build_body.py (which runs
+inside FreeCAD's embedded Python interpreter) via subprocess, and checks that
+the output files were actually written.
 """
 
 from __future__ import annotations
@@ -44,18 +42,19 @@ from .lead_sides import local_lead_sides
 
 DEFAULT_FONT_FILE = r"C:\Windows\Fonts\arial.ttf"
 
-#: Secondi di SILENZIO tollerati dal figlio freecadcmd, non secondi di lavoro:
-#: il conto riparte a ogni riga stampata (vedi process_log.run_logged). E' il
-#: solo posto in cui il numero esiste; l'intervallo del battito dello script
-#: FreeCAD si ricava da qui con `heartbeat_interval`, cosi' i due non possono
-#: divergere.
+#: Seconds of SILENCE tolerated from the freecadcmd child, not seconds of work:
+#: the count restarts at every printed line (see process_log.run_logged). It is
+#: the only place where the number exists; the heartbeat interval of the
+#: FreeCAD script is derived from here with `heartbeat_interval`, so the two
+#: cannot diverge.
 FREECAD_SILENCE_TIMEOUT_S = 300
 
-#: Testo unico dell'interruzione chiesta da chi guarda. Passa per `Cad3DError`,
-#: cioe' per la STESSA via di uscita di ogni altro guasto della generazione 3D:
-#: l'interfaccia ha gia' un percorso che riporta la finestra in quiete quando
-#: il 3D non si completa, e un'interruzione e' un 3D non completato con un
-#: motivo diverso, non un secondo meccanismo da mantenere in parallelo.
+#: Single text of the interruption requested by whoever is watching. It goes
+#: through `Cad3DError`, i.e. through the SAME exit path as every other fault of
+#: the 3D generation: the interface already has a path that brings the window
+#: back to rest when the 3D does not complete, and an interruption is an
+#: uncompleted 3D with a different reason, not a second mechanism to maintain
+#: in parallel.
 CAD_ABORT_MESSAGE = tx("Generazione 3D interrotta su richiesta dell'utente.")
 
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
@@ -64,13 +63,13 @@ _CFLAGS = NO_WINDOW_FLAGS
 
 
 def _safe_name(name: str, index: int) -> str:
-    """Nome usabile come nome di oggetto FreeCAD (solo lettere, cifre, _)."""
+    """Name usable as a FreeCAD object name (letters, digits and _ only)."""
     cleaned = "".join(c if c.isalnum() else "_" for c in (name or "").strip())
     return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
 
 
-#: Distanza minima tenuta tra il bordo di un componente e il bordo del modulo,
-#: quando il componente viene riportato dentro (vedi `place_component`).
+#: Minimum distance kept between a component's edge and the module's edge,
+#: when the component is brought back inside (see `place_component`).
 COMPONENT_EDGE_MARGIN_MM = 0.2
 
 
@@ -84,22 +83,22 @@ def _match_evidence(component):
               "_smd_accepted", "_smd_body", "_smd_rotation_kind", "_smd_views_agree",
               "_smd_terminal_count",
               "_yolo_review_only", "_yolo_origin", "terminal_count",
-              # Identita' della proposta e decisione di presenza: servono a
-              # kicad_models._is_yolo_only_hypothesis per riconoscere per
-              # struttura, non per nome, un'ipotesi del solo rilevatore.
+              # Identity of the proposal and presence decision: they let
+              # kicad_models._is_yolo_only_hypothesis recognise by
+              # structure, not by name, a hypothesis of the detector alone.
               "_yolo_proposal_id", "_presence_reviewed_by_user",
-              # Conteggi strutturali di reofori e terminali (3 reofori + aletta).
+              # Structural counts of leads and terminals (3 leads + tab).
               "lead_count", "lead_count_complete",
               "terminal_layout", "terminal_count_basis", "_global_inventory_status", "class",
-              # Riferimento asimmetrico osservato: il costruttore lo confronta
-              # col baricentro del modello nativo per ricavare il verso.
+              # Observed asymmetric reference: the builder compares it
+              # with the centroid of the native model to derive the direction.
               "landmark_feature", "landmark_side", "landmark_confidence",
-              # Affidabilita' della lettura della sigla: una sigla «low» non
-              # diventa una chiave di ricerca dei modelli (kicad_models).
+              # Reliability of the marking reading: a «low» marking does not
+              # become a search key for the models (kicad_models).
               "marking_confidence",
-              # Incertezza della misura fotografica (mm per bordo) o scala
-              # della foto (px/mm): decidono se due ingombri sono la stessa
-              # taglia (archivio degli abbinamenti, kicad_models).
+              # Uncertainty of the photo measure (mm per edge) or scale
+              # of the photo (px/mm): they decide whether two envelopes are the same
+              # size (archive of the matches, kicad_models).
               UNCERTAINTY_KEY, SCALE_KEY,
               # Compact, transient OpenCV descriptor from the calibrated PCB
               # crop; never the source photo or a persisted project field.
@@ -116,10 +115,10 @@ def _match_evidence(component):
 def _model_placement(component):
     """Keep only explicit finite native-model overrides; None means infer axes.
 
-    Vi rientrano anche le scelte fatte a mano dal menu contestuale della
-    vista 3D -- esclusione dal solido e correzione d'orientamento -- perche'
-    devono arrivare al costruttore per entrambe le famiglie di componente,
-    non solo per quella che capita di toccare per prima.
+    The choices made by hand from the context menu of the 3D view --
+    exclusion from the solid and orientation correction -- are included too,
+    because they must reach the builder for both component families, not
+    only for the one that happens to be touched first.
     """
     result = {}
     for field in ("model_rotation_deg", "model_z_offset_mm", "model_rotation_delta_deg"):
@@ -130,10 +129,10 @@ def _model_placement(component):
                     continue
             except OverflowError:
                 continue
-            # Una correzione di zero gradi non e' una scelta fatta: si omette,
-            # come si omette un override di visibilita' non impostato. Gli
-            # altri due campi restano com'erano per non cambiare un contratto
-            # gia' in uso altrove.
+            # A correction of zero degrees is not a choice made: it is omitted,
+            # as an unset visibility override is omitted. The
+            # other two fields stay as they were so as not to change a contract
+            # already in use elsewhere.
             if field == "model_rotation_delta_deg" and not value:
                 continue
             result[field] = value
@@ -145,7 +144,7 @@ def _model_placement(component):
 
 
 def _rectangle_axes(rotation: float) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Assi unitari locali, esatti per le rotazioni cardinali."""
+    """Local unit axes, exact for the cardinal rotations."""
     angle = rotation % 360
     if angle % 90 == 0:
         c, s = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))[int(angle / 90)]
@@ -172,19 +171,27 @@ def clamp_component_position(
     x: float, y: float, length: float, width: float, rotation: float,
     body_length: float, body_width: float, margin: float = COMPONENT_EDGE_MARGIN_MM,
 ) -> tuple[float, float]:
-    """@brief Tiene il centro di un componente dentro il perimetro del modulo.
+    """@brief Keep the centre of a component inside the perimeter of the module.
 
-    Le stime di posizione dell'estrazione a volte cadono a cavallo del
-    bordo (letto vicino al margine della foto, o con un componente grande
-    vicino a un contatto): e' un vincolo geometrico generico, applicabile a
-    qualunque componente di qualunque modulo, non una correzione per un
-    pezzo particolare. Proietta il rettangolo ruotato sugli assi X/Y;
-    a 90/270 gradi lunghezza e larghezza si scambiano.
+    The position estimates of the extraction sometimes fall across the edge
+    (read close to the margin of the photo, or with a large component near a
+    contact): this is a generic geometric constraint, applicable to any
+    component of any module, not a correction for one particular part. It
+    projects the rotated rectangle onto the X/Y axes; at 90/270 degrees
+    length and width swap.
 
-    @return (x, y) clampati, in mm.
-    @throws ValueError Se un valore non e' un numero finito: un NaN finiva
-        spinto sul bordo e una rotazione NaN o una lunghezza infinita al
-        centro, cioe' coordinate inventate.
+    @param x Centre X of the component, mm (origin at the module centre).
+    @param y Centre Y of the component, mm.
+    @param length Long side of the component, mm.
+    @param width Short side of the component, mm.
+    @param rotation Rotation on the module, degrees (any angle).
+    @param body_length Module size along X, mm.
+    @param body_width Module size along Y, mm.
+    @param margin Clearance kept from the module edge, mm.
+    @return (x, y) clamped, in mm.
+    @throws ValueError When a value is not a finite number: a NaN used to end
+        up pushed to the edge, and a NaN rotation or an infinite length at
+        the centre, i.e. invented coordinates.
     """
     if not all(is_finite_number(value) for value in
                (x, y, length, width, rotation, body_length, body_width, margin)):
@@ -229,14 +236,14 @@ def place_component(
     body_length: float, body_width: float, tolerance_mm: float,
     margin: float = COMPONENT_EDGE_MARGIN_MM,
 ) -> tuple[float, float, float, float]:
-    """@brief Decide, per axis, whether an overhanging component is kept or moved inside.
+    """@brief Decide, axis by axis, whether an overhanging component is kept or moved inside.
 
-    Decisione dell'utente (2026-09-26): un corpo che sporge dal bordo resta
-    dove e' stato misurato, con una nota nel log; viene riportato dentro
-    (con `margin`) solo quando lo sforamento e' minore dell'incertezza di
-    misura, cioe' quando la sporgenza non si distingue dall'errore della
-    foto. Un modulo con un'antenna, un connettore o un pulsante a sbalzo
-    conserva cosi' la sua geometria reale.
+    User decision (2026-09-26): a body sticking out of the edge stays where
+    it was measured, with a note in the log; it is moved back inside (with
+    `margin`) only when the overrun is smaller than the measurement
+    uncertainty, i.e. when the overhang cannot be told apart from the error
+    of the photo. A module with an antenna, a connector or a cantilevered
+    button thus keeps its real geometry.
 
     @param x Measured centre X, mm.
     @param y Measured centre Y, mm.
@@ -249,7 +256,7 @@ def place_component(
         value is treated as measurement error.
     @param margin Clearance kept from the edge when a body is moved inside.
     @return (x, y, kept_overhang_x, kept_overhang_y): the centre to build and,
-        per axis, the overhang left in place (zero when none was kept).
+        for each axis, the overhang left in place (zero when none was kept).
     @throws ValueError When a value is not a finite number or the tolerance
         is negative.
     @note Each axis is decided on its own: a body can project 3 mm beyond one
@@ -278,26 +285,28 @@ def _uncertainty_basis(source: str) -> str:
     return tx("dalla scala della foto")
 
 
-#: Sovrapposizione minima, su entrambi gli assi, perche' due componenti
-#: contino come sovrapposti (non solo adiacenti/a contatto).
+#: Minimum overlap, on both axes, for two components to
+#: count as overlapping (not merely adjacent/touching).
 OVERLAP_TOLERANCE_MM = 0.05
 
 
 def find_overlapping_components(components: list) -> list[str]:
     """@brief Return log warnings for pairs of components whose rotated outlines overlap.
 
-    Coppie di componenti le cui sagome (gia' clampate, gia' ruotate) si
-    sovrappongono, come avvisi pronti per il log.
+    The positions come from the extraction estimate, taken component by
+    component: nothing prevents two independent estimates from ending up one
+    on top of the other. No attempt is made to resolve it by moving
+    something (that would be an arbitrary choice, not geometry) -- the pair
+    is reported, so it gets corrected with «Modifica componenti…» instead of
+    being discovered only in the finished 3D model.
 
-    Le posizioni vengono dalla stima dell'estrazione, presa componente per
-    componente: nulla impedisce a due stime indipendenti di finire una
-    sopra l'altra. Non si tenta di risolverlo spostando qualcosa (sarebbe
-    una scelta arbitraria, non geometria) -- si segnala la coppia, cosi'
-    si corregge con «Modifica componenti…» invece di scoprirlo solo nel
-    modello 3D finito.
+    The separating-axes test compares the oriented rectangles, avoiding false
+    positives between diagonal components with overlapping bounding boxes.
 
-    Il test degli assi separatori confronta i rettangoli orientati, evitando
-    falsi positivi tra componenti diagonali con bounding box sovrapposte.
+    @param components Component dictionaries with x, y, length_mm, width_mm
+        and optional rotation_deg (already clamped, already rotated);
+        entries with unusable numbers are skipped.
+    @return Warning lines ready for the log, one for each overlapping pair.
     """
     boxes = []
     for component in components:
@@ -308,9 +317,9 @@ def find_overlapping_components(components: list) -> list[str]:
             x, y = float(component["x"]), float(component["y"])
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        # Un valore non finito non ha una sagoma da confrontare: NaN rendeva
-        # falso ogni confronto e la coppia spariva senza avvisi. Il componente
-        # e' gia' escluso a monte; qui non si inventa nulla.
+        # A non-finite value has no outline to compare: NaN made
+        # every comparison false and the pair vanished without warnings. The
+        # component is already excluded upstream; nothing is invented here.
         if not all(math.isfinite(value) for value in (rotation, length, width, x, y)):
             continue
         u, v = _rectangle_axes(rotation)
@@ -327,8 +336,8 @@ def find_overlapping_components(components: list) -> list[str]:
         for j in range(i + 1, len(boxes)):
             name_b, corners_b, axes_b = boxes[j]
             overlaps = []
-            # X/Y mantengono le misure del messaggio per i casi cardinali;
-            # gli assi locali eliminano i falsi positivi delle bounding box.
+            # X/Y keep the measures of the message for the cardinal cases;
+            # the local axes remove the false positives of the bounding boxes.
             for ux, uy in ((1.0, 0.0), (0.0, 1.0)) + axes_a + axes_b:
                 pa = [x * ux + y * uy for x, y in corners_a]
                 pb = [x * ux + y * uy for x, y in corners_b]
@@ -356,19 +365,22 @@ def _hex_to_rgb(color: str) -> tuple[float, float, float]:
 
 
 def colorize_step(step_text: str, colors: list) -> str:
-    """@brief Add one colour per solid, in export order, to an AP214 STEP text.
+    """@brief Add one colour for each solid, in export order, to an AP214 STEP text.
 
-    Aggiunge a uno STEP AP214 un colore per ogni solido, nell'ordine di export.
+    FreeCAD's `Part.export` writes the geometry only: without these
+    presentation entities KiCad and the other CADs show everything in grey.
+    For every MANIFOLD_SOLID_BREP the chain
+    COLOUR_RGB -> FILL_AREA_STYLE -> ... -> STYLED_ITEM is added, plus a
+    single MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION collecting
+    them.
 
-    `Part.export` di FreeCAD scrive la sola geometria: senza queste entita' di
-    presentazione KiCad e gli altri CAD mostrano tutto in grigio. Per ogni
-    MANIFOLD_SOLID_BREP si aggiunge la catena
-    COLOUR_RGB -> FILL_AREA_STYLE -> ... -> STYLED_ITEM, e un'unica
-    MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION che le raccoglie.
-
-    `colors` sono stringhe '#rrggbb', una per solido. Se il conteggio non
-    torna (geometria vuota, export parziale) si solleva ValueError e il file
-    resta com'e': meglio grigio che colorato a caso.
+    @param step_text Full text of the AP214 STEP file written by FreeCAD.
+    @param colors '#rrggbb' strings, one for each solid, in export order.
+    @return The STEP text with the presentation entities inserted before the
+        end of the data section.
+    @throws ValueError When the count does not add up (empty geometry,
+        partial export), the geometric context or the terminator is missing:
+        the file stays as it is -- better grey than randomly coloured.
     """
     breps = re.findall(r"#(\d+) = MANIFOLD_SOLID_BREP", step_text)
     if not breps:
@@ -415,10 +427,7 @@ def colorize_step(step_text: str, colors: list) -> str:
 
 
 class Cad3DError(Exception):
-    """@brief Application error: freecadcmd missing or 3D generation failed or cancelled.
-
-    Errore applicativo: freecadcmd non trovato, o generazione fallita.
-    """
+    """@brief Application error: freecadcmd missing or 3D generation failed or cancelled."""
 
 
 def child_environment() -> dict:
@@ -565,8 +574,8 @@ def find_freecadcmd() -> str:
         come last; remaining ties are broken by the path text
         (`_freecad_install_order`).
 
-    Cerca freecadcmd: variabile d'ambiente FREECAD_CMD_PATH, poi le
-    installazioni tipiche di Windows sotto Program Files."""
+    The search order is the FREECAD_CMD_PATH environment variable first,
+    then the typical Windows installations under Program Files."""
     env_path = os.environ.get("FREECAD_CMD_PATH")
     if env_path and Path(env_path).is_file():
         return env_path
@@ -587,10 +596,10 @@ def find_freecadcmd() -> str:
     )
 
 
-#: Margine fra la fine di una piazzola e il centro della sua sigla serigrafata,
-#: oltre al raggio del foro: e' la convenzione con cui il 3D dispone le sigle
-#: (e che contact_zones replica per mascherarle). Non cambia fra i tipi di
-#: contatto: cambia solo dove finisce la piazzola.
+#: Margin between the end of a pad and the centre of its silkscreen label,
+#: beyond the hole radius: it is the convention by which the 3D lays out the
+#: labels (and which contact_zones replicates to mask them). It does not change
+#: between contact types: only where the pad ends changes.
 SILK_LABEL_MARGIN_MM = 0.55
 
 
@@ -604,14 +613,14 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
         plated features, one entry per contact; `silk_texts` the optional
         labels; `notes` human-readable lines about estimated quantities
         (Italian, for the log): params.geometry_notes().
-    @note Hole sizes and through-hole positions are the per-side ones
+    @note Hole sizes and through-hole positions are those of each side
         (CastellatedModuleParams.side_geometry): each side may declare its own
         half-hole, drill and ring, and an assumed size too large for the pitch
         is reduced there (and reported in `notes`), never here.
     @note No board silkscreen frame any more (user, 2026-09-26): it was a
         rectangle drawn inside the contacts, taken from no document or photo,
         and it read as a real feature of the board.
-    @note Per contact style:
+    @note For each contact style:
         * half_hole -- a notch of radius hole_diameter/2 at half_hole_inset,
           and an edge contact (sleeve + rectangular pads on both faces);
         * half_and_through -- the same, plus the closed hole's notch and, in
@@ -637,12 +646,12 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
     contacts = []
     silk_texts = []
     for placement in pad_positions(params):
-        # Quote dei fori del LATO del contatto: i lati possono averne di diverse.
+        # Hole dimensions of the contact's SIDE: the sides can have different ones.
         geometry = params.contact_geometry(placement)
         radius = geometry.half_hole / 2
-        # Il foro di un castellated non e' centrato sul bordo: e' un foro normale
-        # forato vicino al bordo e poi tagliato via, quindi il suo centro sta
-        # DENTRO la scheda di una frazione del diametro.
+        # A castellated hole is not centred on the edge: it is a normal hole
+        # drilled near the edge and then cut away, so its centre lies
+        # INSIDE the board by a fraction of the diameter.
         inset = geometry.half_hole_inset
         drill_radius = geometry.drill / 2
         label_gap = radius + SILK_LABEL_MARGIN_MM
@@ -664,7 +673,7 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
         else:
             pad_len = placement.width if placement.edge in ("left", "right") else placement.height
             pad_w = placement.height if placement.edge in ("left", "right") else placement.width
-            # Parte del pad che sta dentro la scheda: e' la piazzola dorata visibile.
+            # Part of the pad that lies inside the board: it is the visible golden pad.
             inner_len = max(0.6, pad_len - params.pad_overhang)
             if placement.edge == "left":
                 centre = (-half_length + inset, placement.y)
@@ -686,20 +695,20 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "color_hex": pin_color_hex,
             }
             if placement.style == CONTACT_HALF_AND_THROUGH and geometry.has_thru_holes:
-                # Il foro intero non tocca il bordo: e' l'altra meta' del
-                # contatto, quella in cui si salda uno strip. Va tagliato E
-                # metallizzato: stesso numero, stesso metallo, stesso solido.
+                # The whole hole does not touch the edge: it is the other half of the
+                # contact, the one into which a strip is soldered. It must be cut AND
+                # plated: same number, same metal, same solid.
                 hole_x, hole_y = params.thru_hole_centre(placement)
                 notches.append({"x": hole_x, "y": hole_y, "radius": drill_radius})
                 contact["through_hole"] = {
                     "x": hole_x, "y": hole_y, "radius": drill_radius,
                     "pad_diameter_mm": geometry.ring,
                 }
-                # Rame continuo dal bordo fino oltre la corona, come sulla
-                # scheda reale: sostituisce piazzola di bordo e corone.
-                # Stesse quote della piazzola del footprint (continuous_pad),
-                # misurate dal bordo verso l'interno: il modulo non ha rame
-                # oltre il proprio bordo, lo sbalzo e' della scheda madre.
+                # Continuous copper from the edge to past the annular ring, as on the
+                # real board: it replaces the edge pad and the rings.
+                # Same dimensions as the footprint pad (continuous_pad),
+                # measured from the edge inwards: the module has no copper
+                # beyond its own edge, the overhang belongs to the motherboard.
                 land = continuous_pad(params, placement)
                 contact["stadium"] = {"length_mm": land.inner_reach, "width_mm": land.across}
                 inward = {"left": (1, 0), "right": (-1, 0), "top": (0, 1), "bottom": (0, -1)}[placement.edge]
@@ -715,9 +724,9 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
                 "angle": 0, "color_hex": params.silk_color_hex,
             })
 
-    # Le note sulle quote stimate (distanza dal bordo dei fori passanti, fori
-    # ridotti per stare nel passo) le scrive il generatore del footprint:
-    # sono le stesse quote, quindi una sola fonte.
+    # The notes on the estimated dimensions (edge distance of the through holes,
+    # holes reduced to fit the pitch) are written by the footprint generator:
+    # they are the same dimensions, so a single source.
     notes = params.geometry_notes()
     return notches, contacts, silk_texts, notes
 
@@ -798,8 +807,8 @@ def component_payloads(components, board_length: float, board_width: float,
         if component.mating == "edge":
             x, y = component.x, component.y
         else:
-            # L'incertezza della sporgenza e' quella di due bordi misurati
-            # sulla stessa foto: il bordo del corpo e il bordo della scheda.
+            # The uncertainty of the overhang is that of two edges measured
+            # on the same photo: the body edge and the board edge.
             edge_mm, source = component_edge_uncertainty(component, photo_scale_px_per_mm)
             tolerance = side_uncertainty_mm(edge_mm)
             x, y, kept_x, kept_y = place_component(
@@ -847,8 +856,8 @@ def component_payloads(components, board_length: float, board_width: float,
             "pin_count_confidence": component.pin_count_confidence,
             "pin_count_source": component.pin_count_source,
             "pins_by_side": component.pins_by_side,
-            # Stessi lati nel riferimento locale del costruttore (asse lungo su
-            # X, prima della rotazione): e' da qui che si disegnano i reofori.
+            # Same sides in the builder's local frame (long axis on
+            # X, before the rotation): it is from here that the leads are drawn.
             "lead_sides_local": local_lead_sides(component.pins_by_side, component.rotation),
             "terminal_geometry": component.terminal_geometry,
             "package": component.package,
@@ -890,17 +899,17 @@ def attach_library_models(components, height_notes, notes, report, *,
     """
     try:
         from .kicad_models import attach_models
-        # Il canale si passa SOLO quando c'e', come a `run_logged`: una
-        # sostituzione di `attach_models` scritta prima di questo parametro
-        # non deve far fallire una generazione buona.
+        # The channel is passed ONLY when present, as for `run_logged`: a
+        # replacement of `attach_models` written before this parameter
+        # must not make a good generation fail.
         attach_models(components, log=report, progress=model_progress,
                       **({"cancel": cancel} if cancel is not None else {}))
     except ProcessCancelled as exc:
-        # La rinuncia NON e' un difetto della libreria 3D: se finisse nel ramo
-        # sotto, verrebbe annunciata come «libreria non utilizzabile» e la
-        # costruzione del solido partirebbe lo stesso.
+        # The give-up is NOT a defect of the 3D library: if it ended in the branch
+        # below, it would be announced as «libreria non utilizzabile» (library not
+        # usable) and the construction of the solid would start anyway.
         raise Cad3DError(CAD_ABORT_MESSAGE) from exc
-    except Exception as exc:  # noqa: BLE001 - la libreria e' un di piu', mai un requisito
+    except Exception as exc:  # noqa: BLE001 - the library is an extra, never a requirement
         report(tx("Libreria 3D KiCad non utilizzabile ({exc}); si usano le forme "
                   "approssimate.",
                   exc=exc))
@@ -983,57 +992,75 @@ def generate_castellated_3d_model(
     cancel=None,
     photo_scale_px_per_mm: Optional[float] = None,
 ) -> dict:
-    """@brief Genera il 3D di un modulo castellated come PCB vero e proprio.
+    """@brief Generate the 3D model of a castellated module as a real PCB.
 
-    `cancel` e' il canale di rinuncia (vedi `_run_freecad`): un
-    `threading.Event` che chi ha avviato il lavoro mette a uno per fermarlo.
+    What is seen on a real module, and what is reconstructed here:
 
-    `photo_scale_px_per_mm` e' la scala della foto calibrata da cui vengono le
-    posizioni dei componenti, quando e' nota: da essa si ricava l'incertezza
-    di misura (vedi `measurement_uncertainty`). Un componente che porta la
-    propria (`measurement_uncertainty_mm` o `photo_scale_px_per_mm` nelle
-    evidenze) usa quella. Senza nessuna delle due si usa un ripiego
-    dichiarato e la nota lo dice. Un corpo che sporge dal bordo piu'
-    dell'incertezza resta dove e' stato misurato (nota nel log); uno che
-    sporge meno viene riportato dentro (vedi `place_component`). I connettori
-    con innesto dal bordo (`mating == "edge"`) non vengono mai spostati.
+    * the **PCB** -- FR4 substrate between two solder-mask layers,
+      `pcb_thickness` thick, with the half-holes cut on the edge of the sides
+      that have them only (`CastellatedSide.contact_style`): a through_hole
+      side has a straight edge;
+    * the **contacts**: plated hole (sleeve) plus the gold pad on the top and
+      bottom faces, so they are visible from both sides; the through-hole is
+      plated the same way, with a ring on both faces; a half_and_through
+      contact is ONE continuous gold pad from the edge to beyond the ring,
+      as on the real board (see castellated_contact_payload);
+    * the **silkscreen**: label next to each contact (from `silk_labels`) and
+      the edge frame;
+    * the **components** read from the photo, each with the shape of its
+      type (SOIC with leads, filleted transformer, LED with lens...); the
+      marking read from the photo is NOT printed on top, unless
+      `body.show_markings_3d` asks for it: the standard path produces generic
+      volumes without writing.
 
-    Quello che si vede in un modulo reale, e che qui viene ricostruito:
+    There are no cylindrical pins: the contacts are half-holes and
+    through-holes. With `body.show_pins_3d` every contact that has a closed
+    through-hole receives a male header strip soldered underneath (see
+    castellated_header_pins and header_geometry); half-hole-only contacts
+    stay without one, and a note says so when the board has both kinds.
+    The notes of the result say where the edge distance of the through-holes
+    comes from, and whether it is an estimate.
 
-    * il **PCB** -- substrato FR4 tra due strati di soldermask, spesso
-      `pcb_thickness`, con i semi-fori tagliati sul bordo dei soli lati che
-      li hanno (`CastellatedSide.contact_style`): un lato through_hole ha il
-      bordo dritto;
-    * i **contatti**: foro metallizzato (manicotto) piu' la piazzola dorata
-      sulla faccia superiore e inferiore, cosi' si vedono da entrambi i lati;
-      il foro passante e' metallizzato allo stesso modo, con una corona su
-      entrambe le facce; un contatto half_and_through e' UNA piazzola dorata
-      continua dal bordo fino oltre la corona, come sulla scheda reale (vedi
-      castellated_contact_payload);
-    * la **serigrafia**: sigla accanto a ogni contatto (da `silk_labels`) e
-      cornice del bordo;
-    * i **componenti** letti dalla foto, ognuno con la forma del suo tipo
-      (SOIC con reofori, trasformatore raccordato, LED con lente...); la
-      marcatura letta dalla foto NON viene stampata sopra, a meno che
-      `body.show_markings_3d` non lo chieda: il percorso standard produce
-      volumi generici senza scritte.
-
-    Non ci sono pin cilindrici: i contatti sono semi-fori e fori passanti.
-    Con `body.show_pins_3d` ogni contatto che ha un foro passante chiuso
-    riceve uno strip maschio saldato sotto (vedi castellated_header_pins e
-    header_geometry); i contatti a solo mezzo foro restano senza, e una nota
-    lo dice quando la scheda ha entrambi i tipi.
-    Le note del risultato dicono da dove viene la distanza dal bordo dei fori
-    passanti, e se e' una stima.
+    @param params Validated castellated module description (contacts, sides,
+        components, PCB thickness).
+    @param body Body parameters: total height, colours and the
+        show_pins_3d/show_markings_3d choices; the height of the PCB itself
+        is `params.pcb_thickness`.
+    @param output_dir Project directory receiving the `.3dshapes` folder.
+    @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
+    @param fillets EdgeFilletAnnotation list applied to the board before the
+        export, or None.
+    @param face_texts FaceTextAnnotation list printed on the board faces, or
+        None.
+    @param font_file TrueType font used for every text solid.
+    @param progress Optional callable receiving one status line at a time.
+    @param model_progress Optional callback(done, total) of the KiCad model
+        matching of the components.
+    @param cancel Cancellation channel (see `_run_freecad`): a
+        `threading.Event` that whoever started the job sets to stop it.
+    @param photo_scale_px_per_mm Scale of the calibrated photo the component
+        positions come from, when known: the measurement uncertainty is
+        derived from it (see `measurement_uncertainty`). A component carrying
+        its own (`measurement_uncertainty_mm` or `photo_scale_px_per_mm` in
+        its evidence) uses that one. With neither, a declared fallback is
+        used and the note says so. A body sticking out of the edge by more
+        than the uncertainty stays where it was measured (note in the log);
+        one sticking out by less is moved back inside (see
+        `place_component`). Edge-mating connectors (`mating == "edge"`) are
+        never moved.
+    @return The `_run_freecad` result ({"step_path", "wrl_path", ...}) with
+        the placement, height, pin and matching notes appended.
+    @throws Cad3DError When freecadcmd is missing, the FreeCAD script fails
+        or the job is stopped on request.
     """
     params.validate()
 
     notches, contacts, silk_texts, inset_notes = castellated_contact_payload(
         params, body.pin_color_hex)
 
-    # Strip maschi solo nei fori passanti veri (decisione dell'utente,
-    # 2026-09-26). Senza pin da mostrare il payload resta quello di prima:
-    # nessun pin e nessuno stile.
+    # Male strips only in real through holes (user decision,
+    # 2026-09-26). With no pins to show the payload stays as before:
+    # no pins and no style.
     header_pins, header_pitches, header_skipped = (
         castellated_header_pins(params) if getattr(body, "show_pins_3d", True) else ([], [], []))
     header_payload = ({"pin_style": "male_header", "header_pitches": header_pitches}
@@ -1045,14 +1072,14 @@ def generate_castellated_3d_model(
             "maschio, perche' uno strip si salda solo in un foro passante.",
             count=len(header_skipped), numbers=", ".join(header_skipped)))
 
-    # Il corpo e' il PCB del modulo; l'altezza totale di `body` resta il
-    # riferimento per il blocco componenti quando non c'e' la foto.
+    # The body is the module's PCB; the total height of `body` stays the
+    # reference for the component block when there is no photo.
     pcb = replace(body, height_mm=params.pcb_thickness)
     component_height = body.height_mm - params.pcb_thickness
 
-    # Ogni valore cambiato qui (centro spostato dentro il modulo, altezza
-    # stimata ridotta) e' una correzione di una stima: va detta, non fatta in
-    # silenzio (regola del progetto sulle altezze stimate).
+    # Every value changed here (centre moved inside the module, estimated
+    # height reduced) is a correction of an estimate: it must be stated, not
+    # done silently (project rule on estimated heights).
     components, placement_notes, height_notes = component_payloads(
         params.components, params.body_length, params.body_width, component_height,
         photo_scale_px_per_mm=photo_scale_px_per_mm)
@@ -1061,8 +1088,8 @@ def generate_castellated_3d_model(
     inset_c = params.component_inset
     if (not components and component_height > 0
             and params.body_length > 2 * inset_c and params.body_width > 2 * inset_c):
-        # Senza l'elenco dei componenti resta il blocco unico: approssima
-        # l'ingombro, che e' comunque meglio di una lastra nuda.
+        # Without the component list the single block remains: it approximates
+        # the envelope, which is still better than a bare slab.
         extra_boxes.append({
             "name": "Componenti",
             "x": -params.body_length / 2 + inset_c,
@@ -1074,8 +1101,8 @@ def generate_castellated_3d_model(
             "color_hex": params.component_color_hex,
         })
 
-    # Modelli 3D reali dalla libreria di KiCad, quando il package e' noto e
-    # l'ingombro lo conferma (vedi `attach_library_models`).
+    # Real 3D models from the KiCad library, when the package is known and
+    # the envelope confirms it (see `attach_library_models`).
     model_notes = []
     def report_model(message):
         model_notes.append(message)
@@ -1087,13 +1114,13 @@ def generate_castellated_3d_model(
         reuse, components, height_notes, placement_notes, report_model,
         progress=progress, model_progress=model_progress, cancel=cancel)
 
-    # Rilevato PRIMA di chiamare FreeCAD: e' un controllo geometrico sui dati
-    # gia' pronti, non serve costruire il solido per accorgersene, e cosi'
-    # l'avviso arriva anche se la sovrapposizione manda in errore una delle
-    # forme (fillet/taglio che si scontrano) piu' avanti nello script. DOPO
-    # l'abbinamento, pero': e' li' che le ipotesi del solo rilevatore vengono
-    # escluse dal 3D, e un corpo che non verra' costruito non si sovrappone a
-    # nulla.
+    # Detected BEFORE calling FreeCAD: it is a geometric check on data
+    # already prepared, there is no need to build the solid to notice it, and so
+    # the warning arrives even if the overlap makes one of the shapes fail
+    # (clashing fillet/cut) further on in the script. AFTER the
+    # matching, though: that is where the hypotheses of the detector alone are
+    # excluded from the 3D, and a body that will not be built overlaps
+    # nothing.
     overlap_warnings = find_overlapping_components(_rendered(components))
 
     from ..services.model_choices import save_candidate_report
@@ -1116,12 +1143,12 @@ def generate_castellated_3d_model(
     result["warnings"] = overlap_warnings + result["warnings"]
     result["candidate_report_path"] = candidate_report
     _reconcile_model_imports(result, components, output_dir)
-    # Annotazioni informative, distinte dagli avvisi: dicono quanti modelli
-    # reali sono stati usati. Senza, l'esito della risoluzione non arriva
-    # all'utente e il meccanismo sembra non essere entrato in funzione.
+    # Informative annotations, distinct from warnings: they tell how many real
+    # models were used. Without them, the outcome of the resolution does not
+    # reach the user and the mechanism seems not to have kicked in.
     result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
-    # La provenienza della distanza dal bordo dei fori passanti non e' un
-    # dettaglio: quando e' una stima deve arrivare all'utente, sempre.
+    # The provenance of the edge distance of the through holes is not a
+    # detail: when it is an estimate it must reach the user, always.
     result["notes"] = inset_notes + header_notes + placement_notes + result["notes"]
     reuse.save(components, result, notes=model_notes)
     return result
@@ -1146,18 +1173,25 @@ def generate_3d_model(
 ) -> dict:
     """@brief Generate the STEP (and best-effort WRL) model of a pin header body in output_dir.
 
-    Genera <Nome>.step (e best-effort <Nome>.wrl) in output_dir/<Nome>.3dshapes/.
+    Writes <Name>.step (and best-effort <Name>.wrl) in output_dir/<Name>.3dshapes/.
 
-    `fillets` e `face_texts` sono liste di EdgeFilletAnnotation/FaceTextAnnotation
-    (kicadgen.cad3d.annotations) applicate al corpo prima dell'export: fillet
-    per primi (in ordine), poi il testo inciso sulle facce risultanti.
-
-    `cancel` e' il canale di rinuncia (vedi `_run_freecad`).
-
-    Ritorna {"step_path": Path, "wrl_path": Path | None}.
-    Solleva Cad3DError per problemi applicativi (freecadcmd assente, script
-    FreeCAD fallito, interruzione chiesta dall'utente) con l'output di
-    freecadcmd incluso per debug.
+    @param pin_params Pin grid of the header; validated here.
+    @param body Body dimensions, colours and the populated-board options.
+    @param output_dir Project directory receiving the `.3dshapes` folder.
+    @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
+    @param fillets EdgeFilletAnnotation list (kicadgen.cad3d.annotations)
+        applied to the body before the export, first and in order.
+    @param face_texts FaceTextAnnotation list laid on the resulting faces
+        after the fillets.
+    @param font_file TrueType font used for every text solid.
+    @param progress Optional callable receiving one status line at a time.
+    @param model_progress Optional callback(done, total) of the KiCad model
+        matching, used only for a populated board.
+    @param cancel Cancellation channel (see `_run_freecad`).
+    @return {"step_path": Path, "wrl_path": Path | None}.
+    @throws Cad3DError For application problems (freecadcmd missing, FreeCAD
+        script failed, interruption requested by the user), with the
+        freecadcmd output included for debugging.
     """
     pin_params.validate()
     pins = [[pin, x, y] for pin, x, y in pin_positions(pin_params)]
@@ -1193,6 +1227,16 @@ def generate_single_package_3d_model(
     @param package Explicit pad geometry of the part (THT and/or SMD pins).
     @param body Colours and fallback dimensions when the package gives none.
     @param output_dir Project directory receiving the `.3dshapes` folder.
+    @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
+    @param fillets EdgeFilletAnnotation list applied to the body, or None.
+    @param face_texts FaceTextAnnotation list laid on the body faces, or None.
+    @param font_file TrueType font used for every text solid.
+    @param progress Optional callable receiving one status line at a time.
+    @param model_progress Accepted for signature compatibility with the other
+        generators; this path performs no model matching.
+    @param cancel Cancellation channel (see `_run_freecad`).
+    @param photo_scale_px_per_mm Accepted for signature compatibility; a
+        single part has no photographic placement to tolerate.
     @return The `_run_freecad` result with a generic-model note appended.
     @note The body box turns with the package: `orientation_deg` (KiCad
         convention, any angle) is applied to the body about the footprint
@@ -1409,9 +1453,18 @@ def generate_single_tht_3d_model(
     @param pin_params Pin grid of the part; validated here.
     @param body Body dimensions, colours and the `pin_numbers_3d` choice.
     @param output_dir Project directory receiving the `.3dshapes` folder.
+    @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
+    @param fillets EdgeFilletAnnotation list applied to the body, or None.
     @param face_texts Texts on the faces (the top-face writing from the GUI);
         the pin numbers of `pin_number_face_texts` are appended when
         `body.pin_numbers_3d` is set.
+    @param font_file TrueType font used for every text solid.
+    @param progress Optional callable receiving one status line at a time.
+    @param model_progress Accepted for signature compatibility with the other
+        generators; this path performs no model matching.
+    @param cancel Cancellation channel (see `_run_freecad`).
+    @param photo_scale_px_per_mm Accepted for signature compatibility; a
+        single part has no photographic placement to tolerate.
     @return The `_run_freecad` result with a generic-model note appended.
     """
     pin_params.validate()
@@ -1442,8 +1495,8 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     the PCB box starts at (offset_x_mm, offset_y_mm).
     """
     progress = options.get("progress")
-    # Estratto, non letto: piu' avanti `options` viene inoltrato tale e quale
-    # a _run_freecad, che non conosce questo callback e rifiuterebbe la chiamata.
+    # Extracted, not read: further on `options` is forwarded as is
+    # to _run_freecad, which does not know this callback and would reject the call.
     model_progress = options.pop("model_progress", None)
     notes = []
     def report(message):
@@ -1458,9 +1511,10 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
     components, placement_notes, height_notes = component_payloads(
         body.components or [], body.length_mm, body.width_mm, body.height_mm - thickness,
         centre=centre)
-    # `options` viaggia intatto fino a `_run_freecad`, che vuole ancora il
-    # canale: qui si LEGGE soltanto. Stessa regola del sito castellated --
-    # una sola richiesta copre misura dei candidati e costruzione del solido.
+    # `options` travels intact up to `_run_freecad`, which still wants the
+    # channel: here it is ONLY READ. Same rule as the castellated site --
+    # a single request covers the measure of the candidates and the construction
+    # of the solid.
     reuse = HeaderModelReuse(output_dir, params, body,
         [options.get('fillets'), options.get('face_texts'), options.get('font_file')])
     # Only the model-resolution messages go into the snapshot: the thickness
@@ -1485,9 +1539,9 @@ def _generate_populated_tht(params, body, pins, output_dir, **options):
         notches=holes, edge_contacts=contacts,
         extra_payload={"components": components,
                        "substrate": {"color_hex": "#2f3f1f", "mask_thickness_mm": .02},
-                       # Una scheda popolata si collega con strip maschi saldati
-                       # sotto (utente, 2026-09-26): pin quadrati e distanziale
-                       # nero, non cilindri (vedi header_geometry).
+                       # A populated board connects through male strips soldered
+                       # underneath (user, 2026-09-26): square pins and black
+                       # spacer, not cylinders (see header_geometry).
                        "pin_style": "male_header",
                        # Missing positions do not change the physical header pitch.
                        "header_pitches": [params.pitch] * len(pins)},
@@ -1627,7 +1681,7 @@ def _run_freecad(
     cancel=None,
     body_rotation_deg: float = 0.0,
 ) -> dict:
-    """Costruisce il JSON e lancia freecadcmd; comune a tutti i generatori 3D.
+    """Build the JSON and launch freecadcmd; shared by every 3D generator.
 
     `body_rotation_deg` turns the body box, its fillets and its face texts
     about the footprint origin (Z axis), KiCad convention (degrees
@@ -1638,26 +1692,27 @@ def _run_freecad(
     ones. Edge contacts are classified on the axis-aligned board edges and
     cannot be combined with a turned body (ValueError).
 
-    `pins` sono i cilindri da aggiungere sotto il corpo (vuoto per i moduli
-    castellated), `notches` i cilindri da SOTTRARRE al corpo per ricavare i
-    semi-fori sul bordo, `extra_boxes` i solidi da aggiungere sopra il corpo
-    (per i moduli, il blocco che rappresenta i componenti montati sul PCB).
+    `pins` are the cylinders to add under the body (empty for castellated
+    modules), `notches` the cylinders to SUBTRACT from the body to carve the
+    half-holes on the edge, `extra_boxes` the solids to add on top of the
+    body (for modules, the block representing the components mounted on the
+    PCB).
 
-    `cancel` e' il canale di rinuncia: un oggetto con `is_set()`/`wait()`
-    (tipicamente `threading.Event`) che chi ha avviato il lavoro mette a uno
-    per chiedere di fermarsi. Il figlio freecadcmd viene ucciso dalla stessa
-    macchina che lo uccide quando tace troppo a lungo (process_log.run_logged)
-    e la chiamata esce con `Cad3DError(CAD_ABORT_MESSAGE)`, cioe' per la via
-    con cui l'interfaccia riporta gia' la finestra in quiete.
+    `cancel` is the cancellation channel: an object with `is_set()`/`wait()`
+    (typically `threading.Event`) that whoever started the job sets to ask
+    it to stop. The freecadcmd child is killed by the same machinery that
+    kills it when it stays silent too long (process_log.run_logged) and the
+    call exits with `Cad3DError(CAD_ABORT_MESSAGE)`, i.e. through the path
+    by which the interface already brings the window back to rest.
 
-    Lo STESSO canale copre le due meta' della fase 3D: l'abbinamento dei
-    modelli di libreria, che precede questa chiamata, lo riceve da chi chiama
+    The SAME channel covers both halves of the 3D phase: the matching of the
+    library models, which precedes this call, receives it from the caller
     (`attach_models` -> `model_candidates` -> `model_sizes` ->
-    `kicad_models.measure_models`) e uccide il proprio figlio freecadcmd --
-    quello che misura i candidati non ancora in cache -- invece di aspettare
-    che il lotto finisca. Una rinuncia chiesta durante l'abbinamento esce
-    quindi subito, per la stessa via (`Cad3DError(CAD_ABORT_MESSAGE)`), e
-    questa funzione non avvia nemmeno il figlio del solido.
+    `kicad_models.measure_models`) and kills its own freecadcmd child -- the
+    one measuring the candidates not yet in cache -- instead of waiting for
+    the batch to finish. A cancellation requested during the matching thus
+    exits immediately, through the same path (`Cad3DError(CAD_ABORT_MESSAGE)`),
+    and this function does not even start the child of the solid.
 
     Output contract (see `_discard_outputs`): right before freecadcmd starts,
     the previous ``<name>.step``, ``.wrl`` and ``.preview.json`` are deleted;
@@ -1720,25 +1775,25 @@ def _run_freecad(
             for t in face_texts
         ],
         "font_file": font_file,
-        # Le marcature restano nel payload dei componenti (servono a chi
-        # abbina i modelli di libreria e a chi rilegge il JSON), ma lo
-        # script FreeCAD le stampa solo se il corpo lo chiede esplicitamente.
+        # The markings stay in the component payload (they serve whoever
+        # matches the library models and whoever rereads the JSON), but the
+        # FreeCAD script prints them only if the body explicitly asks for it.
         "show_markings_3d": bool(body.show_markings_3d),
         "show_pins_3d": bool(getattr(body, "show_pins_3d", True)),
     }
     payload.update(extra_payload or {})
 
-    # Canale di trasporto del battito: lo script FreeCAD non puo' importare
-    # questo modulo (gira nell'interprete embedded), quindi l'intervallo
-    # viaggia nel JSON invece di essere riscritto a mano la' dentro. Scritto
-    # DOPO l'update di extra_payload: un chiamante non deve poter scollegare
-    # per sbaglio il battito dal watchdog.
+    # Transport channel of the heartbeat: the FreeCAD script cannot import
+    # this module (it runs in the embedded interpreter), so the interval
+    # travels in the JSON instead of being rewritten by hand in there. Written
+    # AFTER the update of extra_payload: a caller must not be able to
+    # disconnect the heartbeat from the watchdog by mistake.
     #
-    # Lo stesso numero fa da budget alla misura del verso di un modello
-    # nativo (freecad_parts._landmark_budget_s): una misura che stesse muta
-    # piu' a lungo dell'intervallo fra due battiti potrebbe, da sola,
-    # trasformare una corsa sana nel silenzio che il watchdog uccide. Una
-    # manopola sola, quindi non possono divergere.
+    # The same number is the budget of the direction measure of a native
+    # model (freecad_parts._landmark_budget_s): a measure that stayed silent
+    # longer than the interval between two heartbeats could, on its own,
+    # turn a healthy run into the silence the watchdog kills. A single
+    # knob, so they cannot diverge.
     payload["heartbeat_interval_s"] = heartbeat_interval(FREECAD_SILENCE_TIMEOUT_S)
     # Staging names of the three shipped outputs: the child writes each one
     # there and renames it only after that export succeeded (see
@@ -1746,16 +1801,16 @@ def _run_freecad(
     # the heartbeat: no caller may point the child back at the final names.
     published = _published_outputs(step_path, wrl_path, mesh_path)
     payload["staging_paths"] = {key: str(staged) for key, (_, staged) in published.items()}
-    # Cartelle delle cache utente (indice dei versi dei modelli nativi): il
-    # figlio non puo' importare kicadgen.app_paths, quindi le riceve qui, con
-    # KICADGEN_DATA_DIR gia' applicato.
+    # User cache folders (index of the native model directions): the
+    # child cannot import kicadgen.app_paths, so it receives them here, with
+    # KICADGEN_DATA_DIR already applied.
     from . import model_size_cache
     payload["cache_dirs"] = [str(folder) for folder in model_size_cache.user_cache_dirs()]
 
-    # Suffisso non ".json": freecadcmd tenta di aprire come documento ogni
-    # argomento extra con estensione che riconosce come formato importabile
-    # (incluso .json, per via dell'importer FEM YAML/JSON), causando
-    # un'eccezione rumorosa (innocua, ma da evitare) dopo l'esecuzione dello script.
+    # Suffix other than ".json": freecadcmd tries to open as a document every
+    # extra argument with an extension it recognises as an importable format
+    # (including .json, because of the FEM YAML/JSON importer), causing
+    # a noisy exception (harmless, but to be avoided) after the script runs.
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".kicadgen_params", delete=False, encoding="utf-8"
     ) as tmp:
@@ -1766,8 +1821,8 @@ def _run_freecad(
     try:
         try:
             if cancel is not None and cancel.is_set():
-                # Rinuncia gia' chiesta durante l'abbinamento dei modelli: non si
-                # avvia un processo che andrebbe ucciso al primo respiro.
+                # Give-up already requested during the model matching: do not
+                # start a process that would be killed at its first breath.
                 raise Cad3DError(CAD_ABORT_MESSAGE)
             # From here on the previous outputs are gone: whatever happens to this
             # run, no older STEP/WRL/preview can be mistaken for its result.
@@ -1775,30 +1830,30 @@ def _run_freecad(
             launched = True
             if progress:
                 from .process_log import ProcessCancelled, run_logged
-                # freecadcmd, finito lo script, prova ad aprire come documento ogni
-                # argomento in piu' -- cioe' il NOSTRO file di parametri -- e scrive
-                # «File format not supported: <quel file>». E' atteso per
-                # costruzione e innocuo: resta in freecad.log, ma non arriva alla
-                # finestra, dove sembrava un errore (utente, 2026-09-26). Il
-                # criterio e' il percorso esatto del file che passiamo noi, non il
-                # testo di FreeCAD: una riga che nomina altri file passa sempre.
+                # freecadcmd, once the script is done, tries to open as a document every
+                # extra argument -- i.e. OUR parameter file -- and writes
+                # «File format not supported: <that file>». It is expected by
+                # construction and harmless: it stays in freecad.log, but it does not reach
+                # the window, where it looked like an error (user, 2026-09-26). The
+                # criterion is the exact path of the file we pass, not the
+                # FreeCAD text: a line naming other files always passes.
                 params_names = {json_path, json_path.replace("\\", "/"), Path(json_path).name}
                 user_progress = progress
 
-                def progress(line, _forward=user_progress):  # noqa: F811 - filtro dichiarato sopra
+                def progress(line, _forward=user_progress):  # noqa: F811 - filter declared above
                     if "not supported" in str(line) and any(n in str(line) for n in params_names):
                         return
                     _forward(line)
-                # Secondi di SILENZIO, non di lavoro: il conto riparte a ogni riga
-                # che FreeCAD stampa, e ogni passo lungo batte (vedi
-                # heartbeat_interval_s nel payload qui sopra). Un limite sulla
-                # durata complessiva uccideva il lavoro dei componenti successivi
-                # per colpa del primo import lento, ed era tanto piu' probabile
-                # quanto piu' grande era il modulo.
+                # Seconds of SILENCE, not of work: the count restarts at every line
+                # FreeCAD prints, and every long step beats (see
+                # heartbeat_interval_s in the payload above). A limit on the
+                # overall duration killed the work of the following components
+                # because of the first slow import, and it was all the more likely
+                # the larger the module was.
                 try:
-                    # Il canale si passa SOLO quando c'e': cosi' la firma che
-                    # vedono i chiamanti non interattivi (e le loro sostituzioni
-                    # nei test) resta quella di prima.
+                    # The channel is passed ONLY when present: so the signature
+                    # seen by non-interactive callers (and their replacements
+                    # in the tests) stays as before.
                     result = run_logged(
                         [freecadcmd, str(_SCRIPT_PATH), json_path],
                         output_dir / "freecad.log", progress=progress,
@@ -1810,14 +1865,14 @@ def _run_freecad(
                 except subprocess.TimeoutExpired as exc:
                     raise _timeout_error(exc) from exc
             else:
-                # LIMITE DICHIARATO: senza `progress` nessuno legge le righe, quindi
-                # qui il timeout resta quello che subprocess.run sa fare -- la
-                # DURATA COMPLESSIVA -- e il battito non lo puo' salvare. E' la via
-                # usata solo da script e prove non interattive, dove non c'e' una
-                # modale da informare; l'interfaccia passa sempre `progress`. Per
-                # renderlo superfluo servirebbe leggere lo stdout anche qui.
-                # Il figlio scrive UTF-8 (stdout riconfigurato, avvisi JSON): il
-                # codec della localita' (cp1252) ne storpiava le lettere accentate.
+                # DECLARED LIMIT: without `progress` nobody reads the lines, so
+                # here the timeout stays what subprocess.run can do -- the
+                # OVERALL DURATION -- and the heartbeat cannot save it. It is the path
+                # used only by non-interactive scripts and tests, where there is no
+                # modal to inform; the interface always passes `progress`. To
+                # make it unnecessary the stdout would have to be read here too.
+                # The child writes UTF-8 (reconfigured stdout, JSON warnings): the
+                # locale codec (cp1252) mangled its accented letters.
                 try:
                     result = subprocess.run(
                         [freecadcmd, str(_SCRIPT_PATH), json_path],
@@ -1839,17 +1894,17 @@ def _run_freecad(
             tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
             raise Cad3DError(tx("Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}", tail=tail))
 
-        # Avvisi dello script (fillet non applicabile, faccia non trovata...): la
-        # generazione va comunque a buon fine, ma senza riportarli l'utente vedrebbe
-        # un modello privo di un'annotazione senza capire perche'.
+        # Script warnings (fillet not applicable, face not found...): the
+        # generation still succeeds, but without reporting them the user would see
+        # a model lacking a feature without understanding why.
         warnings = [
             child_warning_text(line.split(CHILD_WARNING, 1)[1])
             for line in output.splitlines() if CHILD_WARNING in line
         ]
 
-        # Colori nello STEP: Part.export scrive la sola geometria, e KiCad
-        # mostrerebbe tutto grigio. Si aggiungono le entita' AP214 a partire
-        # dai colori della mesh, che elenca i pezzi nello stesso ordine.
+        # Colours in the STEP: Part.export writes only the geometry, and KiCad
+        # would show everything grey. The AP214 entities are added starting
+        # from the mesh colours, which list the pieces in the same order.
         if ("KICADGEN_STEP_COLORS_OK" not in output
                 and "KICADGEN_MESH_OK" in output and mesh_path.is_file()):
             try:

@@ -94,12 +94,18 @@ class ModelFile:
 
     @property
     def format(self) -> str:
-        """@brief «ONNX» or «PyTorch», from the file extension."""
+        """@brief «ONNX» or «PyTorch», from the file extension.
+
+        @return "ONNX", "PyTorch" or "?" for another extension.
+        """
         return {".onnx": "ONNX", ".pt": "PyTorch"}.get(self.path.suffix.lower(), "?")
 
     @property
     def runs_code_when_loaded(self) -> bool:
-        """@brief True for a .pt checkpoint: loading it unpickles, i.e. runs code."""
+        """@brief True for a .pt checkpoint: loading it unpickles, i.e. runs code.
+
+        @return Whether the file extension is .pt.
+        """
         return self.path.suffix.lower() == ".pt"
 
 

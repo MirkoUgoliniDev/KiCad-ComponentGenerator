@@ -158,6 +158,20 @@ def _scene_baseline(item):
     return item.pos().y() + _drawing_text_baseline(item) * item.scale()
 
 
+def _cells(text, size=1.0):
+    """(along, up) scene px from a bottom-left anchor to where KiCad lays the text's cells and baseline.
+
+    CONTRACT CHANGED 2026-10-16 (user: KiCad's width and box,
+    gui/kicad_text_item.py): the preview draws a drawn text as KiCad does,
+    cells half the pen margin right of the anchor and the baseline
+    0.125 x size above it, no longer the layout edge and baseline on it.
+    """
+    from kicadgen.core.kicad_text import kicad_text_cells
+    from kicadgen.gui.main_window import _drawn_text_thickness
+    along, up = kicad_text_cells(text, size, _drawn_text_thickness())
+    return along * 20, up * 20
+
+
 def _handles(window):
     from kicadgen.gui.footprint_view import HANDLE_KEY_ROLE
     return [i for i in window.preview_scene.items() if i.data(HANDLE_KEY_ROLE) is not None]
@@ -178,9 +192,10 @@ def test_a_new_text_is_anchored_on_the_snapped_click_at_its_bottom_left(preview,
     from kicadgen.gui.main_window import _drawing_text_baseline
     item = _text_item(window)
     box = item.sceneBoundingRect()
-    assert box.left() == pytest.approx(2.0 * 20, abs=0.01)
+    along, up = _cells("HH")
+    assert box.left() == pytest.approx(2.0 * 20 + along, abs=0.01)
     baseline = _scene_baseline(item)
-    assert baseline == pytest.approx(3.1 * 20, abs=0.01), "the baseline sits on the anchor"
+    assert baseline == pytest.approx(3.1 * 20 - up, abs=0.01), "the baseline sits where KiCad's does"
     assert box.right() > box.left() and box.top() < 3.1 * 20, "grows right and up"
     window._on_footprint_drawing_hovered(0)
     (square,) = _handles(window)
@@ -198,17 +213,18 @@ def test_descenders_go_below_the_anchor_like_kicad_and_the_symbol_editor(preview
     from kicadgen.gui.main_window import _drawing_text_baseline
     item = _text_item(window, 0)
     descending = item.sceneBoundingRect()
-    assert descending.left() == pytest.approx(20, abs=0.01)
-    assert _scene_baseline(item) == pytest.approx(5 * 20, abs=0.01)
-    # The box reaches below the anchor by the font's descent (descenders),
+    along, up = _cells("gjpq")
+    assert descending.left() == pytest.approx(20 + along, abs=0.01)
+    assert _scene_baseline(item) == pytest.approx(5 * 20 - up, abs=0.01)
+    # The box reaches below the baseline by the font's descent (descenders),
     # above it by the ascent. The test platform's stub font may have no
     # descent: the identity holds either way, and is > 0 with real fonts.
     descent = QFontMetricsF(item.font()).descent() * item.scale()
-    assert descending.bottom() - 5 * 20 == pytest.approx(descent, abs=0.5)
+    assert descending.bottom() - _scene_baseline(item) == pytest.approx(descent, abs=0.5)
     assert descending.top() < 5 * 20
     capitals = _text_item(window, 1)
     assert capitals.sceneBoundingRect().top() < 9 * 20
-    assert _scene_baseline(capitals) == pytest.approx(9 * 20, abs=0.01)
+    assert _scene_baseline(capitals) == pytest.approx(9 * 20 - _cells("HH")[1], abs=0.01)
 
 
 def test_a_drawn_capital_is_as_tall_as_the_text_size_like_kicad(preview):
@@ -222,7 +238,11 @@ def test_a_drawn_capital_is_as_tall_as_the_text_size_like_kicad(preview):
         item = _text_item(window)
         # The outline of «H» in the item, scaled to the scene.
         assert _cap_height_px(item.font()) * item.scale() == pytest.approx(size * 20, rel=0.03)
-        assert item.font().stretch() in (0, 100), "no horizontal stretch (see _drawing_text_item)"
+        # CONTRACT CHANGED 2026-10-16 (user): stretched to KiCad's width by
+        # the item's transform, not by the font (whose stretch stays plain).
+        from kicadgen.core.kicad_text import kicad_advance_width
+        assert item.font().stretch() in (0, 100)
+        assert item.sceneBoundingRect().width() == pytest.approx(kicad_advance_width("H", size) * 20, abs=0.01)
 
 
 def test_a_legacy_text_keeps_its_drawn_corner_through_the_migration_on_load(preview):
@@ -244,8 +264,11 @@ def test_a_legacy_text_keeps_its_drawn_corner_through_the_migration_on_load(prev
     assert migrated["points"][0] == pytest.approx([old_left / 20, old_baseline / 20], abs=0.001)
     window._draw_preview()
     item = _text_item(window)
-    assert abs(item.sceneBoundingRect().left() - old_left) < 1.0, "within a pixel"
-    assert abs(_scene_baseline(item) - old_baseline) < 1.0
+    # The migration keeps the ANCHOR on the corner the user saw; the text
+    # is now drawn from it as KiCad draws (see `_cells`).
+    along, up = _cells("2q3qe")
+    assert abs(item.sceneBoundingRect().left() - along - old_left) < 1.0, "within a pixel"
+    assert abs(_scene_baseline(item) + up - old_baseline) < 1.0
     # Loading again what the window now saves changes nothing (migrated once).
     window._apply_project_state(deepcopy(window._project_state()))
     assert window.footprint_drawings[0] == migrated
@@ -269,7 +292,7 @@ def test_drag_duplicate_edit_and_undo_keep_the_bottom_left_anchor(preview):
     window._set_drawing_field(0, "text", "LONGER TEXT")
     assert window.footprint_drawings[0]["points"] == [[3.0, 1.0]]
     window._draw_preview()
-    assert _text_item(window).sceneBoundingRect().left() == pytest.approx(60, abs=0.01)
+    assert _text_item(window).sceneBoundingRect().left() == pytest.approx(60 + _cells("LONGER TEXT")[0], abs=0.01)
     # Undo walks back through the same anchored records.
     window._undo_footprint_drawing()
     assert window.footprint_drawings[0]["text"] == "HH"

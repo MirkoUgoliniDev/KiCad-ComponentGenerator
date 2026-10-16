@@ -50,17 +50,29 @@ class Preview3DPending(QWidget):
         """@brief No scene to clear."""
 
     def render_params(self, *args) -> None:
-        """@brief Nothing drawn: the window redraws from its parameters once the viewer exists."""
+        """@brief Nothing drawn: the window redraws from its parameters once the viewer exists.
+
+        @param args Whatever the window passes to the real viewer; ignored.
+        """
 
     def render_mesh(self, path) -> None:
-        """@brief Nothing drawn: the window keeps `_last_mesh_path` and redraws later."""
+        """@brief Nothing drawn: the window keeps `_last_mesh_path` and redraws later.
+
+        @param path Mesh file the real viewer would load; ignored.
+        """
 
     def set_pin_numbers(self, enabled: bool) -> None:
-        """@brief Remember the switch; the real viewer receives it on installation."""
+        """@brief Remember the switch; the real viewer receives it on installation.
+
+        @param enabled True to show pin numbers once the viewer exists.
+        """
         self.show_pin_numbers = bool(enabled)
 
     def set_pin_functions(self, pinout) -> None:
-        """@brief Nothing to label: the window re-sends the pinout before each draw."""
+        """@brief Nothing to label: the window re-sends the pinout before each draw.
+
+        @param pinout Pin rows the real viewer would label; ignored.
+        """
 
     def fit_view(self) -> None:
         """@brief No camera yet."""

@@ -317,7 +317,14 @@ def name_footprint(footprint_text: str, name: str) -> str:
 
 
 def attach_3d_model(footprint_text: str, model_reference: str) -> str:
-    """@brief Replace root model nodes with one normalized STEP reference."""
+    """@brief Replace root model nodes with one normalized STEP reference.
+
+    @param footprint_text Text of a .kicad_mod footprint.
+    @param model_reference Model path written in the `(model ...)` node, e.g.
+        a `${KIPRJMOD}` or absolute STEP reference.
+    @return The footprint text with exactly one model node, with zero offset
+        and rotation and unit scale.
+    """
     without_models = _remove_direct_children(footprint_text, "model")
     model = (
         f"\t(model {_quote(model_reference)}\n"
@@ -830,7 +837,14 @@ def _atomic_copy(source: Path, target: Path) -> None:
 
 
 def launch_preview(pcbnew_path: str | os.PathLike[str], board_path: Path) -> None:
-    """@brief Open an isolated preview board in the KiCad PCB Editor."""
+    """@brief Open an isolated preview board in the KiCad PCB Editor.
+
+    @param pcbnew_path Path of the pcbnew executable.
+    @param board_path Path of the preview .kicad_pcb to open.
+    @throws KiCadLibraryError When the executable or the board file is
+        missing (codes pcbnew_missing, preview_missing) or the process
+        cannot be started (launch_failed).
+    """
     executable = Path(pcbnew_path)
     if not executable.is_file():
         raise KiCadLibraryError(

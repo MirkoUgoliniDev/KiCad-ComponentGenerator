@@ -139,7 +139,12 @@ def marked(kind: str, source: str, /, **values: object) -> Message:
 
 
 def warning(source: str, /, **values: object) -> Message:
-    """@brief A translated message that is also a warning of the report (`marked(WARNING, …)`)."""
+    """@brief A translated message that is also a warning of the report (`marked(WARNING, …)`).
+
+    @param source Italian source text of the message.
+    @param values Named substitutions of the translated text.
+    @return The translated `Message` of kind WARNING.
+    """
     return marked(WARNING, source, **values)
 
 
@@ -158,7 +163,11 @@ def as_warning(text: object) -> Message:
 
 
 def kind_of(message: object) -> str:
-    """@brief Kind carried by a message; "" for a plain string."""
+    """@brief Kind carried by a message; "" for a plain string.
+
+    @param message Any object; only `Message` instances carry a kind.
+    @return The kind (e.g. WARNING) or "".
+    """
     return getattr(message, "kind", "") if isinstance(message, str) else ""
 
 

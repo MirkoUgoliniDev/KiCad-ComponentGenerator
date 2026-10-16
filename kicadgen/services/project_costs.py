@@ -99,12 +99,18 @@ class ProjectCosts:
 
     @property
     def run_complete(self) -> bool:
-        """@brief Tell whether every call of the current analysis reported its cost."""
+        """@brief Tell whether every call of the current analysis reported its cost.
+
+        @return True when no call of the current analysis lacks a cost.
+        """
         return self.run_calls_without_cost == 0
 
     @property
     def complete(self) -> bool:
-        """@brief Tell whether every recorded call reported its cost."""
+        """@brief Tell whether every recorded call reported its cost.
+
+        @return True when no recorded call lacks a cost.
+        """
         return self.calls_without_cost == 0
 
 

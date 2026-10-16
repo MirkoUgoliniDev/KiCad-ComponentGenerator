@@ -65,10 +65,13 @@ def test_header_and_symbol_flags_follow_the_kicad_10_library_format():
 
 def test_properties_carry_show_name_autoplace_and_hide_forms():
     text = serialize_symbol('M', [SymbolPin('1', 'A')], footprint='L:F')
-    visible = re.findall(r'\(property "(Reference|Value)" "([^"]*)" \(at 0 ([\d.]+) 0\) \(show_name no\) '
-                         r'\(do_not_autoplace no\) \(effects \(font \(size 1.27 1.27\)\)\)\)', text)
+    # CONTRACT CHANGED 2026-10-16 (user): the visible properties are anchored
+    # at their bottom-left corner, left of the centre line x = 0.
+    visible = re.findall(r'\(property "(Reference|Value)" "([^"]*)" \(at -[\d.]+ ([\d.]+) 0\) \(show_name no\) '
+                         r'\(do_not_autoplace no\) \(effects \(font \(size 1.27 1.27\)\) '
+                         r'\(justify left bottom\)\)\)', text)
     assert [(key, value) for key, value, _ in visible] == [('Reference', 'U'), ('Value', 'M')]
-    assert float(visible[0][2]) > float(visible[1][2]) > 5.08, 'Reference above Value, both above the body'
+    assert float(visible[0][2]) > float(visible[1][2]) > 5.08 - 0.75, 'Reference above Value, both above the body'
     hidden = re.findall(r'\(property "(\w+)" "([^"]*)" \(at 0 0 0\) \(show_name no\) \(do_not_autoplace no\) '
                         r'\(hide yes\) \(effects \(font \(size 1.27 1.27\)\)\)\)', text)
     assert hidden == [('Footprint', 'L:F'), ('Datasheet', ''), ('Description', '')]

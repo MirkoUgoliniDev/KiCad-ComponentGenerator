@@ -53,7 +53,10 @@ class LibraryModel:
 
     @property
     def label(self) -> str:
-        """@brief Return the ``library/stem`` text shown and filtered in the GUI."""
+        """@brief Return the ``library/stem`` text shown and filtered in the GUI.
+
+        @return "<library>/<stem>".
+        """
         return f"{self.library}/{self.stem}"
 
 
@@ -75,7 +78,10 @@ class FilterResult(list):
 
     @property
     def truncated(self) -> bool:
-        """@brief Whether the complete match set exceeded ``MAX_RESULTS``."""
+        """@brief Whether the complete match set exceeded ``MAX_RESULTS``.
+
+        @return True when `total` is larger than the entries kept.
+        """
         return self.total > len(self)
 
 

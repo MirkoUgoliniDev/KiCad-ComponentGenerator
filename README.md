@@ -1,301 +1,514 @@
-# KiCadGen-Tool
+# KiCadGen
 
-KiCadGen-Tool is a desktop application for creating reusable KiCad component
-footprints and optional 3D models from datasheets, mechanical drawings and
-calibrated product photographs.
+KiCadGen is a Windows desktop application that builds a KiCad component —
+footprint (`.kicad_mod`), electrical symbol (`.kicad_sym`) and 3D model
+(`.step`) — from the manufacturer's documents and from photographs of the
+part. It reads the documents with an AI model, turns what the model read into
+geometry with deterministic rules, lets you review and correct every result,
+and installs the component into a KiCad library.
 
-The workflow is engineering-oriented: source documents are assigned explicit
-roles, AI extracts candidate geometry, code validates the result, and
-KiCad-compatible files are generated locally for human review.
+Italian version: [README.it.md](README.it.md).
 
-> AI-assisted extraction is a starting point, not a metrology instrument.
-> Always verify pin numbering, dimensions, orientation and clearances against
-> the manufacturer's documentation before using an output in a PCB design.
+> AI reading is a starting point, not a measuring instrument. Check pin
+> numbering, dimensions, orientation and clearances against the manufacturer's
+> documentation before using an output in a board.
 
-## What the tool does
+## Purpose and non-goals
 
-~~~mermaid
-flowchart LR
-    A[Datasheet / drawings] --> D[Guided document slots]
-    B[Top-view photo] --> D
-    C[Side-view photo] --> D
-    D --> E[AI extraction]
-    E --> F[Validated parameters]
-    F --> G[KiCad footprint]
-    F --> H[Optional 3D model]
-    G --> I[2D preview]
-    H --> J[3D preview]
-    I --> K[Human verification]
-    J --> K
-~~~
-
-Current geometry families:
-
-- regular THT pin-header matrices;
-- castellated modules with independent contact rows on each side;
-- individual SMD/THT package geometries with explicit pad coordinates.
-
-The application can generate a KiCad .kicad_mod footprint and, when the required
-geometry and FreeCAD installation are available, .step, .wrl and preview
-metadata for the 3D model.
-
-## Guided source documents
-
-The Project tab currently has exactly three source-document roles:
-
-| Role | Local filename | Intended use |
-| --- | --- | --- |
-| Pinout | pinout.extension | Contact numbering, labels and pinout dimensions |
-| Dimensioned drawing | top.extension | Mechanical dimensions and calibrated XY localization |
-| High-resolution photo | hires.extension | Detection of small mounted components |
-
-Supported uploads are PNG, JPEG, WEBP, GIF and PDF files up to 20 MB. Files are
-copied into the component docs folder with the canonical role name while
-preserving their real extension. Original files are never moved or renamed.
-Each role offers preview, replacement, recoverable removal and an explicit
-Not available option.
-
-~~~mermaid
-flowchart TD
-    S[Select source file] --> V{Valid image or PDF?}
-    V -- No --> E[Explain the problem]
-    V -- Yes --> C[Copy to docs role filename]
-    C --> M[Save role metadata]
-    M --> P[Preview / replace / remove]
-    P --> A[Send explicit roles to AI]
-    N[Mark Not available] --> A
-~~~
-
-Assignments are authoritative. Photo localization uses the user-assigned top
-file and never substitutes a pinout because an AI response guessed
-a different image. Existing unassigned documents remain untouched and must be
-assigned manually. Replacement and removal archives are retained under
-docs/.history/.
-
-## AI-assisted analysis
-
-The pipeline separates three analysis stages:
-
-1. **Datasheet** — dimensions, contact layout, pin map and mechanical data.
-2. **Photo localization** — mounted package envelopes on the assigned top view.
-3. **Photo verification** — checks whether proposed rectangles contain real bodies.
-
-Each stage has its own model and prompt. Defaults and per-component-type
-overrides are stored in the tracked SQLite catalog at
-data/analysis_profiles.sqlite3. The Configuration catalog supports creating,
-editing, duplicating, deactivating and deleting component types, with inheritance
-from global defaults.
-
-The same SQLite catalog stores the user-interface translation keys for Italian,
-English, French and German. Select the active language from the selector in the
-top-right corner. Missing entries fall back to English.
-
-~~~mermaid
-flowchart LR
-    DB[(SQLite profile and translation catalog)] --> R[Resolve model, prompts and UI text]
-    R --> D[Datasheet]
-    R --> L[Photo localization]
-    R --> V[Photo verification]
-    D --> X[Structured extraction]
-    L --> X
-    V --> X
-    X --> Q[Code validation]
-    Q --> O[Generation or review]
-~~~
-
-The API key is kept in the Windows Credential Manager (Configuration →
-«AI account...») or in a local .env file, and is never stored in the profile
-database. Cached AI responses and generated output are local data.
-
-For local SMD crop classification with the trained TorchObjectDetection v3
-network, `kicadgen.services.smd_component_classifier.classify_photo_boxes`
-accepts a photo and detected boxes and returns the predicted class, rotation,
-footprint candidates and KiCad STEP paths. See
-[docs/CLASSIFICATORE_SMD.md](docs/CLASSIFICATORE_SMD.md) for setup and a
-PowerShell example.
-
-## Workflow
-
-~~~mermaid
-stateDiagram-v2
-    [*] --> AIExtraction: Run extraction
-    AIExtraction --> AutomaticGeneration: Valid result
-    AutomaticGeneration --> Preview: Footprint and 3D complete
-    AutomaticGeneration --> Stopped: Missing or unsupported data
-    Stopped --> AIExtraction: Complete the documents
-~~~
-
-A valid extraction starts footprint and 3D generation automatically. There are
-no manual parameter editors: footprint, castellated sides, 3D body, annotations
-and photographed components are kept as non-graphical data
-(`kicadgen/gui/component_state.py`) with the same ranges and precision the
-editors enforced, and are saved in the project file. Explicit-pad package geometries produce the footprint
-only, because the 3D generator does not support them yet. Existing output files
-require confirmation before replacement. The photo review can be reopened from
-the Project tab; the AI Log includes copy buttons for analysis and detected
-elements.
-
-The component type decides the analysis: the two «Board with components» types (through-hole or castellated
-connectors) run the photo inventory of the mounted bodies, the two single
-component types do not. For boards, «Square pins to connect to the main board»
-(off by default) adds male headers under the board in the 3D model only; on
-castellated boards only on contacts that have a through hole. It changes
-neither the analysis nor the footprint. Mounted bodies can be edited by hand at
-any time with «Edit components…» in the 3D toolbar or from the right-click
-menu on a body, with or without the photo.
-
-The progress window shows the three generation steps and who works in each:
-the footprint is written by this program (KiCad is not running), 3D models are
-chosen from the KiCad library files (FreeCAD measures candidates that are not
-cached yet), and FreeCAD builds the solid.
+- **Single components** (through-hole or SMD): pads, holes and body from the
+  datasheet; the electrical symbol from the pinout.
+- **Boards with mounted components** (modules, breakout boards, with
+  through-hole or castellated contacts): besides the footprint and the symbol,
+  KiCadGen reconstructs the **mechanical envelopes** of the bodies visible in a
+  top photograph — position, size and orientation — so the 3D model shows what
+  takes room on the board.
+- It is **not** reverse engineering: the bodies are generic volumes, or models
+  taken from the KiCad 3D library because their measures match. Exact part
+  names, electrical values and markings are not the goal.
+- **Heights read from a single top photograph are estimates**, not measures.
+  The program says so wherever a height is estimated; verify heights and
+  critical distances with dimensioned drawings or a ruler.
+- The AI inventory does not guarantee that every body was found, nor that
+  every rectangle is a body: the review window exists for that.
 
 ## Installation
 
-**Windows users**: download `KiCadGen-X.Y.Z.msi` from the GitHub Releases and
-follow [docs/INSTALLATION-WINDOWS.md](docs/INSTALLATION-WINDOWS.md). How the
-executable and the installer are built: [docs/PACKAGING-WINDOWS-MSI.md](docs/PACKAGING-WINDOWS-MSI.md).
+### Windows installer
 
-From the sources:
+Download `KiCadGen-X.Y.Z.msi` from the GitHub Releases and follow
+[docs/INSTALLATION-WINDOWS.md](docs/INSTALLATION-WINDOWS.md) (prerequisites,
+API keys, where the files go, update and uninstall). How the executable and
+the MSI are built: [docs/PACKAGING-WINDOWS-MSI.md](docs/PACKAGING-WINDOWS-MSI.md).
+
+### From the sources
 
 Requirements:
 
-- Python 3.11 or newer;
-- packages listed in requirements.txt;
-- FreeCAD with freecadcmd on PATH for STEP/VRML generation;
-- KiCad 10 or newer for opening the generated footprint and symbol: they are
-  written in the KiCad 10 file formats (footprint `20260206`, symbol library
-  `20251024`), which KiCad 8 and 9 cannot read.
+- Python 3.11 or newer (the release build uses 3.13);
+- the packages of `requirements.txt` (PyQt6, Pillow, OpenCV, pyvista,
+  pyvistaqt, python-dotenv, pytest);
+- optional: **FreeCAD** with `freecadcmd` (3D models). Without it the
+  footprint and the symbol are still produced; the progress window says which
+  step cannot run and why;
+- optional: **KiCad 10 or newer**: its PCB Editor (`pcbnew`) opens «Test in
+  KiCad...»; `kicad-cli` is needed for the global library installation and
+  for the real loading check of «Check component for KiCad», which without it
+  runs the other checks and skips that one. The generated
+  files use the KiCad 10 formats (footprint `20260206`, symbol library
+  `20251024`), which KiCad 8 and 9 cannot read;
+- optional local detectors: `requirements-yolo.txt` (ONNX Runtime, for `.onnx`
+  YOLO weights), `requirements-yolo-pt.txt` (Ultralytics/PyTorch, for `.pt`
+  weights), `requirements-smd.txt` (PyTorch/torchvision, for the local SMD
+  network). The weights are not in the repository: detectors go in
+  `models/yolo/`, the SMD network in `models/smd/`.
 
-~~~bash
+**Default detector from the sources.** When run from the sources the photo
+detector defaults to *YOLO + local SMD network (v3)*, which needs
+`models/smd/smd_classifier.pt` and
+`models/yolo/pcb_component_detector_yolov8m_best.pt` plus the packages of
+both `requirements-smd.txt` and `requirements-yolo-pt.txt`. These weights are
+not distributed with the sources and a fresh checkout has no `models/`
+folders: create `models/yolo/` and `models/smd/` when you add the files.
+Without them a board analysis stops with a warning before any paid call; to
+work without local weights choose another entry in **Photo detection** (for
+example *AI (current)*) in the **AI tools** box.
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
-python -m pip install -r requirements.txt
-~~~
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe main.py
+```
 
-Set the OpenRouter key from the program: Configuration → «AI account...»,
-paste the key, press «Verify», then «Save». It is stored in the Windows
-Credential Manager of your user account, not in a file.
+The interpreter is called directly because the default PowerShell execution
+policy blocks `.venv\Scripts\Activate.ps1`. `python main.py` also works: it
+switches to the project's `.venv` interpreter when it exists.
+`python main.py --check-runtime` checks imports and required resources without
+opening a window, reading `.env` or calling any AI.
 
-A local .env file still works, for example on a development machine:
+KiCad is found through the `KICAD_CLI_PATH` variable, on PATH, or in
+`C:\Program Files` (and `Program Files (x86)`). FreeCAD is **not** looked up on
+PATH: it is found through the `FREECAD_CMD_PATH` variable (full path of
+`freecadcmd.exe`) or in `C:\Program Files\FreeCAD*\bin\freecadcmd.exe` (and
+`Program Files (x86)`).
 
-~~~text
-OPENROUTER_API_KEY=your-key-here
-~~~
+## AI account and providers
 
-The key is looked up in this order: the `OPENROUTER_API_KEY` environment
-variable, the Windows Credential Manager, the .env file. Do not commit .env,
-API keys, generated output or migration backups.
+The document analysis is paid and needs an API key. Two providers are
+supported, chosen by the model identifier:
 
-## Run the application
+- **OpenRouter** (`vendor/model` identifiers, e.g. `anthropic/claude-opus-5`):
+  one key for many vendors; the cost of every call is the one OpenRouter
+  reports.
+- **DeepSeek, direct API** (`deepseek-api/...` identifiers): DeepSeek reports
+  no cost, so each call is charged as tokens × DeepSeek's published prices.
 
-~~~bash
-python main.py
-~~~
+The default model depends on how the program is started. **From the
+sources** it is `deepseek-api/deepseek-flash` (stored in the profile database
+`data/analysis_profiles.sqlite3`), so a DeepSeek key is needed. **Installed
+from the MSI** it is `anthropic/claude-opus-5` through OpenRouter (the
+installer rebuilds the database from the code). The model is always chosen
+from the interface: the default in «Configuration» → «General AI
+defaults...», tab «Model», and for the current session in the «AI model»
+box; never by editing the database by hand.
 
-The workflow stays focused on documents, extraction and verification.
+**Configuration → AI account...** lists every provider with where its key in
+use comes from (environment variable, Windows Credential Manager, `.env` file
+or none) and its current balance, read with the providers' free status
+endpoints. Paste a key, press **Verify** (no model call, no cost), then
+**Save**: the key is stored in the Windows Credential Manager of your user
+account (`KiCadGen/OpenRouter`, `KiCadGen/DeepSeek`), never in a file or in
+the profile database. **Remove key** deletes that entry only.
 
-## Output structure
+The key is looked up in this order: the environment variable
+(`OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`), the Credential Manager, a `.env`
+file (the repository's `.env` from the sources; `%LOCALAPPDATA%\KiCadGen\.env`
+in the installed program). `.env.example` is the commented template.
 
-~~~text
-ComponentName/
-├── ComponentName.pretty/
-│   └── ComponentName.kicad_mod
-├── ComponentName.3dshapes/
-│   ├── ComponentName.step
-│   ├── ComponentName.wrl
-│   └── ComponentName.preview.json
-└── docs/
-    ├── pinout.extension
-    ├── top.extension
-    ├── front.extension
-    ├── .document-roles.json
-    └── .history/
-~~~
+Costs: every paid call is appended to `ai-costs.json` in the project folder,
+split by provider; the analysis window shows the cost of the current analysis,
+the project total and the account balance («AI credit» in the Project tab).
+Answers served from the local cache (`<project>/photo-cache`) cost nothing and
+the log says so. Every command that spends says so in its tooltip; review and
+3D regeneration commands are free.
 
-Generated libraries remain local until the user explicitly exports them to a
-KiCad library, keeping unverified results separate from production libraries.
+## Screens
 
-## Review and install in KiCad
+### Start page and projects
 
-After both the footprint and STEP model have been generated, open the **KiCad**
-tab. The workflow deliberately separates review from installation:
+With no project open the window shows a start page: **New project...**
+(Ctrl+N), **Open project...** (Ctrl+O) and the list of recent projects (one
+click reopens one; the right-click menu removes it from the list). A project
+is a folder in the **workspace** (`Documents\KiCadGen` in the installed
+program, `generated\` from the sources; the folder button beside the field
+chooses another). Its name is also the name of the footprint, the symbol and
+the 3D model; **File → Rename project...** (F2) renames the folder and the
+files together.
 
-1. **Test in KiCad** creates an isolated preview project under the generated
-   component directory and opens it in the KiCad PCB Editor. It does not edit
-   any footprint library table. Press `Alt+3` in KiCad to inspect the real STEP
-   model.
-2. **Install in KiCad project** creates or updates `KiCadGen.pretty` and
-   `KiCadGen.3dshapes` in the selected project and registers the footprint
-   library in that project's `fp-lib-table`. The generated 3D reference uses
-   `${KIPRJMOD}`, so the project remains portable.
-3. **Install as global library** copies the same artifacts to a stable folder
-   selected by the user and registers `KiCadGen.pretty` in the detected KiCad
-   global library table. Global model references use an absolute path on that
-   computer.
+### Menus
 
-Only the current component files are replaced after explicit confirmation;
-other components in the library are preserved. Before changing an existing
-`fp-lib-table`, the application keeps a one-time `.kicadgen-backup` copy.
+- **File**: new, open, rename, recent projects, exit.
+- **Configuration**: «Manage AI types and profiles...» (component types and
+  their prompts, in the SQLite catalogue `data/analysis_profiles.sqlite3`),
+  «General AI defaults...» (the single AI model with its source, OpenRouter or
+  DeepSeek, and the base prompts in the tabs Model, Datasheet,
+  Photo localization, Photo verification), «AI account...», «Generation
+  options...» (NC pins, engraved pin labels, pause after the AI inventory),
+  «Accepted matches archive...».
+- **Tools**: open the component folder, the three KiCad commands (also in
+  the KiCad tab), open the program's data folder and `config.json`.
+- **Help** (shown as **?** in Italian): «User guide» (the HTML guide shipped
+  with the program, in Italian), «Open log folder», «Report a problem...»,
+  «Check for updates...», «Licenses», «About KiCadGen», «Keyboard
+  shortcuts...».
 
-The installed library has this structure:
+### Workflow bar and tabs
 
-~~~text
-KiCad project or global library root/
-├── KiCadGen.pretty/
-│   └── ComponentName.kicad_mod
-├── KiCadGen.3dshapes/
-│   ├── ComponentName.step
-│   └── ComponentName.wrl
-└── fp-lib-table                 # project mode; global table lives in KiCad config
-~~~
+Above the tabs, a bar shows the phases of the work — **Documents › AI analysis
+› Body review › 3D model › KiCad** — with the completed ones ticked, the
+current one highlighted and the ones that do not apply dimmed (the body review
+for a single component). Clicking a phase goes to its tab. On the right, the
+language selector: Italian, English, French, German (the texts come from the
+same SQLite catalogue; missing entries fall back to English).
 
-This is a footprint and 3D-model library. A schematic symbol library
-(`.kicad_sym`) is not generated yet; assign the installed footprint to an
-existing or custom symbol in the Schematic Editor.
+The tabs are **Project** (Ctrl+1), **Footprint preview** (Ctrl+2),
+**Electrical symbol** (Ctrl+3), **3D model** (Ctrl+4), **KiCad** (Ctrl+5)
+and **Exports** (Ctrl+6).
+
+## Inputs
+
+The Project tab guides the preparation in two steps, **Documents** and
+**Mounting and analysis**, with **Continue** / **Back** (**Back to
+projects** on the first step saves and returns to the start page). The
+collapsible panel **Project details** holds name and workspace.
+
+### Documents and roles
+
+**Add…** copies a file (PDF, PNG, JPG, WEBP, GIF) into the project's
+`docs` folder; the original is not touched. Each file gets a card where you
+tick the roles it carries:
+
+| Role | Content |
+|---|---|
+| Pinout | numbering and position of the contacts; the model says from which side the drawing is seen and the code mirrors it |
+| Dimensions | the dimensioned top view: body length and width, holes, row spacing |
+| High resolution | a real top photograph: the only role sent to the component detector and to the calibration; images only |
+| Land pattern | the recommended land pattern |
+| Side view | heights: body, components, board thickness |
+| Datasheet | the complete manufacturer datasheet; a PDF always takes this role alone, and the extraction looks inside it for pinout, dimensions, land pattern and side view |
+
+A file without roles blocks the analysis until you tick one or remove it. The
+card's buttons replace the file (keeping its roles), open a zoomable preview
+or remove the local copy (recoverable from `docs/.history`). A role nobody
+provides is «not provided»: the model knows it and does not substitute
+another file.
+
+Top photographs are calibrated on the board dimensions, axis by axis. They
+must be taken from above, nearly orthogonal, with the board's long side
+horizontal and the outline distinguishable from the background; perspective
+is not corrected, a tilted photo is refused. Every image is re-encoded
+**without metadata** (GPS, device) before it reaches a provider; an image
+whose metadata cannot be removed is refused with the request to save it as
+JPEG or PNG.
+
+### Component type and manual parameters
+
+**Component type** tells the model what it is reading:
+
+- *Single through-hole component (THT)* — pads with holes; the group
+  «THT component pads» (pad Ø, hole Ø, «Regenerate footprint»);
+- *Single SMD component* — no holes, pads from the land pattern;
+- *Board with components · through-hole connectors* and *Board with
+  components · castellated connectors (half-holes)* — in addition to the footprint, the
+  photo inventory of the mounted bodies runs.
+
+The analysis is blocked without a component type. For boards, **Mounting
+on the host board** chooses how the module sits on the host board
+(direct soldering / module pads; strip header with round or square pads, with
+pad and hole diameters); **Show headers in the 3D model** adds the male
+headers under the board in the 3D model only (on castellated boards, only on
+contacts that have a through hole). **PCB thickness** shows the board
+thickness with its provenance (from the documents, estimated by the AI, or set
+by you; «Reset» goes back).
+
+The pin-header parameters (rows, columns, pitch, row spacing, pad and hole
+diameters) and the castellated parameters (body, pad size, overhang, half-hole
+diameter, board thickness) are kept as project data with validated ranges;
+the analysis fills them and the footprint preview edits the host pads. A pin
+header entered by hand without an analysis gets a correct footprint but **no
+3D body** (user decision of 2026-10-15); it still asks for the keywords before
+installation.
+
+The collapsible **AI tools** box shows the detector and the model in use:
+
+- **Photo detection** (boards only): *YOLO + local SMD network (v3)* (default
+  from the sources: the local network classifies the kept bodies and only the
+  ones it does not resolve go to the AI), *Local YOLO + AI verification*
+  (default in the installed program, where PyTorch is not shipped), *AI
+  (current)*, *Vision model only (no local detector)*, *Local YOLO only
+  (pretest, no AI)*. The *YOLO model* row opens a picker that shows, for every
+  weights file, format, size, origin, licence, classes and compatibility; a
+  `.pt` YOLO checkpoint runs code when loaded, so it is checked only on «Check
+  compatibility». The *SMD network model* row opens a separate picker that
+  shows size, date, SHA-256 and what the checkpoint declares about itself
+  (architecture, training, classes, rotation kinds, threshold, metrics); it
+  reads the checkpoint with `weights_only=True`, so no code from the file runs,
+  and has no «Check compatibility» button. See
+  [docs/yolo-photo-workflow.md](docs/yolo-photo-workflow.md) and
+  [docs/CLASSIFICATORE_SMD.md](docs/CLASSIFICATORE_SMD.md).
+- **AI model**: the single model used for documents, photos and
+  verification; the button beside it changes it for this session only
+  (filter by cost, source OpenRouter or DeepSeek).
+
+## Analysis
+
+**Extract parameters with AI** starts the paid analysis. A progress window lists
+the phases and who works in each one — *AI model*, *Crop reading*,
+*Marking reading* (remote, paid), *YOLO*, *Local SMD network*, *OpenCV*,
+*KiCadGen (2D footprint)*, *KiCad 3D model library*, *Accepted matches*,
+*FreeCAD* (local) — with the cost of the analysis; **Stop** stops it
+(a request already sent must finish; nothing more is attempted). The AI log
+(Ctrl+L) is written to `analisi-ai.log` in the project folder.
+
+What happens, in order:
+
+1. **Documents**: dimensions, contacts, pin map, board thickness and their
+   provenance. A new analysis that would discard pin names you typed asks
+   first. Doubts about the package orientation (body covering the pads,
+   mirrored bottom view) are asked, never resolved silently. Pin header pitch
+   and row spacing are kept distinct; a row spacing that was not read does not
+   place holes, and a pad width equal to the pitch is not taken as a measure.
+2. **Castellated contacts**: the AI counts the half-holes in its first call;
+   the photo then counts the notches of the outline on every edge. A side
+   declared on an edge without notches is dropped, a disagreeing count is
+   recounted by the model on the enlarged edge (only the contradicted sides),
+   and on confirmed sides the lands are **measured** on the photo (recorded as
+   «measured», never overriding a dimension read in the documents).
+3. **Local detector** (boards): YOLO proposes the bodies on the calibrated
+   photo. The **review window** opens in its first stage with the detector's
+   proposals: remove rectangles that fall on prints, holes or empty pads, draw
+   missing ones, then OK sends the kept proposals on; Cancel stops before
+   paying. The proposals are saved in `photo-review/` and can be reopened for
+   free.
+4. **AI inventory**: one global call on the whole board, then — for the
+   bodies the local SMD network did not resolve — each body is re-read twice
+   from its own enlarged crop with a visual questionnaire; the class is
+   derived by the program from the observations, and only agreeing readings
+   are adopted. Contradictions with the inventory are flagged for review.
+   Bodies proposed by the AI alone are checked against the local detector and
+   start excluded until you keep them. Estimated sizes are never used as
+   measures.
+5. **Pause after the inventory** (on by default, Configuration → Generation
+   options...): the review window opens in its second stage with the
+   reconciled bodies, the detector's reading kept beside the AI's (never
+   overwritten), the detector's original box as a dotted ghost, markers for
+   rows with warnings or an undetermined type.
+6. **Generation**: footprint, candidate 3D models from the KiCad library
+   (FreeCAD measures the ones not cached yet), the STEP solid with FreeCAD.
+
+### The review window
+
+One window, two stages. Toolbar: **Add component** (R), **Delete
+selected** (Del), **Lasso** (L), **Keep or leave** the bodies added by the
+model alone (T), **Copy format** (copy sizes, height, type, package and
+KiCad model onto other bodies), zoom, **Fit photo** (F), photo visibility
+(P: full, attenuated, hidden), details, model doubts. Centre and sides are
+corrected by dragging the rectangle and its handles; the rotation only through
+the numeric «Rotation» field of **Parameters…**, which opens a
+modal with three read-only sections (local detector, AI, KiCad model) and the
+editable corrections, plus **Choose KiCad model…**. **Apply corrections**
+saves; **Cancel** leaves everything as it was. Later, from the Project tab,
+**Component review…** reopens the saved stage for free and **Rerun AI
+inventory (paid)…** repeats only the AI inventory on the saved
+proposals.
+
+## Outputs
+
+### Footprint preview
+
+The 2D drawing in scale with dimensions and pin numbers, a grid (1 mm or
+0.1 in) with a fine dotted sub-grid for drawings, KiCad layer colours and a
+kept camera. The preview is a **draft** like the symbol: the Reference and
+Value texts can be dragged, drawings added from the palette, host pads edited
+(«Host-board footprint»: direct soldering or strip header, pad and
+hole diameters), with undo/redo; **Apply** writes the `.kicad_mod`,
+**Cancel** discards, **Recover draft** restores an unapplied draft after a
+crash (`.footprint-draft.json` in the project). «Update footprint only»
+rewrites the file from the mounting choice without calling the AI or
+rebuilding the 3D.
+
+### Electrical symbol
+
+The pin numbers are the footprint's pads and cannot be changed in the table;
+names and electrical types can. The editor moves pins freely (connection point
+on the 0.1 in grid), rotates them, resizes the rectangle, selects groups,
+aligns and distributes, adds wires and glyphs from the catalogue, with
+undo/redo, a draft recovered after a crash, and **Apply** / **Cancel**.
+**Check symbol** reports missing names, overlapping texts and unverified
+passive types; the same check precedes the export. **Suggest pin types with
+AI** proposes electrical types from the pinout or datasheet documents (paid;
+the proposals carry source and reason and are selected one by one).
+**Export KiCad symbol** writes the `.kicad_sym` with the footprint link
+`KiCadGen:<name>`. The initial types are *passive*: verify them on the
+datasheet before relying on KiCad's ERC.
+
+### 3D model
+
+Rotate with the mouse, the navigation cube for the standard views. Toolbar:
+pin numbers (visible from the pin side, a practical check of mirroring),
+pinout table, fit, open the `3dshapes` folder, **Regenerate 3D model (STEP) with
+these annotations** (F5, free), **I like it — remember these models…** (saves the accepted
+body/model matches for future boards), **Copy format**. **Edit
+components…** (Ctrl+E, or right click on a body) edits name, type, position,
+sizes, rotation, colour and marking by hand, also without the photo; the
+right-click menu also offers *Remove from the 3D model (false positive)*,
+*Put back into the 3D model*, *Rotate the solid*, *Change KiCad model...*.
+
+**STEP model choice** shows up to five candidates of the KiCad library
+with their measures beside the photo crop; the preview is oriented as mounted,
+with manual or automatic rotation. A dimensional match is not a verified
+electrical identity: the report distinguishes `auto_matched` from
+`confirmed`. Details: [docs/interactive-kicad-models.md](docs/interactive-kicad-models.md).
+
+Mounted body heights, hidden contacts, pin 1 and polarity are not established
+by a top photograph: they stay to be verified.
+
+### Project folder
+
+```text
+<Name>/
+├── <Name>.pretty/<Name>.kicad_mod
+├── <Name>.3dshapes/<Name>.step, .wrl, .preview.json
+├── <Name>.kicad_sym                (after «Export KiCad symbol»)
+├── project_config.json             (the project file: settings, tables, annotations)
+├── docs/                           (your documents, .document-roles.json, .history/)
+├── photo-cache/                    (AI answers, keyed by model, prompt and pixels; no keys)
+├── photo-review/                   (saved detector proposals and reviews)
+├── yolo-pretest/                   (photo-review/ and photo-cache/ of «Local YOLO only»)
+├── kicad-model-candidates.json, kicad-model-choices.json
+├── consolidated-matches.json       (comparison with the accepted matches)
+├── .header-model-reuse.json        (reused pin-header 3D model, boards with headers)
+├── ai-costs.json, analisi-ai.log, freecad.log
+└── .kicad-preview/                 (the isolated test project)
+```
+
+Generated files stay local until you install them explicitly.
+
+## The KiCad tab
+
+**Files ready for KiCad** lists footprint, symbol and STEP with their state.
+Installation and the isolated test are **blocked until the files on disk
+match the parameters** and every block names its remedy, enabled while the
+block stands: *Apply to files* (metadata, footprint) and *Update the symbol
+file* in this tab; for a STEP that no longer matches (also after a change of
+colours or 3D annotations only) the regenerate button of the 3D model tab
+toolbar («Regenerate 3D model (STEP) with these annotations»), or *Remove the
+obsolete 3D model* here (a stale STEP that cannot be rebuilt).
+Projects saved by older versions may need one «Apply to files». The commands
+are also blocked while a background job runs. They use the **applied** files:
+an unapplied footprint or symbol draft is not installed, is not a block, and
+is reported by «Check component for KiCad».
+
+**Component metadata** (collapsed by default): reference designator
+(letters only; the grey proposal counts as filled), description, keywords,
+datasheet (URL or file), footprint filters. Designator, description, keywords
+and datasheet are **required** before installation. The list **KiCad checks
+(KLC)** updates while you type (⛔ error, ⚠ warning) and «Apply to files»
+writes the values into the footprint and the symbol.
+
+**Review before installation**:
+
+- **Test in KiCad...** creates a small temporary project in the component's
+  `.kicad-preview` folder, with the footprint embedded and a local copy of the
+  STEP referenced through `${KIPRJMOD}`, and opens it in the PCB Editor
+  (Alt+3 for the 3D view). **No library table is touched.**
+- **Check component for KiCad** runs read-only checks in a worker and
+  shows a copyable report: footprint on disk, pin–pad correspondence,
+  original 3D link, STEP integrity, the exported symbol compared with the
+  applied one, and — when `kicad-cli` is available — the real opening of
+  footprint, symbol and 3D import in a temporary folder. It does not certify
+  pinout, measures or visual alignment; ERC and DRC stay on the final design.
+- **Quick guide to using the component in KiCad** opens a five-page wizard on using the component in KiCad.
+
+**Library installation**:
+
+| Command | What it writes |
+|---|---|
+| **Install in KiCad project...** (recommended) | creates or updates `KiCadGen.pretty` and `KiCadGen.3dshapes` in the chosen KiCad project and registers the footprint library in that project's `fp-lib-table` with `${KIPRJMOD}` paths, so the project stays portable |
+| **Install as global library...** | copies the same files to a stable folder you choose and registers `KiCadGen.pretty` in the per-user global `fp-lib-table` of the installed KiCad (found through `kicad-cli version`), with absolute paths. It is refused while that table does not exist yet: start KiCad once, complete its initial library setup, then retry |
+
+Only the current component's files are replaced, after explicit confirmation;
+other components and other library rows are preserved. Before changing a
+table the program keeps `<table>.kicadgen-backup` (rotated), writes through a
+scratch file and rolls back everything it touched if a step fails. A table
+that is not UTF-8 or a write refused by the operating system is reported with
+the real path.
+
+The **symbol** is not registered in any `sym-lib-table`: export the
+`.kicad_sym` and add it in KiCad with *Manage Symbol Libraries*, then set
+the symbol's Footprint to `KiCadGen:<name>`.
+
+The **Exports** tab keeps the history of every installation and symbol
+export made from this computer (component, kind, destination, date).
+
+## Logs, problems, updates
+
+| File | Where | Content |
+|---|---|---|
+| `analisi-ai.log` | project folder | the analysis diary: steps, models, costs, warnings |
+| `freecad.log` | project folder | FreeCAD's output while building the 3D |
+| `crash-reports/` | `%LOCALAPPDATA%\KiCadGen\logs` (installed) | one file per unhandled error: version, system, traceback; only the newest 20 are kept |
+
+**Help → Report a problem...** opens a new GitHub issue prefilled with versions
+only and opens the log folder: you attach what you want after reading it.
+**Help → Check for updates...** compares this version with the latest GitHub
+release, only when you ask. The only network call made at start-up reads the
+balance of the AI provider (OpenRouter or DeepSeek) whose API key is
+configured; without a key nothing is sent. No other call is made at start-up.
+
+## Limits and known heuristics
+
+- The AI can misread: always check the previews before using a result.
+- Heights from a single top photograph are estimates; so is a board
+  thickness not quoted in the documents (the standard value is used and
+  logged).
+- The photo inventory can miss bodies or keep non-bodies; the review window
+  and «Edit components…» exist for that. The number of bodies found is
+  not a measure of accuracy.
+- The notch counting of castellated contacts counts open half-holes only; a
+  run touching an end of the edge gives a lower bound, not a count.
+- The orientation doubt for packages relies on the IPC assumption «pad width
+  ≈ lead width»; a pad read exactly on the body edge can raise a false doubt
+  and a transposed TSSOP is not detectable.
+- The KiCad library matcher compares measures (30 % tolerance, at most 64
+  candidates measured per search): a dimensional match is not an identity.
+- Documents, photographs, generated models and third-party libraries may have
+  their own copyright or usage restrictions.
 
 ## Repository layout
 
-~~~text
-main.py                         GUI entry point
+```text
+main.py                          GUI entry point (uses .venv when present)
 kicadgen/core/                   KiCad data models and S-expression writers
-kicadgen/generators/             Parametric footprint generators
-kicadgen/cad3d/                 FreeCAD orchestration and 3D builders
-kicadgen/services/               AI, profiles, document roles and photo analysis
-kicadgen/gui/                    Qt desktop interface and previews
-data/analysis_profiles.sqlite3  Versioned AI profile catalog
-examples/                       Small command-line examples
-tests/                          Automated regression and GUI tests
-~~~
+kicadgen/generators/             footprint and symbol generators
+kicadgen/cad3d/                  FreeCAD orchestration, KiCad model matcher
+kicadgen/services/               AI providers, profiles, documents, photo pipeline, KiCad library
+kicadgen/gui/                    Qt interface, previews, help/guida.html
+data/analysis_profiles.sqlite3   profile and translation catalogue (tracked)
+docs/                            user and maintainer documentation
+examples/, tools/                command-line examples and maintenance tools
+packaging/, scripts/             PyInstaller spec, WiX source, build and release scripts
+tests/                           regression and GUI tests
+```
 
 ## Testing
 
-~~~bash
-pytest
-~~~
+```powershell
+.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
+```
 
-The tests cover serialization, geometry validation, AI response parsing, SQLite
-profile CRUD, guided document roles, photo review, automatic generation, 2D/3D
-preview behavior and worker lifecycle handling.
-
-## Engineering limitations
-
-- AI output can contain uncertain classifications, estimated package heights or
-  incomplete mechanical information.
-- A photograph can localize visible bodies but cannot reliably establish hidden
-  geometry, electrical identity or certified dimensions.
-- FreeCAD is required for the real STEP/VRML generation path.
-- Generated footprints and models must be checked against the source datasheet,
-  especially pin numbering, pitch, body orientation, solder clearances and 3D
-  alignment.
-- Datasheets, photographs, product markings, generated models and third-party
-  libraries may have separate copyright or usage restrictions.
-
-## Roadmap
-
-The current three-role document workflow is deliberately small and explicit.
-Future extensions can add more source roles, richer review tools, additional
-geometry families and project-level reproducibility metadata without changing
-the existing role contract.
+The suite is large (about 8 500 tests) and is run in two halves in CI
+(`tools/run_test_halves.py`) because a single process can die with a native
+Qt/VTK crash. Use a fresh temporary directory for every run.
 
 ## Licensing
 

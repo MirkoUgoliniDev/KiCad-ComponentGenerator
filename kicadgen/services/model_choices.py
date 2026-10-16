@@ -13,7 +13,13 @@ FILENAME = 'kicad-model-choices.json'
 
 
 def component_key(component):
-    """@brief Identify unchanged component geometry and package independently of row order."""
+    """@brief Identify unchanged component geometry and package independently of row order.
+
+    @param component Component dict with x_mm, y_mm, length_mm, width_mm,
+        rotation_deg (rounded to 1e-6), package, kind, _detected_kind and
+        bbox_basis.
+    @return SHA-256 hex digest of those values.
+    """
     values = {key: component.get(key) for key in (
         'x_mm', 'y_mm', 'length_mm', 'width_mm', 'rotation_deg', 'package', 'kind',
         '_detected_kind', 'bbox_basis')}
@@ -46,9 +52,9 @@ def save_choices(directory, photo_png, components):
                 'model_rotation_deg': c.get('model_rotation_deg'),
                 'render_3d': c.get('render_3d', True),
                 'rotation_deg': c.get('rotation_deg'),
-                # Scelte dirette dell'utente sul solido, distinte da
-                # render_3d/model_rotation_deg che sopra sono l'esito
-                # calcolato: solo queste vengono riapplicate al rientro.
+                # The user's direct choices on the solid, distinct from
+                # render_3d/model_rotation_deg which above are the computed
+                # outcome: only these are reapplied on re-entry.
                 'render_3d_override': c.get('render_3d_override'),
                 'model_rotation_delta_deg': c.get('model_rotation_delta_deg') or 0,
             } for c in components]}
@@ -67,7 +73,13 @@ def save_choices(directory, photo_png, components):
 def restore_choices(directory, photo_png, components):
     """@brief Restore only explicit choices for identical photos and unchanged component geometry.
 
+    @param directory Component output directory holding FILENAME.
+    @param photo_png Calibrated photo bytes; choices are restored only when
+        their SHA-256 matches the saved one.
+    @param components Current component dictionaries (never modified).
     @return Independent component list; missing state is normal, corrupt state raises ValueError.
+    @throws ValueError When the choice file has an unsupported version or
+        its component records are not a list.
     @note Restored: an explicit confirmed/rejected model_selection (with the
         model_match report saved alongside it), the manual exclusion and the
         manual rotation delta. An automatic model_match without an explicit
@@ -103,10 +115,10 @@ def restore_choices(directory, photo_png, components):
         # stale automatic match cannot pose as a user choice.
         if explicit and isinstance(record.get('model_match'), dict):
             component['model_match'] = deepcopy(record['model_match'])
-        # Esclusione e rotazione manuali: sono scelte dell'utente come la
-        # selezione del modello, quindi devono sopravvivere alla rigenerazione
-        # esattamente come quella. Un valore assente o di tipo sbagliato non
-        # sovrascrive nulla: si torna al comportamento automatico.
+        # Manual exclusion and rotation: they are user choices like the
+        # model selection, so they must survive regeneration exactly like
+        # it. A missing value or one of the wrong type overwrites nothing:
+        # the automatic behaviour comes back.
         if isinstance(record.get('render_3d_override'), bool):
             component['render_3d_override'] = record['render_3d_override']
         delta = record.get('model_rotation_delta_deg')
@@ -118,6 +130,8 @@ def restore_choices(directory, photo_png, components):
 def save_candidate_report(directory, components):
     """@brief Save the bounded candidate lists supplied to the CAD builder as inspectable JSON.
 
+    @param directory Component output directory (created when missing).
+    @param components Component dictionaries with their candidate lists.
     @return Path of the report, preserving both uncertainty and explicit user selections.
     """
     directory = Path(directory)

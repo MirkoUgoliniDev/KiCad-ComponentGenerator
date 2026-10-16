@@ -5,7 +5,8 @@ bottom-left corner, the file writes `(justify left bottom)` there and KiCad
 draws the text starting at that point (0 and 90 degrees). Migration: texts
 drawn before (centre/left/right, vertically centred) keep the box the editor
 drew within a pixel and are migrated once. Negative: glyph texts imported
-from KiCad libraries and the symbol's property texts are unchanged.
+from KiCad libraries are unchanged; the property texts follow the same anchor
+since 2026-10-16 (tests/test_symbol_property_anchor.py).
 """
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -20,6 +21,7 @@ import pytest
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QGraphicsSimpleTextItem
 
+from kicadgen.core.kicad_text import kicad_text_cells
 from kicadgen.generators import symbol_glyphs as g
 from kicadgen.generators.symbol import SymbolPin, export_symbol, serialize_symbol
 from kicadgen.gui.symbol_tab import SCENE_UNITS_PER_MM, SymbolTab
@@ -124,9 +126,13 @@ def test_the_text_tool_snaps_the_bottom_left_corner_and_draws_the_handle_there(q
         (item,) = _text_items(tab, "IN+")
         ascent = tab.drawn_text_metrics("IN+", 1.27)[2] * S
         rect = item.sceneBoundingRect()
-        assert rect.left() == pytest.approx(2.54 * S, abs=0.5), "the text starts at the anchor"
-        assert rect.top() + ascent == pytest.approx(-5.08 * S, abs=0.5), "its baseline is on the anchor"
-        assert rect.bottom() >= -5.08 * S - 0.5 and rect.top() < -5.08 * S, "it grows upwards (descenders only below)"
+        # CONTRACT CHANGED 2026-10-16 (user: KiCad's width and box,
+        # gui/kicad_text_item.py): drawn as KiCad draws from the anchor, cells
+        # half the pen margin along and the baseline 0.125 x size above it.
+        along, up = (v * S for v in kicad_text_cells("IN+", 1.27))
+        assert rect.left() == pytest.approx(2.54 * S + along, abs=0.05), "the text starts at the anchor"
+        assert rect.top() + ascent == pytest.approx(-5.08 * S - up, abs=0.05), "its baseline is KiCad's"
+        assert rect.bottom() >= -5.08 * S - up - 0.05 and rect.top() < -5.08 * S,             "it grows upwards (descenders only below its baseline)"
         handles = [i for i in tab.view.scene().items() if i.data(0) == ("shape_point", 0, 0)]
         assert len(handles) == 1
         assert (handles[0].pos().x(), handles[0].pos().y()) == pytest.approx((2.54 * S, -5.08 * S))
@@ -135,9 +141,9 @@ def test_the_text_tool_snaps_the_bottom_left_corner_and_draws_the_handle_there(q
         (item,) = _text_items(tab, "IN+")
         rect = item.sceneBoundingRect()
         assert item.rotation() == -90
-        assert rect.bottom() == pytest.approx(-5.08 * S, abs=0.5), "the text starts at the anchor"
-        assert rect.left() + ascent == pytest.approx(2.54 * S, abs=0.5), "its baseline is on the anchor"
-        assert rect.right() >= 2.54 * S - 0.5 and rect.left() < 2.54 * S, "it grows to the left (descenders only right)"
+        assert rect.bottom() == pytest.approx(-5.08 * S - along, abs=0.05), "the text starts at the anchor"
+        assert rect.left() + ascent == pytest.approx(2.54 * S - up, abs=0.05), "its baseline is KiCad's"
+        assert rect.right() >= 2.54 * S - up - 0.05 and rect.left() < 2.54 * S,             "it grows to the left (descenders only right of its baseline)"
     finally:
         tab.deleteLater()
 
@@ -228,12 +234,15 @@ def test_a_legacy_text_keeps_its_drawn_box_and_is_migrated_once(qapp, justify, r
             corner = (old.left(), old.top() + legacy_ascent)
         assert (record["x"] * S, -record["y"] * S) == pytest.approx(corner, abs=1.0)
         # ...and the text is drawn from that corner, now at KiCad's size.
+        # CONTRACT CHANGED 2026-10-16: from that corner as KiCad draws (cells
+        # half the pen margin along, baseline 0.125 x size above it).
         new = item.sceneBoundingRect()
         ascent = tab.drawn_text_metrics("GND", legacy["primitives"][0]["size"])[2] * S
+        along, up = (v * S for v in kicad_text_cells("GND", legacy["primitives"][0]["size"]))
         if rotation:
-            assert (new.left() + ascent, new.bottom()) == pytest.approx(corner, abs=1.0)
+            assert (new.left() + ascent + up, new.bottom() + along) == pytest.approx(corner, abs=1.0)
         else:
-            assert (new.left(), new.top() + ascent) == pytest.approx(corner, abs=1.0)
+            assert (new.left() - along, new.top() + ascent + up) == pytest.approx(corner, abs=1.0)
         if justify != "left" or rotation:
             assert (record["x"], record["y"]) != (legacy["x"], legacy["y"]), "the anchor moved to the corner"
         # Once: migrating again, or loading the migrated rows again, changes nothing.
@@ -307,4 +316,7 @@ def test_property_texts_are_unchanged_by_a_drawn_text():
     drawn = serialize_symbol("T", pins, graphics=[g.shape_instance("text", [(0.0, 0.0)], text="NOTE")])
     properties = lambda body: [line for line in body.splitlines() if "(property " in line]
     assert properties(drawn) == properties(plain)
-    assert not any("justify" in line for line in properties(drawn))
+    # CONTRACT CHANGED 2026-10-16 (user): Reference and Value now carry the
+    # same bottom-left anchor as the drawn texts (tests/test_symbol_property_anchor.py);
+    # the hidden properties still have no justification.
+    assert [("justify" in line) for line in properties(drawn)] == [True, True, False, False, False]

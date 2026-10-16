@@ -53,6 +53,8 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
     @param pad_diameter Host copper diameter in mm, chosen by the user.
     @param drill Host drill diameter in mm, chosen for the header pins.
     @param shape Host copper shape (circle or square/rect).
+    @param pad_overrides Optional {pin number: {"size": mm, "shape": str}}
+        applied to single lands instead of the shared diameter and shape.
     @return Independent parameters used only by footprint export and 2D preview.
     @throws ValueError For missing closed holes, invalid sizes or overlapping lands.
     """

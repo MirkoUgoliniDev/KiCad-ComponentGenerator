@@ -1,7 +1,4 @@
-"""@brief Reproducible photo-localization benchmark (API calls); stores raw answers for offline replay.
-
-Esperimento riproducibile di localizzazione (API); conserva risposte per replay offline.
-"""
+"""@brief Reproducible photo-localization benchmark (API calls); stores raw answers for offline replay."""
 import argparse
 import json
 import sys
@@ -30,7 +27,11 @@ PROMPT = (
 
 
 def tool():
-    """@brief Return the OpenAI-style tool schema asking the model for 0-1000 normalized component boxes."""
+    """@brief Return the OpenAI-style tool schema asking the model for 0-1000 normalized component boxes.
+
+    @return Tool definition (dict) whose single `components` array carries
+        `box_2d`, `label` and `kind` for each component.
+    """
     return {"type":"function","function":{
         "name":"locate_components", "description":"PCB component bounding boxes",
         "parameters":{"type":"object","properties":{
@@ -74,7 +75,11 @@ def components_from_response(data, length, width, region=(0,0,1,1)):
 
 
 def main():
-    """@brief Parse the CLI, localize components tile by tile and write raw answers, inventory and overlay."""
+    """@brief Parse the CLI, localize components tile by tile and write raw answers, inventory and overlay.
+
+    @throws SystemExit When the photograph cannot be calibrated to the given
+        board size.
+    """
     parser=argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument("photo",type=Path)
     parser.add_argument("--model",required=True)

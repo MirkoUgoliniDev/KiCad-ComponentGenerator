@@ -42,7 +42,7 @@ def _integral(value) -> bool:
 
 
 def local_lead_sides(sides, rotation):
-    """@brief Observed lead counts per image side of a component, moved to its local frame.
+    """@brief Observed lead counts for each image side of a component, moved to its local frame.
 
     @param sides {side: count} over left/right/top/bottom of the component box
         as seen in the photograph (X right, Y down), e.g. pins_by_side.
@@ -57,7 +57,7 @@ def local_lead_sides(sides, rotation):
         local bottom/top: without this conversion the leads of every vertical
         SOT or SOIC were drawn on the wrong sides.
     @note A non-cardinal angle (an edge-measured body) is taken at the nearest
-        quarter turn: the model counted leads per side of the component box,
+        quarter turn: the model counted leads on each side of the component box,
         and each box side stays nearest to one body side up to 45 degrees.
         Exactly 45 degrees has no nearest side and returns None.
     @note Numbers are recognised by their abstract type (numbers.Real,

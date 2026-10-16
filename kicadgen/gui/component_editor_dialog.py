@@ -120,14 +120,14 @@ class ComponentEditorDialog(QDialog):
         for column, key, minimum in _NUMBERS:
             value = float(component.get(key, NEW_COMPONENT[key]) or 0.0)
             spin = QDoubleSpinBox()
-            # Sei decimali: le correzioni fotografiche dei piccoli package
-            # stanno sotto il centesimo di millimetro.
+            # Six decimals: the photographic corrections of small packages
+            # are below a hundredth of a millimetre.
             spin.setDecimals(6)
             spin.setRange(min(minimum, value), max(300.0, value))
             spin.setSingleStep(0.1)
             spin.setValue(value)
             if key == "height_mm" and height_is_estimated(component):
-                # Stessa cella, ma si legge che e' una stima e non una misura.
+                # Same cell, but it reads as an estimate and not a measurement.
                 spin.setSuffix(" ~")
                 tip = "Altezza stimata, non misurata: correggila se la conosci."
                 i18n = getattr(self.parent(), "i18n", None)
@@ -147,7 +147,7 @@ class ComponentEditorDialog(QDialog):
         color.setMaxLength(7)
         self.table.setCellWidget(row, 8, color)
         self.table.setCellWidget(row, 9, QLineEdit(str(component.get("marking") or "")))
-        # I dati non mostrati (metadati del rilevamento) viaggiano con la riga.
+        # Data not shown (detection metadata) travel with the row.
         self._rows_data.append(component)
 
     def _fit_column_to(self, column: int, spin: QDoubleSpinBox) -> None:
@@ -193,8 +193,8 @@ class ComponentEditorDialog(QDialog):
             entry["kind"] = self.table.cellWidget(row, 1).currentData() or "generic"
             for column, key, _minimum in _NUMBERS:
                 entry[key] = self.table.cellWidget(row, column).value()
-            # La cella mostrava l'altezza del componente, o quella del nuovo
-            # componente se mancava: un valore diverso e' stato scritto a mano.
+            # The cell showed the component height, or the new component's
+            # one if missing: a different value was typed by hand.
             before = (original if original is not None else {}).get(
                 "height_mm", NEW_COMPONENT["height_mm"])
             if abs(float(entry["height_mm"]) - float(before or 0.0)) > 1e-9:
@@ -213,10 +213,10 @@ class ComponentEditorDialog(QDialog):
                       or entry["rotation_deg"] != float(original.get("rotation_deg") or 0.0) % 360):
                     for key in _MODEL_EVIDENCE:
                         entry.pop(key, None)
-                # Il corpo che la rete SMD ha visto non e' piu' questo: tipo,
-                # misura, posizione o rotazione cambiati a mano tolgono la sua
-                # identita' e la sua posa, che altrimenti sceglierebbero
-                # modello e verso al posto della correzione (audit 2026-10-02).
+                # The body the SMD network saw is no longer this one: type,
+                # size, position or rotation changed by hand remove its
+                # identity and its pose, which would otherwise choose model
+                # and orientation in place of the correction (audit 2026-10-02).
                 if resized or any(
                         entry[key] != original.get(key, entry[key])
                         for key in ("x_mm", "y_mm")) or (

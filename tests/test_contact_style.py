@@ -86,11 +86,15 @@ _DESCRIPTION_PROPERTY = re.compile(r'\(property "Description" "[^"]*"')
 #: and nothing else; the D1 placement itself is verified in
 #: tests/test_kicad_residual_fixes.py and by
 #: test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides.
+#: CONTRACT CHANGED 2026-10-16 (user: KiCad stays still, same file form
+#: everywhere): the defaults are also written as bottom-left anchors with
+#: ``(justify left bottom)``; the normaliser drops that justification too,
+#: and nothing else (same test).
 def _legacy_text_anchors(fp):
     from dataclasses import replace
     from kicadgen.core.footprint import DEFAULT_TEXT_POSITIONS
     return replace(fp, reference_at=DEFAULT_TEXT_POSITIONS["Reference"],
-                   value_at=DEFAULT_TEXT_POSITIONS["Value"])
+                   value_at=DEFAULT_TEXT_POSITIONS["Value"], text_justify={})
 
 
 def _uuidless(fp):
@@ -99,14 +103,19 @@ def _uuidless(fp):
 
 
 def test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides():
-    """@brief Folding the D1 anchors back changes the two (at ...) of Reference/Value only."""
+    """@brief Folding the D1 anchors back changes the two (at ...) of Reference/Value and their justify only."""
+    import difflib
     fp = build_castellated_module(rs485())
     plain = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
     folded = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(fp).render())
     assert fp.reference_at != (0.0, -2.0) and fp.value_at != (0.0, 2.0)
-    changed = [(a, b) for a, b in zip(plain.splitlines(), folded.splitlines()) if a != b]
-    assert len(plain.splitlines()) == len(folded.splitlines()) and len(changed) == 2
-    assert all(a.strip().startswith("(at ") for a, _ in changed)
+    diff = [line for line in difflib.ndiff(plain.splitlines(), folded.splitlines())
+            if line[:2] in ("- ", "+ ")]
+    removed = [line[2:].strip() for line in diff if line.startswith("- ")]
+    added = [line[2:].strip() for line in diff if line.startswith("+ ")]
+    assert len(removed) == 4 and len([r for r in removed if r.startswith("(at ")]) == 2
+    assert [r for r in removed if not r.startswith("(at ")] == ["(justify left bottom)"] * 2
+    assert added == ["(at 0 -2)", "(at 0 2)"]
 
 
 def test_the_description_property_is_the_only_text_the_normaliser_hides():

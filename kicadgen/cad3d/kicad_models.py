@@ -1,34 +1,34 @@
 """@brief Resolve installed KiCad solids against photographic mechanical envelopes.
 
-Perche' esiste questo modulo
-----------------------------
-Finora ogni package veniva **approssimato** a partire dal solo ingombro letto
-dalla fotografia: una forma disegnata a mano che imita un SOT-223, un USB-C,
-un coassiale. Ma quei modelli esistono gia', modellati correttamente, dentro
-la libreria che KiCad installa sul disco: oltre settemila file STEP/WRL
-organizzati per nome di footprint.
+Why this module exists
+----------------------
+Until now every package was **approximated** from the envelope read on the
+photograph alone: a hand-drawn shape imitating a SOT-223, a USB-C, a coaxial
+connector. But those models already exist, correctly modelled, inside the
+library that KiCad installs on disk: more than seven thousand STEP/WRL files
+organised by footprint name.
 
-Usarli risolve due problemi in una volta:
+Using them solves two problems at once:
 
-* la forma e' quella vera, non un'imitazione ricavata da un rettangolo;
-* il vocabolario smette di essere una lista di `kind` inventata qui dentro e
-  diventa la **nomenclatura standard** dell'industria (``SOT-223``, ``0402``,
-  ``USB_C_Receptacle``), che un modello linguistico conosce molto meglio.
+* the shape is the real one, not an imitation derived from a rectangle;
+* the vocabulary stops being a list of `kind` values invented in here and
+  becomes the industry's **standard nomenclature** (``SOT-223``, ``0402``,
+  ``USB_C_Receptacle``), which a language model knows far better.
 
-Non e' un'API: non c'e' nessun servizio da interrogare. Sono file locali,
-quindi niente rete, niente credenziali, niente costo per pezzo.
+It is not an API: there is no service to query. These are local files, so no
+network, no credentials, no cost per part.
 
-Il punto delicato: la proposta va verificata
---------------------------------------------
-Chiedere al modello *quale* package sia sposta il problema, non lo elimina:
-una risposta sbagliata darebbe un solido sbagliato con l'aria di essere
-esatto. Per questo :func:`resolve_model` non si fida del nome: confronta
-l'ingombro del modello candidato con quello **misurato sulla fotografia** e
-rifiuta quando non combaciano. Una proposta controllata contro una misura
-non e' un indovinello.
+The delicate point: the proposal must be verified
+-------------------------------------------------
+Asking the model *which* package it is moves the problem, it does not remove
+it: a wrong answer would give a wrong solid that looks exact. This is why
+:func:`resolve_model` does not trust the name: it compares the envelope of
+the candidate model with the one **measured on the photograph** and refuses
+when they do not match. A proposal checked against a measurement is not a
+guess.
 
-Quando non c'e' corrispondenza il chiamante resta libero di ripiegare sulle
-forme sintetiche di ``freecad_parts``: questo modulo non decide, propone.
+When there is no match the caller remains free to fall back on the synthetic
+shapes of ``freecad_parts``: this module does not decide, it proposes.
 """
 
 from __future__ import annotations
@@ -50,20 +50,25 @@ from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
 
-#: Variabile d'ambiente per indicare una libreria diversa da quella trovata.
+#: Environment variable to point to a library other than the one found.
 LIBRARY_ENV = "KICAD_3DMODEL_DIR"
 
-#: Chi vuole sapere quando FreeCAD sta DAVVERO misurando dei modelli, per
-#: thread: la finestra di avanzamento lo mostra invece di attribuire tutta la
-#: fase alla libreria di KiCad (utente, 2026-09-26). Per thread perche' ogni
-#: generazione gira nel proprio QThread e non deve sentire le misure altrui.
+#: Who wants to know when FreeCAD is REALLY measuring models, per
+#: thread: the progress window shows it instead of attributing the whole
+#: phase to the KiCad library (user, 2026-09-26). Per thread because every
+#: generation runs in its own QThread and must not hear the others' measures.
 _measuring_listener = threading.local()
 _archive_state = threading.local()
 
 
 @contextmanager
 def archive_progress_listener(callback):
-    """@brief Report the separate archive pass as (done, total, records)."""
+    """@brief Report the separate archive pass as (done, total, records).
+
+    @param callback Callable receiving (done, total, records) while the
+        archive pre-pass runs inside the context, or None to silence it; the
+        previous listener is restored on exit.
+    """
     previous = getattr(_archive_state, 'callback', None)
     _archive_state.callback = callback
     try:
@@ -119,9 +124,9 @@ def _archive_prepass(components, library, note, cancel):
             if diagnostic.get('error'):
                 record.update(status='unavailable', reason=diagnostic['error'])
             elif found:
-                # Stesso controllo di model_candidates: un modello d'archivio
-                # fuori dal package visto dalla rete non e' «trovato», e il
-                # resoconto non deve dirlo (verifica avversariale A4, 2026-10-02).
+                # Same check as model_candidates: an archived model outside
+                # the package seen by the network is not «trovato» (found), and the
+                # report must not say so (adversarial check A4, 2026-10-02).
                 outside_network = (_local_classifier_identity(component)
                                    and not _classifier_admits(
                                        Path(found['candidates'][0]['path']), component))
@@ -178,39 +183,41 @@ def _announce_measuring(started: bool, count: int) -> None:
         return
     try:
         callback(started, count)
-    except Exception:  # noqa: BLE001 - l'avanzamento non deve fermare il lavoro
+    except Exception:  # noqa: BLE001 - progress must not stop the work
         pass
 
-#: Estensioni dei modelli, in ordine di preferenza: lo STEP e' geometria
-#: solida ed e' cio' che serve per un componente montato; il VRML e' solo
-#: una mesh per la visualizzazione.
+#: Model extensions, in order of preference: STEP is solid geometry
+#: and is what is needed for a mounted component; VRML is only
+#: a mesh for display.
 MODEL_SUFFIXES = (".step", ".stp", ".wrl")
 
-#: Scarto relativo massimo fra l'ingombro del modello e quello misurato sulla
-#: fotografia.
+#: Maximum relative gap between the model's envelope and the one measured on
+#: the photograph.
 #:
-#: EURISTICA DICHIARATA. Non e' il criterio di scelta -- fra i candidati entro
-#: la soglia la scelta avviene per vicinanza -- ma il limite oltre il quale la
-#: misura non conferma piu' nulla e il candidato non viene nemmeno proposto.
+#: DECLARED HEURISTIC. It is not the selection criterion -- among the
+#: candidates within the threshold the choice is made by closeness -- but the
+#: limit beyond which the measure no longer confirms anything and the candidate
+#: is not even proposed.
 #:
-#: CORREZIONE (audit 26/09, punto 82 medio 8): il commento precedente diceva
-#: che fra due taglie standard adiacenti corre «almeno il 60%». Vale per i
-#: passivi piccoli (0402 1.0x0.5 contro 0603 1.6x0.8), non in generale: QFN
-#: 6x6 contro 7x7 distano il 14%, 7x7 contro 8x8 il 12.5%, e la distanza
-#: relativa cala al crescere del package. Il 30% quindi NON separa le taglie
-#: vicine dei package grandi: le lascia entrambe nella lista, e a separarle
-#: sono la vicinanza (ordinamento), il numero di terminali dichiarato e la
-#: revisione dell'utente. Tarato come limite largo per misure fotografiche a
-#: bassa risoluzione; lo renderebbe superfluo una tolleranza per candidato
-#: ricavata dall'incertezza di misura (`measurement_uncertainty`).
+#: CORRECTION (audit 26/09, point 82 medium 8): the previous comment said that
+#: between two adjacent standard sizes there is «almeno il 60%» (at least 60%).
+#: That holds for small passives (0402 1.0x0.5 against 0603 1.6x0.8), not in
+#: general: QFN 6x6 against 7x7 differ by 14%, 7x7 against 8x8 by 12.5%, and
+#: the relative distance falls as the package grows. The 30% therefore does
+#: NOT separate the neighbouring sizes of large packages: it leaves both in the
+#: list, and what separates them is closeness (ordering), the declared
+#: terminal count and the user's review. Calibrated as a wide limit for
+#: low-resolution photo measures; it would be made unnecessary by a
+#: per-candidate tolerance derived from the measurement uncertainty
+#: (`measurement_uncertainty`).
 DEFAULT_SIZE_TOLERANCE = 0.30
 
-#: Entro questo scarto due candidati sono sostenuti dalla misura allo stesso
-#: modo: la fotografia non puo' distinguerli, quindi a decidere e' il nome.
+#: Within this gap two candidates are equally supported by the measure: the
+#: photograph cannot tell them apart, so the name decides.
 NAME_TIEBREAK_MARGIN = 0.05
 
-#: Indice degli ingombri gia' misurati, accanto alla libreria o nella cache
-#: utente. Misurare un STEP richiede FreeCAD: si fa una volta per modello.
+#: Index of the envelopes already measured, next to the library or in the user
+#: cache. Measuring a STEP requires FreeCAD: it is done once per model.
 INDEX_FILENAME = ".kicadgen-model-sizes-v4.json"
 
 # Resource budget, not a geometric threshold: never launch a library-wide CAD batch.
@@ -219,15 +226,15 @@ MAX_CANDIDATE_MEASUREMENTS = 64
 _NAMED_PACKAGE_PATTERN = r"(?<![\w-])(?:SC|SOT|SOD|SOIC|SSOP|TSSOP|MSOP|TSOP|SOP|QFN|DFN|LQFP|TQFP|QFP|BGA|DIP|TO)[ _-]?\d+(?:[-_]\d+)?(?![\w])"
 _CHIP_SIZE_CODES = r"(?:008004|01005|0201|0402|0603|0805|1008|1206|1210|1806|1812|2010|2512)"
 
-#: Famiglie che hanno in libreria un catalogo SMD a sigle di taglia standard e
-#: corpo rettangolare a due terminali metallizzati. Solo per queste una taglia
-#: nominata piu' due endcap osservati delimitano una ricerca *completa*: il
-#: catalogo copre per costruzione tutte le taglie e le varianti di suffisso.
-#: I diodi ne restano fuori di proposito: condividono il catalogo a sigle
-#: (D_0603_1608Metric) ma anche gli involucri MELF cilindrici, che con due
-#: terminali metallizzati si vedono uguali in fotografia e non entrerebbero
-#: nell'elenco -- dichiarare completa una ricerca che li esclude significa
-#: poter agganciare da soli il modello sbagliato.
+#: Families that have in the library an SMD catalogue with standard size codes
+#: and a rectangular body with two plated terminals. Only for these does a
+#: named size plus two observed endcaps bound a *complete* search: the
+#: catalogue covers by construction all sizes and suffix variants.
+#: Diodes stay out on purpose: they share the code catalogue
+#: (D_0603_1608Metric) but also the cylindrical MELF packages, which with two
+#: plated terminals look the same in a photograph and would not enter
+#: the list -- declaring complete a search that excludes them means
+#: possibly attaching the wrong model on its own.
 _ENDCAP_CHIP_CATALOG = {"resistor": ("R", "Resistor_SMD.3dshapes"),
                         "capacitor": ("C", "Capacitor_SMD.3dshapes"),
                         "led": ("LED", "LED_SMD.3dshapes")}
@@ -296,7 +303,7 @@ _INSTALL_BASES = (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad")
 
 
 def _candidate_roots() -> Iterable[Path]:
-    """Percorsi in cui cercare la libreria, dal piu' esplicito al piu' generico."""
+    """Folders to search for the library, from the most explicit to the most generic."""
     override = os.environ.get(LIBRARY_ENV)
     if override:
         yield Path(override)
@@ -306,10 +313,10 @@ def _candidate_roots() -> Iterable[Path]:
             # Newest version first by numeric value: as text, 9.0 > 10.0.
             for version in newest_version_first(root.iterdir(), lambda p: p.name):
                 yield version / "share" / "kicad" / "3dmodels"
-    # KiCad mantiene le librerie 3rd-party installate dall'utente fuori da
-    # Program Files. Ogni repository puo' avere una propria cartella
-    # ``*.3dshapes`` (es. ``espressif.3dshapes``), quindi si espongono i
-    # repository come radici indipendenti e si evita di assumere un vendor.
+    # KiCad keeps the 3rd-party libraries installed by the user outside
+    # Program Files. Every repository can have its own
+    # ``*.3dshapes`` folder (e.g. ``espressif.3dshapes``), so the
+    # repositories are exposed as independent roots and no vendor is assumed.
     user_kicad = Path.home() / "Documents" / "KiCad"
     if user_kicad.is_dir():
         for version in newest_version_first(user_kicad.iterdir(), lambda p: p.name):
@@ -356,7 +363,10 @@ def _search_roots(library: Optional[Path]) -> list[Path]:
 def find_library() -> Optional[Path]:
     """@brief Find the installed KiCad model directory, or return None.
 
-    Assenza non e' un errore: il chiamante ripiega sulle forme sintetiche.
+    @return The first candidate root containing at least one `*.3dshapes`
+        folder, or None when no installed library is found.
+    @note Absence is not an error: the caller falls back on the synthetic
+        shapes.
     """
     for root in _candidate_roots():
         try:
@@ -368,24 +378,24 @@ def find_library() -> Optional[Path]:
 
 
 def _normalize(text: str) -> str:
-    """Forma confrontabile di un nome di package.
+    """Comparable form of a package name.
 
-    I nomi reali mescolano trattini, trattini bassi e punti senza coerenza
-    (``SOT-223``, ``SOT_223``, ``U.FL``): normalizzarli evita di perdere una
-    corrispondenza per un separatore diverso.
+    Real names mix hyphens, underscores and dots inconsistently
+    (``SOT-223``, ``SOT_223``, ``U.FL``): normalising them avoids losing a
+    match because of a different separator.
     """
     return re.sub(r"[^a-z0-9]+", "", str(text or "").lower())
 
 
-#: Caratteri alfanumerici minimi di una sigla letta sul componente perche'
-#: diventi una chiave di ricerca nei nomi dei file STEP.
+#: Minimum alphanumeric characters of a marking read on the component for it
+#: to become a search key in the STEP file names.
 #:
-#: EURISTICA DICHIARATA: la chiave si cerca come SOTTOSTRINGA fra migliaia di
-#: nomi di file. Codici di 3-4 caratteri (valori «103», «R10», lotti «A1B2»,
-#: taglie «0805») compaiono per caso dentro nomi che non c'entrano; da 5
-#: caratteri con lettere E cifre la coincidenza casuale diventa rara. Non
-#: dipende da una marca: vale per qualunque sigla. Lo renderebbe superfluo un
-#: confronto per token interi invece che per sottostringa.
+#: DECLARED HEURISTIC: the key is searched as a SUBSTRING among thousands of
+#: file names. Codes of 3-4 characters (values «103», «R10», lots «A1B2»,
+#: sizes «0805») appear by chance inside unrelated names; from 5
+#: characters with letters AND digits a chance coincidence becomes rare. It does
+#: not depend on a brand: it holds for any marking. It would be made
+#: unnecessary by a comparison by whole tokens instead of by substring.
 MIN_MARKING_TOKEN_CHARS = 5
 
 
@@ -401,8 +411,8 @@ def _marking_model_tokens(component: dict) -> tuple[str, ...]:
     requires the exact filename (_marked_model_is_named) and compatible
     dimensions. No brand or vendor list is involved.
     """
-    # Una sigla letta con affidabilita' bassa e' in gran parte indovinata: come
-    # chiave di ricerca porterebbe a un file sbagliato con l'aria di un'identita'.
+    # A marking read with low reliability is largely guessed: as a
+    # search key it would lead to a wrong file with the air of an identity.
     if str(component.get("marking_confidence") or "").lower() == "low":
         return ()
     marking = str(component.get("marking") or "")
@@ -469,8 +479,8 @@ def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
     @param library Optional installed 3D library root.
     @return All matching paths, without an arbitrary candidate count limit.
 
-    L'ordinamento conta: ``SOT-223`` deve trovare ``SOT-223.step`` prima di
-    ``SOT-223-8.step``, che e' un altro componente.
+    The order matters: ``SOT-223`` must find ``SOT-223.step`` before
+    ``SOT-223-8.step``, which is a different component.
     """
     library = Path(library) if library is not None else find_library()
     token = _package_token(package)
@@ -497,8 +507,8 @@ def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
             partial.append(path)
 
     def order(path: Path) -> tuple:
-        # A parita' di attinenza vince lo STEP, poi il nome piu' corto: un
-        # nome piu' lungo porta quasi sempre una variante piu' specifica.
+        # At equal relevance STEP wins, then the shortest name: a
+        # longer name almost always carries a more specific variant.
         return (MODEL_SUFFIXES.index(path.suffix.lower()), len(path.stem), str(path))
 
     return (sorted(exact, key=order) + sorted(prefix, key=order)
@@ -506,7 +516,7 @@ def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
 
 
 def _index_path(library: Path) -> Path:
-    """File dell'indice degli ingombri, scrivibile anche senza permessi di sistema."""
+    """Envelope index file, writable even without system permissions."""
     beside = library / INDEX_FILENAME
     if os.access(library, os.W_OK):
         return beside
@@ -526,7 +536,13 @@ def _index_paths(library):
 
 
 def load_index(library: Optional[Path] = None) -> dict:
-    """@brief Read the measured-size index, tolerating a missing or broken file."""
+    """@brief Read the measured-size index, tolerating a missing or broken file.
+
+    @param library Library root whose index is read; None looks up the
+        installed library.
+    @return The index mapping (key -> measurement), empty when no library or
+        no readable index exists.
+    """
     library = library or find_library()
     if not library:
         return {}
@@ -534,7 +550,12 @@ def load_index(library: Optional[Path] = None) -> dict:
 
 
 def save_index(index: dict, library: Optional[Path] = None) -> None:
-    """@brief Persist the measured-size index; a failure is never fatal."""
+    """@brief Persist the measured-size index; a failure is never fatal.
+
+    @param index Index mapping (key -> measurement) to write.
+    @param library Library root whose index is written; None looks up the
+        installed library, and nothing is written when none is found.
+    """
     library = library or find_library()
     if not library:
         return
@@ -542,7 +563,14 @@ def save_index(index: dict, library: Optional[Path] = None) -> None:
 
 
 def index_key(path: Path) -> str:
-    """@brief Identify a file by absolute path, byte size and nanosecond mtime."""
+    """@brief Identify a file by absolute path, byte size and nanosecond mtime.
+
+    @param path Model file whose index key is wanted.
+    @return "<absolute path>:<size>:<mtime_ns>", or the absolute path alone
+        when the file cannot be inspected.
+    @note Must stay identical to `model_size_cache.file_identity` (a test
+        checks it).
+    """
     try:
         stat = path.stat()
         return f"{path.absolute()}:{stat.st_size}:{stat.st_mtime_ns}"
@@ -719,11 +747,11 @@ def _footprint_listing(root: Path) -> list:
     """Cheap change detector: (path, size, mtime_ns) of every *.kicad_mod under root.
 
     `os.scandir` returns size and mtime with the directory entries (no extra
-    system call per file on Windows), so the whole KiCad library (~15k files)
-    is listed in well under a tenth of the time the per-file `stat` of the
-    original scan took. Directory mtimes alone are NOT enough: NTFS updates
+    system call for each file on Windows), so the whole KiCad library (~15k
+    files) is listed in well under a tenth of the time the file-by-file
+    `stat` of the original scan took. Directory mtimes alone are NOT enough: NTFS updates
     them at timer-tick granularity (two additions within ~15 ms keep the same
-    value) and never on an in-place edit of a file.
+    value) and never when a file is edited in place.
     Symlinked directories are not descended, as `Path.rglob` does not.
     """
     listing, pending = [], [str(root)]
@@ -882,44 +910,45 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
 class MatchingCancelled(ProcessCancelled):
     """@brief Raised when the KiCad model matching was stopped on request.
 
-    @note Sottoclasse di `process_log.ProcessCancelled` DI PROPOSITO: la fase
-        di abbinamento avvia i suoi figli `freecadcmd` (le misure dei
-        candidati non ancora in cache) e chi la chiama deve poter scrivere UNA
-        sola clausola -- `except ProcessCancelled` -- per entrambe le meta'
-        del 3D, abbinamento e costruzione del solido. Una seconda gerarchia
-        avrebbe voluto dire due convenzioni per la stessa cosa.
-    @note Distinta da un lotto FALLITO, che resta `{}`: una misura che non
-        riesce e' una diagnosi sul file (modello illeggibile, FreeCAD
-        assente), una rinuncia e' una decisione di chi guarda. Confonderle
-        farebbe registrare «nessun candidato» per componenti che nessuno ha
-        mai misurato, cioe' un verdetto inventato.
+    @note Subclass of `process_log.ProcessCancelled` ON PURPOSE: the matching
+        phase starts its own `freecadcmd` children (the measurements of the
+        candidates not yet in cache) and its caller must be able to write ONE
+        single clause -- `except ProcessCancelled` -- for both halves of the
+        3D work, matching and solid construction. A second hierarchy would
+        have meant two conventions for the same thing.
+    @note Distinct from a FAILED batch, which stays `{}`: a measurement that
+        does not succeed is a diagnosis about the file (unreadable model,
+        FreeCAD missing), a cancellation is a decision of the person
+        watching. Confusing them would record «no candidate» for components
+        nobody ever measured, i.e. an invented verdict.
     """
 
     def __init__(self, command=None, output="", measured=None):
         """@brief Carry the killed command and the measurements already paid for.
 
         @param command Command line of the child that was killed, or None when
-            the stop happened between two components, senza nessun figlio vivo.
+            the stop happened between two components, with no child alive.
         @param output Text the child had already written, kept for the log.
         @param measured Mapping path -> measurement completed BEFORE the stop.
-            Sono misure valide: il chiamante le mette in cache invece di
-            buttarle, perche' sono gia' state pagate in tempo di CPU.
+            These are valid measurements: the caller caches them instead of
+            discarding them, because they have already been paid for in CPU
+            time.
         """
         super().__init__(command, output=output)
         self.measured = dict(measured or {})
 
 
-#: Script eseguito dentro FreeCAD: misura l'ingombro di piu' modelli in una
-#: sola invocazione. Aprire un processo per file costerebbe secondi a pezzo.
-#: I percorsi passano da un file di scambio e non da argv, perche' freecadcmd
-#: non inoltra gli argomenti allo script come farebbe python.
+#: Script run inside FreeCAD: it measures the envelope of several models in a
+#: single invocation. Opening a process per file would cost seconds per piece.
+#: The paths go through an exchange file and not through argv, because
+#: freecadcmd does not forward the arguments to the script as python would.
 #:
-#: Protocollo del file di scambio (lo stesso che le prove sostituiscono con un
-#: finto misuratore, visto che FreeCAD non c'e' nei test):
-#:   in.json        -> elenco dei percorsi da misurare;
-#:   progress.jsonl -> una riga {"path": ..., "size": ...} per OGNI misura
-#:                     finita, scritta e scaricata subito;
-#:   out.json       -> l'intera mappa, scritta solo se il lotto arriva in fondo.
+#: Exchange file protocol (the same one the tests replace with a
+#: fake measurer, since FreeCAD is not there in the tests):
+#:   in.json        -> list of the paths to measure;
+#:   progress.jsonl -> one line {"path": ..., "size": ...} for EVERY finished
+#:                     measure, written and flushed at once;
+#:   out.json       -> the whole map, written only if the batch reaches the end.
 _MEASURE_SCRIPT = """
 import json, os
 import FreeCAD
@@ -975,10 +1004,10 @@ with open(os.path.join(folder, "out.json"), "w", encoding="utf-8") as handle:
 
 
 def _partial_measurements(progress_path: Path) -> dict:
-    """Rilegge le misure gia' finite da `progress.jsonl`, riga per riga.
+    """Re-read the measurements already completed from `progress.jsonl`, line by line.
 
-    L'ultima riga puo' essere troncata: il figlio e' stato ucciso mentre la
-    scriveva. Una riga rotta si scarta, le precedenti restano valide.
+    The last line may be truncated: the child was killed while writing it. A
+    broken line is discarded, the previous ones remain valid.
     """
     measured = {}
     try:
@@ -998,49 +1027,49 @@ def _partial_measurements(progress_path: Path) -> dict:
 def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
     """@brief Measure model body and total X/Y/Z dimensions in mm using FreeCAD.
 
-    Una sola invocazione per lotto: aprire un processo per file costerebbe
-    secondi a pezzo. I modelli illeggibili finiscono a ``None`` invece di far
-    fallire il lotto -- un file rotto nella libreria non deve impedire di
-    risolvere gli altri.
+    One invocation for the whole batch: opening one process for each file
+    would cost seconds apiece. Unreadable models end up as ``None`` instead
+    of failing the batch -- a broken file in the library must not prevent
+    the others from being resolved.
 
-    Solo STEP: il VRML e' una mesh per la visualizzazione e FreeCAD non lo
-    importa come solido.
+    STEP only: VRML is a display mesh and FreeCAD does not import it as a
+    solid.
 
-    @param paths Percorsi dei modelli da misurare.
-    @param timeout Secondi di SILENZIO concessi a un singolo modello: il conto
-        riparte a ogni misura conclusa (una riga in `progress.jsonl`), quindi
-        non e' un budget per l'intero lotto.
-    @param cancel Canale di rinuncia: un oggetto con `is_set()` (tipicamente
-        `threading.Event`) che il chiamante mette a uno per chiedere la fine
-        del lavoro. **None significa non interrompibile**, ed e' il valore
-        predefinito.
-    @return Mappa percorso -> misura. Contiene anche le misure concluse prima
-        di un lotto fallito o di un modello fermo; un modello fermo oltre
-        @p timeout vale ``None`` (non misurabile in questa corsa) e il lotto
-        riparte dai modelli che lo seguono. `{}` quando nulla e' stato misurato
-        (FreeCAD assente, lancio fallito).
-    @throws MatchingCancelled Quando @p cancel viene messo a uno: il figlio
-        `freecadcmd` viene UCCISO -- non abbandonato -- con la stessa logica di
-        `process_log.run_logged`, e le misure gia' finite viaggiano
-        nell'eccezione (`measured`) perche' chi chiama possa metterle in cache.
-    @note Prima un budget unico di 300 s copriva fino a 64 file e, scaduto,
-        restituiva `{}`: nulla finiva in cache e ogni corsa successiva si
-        fermava di nuovo allo stesso punto. Ora il silenzio si misura per
-        modello e il lavoro gia' fatto sopravvive sempre.
-    @note Il canale si guarda ogni `process_log.CANCEL_POLL_INTERVAL_S`: e'
-        la stessa promessa di reattivita' fatta alla costruzione del solido.
+    @param paths Paths of the models to measure.
+    @param timeout Seconds of SILENCE granted to a single model: the count
+        restarts at every completed measurement (one line in
+        `progress.jsonl`), so it is not a budget for the whole batch.
+    @param cancel Cancellation channel: an object with `is_set()` (typically
+        `threading.Event`) that the caller sets to ask for the job to end.
+        **None means not interruptible**, and it is the default.
+    @return Mapping path -> measurement. It also contains the measurements
+        completed before a failed batch or a stuck model; a model stuck
+        beyond @p timeout is ``None`` (not measurable in this run) and the
+        batch restarts from the models that follow it. `{}` when nothing was
+        measured (FreeCAD missing, launch failed).
+    @throws MatchingCancelled When @p cancel is set: the `freecadcmd` child is
+        KILLED -- not abandoned -- with the same logic as
+        `process_log.run_logged`, and the measurements already completed
+        travel inside the exception (`measured`) so that the caller can cache
+        them.
+    @note Previously a single budget of 300 s covered up to 64 files and, once
+        expired, returned `{}`: nothing reached the cache and every later run
+        stopped again at the same point. Now silence is measured for each
+        model and the work already done always survives.
+    @note The channel is polled every `process_log.CANCEL_POLL_INTERVAL_S`:
+        it is the same responsiveness promise made to the solid construction.
     """
     readable = [str(p) for p in paths if Path(p).suffix.lower() in (".step", ".stp")]
     if not readable:
         return {}
     if cancel is not None and cancel.is_set():
-        # Rinuncia gia' chiesta: non si avvia un figlio che andrebbe ucciso al
-        # primo respiro (stessa regola di `_run_freecad`).
+        # Give-up already requested: do not start a child that would be killed at
+        # its first breath (same rule as `_run_freecad`).
         raise MatchingCancelled(measured={})
     try:
         from .step_generator import find_freecadcmd
         freecad = find_freecadcmd()
-    except Exception:  # noqa: BLE001 - senza FreeCAD si resta senza misure
+    except Exception:  # noqa: BLE001 - without FreeCAD there are no measures
         return {}
     measured = {}
     remaining = list(readable)
@@ -1061,10 +1090,10 @@ def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
             raise stopped
         if outcome != "stalled":
             return measured
-        # Il modello in corso quando il silenzio e' scaduto e' il primo non
-        # ancora concluso: lo si dichiara non misurabile in QUESTA corsa e si
-        # riparte dai successivi, che non hanno colpa. Ogni giro toglie almeno
-        # un file, quindi il ciclo termina.
+        # The model in progress when the silence expired is the first one not
+        # yet finished: it is declared not measurable in THIS run and
+        # measuring restarts from the following ones, which are not to blame. Every
+        # round removes at least one file, so the loop terminates.
         pending = [path for path in remaining if path not in batch]
         if not pending:
             return measured
@@ -1096,13 +1125,13 @@ def _measure_batch(freecad, paths, timeout, cancel):
         (base / "in.json").write_text(json.dumps(paths), encoding="utf-8")
         script = base / "measure.py"
         script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
-        # PYTHONDONTWRITEBYTECODE: il figlio non deve lasciare __pycache__
-        # accanto ai moduli, che nell'installazione stanno in sola lettura.
+        # PYTHONDONTWRITEBYTECODE: the child must not leave __pycache__
+        # next to the modules, which in the installation are read-only.
         environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base),
                            PYTHONDONTWRITEBYTECODE="1")
         command = [freecad, str(script)]
-        # L'uscita finisce su file e non su una pipe perche' nessuno la legge:
-        # una pipe piena bloccherebbe il figlio.
+        # The output goes to a file and not to a pipe because nobody reads it:
+        # a full pipe would block the child.
         log_path = base / "freecad.out"
         outcome, stopped = "failed", None
         try:
@@ -1113,7 +1142,7 @@ def _measure_batch(freecad, paths, timeout, cancel):
                     env=environment, creationflags=NO_WINDOW_FLAGS) as process:
 
                 def kill_child():
-                    """Unico punto in cui il figlio della misura viene ucciso."""
+                    """The only place where the measurement child process is killed."""
                     try:
                         process.kill()
                     except OSError:
@@ -1137,9 +1166,9 @@ def _measure_batch(freecad, paths, timeout, cancel):
                         pass
                     if cancel is not None and cancel.is_set():
                         kill_child()
-                        # Letture difensive: un errore nel raccogliere il
-                        # bottino non deve trasformare una rinuncia in un
-                        # lotto «fallito», che e' l'altro verdetto.
+                        # Defensive reads: an error while collecting the
+                        # haul must not turn a give-up into a
+                        # «fallito» (failed) batch, which is the other verdict.
                         try:
                             tail = log_path.read_text(encoding="utf-8", errors="replace")
                         except OSError:
@@ -1148,8 +1177,8 @@ def _measure_batch(freecad, paths, timeout, cancel):
                         break
                     size = progress_size()
                     if size != seen:
-                        # Una misura conclusa: il figlio e' vivo, il conto
-                        # del silenzio riparte per il modello successivo.
+                        # A finished measure: the child is alive, the silence
+                        # count restarts for the next model.
                         seen, deadline = size, time.monotonic() + timeout
                     elif time.monotonic() >= deadline:
                         kill_child()
@@ -1165,8 +1194,8 @@ def _measure_batch(freecad, paths, timeout, cancel):
                     return "done", dict(partial, **complete), None
             except (OSError, ValueError):
                 pass
-            # Uscito senza out.json (FreeCAD fallito a meta'): resta cio' che
-            # e' stato scritto riga per riga.
+            # Exited without out.json (FreeCAD failed halfway): what remains is
+            # what was written line by line.
             return "failed", partial, None
         return outcome, partial, stopped
 
@@ -1174,19 +1203,20 @@ def _measure_batch(freecad, paths, timeout, cancel):
 def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
     """@brief Retrieve valid cached dimensions and retry missing/failed measurements.
 
-    @param paths Modelli di cui servono le quote.
-    @param library Radice della libreria, per la cache delle misure.
-    @param cancel Canale di rinuncia inoltrato a `measure_models`. **None
-        significa non interrompibile** ed e' il valore predefinito: senza
-        canale il comportamento e' identico a prima, `measure_models`
-        compreso, che non lo vede nemmeno arrivare.
-    @return Mappa percorso -> misura (anche `None` per chi non si e' potuto misurare).
-    @throws MatchingCancelled Quando la misura viene fermata su richiesta. Le
-        misure gia' concluse prima della rinuncia vengono comunque SALVATE in
-        cache: sono valide e sono gia' state pagate, e buttarle farebbe
-        ricominciare da zero la corsa successiva. Quello che non viene
-        restituito e' il risultato parziale, che il chiamante scambierebbe
-        per completo.
+    @param paths Models whose dimensions are needed.
+    @param library Library root, for the measurement cache.
+    @param cancel Cancellation channel forwarded to `measure_models`. **None
+        means not interruptible** and it is the default: without a channel
+        the behaviour is identical to before, `measure_models` included,
+        which does not even see it arrive.
+    @return Mapping path -> measurement (`None` too, for what could not be
+        measured).
+    @throws MatchingCancelled When the measurement is stopped on request. The
+        measurements completed before the cancellation are SAVED in the cache
+        anyway: they are valid and already paid for, and discarding them
+        would make the next run start again from zero. What is not returned
+        is the partial result, which the caller would mistake for a complete
+        one.
     """
     paths = [Path(p) for p in paths]
     library = library or find_library()
@@ -1201,9 +1231,9 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
     if missing:
         stopped = None
         try:
-            # Il canale si passa SOLO quando c'e': la firma che vedono i
-            # chiamanti non interattivi (e le loro sostituzioni nei test)
-            # resta quella di prima. Stessa regola di `_run_freecad`.
+            # The channel is passed ONLY when present: the signature seen by
+            # non-interactive callers (and their replacements in the tests)
+            # stays as before. Same rule as `_run_freecad`.
             measured = measure_models(missing, **({"cancel": cancel} if cancel is not None else {}))
         except MatchingCancelled as exc:
             measured, stopped = exc.measured, exc
@@ -1232,14 +1262,14 @@ def _readings(size):
 
 
 def declared_height(component):
-    """@brief Altezza del componente, solo quando e' una stima dichiarata.
+    """@brief Height of the component, only when it is a declared estimate.
 
-    @param component Componente come esce dall'inventario fotografico.
-    @return Altezza in mm, oppure None se non e' stata osservata.
-    @note Quando il modello non sa dire l'altezza, l'inventario scrive 1.0 con
-        provenienza `estimated_placeholder_not_measured`: e' un segnaposto per
-        far esistere un solido, non una misura, e usarlo per scegliere un
-        modello significherebbe scegliere sul nulla.
+    @param component Component as it comes out of the photographic inventory.
+    @return Height in mm, or None when it was not observed.
+    @note When the model cannot tell the height, the inventory writes 1.0 with
+        provenance `estimated_placeholder_not_measured`: it is a placeholder
+        so that a solid can exist, not a measurement, and using it to choose
+        a model would mean choosing on nothing.
     """
     source = str(component.get("_height_source") or component.get("height_source") or "")
     if not source or source in ("unknown", "estimated_placeholder_not_measured"):
@@ -1252,15 +1282,17 @@ def declared_height(component):
 
 
 def height_distance(dimensions, height_mm) -> Optional[float]:
-    """@brief Scarto relativo fra l'altezza di un solido e quella osservata.
+    """@brief Relative deviation between the height of a solid and the observed one.
 
-    @param dimensions Quote del candidato; la terza, se c'e', e' l'altezza.
-    @param height_mm Altezza osservata, o None.
-    @return Scarto relativo, oppure None quando il confronto non si puo' fare.
-    @note Serve solo a ordinare i candidati che la misura XY non distingue: un
-        corpo alto 1,3 mm e uno alto 3,2 mm possono avere lo stesso ingombro
-        visto dall'alto, e la fotografia dall'alto non li separa. Non esclude
-        nessuno, perche' l'altezza qui e' una stima visiva e non una quota.
+    @param dimensions Dimensions of the candidate; the third, when present, is
+        the height.
+    @param height_mm Observed height, or None.
+    @return Relative deviation, or None when the comparison cannot be made.
+    @note It only serves to rank the candidates that the XY measurement does
+        not distinguish: a body 1.3 mm tall and one 3.2 mm tall can have the
+        same envelope seen from above, and the top-view photograph does not
+        separate them. It excludes nobody, because the height here is a
+        visual estimate and not a dimension.
     """
     if height_mm is None or len(dimensions) < 3:
         return None
@@ -1299,8 +1331,8 @@ def size_distance(model_size, length_mm, width_mm) -> Optional[float]:
         values = [float(v) for v in (model_size[0], model_size[1], length_mm, width_mm)]
     except (TypeError, ValueError):
         return None
-    # Una dimensione nulla o negativa non e' una misura imprecisa, e' un dato
-    # corrotto: prenderne il valore assoluto lo accetterebbe in silenzio.
+    # A zero or negative dimension is not an imprecise measure, it is corrupt
+    # data: taking its absolute value would silently accept it.
     if not all(math.isfinite(v) and v > 0 for v in values):
         return None
     model_long, model_short = sorted(values[:2], reverse=True)
@@ -1311,16 +1343,23 @@ def size_distance(model_size, length_mm, width_mm) -> Optional[float]:
 
 def size_matches(model_size, length_mm, width_mm,
                  tolerance: float = DEFAULT_SIZE_TOLERANCE) -> bool:
-    """@brief Tell whether a model size is compatible with the measured one."""
+    """@brief Tell whether a model size is compatible with the measured one.
+
+    @param model_size Side pair or body/total/land_patterns measurement mapping.
+    @param length_mm Photographic long or short side in millimetres.
+    @param width_mm Other photographic side in millimetres.
+    @param tolerance Maximum accepted worst-axis relative error.
+    @return True when a valid reading lies within the tolerance.
+    """
     distance = size_distance(model_size, length_mm, width_mm)
     return distance is not None and distance <= tolerance
 
 
-#: Tipo strutturato del corpo -> famiglia di modelli KiCad (vedi
-#: _candidate_family). Unica tabella per il filtro di compatibilita' e per la
-#: scoperta per famiglia: i tipi aggiunti al vocabolario dell'estrazione
-#: (punto 84 medio 13) vi entrano qui una volta sola. Un tipo senza famiglia
-#: (display, rele', batteria...) non restringe la ricerca per famiglia.
+#: Structured body type -> KiCad model family (see
+#: _candidate_family). A single table for the compatibility filter and for
+#: discovery by family: the types added to the extraction vocabulary
+#: (point 84 medium 13) enter it here only once. A type without a family
+#: (display, relay, battery...) does not narrow the search by family.
 KIND_FAMILY_ALIASES = {
     "ic_soic": "ic", "ic_qfn": "ic", "ic_qfp": "ic", "ic_bga": "ic",
     "ic_sot": "semiconductor", "power_tab": "semiconductor",
@@ -1626,17 +1665,17 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
     @note This low-level API does not certify identity. New callers must use
         model_candidates and explicit model_selection before attaching a solid.
 
-    Non si fida del nome proposto: un package sbagliato darebbe un solido
-    sbagliato con l'aria di essere esatto, che e' l'errore peggiore. Fra i
-    candidati vince **il piu' vicino alla misura**, non il primo che rientra
-    nella tolleranza: e' la vicinanza a discriminare fra due taglie dello
-    stesso package, mentre la tolleranza serve solo a fermare gli assurdi.
+    It does not trust the proposed name: a wrong package would give a wrong
+    solid that looks exact, which is the worst error. Among the candidates
+    **the closest to the measurement** wins, not the first one that falls
+    within the tolerance: closeness is what discriminates between two sizes
+    of the same package, while the tolerance only serves to stop the absurd.
 
-    Ritorna None quando la libreria non c'e', il nome non trova nulla o
-    nessun candidato e' abbastanza vicino: il chiamante ripiega sulla forma
-    sintetica, che e' approssimata ma coerente con la misura. Rifiutare e'
-    l'esito sicuro -- meglio una forma dichiaratamente approssimata di un
-    modello reale ma sbagliato.
+    Returns None when the library is absent, the name finds nothing or no
+    candidate is close enough: the caller falls back on the synthetic shape,
+    which is approximate but consistent with the measurement. Refusing is
+    the safe outcome -- better a shape declared approximate than a real but
+    wrong model.
     """
     note = log or (lambda message: None)
     found = candidates(package, library)
@@ -1686,10 +1725,10 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
                 width_mm=width_mm,
                 detail=detail))
         return None
-    # La misura non distingue due varianti con lo stesso corpo (SOT-223 e
-    # SOT-223-8 differiscono per il numero di reofori, non per l'ingombro).
-    # Fra candidati che la misura sostiene allo stesso modo decide il nome:
-    # la corrispondenza esatta prima, poi quella piu' corta.
+    # The measure does not tell apart two variants with the same body (SOT-223
+    # and SOT-223-8 differ in the lead count, not in the envelope).
+    # Among candidates the measure supports equally the name decides:
+    # the exact match first, then the shorter one.
     best = min(d for d, _, _ in scored)
     wanted = _package_name(package)
     equivalent_paths = [p for d, _, p in scored if d <= best + NAME_TIEBREAK_MARGIN]
@@ -1730,7 +1769,12 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
 
 
 def describe_size(size) -> str:
-    """@brief Render a measured model size for the log, body and total."""
+    """@brief Render a measured model size for the log, body and total.
+
+    @param size Side pair or body/total/land_patterns measurement mapping.
+    @return One "L x W" text for each valid reading, labelled by source when
+        the size is a mapping, or "ingombro ignoto" when nothing is valid.
+    """
     if isinstance(size, dict):
         parts = []
         for label, value in _readings(size):
@@ -1832,19 +1876,19 @@ def _tentative_endcap_family(component):
             or not endcaps_observed):
         return None
     package = str(component.get("package") or "").strip()
-    # Una sigla nuda ("0603") e' una dichiarazione, e la ricerca per nome la
-    # tratta come tale. Qui interessa il caso opposto: la taglia *nominata*
-    # dentro una descrizione -- "0603 (approx)", ma anche "0603 chip" o
-    # "0603 chip LED", che il modello scrive molto piu' spesso della forma fra
-    # parentesi. Il criterio e' strutturale, non un elenco di parole: il campo
-    # non e' una sigla nuda, non risolve ad alcun package dichiarato, e nomina
-    # una sola taglia. Due taglie ("0603/0805") restano un'ambiguita' da
-    # risolvere a monte, non una proposta da verificare.
+    # A bare code ("0603") is a declaration, and the name search treats it
+    # as such. Here the opposite case matters: the size *named*
+    # inside a description -- "0603 (approx)", but also "0603 chip" or
+    # "0603 chip LED", which the model writes much more often than the form in
+    # parentheses. The criterion is structural, not a word list: the field
+    # is not a bare code, does not resolve to any declared package, and names
+    # a single size. Two sizes ("0603/0805") stay an ambiguity to be
+    # resolved upstream, not a proposal to verify.
     #
-    # Perche' la nomina vada verificata e non usata come vincolo: su un run
-    # reale di 53 componenti, 21 dichiarano "0603 chip" e per 4 di questi la
-    # misura fotografica indica una classe intera piu' grande (0805). Cercare
-    # per nome un 0603 li avrebbe lasciati senza alcun candidato.
+    # Why the naming must be verified and not used as a constraint: on a real
+    # run of 53 components, 21 declare "0603 chip" and for 4 of them the
+    # photo measure indicates a whole class larger (0805). Searching
+    # by name for an 0603 would have left them without any candidate.
     nominated = set(re.findall(r"(?<![\w.-])" + _CHIP_SIZE_CODES + r"(?![\w.])", package))
     if (re.fullmatch(_CHIP_SIZE_CODES, package) or _package_token(package)
             or len(nominated) != 1):
@@ -1950,30 +1994,30 @@ def _family_paths(component, root, basis):
 def _literal_marking_identity(component, choices, complete, discovery_scope):
     """Whether the marking on the body names the single library model found.
 
-    Decisione dell'utente (B): la scritta letterale sul pezzo e' evidenza di
-    IDENTITA', non di geometria. Quando la scoperta e' stata ristretta ai soli
-    file nominati dalla marcatura (`discovery_scope == 'literal_marking_model'`)
-    e ne e' rimasto uno solo dopo i vincoli d'ingombro, il riquadro fotografico
-    non serve a dire *quale* modello e', ma solo a escludere che quel corpo NON
-    possa essere quel modello. Per questo la porta accetta anche una base
-    'body' con lettura di sezione non verificata, o uno scarto XY che i
-    criteri puramente dimensionali respingerebbero, purche' resti entro
-    DEFAULT_SIZE_TOLERANCE: oltre, la marcatura sarebbe stata letta su un corpo
-    che non puo' essere quel modello (caso negativo). Due file diversi che
-    corrispondono letteralmente alla stessa marcatura (varianti) NON sono
-    identita': restano una proposta provvisoria (caso negativo).
+    User decision (B): the literal writing on the part is evidence of
+    IDENTITY, not of geometry. When discovery was restricted to the files
+    named by the marking alone (`discovery_scope == 'literal_marking_model'`)
+    and only one remained after the envelope constraints, the photographic
+    rectangle does not serve to say *which* model it is, but only to rule
+    out that the body could NOT be that model. For this reason the gate also
+    accepts a 'body' basis with an unverified section reading, or an XY
+    deviation that purely dimensional criteria would reject, provided it
+    stays within DEFAULT_SIZE_TOLERANCE: beyond that, the marking would have
+    been read on a body that cannot be that model (negative case). Two
+    different files that literally match the same marking (variants) are
+    NOT identity: they remain a provisional proposal (negative case).
 
-    Identita' vuol dire che la scritta nomina il file per intero: il gambo
-    normalizzato del nome deve essere UGUALE a un identificatore della
-    marcatura (_marked_model_is_named). Un file che contiene la scritta come
-    sottostringa (marcatura ``X-Y-1``, unico file ``X-Y-1U.step``) e' una
-    variante con lo stesso prefisso, che puo' avere un'altra geometria: entra
-    in lista per la scoperta, ma resta provvisorio (caso negativo).
+    Identity means that the writing names the file in full: the normalised
+    stem of the name must be EQUAL to an identifier of the marking
+    (_marked_model_is_named). A file containing the writing as a substring
+    (marking ``X-Y-1``, single file ``X-Y-1U.step``) is a variant with the
+    same prefix, which may have a different geometry: it enters the list for
+    discovery, but remains provisional (negative case).
 
-    La regola non nomina alcun modello o marca: dipende dallo scopo della
-    scoperta e da grandezze misurate. Presenza 'high' e ricerca completa
-    restano richieste, perche' senza il corpo verificato la marcatura non ha
-    un soggetto e una ricerca troncata non dimostra l'unicita'.
+    The rule names no model or brand: it depends on the discovery scope and
+    on measured quantities. Presence 'high' and a complete search remain
+    required, because without the verified body the marking has no subject
+    and a truncated search does not prove uniqueness.
 
     @param component Component evidence (presence, marking).
     @param choices Candidates ranked by model_candidates, all within tolerance.
@@ -2181,18 +2225,18 @@ def _classifier_geometry_choice(component, choices, complete):
             or component.get("_global_inventory_status") in ("invalid", "rejected")
             or component.get("topology_incomplete")):
         return None
-    # Solo i modelli che il package dichiarato dalla rete ammette: catalogo
-    # chip per un corpo a due cappucci, stesso numero di terminali per un
-    # package che lo dichiara. Gli altri restano nel selettore.
+    # Only the models the package declared by the network admits: chip
+    # catalogue for a body with two caps, same terminal count for a
+    # package that declares it. The others stay in the selector.
     choices = [item for item in choices if _classifier_admits(Path(item["path"]), component)]
     if not choices:
         return None
     full_band = _tie_band(choices) or []
-    # Una sola base di misura nella banda: il corpo di un package non si
-    # confronta con l'ingombro totale o con le piazzole di un altro (audit
-    # 2026-10-02: LQFP 7x7 letto come LQFP-32 5x5). Le piazzole restano una
-    # base valida: il riquadro del rilevatore comprende le saldature, e per
-    # una chip 0805 misurata 2.46 x 1.40 mm sono la lettura piu' vicina.
+    # A single measurement basis in the band: the body of a package is not
+    # compared with the total envelope or with the pads of another (audit
+    # 2026-10-02: LQFP 7x7 read as LQFP-32 5x5). The pads remain a
+    # valid basis: the detector's box includes the solder joints, and for
+    # an 0805 chip measured 2.46 x 1.40 mm they are the closest reading.
     def basis_kind(item):
         label = str(item.get("measurement_basis") or "")
         return "pads" if label.startswith("piazzole") else label
@@ -2212,8 +2256,8 @@ def _classifier_geometry_choice(component, choices, complete):
     band = _tie_band(choices)
     if band is None or not any(item is first for item in band):
         return None
-    # Concorrenti alla pari su un'altra base: non confrontabili, ma la foto
-    # non li esclude, quindi vanno nominati (A3).
+    # Competitors on a par on another basis: not comparable, but the photo
+    # does not exclude them, so they must be named (A3).
     other_bases = [item for item in full_band if basis_kind(item) != kind_of_basis]
 
     def with_alternatives(chosen, peers):
@@ -2227,8 +2271,8 @@ def _classifier_geometry_choice(component, choices, complete):
     if _band_is_homogeneous(band, component.get("length_mm"), component.get("width_mm")):
         return with_alternatives(first, ()) if other_bases else first
     if not complete:
-        # La piu' vicina fra taglie misurate: con candidati mai misurati
-        # «piu' vicina» non vuol dire nulla.
+        # The closest among measured sizes: with never-measured candidates
+        # «piu' vicina» (closest) means nothing.
         return None
     length, width = component.get("length_mm"), component.get("width_mm")
     closest = min(band, key=lambda item: (_axis_deviation_sum(item, length, width),
@@ -2338,44 +2382,44 @@ def _provisional_geometry_choice(component, choices, complete, basis):
         return first
     if component.get("topology_incomplete"):
         return None
-    # La banda di pareggio e' l'insieme di TUTTI i candidati che la misura
-    # dall'alto non distingue dal migliore, non i primi due della lista.
-    # Guardare solo choices[0] e choices[1] lasciava fuori dal confronto un
-    # terzo solido entro il margine: nella corsa reale due varianti identiche
-    # di un modulo radio "pareggiavano" fra loro e venivano promosse, mentre
-    # il modulo giusto, terzo a meno del margine, non partecipava alla
-    # decisione. Un solido che la misura non sa escludere fa parte del dubbio.
+    # The tie band is the set of ALL candidates that the top-down measure
+    # does not tell apart from the best one, not the first two in the list.
+    # Looking only at choices[0] and choices[1] left out of the comparison a
+    # third solid within the margin: in the real run two identical variants
+    # of a radio module "tied" with each other and were promoted, while
+    # the right module, third by less than the margin, did not take part in the
+    # decision. A solid the measure cannot exclude is part of the doubt.
     band = _tie_band(choices)
     if band is None or not any(item is first for item in band):
         return None
-    # Il pareggio dice "la fotografia non distingue queste varianti"; la
-    # dominanza dice "la fotografia le ha distinte, e una sola regge". Sono
-    # le due situazioni in cui l'incertezza residua non riguarda la geometria
-    # XY. Riconoscere solo la prima premiava le liste ambigue e puniva quelle
-    # nitide: su un ricettacolo USB-C con candidati al 4% e al 16% non si
-    # proponeva nulla, mentre sarebbe bastato un doppione identico del
-    # migliore. La dominanza pretende pero' una ricerca completa: dominare
-    # alternative che nessuno ha misurato non e' dominare. Il pareggio
-    # omogeneo resta ammesso su una ricerca troncata, perche' non afferma
-    # nulla su cio' che non e' stato misurato.
-    # Un candidato solo in tutta la lista non e' dominanza, e' assenza di
-    # confronto: la misura non ha scartato nessuno, quindi qui non decide
-    # niente (restano la marcatura letterale e la morfologia, sopra).
+    # The tie says "the photograph does not tell these variants apart"; the
+    # dominance says "the photograph told them apart, and only one holds". They
+    # are the two situations in which the residual uncertainty does not concern
+    # the XY geometry. Recognising only the first rewarded ambiguous lists and
+    # punished clean ones: on a USB-C receptacle with candidates at 4% and 16%
+    # nothing was proposed, whereas an identical duplicate of the best one
+    # would have been enough. Dominance however demands a complete search:
+    # dominating alternatives that nobody measured is not dominating. The
+    # homogeneous tie stays allowed on a truncated search, because it asserts
+    # nothing about what was not measured.
+    # A single candidate in the whole list is not dominance, it is absence of
+    # comparison: the measure has discarded nobody, so here it decides
+    # nothing (the literal marking and the morphology, above, remain).
     if len(band) == 1:
         return first if complete and len(choices) >= 2 else None
     return first if _band_is_homogeneous(
         band, component.get("length_mm"), component.get("width_mm")) else None
 
 
-#: Rapporto d'area minimo perche' una piazzola del footprint conti come
-#: aletta (tab) rispetto alla piazzola mediana del footprint.
+#: Minimum area ratio for a footprint pad to count as a tab
+#: relative to the median pad of the footprint.
 #:
-#: EURISTICA DICHIARATA: un'aletta dissipa e si stende su piu' larghezze di
-#: reoforo. Nella libreria KiCad 10 l'aletta del SOT-223 e' 2.53 volte la
-#: piazzola di un reoforo (2.0x3.8 contro 2.0x1.5), quella del TO-252 oltre
-#: 14 volte, mentre la piazzola 1 allargata del SOT-143 (non un'aletta) e'
-#: 1.67 volte le altre. Separazione con margine MODESTO fra 1.67 e 2.53,
-#: dichiarata: la renderebbe superflua un attributo «tab» nel footprint.
+#: DECLARED HEURISTIC: a tab dissipates heat and spans several lead
+#: widths. In the KiCad 10 library the SOT-223 tab is 2.53 times the
+#: pad of one lead (2.0x3.8 against 2.0x1.5), the TO-252 one over
+#: 14 times, while the enlarged pad 1 of the SOT-143 (not a tab) is
+#: 1.67 times the others. Separation with a MODEST margin between 1.67 and
+#: 2.53, declared: a «tab» attribute in the footprint would make it unnecessary.
 TAB_AREA_RATIO = 2.0
 
 
@@ -2476,7 +2520,7 @@ def _band_is_homogeneous(band, length_mm, width_mm):
 
     Homogeneity is expressed in the SAME quantity as the band itself: the
     relative deviation of a model side from the MEASURED side of the
-    photograph, ``(model - measured) / measured``, taken per axis (long side
+    photograph, ``(model - measured) / measured``, taken for each axis (long side
     to long side, short to short, like size_distance).  relative_xy_error is
     the worst-axis absolute value of exactly this deviation, and the band
     admits a member when that error is within NAME_TIEBREAK_MARGIN of the
@@ -2490,7 +2534,7 @@ def _band_is_homogeneous(band, length_mm, width_mm):
 
     No second constant is introduced: a model-versus-model comparison
     normalised by a model side would be a different quantity from the one
-    the margin was declared for.  Any unreadable or non-positive dimension,
+    the margin was declared for.  Any unreadable or nonpositive dimension,
     on the models or on the measurement, disqualifies the band.
 
     @param band Candidates returned by _tie_band (non-empty).
@@ -2525,7 +2569,7 @@ def _band_is_homogeneous(band, length_mm, width_mm):
                for axis in zip(*deviations))
 
 
-#: Verdetti di presenza di chi ha GIUDICATO il corpo (riconciliazione AI).
+#: Presence verdicts of whoever JUDGED the body (AI reconciliation).
 _PRESENCE_VERDICTS = ("high", "medium", "low")
 
 
@@ -2624,8 +2668,8 @@ def _synchronize_preview_variants(components, note) -> None:
     """
     groups = {}
     for component in components or []:
-        # Stesso contratto di attach_models: una voce malformata non deve
-        # fermare le altre. Qui arriva la lista grezza, non quella filtrata.
+        # Same contract as attach_models: a malformed entry must not
+        # stop the others. The raw list arrives here, not the filtered one.
         if not isinstance(component, dict):
             continue
         report = component.get("model_match") or {}
@@ -2675,10 +2719,10 @@ def _synchronize_preview_variants(components, note) -> None:
                 if candidate.get("path") == selected:
                     reasons = candidate.setdefault("reasons", [])
                     reasons[-1:] = [report["shared_preview_reason"]]
-            # La proposta condivisa e' provvisoria come quella del singolo
-            # componente e, come quella, si aggancia dichiarandosi tale
-            # (decisione A): il solido mostra il modello comune, non il corpo
-            # generico, e il selettore puo' cambiarlo.
+            # The shared proposal is provisional like that of the single
+            # component and, like it, it attaches declaring itself so
+            # (decision A): the solid shows the common model, not the generic
+            # body, and the selector can change it.
             component["model_path"] = selected
             report["attachment"] = "provisional"
             report["attachment_reason"] = (
@@ -2868,13 +2912,13 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     @param limit Maximum result count, clamped to zero through five.
     @param library Optional KiCad model root; cached measurements are reused.
     @param log Optional diagnostic callback accepting a string.
-    @param cancel Canale di rinuncia (`is_set()`) inoltrato alla misura dei
-        candidati non ancora in cache. **None significa non interrompibile**
-        ed e' il valore predefinito.
-    @throws MatchingCancelled Quando la rinuncia arriva prima o durante la
-        misura. NON viene restituito un report parziale: un rapporto senza
-        candidati sarebbe indistinguibile da «nessun modello compatibile»,
-        cioe' un verdetto su un componente che nessuno ha esaminato.
+    @param cancel Cancellation channel (`is_set()`) forwarded to the
+        measurement of the candidates not yet in cache. **None means not
+        interruptible** and it is the default.
+    @throws MatchingCancelled When the cancellation arrives before or during
+        the measurement. NO partial report is returned: a report without
+        candidates would be indistinguishable from «no compatible model»,
+        i.e. a verdict on a component nobody examined.
     @return Mapping with status, candidates and selected_path. Candidate dimensions_mm
         is the matched XY reading (and Z when available), in native model axes.
     @note Dimensional evidence never confirms identity. Explicit confirmation wins;
@@ -2895,8 +2939,8 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     """
     result = {"status": "unresolved", "candidates": [], "selected_path": None}
     note = log or (lambda message: None)
-    # Prima di qualunque lavoro: chi ha gia' chiesto di fermarsi non deve
-    # ricevere il verdetto di un esame mai cominciato.
+    # Before any work: whoever already asked to stop must not
+    # receive the verdict of an examination never started.
     if cancel is not None and cancel.is_set():
         raise MatchingCancelled(measured={})
     if not isinstance(component, dict):
@@ -2920,9 +2964,9 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     if root is None:
         note(tx("Libreria 3D di KiCad non trovata: si usano le forme approssimate."))
         return result
-    # Un corpo con la stessa firma geometrica di uno che l'utente ha gia'
-    # accettato riceve quel modello come proposta da confermare; la ricerca in
-    # libreria gira comunque per offrire alternative alla scelta accettata.
+    # A body with the same geometric signature as one the user already
+    # accepted receives that model as a proposal to confirm; the library
+    # search runs anyway to offer alternatives to the accepted choice.
     cached = getattr(_archive_state, 'results', None)
     accepted = cached[id(component)] if cached is not None and id(component) in cached else _accepted_match(component, roots, note)
     result = _library_search(component, result, limit=limit, roots=roots, root=root,
@@ -2930,9 +2974,9 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
     result = _prefer_closer(accepted, result, limit, note) if accepted else result
     if (accepted and _local_classifier_identity(component) and result.get("candidates")
             and not _classifier_admits(Path(result["candidates"][0]["path"]), component)):
-        # Una scelta d'archivio fuori dal package che la rete ha visto (una
-        # resistenza MELF su un corpo chip, un SOT-23-5 su un SOT-23) non vince
-        # in silenzio: resta proposta, da confermare (audit 2026-10-02, A-D5).
+        # An archived choice outside the package the network saw (an
+        # MELF resistor on a chip body, a SOT-23-5 on a SOT-23) does not win
+        # silently: it stays a proposal, to be confirmed (audit 2026-10-02, A-D5).
         reason = tx("L'archivio propone un modello fuori dal package riconosciuto dalla "
                     "rete locale: da verificare prima di usarlo.")
         result["classifier_archive_conflict"] = True
@@ -3081,15 +3125,15 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
     if not paths:
         return result
     result["discovery"] = "family_dimensions" if fallback else "package"
-    # Vedi `_run_freecad`: il canale si passa solo quando c'e', cosi' le
-    # sostituzioni di `model_sizes` scritte prima di questo parametro
-    # continuano a funzionare.
+    # See `_run_freecad`: the channel is passed only when present, so the
+    # replacements of `model_sizes` written before this parameter
+    # keep working.
     sizes = model_sizes(paths, root, **({"cancel": cancel} if cancel is not None else {}))
     complete = not (result.get("search_truncated") or result.get("topology_incomplete"))
     lands = footprint_sizes(paths, root, log=note) if basis in ("unknown", "pads") else {}
-    # L'altezza non esclude nessun candidato -- e' una stima visiva, non una
-    # quota -- ma dentro la banda in cui la misura dall'alto non distingue
-    # due solidi resta l'unica grandezza che li separa davvero.
+    # Height excludes no candidate -- it is a visual estimate, not a
+    # dimension -- but inside the band where the top-down measure does not tell
+    # two solids apart it remains the only quantity that really separates them.
     observed_height = declared_height(component)
     for path in paths:
         size = sizes.get(str(path))
@@ -3122,13 +3166,13 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
             "reasons": ["Family and dimension discovery" if fallback else "Package name compatible", "No declared family or terminal conflict",
                         f"Compatible {label} dimensions", "Identity and variant require user review"],
         })
-    # Entro NAME_TIEBREAK_MARGIN la fotografia non distingue due solidi: una
-    # frazione di percento di scarto misurato e' rumore, mentre un conteggio
-    # dichiarato che coincide con quello osservato e' evidenza strutturale
-    # indipendente. Ordinare per solo scarto la seppelliva -- un corpo con sei
-    # reofori osservati metteva ultimo il suo unico candidato a sei terminali.
-    # Fuori dalla banda comanda ancora la misura, e un conteggio che coincide
-    # non promuove mai un solido che la misura ha gia' scartato.
+    # Within NAME_TIEBREAK_MARGIN the photograph does not tell two solids apart: a
+    # fraction of a percent of measured gap is noise, whereas a declared count
+    # that matches the observed one is independent structural
+    # evidence. Ordering by gap alone buried it -- a body with six
+    # observed leads put its only six-terminal candidate last.
+    # Outside the band the measure still rules, and a matching count
+    # never promotes a solid the measure has already discarded.
     counts = set(_observed_count(component))
     if (provisional_count := _provisional_terminal_count(component)) is not None:
         counts.add(provisional_count)
@@ -3138,15 +3182,15 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
         equivalent = item["relative_xy_error"] <= closest + NAME_TIEBREAK_MARGIN
         declared = _declared_count(Path(item["path"]))
         supported = bool(counts) and declared is not None and declared in counts
-        # Dentro la banda la fotografia dall'alto ha gia' detto tutto quello
-        # che sa: fra due solidi che le sembrano uguali decide l'altezza, che
-        # la vista dall'alto non misura affatto. Fuori dalla banda comanda
-        # ancora la misura, e un'altezza vicina non promuove mai un solido che
-        # la misura ha gia' scartato.
+        # Inside the band the top-down photograph has already said everything
+        # it knows: between two solids that look equal to it the height decides,
+        # which the top view does not measure at all. Outside the band the
+        # measure still rules, and a close height never promotes a solid that
+        # the measure has already discarded.
         height_error = item.get("relative_z_error")
-        # Fuori dalla banda il criterio deve essere NEUTRO, altrimenti
-        # riordinerebbe candidati che la misura ha gia' separato solo perche'
-        # di uno si conosce l'altezza.
+        # Outside the band the criterion must be NEUTRAL, otherwise it
+        # would reorder candidates the measure has already separated only because
+        # the height of one of them is known.
         height_rank = ((height_error is None, height_error) if equivalent and height_error is not None
                        else (True, 0.0) if equivalent else (False, 0.0))
         return (not equivalent, not (equivalent and supported), height_rank,
@@ -3185,7 +3229,7 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
                     "Applied provisionally: identity not verified; package variant and "
                     "orientation require user review and the picker can replace it")
                 if provisional.get("tie_alternatives"):
-                    # Scelta per vicinanza fra taglie quasi alla pari: va detto.
+                    # Choice by closeness between sizes almost on a par: it must be stated.
                     result["size_tie_alternatives"] = list(provisional["tie_alternatives"])
                     choice["reasons"].append(
                         tx("Taglia piu' vicina alla misura fra taglie quasi alla pari "
@@ -3207,22 +3251,22 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
         This is the one step of a generation with a real total: every component
         may cost a CAD measurement, so the count is what a progress bar can
         honestly be built on.
-    @param cancel Canale di rinuncia: un oggetto con `is_set()` (tipicamente
-        `threading.Event`) che chi ha avviato il lavoro mette a uno per
-        chiedere la fine. **None significa non interrompibile** ed e' il
-        valore predefinito: senza canale questa funzione fa esattamente quel
-        che faceva prima. Il canale viene guardato PRIMA di ogni componente e
-        inoltrato fino al figlio `freecadcmd` che misura i candidati, cosi'
-        una richiesta non aspetta la fine del lotto in corso.
+    @param cancel Cancellation channel: an object with `is_set()` (typically
+        `threading.Event`) that whoever started the job sets to ask for the
+        end. **None means not interruptible** and it is the default: without
+        a channel this function does exactly what it did before. The channel
+        is checked BEFORE every component and forwarded down to the
+        `freecadcmd` child that measures the candidates, so a request does
+        not wait for the end of the batch in progress.
     @return Number of paths attached: explicit choices, automatic mechanical
         estimates and provisional proposals alike.
-    @throws MatchingCancelled Quando la rinuncia arriva: il conteggio parziale
-        NON viene restituito (sarebbe letto come il totale di una corsa
-        completa) e il componente su cui la richiesta e' caduta viene
-        rimesso esattamente com'era. I componenti gia' esaminati conservano il
-        loro verdetto, che e' vero; quelli mai esaminati non ne ricevono
-        nessuno -- un `model_match` «unresolved» scritto d'ufficio direbbe
-        «nessun modello compatibile» di un pezzo che nessuno ha guardato.
+    @throws MatchingCancelled When the cancellation arrives: the partial count
+        is NOT returned (it would be read as the total of a complete run) and
+        the component on which the request landed is put back exactly as it
+        was. The components already examined keep their verdict, which is
+        true; those never examined receive none -- a `model_match`
+        «unresolved» written by default would say «no compatible model» of a
+        part nobody looked at.
     @note Rejected or invalid explicit selections use synthetic geometry. Missing
         selections permit auto_matched mechanical estimates when evidence supports
         them. A provisional_matched report is a proposal whose identity is not
@@ -3266,24 +3310,24 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             progress(done - 1, total)
         if not isinstance(component, dict):
             continue
-        # Guardato PRIMA di toccare il componente: cosi' il pezzo su cui la
-        # rinuncia cade resta intatto invece di restare a meta' strada, senza
-        # modello agganciato e con il verdetto della corsa precedente.
+        # Checked BEFORE touching the component: so the piece on which the
+        # give-up falls stays intact instead of being left halfway, without
+        # an attached model and with the verdict of the previous run.
         if cancel is not None and cancel.is_set():
             note(tx("Abbinamento modelli KiCad interrotto su richiesta dopo {value} "
                     "componenti su {total}.",
                     value=done - 1,
                     total=total))
             raise MatchingCancelled(measured={})
-        # Il ripristino a True ripulisce lo stato calcolato nella corsa
-        # precedente, non la scelta dell'utente: render_3d_override e' l'unico
-        # canale esplicito e vince in entrambe le direzioni, sia per togliere
-        # dal solido un falso positivo del rilevatore sia per rimettere un
-        # pezzo che l'automatismo aveva omesso.
+        # The reset to True clears the state computed in the previous
+        # run, not the user's choice: render_3d_override is the only
+        # explicit channel and it wins in both directions, both to remove
+        # a false positive of the detector from the solid and to put back a
+        # piece the automation had omitted.
         override = component.get("render_3d_override")
-        # Cio' che sto per sovrascrivere, per poterlo rimettere se la rinuncia
-        # arriva a meta' esame: un componente mai esaminato fino in fondo deve
-        # restare come l'ho trovato, non a meta'.
+        # What I am about to overwrite, so it can be put back if the give-up
+        # arrives halfway through the examination: a component never examined to the
+        # end must stay as I found it, not halfway.
         restore = {key: component[key] for key in ("render_3d", "model_path")
                    if key in component}
         previous_model_rotation = component.get("model_rotation_deg")
@@ -3313,14 +3357,14 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             raise
         component["model_match"] = report
         report['consolidated_match'] = component.get('consolidated_match', {})
-        # Lo stato di revisione si dice con un campo, non con un colore: il
-        # magenta resta solo per chi non ha alcun candidato, perche' di quel
-        # corpo non si sa nulla oltre al riquadro. Un corpo in revisione o
-        # con una proposta provvisoria ha una geometria XY nota e un colore
-        # campionato dalla foto, e cancellarlo con il magenta buttava via
-        # un'informazione vera per segnalarne una che il report gia' porta.
-        # model_review e' il verdetto del matcher al momento dell'abbinamento;
-        # lo stato corrente e' model_match.status (vedi @note nel docstring).
+        # The review state is told by a field, not by a colour: the
+        # magenta stays only for whoever has no candidate, because of that
+        # body nothing is known beyond the box. A body under review or
+        # with a provisional proposal has a known XY geometry and a colour
+        # sampled from the photo, and wiping it with magenta threw away
+        # true information to report one the report already carries.
+        # model_review is the matcher's verdict at matching time;
+        # the current state is model_match.status (see @note in the docstring).
         component["model_review"] = report["status"]
         component["render_placeholder"] = report["status"] == "unresolved"
         report["render_placeholder"] = component["render_placeholder"]
@@ -3336,14 +3380,14 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
             resolved += 1
         elif (report["status"] in ("auto_matched", "provisional_matched", "library_matched")
               and report.get("selected_path")):
-            # Decisione dell'utente (A): anche la proposta provvisoria aggancia
-            # il modello, ma lo dichiara. Lasciare il corpo generico per un
-            # candidato che la misura non sa distinguere dalle sue varianti
-            # buttava via un solido compatibile (modulo, USB-C, QFN uscivano
-            # come parallelepipedi) per segnalare un dubbio che il report
-            # porta gia' in un campo. L'identita' resta NON verificata:
-            # model_review e attachment lo dicono, e il selettore puo'
-            # sostituire il modello.
+            # User decision (A): the provisional proposal too attaches
+            # the model, but declares it. Leaving the generic body for a
+            # candidate the measure cannot tell apart from its variants
+            # threw away a compatible solid (module, USB-C, QFN came out
+            # as boxes) to report a doubt the report
+            # already carries in a field. The identity stays NOT verified:
+            # model_review and attachment say so, and the selector can
+            # replace the model.
             component["model_path"] = report["selected_path"]
             if report["status"] == "provisional_matched":
                 report["attachment"] = "provisional"
@@ -3351,26 +3395,26 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                     "Model applied PROVISIONALLY: identity not verified, the photograph "
                     "cannot separate it from its variants; the picker can change it.")
             elif report["status"] == "library_matched":
-                # Scelta dell'utente: «preseleziona, tu confermi». Il modello
-                # viene da un abbinamento che hai gia' accettato su un'altra
-                # scheda con la stessa firma geometrica; resta una proposta.
+                # User's choice: «preseleziona, tu confermi» (preselect, you confirm). The
+                # model comes from a match you already accepted on another
+                # board with the same geometric signature; it stays a proposal.
                 report["attachment"] = "accepted_library"
                 report["attachment_reason"] = (
                     tx("Modello dall'archivio degli abbinamenti accettati: stessa firma "
                        "geometrica di una scelta gia' approvata; da confermare nel selettore."))
             else:
                 report["attachment"] = "automatic"
-            # Il verso del modello nativo non si decide qui. Fino a poco fa lo
-            # decideva una regex inglese su prosa libera, ancorata al nome del
-            # file e valida di fatto per un modulo solo: una regola sui nomi,
-            # che questo progetto vieta. Ora lo ricava il costruttore
-            # confrontando dove pende il materiale del modello (baricentro
-            # contro centro dell'ingombro) con il lato su cui la fotografia ha
-            # visto il riferimento asimmetrico. Se uno dei due lati manca, il
-            # verso resta non verificato invece di essere indovinato.
+            # The direction of the native model is not decided here. Until recently it
+            # was decided by an English regex on free prose, anchored to the file
+            # name and in fact valid for only one module: a rule on names,
+            # which this project forbids. Now the builder derives it
+            # by comparing where the model's material leans (centroid
+            # against centre of the envelope) with the side on which the photograph
+            # saw the asymmetric reference. If one of the two sides is missing, the
+            # direction stays unverified instead of being guessed.
             #
-            # L'angolo assoluto di una corsa precedente e' stato calcolato su
-            # un altro modello e va comunque tolto.
+            # The absolute angle from a previous run was computed on
+            # another model and must be removed anyway.
             component.pop("model_rotation_deg", None)
             component.pop("model_rotation_native_delta_deg", None)
             # A row-wide angle may mix different physical instances. Only an

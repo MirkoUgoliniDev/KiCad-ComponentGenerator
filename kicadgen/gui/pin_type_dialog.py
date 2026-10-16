@@ -157,7 +157,11 @@ class PinTypeDialog(QDialog):
         self._update_use()
 
     def selected(self):
-        """@brief Return checked proposals with known electrical types."""
+        """@brief Return checked proposals with known electrical types.
+
+        @return The proposal dicts whose table row is checked and whose
+            `electrical_type` is not 'unknown', in table order.
+        """
         return [p for i, p in enumerate(self.proposals)
                 if self.table.item(i, 0) is not None
                 and self.table.item(i, 0).checkState() == Qt.CheckState.Checked
@@ -174,7 +178,10 @@ class PinTypeDialog(QDialog):
         super().reject()
 
     def closeEvent(self, event):
-        """@brief Defer closure until the AI worker can finish safely."""
+        """@brief Defer closure until the AI worker can finish safely.
+
+        @param event Qt close event; ignored while the worker is running.
+        """
         if self.worker is not None and self.worker.isRunning():
             self.reject()
             event.ignore()

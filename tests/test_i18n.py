@@ -29,7 +29,8 @@ _TEXT_CONSTRUCTORS = {"QPushButton", "QLabel", "QCheckBox", "QRadioButton",
 #: Setter il cui primo argomento e' testo visibile. Sono gli stessi che
 #: `retranslate_widgets` rilegge dalle proprieta' `i18n_*_source`.
 _TEXT_SETTERS = {"setText", "setToolTip", "setWindowTitle", "setTitle",
-                 "setPlaceholderText", "setAccessibleName", "setTabText"}
+                 "setPlaceholderText", "setAccessibleName", "setTabText",
+                 "setStatusTip", "setWhatsThis"}
 
 #: Proprieta' con cui un widget dichiara da se' la propria sorgente i18n.
 _SOURCE_PROPERTIES = {"i18n_source", "i18n_tooltip_source", "i18n_window_title_source",
@@ -132,6 +133,16 @@ def ui_source_literals():
                 # catalogo, tradotte quando si compone il tooltip.
                 for argument in node.args[1:]:
                     if value := constant(argument):
+                        remember(value, path, node.lineno)
+            elif name in ("add_item", "set_item_source"):
+                # Voce di combo con la sua sorgente (`I18n.add_item(combo, "…", dato)`,
+                # `set_item_source(combo, indice, "…")`): la sorgente del testo
+                # e il tooltip (parola chiave) sono catalogo, il dato no.
+                position = 1 if name == "add_item" else 2
+                if len(node.args) > position and (value := constant(node.args[position])):
+                    remember(value, path, node.lineno)
+                for keyword in node.keywords:
+                    if keyword.arg == "tooltip" and (value := constant(keyword.value)):
                         remember(value, path, node.lineno)
             elif name == "addRow" and len(node.args) >= 2 and (value := constant(node.args[0])):
                 # Etichetta di una riga di QFormLayout: diventa una QLabel che

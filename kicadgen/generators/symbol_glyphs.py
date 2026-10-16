@@ -419,7 +419,12 @@ def primitives_of(unit_form, legacy_text_degrees: bool = False) -> list[Primitiv
 
 
 def terminals_of(unit_form) -> list[Terminal]:
-    """@brief The pins of one unit form as terminals (position, direction, length, name, number)."""
+    """@brief The pins of one unit form as terminals (position, direction, length, name, number).
+
+    @param unit_form A parsed `symbol` unit node of a KiCad library.
+    @return One Terminal per `pin` child that carries an `at` with angle;
+        length defaults to 2.54 mm, name and number to "" when absent.
+    """
     result = []
     for pin in _children(unit_form, "pin"):
         at = _child(pin, "at")
@@ -605,6 +610,7 @@ def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: st
 def kicad_symbols_dir() -> Optional[Path]:
     """@brief The `symbols` folder of the installed KiCad, or None when KiCad is not found.
 
+    @return The resolved folder path, or None when kicad-cli is not found.
     @note Derived from kicad-cli's location (`<kicad>/bin/kicad-cli` ->
         `<kicad>/share/kicad/symbols`), the layout of every KiCad install.
     """
@@ -752,7 +758,10 @@ def _transform(point: tuple[float, float], x: float, y: float, rotation: int, mi
 
 
 def new_instance_id() -> str:
-    """@brief A fresh stable identity for a placed record (uuid4 hex), unique across projects."""
+    """@brief A fresh stable identity for a placed record (uuid4 hex), unique across projects.
+
+    @return 32 lowercase hex characters.
+    """
     return uuid.uuid4().hex
 
 
@@ -802,6 +811,7 @@ def instance_from_glyph(glyph: Glyph, x: float, y: float, rotation: int = 0, mir
 def primitive_record(p: Primitive) -> dict:
     """@brief The JSON-friendly dict of a primitive as stored in a placed record.
 
+    @param p The primitive to serialize.
     @return kind, points, radius, fill, width, style; plus text, size, angle
         and justify for a text primitive, and `vjustify` when it is not
         "center" (records written before vertical justification existed are
@@ -821,6 +831,8 @@ def primitive_from_record(record: dict, points=None) -> Primitive:
 
     @param record Primitive dict of a placed record.
     @param points Points to use instead of the record's (already transformed).
+    @return The Primitive; an unknown style falls back to "default", missing
+        fields to their defaults (no text, TEXT_SIZE_MM, angle 0, centred).
     """
     kind = str(record.get("kind", "polyline"))
     points = tuple(_point_xy(pt) for pt in record.get("points", [])) if points is None else tuple(points)
@@ -848,7 +860,11 @@ def _anchor_of(point) -> Optional[dict]:
 
 
 def is_wire(instance: dict) -> bool:
-    """@brief True when a placed record is a free wire (key "wire") rather than a glyph."""
+    """@brief True when a placed record is a free wire (key "wire") rather than a glyph.
+
+    @param instance Placed record (anything that is not a dict is not a wire).
+    @return True for a wire record.
+    """
     return isinstance(instance, dict) and instance.get("key") == WIRE_KEY
 
 
@@ -996,12 +1012,12 @@ def _resolve_anchor(anchor: dict, by_id: dict, pin_ends: Optional[dict]) -> Opti
 
 
 def elements_by_id(graphics: Optional[Iterable[dict]]) -> dict:
-    """@brief The anchorable elements of a drawing by id: every identified non-wire record.
+    """@brief The anchorable elements of a drawing by id: every identified record that is not a wire.
 
     @param graphics Placed records (None = none).
-    @return {id: record}; computed once per redraw and handed to
+    @return {id: record}; computed once for each redraw and handed to
         `resolve_wire_points`/`placed_primitives` so a scene with many wires
-        does not rebuild it per wire.
+        does not rebuild it for every wire.
     """
     return {inst["id"]: inst for inst in (graphics or ()) if isinstance(inst, dict)
             and isinstance(inst.get("id"), str) and inst["id"] and not is_wire(inst)}
@@ -1035,8 +1051,8 @@ def resolve_wire_points(wire_instance: dict, graphics: Optional[Iterable[dict]],
         a terminal anchor is resolved on the element with that id, by index.
     @param pin_ends `pin_inner_ends(layout)`; a pin anchor is resolved by number.
     @param by_id `elements_by_id(graphics)` computed by the caller, to spare
-        one pass per wire; None builds it from `graphics`.
-    @return One (x, y) per stored point: the anchor's position when it
+        one pass for every wire; None builds it from `graphics`.
+    @return One (x, y) for each stored point: the anchor's position when it
         resolves, else the stored x/y (the last resolved position).
     @note Fixed points and unresolved anchors go through the wire's own
         x/y/rotation/mirror like any primitive; a resolved anchor is absolute,
@@ -1196,7 +1212,12 @@ def freeze_pin_anchors(graphics: list, pin_number: str, pin_ends: Optional[dict]
 
 
 def placed_terminals(instance: dict) -> list[Terminal]:
-    """@brief The terminals of a placed glyph in symbol coordinates, angles turned with it."""
+    """@brief The terminals of a placed glyph in symbol coordinates, angles turned with it.
+
+    @param instance Placed record (x, y, rotation, mirror and its `terminals`).
+    @return One Terminal per stored terminal, position transformed and angle
+        mirrored then rotated like the glyph.
+    """
     x, y = float(instance.get("x", 0.0)), float(instance.get("y", 0.0))
     rotation, mirror = int(instance.get("rotation", 0)), bool(instance.get("mirror", False))
     result = []
@@ -1307,12 +1328,19 @@ FILL_MODES = ("none", "outline", "background")
 
 
 def shape_tool(key: str) -> Optional[tuple[str, str, str, int]]:
-    """@brief The SHAPE_TOOLS entry of a tool key, None for an unknown key."""
+    """@brief The SHAPE_TOOLS entry of a tool key, None for an unknown key.
+
+    @param key Tool key.
+    @return The (key, label, kind, click count) tuple, or None.
+    """
     return next((tool for tool in SHAPE_TOOLS if tool[0] == key), None)
 
 
 def shape_tool_glyphs() -> list[Glyph]:
-    """@brief One sample glyph per shape tool, for the palette icons (never placed as such)."""
+    """@brief One sample glyph for each shape tool, for the palette icons (never placed as such).
+
+    @return Glyphs in SHAPE_TOOLS order, group "tool".
+    """
     sample = {
         "line": Primitive("polyline", ((0, 0), (2.54, 2.54), (5.08, 1.27)), 0.0, "none", SHAPE_WIDTH_MM),
         "rectangle": Primitive("rectangle", ((0, 0), (5.08, 3.81)), 0.0, "none", SHAPE_WIDTH_MM),
@@ -1332,7 +1360,7 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
     @param clicks Clicked points, (x, y) in symbol mm, in the tool's click order.
     @param width Stroke width in mm.
     @param fill KiCad fill: none, outline or background.
-    @param text The text of a text tool (non-blank, single line).
+    @param text The text of a text tool (not blank, single line).
     @param size Font size of a text, mm (> 0).
     @param justify Deprecated, kept for callers of the previous signature:
         None or a value of TEXT_JUSTIFY (anything else refuses the text, as
@@ -1342,7 +1370,7 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
         itself) and whose points are relative to it; None when the clicks
         do not make the shape (too few, a circle of zero radius, a
         rectangle without area, an arc through a repeated point, a text
-        that is blank or not on one line or of non-positive size).
+        that is blank or not on one line or of zero or negative size).
     @note A text's origin is the clicked point and that point is the
         BOTTOM-LEFT corner of the text (user, 2026-10-14): `justify` "left",
         `vjustify` "bottom" and the record marked `text_anchor` =
@@ -1400,7 +1428,11 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
 
 
 def is_shape(instance: dict) -> bool:
-    """@brief True when a placed record was drawn with a shape tool (`shape_instance`)."""
+    """@brief True when a placed record was drawn with a shape tool (`shape_instance`).
+
+    @param instance Placed record.
+    @return True when its `source` is SHAPE_SOURCE.
+    """
     return isinstance(instance, dict) and instance.get("source") == SHAPE_SOURCE
 
 
@@ -1481,6 +1513,11 @@ def instance_bounds(instance: dict, graphics: Optional[Iterable[dict]] = None,
                     pin_ends: Optional[dict] = None) -> Optional[tuple[float, float, float, float]]:
     """@brief The bounding box (min x, min y, max x, max y) of a placed record, symbol mm.
 
+    @param instance Placed record (glyph, shape or wire).
+    @param graphics Every placed record, used to resolve a wire's anchors.
+    @param pin_ends `pin_inner_ends(layout)`, used to resolve pin anchors.
+    @return (min x, min y, max x, max y) over the primitives and the placed
+        terminals, or None when the record has no measurable primitive.
     @note A text counts its anchor point only; a wire resolves its anchors
         when `graphics` or `pin_ends` are given.
     """
@@ -1596,12 +1633,12 @@ def set_text(instance: dict, text: str, size: float, justify: Optional[str] = No
     """@brief Change the content and size (and, for a legacy text, the justification) of a text element.
 
     @param instance Placed record whose first primitive is a text, mutated in place.
-    @param text New text (non-blank, one line).
+    @param text New text (not blank, one line).
     @param size Font size in mm (> 0).
     @param justify Horizontal justification (TEXT_JUSTIFY), or None to keep
         the stored one. Ignored for a bottom-left anchored text
         (`is_bottom_left_text`), whose anchor convention is fixed.
-    @return True when written; False for a non-text record or an invalid value.
+    @return True when written; False for a record that is not a text or an invalid value.
     @note The anchor point does not move: for a bottom-left anchored text a
         longer or bigger text grows right and up from the same corner.
     """
@@ -1689,7 +1726,13 @@ def migrate_text_anchor(instance: dict, measure) -> bool:
 
 
 def snap_to_terminal(instances: Iterable[dict], x: float, y: float) -> Optional[Terminal]:
-    """@brief The terminal within TERMINAL_SNAP_MM of a point, nearest first, or None."""
+    """@brief The terminal within TERMINAL_SNAP_MM of a point, nearest first, or None.
+
+    @param instances Placed records whose terminals are candidates.
+    @param x Symbol X of the point, mm.
+    @param y Symbol Y of the point, mm.
+    @return The nearest Terminal at a distance <= TERMINAL_SNAP_MM, or None.
+    """
     best, best_distance = None, TERMINAL_SNAP_MM
     for instance in instances:
         for terminal in placed_terminals(instance):

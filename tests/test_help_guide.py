@@ -108,7 +108,7 @@ def test_guide_follows_light_and_dark_theme(guide_text):
     "Nuovo documento", "Aggiungi…", "Scheda con componenti · connettori passanti",
     "Scheda con componenti · connettori castellated (mezzo foro)",
     "Estrai parametri con AI", "Credito AI", "Footprint 2D (KiCadGen)",
-    "Modelli 3D dalla libreria KiCad", "Solido 3D con FreeCAD", "Chiudi",
+    "Modelli dalla libreria KiCad", "Solido 3D con FreeCAD", "Chiudi",
     "Modifica componenti…", "Scelta del modello STEP", "Colori",
     "Mostra gli header nel modello 3D", "Montaggio e analisi", "Dati del progetto",
     "Torna ai progetti", "Strumenti AI", "Footprint sulla scheda ospitante",

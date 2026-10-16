@@ -272,7 +272,10 @@ class ComponentCheckDialog(QDialog):
             super().reject()
 
     def closeEvent(self, event):
-        """@brief Keep the dialog alive while its verification thread runs."""
+        """@brief Keep the dialog alive while its verification thread runs.
+
+        @param event Qt close event; ignored while the worker is running.
+        """
         if self._running:
             event.ignore()
         else:

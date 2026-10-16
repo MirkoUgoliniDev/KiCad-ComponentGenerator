@@ -84,8 +84,8 @@ def fitted_tooltip(text: str, window_width: int, font=None) -> str:
     """
     body = tooltip_html(text)
     limit = max(120, min(TOOLTIP_MAX_WIDTH_PX, window_width - 2 * WINDOW_MARGIN_PX - _FRAME_X_PX))
-    # `<qt>` dichiara il rich text: senza, un testo breve con un «&lt;»
-    # scappato verrebbe mostrato alla lettera.
+    # `<qt>` declares the rich text: without it, a short text with an escaped
+    # «&lt;» would be shown literally.
     if _natural_width(body, font or QToolTip.font()) <= limit:
         return f"<qt>{body}</qt>"
     return (f"<qt><table width='{limit}' cellspacing='0' cellpadding='0'>"
@@ -156,10 +156,10 @@ def show_tooltip(widget: QWidget, pointer: QPoint, text: str) -> None:
     label = _tip_label()
     if label is None:
         return
-    # La cornice vera (margini di Qt compresi) si conosce solo a tooltip
-    # mostrato: se il box e' ancora piu' largo dello spazio, si stringe la
-    # colonna di quanto sfora. Prima la stima fissa di 18 px lasciava
-    # uscire a destra un tooltip lungo in una finestra stretta.
+    # The real frame (Qt margins included) is known only once the tooltip is
+    # shown: if the box is still wider than the space, the column is narrowed
+    # by the overflow. Previously the fixed estimate of 18 px let a long
+    # tooltip go out on the right in a narrow window.
     excess = label.frameGeometry().width() - (area.width() - 2 * WINDOW_MARGIN_PX)
     if excess > 0:
         QToolTip.showText(pointer, fitted_tooltip(text, area.width() - excess), widget)
@@ -176,9 +176,9 @@ def _text_for(watched: QWidget, event) -> str:
         return text
     view = watched.parent() if not isinstance(watched, QHeaderView) else watched
     if isinstance(view, QHeaderView) and watched in (view, view.viewport()):
-        # Un'intestazione non ha righe: `indexAt` non trova nulla e il
-        # tooltip della sezione passava a Qt, su una riga e fuori dalla
-        # finestra (revisore 3, difetto 11).
+        # A header has no rows: `indexAt` finds nothing and the section
+        # tooltip went to Qt, on a single line and outside the window
+        # (reviewer 3, defect 11).
         section = view.logicalIndexAt(event.pos())
         model = view.model()
         value = (model.headerData(section, view.orientation(), Qt.ItemDataRole.ToolTipRole)
@@ -236,9 +236,9 @@ def install_tooltip_filter(app: QApplication) -> ToolTipFilter:
     @note Also turns off the tooltip roll/fade effects: the box is moved inside
         the window right after Qt shows it, which an animation would prevent.
     """
-    # Senza animazione: su Windows il tooltip entra con un effetto che lo tiene
-    # nascosto per qualche frazione di secondo, e in quel tempo non si puo'
-    # spostarlo dentro la finestra; spostato dopo, salterebbe sotto gli occhi.
+    # No animation: on Windows the tooltip enters with an effect that keeps it
+    # hidden for a fraction of a second, and during that time it cannot be
+    # moved inside the window; moved afterwards, it would jump before the eyes.
     QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
     QApplication.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, False)
     existing = app.findChild(ToolTipFilter)

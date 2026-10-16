@@ -147,3 +147,95 @@ def test_discarded_detail_reason_is_fully_translated():
     assert all('english diagnostic' not in text for text in texts.values())
     # Errors that are not a rejection (malformed answer) get the generic text.
     assert _rejection_text(KeyError('bbox')) not in texts.values()
+
+
+# --- Shared attachment helpers (MEDIO 16): face anchoring of observed leads ---
+
+MM_BODY = [2, 1, 8, 5]   # millimetre frame, as the renderer anchors
+
+
+@pytest.mark.parametrize('terminal,face', [
+    ([0, 2, 2, 3], (0, -1)),        # left face, exact contact
+    ([0, 2, 1.9, 3], (0, -1)),      # left face, short gap
+    ([8.1, 2, 10, 3], (0, 1)),      # right face, short gap
+    ([3, -1, 4, 1], (1, -1)),       # low Y face
+    ([3, 5, 4, 7], (1, 1)),         # high Y face
+    ([0, 0, 2, 1], (0, -1)),        # corner tie: X faces first, deterministic
+    ([0, 0, 2, 2.5], (0, -1)),      # corner, protrudes more along X
+    ([0, -2, 2.5, 1], (1, -1)),     # corner, protrudes more along Y
+    ([1, 2, 4, 3], (0, -1)),        # overlapping into the body
+])
+def test_anchor_face_is_the_face_the_terminal_protrudes_from_most(terminal, face):
+    from kicadgen.cad3d.lead_geometry import anchor_face
+    assert anchor_face(MM_BODY, terminal) == face
+
+
+def test_a_terminal_inside_the_body_has_no_anchor_face():
+    from kicadgen.cad3d.lead_geometry import anchor_face
+    assert anchor_face(MM_BODY, [3, 2, 4, 3]) is None
+
+
+@pytest.mark.parametrize('terminal,expected', [
+    ([0, 2, 1.9, 3], [0, 2, 2, 3]),            # gap closed by the inner edge only
+    ([0, 2, 2.5, 3], [0, 2, 2.5, 3]),          # overlap kept as observed
+    ([0, 0, 2, 1], [0, 0, 2, 1.12]),           # corner: root lengthened by lateral_min
+    ([0, 5, 1.9, 6], [0, 4.88, 2, 6]),         # high corner with gap: both closures
+    ([0, 2.4, 2, 2.5], [0, 2.4, 2, 2.5]),      # narrow lead inside the span: untouched
+])
+def test_anchored_terminal_grows_only_toward_the_body(terminal, expected):
+    from kicadgen.cad3d.lead_geometry import anchor_face, anchored_terminal
+    face = anchor_face(MM_BODY, terminal)
+    result = anchored_terminal(MM_BODY, terminal, face, .12)
+    assert result == pytest.approx(expected)
+    assert result[0] <= terminal[0] and result[2] >= terminal[2]
+    assert result[1] <= terminal[1] and result[3] >= terminal[3]
+
+
+def test_lateral_overlap_is_capped_at_the_face_span():
+    from kicadgen.cad3d.lead_geometry import anchored_terminal
+    tiny = [2, 1, 8, 1.05]                       # face span .05 < lateral_min
+    result = anchored_terminal(tiny, [0, 0, 2, 1], (0, -1), .12)
+    assert result == pytest.approx([0, 0, 2, 1.05])
+
+
+@pytest.mark.parametrize('terminal,attached', [
+    ([0, .3, .2, .4], True), ([0, .3, .15, .4], True), ([0, .3, .13, .4], False),
+    ([0, 0, .2, .2], True), ([0, 0, .13, .13], False), ([.9, .3, 1, .4], False)])
+def test_is_attached_is_symmetric_in_the_two_axes(terminal, attached):
+    from kicadgen.cad3d.lead_geometry import is_attached
+    body = [.2, .2, .8, .8]
+    swapped = [terminal[1], terminal[0], terminal[3], terminal[2]]
+    assert is_attached(body, terminal) is attached
+    assert is_attached(body, swapped) is attached
+
+
+def test_lateral_growth_stops_at_a_neighbouring_lead():
+    """Positive: a fine-pitch neighbour along the face caps the root growth at
+    its edge, so the anchored lead never enters it; the outer end is kept."""
+    from kicadgen.cad3d.lead_geometry import anchored_terminal
+    neighbour = [0, 1.05, 2, 1.5]                # next lead, .05 mm past the corner
+    result = anchored_terminal(MM_BODY, [0, 0, 2, 1], (0, -1), .12, [neighbour])
+    assert result == pytest.approx([0, 0, 2, 1.05])
+    assert min(result[3], neighbour[3]) - max(result[1], neighbour[1]) <= 1e-12
+
+
+def test_a_neighbour_with_no_room_keeps_the_inner_closure_only():
+    """A neighbour already at the face span edge leaves no lateral room: only
+    the inner-edge closure along the face normal is applied."""
+    from kicadgen.cad3d.lead_geometry import anchored_terminal
+    neighbour = [0, 1, 2, 1.5]                   # touches the face span start
+    result = anchored_terminal(MM_BODY, [0, 0, 1.9, 1], (0, -1), .12, [neighbour])
+    assert result == pytest.approx([0, 0, 2, 1])
+
+
+@pytest.mark.parametrize('obstacles', [
+    [],                                          # isolated lead
+    [[5, 1, 6, 1.5]],                            # far along X: not beside the lead
+    [[0, 3, 2, 4]],                              # beyond the growth target
+    [[0, -1, 2, 0]],                             # on the outer side: never in the way
+])
+def test_obstacles_out_of_the_growth_path_leave_the_growth_unchanged(obstacles):
+    """Negative: leads that the lateral growth cannot reach do not change it."""
+    from kicadgen.cad3d.lead_geometry import anchored_terminal
+    result = anchored_terminal(MM_BODY, [0, 0, 2, 1], (0, -1), .12, obstacles)
+    assert result == pytest.approx([0, 0, 2, 1.12])

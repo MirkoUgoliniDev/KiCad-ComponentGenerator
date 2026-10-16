@@ -125,7 +125,7 @@ class _BalanceTask(QRunnable):
         try:
             status = (providers.deepseek_balance() if self.provider == providers.PROVIDER_DEEPSEEK
                       else openrouter.credit_status(force_refresh=True))
-        except Exception as exc:  # noqa: BLE001 - riportato sulla riga, mai fatale
+        except Exception as exc:  # noqa: BLE001 - reported on the row, never fatal
             self.signals.ready.emit(self.token, None, str(exc))
             return
         self.signals.ready.emit(self.token, status, "")
@@ -328,7 +328,7 @@ class AiAccountLine(QLabel):
             return
         try:
             provider = source()
-        except Exception:  # noqa: BLE001 - la riga non deve mai far cadere l'app
+        except Exception:  # noqa: BLE001 - the row must never bring the app down
             return
         if provider in providers.PROVIDERS and provider != self.provider:
             self.provider = provider
@@ -344,7 +344,7 @@ class AiAccountLine(QLabel):
                 providers.deepseek_api_key()
             else:
                 openrouter.api_key()
-        except Exception as exc:  # noqa: BLE001 - chiave assente: si dice e basta
+        except Exception as exc:  # noqa: BLE001 - missing key: it is stated and that is all
             self._balance_state, self._balance_error = "error", str(exc)
             self.refresh()
             return
@@ -361,7 +361,7 @@ class AiAccountLine(QLabel):
     def _balance_ready(self, token, status, error) -> None:
         self._tasks.pop(token, None)
         if token != self._token:
-            return  # superata da una lettura piu' recente
+            return  # superseded by a more recent reading
         if status is None:
             self._balance_state, self._balance_error = "error", error
         else:
@@ -395,7 +395,7 @@ class AiAccountLine(QLabel):
             self._pending.append((Path(folder), record))
             self._flush_pending()
             self.refresh()
-        except Exception as exc:  # noqa: BLE001 - uno slot che solleva chiude l'app
+        except Exception as exc:  # noqa: BLE001 - a slot that raises closes the app
             self._log(tx("Costo di una chiamata AI non registrato nel progetto ({cost} USD): "
                          "{exc}", cost=self._cost_text(record), exc=exc))
 
@@ -445,14 +445,14 @@ class AiAccountLine(QLabel):
                 else:
                     self._report(tx("File dei costi occupato ({exc}): l'inizio dell'analisi "
                                     "sarà scritto appena possibile.", exc=exc))
-                # Nessun nuovo tentativo a finestra chiusa: una chiamata
-                # consegnata dopo detach() non deve riavviare il timer.
+                # No new attempt once the window is closed: a call delivered
+                # after detach() must not restart the timer.
                 if (not final and not getattr(self, "_detached", False)
                         and not self._retry_timer.isActive()):
                     self._retry_timer.start(self._retry_ms)
                     self._retry_ms = min(self._retry_ms * 2, FLUSH_RETRY_MAX_MS)
                 break
-            except Exception as exc:  # noqa: BLE001 - file rovinato o errore inatteso
+            except Exception as exc:  # noqa: BLE001 - damaged file or unexpected error
                 # Never overwritten, so the item cannot go in: one line per
                 # dropped item, never de-duplicated, and the queue goes on.
                 self._pending.pop(0)
@@ -476,7 +476,7 @@ class AiAccountLine(QLabel):
         try:
             self._flush_pending()
             self.refresh()
-        except Exception as exc:  # noqa: BLE001 - uno slot che solleva chiude l'app
+        except Exception as exc:  # noqa: BLE001 - a slot that raises closes the app
             self._report(tx("Riga del credito AI non aggiornata: {exc}", exc=exc))
 
     def _flush_final(self) -> None:
@@ -489,7 +489,7 @@ class AiAccountLine(QLabel):
                              "(file occupato alla chiusura): il costo registrato del progetto "
                              "è sottostimato.", count=waiting))
             self._pending.clear()
-        except Exception as exc:  # noqa: BLE001 - chiusura: mai un'eccezione
+        except Exception as exc:  # noqa: BLE001 - closing: never an exception
             self._report(tx("Riga del credito AI non aggiornata: {exc}", exc=exc))
 
     def _report(self, message: str) -> None:
@@ -529,7 +529,7 @@ class AiAccountLine(QLabel):
         """
         try:
             self._compose()
-        except Exception as exc:  # noqa: BLE001 - uno slot che solleva chiude l'app
+        except Exception as exc:  # noqa: BLE001 - a slot that raises closes the app
             self._report(tx("Riga del credito AI non aggiornata: {exc}", exc=exc))
 
     def _compose(self) -> None:
@@ -537,7 +537,7 @@ class AiAccountLine(QLabel):
         previous = self.provider
         self._follow_provider()
         if self.provider != previous and self.balance_enabled:
-            # Il fornitore e' cambiato: si legge il saldo giusto (in background).
+            # The provider changed: read the right balance (in background).
             self.refresh_balance()
             return
         parts, details = [], []
@@ -554,8 +554,8 @@ class AiAccountLine(QLabel):
             details.append(tx("Saldo: credito residuo ({limit}), letto alle {time}.",
                               limit=self._status.limiting_factor, time=self._balance_time))
         elif self._balance_state == "ok" and self._status.account_error:
-            # Saldo dell'account non letto e chiave senza tetto: mancano i
-            # dati, non c'e' «nessun limite».
+            # Account balance not read and key without a cap: the data are
+            # missing, it is not «nessun limite» (no limit).
             parts.append(tx("Saldo OpenRouter: non disponibile"))
             details.append(tx("Saldo non letto: {error}", error=self._status.account_error))
         elif self._balance_state == "ok":
@@ -571,7 +571,7 @@ class AiAccountLine(QLabel):
             self._cost_parts(Path(folder), parts, details)
         details.append(tx("Le risposte servite dalla cache locale non costano e non "
                           "sono contate."))
-        # Riga di un modulo: resta al suo posto anche senza dati.
+        # A module's row: it stays in place even without data.
         self.setText("  ·  ".join(parts) or "—")
         self.setToolTip(tx("Credito e spesa AI") + "\n" + "\n".join(details))
 
@@ -617,14 +617,14 @@ class AiAccountLine(QLabel):
                             amount=format_usd(0.0), waiting=waiting) if waiting
                          else tx("Costo dell'analisi: nessuna chiamata a pagamento"))
         else:
-            # Solo l'analisi corrente sulla riga (utente, 28/09); il totale
-            # del progetto resta nel suggerimento.
+            # Only the current analysis on the row (user, 28/09); the project
+            # total stays in the hint.
             parts.append(_analysis_cost_text(costs, waiting))
             split = sorted((provider, total) for provider, (total, _calls, _missing)
                            in (costs.run_by_provider or {}).items())
             if len(split) > 1:
-                # Diviso per fornitore (utente, 27/09: un totale unico accanto
-                # al saldo DeepSeek sembrava la spesa DeepSeek).
+                # Split by provider (user, 27/09: a single total next to the
+                # DeepSeek balance looked like the DeepSeek spending).
                 parts[-1] += " (" + " · ".join(
                     f"{providers.PROVIDER_SHORT_LABELS.get(provider, provider)} "
                     f"{format_usd(total)}"
@@ -636,7 +636,8 @@ class AiAccountLine(QLabel):
                                   calls=costs.run_calls))
             elif costs.run:
                 # No start record for this analysis (hand-edited file): no
-                # date rather than «iniziata il :» (audit 138, B6).
+                # date rather than «iniziata il :» (started on :, an empty date; audit
+        # 138, B6).
                 details.append(tx("Analisi corrente: {calls} chiamate a pagamento, rilanci "
                                   "compresi.", calls=costs.run_calls))
         if waiting:
@@ -661,8 +662,8 @@ class AiAccountLine(QLabel):
             details.append(tx("{count} chiamate DeepSeek calcolate dai token senza la "
                               "parte letta dalla cache: il loro costo è un limite "
                               "superiore.", count=costs.estimated_calls))
-        # Diviso per fornitore (utente, 27/09): un totale unico accanto a
-        # un modello DeepSeek sembrava la spesa DeepSeek.
+        # Split by provider (user, 27/09): a single total next to a DeepSeek
+        # model looked like the DeepSeek spending.
         for provider, (total, calls, missing) in sorted((costs.by_provider or {}).items()):
             label = providers.PROVIDER_LABELS.get(provider, provider)
             details.append(tx("{label}: {amount} USD, {calls} chiamate", label=tx(label),

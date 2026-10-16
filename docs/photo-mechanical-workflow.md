@@ -2,150 +2,225 @@
 
 ## Obiettivo e utilizzo
 
-Ricostruire gli ingombri del modulo, **non fare reverse engineering**: il percorso
-standard produce parallelepipedi semplici, senza scritte, con XY dalla fotografia
-calibrata. La classificazione elettrica precisa non serve. I colori sono campionati
-dai pixel, le altezze sono stime grossolane della classe visiva.
+Ricostruire gli ingombri del modulo, **non fare reverse engineering**: il
+percorso standard produce parallelepipedi semplici, senza scritte, con XY
+dalla fotografia calibrata, oppure modelli della libreria 3D di KiCad scelti
+per somiglianza di misure. La classificazione elettrica precisa non serve. I
+colori sono campionati dai pixel, le altezze sono stime della classe visiva.
 
-1. Caricare una foto dall'alto e le eventuali viste quotate. I nuovi allegati sono
-   selezionati con una spunta per default.
-2. Premere **Estrai parametri con AI**. Il pulsante **≡ Log AI** nel tab Progetto
-   apre una finestra modale con sorgente, localizzazioni, duplicati riconciliati,
-   esclusioni e ingombri finali. Il log si aggiorna anche mentre è aperto e resta
-   disponibile dopo la chiusura. Il pulsante **ⓘ** accanto alla cartella componente
-   apre le informazioni sulla cartella e sull'esportazione.
-3. Aprire **Confronta foto**: selezionare/spostare i rettangoli, modificarne quote,
-   aggiungere o eliminare elementi. Annulla non modifica i dati; Applica aggiorna
-   la tabella e invalida la vecchia anteprima, da rigenerare.
-4. Verificare le altezze con una misura diretta, poi rigenerare il 3D.
+Vale solo per le due tipologie **Scheda con componenti** (connettori passanti
+o castellated): per i componenti singoli l'inventario non viene eseguito.
 
-Il verde indica un rilevamento, **non una misura certificata**. L'arancione indica
-un dubbio automatico sulla presenza/geometria. Anche un inventario senza elementi
-arancioni richiede controllo delle quote e delle altezze prima di verificare
-interferenze meccaniche. Non sono introdotti margini di sicurezza impliciti.
+1. Nella scheda **Progetto**, passo **Documenti**, caricare una foto
+   dall'alto e spuntarle il ruolo **Alta risoluzione** (è l'unico ruolo che va
+   al rilevatore e alla calibrazione); le viste quotate e il datasheet
+   servono alle quote e al pinout, non aggiungono corpi.
+2. Nel passo **Montaggio e analisi** scegliere la tipologia e, nel riquadro
+   **Strumenti AI**, il rilevatore. Premere **Estrai parametri con AI** (a
+   pagamento). La finestra di avanzamento elenca le fasi e chi lavora in
+   ciascuna; il **Log AI** (Ctrl+L) mostra sorgente, localizzazioni,
+   riconciliazioni, esclusioni e ingombri finali, e viene scritto in
+   `analisi-ai.log` nel progetto.
+3. La **finestra di revisione** si apre due volte (vedi sotto): prima sulle
+   proposte del rilevatore locale, poi — se la pausa dopo l'inventario è
+   attiva — sui corpi riconciliati. Selezionare e spostare i rettangoli,
+   modificarne le quote, aggiungere o eliminare elementi. **Annulla** non
+   modifica i dati; **Applica correzioni** aggiorna la tabella e invalida la
+   vecchia anteprima, da rigenerare.
+4. Verificare le altezze con una misura diretta, poi **Rigenera modello 3D
+   (STEP) con queste annotazioni** (F5, gratuito) nella scheda Modello 3D.
+
+Un rettangolo indica un rilevamento, **non una misura certificata**. I
+marcatori della lista dicono se la riga ha almeno un avviso (`[!]`, di solito
+«modello KiCad non confermato»), se il tipo non è stato stabilito (`[?]`) o se
+la classe del rilevatore contraddice quella dell'AI. Anche un inventario senza
+marcatori richiede il controllo delle quote e delle altezze prima di
+verificare interferenze meccaniche. Non sono introdotti margini di sicurezza
+impliciti.
+
+## Configurazione dei modelli e dei prompt
+
+- **Configurazione → Default generali AI…**: il modello AI **unico** usato
+  per documenti, localizzazione, verifica e lettura dei ritagli, con la sua
+  sorgente (OpenRouter o DeepSeek API diretta) nella scheda **Modello**, e i
+  prompt base nelle schede **Datasheet**, **Localizzazione foto**, **Verifica
+  foto**. Predefinito: `deepseek-api/deepseek-flash` dai sorgenti (database
+  dei profili), `anthropic/claude-opus-5` via OpenRouter nel programma
+  installato dall'MSI. Il modello si sceglie solo da qui o dal riquadro
+  «Modello AI», mai modificando a mano il database.
+- **Configurazione → Gestione tipologie e profili AI…**: per ogni tipologia,
+  le stesse tre sezioni con i sotto-tab **Prompt base**, **Istruzioni foto**,
+  **Terminali**, **Reofori**, **Lettura ritagli** (localizzazione) e **Schede
+  e moduli**, **Componente singolo**, **Numerazione pin** (datasheet), più
+  **Istruzioni tipologia**; ogni campo può ereditare il default generale. Le
+  istruzioni foto si aggiungono ai prompt fotografici, verifica compresa, ma
+  non alla lettura dei ritagli, che descrive un corpo solo.
+- Il pulsante accanto a **Modello AI** nel riquadro Strumenti AI cambia il
+  modello per la sola sessione (filtro per costo); il default non cambia.
+- Gli schemi JSON restano nel codice. Una modifica al prompt invalida la cache
+  delle relative chiamate e può comportare nuove inferenze a pagamento.
 
 ## Pipeline
 
-In **Configurazione → Modello e prompt di sistema LLM**, i sotto-tab **Datasheet**,
-**Localizzazione foto** e **Verifica foto** espongono prompt globali indipendenti.
-La verifica usa il modello datasheet con un prompt distinto. Il ripristino riguarda
-solo il tab aperto; Annulla non salva modifiche. Le vecchie configurazioni ricevono
-i default dei due nuovi prompt, senza sostituire il prompt datasheet personalizzato.
-Gli schemi JSON restano nel codice. Una modifica al prompt invalida la cache delle
-relative chiamate e può quindi comportare nuove inferenze a pagamento.
+- **Una sola foto di riferimento** dall'alto; le altre viste servono a quote e
+  pinout e non vengono sommate come se contenessero altri componenti.
+- **Calibrazione** (OpenCV): ritaglio della PCB sulle quote note, asse per
+  asse (anche foto con proporzioni diverse dalla scheda). La foto deve avere
+  il lato lungo orizzontale ed essere quasi ortogonale: la prospettiva non
+  viene rettificata, un'inclinazione significativa viene rifiutata e la foto
+  rifiutata non calibra nulla. Le fasi OpenCV sono annunciate nella finestra
+  di avanzamento. Ogni immagine è ricodificata senza metadati prima
+  dell'invio; se i metadati non si possono togliere, l'immagine è rifiutata.
+- **Rilevatore locale** (`Rilevamento foto`): con *YOLO + rete SMD locale
+  (v3)* (default dai sorgenti) o *YOLO locale + verifica AI* (default nel
+  programma installato) la rete YOLO propone i corpi sulla vista completa e su
+  tasselli ingranditi da 640/1280 px (confidenza 0.25, NMS IoU 0.5, modificabili
+  in **Parametri YOLO**). Le proposte aprono la finestra di revisione nella
+  **fase rilevatore**: OK manda avanti quelle tenute, Annulla ferma tutto
+  prima di pagare. Con *Solo YOLO locale (pretest, nessuna AI)* ci si ferma
+  qui: nessuna chiamata, la scheda viene calibrata con i campi Lunghezza /
+  Larghezza corpo. Dettagli in `yolo-photo-workflow.md` e
+  `CLASSIFICATORE_SMD.md`.
+- **Inventario AI globale**: una chiamata con la foto intera, l'overlay
+  numerato e una griglia di dettagli ingranditi calcolata dalle quote della
+  scheda (il corpo più piccolo assunto presente, il lato corto di un 0402,
+  deve avere risoluzione sufficiente). Il prompt separa la forma del package
+  dalla funzione e chiede i terminali per lato; per i moduli castellated
+  conta i semi-fori già in questa chiamata, con le strisce dei bordi
+  ingrandite. L'immagine è adattata ai limiti del provider del modello
+  (DeepSeek e OpenRouter hanno limiti diversi, letti dall'identificativo del
+  modello, mai dal nome).
+- **Riconciliazione** uno-a-uno fra rilevatore e AI: IoU oppure contenimento
+  con centri coincidenti entro l'incertezza in pixel; un piccolo passivo non
+  viene assorbito da un grande IC; l'assegnazione considera l'intera vista.
+  La lettura del rilevatore (classe, confidenza, riquadro) resta accanto a
+  quella dell'AI e non viene mai sovrascritta; la classe del rilevatore passa
+  nelle righe riconciliate. I corpi proposti dalla sola AI sono confrontati
+  con il rilevatore e partono **esclusi** finché non vengono tenuti.
+- **Rete SMD locale** (solo *YOLO + rete SMD locale*): classifica i corpi
+  tenuti senza chiamate remote; solo le risposte `_other` o sotto soglia
+  passano alla lettura AI dei ritagli.
+- **Lettura ritagli** (a pagamento): ogni corpo non risolto viene riletto
+  **due volte** dal suo ritaglio ingrandito con un questionario visivo
+  (osservazioni, non nomi di classe); la classe la deriva il programma e si
+  adotta solo ciò su cui le due letture concordano. Le letture fallite sono
+  tenute separate dai disaccordi; le contraddizioni con l'inventario sono
+  segnalate per la revisione. La famiglia di un package a terminali viene
+  ricavata dal numero di piedini e dall'ingombro misurato quando il nome
+  dichiarato contraddice la misura, con i limiti JEDEC delle famiglie SOIC.
+- **Lettura sigle**: marcature leggibili riportate come dato, mai usate come
+  regola di classificazione.
+- **Conversione pixel → mm** deterministica, origine al centro, X a destra, Y
+  in basso. I volumi comprendono l'ingombro visibile delle terminazioni; i
+  terminali osservati vengono disegnati nel 3D. Per ogni piedino il modello
+  dice se lo vede attaccato al corpo, staccato o se non lo distingue:
+  attaccato viene unito alla faccia piu' vicina coprendo solo lo spazio
+  visto; staccato resta come in foto, senza metallo aggiunto; se la foto
+  mostra uno spazio troppo grande per un piedino «attaccato», nessun ponte e
+  un dubbio nel registro; senza risposta decide la geometria. Le misure stimate non vengono
+  mai usate come misure: le piazzole stimate vengono ridotte per starci.
+- **Contatti castellated** confrontati con la foto (`edge_notches`): le tacche
+  del contorno contano i semi-fori di ogni lato in modo strutturale (il fondo
+  che appare attraverso il contorno), con soglia dal rumore del contorno
+  stesso; un lato dichiarato su un bordo senza tacche viene escluso, un
+  numero diverso viene ricontato dal modello sull'ingrandimento di quel bordo
+  (solo i lati contraddetti) e adottato solo se i contatti ricontati stanno
+  dove la foto mostra le tacche; una serie che tocca l'estremità del bordo
+  dà un limite inferiore. Sui lati confermati le piazzole vengono
+  **misurate** (`edge_lands`): colore del soldermask campionato fra due
+  contatti, «non maschera» separato con Otsu, serigrafie e piste tolte con
+  un'apertura morfologica, larghezza come quartile superiore delle righe della
+  piazzola, con l'incertezza della scala. La misura sostituisce le stime del
+  modello (`value_sources` «measured»), mai una quota letta nei documenti; un
+  interasse non letto non posiziona i fori passanti, e una larghezza di
+  piazzola pari al passo non è una misura.
+- **Pausa dopo l'inventario** (Configurazione → Opzioni di generazione…,
+  attiva per default): la revisione si riapre nella **fase inventario** prima
+  dell'abbinamento dei modelli KiCad e del 3D. Gratuita.
+- **Modelli KiCad e FreeCAD**: per ogni corpo si cercano modelli della
+  libreria 3D di KiCad con misure compatibili (vedi
+  `interactive-kicad-models.md`), poi FreeCAD costruisce il solido; i
+  controlli CAD di bordo e sovrapposizione supportano rotazioni non multiple
+  di 90°.
 
-- Un solo riferimento superiore; le altre foto servono a quote e pinout, non
-  vengono sommate come se contenessero altri componenti.
-- Ritaglio PCB calibrato con dimensioni note. La foto deve avere lato lungo
-  orizzontale ed essere quasi ortogonale: non viene rettificata la prospettiva.
-  Inclinazioni significative vengono rifiutate; resta una piccola tolleranza
-  di rasterizzazione. Una foto rifiutata non viene usata per calibrare le quote.
-- Localizzazione dedicata: una vista completa e una griglia di dettagli
-  ingranditi calcolata dalle quote della scheda su entrambi gli assi, per dare
-  al componente piu' piccolo che si assume presente (lato corto di un 0402) una
-  risoluzione sufficiente; le schede grandi hanno piu' dettagli (piu' chiamate),
-  le piccole meno. I grandi package restano nella vista completa; i piccoli sono
-  assegnati per centro alla propria cella, evitando il conteggio ripetuto.
-- Associazione geometrica uno-a-uno tra viste: IoU oppure contenimento con centri
-  coincidenti entro l'incertezza di misura in pixel della foto. Un piccolo passivo non viene
-  assorbito da un grande IC solo perché gli sta vicino. L'assegnazione considera
-  l'intera vista per evitare duplicati causati dall'ordine dei rilevamenti.
-- Verifica della sola presenza di corpi montati, in gruppi di massimo 24.
-  Piazzole vuote/vie/scritte possono essere escluse; non vengono inventate nuove
-  coordinate. In caso di errore la geometria disponibile resta come dubbia.
-- Conversione pixel → mm deterministica, origine al centro, X destra e Y basso.
-  I volumi comprendono l'ingombro visibile delle terminazioni.
-- Contatti castellated confrontati con la foto (`edge_notches`): le tacche del
-  contorno contano i semi-fori di ogni lato; un lato dichiarato dal modello su
-  un bordo senza tacche viene escluso, un lato su un bordo non leggibile viene
-  ricontrollato dal modello sull'ingrandimento di quel bordo, un numero diverso
-  viene ricontato. Sui lati confermati le piazzole vengono **misurate**
-  (`edge_lands`): colore del soldermask campionato fra due contatti, «non
-  maschera» separato con Otsu, serigrafie e piste tolte con un'apertura
-  morfologica grande quanto l'anello minimo, larghezza lungo il bordo come
-  quartile superiore delle righe della piazzola, con l'incertezza della scala.
-  La misura sostituisce le stime del modello (`value_sources` «measured»), mai
-  una quota letta nei documenti; una distanza fra le file non letta non
-  posiziona i fori passanti, e una larghezza di piazzola pari al passo non è
-  una misura.
+### Cache e costi
 
-Il modello fotografico predefinito è `google/gemini-3.1-pro-preview`, modificabile
-nelle impostazioni LLM. Il modello datasheet scelto dall'utente viene usato anche
-per la verifica di presenza (nella prova: `anthropic/claude-sonnet-5`). Non si cambia
-il modello datasheet già configurato. Il percorso standard con 42 candidati usa
-4 chiamate di localizzazione e 2 di presenza, oltre alla prima estrazione generale.
+Le risposte vengono salvate in `<progetto>/photo-cache` (gli script di
+`examples/` usano `<output>/photo-cache`), senza chiave API e senza duplicare
+i dati immagine; `photo-cache/yolo-audit/` contiene gli audit del rilevatore.
+La chiave della cache include modello, schema, prompt, parametri e pixel: una
+ripetizione identica riusa la cache e il log lo dice. Risposte incomplete non
+sono trattate come successi riutilizzabili, ma gli elementi validi di una
+risposta parziale vengono conservati. La cache può contenere informazioni
+estratte dai documenti: resta locale e ignorata da Git. Per una nuova
+inferenza degli stessi input si rimuove esplicitamente la cache.
 
-Le risposte vengono salvate nella cartella del progetto, `<progetto>/photo-cache`
-(dal 2026-09-24; prima in `generated/photo-cache`, comune a tutti i progetti;
-gli script di `examples/` usano `<output>/photo-cache`), senza chiave API e senza
-duplicare i dati immagine. La chiave include modello, schema, prompt, parametri e
-pixel; una ripetizione identica riusa la cache. Risposte incomplete non sono
-trattate come successi riutilizzabili. La cache può contenere informazioni estratte
-dai documenti: resta locale e ignorata da Git. Per una nuova inferenza degli stessi
-input si può rimuovere esplicitamente la cache locale.
+Ogni chiamata a pagamento finisce in `ai-costs.json` nel progetto, divisa per
+provider (OpenRouter: costo riportato; DeepSeek: token × prezzo ufficiale).
+La finestra di analisi mostra il costo dell'analisi corrente e il totale del
+progetto; la riga **Credito AI** il saldo del conto.
 
-Anche il fallback dall'estrazione globale conserva ingombri generici senza
-marcature e segnala le altezze come stimate. Quote opzionali non valide vengono
-scartate e segnalate; un lato malformato non elimina gli altri lati validi.
-Nuove estrazioni e correzioni applicate invalidano l'anteprima precedente:
-completamenti CAD riferiti ai dati precedenti non la ripristinano. I controlli
-CAD di bordo e sovrapposizione supportano anche rotazioni non multiple di 90°.
+### Dopo l'analisi
 
-## Prova sull'immagine fornita
+Dalla scheda Progetto: **Revisione componenti…** riapre gratis la fase
+salvata in `photo-review/` (proposte del rilevatore prima dell'inventario,
+corpi riconciliati dopo); **Rilancia inventario AI (a pagamento)…** rifà solo
+l'inventario sulle proposte salvate. Dalla scheda Modello 3D: **Modifica
+componenti…** (Ctrl+E) modifica ogni corpo a mano, anche senza foto, e il
+tasto destro su un corpo offre eliminazione, ripristino, rotazione e cambio
+del modello KiCad. Nuove estrazioni e correzioni applicate invalidano
+l'anteprima precedente: completamenti CAD riferiti ai dati vecchi non la
+ripristinano.
+
+## Prova storica sull'immagine di riferimento (settembre 2026)
 
 Immagine `Screenshot_1.png`, PCB quotata 42.8 × 15.2 mm, ritaglio
-`[315,117,1435,519]` dell'originale 1597 × 576 pixel. Il riferimento contiene 42
-corpi annotati separatamente dall'assistente guardando l'originale; **non è una
-BOM o una validazione metrologica umana**. Non entra in prompt o codice produttivo.
+`[315,117,1435,519]` dell'originale 1597 × 576 pixel. Il riferimento contiene
+42 corpi annotati separatamente dall'assistente guardando l'originale; **non
+è una BOM o una validazione metrologica umana** e non entra in prompt o
+codice produttivo. Con associazione uno-a-uno e IoU ≥ 0.5 il percorso a
+ingombri produsse 42 rettangoli, 36 corrispondenti (precisione e richiamo
+85.7 %), errore medio dei centri 0.159 mm. Il numero 42 da solo non prova
+completezza: sei rettangoli non raggiungevano la soglia. Il modello FreeCAD
+fu generato con 42 volumi; spessore PCB 1 mm e altezze erano **stime**; i
+passi dei contatti erano espliciti nella figura (sinistra 3 × 5.08 mm, destra
+4 × 2.54 mm). La prova precede il rilevatore locale, la rete SMD e la lettura
+dei ritagli: descrive il percorso AI-only di allora, non le prestazioni
+attuali, e va ripetuta su più moduli prima di attribuire prestazioni generali.
 
-Con associazione uno-a-uno e IoU ≥ 0.5:
+## Riproduzione da riga di comando
 
-| Risultato | Rettangoli | Corrispondenze | Precisione / richiamo |
-|---|---:|---:|---:|
-| Precedente prova Claude | 71 | 7 / 42 | 9.9% / 16.7% |
-| Nuovo percorso a ingombri | 42 | 36 / 42 | 85.7% / 85.7% |
-
-Errore medio dei centri sui 36 abbinamenti: **0.159 mm**. Nessuna coppia di
-rettangoli finali risulta sospetta per sovrapposizione nel valutatore. Il numero
-42 da solo non prova completezza: sei rettangoli non raggiungono la soglia di
-sovrapposizione richiesta. La prova precedente non registrava l'origine del crop:
-il confronto storico assume lo stesso ritaglio ricostruito. La nuova esportazione
-registra crop, dimensioni e SHA-256 del file sorgente.
-
-Il modello FreeCAD di esempio è stato realmente generato e renderizzato con
-42 volumi, senza avvisi di generazione. Spessore PCB di esempio 1 mm e altezze
-sono **stime**, non quote del produttore. I passi dei contatti, invece, sono
-forniti esplicitamente dalla figura: sinistra 3 × 5.08 mm, destra 4 × 2.54 mm.
-
-Le prove di aggancio automatico ai bordi OpenCV e di riclassificazione dettagliata
-hanno mostrato regressioni: sono disponibili come strumenti sperimentali ma non
-attive nel percorso standard. Il risultato va verificato su più moduli prima di
-attribuirgli prestazioni generali o industriali.
-
-## Riproduzione
+La foto di riferimento `Screenshot_1.png` **non è nel repository** (lo è solo
+la sua annotazione, `tests/fixtures/pcb_reference.json`, che ne registra
+dimensioni e SHA-256): senza quel file la prova storica non si può ripetere.
+I comandi sotto valgono anche per un'altra foto, ma la valutazione offline
+confronta con il riferimento solo la foto annotata.
 
 ```powershell
 # Rete/API: prima esecuzione a pagamento, successive identiche dalla cache
-.venv/Scripts/python.exe examples/inspect_photo_inventory.py C:/App/Screenshot_1.png --length 42.8 --width 15.2 --output generated/mechanical-envelope
+.venv/Scripts/python.exe examples/inspect_photo_inventory.py <foto>.png --length 42.8 --width 15.2 --output generated/mechanical-envelope
 
 # Offline, sullo stesso riferimento fotografico
-.venv/Scripts/python.exe tools/evaluate_photo_inventory.py generated/mechanical-envelope/inventory.json --photo C:/App/Screenshot_1.png --output generated/mechanical-envelope/metrics.json
+.venv/Scripts/python.exe tools/evaluate_photo_inventory.py generated/mechanical-envelope/inventory.json --photo <foto>.png --output generated/mechanical-envelope/metrics.json
 
 # Offline, richiede FreeCAD: STEP, FCStd, VRML e anteprime del modello reale
 .venv/Scripts/python.exe examples/build_inventory_envelopes.py generated/mechanical-envelope/inventory.json --side left:3:5.08 --side right:4:2.54
 
-.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider
+.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
 ```
 
-Gli artefatti locali sono in `generated/mechanical-envelope`: `inventory.json`,
-`analysis.log`, `calibrated-photo.png`, `comparison.png` e la cartella `model`.
-Il fixture `tests/fixtures/pcb_reference.json` è esclusivamente di valutazione.
+`inspect_photo_inventory.py` accetta anche `--model` e `--classifier-model`;
+`build_inventory_envelopes.py` anche `--output`, `--observed-packages` e
+`--pcb-thickness`. Gli artefatti locali finiscono in
+`generated/mechanical-envelope`. Il fixture `tests/fixtures/pcb_reference.json`
+è esclusivamente di valutazione.
 
 ## Riferimenti tecnici
 
-- Il formato nativo di localizzazione `box_2d=[ymin,xmin,ymax,xmax]`, normalizzato
-  0–1000, è documentato da [Google Image Understanding](https://ai.google.dev/gemini-api/docs/image-understanding).
+- Il formato nativo di localizzazione `box_2d=[ymin,xmin,ymax,xmax]`,
+  normalizzato 0–1000, è documentato da
+  [Google Image Understanding](https://ai.google.dev/gemini-api/docs/image-understanding).
 - La separazione tra calibrazione, preparazione e ispezione è coerente con
   [Cognex Inspection Concepts](https://docs.cognex.com/apasap_431/web/EN/ConceptsGuide/Content/Topics/Concept/Apps/Inspection/Inspection%20Concept.htm).
-  Qui si lavora comunque su foto di prodotto, non su un sistema ottico industriale
-  calibrato e validato.
+  Qui si lavora comunque su foto di prodotto, non su un sistema ottico
+  industriale calibrato e validato.

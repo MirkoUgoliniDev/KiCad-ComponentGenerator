@@ -1,20 +1,20 @@
 """@brief Minimal OpenRouter client with privacy-safe provider diagnostics.
 
-OpenRouter espone con una sola chiave (OPENROUTER_API_KEY) i modelli di
-tutti i fornitori (Anthropic, OpenAI, Google, ...) dietro un'API
-OpenAI-compatible: si sceglie il modello passando il suo id (es.
-"anthropic/claude-sonnet-5") nel corpo della richiesta.
+OpenRouter exposes, behind one key (OPENROUTER_API_KEY), the models of every
+vendor (Anthropic, OpenAI, Google, ...) through an OpenAI-compatible API: the
+model is chosen by passing its id (e.g. "anthropic/claude-sonnet-5") in the
+request body.
 
-Qui dentro c'e' solo il minimo indispensabile per l'estrazione dei
-parametri dal datasheet:
+This module holds only the bare minimum needed to extract parameters from a
+datasheet:
 
-* :func:`list_models`  -- elenco dei modelli con prezzi e capacita', usato
-  dalla GUI per far scegliere il modello filtrando per costo;
-* :func:`call_tool`    -- una chiamata chat/completions con *tool calling*
-  forzato, che ritorna direttamente il dizionario degli argomenti.
+* :func:`list_models`  -- the model list with prices and capabilities, used
+  by the GUI to let the user pick a model filtered by cost;
+* :func:`call_tool`    -- one chat/completions call with forced *tool
+  calling*, returning the argument dictionary directly.
 
-Si usa solo la stdlib (``urllib``): l'API e' HTTP+JSON e aggiungere una
-dipendenza esterna per due chiamate non si giustifica.
+Only the standard library (``urllib``) is used: the API is HTTP+JSON, and
+adding an external dependency for two calls would not be justified.
 """
 
 from __future__ import annotations
@@ -48,10 +48,10 @@ KEY_STATUS_URL = f"{API_BASE}/auth/key"
 
 API_KEY_ENV = "OPENROUTER_API_KEY"
 
-#: Modello usato quando l'utente non ne ha ancora scelto uno.
+#: Model used when the user has not chosen one yet.
 DEFAULT_MODEL = "anthropic/claude-opus-5"
 
-#: Cache locale dell'elenco modelli (e' lungo ~1 MB e cambia di rado).
+#: Local cache of the model list (it is ~1 MB long and changes rarely).
 MODELS_CACHE_PATH = user_data_dir() / ".openrouter_models.json"
 #: File name of the cache inside the user data directory; `_models_cache_path`
 #: resolves it at use time, so a data directory chosen after import is honoured.
@@ -59,8 +59,8 @@ _MODELS_CACHE_NAME = ".openrouter_models.json"
 _IMPORT_TIME_CACHE_PATH = MODELS_CACHE_PATH
 MODELS_CACHE_TTL_S = 24 * 3600
 
-# Header opzionali di OpenRouter: identificano l'applicazione chiamante
-# nelle statistiche del proprio account.
+# Optional OpenRouter headers: they identify the calling application in
+# the statistics of its account.
 _APP_HEADERS = {
     "HTTP-Referer": "https://github.com/kicadgen-tool",
     "X-Title": "KiCadGen",
@@ -70,18 +70,18 @@ _HTTP_TIMEOUT_MODELS_S = 30
 _HTTP_TIMEOUT_CHAT_S = 300
 _HTTP_TIMEOUT_CREDITS_S = 20
 
-#: Credito minimo (USD) sotto il quale un'estrazione non viene nemmeno avviata.
-#: Una singola estrazione con foto e crop costa tipicamente pochi centesimi, ma
-#: partire con il serbatoio quasi vuoto significa fallire a meta' catena, dopo
-#: aver gia' speso: meglio fermarsi prima con un messaggio chiaro.
+#: Minimum credit (USD) below which an extraction is not even started.
+#: A single extraction with photo and crops typically costs a few cents, but
+#: starting with the tank nearly empty means failing halfway through the
+#: chain, after having already spent: better to stop first with a clear message.
 MIN_CREDIT_USD = 0.50
 
-#: Sopra MIN_CREDIT_USD ma sotto questa soglia il lavoro parte comunque,
-#: segnalando che il credito sta per finire.
+#: Above MIN_CREDIT_USD but below this threshold the work starts anyway,
+#: reporting that the credit is about to run out.
 LOW_CREDIT_USD = 2.00
 
-#: Il credito cambia solo quando si spende: una catena di decine di chiamate
-#: non deve interrogare l'endpoint a ogni passo.
+#: The credit changes only when money is spent: a chain of dozens of calls
+#: must not query the endpoint at every step.
 _CREDIT_CACHE_TTL_S = 60
 _credit_cache: Optional[tuple[float, "CreditStatus"]] = None
 
@@ -151,11 +151,11 @@ class ToolArgumentsError(OpenRouterError):
 class ModelInfo:
     """@brief OpenRouter catalogue model with prices in USD per million tokens and capabilities.
 
-    Un modello dell'elenco OpenRouter, con quello che serve per sceglierlo.
+    One model of the OpenRouter list, with what is needed to choose it.
 
-    I prezzi arrivati dall'API sono in dollari per singolo token; qui sono
-    gia' convertiti in dollari per milione di token, che e' l'unita' con
-    cui i prezzi vengono normalmente confrontati.
+    @note The prices delivered by the API are in dollars for a single token;
+        here they are already converted to dollars for a million tokens, the
+        unit in which prices are normally compared.
     """
 
     id: str
@@ -173,39 +173,50 @@ class ModelInfo:
 
     @property
     def supports_images(self) -> bool:
-        """@brief Return whether the model accepts image input."""
+        """@brief Return whether the model accepts image input.
+
+        @return True when "image" is among the declared input modalities.
+        """
         return "image" in self.input_modalities
 
     @property
     def supports_pdf(self) -> bool:
-        """@brief Return whether the model accepts file (PDF) input."""
+        """@brief Return whether the model accepts file (PDF) input.
+
+        @return True when "file" is among the declared input modalities.
+        """
         return "file" in self.input_modalities
 
     @property
     def is_free(self) -> bool:
-        """@brief Return whether both prompt and completion prices are zero."""
+        """@brief Return whether both prompt and completion prices are zero.
+
+        @return True when neither price is positive (an unknown NaN price is
+            never free).
+        """
         return self.prompt_usd_per_mtok <= 0 and self.completion_usd_per_mtok <= 0
 
     def usable_for_datasheets(self) -> bool:
         """@brief Return whether the model supports tool calling plus PDF or image input for datasheets.
 
-        True se il modello puo' fare il lavoro: tool calling + PDF/immagini.
-
-        L'estrazione manda disegni meccanici (immagini o PDF) e pretende la
-        risposta come chiamata a uno strumento: un modello senza queste due
-        capacita' fallirebbe la richiesta, quindi la GUI lo nasconde.
+        @return True when the model can do the job: tool calling plus
+            PDF/image input (DATASHEET_CAPABILITIES).
+        @note The extraction sends mechanical drawings (images or PDF) and
+            demands the answer as a tool call: a model without these two
+            capabilities would fail the request, so the GUI hides it.
         """
         return self.usable_for(DATASHEET_CAPABILITIES)
 
     def usable_for(self, capabilities) -> bool:
-        """@brief True se il modello ha tutte le capacita' richieste.
+        """@brief Return whether the model has every requested capability.
 
-        @param capabilities Nomi fra 'tools', 'images', 'files'.
-        @return Se il modello dichiara tutte quelle capacita'.
-        @note Il requisito dipende da cosa si chiedera' al modello, non dal
-            campo in cui viene scritto: il percorso fotografico manda solo
-            immagini, quindi pretendere anche la lettura dei PDF nasconderebbe
-            modelli che quel lavoro lo fanno benissimo.
+        @param capabilities Names among 'tools', 'images', 'files'.
+        @return True when the model declares all of those capabilities.
+        @throws ValueError When a name is not one of the known capabilities.
+        @note The requirement depends on what the model will be asked to do,
+            not on the field it is written in: the photo path sends only
+            images, so demanding PDF reading as well would hide models that
+            do that job perfectly well.
         """
         have = {"tools": self.supports_tools, "images": self.supports_images,
                 "files": self.supports_pdf}
@@ -215,11 +226,11 @@ class ModelInfo:
         return all(have[name] for name in capabilities)
 
 
-#: Cosa serve per leggere un datasheet: risposta strutturata, disegni
-#: meccanici come immagini e documenti allegati.
+#: What is needed to read a datasheet: structured answer, mechanical
+#: drawings as images and attached documents.
 DATASHEET_CAPABILITIES = ("tools", "images", "files")
-#: Cosa serve sulle fotografie: risposta strutturata e lettura di immagini.
-#: I PDF non entrano mai in questo percorso.
+#: What is needed on photographs: structured answer and image reading.
+#: PDFs never enter this path.
 PHOTO_CAPABILITIES = ("tools", "images")
 
 
@@ -358,17 +369,17 @@ def _key_for_redaction() -> str:
 class CreditStatus:
     """@brief Remaining OpenRouter credit as the minimum of account balance and key limit.
 
-    Credito residuo su OpenRouter, visto dai due vincoli indipendenti.
+    The remaining credit on OpenRouter, seen through two independent limits.
 
-    Il saldo dell'account (``/credits``) e il tetto di spesa della singola
-    chiave (``/auth/key``) sono limiti separati e non coincidono: una chiave
-    con 13.73 USD ancora concessi su un account che ne ha 11.92 puo' spendere
-    solo 11.92. Il vincolo che conta e' quindi il **minimo** dei due, ed e'
-    quello che :attr:`remaining` espone.
-
-    Un valore ``None`` significa "nessun limite di questo tipo" (chiave senza
-    tetto) oppure "non riportato dall'API": in entrambi i casi non partecipa al
-    minimo, e se nessuno dei due e' noto :attr:`remaining` resta ``None``.
+    @note The account balance (``/credits``) and the spending ceiling of the
+        single key (``/auth/key``) are separate limits and do not coincide: a
+        key still granted 13.73 USD on an account holding 11.92 can spend only
+        11.92. The binding limit is therefore the **minimum** of the two, and
+        that is what :attr:`remaining` exposes.
+    @note A ``None`` value means "no limit of this kind" (a key without a
+        ceiling) or "not reported by the API": in both cases it takes no part
+        in the minimum, and when neither is known :attr:`remaining` stays
+        ``None``.
     """
 
     account_remaining: Optional[float] = None
@@ -384,13 +395,21 @@ class CreditStatus:
 
     @property
     def remaining(self) -> Optional[float]:
-        """@brief Return the binding credit limit, or None when unknown."""
+        """@brief Return the binding credit limit, or None when unknown.
+
+        @return The minimum of the known account and key remainders in USD;
+            None when neither is known.
+        """
         known = [v for v in (self.account_remaining, self.key_remaining) if v is not None]
         return min(known) if known else None
 
     @property
     def limiting_factor(self) -> str:
-        """@brief Name which of the two ceilings is the binding one."""
+        """@brief Name which of the two ceilings is the binding one.
+
+        @return A translated label (key ceiling, account balance, or both when
+            they coincide); an empty string when no limit is known.
+        """
         remaining = self.remaining
         if remaining is None:
             return ""
@@ -400,7 +419,12 @@ class CreditStatus:
         return tx("saldo dell'account")
 
     def describe(self) -> str:
-        """@brief Render the credit status as one line for the AI log."""
+        """@brief Render the credit status as one line for the AI log.
+
+        @return The translated line with the remaining USD and its limiting
+            factor, the account usage when known and the key ceiling when it
+            differs; or a line saying the API reported no limit.
+        """
         remaining = self.remaining
         if remaining is None:
             return tx("Credito OpenRouter: nessun limite riportato dall'API.")
@@ -417,8 +441,8 @@ class CreditStatus:
 
 def _calls(count: int) -> str:
     """@brief Render a call count with the singular or plural of the active language."""
-    # Singolare e plurale sono due frasi intere nel catalogo: ogni lingua li
-    # accorda a modo suo.
+    # Singular and plural are two whole sentences in the catalogue: each
+    # language inflects them its own way.
     return tx("{count} chiamata", count=count) if count == 1 else tx("{count} chiamate", count=count)
 
 
@@ -426,15 +450,13 @@ def _calls(count: int) -> str:
 class UsageTotals:
     """@brief Totals of one processing run: calls, tokens and actual cost reported by OpenRouter.
 
-    Consuntivo di una elaborazione: chiamate, token e costo effettivo.
-
-    Il costo arriva da OpenRouter con la risposta di ogni chiamata (campo
-    ``usage.cost``, in USD), non da una stima sui listini: tiene gia' conto
-    del provider che ha effettivamente servito la richiesta, degli sconti sui
-    token letti dalla cache del modello e dei token di ragionamento.
-
-    Le risposte servite dalla cache locale su disco non passano di qui e
-    valgono zero, che e' corretto: non hanno toccato l'API.
+    @note The cost comes from OpenRouter with the response of every call
+        (field ``usage.cost``, in USD), not from an estimate on the price
+        lists: it already accounts for the provider that actually served the
+        request, for the discounts on tokens read from the model cache and
+        for the reasoning tokens.
+    @note Responses served by the local disk cache do not pass through here
+        and count as zero, which is correct: they never touched the API.
     """
 
     calls: int = 0
@@ -447,15 +469,22 @@ class UsageTotals:
 
     @property
     def complete(self) -> bool:
-        """@brief Tell whether every call reported its own cost."""
+        """@brief Tell whether every call reported its own cost.
+
+        @return True when no call of the run lacks a cost.
+        """
         return self.calls_without_cost == 0
 
     def describe(self) -> str:
-        """@brief Render the run total as one line for the AI log."""
+        """@brief Render the run total as one line for the AI log.
+
+        @return The translated line with the call count, the tokens and the
+            cost in USD, or a line saying no API call was made.
+        """
         if not self.calls:
             return (tx("Costo elaborazione AI: nessuna chiamata all'API (risposte servite "
                        "dalla cache locale)."))
-        # Sotto il centesimo le quattro cifre non bastano a distinguere nulla.
+        # Below one cent four digits are not enough to tell anything apart.
         amount = f"{self.cost_usd:.4f}" if self.cost_usd >= 0.01 else f"{self.cost_usd:.6f}"
         detail = (tx("Costo elaborazione AI: {amount} USD su {calls}; {prompt_tokens} token "
                      "in ingresso, {completion_tokens} in uscita",
@@ -477,8 +506,8 @@ class UsageTotals:
         return detail + "."
 
 
-#: L'estrazione gira in un thread di lavoro mentre la GUI resta viva: il
-#: consuntivo va protetto, non lasciato a un aggiornamento non atomico.
+#: The extraction runs in a worker thread while the GUI stays alive: the
+#: cost tally must be protected, not left to a non-atomic update.
 _usage_lock = threading.Lock()
 _usage_totals = UsageTotals()
 
@@ -491,7 +520,11 @@ def reset_usage() -> None:
 
 
 def usage_totals() -> UsageTotals:
-    """@brief Return a snapshot of the current run totals."""
+    """@brief Return a snapshot of the current run totals.
+
+    @return A UsageTotals copy taken under the usage lock, independent of
+        later updates.
+    """
     with _usage_lock:
         return UsageTotals(**vars(_usage_totals))
 
@@ -576,20 +609,20 @@ def _end_request() -> None:
 
 def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
                   model: str = "") -> None:
-    """Somma al consuntivo l'uso dichiarato da una risposta dell'API.
+    """Add the usage declared by an API response to the run totals.
 
-    Va chiamata per ogni risposta ricevuta, anche quando poi risultera'
-    inutilizzabile: una chiamata che non ha prodotto la tool call e' stata
-    comunque pagata, e tacerla renderebbe il consuntivo piu' basso del vero.
-    Anche con `payload` None: richiesta inviata e risposta persa (timeout in
-    lettura), forse fatturata, contata come chiamata senza costo.
+    It must be called for every response received, even one that later
+    turns out to be unusable: a call that produced no tool call was paid
+    all the same, and keeping quiet about it would make the totals lower
+    than the truth. Also with `payload` None: request sent and response
+    lost (read timeout), possibly billed, counted as a call without cost.
 
-    `sent_at` e' l'ora in cui la richiesta e' partita (UTC) e va nel record
-    come ``time``: una scrittura rimandata (file dei costi occupato) resta
-    datata alla chiamata, non alla scrittura (audit 138, B10). Assente, vale
-    quella registrata da `_begin_request` nello stesso thread (call_tool),
-    poi adesso. `model` vale quando la risposta non lo porta, con lo stesso
-    ripiego. Il ripiego tiene la forma a un argomento di questo aggancio.
+    `sent_at` is the time the request left (UTC) and goes into the record
+    as ``time``: a deferred write (cost file busy) stays dated at the call,
+    not at the write (audit 138, B10). When absent, the time registered by
+    `_begin_request` in the same thread (call_tool) is used, then now.
+    `model` applies when the response does not carry it, with the same
+    fallback. The fallback keeps the one-argument form of this hook.
     """
     sent_at = sent_at or getattr(_request_context, "sent_at", None)
     model = model or getattr(_request_context, "model", "") or ""
@@ -633,7 +666,7 @@ def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
             record["cost_source"] = usage["cost_source"]
         try:
             listener(record)
-        except Exception:  # noqa: BLE001 - la chiamata e' pagata e resta valida
+        except Exception:  # noqa: BLE001 - the call is paid and stays valid
             pass
 
 
@@ -643,11 +676,11 @@ def _credit_number(value: Any) -> Optional[float]:
 
 
 def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
-    """GET autenticata che ritorna il corpo JSON; solleva OpenRouterError.
+    """Authenticated GET returning the JSON body; raises OpenRouterError.
 
-    `key` e' la chiave da usare al posto di quella in uso (verifica di una
-    chiave appena incollata, non ancora salvata). L'errore dice se e' arrivato
-    un rifiuto HTTP (`http_status`) o se OpenRouter non e' stato raggiunto
+    `key` is the key to use instead of the configured one (check of a key
+    just pasted, not yet saved). The error tells whether an HTTP refusal
+    arrived (`http_status`) or whether OpenRouter was not reached
     (`unreachable`).
     """
     request = urllib.request.Request(
@@ -666,8 +699,8 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
                                  safe_error_text=_safe_error_text(exc.reason))
                               + _diagnostic_context(), unreachable=True) from None
     except (ValueError, OSError) as exc:
-        # Un OSError che non e' un ValueError e' un guasto di trasporto
-        # (timeout in lettura, connessione chiusa): la risposta non e' arrivata.
+        # An OSError that is not a ValueError is a transport failure
+        # (read timeout, connection closed): the answer did not arrive.
         raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context(),
                               unreachable=not isinstance(exc, ValueError)) from None
     return payload if isinstance(payload, dict) else {}
@@ -676,15 +709,16 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
 def credit_status(force_refresh: bool = False) -> CreditStatus:
     """@brief Query both credit endpoints (cached) and return the effective credit constraint.
 
-    Interroga i due endpoint di credito e ne ricava il vincolo effettivo.
-
-    I due endpoint sono indipendenti: basta che ne risponda uno perche' il
-    controllo abbia comunque un limite da applicare. Solleva OpenRouterError
-    solo quando falliscono entrambi, cosi' il chiamante puo' distinguere
-    "credito esaurito" da "credito non verificabile".
-
-    Il risultato resta in cache per :data:`_CREDIT_CACHE_TTL_S` secondi: una
-    catena di decine di chiamate non deve interrogare l'API a ogni passo.
+    @param force_refresh True ignores the cached status and queries the API
+        again; False (default) reuses a status younger than
+        :data:`_CREDIT_CACHE_TTL_S` seconds.
+    @return The CreditStatus read from the endpoints that answered.
+    @throws OpenRouterError Only when BOTH endpoints fail, so that the caller
+        can tell "credit exhausted" from "credit not verifiable".
+    @note The two endpoints are independent: one answering is enough for the
+        check to have a limit to apply.
+    @note The result stays cached for :data:`_CREDIT_CACHE_TTL_S` seconds: a
+        chain of dozens of calls must not query the API at every step.
     """
     global _credit_cache
     if not force_refresh and _credit_cache is not None:
@@ -728,7 +762,7 @@ def _account_balance(key: Optional[str]) -> tuple:
 def _key_limits(key: Optional[str]) -> tuple:
     """(key_remaining, is_free_tier, expires_at) from /auth/key; raises OpenRouterError."""
     data = _get_json(KEY_STATUS_URL, _HTTP_TIMEOUT_CREDITS_S, key).get("data") or {}
-    # limit = None significa chiave senza tetto proprio: non e' un vincolo.
+    # limit = None means a key without its own cap: it is not a constraint.
     key_remaining = (_credit_number(data.get("limit_remaining"))
                      if _credit_number(data.get("limit")) is not None else None)
     return key_remaining, bool(data.get("is_free_tier")), str(data.get("expires_at") or "")
@@ -799,19 +833,23 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
                  force_refresh: bool = False) -> Optional[CreditStatus]:
     """@brief Check the credit before spending; raise OpenRouterError only when it is known to be too low.
 
-    Verifica il credito PRIMA di spendere; solleva se non basta.
+    @param minimum_usd Credit, in USD, below which the work must not start.
+    @param progress Optional callable(str) receiving the status line and the
+        warnings; None discards them.
+    @param force_refresh Forwarded to `credit_status`: True queries the API
+        again instead of using the cached status.
+    @return The status read, or None when it could not be read.
+    @throws OpenRouterError When the credit is known and below `minimum_usd`.
+    @note Three distinct outcomes, because they must be treated differently:
 
-    Tre esiti distinti, perche' vanno trattati in modo diverso:
-
-    * credito noto e sotto `minimum_usd` -> OpenRouterError: il lavoro non
-      parte, invece di fallire a meta' catena dopo aver gia' speso;
-    * credito noto ma basso -> passa, con un avviso su `progress`;
-    * credito **non verificabile** (rete giu', endpoint cambiato) -> passa con
-      un avviso. Un controllo di cortesia non deve rendere l'applicazione meno
-      utilizzabile di quando il controllo non c'era: e' l'API stessa a
-      rifiutare la chiamata se davvero non c'e' credito.
-
-    Ritorna lo stato letto, oppure None se non e' stato possibile leggerlo.
+        * credit known and below `minimum_usd` -> OpenRouterError: the work
+          does not start, instead of failing halfway through the chain after
+          having already spent;
+        * credit known but low -> passes, with a warning on `progress`;
+        * credit **not verifiable** (network down, endpoint changed) ->
+          passes with a warning. A courtesy check must not make the
+          application less usable than it was before the check existed: the
+          API itself refuses the call when there really is no credit.
     """
     log = progress or (lambda message: None)
     try:
@@ -840,9 +878,9 @@ def check_credit(minimum_usd: float = MIN_CREDIT_USD, progress=None,
 
 
 def _parse_price(value: Any) -> float:
-    """Prezzo per token (stringa dall'API) -> dollari per milione di token.
+    """Price of one token (string from the API) -> dollars for a million tokens.
 
-    A non-finite price ("nan", "inf") is not a price: it is unknown (NaN, the
+    A nonfinite price ("nan", "inf") is not a price: it is unknown (NaN, the
     same marker DeepSeek's models carry) and never free, so the model is not
     offered as a free one. An absent or unparsable price keeps the historical
     0.0; the negative sentinels of the "auto" models are 0 as well.
@@ -921,7 +959,7 @@ def _models_list(payload: Any) -> Optional[list]:
 
 
 def _load_models_cache(ignore_ttl: bool = False) -> Optional[list[dict]]:
-    """Legge la cache su disco; None se manca, e' illeggibile, corrotta o scaduta."""
+    """Read the disk cache; None when it is missing, unreadable, corrupt or expired (unless ignore_ttl)."""
     path = _models_cache_path()
     if not path.is_file():
         return None
@@ -952,7 +990,7 @@ def _write_models_cache(payload: list[dict]) -> None:
             json.dump(payload, fh)
         replace_file(temporary, path)
     except OSError:
-        # La cache e' un'ottimizzazione: se non si puo' scrivere, pazienza.
+        # The cache is an optimisation: if it cannot be written, never mind.
         try:
             temporary.unlink()
         except OSError:
@@ -962,16 +1000,17 @@ def _write_models_cache(payload: list[dict]) -> None:
 def list_models(force_refresh: bool = False) -> list[ModelInfo]:
     """@brief Return the OpenRouter models sorted by cost, using a one-day disk cache and offline fallback.
 
-    Elenco dei modelli disponibili su OpenRouter, ordinato per costo.
-
-    L'endpoint /models e' pubblico (non serve la API key) e restituisce
-    prezzi e modalita' di input di ogni modello: e' quello che permette
-    alla GUI di filtrare per costo prima di scegliere.
-
-    Il risultato viene messo in cache su disco per un giorno; con
-    `force_refresh=True` la cache viene ignorata e riscritta. Se la rete
-    non risponde si ripiega sulla cache anche scaduta, cosi' la scelta del
-    modello resta possibile offline.
+    @param force_refresh True ignores the disk cache and rewrites it; False
+        (default) uses a cache younger than one day.
+    @return The available models as ModelInfo, sorted by prompt price, then
+        completion price, then id.
+    @throws OpenRouterError When the list cannot be downloaded and no cached
+        list, even an expired one, exists.
+    @note The /models endpoint is public (no API key needed) and returns the
+        prices and input modalities of every model: that is what lets the
+        GUI filter by cost before choosing.
+    @note When the network does not answer, the cache is used even when
+        expired, so the model choice stays possible offline.
     """
     payload = None if force_refresh else _load_models_cache()
     if payload is None:
@@ -1127,9 +1166,18 @@ def _retry_after(exc: urllib.error.HTTPError) -> Optional[float]:
 def call_tool(*args, **kwargs) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
-    Same parameters, result and errors as `_call_tool`, which does the work;
-    this wrapper only guarantees that the request context read by
-    `_record_usage` (time and model of the call) never outlives the call.
+    @param args Positional parameters of `_call_tool` (model, system_prompt,
+        content_blocks, tool, max_tokens, has_pdf, pdf_engine,
+        compatibility_retry), forwarded unchanged.
+    @param kwargs Keyword parameters of `_call_tool`, forwarded unchanged.
+    @return The decoded argument object returned by `_call_tool`.
+    @throws OpenRouterError Propagated from `_call_tool` (safe network or
+        provider diagnostics, invalid or missing arguments).
+    @throws ProviderError Propagated from `_call_tool` (a direct-provider
+        request that cannot be served, e.g. a PDF sent to DeepSeek).
+    @note Same parameters, result and errors as `_call_tool`, which does the
+        work; this wrapper only guarantees that the request context read by
+        `_record_usage` (time and model of the call) never outlives the call.
     """
     try:
         return _call_tool(*args, **kwargs)
@@ -1159,18 +1207,18 @@ def _call_tool(
     @param compatibility_retry Use the less provider-specific required-tool form.
     @return Explicit argument object; an explicitly supplied empty object is valid.
     @throws OpenRouterError Safe network/provider diagnostics or invalid/missing arguments.
+    @throws ProviderError When the direct DeepSeek API is asked to read a PDF,
+        which it cannot do.
     @note Retry orchestration belongs to the logged application wrapper; paid response
         usage is recorded before argument validation.
-
-    `tool` e' lo schema in formato OpenAI
-    (``{"type": "function", "function": {"name", "description", "parameters"}}``);
-    il valore di ritorno e' il dizionario degli argomenti gia' decodificato,
-    cosi' il chiamante non deve mai fare parsing di testo libero.
-
-    `pdf_engine` conta solo quando tra i file c'e' un PDF: "native" lascia
-    il PDF al modello (indispensabile per leggere i disegni meccanici, che
-    nel PDF sono immagini), mentre gli altri motori di OpenRouter ne
-    estrarrebbero solo il testo.
+    @note `tool` is the schema in OpenAI format
+        (``{"type": "function", "function": {"name", "description", "parameters"}}``);
+        the return value is the argument dictionary already decoded, so the
+        caller never has to parse free text.
+    @note `pdf_engine` matters only when a PDF is among the files: "native"
+        leaves the PDF to the model (indispensable to read mechanical
+        drawings, which are images inside the PDF), whereas the other
+        OpenRouter engines would extract only its text.
     """
     from .providers import (DEEPSEEK_CHAT_URL, PROVIDER_DEEPSEEK, ProviderError,
                             deepseek_request, provider_model_name, provider_of)
@@ -1186,15 +1234,15 @@ def _call_tool(
             "type": "function", "function": {"name": tool["function"]["name"]}},
     }
     if provider_of(model) == PROVIDER_DEEPSEEK:
-        # API diretta di DeepSeek (compatibile OpenAI): niente plugin PDF ne'
-        # costo nella risposta; il costo si calcola dai token (sotto).
+        # DeepSeek direct API (OpenAI compatible): no PDF plugin and no cost
+        # in the answer; the cost is computed from the tokens (below).
         if has_pdf:
             raise ProviderError(tx("L'API diretta di DeepSeek non legge i PDF: per un "
                                    "datasheet PDF scegli un modello OpenRouter che li legga."))
-        # Il ragionamento rifiuta ogni tool_choice (HTTP 400, 27/09 e 29/09) e
-        # consuma token a pagamento: la risposta strutturata conta di piu'.
-        # Sempre spento (utente, 2026-10-02: tolta la casella «Ragionamento
-        # DeepSeek» del punto 161).
+        # Reasoning rejects any tool_choice (HTTP 400, 27/09 and 29/09) and
+        # consumes paid tokens: the structured answer matters more.
+        # Always off (user, 2026-10-02: the «Ragionamento DeepSeek» (DeepSeek
+        # reasoning) checkbox of point 161 was removed).
         body["thinking"] = {"type": "disabled"}
         sent_at = _begin_request(model)
         try:
@@ -1205,11 +1253,11 @@ def _call_tool(
                 _record_usage(None)
             raise
         if isinstance(payload, dict):
-            # L'identificativo completo, non il nome che risponde DeepSeek: il
-            # file dei costi riconosce cosi' il fornitore di ogni chiamata.
+            # The full identifier, not the name DeepSeek answers with: this
+            # way the cost file recognises the provider of every call.
             payload["model"] = model
-            # DeepSeek non riporta il costo: si calcola come fa la sua
-            # fatturazione, token x prezzo del listino ufficiale (HANDOFF 128).
+            # DeepSeek does not report the cost: it is computed as its billing
+            # does, tokens x official list price (HANDOFF 128).
             from .deepseek_pricing import call_cost
             usage = payload.get("usage")
             # Priced at the time the request was sent (peak / off-peak hours).
@@ -1220,8 +1268,8 @@ def _call_tool(
         return tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
-    # Senza questo flag la risposta porta i token ma non il costo, e il
-    # consuntivo finale dovrebbe stimarlo dai listini invece di leggerlo.
+    # Without this flag the answer carries the tokens but not the cost, and
+    # the final tally would have to estimate it from price lists instead of reading it.
     body["usage"] = {"include": True}
 
     request = urllib.request.Request(
@@ -1283,8 +1331,8 @@ def _call_tool(
         error.possibly_billed = billed
         raise error from None
 
-    # Prima di tool_arguments, che puo' sollevare: la chiamata e' stata pagata
-    # comunque, e un consuntivo che ignora i tentativi falliti e' falso.
+    # Before tool_arguments, which may raise: the call was paid anyway, and
+    # a cost tally that ignores the failed attempts is false.
     _record_usage(payload)
     return tool_arguments(payload, tool["function"]["name"])
 
@@ -1392,13 +1440,13 @@ def _finite_float(text: str) -> Optional[float]:
 
 
 def _finite_tree(value: Any) -> Any:
-    """A decoded JSON tree with every non-finite float replaced by None.
+    """A decoded JSON tree with every nonfinite float replaced by None.
 
     Used when the provider already delivers the arguments as an object (its
     envelope was decoded by `json.load`, which accepts NaN). A tree without
-    any non-finite float is returned as the SAME object (callers rely on
+    any nonfinite float is returned as the SAME object (callers rely on
     the identity of an explicitly supplied object); otherwise a copy.
-    Any real non-integral scalar counts as a float, NumPy's included
+    Any real scalar that is not integral counts as a float, NumPy's included
     (``numpy.float32`` is not a Python float); integers and booleans are
     always finite and are kept as they are.
     """

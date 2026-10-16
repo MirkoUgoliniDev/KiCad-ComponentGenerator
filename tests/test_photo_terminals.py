@@ -73,12 +73,23 @@ def test_duplicate_terminal_boxes_rejected():
         decode_terminal_geometry(entry, 0)
 
 
+def stated(entry, attachment='attached'):
+    """The same answer with the per-terminal `attachment` the tool now requires."""
+    for terminal in entry['terminals']:
+        terminal['attachment'] = attachment
+    return entry
+
+
+# CONTRACT CHANGED 2026-10-16 (T2): `attachment` is a required field of every
+# terminal, and cached_call never stores an answer that misses a required
+# field. The cached answer is therefore a complete one; an answer without the
+# field is still decoded (geometric fallback) but asked again next time.
 def test_call_cache_and_metadata_preserved(png, tmp_path):
     original = [component()]
     original[0]['_id'] = 99
     original[0]['pin_count'] = 123
     before = deepcopy(original)
-    call = Mock(return_value={'components':[observation()]})
+    call = Mock(return_value={'components':[stated(observation())]})
     messages = []
     first = observe_terminals(png, original, 'photo-model', call, messages.append, tmp_path)
     second = observe_terminals(png, original, 'photo-model', call, messages.append, tmp_path)
@@ -167,3 +178,29 @@ def test_the_attachment_gap_is_the_declared_constant():
     far['terminals'][0]['bbox'] = [0, .3, .2 - 2 * gap, .4]
     with pytest.raises(ValueError):
         decode_terminal_geometry(far, 0)
+
+
+def test_the_attachment_criterion_is_the_one_the_renderer_uses():
+    """Decoder and FreeCAD renderer must agree on 'attached': one shared rule."""
+    from kicadgen.cad3d import lead_geometry
+    from kicadgen.services.photo_terminals import TERMINAL_ATTACH_GAP_MAX
+    assert TERMINAL_ATTACH_GAP_MAX is lead_geometry.TERMINAL_ATTACH_GAP_MAX
+    body = [.2, .2, .8, .8]
+    for box in ([0, .3, .19, .4], [0, 0, .2, .2], [0, .05, .17, .15]):
+        entry = observation()
+        entry['terminals'][0]['bbox'] = box
+        assert lead_geometry.is_attached(body, box)
+        assert decode_terminal_geometry(entry, 0)['terminals'][0]['bbox'] == box
+    far = observation()
+    far['terminals'][0]['bbox'] = [0, .3, .1, .4]
+    assert not lead_geometry.is_attached(body, far['terminals'][0]['bbox'])
+    with pytest.raises(ValueError):
+        decode_terminal_geometry(far, 0)
+
+
+@pytest.mark.parametrize('rotation', [0, 90, 180, 270])
+def test_every_decoded_terminal_carries_the_attachment_decision(rotation):
+    """The decoder's decision travels with each box, so the renderer does not
+    re-take it on coordinates already rotated by 1 - x."""
+    geometry = decode_terminal_geometry(observation(), rotation)
+    assert [t['attached'] for t in geometry['terminals']] == [True] * len(geometry['terminals'])

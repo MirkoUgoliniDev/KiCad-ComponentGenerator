@@ -36,42 +36,42 @@ from typing import Iterable, Optional
 from .messages import tx
 from ..core.validation import finite_number, positive_number
 
-#: Nome del file dentro `data/` quando non c'e' la variabile d'ambiente.
+#: File name inside `data/` when the environment variable is not set.
 DEFAULT_FILENAME = "accepted_components.sqlite3"
 
-#: Variabile che sposta l'archivio (usata anche dai test per isolarsi).
+#: Variable that relocates the archive (also used by the tests to isolate themselves).
 DB_ENV = "KICADGEN_MATCH_DB"
 
-#: 2: colonna `side_uncertainty_mm` (incertezza della misura archiviata).
-#: Un archivio della versione 1 resta leggibile (la colonna manca = incertezza
-#: non nota) e viene aggiornato alla prima scrittura.
+#: 2: column `side_uncertainty_mm` (uncertainty of the archived measurement).
+#: A version 1 archive stays readable (missing column = uncertainty not
+#: known) and is upgraded on the first write.
 SCHEMA_VERSION = 5
 IMAGE_CROP_VERSION = 2
 
-#: CORREZIONE (audit 26/09, punto 82 medio 8): la vecchia tolleranza relativa
-#: fissa del 15% si giustificava con «le taglie adiacenti distano almeno
-#: ~35%», che e' falso: QFN 6x6 contro 7x7 distano il 14%, 7x7 contro 8x8 il
-#: 12.5%, e piu' il package e' grande piu' la distanza relativa si riduce.
-#: Le taglie standard sono separate da un passo ASSOLUTO, quindi la tolleranza
-#: e' ora in millimetri per lato e viene dall'incertezza delle due misure
-#: fotografiche (vedi `match_tolerance_mm`).
+#: CORRECTION (audit 26/09, point 82 medium 8): the old fixed relative
+#: tolerance of 15% was justified by «le taglie adiacenti distano almeno
+#: ~35%» (adjacent sizes are at least ~35% apart), which is false: QFN 6x6
+#: versus 7x7 are 14% apart, 7x7 versus 8x8 12.5%, and the larger the package
+#: the smaller the relative gap. Standard sizes are separated by an ABSOLUTE
+#: step, so the tolerance is now in millimetres per side and comes from the
+#: uncertainty of the two photographic measurements (see `match_tolerance_mm`).
 
-#: Categorie in cui lo stesso ingombro esiste con numeri di terminali diversi
-#: (SOT-23-3/5/6, SOIC/QFN con passi diversi nello stesso corpo, QFN-48 sia
-#: 6x6 sia 7x7): per queste l'ingombro non identifica il modello e il numero
-#: di terminali deve essere stato osservato su ENTRAMBE le schede, uguale.
-#: Sono i tipi strutturati che il matcher tratta come circuito integrato o
-#: semiconduttore (`kicad_models._compatible_candidates`), non nomi di parti.
+#: Categories in which the same footprint exists with different terminal
+#: counts (SOT-23-3/5/6, SOIC/QFN with different pitches on the same body,
+#: QFN-48 both 6x6 and 7x7): for these the footprint does not identify the
+#: model and the terminal count must have been observed on BOTH boards, equal.
+#: They are the structured types the matcher treats as integrated circuit or
+#: semiconductor (`kicad_models._compatible_candidates`), not part names.
 TERMINAL_COUNT_CATEGORIES = frozenset({
     "ic", "ic_soic", "ic_qfn", "ic_qfp", "ic_bga", "ic_sot", "power_tab",
     "semiconductor", "semiconductor_unknown", "transistor"})
 
-#: Entro questo scarto due voci sono sostenute dalla misura allo stesso modo
-#: (stesso valore di `kicad_models.NAME_TIEBREAK_MARGIN`): decide la scelta
-#: piu' recente, cioe' l'ultima correzione dell'utente.
+#: Within this gap two entries are equally supported by the measurement
+#: (same value as `kicad_models.NAME_TIEBREAK_MARGIN`): the most recent choice
+#: wins, i.e. the user's latest correction.
 RECENCY_TIE_MARGIN = 0.05
 
-#: Basi di misura riconosciute, con gli alias del matcher.
+#: Recognised measurement bases, with the matcher's aliases.
 _BASIS_ALIASES = {"leads": "total", "body_and_leads": "total"}
 _BASES = ("unknown", "body", "total", "pads")
 
@@ -91,7 +91,10 @@ class ConsolidationResult:
 
     @property
     def stored(self) -> int:
-        """@brief Components actually recorded (new entries plus confirmations)."""
+        """@brief Components actually recorded (new entries plus confirmations).
+
+        @return created + confirmed.
+        """
         return self.created + self.confirmed
 
 
@@ -149,7 +152,7 @@ def signature(component: dict) -> Optional[dict]:
     width = positive_number(component.get("width_mm"))
     if length is None or width is None:
         return None
-    # Import pigro: kicad_models importa questo modulo durante il matching.
+    # Lazy import: kicad_models imports this module during matching.
     from ..cad3d.kicad_models import declared_height, observed_terminal_count
     long_mm, short_mm = sorted((length, width), reverse=True)
     return {"category": category_of(component), "basis": basis_of(component),
@@ -173,7 +176,7 @@ def match_tolerance_mm(component: dict, stored_side_uncertainty=None) -> tuple[f
         assumed as good as the new one (declared estimate). Without any data
         the fallback of `measurement_uncertainty` applies (24 px/mm, the
         coarsest scale at which the inventory claims completeness): about
-        0.33 mm per side, which separates 0402/0603/0805 and QFN 6x6/7x7 but
+        0.33 mm on each side, which separates 0402/0603/0805 and QFN 6x6/7x7 but
         not 01005 from 0201 -- sizes that such a photo cannot resolve anyway.
     """
     from ..cad3d.measurement_uncertainty import (
@@ -214,6 +217,10 @@ def within_tolerance(long_a, short_a, long_b, short_b, tolerance_mm: float) -> b
 def xy_error(long_a, short_a, long_b, short_b) -> float:
     """@brief Worst-axis relative error of (a) against the current measurement (b).
 
+    @param long_a Long side of the archived envelope, mm.
+    @param short_a Short side of the archived envelope, mm.
+    @param long_b Long side of the current measurement, mm.
+    @param short_b Short side of the current measurement, mm.
     @return max(|La-Lb|/Lb, |Sa-Sb|/Sb), the metric of `kicad_models.size_distance`.
     """
     return max(abs(long_a - long_b) / long_b, abs(short_a - short_b) / short_b)
@@ -369,9 +376,9 @@ class AcceptedModelStore:
         if version == SCHEMA_VERSION:
             return
         if version == 1:
-            # Versione 1: stessa tabella senza l'incertezza. In lettura la
-            # colonna mancante vale «non nota»; alla prima scrittura si
-            # aggiunge, senza toccare le voci esistenti.
+            # Version 1: same table without the uncertainty. On read the
+            # missing column means «non nota» (not known); on the first write
+            # it is added, without touching the existing entries.
             if create:
                 db.execute("ALTER TABLE accepted_models ADD COLUMN side_uncertainty_mm REAL")
                 db.execute("PRAGMA user_version=2")
@@ -412,7 +419,7 @@ class AcceptedModelStore:
             db.execute("PRAGMA user_version=5")
             return
         if not create:
-            # Un file vuoto o estraneo in sola lettura: nessuna voce, nessuna scrittura.
+            # An empty or foreign file in read-only mode: no entries, no write.
             raise AcceptedModelsError(tx("Archivio abbinamenti senza schema riconosciuto."))
         db.execute(
             "CREATE TABLE IF NOT EXISTS accepted_models ("
@@ -458,7 +465,14 @@ class AcceptedModelStore:
                 "FROM accepted_models a ORDER BY last_accepted DESC, id DESC")]
 
     def images(self, entry_id: int) -> list[dict]:
-        """@brief Return verified crop examples stored for one accepted model entry."""
+        """@brief Return verified crop examples stored for one accepted model entry.
+
+        @param entry_id Row id of the accepted model entry.
+        @return List of image rows (id, accepted_model_id, image_png,
+            descriptor, crop_version, created_at, component_name,
+            model_rotation_deg) in insertion order; empty when the database
+            or the image table does not exist.
+        """
         with self._connect(create=False) as db:
             if db is None:
                 return []
@@ -481,6 +495,14 @@ class AcceptedModelStore:
         Strong visual candidates survive conflicting AI observations as review-only
         proposals. A visual score is similarity, not a probability of correctness.
         Legacy entries without usable images retain the mechanical fallback.
+
+        @param component Body of the new board (inventory row with its
+            envelope and, when available, `_accepted_image_descriptor`).
+        @param roots 3D library roots used to locate the STEP file.
+        @param diagnostic Optional dict that receives why a match was or was
+            not made (visual examples compared, rejection reason).
+        @return The match mapping of `_find_visual` or `_find_mechanical`
+            (`entry`, `path`, errors and alternatives), or None.
         """
         roots = list(roots or ())
         visual = self._find_visual(component, roots, diagnostic)
@@ -635,8 +657,8 @@ class AcceptedModelStore:
         needs_count = sig["category"] in TERMINAL_COUNT_CATEGORIES
         if needs_count and sig["terminal_count"] is None:
             explain(tx('Conteggio dei terminali mancante o da verificare.'))
-            # Stesso ingombro, piedinature diverse: senza il conteggio su
-            # questa scheda l'archivio non sa quale modello proporre.
+            # Same footprint, different pinouts: without the count on this
+            # board the archive does not know which model to propose.
             return None
         compatible = []
         passed_count, passed_size = 0, 0
@@ -695,7 +717,7 @@ class AcceptedModelStore:
                         compatible = [(*item[:5], scores.get(item[1]["id"], 0.0))
                                       for item in compatible]
             except (TypeError, ValueError, sqlite3.Error, AcceptedModelsError):
-                # Immagine/descriptor non valido: il match meccanico resta valido.
+                # Invalid image/descriptor: the mechanical match stays valid.
                 pass
         # A basis label can change between AI runs. Recover only with strong,
         # unambiguous visual evidence, compatible dimensions AND terminal count.
@@ -804,9 +826,9 @@ class AcceptedModelStore:
                         ((row["long_mm"] * n + sig["long_mm"]) / (n + 1),
                          (row["short_mm"] * n + sig["short_mm"]) / (n + 1),
                          height,
-                         # Una nuova accettazione senza scelta esplicita
-                         # dell'angolo non e' una scelta di "nessun angolo":
-                         # l'angolo confermato in precedenza resta valido.
+                         # A new acceptance without an explicit angle choice
+                         # is not a choice of "no angle": the previously
+                         # confirmed angle stays valid.
                          rotation if rotation is not None else row["rotation_deg"],
                          n + 1, now, source, name, max(known) if known else None,
                          row["id"]))

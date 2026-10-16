@@ -69,7 +69,8 @@ def _replace_superseded_texts(db):
     @note A stored text is replaced only when its SHA-256 digest is one of the
         known former defaults (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
         datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS,
-        photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS): a text the user
+        photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS,
+        photo_terminals.SUPERSEDED_PROMPT_DIGESTS): a text the user
         edited, even by one character, never matches and is kept. Only the
         global system prompt, the global crop prompt and the built-in types
         are touched; a per-type
@@ -91,11 +92,14 @@ def _replace_superseded_texts(db):
                        'WHERE key=? AND builtin=1 AND instructions=?',
                        (current.prompt, key, instructions))
     from .photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT as CROP_PROMPT
+    from .photo_terminals import SUPERSEDED_PROMPT_DIGESTS as SUPERSEDED_TERMINAL_PROMPT_DIGESTS
+    from .photo_terminals import PROMPT as TERMINAL_PROMPT
     for name, current, superseded in (
             ('system_prompt', DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS),
             ('system_prompt_single', DEFAULT_SINGLE_SYSTEM_PROMPT, SUPERSEDED_SINGLE_PROMPT_DIGESTS),
             ('numbering_prompt', DEFAULT_PIN_NUMBERING_PROMPT, SUPERSEDED_NUMBERING_PROMPT_DIGESTS),
-            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS)):
+            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS),
+            ('terminal_prompt', TERMINAL_PROMPT, SUPERSEDED_TERMINAL_PROMPT_DIGESTS)):
         row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (name,)).fetchone()
         if row is not None and row[0] != current and text_digest(row[0]) in superseded:
             db.execute('UPDATE ai_defaults SET value=? WHERE name=? AND value=?',
@@ -103,7 +107,10 @@ def _replace_superseded_texts(db):
 
 
 def factory_defaults():
-    """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database."""
+    """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database.
+
+    @return Mapping of default name to its factory value (a fresh dict).
+    """
     from .datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
                                       DEFAULT_PIN_NUMBERING_PROMPT)
     from .openrouter import DEFAULT_MODEL
@@ -148,8 +155,8 @@ class ProfileError(ValueError):
 class ProfileStore:
     """@brief Persist and retrieve component analysis profiles in SQLite."""
     def __init__(self,path=None,*,legacy_config=None,legacy_path=None):
-        # Da sorgente il database del repository (come prima); installato,
-        # la copia dell'utente, creata al primo avvio da quella distribuita.
+        # From source, the repository database (as before); when installed,
+        # the user's copy, created on first start from the distributed one.
         if not path and not os.environ.get('KICADGEN_PROFILE_DB'):
             from ..app_paths import data_file
             path = data_file('analysis_profiles.sqlite3', seed=True)
@@ -404,7 +411,11 @@ class ProfileStore:
         self.invalidate_translations()
 
     def list_translations(self, language=None):
-        """@brief List translation rows, optionally filtered by language."""
+        """@brief List translation rows, optionally filtered by language.
+
+        @param language Language code to keep, or None/empty for every language.
+        @return List of dicts with key, language and text, ordered by key.
+        """
         with self._connect() as db:
             if language:
                 rows = db.execute('SELECT key,language,text FROM translations WHERE language=? '
@@ -414,7 +425,10 @@ class ProfileStore:
             return [dict(row) for row in rows]
 
     def defaults(self):
-        """@brief Return the global AI default values as a name-to-value dictionary."""
+        """@brief Return the global AI default values as a name-to-value dictionary.
+
+        @return Mapping of default name to its stored value.
+        """
         with self._connect() as db:
             return dict(db.execute('SELECT name,value FROM ai_defaults'))
 
@@ -446,7 +460,11 @@ class ProfileStore:
             db.executemany('UPDATE ai_defaults SET value=? WHERE name=?',[(v,k) for k,v in values.items()])
 
     def list_types(self,include_inactive=False):
-        """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`."""
+        """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`.
+
+        @param include_inactive True to include the types marked inactive.
+        @return List of type rows as dicts (every column of component_types).
+        """
         with self._connect() as db:
             query = 'SELECT * FROM component_types'
             if not include_inactive:
@@ -454,13 +472,21 @@ class ProfileStore:
             return [dict(r) for r in db.execute(query+' ORDER BY position,label,key')]
 
     def get_type(self,key):
-        """@brief Return the component type row for `key` as a dictionary, or None when absent."""
+        """@brief Return the component type row for `key` as a dictionary, or None when absent.
+
+        @param key Component type key.
+        @return The row as a dict, or None.
+        """
         with self._connect() as db:
             row = db.execute('SELECT * FROM component_types WHERE key=?',(key,)).fetchone()
             return dict(row) if row else None
 
     def overrides(self,key):
-        """@brief Return the AI values overridden by the component type `key`."""
+        """@brief Return the AI values overridden by the component type `key`.
+
+        @param key Component type key.
+        @return Mapping of field name to override text (empty when none).
+        """
         with self._connect() as db:
             return dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,)))
 
@@ -469,6 +495,7 @@ class ProfileStore:
 
         No instructions are composed and no persisted text is changed.
         @param key Component type key; empty for the global defaults only.
+        @return Mapping of every profile field to its effective value.
         @throws ProfileError When `key` is not in the catalogue.
         @note One model for every analysis (user, 2026-10-02): a type's
             override of a MODEL_FIELDS entry is ignored (see
@@ -529,6 +556,10 @@ class ProfileStore:
         """@brief Create (empty `key`) or update a component type and optionally replace its overrides.
 
         @param key Existing type key, or a false value to create a new custom type.
+        @param label Display name of the type; must not be blank.
+        @param family Geometric family, one of FAMILIES.
+        @param instructions Instruction block inserted in the component notes.
+        @param active False to hide the type from the selectable list.
         @param overrides New override mapping (None values inherit); None keeps the stored ones.
         @return The key of the saved type.
         @throws ProfileError On missing label, invalid family or data, or a type removed meanwhile.
@@ -562,6 +593,8 @@ class ProfileStore:
     def duplicate(self,key):
         """@brief Create an active copy of type `key`, including its overrides, and return the new key.
 
+        @param key Key of the type to copy.
+        @return The key of the new custom type.
         @throws ProfileError When `key` does not exist.
         """
         original = self.get_type(key)
@@ -573,6 +606,7 @@ class ProfileStore:
     def delete_type(self,key):
         """@brief Delete the component type `key` from the catalogue.
 
+        @param key Key of the type to delete.
         @throws ProfileError When `key` does not exist.
         """
         with self._connect() as db:

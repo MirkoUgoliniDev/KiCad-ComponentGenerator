@@ -1,17 +1,17 @@
 """@brief Compare two vision models on the same set of YOLO proposals (paid API calls, cached).
 
-Confronta due modelli di visione sullo STESSO insieme di proposte YOLO.
+Compares two vision models on the SAME set of YOLO proposals.
 
-Serve a rispondere a una domanda sola: quale modello riconosce meglio tipo,
-quote e orientamento dei componenti? Per poterlo dire, l'unica cosa che cambia
-fra le due esecuzioni deve essere il modello: la foto, la calibrazione e le
-proposte del rilevatore locale sono le stesse, rilevate una volta e riusate.
+It answers one question only: which model recognises component type, sizes
+and orientation better? To be able to say so, the only thing that changes
+between the two runs must be the model: the photo, the calibration and the
+proposals of the local detector are the same, detected once and reused.
 
-Percorso esercitato: `prepare_photo` -> `detect_yolo_components` ->
-`review_global_inventory`, cioe' la pipeline di produzione. Non c'e' una
-seconda strada "di prova" che poi si comporta diversamente da quella vera.
+Path exercised: `prepare_photo` -> `detect_yolo_components` ->
+`review_global_inventory`, i.e. the production pipeline. There is no second
+"trial" path that then behaves differently from the real one.
 
-Esempi (dalla radice del repository, con OPENROUTER_API_KEY nell'ambiente):
+Examples (from the repository root, with OPENROUTER_API_KEY in the environment):
 
   python tools/compare_vision_models.py foto.png --length 25.5 --width 18 \\
       --model qwen/qwen3-vl-235b-a22b-instruct
@@ -20,10 +20,10 @@ Esempi (dalla radice del repository, con OPENROUTER_API_KEY nell'ambiente):
       --model qwen/qwen3-vl-235b-a22b-instruct \\
       --against anthropic/claude-opus-5 --output generated/confronto-modelli
 
-ATTENZIONE AL COSTO: ogni modello indicato e' **una** richiesta a pagamento.
-Con `--against` sono due. Il rilevamento locale non costa nulla. Le risposte
-vengono messe in cache sotto la cartella di uscita: rieseguire lo stesso
-confronto rigioca la cache invece di pagare di nuovo.
+MIND THE COST: every model named is **one** paid request. With `--against`
+there are two. The local detection costs nothing. The answers are cached
+under the output folder: re-running the same comparison replays the cache
+instead of paying again.
 """
 from __future__ import annotations
 
@@ -35,16 +35,16 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-#: Quanto conta uno scostamento di quota prima di essere segnalato. Non e' una
-#: soglia di qualita': serve solo a decidere cosa vale la pena di stampare.
+#: How much a dimension deviation counts before it is reported. It is not a
+#: quality threshold: it only decides what is worth printing.
 SIZE_REPORT_FRACTION = 0.15
 
 
 def parse_arguments(argv=None):
-    """@brief Legge la riga di comando del confronto.
+    """@brief Read the command line of the comparison.
 
-    @param argv Argomenti, o None per quelli del processo.
-    @return Namespace con foto, quote, modelli e cartella di uscita.
+    @param argv Arguments, or None for those of the process.
+    @return Namespace with photo, board sizes, models and output folder.
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1),
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -67,13 +67,13 @@ def parse_arguments(argv=None):
 
 
 def require_credentials():
-    """@brief Carica il .env e pretende la chiave PRIMA di lavorare.
+    """@brief Load the .env and demand the API key BEFORE doing any work.
 
-    @throws SystemExit Se la chiave non c'e'.
-    @note L'applicazione legge il .env all'avvio; uno strumento da riga di
-        comando parte da un ambiente nudo, e senza questo passaggio la
-        mancanza della chiave si scopriva solo dopo minuti di rilevamento
-        locale, sotto forma di risposta vuota che sembrava una risposta.
+    @throws SystemExit When the key is missing.
+    @note The application reads the .env at start-up; a command-line tool
+        starts from a bare environment, and without this step the missing
+        key was discovered only after minutes of local detection, in the
+        shape of an empty answer that looked like an answer.
     """
     try:
         from dotenv import load_dotenv
@@ -88,31 +88,30 @@ def require_credentials():
 
 
 def resolved_names(summary):
-    """@brief I componenti che il modello ha davvero nominato.
+    """@brief The components the model actually named.
 
-    @param summary Uscita di summarize.
-    @return L'insieme dei nomi con `resolved` vero.
-    @note Una proposta che torna indietro com'era non e' una risposta del
-        modello: e' la proposta del rilevatore conservata perche' nessuno l'ha
-        giudicata. Contarla come risposta e' cio' che faceva sembrare
-        d'accordo due esecuzioni entrambe fallite.
+    @param summary Output of summarize.
+    @return The set of names whose `resolved` flag is true.
+    @note A proposal that comes back unchanged is not an answer of the
+        model: it is the detector's proposal kept because nobody judged it.
+        Counting it as an answer is what made two failed runs look as if
+        they agreed.
     """
     return {name for name, row in summary.items() if row['resolved']}
 
 
 def answered_or_stop(label, model, summary, components):
-    """@brief Pretende che il modello abbia risposto, prima di proseguire.
+    """@brief Demand that the model has answered before going on.
 
-    @param label Etichetta dell'esecuzione (A o B).
-    @param model Id del modello, per il messaggio.
-    @param summary Uscita di summarize.
-    @param components Ipotesi grezze, da cui si leggono le diagnosi.
-    @return I nomi riconciliati.
-    @throws SystemExit Se il modello non ha riconciliato nulla.
-    @note Senza questa fermata il confronto proseguiva, chiedeva anche il
-        secondo modello e dichiarava «Differenze: 0» su due esecuzioni
-        entrambe fallite: il verdetto peggiore possibile, perche' sembra un
-        risultato.
+    @param label Label of the run (A or B).
+    @param model Model id, for the message.
+    @param summary Output of summarize.
+    @param components Raw hypotheses, from which the diagnostics are read.
+    @return The reconciled names.
+    @throws SystemExit When the model reconciled nothing.
+    @note Without this stop the comparison went on, asked the second model
+        too and declared «--- Differenze: 0» on two runs that had both failed:
+        the worst possible verdict, because it looks like a result.
     """
     answered = resolved_names(summary)
     if answered:
@@ -125,15 +124,20 @@ def answered_or_stop(label, model, summary, components):
 
 
 def inventory_with(model, photo, proposals, length, width, cache_dir, instructions, log):
-    """@brief Esegue la riconciliazione globale con un modello, e nient'altro.
+    """@brief Run the global reconciliation with one model, and nothing else.
 
-    @param model Id OpenRouter del modello.
-    @param photo Fotografia calibrata (BGR).
-    @param proposals Proposte del rilevatore, identiche fra i modelli.
-    @param cache_dir Cartella di cache: una seconda esecuzione non ripaga.
-    @return Le ipotesi di componente, nel formato dell'applicazione.
-    @note La chiamata avviene **una volta sola** per modello, come in
-        produzione: il costo del confronto e' prevedibile.
+    @param model OpenRouter id of the model.
+    @param photo Calibrated photograph (BGR).
+    @param proposals Detector proposals, identical between the models.
+    @param length Known board size along X, in mm.
+    @param width Known board size along Y, in mm.
+    @param cache_dir Cache folder: a second run does not pay again.
+    @param instructions Extra instructions appended to the prompt, or an
+        empty value for none.
+    @param log Callable receiving each progress message.
+    @return The component hypotheses, in the application's format.
+    @note The call happens **once only** for each model, as in production:
+        the cost of the comparison is predictable.
     """
     from kicadgen.services.openrouter import call_tool
     from kicadgen.services.photo_global_inventory import review_global_inventory
@@ -144,15 +148,15 @@ def inventory_with(model, photo, proposals, length, width, cache_dir, instructio
 
 
 def summarize(components):
-    """@brief Riduce le ipotesi a cio' che si vuole confrontare.
+    """@brief Reduce the hypotheses to what is to be compared.
 
-    @param components Ipotesi restituite dalla riconciliazione globale.
-    @return Dizionario per component_id con tipo, package, quote e orientamento.
+    @param components Hypotheses returned by the global reconciliation.
+    @return Dictionary by component_id with type, package, sizes and orientation.
     """
     rows = {}
     for component in components:
-        # `component_id` lo scrive la riconciliazione; una proposta conservata
-        # perche' irrisolta conserva invece il nome del rilevatore.
+        # `component_id` is written by the reconciliation; a proposal kept because
+        # unresolved keeps the detector's name instead.
         resolved = bool(component.get('component_id'))
         rows[str(component.get('component_id') or component.get('name'))] = dict(
             resolved=resolved,
@@ -171,11 +175,14 @@ def summarize(components):
 
 
 def differences(left, right):
-    """@brief Dove i due modelli non dicono la stessa cosa.
+    """@brief Where the two models do not say the same thing.
 
-    @return Righe di differenza, una per componente e campo.
-    @note Confronta per `component_id`: un componente che un modello non
-        nomina affatto e' esso stesso una differenza, e va detto.
+    @param left Summary of run A (output of summarize).
+    @param right Summary of run B (output of summarize).
+    @return Difference lines, one for each component and field; sizes are
+        reported only beyond SIZE_REPORT_FRACTION of the larger value.
+    @note Compares by `component_id`: a component that one model does not
+        name at all is itself a difference, and has to be said.
     """
     lines = []
     for key in sorted(set(left) | set(right)):
@@ -197,18 +204,18 @@ def differences(left, right):
 
 
 def main(argv=None):
-    """@brief Esegue il confronto e scrive il rapporto.
+    """@brief Run the comparison and write the report.
 
-    @param argv Argomenti della riga di comando.
-    @return Codice di uscita del processo.
-    @throws SystemExit Se manca la chiave, se la fotografia non e' calibrabile,
-        o se un modello non riconcilia nulla.
-    @note Ogni modello indicato costa una richiesta; la cache sotto la cartella
-        di uscita evita di ripagare lo stesso confronto.
+    @param argv Command-line arguments.
+    @return Process exit code.
+    @throws SystemExit When the key is missing, when the photograph cannot be
+        calibrated, or when a model reconciles nothing.
+    @note Every model named costs one request; the cache under the output
+        folder avoids paying for the same comparison again.
     """
     arguments = parse_arguments(argv)
-    # Prima di tutto: il rilevamento locale dura minuti, e scoprire solo dopo
-    # che manca la chiave significa buttarli.
+    # First of all: local detection takes minutes, and finding out only afterwards
+    # that the key is missing means throwing them away.
     require_credentials()
     arguments.output.mkdir(parents=True, exist_ok=True)
     messages = []
@@ -225,8 +232,8 @@ def main(argv=None):
     if photo is None:
         raise SystemExit('Foto non calibrabile: la scheda non e\' stata riconosciuta o e\' inclinata.')
     log(f'Calibrazione: {calibration}')
-    # Un solo rilevamento per entrambi i modelli: e' la condizione perche' il
-    # confronto dica qualcosa sul modello e non sul rilevatore.
+    # A single detection for both models: it is the condition for the comparison
+    # to say something about the model and not about the detector.
     proposals = detect_yolo_components(photo, arguments.length, arguments.width,
                                        model_path=arguments.yolo_model, log=log,
                                        audit_dir=arguments.output/'yolo-audit',

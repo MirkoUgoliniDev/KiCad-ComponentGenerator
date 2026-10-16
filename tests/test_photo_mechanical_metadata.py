@@ -215,8 +215,9 @@ def test_terminal_geometry_success_cache_preserves_mechanical_metadata(tmp_path)
     c = component(**META)
     c["_box"] = [.1, .1, .9, .9]
     response = dict(id=1, resolved=True, confidence="high", body_bbox=[.2, .2, .8, .8],
-                    terminals=[dict(bbox=[0, .3, .2, .4]), dict(bbox=[.8, .6, 1, .7]),
-                               dict(bbox=[.4, 0, .5, .2])])
+                    terminals=[dict(bbox=[0, .3, .2, .4], attachment="attached"),
+                               dict(bbox=[.8, .6, 1, .7], attachment="attached"),
+                               dict(bbox=[.4, 0, .5, .2], attachment="attached")])
     call = Mock(return_value={"components": [response]})
     args = (png.tobytes(), [c], "offline", call, lambda _: None, tmp_path)
     first = terminals.observe_terminals(*args)

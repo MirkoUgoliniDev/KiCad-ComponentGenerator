@@ -1,60 +1,58 @@
 """@brief Find the real component edges in the photo through edge detection.
 
-Ritrova nella foto i bordi reali dei componenti, via edge detection.
+The language model estimates well *which* components there are but often
+gets wrong *where* they are and *how* they are oriented: two independent
+estimates can end up overlapping, or an almost black component on an almost
+black PCB (a common case: dark plastic case) is placed by eye without the
+model really managing to read its boundaries.
 
-Il modello linguistico stima bene *quali* componenti ci sono ma sbaglia
-spesso *dove* e *come* sono orientati: due stime indipendenti possono
-finire sovrapposte, o un componente quasi nero su un PCB quasi nero
-(caso comune: case plastico scuro) viene piazzato a occhio senza che il
-modello riesca davvero a leggerne i confini.
+A colour-threshold contour fails precisely in that case (black on black has
+no colour step to segment). The luminance gradient, instead, is almost
+always there, even between two slightly different blacks (glossy vs. matte,
+plastic vs. solder mask): this is why **Canny** on the local contrast is
+used here, not a global threshold.
 
-Un contorno di soglia sul colore fallisce proprio in quel caso (nero su
-nero non ha alcun salto di colore da segmentare). Il gradiente di
-luminosita' invece c'e' quasi sempre, anche tra due neri leggermente
-diversi (lucido vs. opaco, plastica vs. soldermask): per questo qui si usa
-**Canny** sul contrasto locale, non una soglia globale.
+Procedure, deterministic and independent of the module:
 
-Procedimento, deterministico e indipendente dal modulo:
+1. in the top-view photo the board is found by CONTRAST WITH THE BACKGROUND,
+   whatever the colours: the background is estimated from the photo border,
+   and a region is the board only if it does not touch the border on two or
+   more sides, is surrounded by the background on every free side and has
+   the declared proportions IN THE DECLARED DIRECTION (X = length). The
+   px/mm scale is derived from its extents; an incompatible photo (side
+   view, detail, board rotated by 90 degrees with respect to the
+   dimensions) is rejected with an explicit reason, never cropped at random;
+2. for each component estimated by the model a window is cut around the
+   declared position, the edges are searched with Canny (thresholds from
+   the window gradient and its noise, not from the luminance: valid for
+   black, green, blue and white boards), dilated just enough to close the
+   broken contours, and the closed contour most compatible by area and
+   distance from the centre is searched;
+3. the minimum rectangle containing it gives the orientation; position and
+   extent are re-read on the Canny pixels enclosed by the contour, along
+   that orientation, so the growth of the dilation does not inflate the
+   measurement (error within one pixel at every scale). The angle is kept
+   as measured: the CAD generator applies arbitrary rotations
+   (`_rectangle_axes` has the branch for angles that are not cardinal). It
+   is brought back to the cardinal only when the deviation is smaller than
+   the uncertainty -- the residual tilt that the calibration admits on the
+   board, or the angular resolution of the contour for that size -- because
+   there an oblique part and a skewed board give the same measurement.
 
-1. nella foto dall'alto si trova la scheda per CONTRASTO CON LO SFONDO,
-   qualunque ne siano i colori: lo sfondo si stima dalla cornice della foto,
-   e una regione e' la scheda solo se non tocca la cornice su due o piu'
-   lati, e' circondata dallo sfondo su ogni lato libero e ha le proporzioni
-   dichiarate NEL VERSO dichiarato (X = lunghezza). Dalle sue estensioni si
-   ricava la scala px/mm; una foto incompatibile (vista laterale, dettaglio,
-   scheda ruotata di 90 gradi rispetto alle quote) viene scartata con un
-   motivo esplicito, mai ritagliata a caso;
-2. per ogni componente stimato dal modello si ritaglia una finestra
-   intorno alla posizione dichiarata, si cercano i bordi con Canny (soglie
-   dal gradiente della finestra e dal suo rumore, non dalla luminosita':
-   vale per schede nere, verdi, blu e bianche), si dilatano quanto basta a
-   chiudere i contorni spezzati e si cerca il contorno chiuso piu'
-   compatibile per area e distanza dal centro;
-3. il rettangolo minimo che lo contiene da' l'orientamento; posizione e
-   ingombro si rileggono sui pixel di Canny che il contorno racchiude, lungo
-   quell'orientamento, cosi' la crescita della dilatazione non gonfia la
-   misura (errore entro un pixel a ogni scala). L'angolo si tiene come misurato: il generatore
-   CAD applica rotazioni qualsiasi (`_rectangle_axes` ha il ramo non
-   cardinale). Si riporta alla cardinale solo quando lo scarto e' piu'
-   piccolo dell'incertezza -- il residuo di inclinazione che la
-   calibrazione ammette sulla scheda, o la risoluzione angolare del
-   contorno per quella taglia -- perche' li' un pezzo obliquo e una
-   scheda storta danno la stessa misura.
+When the measurement is not reliable -- no useful contour, area too
+different from the estimated one, excessive displacement from the estimate
+-- the model estimate is kept: when it does NOT measure, the result is never
+worse than not measuring.
 
-Quando la misura non e' affidabile -- nessun contorno utile, area troppo
-diversa da quella stimata, spostamento eccessivo rispetto alla stima -- si
-tiene la stima del modello: quando NON misura, il risultato non peggiora
-mai rispetto a non misurare.
-
-Limite noto, verificato su foto reali (non solo sui casi sintetici dei
-test): quando misura, non e' infallibile. Su una scheda densa un piccolo
-foro metallizzato (via) o un punto di saldatura isolato puo' avere bordi
-abbastanza netti da superare i filtri e passare per un componente,
-spostando la stima su una posizione sbagliata invece di lasciarla
-inalterata. E' la stessa categoria di errore delle stime del modello
-linguistico (a volte sbagliano), non un difetto risolvibile con altra
-soglia: va quindi usato come un secondo parere da rivedere nella tabella
-componenti, non come una correzione automatica di cui fidarsi alla cieca.
+Known limit, verified on real photos (not only on the synthetic cases of the
+tests): when it measures, it is not infallible. On a dense board a small
+plated hole (via) or an isolated solder spot can have edges sharp enough to
+pass the filters and be taken for a component, moving the estimate to a
+wrong position instead of leaving it unchanged. It is the same category of
+error as the language model estimates (sometimes they are wrong), not a
+defect fixable with another threshold: it must therefore be used as a second
+opinion to review in the component table, not as an automatic correction to
+trust blindly.
 """
 
 from __future__ import annotations
@@ -72,132 +70,128 @@ except ImportError:  # pragma: no cover - dipendenza opzionale (opencv-python)
     cv2 = None
     np = None
 
-#: Scarto massimo ammesso tra il rapporto lunghezza/larghezza della scheda
-#: trovata e quello del modulo: oltre, la foto non e' una vista dall'alto.
+#: Maximum allowed gap between the length/width ratio of the board found and
+#: that of the module: beyond it, the photo is not a top view.
 MAX_BOARD_ASPECT_ERROR = 0.12
-#: Deriva massima del bordo dovuta a rasterizzazione/contorno irregolare.
-#: Il limite angolare evita di accettare vere rotazioni su immagini piccole.
+#: Maximum edge drift due to rasterisation/irregular contour.
+#: The angular limit avoids accepting real rotations on small images.
 #:
-#: La deriva cresce con la lunghezza del contorno: un bordo seghettato dai pad
-#: castellati fa leggere a minAreaRect qualche decimo di grado, che su un lato
-#: lungo 770 px vale gia' 5.6 px. Con una soglia in pixel *assoluta* la stessa
-#: scheda, perfettamente allineata agli assi, passava a bassa risoluzione e
-#: veniva scartata ad alta: il criterio diventava la dimensione dell'immagine,
-#: non la geometria. L'allowance e' quindi la maggiore tra un minimo in pixel
-#: (immagini piccole, dove pochi pixel di rasterizzazione pesano molto) e una
-#: frazione del lato lungo. Il limite angolare resta e continua a dominare:
-#: 1 deg vale 1.75% di deriva, piu' del rapporto qui sotto.
+#: The drift grows with the contour length: an edge serrated by castellated
+#: pads makes minAreaRect read a few tenths of a degree, which on a 770 px
+#: long side is already 5.6 px. With an *absolute* threshold in pixels the
+#: same board, perfectly aligned to the axes, passed at low resolution and was
+#: rejected at high resolution: the criterion became the image size, not the
+#: geometry. The allowance is therefore the larger of a minimum in pixels
+#: (small images, where a few rasterisation pixels weigh a lot) and a
+#: fraction of the long side. The angular limit stays and keeps dominating:
+#: 1 deg is 1.75% drift, more than the ratio below.
 MAX_BOARD_EDGE_DRIFT_PX = 5.0
 MAX_BOARD_EDGE_DRIFT_RATIO = 0.01
 MAX_BOARD_TILT_DEG = 1.0
-#: Risoluzione minima del ritaglio: sotto, misurare i package non ha senso.
-#: A 1.9 px/mm un passivo da 1 mm occupa 2 px, e l'inventario misurerebbe
-#: rumore. Serve anche a smascherare i falsi positivi: un rettangolino scuro
-#: con il rapporto d'aspetto giusto supera ogni altro filtro, ma non questo.
+#: Minimum resolution of the crop: below it, measuring packages makes no
+#: sense. At 1.9 px/mm a 1 mm passive takes 2 px, and the inventory would
+#: measure noise. It also unmasks false positives: a small dark rectangle
+#: with the right aspect ratio passes every other filter, but not this one.
 MIN_BOARD_SCALE_PX_PER_MM = 4.0
-#: Frazione minima dell'immagine occupata dalla scheda. In una vista dall'alto
-#: la scheda e' il soggetto: un candidato che ne copre una porzione irrisoria
-#: e' un dettaglio interno (un connettore, un'etichetta), non il modulo.
+#: Minimum fraction of the image taken by the board. In a top view the board
+#: is the subject: a candidate covering a negligible portion of it is an
+#: inner detail (a connector, a label), not the module.
 MIN_BOARD_IMAGE_FRACTION = 0.02
-#: Pixel minimi sul lato corto del corpo piu' piccolo perche' sia
-#: distinguibile. Esposto qui (e riusato dall'inventario) perche' la GUI possa
-#: giudicare una foto senza importare l'intera catena.
+#: Minimum pixels on the short side of the smallest body for it to be
+#: distinguishable. Exposed here (and reused by the inventory) so that the GUI
+#: can judge a photo without importing the whole chain.
 MIN_PACKAGE_PIXELS_HINT = 12
-#: Lato corto, in mm, del corpo piu' piccolo che si assume montato sulla
-#: scheda quando si giudica se una foto e' abbastanza fine. IPOTESI
-#: DICHIARATA, non una misura e non ricavata da una scheda: 0.5 mm e' il lato
-#: corto di un passivo 0402 (1.0 x 0.5 mm), il piu' piccolo package comune
-#: sulle schede assemblate in serie. Una scheda con 0201 (0.3 mm) richiede
-#: foto piu' fini, una con soli 0805 ne tollera di piu' grossolane: chi conosce
-#: la scheda puo' passare la propria taglia (photo_inventory._warn_if_too_coarse),
-#: e l'avviso dice sempre rispetto a quale taglia e' stato dato.
+#: Short side, in mm, of the smallest body assumed mounted on the board when
+#: judging whether a photo is fine enough. DECLARED ASSUMPTION, not a
+#: measurement and not derived from a board: 0.5 mm is the short side of an
+#: 0402 passive (1.0 x 0.5 mm), the smallest common package on mass-assembled
+#: boards. A board with 0201 (0.3 mm) needs finer photos, one with only 0805
+#: tolerates coarser ones: whoever knows the board can pass their own size
+#: (photo_inventory._warn_if_too_coarse), and the warning always says against
+#: which size it was given.
 SMALLEST_EXPECTED_PART_MM = 0.5
-#: TETTO di quanto ci si allontana dalla posizione stimata nel cercare i bordi,
-#: oltre il semi-ingombro del componente. Non e' la finestra: quella si ferma a
-#: meta' strada dal corpo piu' vicino (vedi `search_margin_mm`). Resta come
-#: limite superiore per i corpi isolati, dove non c'e' un vicino che la chiuda.
+#: CAP on how far one moves from the estimated position when looking for the
+#: edges, beyond the component's half-footprint. It is not the window: that
+#: stops halfway to the nearest body (see `search_margin_mm`). It stays as the
+#: upper limit for isolated bodies, where no neighbour closes it.
 SEARCH_MARGIN_MM = 2.0
-#: Area del contorno trovato rispetto a quella stimata: fuori da questo
-#: intervallo non e' lo stesso componente (troppo piccolo, o troppo grande
-#: perche' fuso con un vicino dalla chiusura morfologica).
+#: Area of the contour found relative to the estimated one: outside this
+#: range it is not the same component (too small, or too large because merged
+#: with a neighbour by the morphological closing).
 AREA_RATIO_RANGE = (0.4, 1.8)
-#: Spostamento massimo accettato tra centro stimato e centro misurato.
+#: Maximum accepted shift between estimated centre and measured centre.
 MAX_SHIFT_MM = 2.0
-#: Frazione minima del rettangolo minimo (minAreaRect) effettivamente
-#: riempita dal contorno: un componente pieno la riempie quasi tutta, un
-#: blob risultato dalla fusione di piu' pezzi vicini (sagoma a "manubrio"
-#: o a "L") ne riempie una frazione molto minore.
+#: Minimum fraction of the minimum rectangle (minAreaRect) actually filled by
+#: the contour: a solid component fills almost all of it, a blob resulting
+#: from the merging of several nearby pieces ("dumbbell" or "L" shape) fills
+#: a much smaller fraction.
 MIN_FILL_RATIO = 0.45
-#: Quanto l'allungamento (lato lungo / lato corto) del contorno puo'
-#: discostarsi da quello stimato: un blob fuso e' quasi sempre molto piu'
-#: allungato o molto meno del componente che dovrebbe rappresentare.
+#: How far the elongation (long side / short side) of the contour may depart
+#: from the estimated one: a merged blob is almost always much more or much
+#: less elongated than the component it should represent.
 MAX_ELONGATION_RATIO = 1.5
-#: Incertezza di posizione di un punto di contorno, in pixel. Ripiego
-#: dichiarato: e' la quantizzazione del contorno (un pixel), non una misura
-#: del rumore di questa fotocamera. Serve a ricavare la risoluzione angolare
-#: di un corpo dalla sua dimensione: un corpo corto non puo' dichiarare un
-#: angolo fine. Diventerebbe superflua stimando il rumore di bordo dalla foto
-#: stessa.
+#: Position uncertainty of a contour point, in pixels. Declared fallback: it
+#: is the quantisation of the contour (one pixel), not a measurement of this
+#: camera's noise. It is used to derive the angular resolution of a body from
+#: its size: a short body cannot declare a fine angle. It would become
+#: unnecessary by estimating the edge noise from the photo itself.
 CONTOUR_NOISE_PX = 1.0
-#: Di quanto `_edge_mask` gonfia il contorno rispetto al corpo, per lato:
-#: l'anello di Canny dopo la sfocatura sta circa un pixel fuori dal bordo e
-#: la dilatazione 3x3 ne aggiunge un altro. Va tolta dal lato corto misurato
-#: prima di giudicare quanto fine puo' essere l'angolo, altrimenti un corpo
-#: piccolo sembra piu' grande di quello che e' e si finisce per attribuirgli
-#: una precisione angolare che non ha. Misurato su rettangoli sintetici da 10
-#: a 84 px: il contorno risulta piu' largo di 4.4-4.8 px in tutto, quindi 2.0
-#: per lato e' il valore che il kernel prevede ed e' anche quello osservato.
+#: How much `_edge_mask` inflates the contour relative to the body, per side:
+#: the Canny ring after blurring lies about one pixel outside the edge and the
+#: 3x3 dilation adds another. It must be removed from the measured short side
+#: before judging how fine the angle can be, otherwise a small body looks
+#: larger than it is and ends up credited with an angular precision it does
+#: not have. Measured on synthetic rectangles from 10 to 84 px: the contour
+#: comes out 4.4-4.8 px wider in total, so 2.0 per side is the value the
+#: kernel predicts and also the one observed.
 MORPH_GROWTH_PX = 2.0
-#: Spessore, in pixel, della fascia di pixel di bordo che descrive UN lato di
-#: un corpo in `_edge_extent`. Non e' una soglia tarata: il salto di
-#: luminosita' cade fra due pixel adiacenti e Canny ne marca uno dei due, quindi
-#: i pixel di un lato stanno in una fascia larga un pixel dal piu' esterno.
-#: La media di quella fascia sta entro mezzo pixel dal bordo vero, per lato:
-#: l'ingombro misurato resta entro un pixel da quello del corpo a ogni scala,
-#: mentre il contorno dilatato lo gonfiava di una quantita' costante in pixel
-#: (+0.25 mm a 12 px/mm, +0.38 mm a 8 px/mm).
+#: Thickness, in pixels, of the band of edge pixels describing ONE side of a
+#: body in `_edge_extent`. It is not a tuned threshold: the brightness step
+#: falls between two adjacent pixels and Canny marks one of the two, so the
+#: pixels of a side lie in a band one pixel wide from the outermost one.
+#: The mean of that band lies within half a pixel of the true edge, per side:
+#: the measured footprint stays within one pixel of the body's at every
+#: scale, while the dilated contour inflated it by a constant amount in pixels
+#: (+0.25 mm at 12 px/mm, +0.38 mm at 8 px/mm).
 EDGE_SIDE_BAND_PX = 1.0
-#: Spessore dell'anello di cornice da cui si stima lo sfondo, come frazione
-#: del lato corto dell'immagine (minimo BACKGROUND_RING_MIN_PX). In una vista
-#: dall'alto la cornice e' sfondo per costruzione: la scheda deve stare tutta
-#: nell'inquadratura. Ripiego dichiarato sullo spessore: abbastanza sottile da
-#: non entrare nella scheda con un margine normale, abbastanza spesso da dare
-#: migliaia di campioni anche su una foto piccola.
+#: Thickness of the frame ring from which the background is estimated, as a
+#: fraction of the short side of the image (minimum BACKGROUND_RING_MIN_PX).
+#: In a top view the frame is background by construction: the board must lie
+#: entirely within the shot. Declared fallback on the thickness: thin enough
+#: not to enter the board with a normal margin, thick enough to give
+#: thousands of samples even on a small photo.
 BACKGROUND_RING_FRACTION = 0.02
 BACKGROUND_RING_MIN_PX = 2
-#: Quante deviazioni robuste (MAD scalata a sigma) oltre la mediana della
-#: cornice un colore deve distare dallo sfondo per non esserlo. Ripiego
-#: dichiarato, non tarato su una foto: 4 sigma sarebbero la coda di un rumore
-#: gaussiano, ma Delta E e' un modulo con coda a destra e su rumore sintetico
-#: lascia fuori soglia ~0.5% dei pixel di sfondo, isolati; li toglie il voto
-#: a maggioranza di `_contrast_mask`, non questa costante. Su uno sfondo
-#: davvero non uniforme (vignettatura, due superfici) la statistica della
-#: cornice non basta: e' un limite dichiarato.
+#: How many robust deviations (MAD scaled to sigma) beyond the frame median a
+#: colour must be from the background not to be background. Declared
+#: fallback, not tuned on a photo: 4 sigma would be the tail of a Gaussian
+#: noise, but Delta E is a modulus with a right tail and on synthetic noise it
+#: leaves ~0.5% of background pixels above threshold, isolated; they are
+#: removed by the majority vote of `_contrast_mask`, not by this constant. On
+#: a truly non-uniform background (vignetting, two surfaces) the frame
+#: statistics are not enough: it is a declared limit.
 BACKGROUND_SPREAD_SIGMAS = 4.0
-#: Distanza di colore minima (Delta E CIE76) sotto cui due superfici non si
-#: distinguono: la soglia di percettibilita' (JND) classica. Serve solo
-#: quando la cornice e' perfettamente uniforme (disegni, rendering), dove la
-#: dispersione misurata e' zero e ogni pixel antialias sembrerebbe "scheda".
+#: Minimum colour distance (Delta E CIE76) below which two surfaces cannot be
+#: told apart: the classic just-noticeable-difference (JND) threshold. It is
+#: used only when the frame is perfectly uniform (drawings, renderings), where
+#: the measured spread is zero and every antialias pixel would look "board".
 MIN_BACKGROUND_DELTA_E = 2.3
-#: Frazione della fascia appena FUORI da ogni lato libero della scheda che
-#: deve somigliare allo sfondo. La scheda e' circondata dallo sfondo; un
-#: dettaglio interno (un integrato, uno schermo, una zona fitta di
-#: componenti) e' circondato dalla scheda su almeno un lato. Maggioranza
-#: semplice: un cavo, un connettore sporgente o una quota che attraversano il
-#: bordo ne coprono una parte minore, un lato interno lo copre quasi tutto.
+#: Fraction of the band just OUTSIDE each free side of the board that must
+#: resemble the background. The board is surrounded by the background; an
+#: inner detail (an IC, a shield, a dense component area) is surrounded by
+#: the board on at least one side. Simple majority: a cable, a protruding
+#: connector or a dimension line crossing the edge covers a smaller part of
+#: it, an inner side covers almost all of it.
 MIN_OUTSIDE_BACKGROUND_SHARE = 0.5
-#: Lati della cornice che un candidato puo' toccare. Una regione che ne tocca
-#: due o piu' e' lo sfondo stesso (o una superficie che esce dall'inquadratura)
-#: e la sua estensione vera non e' misurabile: non e' mai la scheda.
+#: Frame sides a candidate may touch. A region touching two or more of them is
+#: the background itself (or a surface leaving the shot) and its true extent
+#: is not measurable: it is never the board.
 MAX_FRAME_SIDES_TOUCHED = 1
 
 
 @dataclass
 class BoardFrame:
-    """@brief Board placement in the photo: centre in pixels and px/mm scale.
-
-    Dove sta la scheda nella foto: centro in px, scala px/mm.
-    """
+    """@brief Board placement in the photo: centre in pixels and px/mm scale."""
 
     cx: float
     cy: float
@@ -206,12 +200,22 @@ class BoardFrame:
     height_px: float
 
     def to_px(self, x_mm: float, y_mm: float) -> tuple[float, float]:
-        """@brief Convert board millimetres (origin at centre, Y down) to photo pixels."""
-        # Y del footprint verso il basso, come le righe dell'immagine.
+        """@brief Convert board millimetres (origin at centre, Y down) to photo pixels.
+
+        @param x_mm Board X coordinate, in mm.
+        @param y_mm Board Y coordinate, in mm.
+        @return (x_px, y_px) in the photo, in px.
+        """
+        # Footprint Y pointing down, like the image rows.
         return self.cx + x_mm * self.scale, self.cy + y_mm * self.scale
 
     def to_mm(self, x_px: float, y_px: float) -> tuple[float, float]:
-        """@brief Convert photo pixels to board millimetres (origin at centre, Y down)."""
+        """@brief Convert photo pixels to board millimetres (origin at centre, Y down).
+
+        @param x_px Photo X coordinate, in px.
+        @param y_px Photo Y coordinate, in px.
+        @return (x_mm, y_mm) in the board frame, in mm.
+        """
         return (x_px - self.cx) / self.scale, (y_px - self.cy) / self.scale
 
 
@@ -244,35 +248,36 @@ class RefineReport:
     failed: list = field(default_factory=list)
 
 
-#: Inclinazione massima che si prova a raddrizzare. Oltre, la foto non e'
-#: una vista dall'alto storta ma un'inquadratura prospettica, che una
-#: rotazione rigida non puo' correggere.
+#: Maximum tilt one tries to straighten. Beyond it, the photo is not a
+#: skewed top view but a perspective shot, which a rigid rotation cannot
+#: correct.
 MAX_DESKEW_DEG = 20.0
-#: Fascia di verifica del contorno della scheda, come frazione del suo lato
-#: corto in pixel: `gap` salta la transizione antialias e le piazzole
-#: castellate che sporgono di qualche pixel, `band` e' lo spessore esaminato.
-#: Ripiego dichiarato sulle proporzioni (1% e 3%): servono solo a campionare
-#: una striscia sottile a ridosso del bordo, il verdetto lo da' la
-#: maggioranza (BOUNDARY_MAJORITY_SHARE), non questi valori.
+#: Verification band of the board contour, as a fraction of its short side in
+#: pixels: `gap` skips the antialias transition and the castellated pads that
+#: protrude by a few pixels, `band` is the thickness examined.
+#: Declared fallback on the proportions (1% and 3%): they only serve to sample
+#: a thin strip close to the edge, the verdict comes from the majority
+#: (BOUNDARY_MAJORITY_SHARE), not from these values.
 BOUNDARY_GAP_FRACTION = 0.01
 BOUNDARY_GAP_MIN_PX = 2
 BOUNDARY_BAND_FRACTION = 0.03
 BOUNDARY_BAND_MIN_PX = 3
-#: Maggioranza richiesta su ogni lato libero: fuori deve prevalere lo sfondo,
-#: dentro deve prevalere cio' che sfondo non e'.
+#: Majority required on each free side: outside the background must prevail,
+#: inside what is not background must prevail.
 BOUNDARY_MAJORITY_SHARE = 0.5
 
-#: Codici del motivo per cui `locate_board` non ha trovato la scheda.
+#: Codes of the reason why `locate_board` did not find the board.
 BOARD_FOUND = "found"
 BOARD_NOT_FOUND = "not_found"
 BOARD_ROTATED_90 = "rotated_90"
-#: Nessuna scheda con le proporzioni dichiarate e PIU' di un oggetto separato
-#: dallo sfondo con proporzioni diverse: quale sia la scheda non si decide.
+#: No board with the declared proportions and MORE than one object separated
+#: from the background with different proportions: which one is the board
+#: cannot be decided.
 BOARD_AMBIGUOUS = "ambiguous"
-#: Pixel di quantizzazione per lato del riquadro (la stessa ipotesi della
-#: tolleranza di scala dei test: un pixel di bordo per lato): sotto 2 px di
-#: differenza fra le due estensioni il verso di un contorno quasi quadrato
-#: non e' misurato, e' rumore di bordo.
+#: Quantisation pixels per side of the box (the same assumption as the scale
+#: tolerance of the tests: one edge pixel per side): below 2 px of difference
+#: between the two extents the orientation of an almost square contour is not
+#: measured, it is edge noise.
 ORIENTATION_QUANTIZATION_PX = 2.0
 
 
@@ -331,7 +336,7 @@ def estimate_background(image) -> Optional[BackgroundModel]:
     centre = np.median(samples, axis=0)
     distance = np.linalg.norm(samples - centre, axis=1)
     median = float(np.median(distance))
-    # MAD scalata a sigma (1.4826): stessa unita' di una deviazione standard.
+    # MAD scaled to sigma (1.4826): same unit as a standard deviation.
     spread = 1.4826 * float(np.median(np.abs(distance - median)))
     tolerance = max(MIN_BACKGROUND_DELTA_E, median + BACKGROUND_SPREAD_SIGMAS * spread)
     bgr = tuple(int(v) for v in np.median(frame_pixels(image), axis=0))
@@ -340,12 +345,12 @@ def estimate_background(image) -> Optional[BackgroundModel]:
 
 
 def _background_distance(image, background: BackgroundModel):
-    """Delta E di ogni pixel dal colore dello sfondo."""
+    """Delta E of every pixel from the background colour."""
     return np.linalg.norm(_lab(image) - np.array(background.lab, dtype=np.float32), axis=2)
 
 
 def _clean_mask(mask, shape):
-    """Chiusura (ricuce) e apertura (toglie linee sottili: quote, piste)."""
+    """Closing (stitches back together) and opening (removes thin lines: dimensions, traces)."""
     close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
     open_size = max(9, int(min(shape[:2]) * 0.02) | 1)
     open_k = cv2.getStructuringElement(cv2.MORPH_RECT, (open_size, open_size))
@@ -354,15 +359,15 @@ def _clean_mask(mask, shape):
 
 
 def _board_mask(image):
-    """Maschera storica dei pixel molto scuri (grigio < 70).
+    """Historical mask of the very dark pixels (grey < 70).
 
-    Non e' piu' il criterio che decide cos'e' la scheda: e' una delle
-    segmentazioni provate, e ogni suo candidato deve superare le stesse
-    verifiche di contrasto con lo sfondo (`_board_candidates`). Resta la prima
-    per compatibilita': sulle foto scure-su-chiaro in cui era gia' corretta
-    riproduce al pixel il ritaglio di prima, e con esso le risposte in cache.
-    La soglia 70 e' ereditata, non derivata: su uno sfondo scuro la maschera
-    prende lo sfondo, che tocca la cornice e viene scartato.
+    It is no longer the criterion that decides what the board is: it is one
+    of the segmentations tried, and each of its candidates must pass the same
+    background-contrast checks (`_board_candidates`). It stays first for
+    compatibility: on the dark-on-light photos where it was already correct
+    it reproduces the earlier crop to the pixel, and with it the cached
+    answers. The threshold 70 is inherited, not derived: on a dark background
+    the mask takes the background, which touches the border and is discarded.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, dark = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
@@ -370,32 +375,33 @@ def _board_mask(image):
 
 
 def _contrast_mask(distance, background: BackgroundModel, shape):
-    """Maschera di cio' che si distingue dallo sfondo, qualunque colore abbia.
+    """Mask of what stands out from the background, whatever its colour.
 
-    La distanza Delta E e' un modulo, con coda a destra: anche oltre la
-    tolleranza resta qualche pixel di rumore isolato (misurato ~0.5% su
-    rumore gaussiano sintetico). La chiusura 15x15 li salderebbe alla scheda
-    in escrescenze che ne allargano il riquadro. Prima si vota a maggioranza
-    su 5x5 (filtro mediano): la scheda e' una regione, un pixel isolato no. Un
-    bordo rettilineo resta dov'e', uno spigolo si arrotonda di un pixel senza
-    cambiare il riquadro.
+    The Delta E distance is a magnitude, with a right tail: even beyond the
+    tolerance some isolated noise pixels remain (measured ~0.5% on synthetic
+    Gaussian noise). The 15x15 closing would weld them to the board as
+    excrescences that widen its box. A 5x5 majority vote (median filter) is
+    taken first: the board is a region, an isolated pixel is not. A straight
+    edge stays where it is, a corner is rounded by one pixel without changing
+    the box.
     """
     mask = np.where(distance > background.tolerance, 255, 0).astype("uint8")
     return _clean_mask(cv2.medianBlur(mask, 5), shape)
 
 
 def _texture_mask(image):
-    """Maschera della scheda per tessitura, non per colore.
+    """Board mask by texture, not by colour.
 
-    Su una fotografia la scheda e' fitta di componenti, serigrafie e piste,
-    mentre uno sfondo uniforme e' liscio. L'energia del gradiente separa le
-    due cose anche quando i colori si sovrappongono: uno schermo metallico
-    chiaro quasi quanto il piano d'appoggio e' pieno di bordi, il piano no.
+    In a photograph the board is dense with components, silkscreen and
+    traces, while a uniform background is smooth. The gradient energy
+    separates the two even when the colours overlap: a light metal shield
+    almost as bright as the supporting surface is full of edges, the surface
+    is not.
 
-    La chiusura morfologica con kernel largo ricuce l'interno della scheda,
-    compreso lo schermo: quello che conta e' la sagoma esterna.
-    Limite: uno sfondo a sua volta tessuto (legno, tessuto) non si separa
-    cosi'; i suoi blob toccano la cornice e vengono scartati.
+    The morphological closing with a wide kernel stitches the inside of the
+    board back together, shield included: what matters is the outer shape.
+    Limit: a background that is itself textured (wood, cloth) does not
+    separate this way; its blobs touch the border and are discarded.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -412,32 +418,32 @@ def _texture_mask(image):
 
 
 def _segmentations(image, background: BackgroundModel, distance):
-    """Maschere in ordine di prova, ciascuna con l'indicazione se il riquadro
-    va riportato a meta' del salto di contrasto (`_mid_step_box`).
+    """Masks in trial order, each with the indication whether the box must
+    be brought to the middle of the contrast step (`_mid_step_box`).
 
-    1. pixel molto scuri (storica, vedi `_board_mask`): riquadro invariato,
-       per riprodurre al pixel i ritagli di prima;
-    2. contrasto con lo sfondo stimato dalla cornice: il criterio generale,
-       che vale per scheda verde su nero, bianca su scuro, rossa su grigio;
-    3. tessitura: ripiego per le parti della scheda dello stesso colore dello
-       sfondo (schermi metallici), dove nessuna maschera a colore vede il bordo.
+    1. very dark pixels (historical, see `_board_mask`): box unchanged, to
+       reproduce the earlier crops to the pixel;
+    2. contrast with the background estimated from the border: the general
+       criterion, valid for a green board on black, white on dark, red on grey;
+    3. texture: fallback for the parts of the board having the same colour as
+       the background (metal shields), where no colour mask sees the edge.
     """
-    # Generatore: una maschera si calcola solo se le precedenti non bastano.
+    # Generator: a mask is computed only if the previous ones are not enough.
     yield _board_mask(image), False
     yield _contrast_mask(distance, background, image.shape), True
     yield _texture_mask(image), False
 
 
 def _mid_step_box(distance, background: BackgroundModel, bx, by, bw, bh):
-    """Riquadro del candidato con il bordo a meta' del salto sfondo -> scheda.
+    """Box of the candidate with the edge at the middle of the background -> board step.
 
-    La maschera di contrasto usa la tolleranza del rumore, cioe' il piede del
-    gradino: su un bordo sfocato (ottica, ricampionamento) prende tutta la
-    sfumatura e allarga il riquadro del raggio di sfocatura per lato, un
-    errore di scala sistematico. Il punto di un gradino sfocato che non si
-    sposta con la sfocatura e' quello a meta' ampiezza: qui si ri-soglia la
-    finestra del candidato a meta' del contrasto mediano della scheda (mai
-    sotto la tolleranza del rumore) e se ne prende il riquadro.
+    The contrast mask uses the noise tolerance, that is the foot of the step:
+    on a blurred edge (optics, resampling) it takes the whole gradient and
+    widens the box by the blur radius on each side, a systematic scale error.
+    The point of a blurred step that does not move with the blur is the one
+    at half amplitude: here the candidate window is thresholded again at half
+    the median contrast of the board (never below the noise tolerance) and
+    its box is taken.
     """
     height, width = distance.shape[:2]
     _, gap = _side_bands(bx, by, bw, bh, width, height)
@@ -448,9 +454,9 @@ def _mid_step_box(distance, background: BackgroundModel, bx, by, bw, bh):
     x0, y0 = max(0, bx - gap), max(0, by - gap)
     x1, y1 = min(width, bx + bw + gap), min(height, by + bh + gap)
     window = np.where(distance[y0:y1, x0:x1] > level, 255, 0).astype("uint8")
-    # Cornice di zeri piu' larga del kernel di chiusura: senza, la chiusura
-    # (erosione con bordo "infinito") non erode dal lato della finestra e la
-    # regione si allarga fino al bordo della finestra stessa.
+    # Frame of zeros wider than the closing kernel: without it, the closing
+    # (erosion with an "infinite" border) does not erode from the window side
+    # and the region grows up to the edge of the window itself.
     pad = 16
     window = cv2.copyMakeBorder(cv2.medianBlur(window, 5), pad, pad, pad, pad,
                                 cv2.BORDER_CONSTANT, value=0)
@@ -463,12 +469,12 @@ def _mid_step_box(distance, background: BackgroundModel, bx, by, bw, bh):
 
 
 def _frame_sides_touched(bx, by, bw, bh, width, height) -> int:
-    """Quanti lati della cornice il riquadro raggiunge."""
+    """How many sides of the photo border the box reaches."""
     return sum((bx <= 0, by <= 0, bx + bw >= width, by + bh >= height))
 
 
 def _side_bands(bx, by, bw, bh, width, height):
-    """Coppie (fascia esterna, fascia interna) per ogni lato non sulla cornice."""
+    """Pairs (outer band, inner band) for every side not on the border."""
     short = min(bw, bh)
     gap = max(BOUNDARY_GAP_MIN_PX, int(round(BOUNDARY_GAP_FRACTION * short)))
     band = max(BOUNDARY_BAND_MIN_PX, int(round(BOUNDARY_BAND_FRACTION * short)))
@@ -491,28 +497,28 @@ def _side_bands(bx, by, bw, bh, width, height):
 
 
 def _surrounded_by_background(distance, background: BackgroundModel, bx, by, bw, bh) -> bool:
-    """Il riquadro separa, lato per lato, cio' che sfondo non e' dallo sfondo.
+    """The box separates, one side at a time, what is not background from the background.
 
-    Fuori: un pixel conta come sfondo se e' piu' vicino allo sfondo che alla
-    scheda (meta' del salto di contrasto, il criterio del bordo a gradino), o
-    comunque indistinguibile dallo sfondo. Cosi' un alone chiaro, un'ombra
-    tenue o una piazzola che sporge di un pixel restano "fuori", mentre la
-    scheda attorno a un dettaglio interno no.
+    Outside: a pixel counts as background if it is closer to the background
+    than to the board (half the contrast step, the step-edge criterion), or
+    anyway indistinguishable from the background. So a light halo, a faint
+    shadow or a pad protruding by one pixel stay "outside", while the board
+    around an inner detail does not.
 
-    Dentro: la fascia deve essere in maggioranza distinguibile dallo sfondo.
-    Una maschera che mette un lato dove dentro c'e' sfondo ha incollato alla
-    scheda qualcosa di esterno (il testo di una quota, un connettore
-    sporgente): il riquadro e' sbagliato. Vale per tutte le segmentazioni:
-    sulla foto quotata di riferimento la tessitura incollava le quote alla
-    scheda e dava un riquadro con il 7% di scarto d'aspetto, dentro la
-    tolleranza, che senza questa verifica passava in silenzio. Limite
-    dichiarato: una scheda il cui lato e' occupato per piu' di meta' da una
-    superficie indistinguibile dallo sfondo (schermo metallico fino al bordo
-    su un piano dello stesso colore) viene rifiutata, non misurata.
+    Inside: the band must be mostly distinguishable from the background. A
+    mask that puts a side where there is background inside has glued
+    something external to the board (the text of a dimension, a protruding
+    connector): the box is wrong. It holds for every segmentation: on the
+    dimensioned reference photo the texture glued the dimensions to the board
+    and gave a box with a 7% aspect deviation, within tolerance, which passed
+    silently without this check. Declared limit: a board whose side is
+    occupied for more than half by a surface indistinguishable from the
+    background (metal shield up to the edge on a surface of the same colour)
+    is rejected, not measured.
 
-    Un lato che giace sulla cornice non si puo' verificare e si salta; se non
-    resta nessun lato verificabile la scheda non e' dimostrabilmente
-    circondata dallo sfondo e il candidato si scarta.
+    A side lying on the border cannot be checked and is skipped; if no
+    checkable side remains the board is not demonstrably surrounded by the
+    background and the candidate is discarded.
     """
     height, width = distance.shape[:2]
     sides, gap = _side_bands(bx, by, bw, bh, width, height)
@@ -533,12 +539,13 @@ def _surrounded_by_background(distance, background: BackgroundModel, bx, by, bw,
 
 
 def _aspect_error(width_px, height_px, body_length, body_width) -> float:
-    """Scarto relativo del rapporto X/Y trovato da quello dichiarato, nel verso dichiarato.
+    """Relative deviation of the measured X/Y ratio from the declared one, in the declared direction.
 
-    Il confronto si fa sul rapporto lato lungo / lato corto DELLE QUOTE: con
-    L >= W la scheda deve essere orizzontale (w/h contro L/W, come sempre), con
-    L < W verticale (h/w contro W/L). Una scheda con il verso sbagliato da' un
-    rapporto < 1 contro uno >= 1 e viene scartata, senza scambiare gli assi.
+    The comparison is made on the long side / short side ratio OF THE
+    DIMENSIONS: with L >= W the board must be horizontal (w/h against L/W, as
+    always), with L < W vertical (h/w against W/L). A board with the wrong
+    direction gives a ratio < 1 against one >= 1 and is discarded, without
+    swapping the axes.
     """
     if body_length >= body_width:
         found, expected = width_px / height_px, body_length / body_width
@@ -550,22 +557,21 @@ def _aspect_error(width_px, height_px, body_length, body_width) -> float:
 def deskew_board(image, body_length: float, body_width: float):
     """@brief Rotate a tilted board photo upright, or return None when not needed or not possible.
 
-    Raddrizza la foto quando la scheda e' inquadrata storta.
+    `find_board` does not rectify the rotation, so as not to distort scale
+    and coordinates: it therefore tolerates less than one degree. On a photo
+    taken by hand two or three degrees are enough to get the image rejected,
+    and this is why a real high-resolution photo was discarded in favour of a
+    low-resolution drawing.
 
-    `find_board` non rettifica la rotazione, per non falsare scala e
-    coordinate: tollera percio' meno di un grado. Su una foto scattata a mano
-    libera bastano due o tre gradi per far rifiutare l'immagine, ed e' il
-    motivo per cui una foto vera ad alta risoluzione veniva scartata in favore
-    di un disegno a bassa risoluzione.
-
-    Qui si misura l'inclinazione della regione piu' grande compatibile con le
-    proporzioni del modulo (in qualunque verso: il verso lo giudica poi
-    `find_board`) e che non tocca la cornice su due o piu' lati, e si ruota
-    l'intera immagine. E' una trasformazione rigida: lunghezze e proporzioni
-    restano quelle vere, quindi la scala ricavata dopo il raddrizzamento e'
-    altrettanto valida. La tela viene allargata, cosi' la rotazione non taglia
-    gli angoli, e riempita con il colore dello sfondo stimato: un riempimento
-    bianco fisso creerebbe su uno sfondo scuro un bordo che non esiste.
+    Here the tilt of the largest region compatible with the module
+    proportions (in either direction: the direction is judged later by
+    `find_board`) and not touching the border on two or more sides is
+    measured, and the whole image is rotated. It is a rigid transformation:
+    lengths and proportions remain the true ones, so the scale derived after
+    straightening is just as valid. The canvas is enlarged, so the rotation
+    does not cut the corners, and filled with the estimated background
+    colour: a fixed white fill would create, on a dark background, an edge
+    that does not exist.
 
     @param image BGR photo.
     @param body_length Declared board extent along X, in mm.
@@ -592,8 +598,8 @@ def deskew_board(image, body_length: float, body_width: float):
             continue
         if _frame_sides_touched(*cv2.boundingRect(contour), width, height) > MAX_FRAME_SIDES_TOUCHED:
             continue
-        # Sul rettangolo ruotato il rapporto e' quello vero della scheda: il
-        # bounding box assiale di un rettangolo storto e' sempre piu' tozzo.
+        # On the rotated rectangle the ratio is the board's true one: the
+        # axis-aligned bounding box of a skewed rectangle is always stubbier.
         found = max(rw, rh) / min(rw, rh)
         if abs(found - expected) / expected > MAX_BOARD_ASPECT_ERROR:
             continue
@@ -603,8 +609,8 @@ def deskew_board(image, body_length: float, body_width: float):
     if best is None:
         return None
     _, cx, cy, rw, rh, angle = best
-    # minAreaRect riporta l'angolo del lato, non della scheda: si porta la
-    # correzione nel quarto piu' vicino allo zero.
+    # minAreaRect reports the angle of the side, not of the board: the
+    # correction is brought into the quadrant closest to zero.
     tilt = angle % 90
     if tilt > 45:
         tilt -= 90
@@ -657,7 +663,7 @@ class BoardSearch:
 
 
 def _search(image, body_length, body_width, background, distance) -> Optional[BoardFrame]:
-    """Prima segmentazione che da' candidati validi; il piu' grande vince."""
+    """First segmentation that yields valid candidates; the largest wins."""
     for mask, mid_step in _segmentations(image, background, distance):
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = _board_candidates(contours, image, body_length, body_width,
@@ -668,11 +674,11 @@ def _search(image, body_length, body_width, background, distance) -> Optional[Bo
 
 
 def _orientation_mismatch(width_px, height_px, body_length, body_width) -> bool:
-    """Il lato lungo misurato sta sull'asse opposto a quello dichiarato.
+    """The measured long side lies on the axis opposite to the declared one.
 
-    Solo se entrambi i versi sono determinati: quote uguali non ne dichiarano
-    uno, e un contorno le cui estensioni differiscono di non piu' di
-    ORIENTATION_QUANTIZATION_PX non ne misura uno.
+    Only if both directions are determined: equal dimensions do not declare
+    one, and a contour whose extents differ by no more than
+    ORIENTATION_QUANTIZATION_PX does not measure one.
     """
     if body_length == body_width or abs(width_px - height_px) <= ORIENTATION_QUANTIZATION_PX:
         return False
@@ -680,24 +686,30 @@ def _orientation_mismatch(width_px, height_px, body_length, body_width) -> bool:
 
 
 def _search_any_aspect(image, body_length, body_width, background, distance):
-    """Seconda passata: la scheda con proporzioni diverse da quelle dichiarate.
+    """Second pass: the board with proportions different from the declared ones.
 
-    Una vista dall'alto ridimensionata in modo non proporzionale (o fotografata
-    con pixel non quadrati) resta una vista dall'alto: la scala si misura per
-    asse, X sulla lunghezza e Y sulla larghezza, e i consumatori leggono gia'
-    le coordinate asse per asse (`isotropic_board` ricampiona dove serve una
-    scala unica). Qui il rapporto d'aspetto smette di identificare la scheda;
-    la identificano i criteri strutturali, tutti ancora applicati da
-    `_board_candidates` (circondata dallo sfondo, al piu' un lato di cornice,
-    non inclinata, scala e area minime), piu' l'unicita': senza il rapporto
-    nulla distingue due oggetti sul tavolo, quindi se ce n'e' piu' di uno la
-    risposta e' BOARD_AMBIGUOUS, non il piu' grande.
+    A top view resized out of proportion (or photographed with pixels that
+    are not square) is still a top view: the scale is measured along each
+    axis, X on the length and Y on the width, and the consumers already read
+    the coordinates axis by axis (`isotropic_board` resamples where a single
+    scale is needed). Here the aspect ratio stops identifying the board; the
+    structural criteria identify it, all still applied by `_board_candidates`
+    (surrounded by the background, at most one border side, not tilted,
+    minimum scale and area), plus uniqueness: without the ratio nothing
+    distinguishes two objects on the table, so if there is more than one the
+    answer is BOARD_AMBIGUOUS, not the largest.
 
+    @param image BGR photo.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @param background Background model estimated from the photo border.
+    @param distance Delta E distance of every pixel from the background.
     @return (reason, frame or None) with reason one of the BOARD_* codes.
-    @note La deformazione non e' limitata: ogni soglia sarebbe tarata sulle
-        foto viste finora. Viene dichiarata nel log (`aspect_deformation`),
-        perche' o la foto e' deformata o le quote dichiarate sono sbagliate, e
-        dalla sola foto le due cause non si distinguono.
+    @note The deformation is not bounded: any threshold would be calibrated
+        on the photos seen so far. It is declared in the log
+        (`aspect_deformation`), because either the photo is deformed or the
+        declared dimensions are wrong, and from the photo alone the two
+        causes cannot be told apart.
     """
     for mask, mid_step in _segmentations(image, background, distance):
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -766,8 +778,7 @@ def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
 def find_board(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
     """@brief Locate the board rectangle in the photo; None when it is not a usable top view.
 
-    Trova il rettangolo della scheda nella foto; None se non e' una vista
-    dall'alto utilizzabile. Il motivo del rifiuto lo da' `locate_board`.
+    The reason for the rejection is given by `locate_board`.
 
     @param image BGR photo.
     @param body_length Declared board extent along X, in mm.
@@ -779,15 +790,15 @@ def find_board(image, body_length: float, body_width: float) -> Optional[BoardFr
 
 def _board_candidates(contours, image, body_length, body_width, distance, background,
                       mid_step=False, check_aspect=True):
-    """Rettangoli compatibili col modulo, filtrati come da contratto.
+    """Rectangles compatible with the module, filtered as the contract requires.
 
-    Con `check_aspect` False il rapporto d'aspetto non filtra (seconda
-    passata, `_search_any_aspect`): tutti gli altri criteri restano.
+    With `check_aspect` False the aspect ratio does not filter (second pass,
+    `_search_any_aspect`): every other criterion remains.
     """
-    # Le foto dei moduli sono spesso corredate da quote: linee e frecce possono
-    # formare il contorno più grande, ma con un rapporto molto diverso da quello
-    # reale della scheda. Scegliamo quindi il candidato più grande tra quelli
-    # geometricamente compatibili, invece di usare sempre max(contourArea).
+    # Module photos often come with dimension annotations: lines and arrows
+    # can form the largest contour, but with a ratio very different from the
+    # board's real one. So we choose the largest candidate among the
+    # geometrically compatible ones, instead of always using max(contourArea).
     candidates = []
     height, width = image.shape[:2]
     for contour in contours:
@@ -795,10 +806,10 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
         if min(rw, rh) < 20:
             continue
         tilt = min(abs(angle) % 90, 90 - abs(angle) % 90)
-        # BoardFrame non rettifica la rotazione: tollerare solo una deriva
-        # marginale sul lato lungo, non inclinazioni che falsano scala e XY.
-        # L'allowance scala con il contorno, altrimenti il filtro misurerebbe
-        # la risoluzione dell'immagine invece dell'inclinazione della scheda.
+        # BoardFrame does not correct the rotation: tolerate only a marginal
+        # drift on the long side, not tilts that distort scale and XY.
+        # The allowance scales with the contour, otherwise the filter would
+        # measure the image resolution instead of the board tilt.
         edge_drift = max(rw, rh) * math.sin(math.radians(tilt))
         drift_allowance = max(MAX_BOARD_EDGE_DRIFT_PX,
                               MAX_BOARD_EDGE_DRIFT_RATIO * max(rw, rh))
@@ -808,26 +819,26 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
         if mid_step:
             bx, by, bw, bh = _mid_step_box(distance, background, bx, by, bw, bh)
         w, h = float(bw), float(bh)
-        # I consumatori usano X = lunghezza dichiarata. Il verso si confronta
-        # con quello delle quote: nessuno scambio implicito di assi.
+        # Consumers use X = declared length. The orientation is compared with
+        # that of the dimensions: no implicit axis swap.
         error = _aspect_error(w, h, body_length, body_width)
         if check_aspect and error > MAX_BOARD_ASPECT_ERROR:
             continue
-        # Il solo rapporto d'aspetto non identifica la scheda: su una foto
-        # reale un connettore o un'etichetta scura possono avere lo stesso
-        # rapporto. Senza questi filtri il candidato sbagliato veniva
-        # accettato in silenzio e calibrava tutto l'inventario su un ritaglio
-        # sbagliato -- un errore muto, peggiore di un rifiuto.
+        # The aspect ratio alone does not identify the board: on a real photo
+        # a connector or a dark label can have the same ratio. Without these
+        # filters the wrong candidate was silently accepted and calibrated the
+        # whole inventory on a wrong crop -- a silent error, worse than a
+        # rejection.
         if w / body_length < MIN_BOARD_SCALE_PX_PER_MM:
             continue
         if (w * h) < MIN_BOARD_IMAGE_FRACTION * height * width:
             continue
-        # Una regione che raggiunge due o piu' lati della cornice e' lo sfondo
-        # (o esce dall'inquadratura): la sua estensione non e' misurabile.
+        # A region reaching two or more sides of the frame is the background
+        # (or leaves the shot): its extent is not measurable.
         if _frame_sides_touched(bx, by, bw, bh, width, height) > MAX_FRAME_SIDES_TOUCHED:
             continue
-        # La scheda e' circondata dallo sfondo; un dettaglio interno con le
-        # stesse proporzioni no.
+        # The board is surrounded by the background; an inner detail with the
+        # same proportions is not.
         if not _surrounded_by_background(distance, background, bx, by, bw, bh):
             continue
         candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
@@ -835,11 +846,11 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
 
 
 def _frame_from(candidates, body_length, body_width):
-    """Il candidato piu' grande diventa il riferimento della scheda.
+    """The largest candidate becomes the board reference.
 
-    width_px e height_px sono le estensioni su X e su Y dell'immagine, nel
-    verso dichiarato (X = lunghezza): per una scheda dichiarata verticale
-    width_px e' il lato corto.
+    width_px and height_px are the extents along the image X and Y, in the
+    declared direction (X = length): for a board declared vertical width_px
+    is the short side.
     """
     _, _, bx, by, w, h = max(candidates, key=lambda item: item[0])
     cx, cy = bx + w / 2, by + h / 2
@@ -847,23 +858,23 @@ def _frame_from(candidates, body_length, body_width):
     return BoardFrame(cx=cx, cy=cy, scale=scale, width_px=w, height_px=h)
 
 
-#: Quante deviazioni standard del rumore deve superare il gradiente perche'
-#: Canny lo prenda anche solo come bordo debole (soglia bassa). Ripiego
-#: dichiarato, non tarato su una foto: per un gradiente di puro rumore
-#: gaussiano il modulo supera 3 sigma con probabilita' exp(-4.5) ~ 1% per
-#: pixel, e la soppressione dei non massimi ne lascia una frazione; su
-#: rumore sintetico (sigma 1-6, grigio 22-225) nessuna misura falsa. Lo
-#: renderebbe superfluo un modello del rumore della fotocamera.
+#: How many noise standard deviations the gradient must exceed for Canny to
+#: take it even as a weak edge (low threshold). Declared fallback, not tuned
+#: on a photo: for a gradient of pure Gaussian noise the modulus exceeds 3
+#: sigma with probability exp(-4.5) ~ 1% per pixel, and non-maximum
+#: suppression leaves a fraction of it; on synthetic noise (sigma 1-6, grey
+#: 22-225) no false measurement. A model of the camera noise would make it
+#: unnecessary.
 EDGE_NOISE_SIGMAS = 3.0
 
 
 @functools.lru_cache(maxsize=1)
 def _gradient_gain() -> float:
-    """Deviazione standard del gradiente Sobel (ksize 3) di un rumore bianco
-    unitario dopo la sfocatura gaussiana 3x3 usata da `_canny_edges`.
+    """Standard deviation of the Sobel gradient (ksize 3) of unit white noise
+    after the 3x3 Gaussian blur used by `_canny_edges`.
 
-    Si misura applicando gli stessi due filtri a un impulso: la norma L2 della
-    risposta e' il guadagno esatto della catena, nessun numero ricopiato.
+    It is measured by applying the same two filters to an impulse: the L2
+    norm of the response is the exact gain of the chain, no copied number.
     """
     impulse = np.zeros((11, 11), np.float32)
     impulse[5, 5] = 1.0
@@ -872,25 +883,25 @@ def _gradient_gain() -> float:
 
 
 def _noise_sigma(gray) -> float:
-    """Rumore dei livelli di grigio della finestra (stimatore di Immerkaer, 1996).
+    """Grey-level noise of the window (Immerkaer estimator, 1996).
 
-    Il nucleo [[1,-2,1],[-2,4,-2],[1,-2,1]] e' il prodotto di due derivate
-    seconde: su un bordo rettilineo risponde zero, quindi il bordo di un corpo
-    non passa per rumore. La mediana (invece della media dello stimatore
-    originale) toglie anche il peso degli spigoli e delle scritte. Il minimo e'
-    il rumore di quantizzazione a 8 bit (1/sqrt(12) livelli): un'immagine
-    sintetica senza rumore non ha soglia zero.
+    The kernel [[1,-2,1],[-2,4,-2],[1,-2,1]] is the product of two second
+    derivatives: on a straight edge it responds zero, so the edge of a body
+    does not pass for noise. The median (instead of the mean of the original
+    estimator) also removes the weight of corners and lettering. The minimum
+    is the 8-bit quantization noise (1/sqrt(12) levels): a synthetic image
+    without noise does not get a zero threshold.
     """
     kernel = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
     response = cv2.filter2D(gray.astype(np.float32), -1, kernel,
                             borderType=cv2.BORDER_REFLECT)[1:-1, 1:-1]
-    # 0.6745 = mediana di |N(0,1)|; 6 = norma L2 del nucleo.
+    # 0.6745 = median of |N(0,1)|; 6 = L2 norm of the kernel.
     sigma = float(np.median(np.abs(response))) / (0.6745 * 6.0) if response.size else 0.0
     return max(sigma, 1.0 / math.sqrt(12.0))
 
 
 def _otsu_level(values) -> float:
-    """Soglia di Otsu su valori float (256 classi fra minimo e massimo)."""
+    """Otsu threshold on float values (256 bins between minimum and maximum)."""
     if values.size == 0:
         return 0.0
     hist, bounds = np.histogram(values, bins=256)
@@ -932,17 +943,18 @@ def canny_thresholds(gray, blurred=None) -> tuple:
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
-    magnitude = np.abs(gx) + np.abs(gy)          # stessa norma L1 di cv2.Canny
-    # Modulo L1 di due componenti con deviazione s: sta sotto sqrt(2) volte il
-    # modulo euclideo, la cui coda oltre k*s e' exp(-k^2/2) (Rayleigh).
-    # Il guadagno comprende gia' la sfocatura: il rumore si misura prima.
+    magnitude = np.abs(gx) + np.abs(gy)          # same L1 norm as cv2.Canny
+    # L1 modulus of two components with deviation s: it stays below sqrt(2)
+    # times the Euclidean modulus, whose tail beyond k*s is exp(-k^2/2)
+    # (Rayleigh). The gain already includes the blur: the noise is measured
+    # before.
     floor = EDGE_NOISE_SIGMAS * math.sqrt(2.0) * _noise_sigma(gray) * _gradient_gain()
     split = _otsu_level(magnitude.ravel())
     return max(split / 2.0, floor), max(split, 2.0 * floor)
 
 
 def _canny_edges(window) -> "np.ndarray":
-    """Bordi di Canny della finestra, con soglie dal gradiente (vedi canny_thresholds)."""
+    """Canny edges of the window, with thresholds from the gradient (see canny_thresholds)."""
     gray = cv2.cvtColor(window, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     low, high = canny_thresholds(gray, blurred)
@@ -950,12 +962,12 @@ def _canny_edges(window) -> "np.ndarray":
 
 
 def _closed_edges(edges) -> "np.ndarray":
-    """Chiusura minima dei bordi: dilatazione e chiusura con nucleo 3x3.
+    """Minimal closing of the edges: dilation and closing with a 3x3 kernel.
 
-    Un solo giro, kernel minimo: su una scheda densa (componenti vicini,
-    ognuno con la propria cornice serigrafica) una chiusura piu' aggressiva
-    salda i contorni di pezzi ADIACENTI in un unico blob, che poi
-    sostituirebbe la stima con la sagoma sbagliata (il gruppo, non il pezzo).
+    One pass only, minimal kernel: on a dense board (close components, each
+    with its own silkscreen frame) a more aggressive closing welds the
+    contours of ADJACENT parts into a single blob, which would then replace
+    the estimate with the wrong shape (the group, not the part).
     """
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     edges = cv2.dilate(edges, kernel, iterations=1)
@@ -963,34 +975,34 @@ def _closed_edges(edges) -> "np.ndarray":
 
 
 def _edge_mask(window) -> "np.ndarray":
-    """Contorni chiusi e utilizzabili nella finestra: Canny + chiusura morfologica.
+    """Closed, usable contours in the window: Canny + morphological closing.
 
-    Canny lavora sul gradiente locale, non su una soglia assoluta: separa
-    un componente nero da un PCB nero se c'e' anche una minima differenza
-    di riflettanza tra le due superfici, cosa che una soglia di colore non
-    puo' fare. Le sue soglie vengono dal gradiente della finestra
-    (`canny_thresholds`), non dalla luminosita'.
+    Canny works on the local gradient, not on an absolute threshold: it
+    separates a black component from a black PCB if there is even a minimal
+    reflectance difference between the two surfaces, something a colour
+    threshold cannot do. Its thresholds come from the window gradient
+    (`canny_thresholds`), not from the luminance.
     """
     return _closed_edges(_canny_edges(window))
 
 
 def _edge_extent(edges, contour, rotation_deg):
-    """Centro ed estensione dei bordi VERI (non dilatati) racchiusi dal contorno scelto.
+    """Centre and extent of the TRUE (undilated) edges enclosed by the chosen contour.
 
-    Il contorno viene dalla maschera dilatata e chiusa, quindi e' piu' largo
-    del corpo di quanto la morfologia l'ha gonfiato (circa MORPH_GROWTH_PX per
-    lato, ma dipende dal nucleo e dalla posa). Invece di togliere una costante
-    si rilegge il corpo sui pixel di Canny che il contorno racchiude,
-    proiettati sull'asse lungo dichiarato (`rotation_deg`, lo stesso che la
-    misura riporta) e sul suo perpendicolare: la crescita sparisce lungo
-    ciascun asse, qualunque sia il nucleo, e resta l'errore di quantizzazione
-    del bordo. Proiettare sugli assi RIPORTATI, non su quelli grezzi di
-    minAreaRect, tiene coerenti ingombro e orientamento: su un corpo piccolo il
-    rettangolo grezzo puo' essere storto di qualche grado che la misura poi
-    riporta alla cardinale (vedi _axis_rotation).
+    The contour comes from the dilated and closed mask, so it is wider than
+    the body by as much as the morphology inflated it (about MORPH_GROWTH_PX
+    on each side, but it depends on the kernel and the pose). Instead of
+    subtracting a constant, the body is re-read on the Canny pixels enclosed
+    by the contour, projected on the declared long axis (`rotation_deg`, the
+    same the measurement reports) and on its perpendicular: the growth
+    disappears along each axis, whatever the kernel, and the edge
+    quantization error remains. Projecting on the REPORTED axes, not on the
+    raw ones of minAreaRect, keeps extent and orientation consistent: on a
+    small body the raw rectangle can be skewed by a few degrees that the
+    measurement then brings back to the cardinal (see _axis_rotation).
 
-    Ritorna (cx, cy, lunghezza, larghezza) in pixel della finestra, o None se
-    il contorno non racchiude abbastanza pixel di bordo.
+    Returns (cx, cy, length, width) in window pixels, or None if the contour
+    does not enclose enough edge pixels.
     """
     filled = np.zeros(edges.shape[:2], dtype="uint8")
     cv2.drawContours(filled, [contour], -1, 255, thickness=-1)
@@ -998,8 +1010,8 @@ def _edge_extent(edges, contour, rotation_deg):
     if xs.size < 4:
         return None
     points = np.stack([xs, ys], axis=1).astype(np.float64)
-    # Righe dell'immagine verso il basso: e' lo stesso verso degli angoli di
-    # minAreaRect da cui viene rotation_deg.
+    # Image rows pointing down: it is the same orientation as the minAreaRect
+    # angles that rotation_deg comes from.
     angle = math.radians(float(rotation_deg))
     along = np.array([math.cos(angle), math.sin(angle)])
     across = np.array([-math.sin(angle), math.cos(angle)])
@@ -1007,14 +1019,14 @@ def _edge_extent(edges, contour, rotation_deg):
     spans, middle = [], np.zeros(2)
     for index, axis in enumerate((along, across)):
         projection, other = projections[index], projections[1 - index]
-        # Il salto di luminosita' cade FRA due pixel e Canny ne marca uno, a
-        # volte quello interno e a volte quello esterno: il bordo di un lato e'
-        # la media dei pixel entro EDGE_SIDE_BAND_PX dal suo estremo, non
-        # l'estremo stesso (che su un lato lungo prende sempre il pixel piu'
-        # esterno, su uno corto no: l'errore dipenderebbe dalla taglia). Gli
-        # angoli si lasciano fuori: i pixel dei due lati perpendicolari che ci
-        # cadono sono gia' dentro il corpo e sul lato corto di un passivo
-        # piccolo ne sposterebbero la media verso l'interno.
+        # The brightness step falls BETWEEN two pixels and Canny marks one,
+        # sometimes the inner one and sometimes the outer one: the edge of a
+        # side is the mean of the pixels within EDGE_SIDE_BAND_PX of its
+        # extreme, not the extreme itself (which on a long side always takes
+        # the outermost pixel, on a short one not: the error would depend on
+        # the size). Corners are left out: the pixels of the two perpendicular
+        # sides falling there are already inside the body and on the short
+        # side of a small passive they would shift its mean inwards.
         core = ((other > other.min() + EDGE_SIDE_BAND_PX + 1e-9)
                 & (other < other.max() - EDGE_SIDE_BAND_PX - 1e-9))
         extreme_low, extreme_high = float(projection.min()), float(projection.max())
@@ -1030,9 +1042,8 @@ def _edge_extent(edges, contour, rotation_deg):
 
 
 def _forbidden_mask(image, frame: BoardFrame, exclude_rects_mm) -> "np.ndarray":
-    """Pixel da ignorare: fuori dal contorno della scheda e sopra le
-    piazzole dei contatti (bordi metallici lucidi, facili da confondere
-    con quelli di un componente)."""
+    """Pixels to ignore: outside the board outline and over the contact
+    pads (shiny metal edges, easy to confuse with those of a component)."""
     forbidden = np.ones(image.shape[:2], dtype="uint8")
     margin = 0.15 * frame.scale
     x0 = int(frame.cx - frame.width_px / 2 + margin)
@@ -1048,7 +1059,7 @@ def _forbidden_mask(image, frame: BoardFrame, exclude_rects_mm) -> "np.ndarray":
 
 
 def _body_rect_mm(component) -> tuple:
-    """Riquadro allineato agli assi del corpo stimato, in millimetri."""
+    """Axis-aligned box of the estimated body, in millimetres."""
     length, width = float(component["length_mm"]), float(component["width_mm"])
     rotation = math.radians(float(component.get("rotation_deg") or 0.0))
     span_x = length * abs(math.cos(rotation)) + width * abs(math.sin(rotation))
@@ -1058,75 +1069,76 @@ def _body_rect_mm(component) -> tuple:
 
 
 def _rect_gap_mm(first, second) -> float:
-    """Distanza fra due riquadri, zero quando si toccano o si sovrappongono."""
+    """Distance between two boxes, in mm; zero when they touch or overlap."""
     dx = max(second[0] - first[2], first[0] - second[2], 0.0)
     dy = max(second[1] - first[3], first[1] - second[3], 0.0)
     return math.hypot(dx, dy)
 
 
 def search_margin_mm(gap_mm: float, scale_px_per_mm: float) -> float:
-    """@brief Quanto guardare oltre il corpo stimato, cercandone i bordi.
+    """@brief How far to look beyond the estimated body when searching for its edges.
 
-    @param gap_mm Distanza dal corpo stimato piu' vicino, zero se si toccano.
-    @param scale_px_per_mm Scala della fotografia calibrata.
-    @return Millimetri oltre il semi-ingombro, per il lato della finestra.
-    @note La zona di competenza di un corpo finisce dove comincia quella di un
-        altro: si guarda al piu' fino a meta' strada dal vicino. Non e' una
-        soglia scelta a mano -- la decide la densita' della scheda, quindi su
-        un modulo fitto la finestra e' minuscola e su una scheda sparsa si
-        apre fino al tetto di SEARCH_MARGIN_MM.
-    @note Il minimo non e' arbitrario: e' di quanto `_edge_mask` gonfia il
-        contorno rispetto al corpo. Con una finestra piu' stretta si
-        taglierebbe il proprio stesso contorno e non si misurerebbe piu' nulla.
-    @note Perche' serve: con una finestra fissa di 2 mm, su una foto a 55 px/mm
-        si guardano 110 pixel di vicinato per parte. Misurato sulle 123
-        proposte del modulo di prova, dove la distanza mediana fra proposte e'
-        zero: la chiusura morfologica fondeva il corpo con cio' che ha intorno
-        (contorno mediano 9 volte l'area della proposta) e delle 12 misure che
-        passavano i filtri lo spostamento mediano era 1.44 mm, cioe' il
-        rilevamento agganciava il vicino invece di rifinire il corpo. Con
-        questa regola le misure diventano 71 e lo spostamento mediano 0.08 mm.
+    @param gap_mm Distance from the nearest estimated body, in mm; zero if they touch.
+    @param scale_px_per_mm Scale of the calibrated photograph, in px/mm.
+    @return Millimetres beyond the half extent, for the window side.
+    @note The zone of competence of a body ends where that of another
+        begins: one looks at most halfway to the neighbour. It is not a
+        hand-picked threshold -- the density of the board decides it, so on a
+        dense module the window is tiny and on a sparse board it opens up to
+        the SEARCH_MARGIN_MM ceiling.
+    @note The minimum is not arbitrary: it is how much `_edge_mask` inflates
+        the contour with respect to the body. With a narrower window one
+        would cut one's own contour and measure nothing any more.
+    @note Why it is needed: with a fixed 2 mm window, on a 55 px/mm photo one
+        looks at 110 pixels of neighbourhood on each side. Measured on the
+        123 proposals of the test module, where the median distance between
+        proposals is zero: the morphological closing merged the body with
+        its surroundings (median contour 9 times the proposal area) and of
+        the 12 measurements that passed the filters the median displacement
+        was 1.44 mm, that is the detection latched onto the neighbour instead
+        of refining the body. With this rule the measurements become 71 and
+        the median displacement 0.08 mm.
     """
     floor = MORPH_GROWTH_PX / max(float(scale_px_per_mm), 1e-6)
     return max(floor, min(SEARCH_MARGIN_MM, float(gap_mm) / 2))
 
 
 def angular_resolution_deg(short_side_px: float) -> float:
-    """@brief Angolo piu' fine che un contorno di questa taglia puo' dichiarare.
+    """@brief Finest angle a contour of this size can declare.
 
-    @param short_side_px Lato corto del rettangolo minimo, in pixel, gia'
-        misurato sul contorno gonfiato dalla chiusura morfologica.
-    @return Gradi: sotto questo valore l'inclinazione non e' distinguibile
-        dall'incertezza di posizione dei punti di contorno.
-    @note Un chip 0402 alto 10 px non puo' dire che e' ruotato di due gradi:
-        basta che un punto di bordo sia fuori di un pixel. Un modulo lungo 800
-        px si'. La quota nasce dalla geometria del contorno, non da una soglia
-        scelta perche' un caso ci ricada dentro.
+    @param short_side_px Short side of the minimum rectangle, in pixels,
+        already measured on the contour inflated by the morphological closing.
+    @return Degrees: below this value the tilt cannot be told apart from the
+        position uncertainty of the contour points.
+    @note A 0402 chip 10 px tall cannot say it is rotated by two degrees: it
+        is enough that one edge point is off by one pixel. An 800 px long
+        module can. The value comes from the geometry of the contour, not
+        from a threshold chosen so that one case falls inside it.
     """
     body_px = float(short_side_px) - 2 * MORPH_GROWTH_PX
     return math.degrees(math.atan2(CONTOUR_NOISE_PX, max(body_px, 1.0)))
 
 
 def _axis_rotation(angle: float, rw: float, rh: float, short_side_px: float) -> float:
-    """@brief Orientamento del lato lungo, in gradi, da un minAreaRect.
+    """@brief Orientation of the long side, in degrees, from a minAreaRect.
 
-    @param angle Angolo restituito da cv2.minAreaRect, riferito a un lato
-        qualsiasi del rettangolo.
-    @param rw Larghezza del rettangolo minimo, in pixel.
-    @param rh Altezza del rettangolo minimo, in pixel.
-    @param short_side_px Lato corto, per sapere quanto fine puo' essere l'angolo.
-    @return Rotazione in [0, 180), gia' riportata al lato lungo.
-    @note minAreaRect e' ambiguo di 90 gradi perche' non dice quale lato ha
-        preso come riferimento: si toglie l'ambiguita' prendendo sempre il lato
-        lungo. Resta indeterminata la POLARITA' (quale estremo e' il pin 1, da
-        che parte guarda l'innesto): quella non si ricava dall'ingombro e va
-        chiesta al modello, non dedotta qui.
-    @note Un'inclinazione piu' piccola dell'incertezza -- il residuo che la
-        calibrazione stessa ammette sulla scheda, oppure la risoluzione
-        angolare del contorno, quale delle due e' maggiore -- viene riportata
-        alla cardinale. Non e' un arrotondamento di comodo: sotto quella soglia
-        un corpo davvero obliquo e una scheda leggermente storta danno la
-        stessa misura, e dichiarare un angolo sarebbe inventare precisione.
+    @param angle Angle returned by cv2.minAreaRect, in degrees, referred to
+        any side of the rectangle.
+    @param rw Width of the minimum rectangle, in pixels.
+    @param rh Height of the minimum rectangle, in pixels.
+    @param short_side_px Short side, in pixels, to know how fine the angle can be.
+    @return Rotation in [0, 180) degrees, already referred to the long side.
+    @note minAreaRect is ambiguous by 90 degrees because it does not say
+        which side it took as reference: the ambiguity is removed by always
+        taking the long side. The POLARITY remains undetermined (which end
+        is pin 1, which way the mating faces): that cannot be derived from
+        the extent and must be asked of the model, not deduced here.
+    @note A tilt smaller than the uncertainty -- the residual that the
+        calibration itself admits on the board, or the angular resolution of
+        the contour, whichever is larger -- is brought back to the cardinal.
+        It is not a rounding of convenience: below that threshold a truly
+        oblique body and a slightly skewed board give the same measurement,
+        and declaring an angle would be inventing precision.
     """
     axis = (angle if rw >= rh else angle + 90) % 180
     cardinal = 0.0 if (axis < 45 or axis > 135) else 90.0
@@ -1141,18 +1153,14 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
                           margin_mm: Optional[float] = None) -> Optional[dict]:
     """@brief Measure the real edges of one component in the photo, or return None when unclear.
 
-    Cerca i bordi reali di un componente nella foto.
-
-    Ritorna {x_mm, y_mm, length_mm, width_mm, rotation_deg} misurati, o
-    None se nella finestra non c'e' un contorno abbastanza chiaro e
-    compatibile con la stima di partenza.
-
     @param image BGR photo.
     @param frame Board reference in the photo.
     @param component Estimate with x_mm, y_mm, length_mm, width_mm, rotation_deg.
     @param forbidden Optional mask (1 = ignore) of the whole photo.
-    @param margin_mm Search margin beyond the half extent; None = SEARCH_MARGIN_MM.
-    @return The measured geometry, or None.
+    @param margin_mm Search margin beyond the half extent, in mm; None = SEARCH_MARGIN_MM.
+    @return The measured geometry {x_mm, y_mm, length_mm, width_mm,
+        rotation_deg}, or None when the window holds no contour clear enough
+        and compatible with the starting estimate.
     @note The contour is chosen on the closed (dilated) edge mask, and the
         orientation read on its minimum rectangle; centre and size are then
         read on the undilated Canny pixels it encloses, along that orientation
@@ -1163,16 +1171,16 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     length = float(component["length_mm"])
     width = float(component["width_mm"])
     rotation = float(component.get("rotation_deg") or 0.0)
-    # Ingombro nel sistema dell'immagine (X/Y), non nel sistema del pezzo.
-    # Vale per una rotazione qualsiasi; sulle cardinali si riduce esattamente
-    # a scambiare lunghezza e larghezza.
+    # Footprint in the image frame (X/Y), not in the part frame.
+    # It holds for any rotation; on the cardinal ones it reduces exactly to
+    # swapping length and width.
     cosine = abs(math.cos(math.radians(rotation)))
     sine = abs(math.sin(math.radians(rotation)))
     span_x = length * cosine + width * sine
     span_y = length * sine + width * cosine
 
-    # Finestra di ricerca: il tetto vale solo per un corpo isolato, altrimenti
-    # ci si ferma prima, dove comincia la zona di competenza del vicino.
+    # Search window: the cap applies only to an isolated body, otherwise one
+    # stops earlier, where the neighbour's area of competence begins.
     margin = SEARCH_MARGIN_MM if margin_mm is None else max(float(margin_mm), 0.0)
     px, py = frame.to_px(float(component["x_mm"]), float(component["y_mm"]))
     half_x = (span_x / 2 + margin) * frame.scale
@@ -1194,9 +1202,10 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     if not contours:
         return None
 
-    # Area e allungamento sono proprieta' del pezzo, non della sua posa: si
-    # ricavano dall'ingombro dichiarato e non dal rettangolo che lo racchiude
-    # nell'immagine, che per una posa obliqua e' piu' grande del corpo.
+    # Area and elongation are properties of the part, not of its pose: they
+    # are derived from the declared footprint and not from the rectangle that
+    # encloses it in the image, which for an oblique pose is larger than the
+    # body.
     expected_area = length * width * frame.scale ** 2
     expected_elongation = max(length, width) / max(1e-6, min(length, width))
     wcx, wcy = px - x0, py - y0
@@ -1211,9 +1220,9 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
         (rcx, rcy), (rw, rh), _ = cv2.minAreaRect(contour)
         rect_area = rw * rh
         if rect_area <= 0 or area / rect_area < MIN_FILL_RATIO:
-            # Riempie solo una piccola frazione del suo stesso rettangolo
-            # minimo: e' la sagoma a "manubrio"/"L" di piu' pezzi vicini
-            # saldati insieme, non un componente pieno.
+            # It fills only a small fraction of its own minimum rectangle: it
+            # is the "dumbbell"/"L" shape of several nearby pieces welded
+            # together, not a solid component.
             continue
         elongation = max(rw, rh) / max(1e-6, min(rw, rh))
         if elongation / expected_elongation > MAX_ELONGATION_RATIO or \
@@ -1229,11 +1238,11 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     (rcx, rcy), (rw, rh), angle = cv2.minAreaRect(best)
     if rw <= 0 or rh <= 0:
         return None
-    # L'orientamento si legge sul contorno chiuso (angular_resolution_deg ne
-    # conosce la crescita); centro e ingombro sui bordi veri che racchiude,
-    # lungo l'asse riportato, cosi' la crescita morfologica non entra nella
-    # misura (vedi _edge_extent). Senza pixel di bordo utili resta il
-    # rettangolo del contorno, meno la crescita dichiarata per lato.
+    # The orientation is read on the closed contour (angular_resolution_deg
+    # knows its growth); centre and footprint on the true edges it encloses,
+    # along the reported axis, so the morphological growth does not enter the
+    # measurement (see _edge_extent). Without useful edge pixels the contour
+    # rectangle remains, minus the declared growth per side.
     new_rotation = _axis_rotation(angle, rw, rh, min(rw, rh))
     extent = _edge_extent(raw_edges, best, new_rotation)
     if extent is not None:
@@ -1256,17 +1265,18 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
     }
 
 
-#: Lato delle classi di colore (Delta E CIE76) dell'istogramma con cui
-#: `sample_board_color` cerca il colore piu' esteso della scheda. Ripiego
-#: dichiarato: circa due soglie di percettibilita' (MIN_BACKGROUND_DELTA_E),
-#: abbastanza stretto da separare il soldermask dai corpi e dalle piazzole,
-#: abbastanza largo da tenere insieme il rumore di una superficie. Non decide
-#: da solo: il conteggio si fa sulla classe e le sue vicine (3x3x3), quindi il
-#: risultato non dipende da dove cadono i confini delle classi.
+#: Side of the colour classes (Delta E CIE76) of the histogram with which
+#: `sample_board_color` looks for the most extensive colour of the board.
+#: Declared fallback: about two perceptibility thresholds
+#: (MIN_BACKGROUND_DELTA_E), narrow enough to separate the soldermask from
+#: bodies and pads, wide enough to keep a surface's noise together. It does
+#: not decide alone: the count is made on the class and its neighbours
+#: (3x3x3), so the result does not depend on where the class boundaries fall.
 BOARD_COLOR_BIN_DELTA_E = 5.0
-#: Lato lungo, in pixel, a cui si riduce il ritaglio prima di contare i
-#: colori: solo velocita'. La riduzione per area media i dettagli fini
-#: (serigrafie, piste) ma non sposta il colore di una superficie estesa.
+#: Long side, in pixels, to which the crop is reduced before counting the
+#: colours: speed only. Area-averaging reduction averages out the fine
+#: details (silkscreen, traces) but does not shift the colour of an extended
+#: surface.
 BOARD_COLOR_MAX_SIDE_PX = 512
 
 
@@ -1276,12 +1286,12 @@ def sample_board_color(crop) -> Optional[str]:
     @param crop BGR image in which the board fills the whole frame (the
         calibrated crop that prepare_photo returns).
     @return "#rrggbb" (lower case), or None when OpenCV is missing or the
-        crop is not a non-empty three-channel image.
+        crop is not a nonempty three-channel image.
     @note The mask is the surface that covers the largest area of the board:
         components, pads, silkscreen and holes are many small patches of other
         colours. The crop is binned in CIE L*a*b* (BOARD_COLOR_BIN_DELTA_E
-        per class), each class counted together with its 26 neighbours, and
-        the result is the per-channel median of the pixels of the winning
+        for each class), each class counted together with its 26 neighbours,
+        and the result is the channel-wise median of the pixels of the winning
         neighbourhood -- so noise and gentle shading of the mask stay inside
         it, and the median ignores the rest.
     @note Declared limit: when one other colour covers more of the board than
@@ -1302,7 +1312,7 @@ def sample_board_color(crop) -> Optional[str]:
                            interpolation=cv2.INTER_AREA)
     pixels = image.reshape(-1, 3)
     lab = _lab(image).reshape(-1, 3)
-    # Classi: L in [0, 100], a e b in [-128, 128]; indici non negativi.
+    # Classes: L in [0, 100], a and b in [-128, 128]; non-negative indices.
     step = BOARD_COLOR_BIN_DELTA_E
     offsets = np.array([0.0, 128.0, 128.0], dtype=np.float32)
     index = np.floor((lab + offsets) / step).astype(np.int64)
@@ -1310,8 +1320,8 @@ def sample_board_color(crop) -> Optional[str]:
     index = np.clip(index, 0, np.array(shape) - 1)
     counts = np.zeros(shape, dtype=np.int64)
     np.add.at(counts, (index[:, 0], index[:, 1], index[:, 2]), 1)
-    # Somma sulla classe e le sue vicine: un colore a cavallo di due classi
-    # conta per intero, come uno che cade nel mezzo di una.
+    # Sum over the class and its neighbours: a colour straddling two classes
+    # counts in full, like one falling in the middle of one.
     padded = np.pad(counts, 1)
     smoothed = np.zeros_like(counts)
     for dl in range(3):
@@ -1327,23 +1337,23 @@ def sample_board_color(crop) -> Optional[str]:
 
 
 def crop_frame(image, body_length: float, body_width: float) -> Optional[BoardFrame]:
-    """@brief Riferimento di una foto GIA' calibrata e ritagliata sulla scheda.
+    """@brief Reference of a photo ALREADY calibrated and cropped to the board.
 
-    @param image Ritaglio in cui la scheda occupa esattamente l'immagine.
-    @param body_length Lunghezza dichiarata della scheda, in millimetri.
-    @param body_width Larghezza dichiarata, in millimetri.
-    @return BoardFrame con origine al centro, o None se le quote non reggono.
-    @note `prepare_photo` ritaglia la scheda sul suo contorno: ricercarla con
-        `find_board` dentro il proprio ritaglio e' sia inutile sia rischioso,
-        perche' li' il rettangolo scuro piu' grande puo' essere un componente.
-        Qui il riferimento si costruisce dalle quote dichiarate e dai pixel del
-        ritaglio, senza nessuna ricerca.
-    @note La scala si prende dal lato lungo: e' il lato su cui l'errore
-        relativo di ritaglio pesa meno. Vale per ENTRAMBI gli assi, quindi
-        e' corretta solo se il ritaglio ha lo stesso rapporto delle quote
-        dichiarate. `find_board` ne accetta uno diverso fino a
-        MAX_BOARD_ASPECT_ERROR: chi misura su un ritaglio qualsiasi passa
-        prima da `isotropic_crop_frame`, che ricampiona l'immagine.
+    @param image Crop in which the board occupies exactly the image.
+    @param body_length Declared board length, in mm.
+    @param body_width Declared board width, in mm.
+    @return BoardFrame with origin at the centre, or None if the dimensions do not hold.
+    @note `prepare_photo` crops the board on its outline: searching for it
+        again with `find_board` inside its own crop is both useless and
+        risky, because there the largest dark rectangle can be a component.
+        Here the reference is built from the declared dimensions and the crop
+        pixels, without any search.
+    @note The scale is taken from the long side: it is the side on which the
+        relative cropping error weighs less. It applies to BOTH axes, so it
+        is correct only if the crop has the same ratio as the declared
+        dimensions. `find_board` accepts a different one up to
+        MAX_BOARD_ASPECT_ERROR: whoever measures on an arbitrary crop goes
+        first through `isotropic_crop_frame`, which resamples the image.
     """
     if image is None or body_length <= 0 or body_width <= 0:
         return None
@@ -1379,8 +1389,8 @@ def isotropic_board(image, frame: BoardFrame, body_length: float, body_width: fl
     extents = (getattr(frame, "width_px", None), getattr(frame, "height_px", None))
     if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
                for value in extents):
-        # Riferimento senza estensioni numeriche: non c'e' nulla da cui
-        # ricavare le due scale, quindi non si ricampiona.
+        # Reference without numeric extents: there is nothing from which to
+        # derive the two scales, so no resampling.
         return image, frame
     scale_x = extents[0] / body_length
     scale_y = extents[1] / body_width
@@ -1392,7 +1402,7 @@ def isotropic_board(image, frame: BoardFrame, body_length: float, body_width: fl
     height, width = image.shape[:2]
     new_width = max(1, round(width * target / scale_x))
     new_height = max(1, round(height * target / scale_y))
-    # Fattori effettivi, dopo l'arrotondamento a pixel interi.
+    # Effective factors, after rounding to whole pixels.
     factor_x, factor_y = new_width / width, new_height / height
     resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
     board_width, board_height = frame.width_px * factor_x, frame.height_px * factor_y
@@ -1421,31 +1431,31 @@ def isotropic_crop_frame(image, body_length: float, body_width: float):
 
 def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
                     exclude_rects_mm: Sequence[tuple] = ()) -> tuple[list[dict], RefineReport]:
-    """@brief Misura i bordi dei componenti dati, su una foto e un riferimento noti.
+    """@brief Measure the edges of the given components, on a known photo and reference.
 
-    @param image Foto in cui cercare i bordi.
-    @param frame Riferimento della scheda nella foto.
-    @param components Ipotesi con x_mm, y_mm, length_mm, width_mm, rotation_deg.
-    @param exclude_rects_mm Rettangoli (x0,y0,x1,y1) in mm dove i contorni non
-        vanno guardati: tipicamente le strisce dei contatti dichiarati, i cui
-        bordi metallici lucidi si confondono con quelli di un componente.
-    @return Copia della lista con la geometria misurata dove e' stato possibile,
-        e il resoconto di quanti sono stati misurati, quanti lasciati stimati
-        (contorno non chiaro o geometria non misurabile) e quanti non misurati
-        per un errore inatteso (RefineReport.failed).
-    @note Non tocca nome, tipo, colore, marcatura: solo la geometria, e solo
-        quando la misura e' abbastanza affidabile (vedi `refine_component_edges`).
-        Quando non misura tiene la stima, quindi non puo' fare peggio che non
-        misurare affatto.
+    @param image Photo in which to search for the edges.
+    @param frame Board reference in the photo.
+    @param components Hypotheses with x_mm, y_mm, length_mm, width_mm, rotation_deg.
+    @param exclude_rects_mm Rectangles (x0, y0, x1, y1) in mm where contours
+        must not be looked at: typically the strips of the declared contacts,
+        whose shiny metal edges are confused with those of a component.
+    @return A copy of the list with the measured geometry where it was
+        possible, and the report of how many were measured, how many left
+        estimated (contour not clear or geometry not measurable) and how many
+        not measured because of an unexpected error (RefineReport.failed).
+    @note It does not touch name, kind, colour, marking: only the geometry,
+        and only when the measurement is reliable enough (see
+        `refine_component_edges`). When it does not measure it keeps the
+        estimate, so it cannot do worse than not measuring at all.
     """
     report = RefineReport()
     refined = [dict(c) for c in components]
     if cv2 is None or frame is None or not refined:
         return refined, report
     forbidden = _forbidden_mask(image, frame, exclude_rects_mm)
-    # La finestra di ricerca di ciascuno si ferma a meta' strada dal corpo piu'
-    # vicino: si calcola una volta sola sulle stime di partenza, prima che le
-    # misure le cambino, altrimenti l'ordine della lista deciderebbe le zone.
+    # The search window of each one stops halfway to the nearest body: it is
+    # computed once on the starting estimates, before the measurements change
+    # them, otherwise the order of the list would decide the areas.
     rects = [_body_rect_mm(c) for c in refined]
     margins = [search_margin_mm(
         min((_rect_gap_mm(rect, other) for index, other in enumerate(rects) if index != position),
@@ -1457,7 +1467,7 @@ def refine_on_frame(image, frame: BoardFrame, components: Sequence[dict],
             measured = refine_component_edges(image, frame, component, forbidden, margin)
         except expected_errors:
             measured = None
-        except Exception as exc:  # noqa: BLE001 - un difetto su un pezzo non ferma gli altri
+        except Exception as exc:  # noqa: BLE001 - a defect on one part does not stop the others
             # Not an unclear contour: a defect. It is kept apart so the log
             # does not present a bug as «contorno non chiaro».
             report.failed.append(f"{component.get('name', '?')}: {type(exc).__name__}: {exc}")

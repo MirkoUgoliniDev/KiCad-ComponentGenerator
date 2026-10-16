@@ -42,6 +42,20 @@ def _property_line(text, key):
     return next(line for line in text.splitlines() if line.strip().startswith(f'(property "{key}"'))
 
 
+def _at_centre(key, centre, name='Board', reference='U'):
+    """The `(at x y 0)` the file writes for a property centred at `centre`.
+
+    CONTRACT CHANGED 2026-10-16 (user): the properties are written at their
+    bottom-left anchor, `(justify left bottom)`, converted from the centre
+    this rule computes with KiCad's text geometry (`property_anchors`), so
+    KiCad still draws them centred there.
+    """
+    from kicadgen.generators.symbol import property_anchor_from_centre, property_texts
+    x, y = property_anchor_from_centre(property_texts(reference, name)[key], TEXT_SIZE, *centre)
+    num = lambda v: f'{v:.4f}'.rstrip('0').rstrip('.') or '0'
+    return f'(at {num(x)} {num(y)} 0)'
+
+
 SIDE_PINS = [SymbolPin('1', 'VCC', 'power_in', 'left'), SymbolPin('2', 'GND', 'power_in', 'left'),
              SymbolPin('3', 'TX', 'output', 'right'), SymbolPin('4', 'RX', 'input', 'right')]
 
@@ -100,8 +114,8 @@ def test_the_written_file_uses_the_lifted_positions():
     layout = layout_symbol(pins)
     positions = default_property_positions(layout)
     text = serialize_symbol('ESP_Module', pins)
-    assert f'(at 0 {positions["Value"][1]:g} 0)' in _property_line(text, 'Value')
-    assert f'(at 0 {positions["Reference"][1]:g} 0)' in _property_line(text, 'Reference')
+    assert _at_centre('Value', positions['Value'], 'ESP_Module') in _property_line(text, 'Value')
+    assert _at_centre('Reference', positions['Reference'], 'ESP_Module') in _property_line(text, 'Reference')
     assert positions != _old_defaults(layout)
 
 
@@ -133,15 +147,19 @@ def test_without_pins_above_the_body_the_file_is_byte_identical(body):
 def test_the_known_default_lines_are_unchanged():
     # Golden lines of a two-pin symbol (body 10.16 x 10.16 mm, h = 5.08).
     text = serialize_symbol('Board', [SymbolPin('1', 'A', 'passive', 'left'), SymbolPin('2', 'B', 'passive', 'right')])
-    assert '(property "Reference" "U" (at 0 10.16 0)' in _property_line(text, 'Reference')
-    assert '(property "Value" "Board" (at 0 7.62 0)' in _property_line(text, 'Value')
+    # CONTRACT CHANGED 2026-10-16: the same centres (0, 10.16) and (0, 7.62),
+    # written as their bottom-left anchors.
+    assert _property_line(text, 'Reference') == (
+        '    (property "Reference" "U" (at -1.3098 9.417 0) (show_name no) (do_not_autoplace no) '
+        '(effects (font (size 1.27 1.27)) (justify left bottom)))')
+    assert _property_line(text, 'Value').startswith('    (property "Value" "Board" ' + _at_centre('Value', (0, 7.62)))
 
 
 def test_explicit_positions_are_never_touched_by_the_rule():
     pins = SIDE_PINS + [SymbolPin('5', 'EN', 'input', 'top', length=12.7)]
     text = serialize_symbol('Board', pins, properties={'Value': (0.0, 2.54), 'Reference': (-7.62, -12.7)})
-    assert '(at 0 2.54 0)' in _property_line(text, 'Value')
-    assert '(at -7.62 -12.7 0)' in _property_line(text, 'Reference')
+    assert _at_centre('Value', (0.0, 2.54)) in _property_line(text, 'Value')
+    assert _at_centre('Reference', (-7.62, -12.7)) in _property_line(text, 'Reference')
 
 
 # -- Review M2 (2026-10-15): a pin name drawn above the body counts ---------
@@ -253,7 +271,7 @@ def test_a_hidden_top_pin_does_not_lift_the_properties():
     assert default_property_positions(layout) == _old_defaults(layout)
     text = serialize_symbol('Board', hidden)
     assert '(hide yes)' in text
-    assert f'(at 0 {_old_defaults(layout)["Value"][1]:g} 0)' in _property_line(text, 'Value')
+    assert _at_centre('Value', _old_defaults(layout)['Value']) in _property_line(text, 'Value')
 
 
 def test_the_same_top_pin_visible_lifts_the_properties():

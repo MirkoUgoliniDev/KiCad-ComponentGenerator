@@ -83,11 +83,12 @@ passo per passo.</p>
 
 <h2 id="cosa-fa">1. Che cosa fa KiCadGen</h2>
 <p>KiCadGen crea un componente per KiCad a partire da documenti tecnici e
-fotografie: il <strong>footprint</strong> (<code>.kicad_mod</code>) e il
+fotografie: il <strong>footprint</strong> (<code>.kicad_mod</code>), il
+<strong>simbolo elettrico</strong> (<code>.kicad_sym</code>) e il
 <strong>modello 3D</strong> (<code>.step</code>). I documenti vengono letti da
-un modello di intelligenza artificiale tramite OpenRouter; il programma
-trasforma poi quello che il modello ha letto in geometria, con regole
-deterministiche.</p>
+un modello di intelligenza artificiale (tramite OpenRouter o l'API diretta di
+DeepSeek); il programma trasforma poi quello che il modello ha letto in
+geometria, con regole deterministiche.</p>
 <p>Per una scheda con componenti montati sopra (un modulo, una scheda di
 sviluppo) KiCadGen ricostruisce gli <strong>ingombri meccanici</strong>: posizione,
 dimensioni e orientamento dei corpi visibili nella foto. Non fa reverse
@@ -101,16 +102,31 @@ KiCad scelti per somiglianza di misure.</p>
   non possono essere eseguiti e perché.</li>
   <li><strong>KiCad</strong> (kicad.org) serve per provare il risultato e per
   installare le librerie.</li>
-  <li><strong>Chiave OpenRouter</strong>: l'analisi dei documenti è a pagamento e
-  richiede una chiave. Si inserisce da <span class="ui">Configurazione</span> →
-  <span class="ui">Account AI...</span>: incollala, premi
-  <span class="ui">Verifica</span> e poi <span class="ui">Salva</span>; resta nel
-  Gestore credenziali di Windows. Il vecchio file <code>.env</code> (riga
-  <code>OPENROUTER_API_KEY=sk-or-...</code> nella cartella
-  <code>%LOCALAPPDATA%\KiCadGen</code>) resta valido. Se manca la chiave,
+  <li><strong>Chiave API</strong>: l'analisi dei documenti è a pagamento e
+  richiede una chiave di uno dei due provider supportati, <strong>OpenRouter</strong>
+  (una chiave per molti vendor; il modello predefinito del programma installato,
+  <code>anthropic/claude-opus-5</code>, passa di lì) oppure
+  <strong>DeepSeek (API diretta)</strong> (modelli <code>deepseek-api/...</code>;
+  avviando dai sorgenti il predefinito è <code>deepseek-api/deepseek-flash</code>).
+  Il modello si sceglie dall'interfaccia: <span class="ui">Configurazione</span> →
+  <span class="ui">Default generali AI...</span>, scheda <span class="ui">Modello</span>,
+  oppure il riquadro <span class="ui">Modello AI</span> per la sessione.
+  Si inserisce da <span class="ui">Configurazione</span> →
+  <span class="ui">Account AI...</span>: la finestra elenca ogni provider con
+  l'origine della chiave in uso (variabile d'ambiente, Gestore credenziali, file
+  <code>.env</code> o nessuna) e il saldo corrente; scegli il provider, incolla
+  la chiave, premi <span class="ui">Verifica</span> (nessuna chiamata a un modello,
+  nessun costo) e poi <span class="ui">Salva</span>; resta nel Gestore
+  credenziali di Windows (<code>KiCadGen/OpenRouter</code>,
+  <code>KiCadGen/DeepSeek</code>). <span class="ui">Rimuovi chiave</span> cancella
+  solo quella voce. Il file <code>.env</code> nella cartella
+  <code>%LOCALAPPDATA%\KiCadGen</code> (righe <code>OPENROUTER_API_KEY=sk-or-...</code>
+  e/o <code>DEEPSEEK_API_KEY=...</code>) resta valido; una chiave salvata con
+  «Account AI...» ha la precedenza su quella del file. Se manca la chiave,
   il programma lo dice prima di avviare un'analisi e offre di aprire la finestra.
   Quando la chiave funziona, la riga <span class="ui">Credito AI</span> della
-  scheda <span class="ui">Progetto</span> mostra il saldo.</li>
+  scheda <span class="ui">Progetto</span> mostra il saldo del provider del modello
+  scelto.</li>
 </ul>
 <p>La lingua dell'interfaccia (italiano, inglese, francese, tedesco) si sceglie
 dall'elenco sopra le schede.</p>
@@ -127,7 +143,10 @@ modello 3D.</p>
   al campo permette di sceglierne un'altra.</li>
   <li>Per riprendere un lavoro: <span class="ui">File → Apri progetto...</span>
   (<kbd>Ctrl</kbd>+<kbd>O</kbd>) elenca i progetti dell'area di lavoro, dal più recente.
-  <span class="ui">File → Rinomina progetto...</span> cambia il nome della cartella.</li>
+  <span class="ui">File → Rinomina progetto...</span> (<kbd>F2</kbd>) cambia il nome
+  della cartella e, insieme, quello di footprint, simbolo e modello 3D. Senza un
+  progetto aperto la finestra mostra la pagina iniziale, con i due comandi e i
+  progetti recenti, riapribili con un clic.</li>
 </ol>
 
 <h2 id="documenti">4. Caricare i documenti</h2>
@@ -208,6 +227,11 @@ il riepilogo mostra rilevatore e modello attivi. Aprilo con la freccia per
 vedere o modificare le altre scelte:</p>
 <ul>
   <li><span class="ui">Rilevamento foto</span> (conta solo per le schede):
+    <span class="ui">YOLO + rete SMD locale (v3)</span> (predefinito avviando il
+    programma dai sorgenti: il rilevatore propone i riquadri, una rete locale
+    classifica i corpi tenuti e solo quelli che non risolve vanno all'AI; nel
+    programma Windows installato la voce è disabilitata perché PyTorch non è
+    incluso, e il predefinito è la voce seguente),
     <span class="ui">YOLO locale + verifica AI</span> (il rilevatore sul tuo
     computer propone i riquadri, il modello AI li verifica),
     <span class="ui">AI (attuale)</span>,
@@ -223,26 +247,36 @@ vedere o modificare le altre scelte:</p>
     viene caricato, quindi si verifica solo premendo
     <span class="ui">Verifica compatibilità</span>. Se il file manca o non è
     compatibile, l'analisi si ferma prima di spendere.</li>
-  <li><span class="ui">Modello AI</span>: il modello usato per l'analisi. Il
-  pulsante accanto sceglie un modello diverso <em>solo per questa sessione</em>;
-  il predefinito si imposta da <span class="ui">Configurazione → Gestione
-  tipologie e profili AI...</span>.</li>
+  <li><span class="ui">Modello AI</span>: il modello unico usato per documenti,
+  foto e verifica. Il pulsante accanto sceglie un modello diverso (filtrabile per
+  costo, sorgente OpenRouter o DeepSeek) <em>solo per questa sessione</em>;
+  il predefinito e la sua sorgente si impostano da <span class="ui">Configurazione →
+  Default generali AI...</span>, i prompt per tipologia da <span class="ui">Configurazione →
+  Gestione tipologie e profili AI...</span>.</li>
 </ul>
 
 <h2 id="analisi">6. Avviare l'analisi e controllare i costi</h2>
 <ol>
   <li>Premi <span class="ui">Estrai parametri con AI</span>. È un'analisi
-  <strong>a pagamento</strong>: consuma credito OpenRouter. Prima di partire, il
-  log scrive quali modelli verranno usati.</li>
-  <li>Una finestra mostra l'avanzamento. <span class="ui">Interrompi</span> ferma il
-  lavoro.</li>
+  <strong>a pagamento</strong>: consuma credito del provider del modello scelto.
+  Prima di partire, il log scrive quali modelli verranno usati.</li>
+  <li>Una finestra mostra l'avanzamento: l'elenco delle fasi e chi lavora in
+  ciascuna (<span class="ui">Modello AI</span>, <span class="ui">Lettura ritagli</span>
+  e <span class="ui">Lettura sigle</span> sono le fasi remote a pagamento;
+  <span class="ui">YOLO</span>, <span class="ui">Rete SMD locale</span>,
+  <span class="ui">OpenCV</span>, KiCadGen, la libreria KiCad e FreeCAD lavorano sul
+  tuo computer). <span class="ui">Interrompi</span> ferma il lavoro: una richiesta
+  già inviata deve concludersi, ma non ne partono altre.</li>
   <li>Alla fine, il costo dell'ultima analisi compare nella finestra e nel
   <span class="ui">Log AI</span> (icona in alto nella scheda
   <span class="ui">Progetto</span>). Se la risposta è stata presa dalla cache
   locale, non c'è stata nessuna chiamata a pagamento e il log lo dice.</li>
-  <li>La riga <span class="ui">Credito AI</span> mostra il saldo del conto
-  OpenRouter e il <strong>costo totale del progetto</strong>, somma di tutte le
-  chiamate a pagamento fatte per quel progetto.</li>
+  <li>La riga <span class="ui">Credito AI</span> mostra il saldo del conto del
+  provider e il <strong>costo totale del progetto</strong>, somma di tutte le
+  chiamate a pagamento fatte per quel progetto, divisa per provider e salvata in
+  <code>ai-costs.json</code> nella cartella del progetto (OpenRouter riporta il
+  costo di ogni chiamata; DeepSeek no, quindi si calcola token × prezzo
+  ufficiale).</li>
 </ol>
 <div class="note">Ogni comando che spende lo dice nel suo suggerimento (il testo che
 compare fermando il mouse sul pulsante). I comandi di revisione e di rigenerazione
@@ -250,60 +284,84 @@ del 3D sono gratuiti.</div>
 
 <h2 id="revisione">7. Rivedere i corpi trovati sulla foto</h2>
 <p>Solo per le due tipologie <span class="ui">Scheda con componenti</span>.</p>
-<h3>Classificazione YOLO</h3>
-<p>Con il rilevatore YOLO, prima della verifica a pagamento si apre la finestra
-<span class="ui">Classificazione YOLO</span>, con i corpi rilevati. Togli i
-riquadri che cadono su scritte, fori o piazzole vuote, aggiungi quelli mancanti,
-poi <span class="ui">OK</span>. Annullando, l'analisi si ferma senza pagare la
-verifica.</p>
-<h3>Pausa dopo l'inventario</h3>
-<p>Quando l'inventario AI è finito, il programma chiede se vuoi rivedere gli
-ingombri <strong>prima</strong> della scelta dei modelli e della generazione 3D. La
-revisione è gratuita. Rispondendo <span class="ui">No</span> si prosegue con i corpi
-come li ha proposti l'AI. La pausa si attiva o si disattiva da
-<span class="ui">Configurazione → Opzioni di generazione...</span>
-(<span class="ui">Fermati dopo l'inventario AI per rivedere i corpi</span>).</p>
-<h3>Revisione AI</h3>
+<p>La revisione avviene in <strong>una sola finestra, in due fasi</strong>: prima
+sulle proposte del rilevatore locale, poi sui corpi riconciliati con l'AI.
+Entrambe le fasi sono gratuite.</p>
+<h3>Fase 1: le proposte del rilevatore locale</h3>
+<p>Con un rilevatore YOLO, prima di qualunque chiamata a pagamento la finestra di
+revisione si apre con i riquadri trovati sul tuo computer. Togli quelli che cadono
+su scritte, fori o piazzole vuote, traccia quelli mancanti, poi
+<span class="ui">OK</span> manda avanti i riquadri tenuti. Annullando, l'analisi si
+ferma senza pagare nulla. Le proposte tenute vengono salvate nella cartella
+<code>photo-review</code> del progetto. Con <span class="ui">Solo YOLO locale
+(pretest, nessuna AI)</span> il lavoro finisce qui.</p>
+<h3>Fase 2: pausa dopo l'inventario</h3>
+<p>Quando l'inventario AI è finito, la stessa finestra si riapre con i corpi
+riconciliati, <strong>prima</strong> della scelta dei modelli e della generazione 3D.
+Accanto alla lettura dell'AI resta quella del rilevatore (classe, confidenza,
+riquadro), mai sovrascritta: se il riquadro originale del rilevatore differisce
+da quello attuale, compare come fantasma tratteggiato sotto il corpo scelto. I
+corpi proposti dalla sola AI (gialli tratteggiati) partono esclusi: si tengono
+con <span class="ui">Tieni o lascia</span> (<kbd>T</kbd>). La pausa si attiva o si
+disattiva da <span class="ui">Configurazione → Opzioni di generazione...</span>
+(<span class="ui">Fermati dopo l'inventario AI per rivedere i corpi (gratuito)</span>);
+disattivata, si prosegue con i corpi come li ha proposti l'AI.</p>
+<h3>I comandi della finestra</h3>
 <p>La finestra mostra la foto con un rettangolo per ogni corpo:</p>
 <ul>
   <li><span class="ui">Aggiungi componente</span> (<kbd>R</kbd>): traccia un
   rettangolo sulla foto, poi assegna la tipologia.
   <span class="ui">Elimina selezionato</span> (<kbd>Canc</kbd>) toglie il corpo
-  scelto.</li>
+  scelto; <span class="ui">Lazo</span> (<kbd>L</kbd>) sceglie insieme i riquadri
+  racchiusi in un rettangolo.</li>
+  <li><span class="ui">Copia formato</span>: clic sul componente da copiare, poi
+  clic sugli altri per incollare misure, altezza, tipologia, package e modello
+  KiCad (posizione e rotazione restano).</li>
   <li>Zoom con <kbd>+</kbd>, <kbd>-</kbd> o la rotella del mouse;
-  <span class="ui">Adatta foto</span> (<kbd>F</kbd>) mostra la foto intera.</li>
-  <li><span class="ui">Parametri…</span>: quote, rotazione, altezza e nome del
-  componente scelto. <span class="ui">Scegli modello KiCad…</span> (anche con doppio
-  clic nella lista): vedi il <a href="#step">capitolo 10</a>.</li>
+  <span class="ui">Adatta foto</span> (<kbd>F</kbd>) mostra la foto intera; il
+  pulsante della foto (<kbd>P</kbd>) la mostra intera, attenuata o nascosta per
+  leggere i soli contorni.</li>
   <li>Scelto un corpo nell'elenco o sulla foto, <span class="ui">Parametri…</span>
-  mostra nome, tipo e marcatura, modificabili, e sotto cosa ha letto
-  l'AI per quel corpo: tipo, package e sigla con le loro confidenze, l'esito
-  delle due letture del ritaglio e lo stato del modello KiCad. Centro, lati e
-  rotazione si correggono trascinando il rettangolo sulla foto; l'altezza e
-  ogni altra quota in <span class="ui">Modifica componenti…</span> (<kbd>Ctrl+E</kbd>). Nessuna richiesta AI. Il
-  marcatore <code>[!]</code> dice solo che la riga ha almeno un avviso (di
-  solito «modello KiCad non confermato»), <code>[?]</code> che il tipo non è
-  stato stabilito.</li>
+  apre <span class="ui">Parametri componente</span>: tre sezioni di sola lettura
+  (che cosa ha letto il rilevatore locale, che cosa ha letto l'AI con tipo, package
+  e sigla e le loro confidenze, l'esito delle due letture del ritaglio e la riga
+  <span class="ui">Esito rete SMD</span>; lo stato del modello KiCad con
+  <span class="ui">Scegli modello KiCad…</span>, vedi il <a href="#step">capitolo
+  11</a>, anche con doppio clic nella lista) e sotto le correzioni modificabili:
+  nome, tipo, marcatura, quote, rotazione, altezza. Centro e lati si correggono
+  anche trascinando il rettangolo e le sue maniglie sulla foto; la rotazione si
+  cambia solo con il campo numerico <span class="ui">Rotazione</span>. Nessuna
+  richiesta AI.</li>
+  <li>I marcatori dell'elenco: <code>[!]</code> dice che la riga ha almeno un
+  avviso (di solito «modello KiCad non confermato»), <code>[?]</code> che il tipo
+  non è stato stabilito; un altro marcatore segnala che la classe del rilevatore
+  contraddice quella dell'AI. Il pulsante dei dubbi mostra le incertezze dichiarate
+  dal modello, come testo.</li>
   <li><span class="ui">Applica correzioni</span> salva; <span class="ui">Annulla</span>
-  lascia tutto com'era.</li>
+  lascia tutto com'era. Dopo averle applicate, <span class="ui">Rigenera modello
+  3D</span> nella scheda <span class="ui">Modello 3D</span> ricostruisce lo STEP.</li>
 </ul>
 <p>Più tardi, dalla scheda <span class="ui">Progetto</span>:</p>
 <ul>
-  <li><span class="ui">Rivedi proposte salvate…</span> riapre i corpi rilevati
-  salvati nel progetto. Gratuito.</li>
+  <li><span class="ui">Revisione componenti…</span> riapre la fase salvata nel
+  progetto: le proposte del rilevatore prima dell'inventario AI, i corpi
+  riconciliati con quote e scelta dei modelli KiCad dopo. Gratuito.</li>
   <li><span class="ui">Rilancia inventario AI (a pagamento)…</span> rifà solo
-  l'inventario sulle proposte salvate. È l'unico dei tre che spende.</li>
-  <li><span class="ui">Modifica la revisione dei componenti…</span> riapre la
-  revisione: ingombri, quote e scelta dei modelli KiCad. Gratuito.</li>
+  l'inventario AI sulle proposte salvate. È l'unico dei due che spende.</li>
 </ul>
 
 <h2 id="generazione">8. Generazione: footprint e modello 3D</h2>
-<p>Quando l'analisi è valida, la generazione parte da sola. La finestra di
-avanzamento mostra tre passi, e per ciascuno chi lo esegue:</p>
+<p>Quando l'analisi è valida, la generazione parte da sola. Nella stessa finestra
+di avanzamento del <a href="#analisi">capitolo 6</a>, dopo le fasi dell'analisi, la
+generazione occupa quattro passi, e per ciascuno l'intestazione dice chi lo
+esegue:</p>
 <ol>
   <li><span class="ui">Footprint 2D (KiCadGen)</span>: il file
   <code>.kicad_mod</code>, scritto dal programma.</li>
-  <li><span class="ui">Modelli 3D dalla libreria KiCad</span>: per ogni corpo si
+  <li><span class="ui">Confronto con i consolidati</span>: per le schede, i corpi
+  vengono confrontati con gli abbinamenti corpo/modello già accettati
+  (<span class="ui">Archivio abbinamenti accettati…</span>).</li>
+  <li><strong>Modelli dalla libreria KiCad</strong>: per ogni corpo si
   cercano i modelli della libreria 3D di KiCad con misure compatibili.</li>
   <li><span class="ui">Solido 3D con FreeCAD</span>: il file <code>.step</code>.</li>
 </ol>
@@ -315,7 +373,17 @@ stato «Completato»: si chiude con <span class="ui">Chiudi</span>. In caso di e
 o interruzione si chiude da sola e l'errore viene mostrato.</p>
 <p>La scheda <span class="ui">Anteprima footprint</span> mostra il disegno 2D in
 scala con le quote, i numeri dei pin e la <span class="ui">Griglia</span> (passo
-1 mm oppure 0.1 in); l'icona della tabella apre il pinout.</p>
+1 mm oppure 0.1 in, con una sotto-griglia puntinata per i disegni); l'icona della
+tabella apre il pinout. L'anteprima è una <strong>bozza</strong>, come il simbolo:
+i testi Reference e Value si trascinano, i disegni si aggiungono dalla tavolozza,
+le piazzole ospitanti si modificano, con <span class="ui">Annulla modifica</span> /
+<span class="ui">Ripeti modifica</span>. <span class="ui">Applica</span> scrive il
+file <code>.kicad_mod</code>, <span class="ui">Annulla</span> scarta le modifiche
+non applicate, <span class="ui">Recupera bozza</span> ripristina una bozza non
+applicata dopo una chiusura imprevista. I comandi della scheda
+<span class="ui">KiCad</span> usano il file applicato: una bozza non applicata non
+viene installata e la segnala <span class="ui">Verifica componente per
+KiCad</span>.</p>
 <p>Per le schede, il riquadro <span class="ui">Footprint sulla scheda ospitante</span>
 permette di scegliere il montaggio direttamente dall'anteprima, senza tornare
 all'inizio o ripetere l'analisi:</p>
@@ -337,7 +405,7 @@ e non rigenera il modello 3D. Le scelte sono sincronizzate con quelle del passo
 del modulo 3D, ricavata dalla foto, resta invariata. Un contatto castellated
 che possiede soltanto un mezzo foro non viene trasformato in un foro passante.</p>
 
-<h2 id="simbolo">Simbolo elettrico</h2>
+<h2 id="simbolo">9. La scheda «Simbolo elettrico»</h2>
 <p>Tra «Anteprima footprint» e «Modello 3D» trovi il simbolo da usare nello
 schema. I numeri sono quelli dei pad elettrici del footprint e non si modificano
 in questa tabella. Puoi correggere la funzione, scegliere il tipo elettrico e
@@ -405,8 +473,19 @@ installi il footprint, oppure modifica l'associazione in KiCad. L'installazione
 della scheda «KiCad» continua a gestire footprint e modello 3D; la libreria di
 simboli si esporta separatamente.</p>
 <p>Scorciatoie: Ctrl+3 apre il simbolo, Ctrl+4 il modello 3D, Ctrl+5 KiCad.</p>
+<h3>Tipi elettrici suggeriti dall'AI</h3>
+<p>Nel tab <span class="ui">Simbolo elettrico</span>, <span class="ui">Suggerisci tipi pin con AI</span>
+usa i documenti dichiarati pinout o datasheet e il modello AI configurato. Prima della chiamata
+sono mostrati modello e documenti; l'analisi può comportare costi. Le proposte includono fonte
+e motivazione: controllarle e selezionare quelle da usare. I casi incerti restano da verificare;
+i tipi già confermati non sono preselezionati. Le modifiche entrano nella bozza come una sola
+operazione annullabile e vengono salvate con <span class="ui">Applica</span>.</p>
+<p>È possibile annullare l'analisi AI: una richiesta già inviata deve terminare,
+ma non vengono effettuati ulteriori tentativi e la risposta viene scartata.
+Rinominare un pin revoca la conferma del suo tipo precedente. Per confermare
+un tipo già visualizzato, selezionarlo nuovamente nel menu della tabella.</p>
 
-<h2 id="modello3d">9. La scheda «Modello 3D»</h2>
+<h2 id="modello3d">10. La scheda «Modello 3D»</h2>
 <p>Il modello si ruota con il mouse; il cubo di navigazione porta sulle viste
 standard. Nella barra in alto:</p>
 <ul>
@@ -421,21 +500,25 @@ standard. Nella barra in alto:</p>
   rotazione, colore e marcatura di ogni corpo, a mano. Funziona anche senza la foto.
   Dopo <span class="ui">Applica</span> il modello 3D si rigenera con FreeCAD.
   Nessuna richiesta AI.</li>
-  <li><strong>Rigenera modello 3D (STEP)</strong>: ricostruisce lo STEP dai corpi
+  <li><span class="ui">Rigenera modello 3D (STEP) con queste annotazioni</span>: ricostruisce lo STEP dai corpi
   attuali, comprese le correzioni appena applicate. Gratuito.</li>
   <li><span class="ui">Accetto, mi piace — ricorda questi modelli…</span>: salva gli
   abbinamenti fra corpi e modelli KiCad, che in una scheda futura verranno proposti
   subito (da confermare). L'archivio si rivede con
   <span class="ui">Archivio abbinamenti accettati…</span>.</li>
+  <li><span class="ui">Copia formato</span>: come nella revisione, copia misure,
+  tipologia, package e modello KiCad da un corpo agli altri.</li>
   <li>Per i moduli castellated, una tendina corregge il <strong>tipo di
   contatto</strong> di tutti i lati.</li>
 </ul>
+<p>Il visualizzatore 3D viene caricato alla prima apertura della scheda: finché
+non è pronto, la scheda mostra un segnaposto e nulla va perso.</p>
 <p>Con il tasto destro su un corpo del modello: <span class="ui">Elimina dal modello
 3D (falso positivo)</span> (e <span class="ui">Rimetti nel modello 3D</span>),
 <span class="ui">Ruota il solido</span>, <span class="ui">Modifica
 componente...</span> e <span class="ui">Cambia modello KiCad...</span>.</p>
 
-<h2 id="step">10. Scegliere il modello STEP di un componente</h2>
+<h2 id="step">11. Scegliere il modello STEP di un componente</h2>
 <p>La finestra <span class="ui">Scelta del modello STEP</span> si apre da
 <span class="ui">Scegli modello KiCad…</span> nella revisione o da
 <span class="ui">Cambia modello KiCad...</span> nel 3D. Mostra fino a cinque
@@ -450,7 +533,7 @@ del componente.</p>
   ricordata.</li>
 </ul>
 
-<h2 id="pin">11. Pin maschi sotto la scheda</h2>
+<h2 id="pin">12. Pin maschi sotto la scheda</h2>
 <p>Per le due tipologie <span class="ui">Scheda con componenti</span>, la spunta
 <span class="ui">Mostra gli header nel modello 3D</span> nel passo
 <span class="ui">Montaggio e analisi</span> della scheda <span class="ui">Progetto</span>
@@ -470,9 +553,39 @@ e il salvataggio del solido con FreeCAD. Il riuso viene preparato dalla prima
 generazione completa con questa versione; se cambiano anche quote, componenti,
 annotazioni o file dei modelli, viene eseguita nuovamente la procedura completa.</p>
 
-<h2 id="kicad">12. La scheda «KiCad»: prova e installazione</h2>
-<p>La scheda elenca i file pronti (footprint e modello STEP) e offre tre
-operazioni.</p>
+<h2 id="kicad">13. La scheda «KiCad»: prova e installazione</h2>
+<p>Il riquadro <span class="ui">File pronti per KiCad</span> elenca footprint,
+simbolo elettrico e modello STEP con il loro stato. La prova isolata e le due
+installazioni sono <strong>bloccate finché i file su disco non corrispondono ai
+parametri</strong> del progetto, e ogni blocco nomina il suo rimedio, abilitato lì
+accanto: <span class="ui">Applica ai file</span> (metadati o footprint non ancora
+scritti), <span class="ui">Aggiorna il file del simbolo</span> (il
+<code>.kicad_sym</code> esportato non corrisponde al simbolo applicato),
+<span class="ui">Rimuovi il modello 3D obsoleto</span> (uno STEP vecchio che non si
+può ricostruire). Quando lo STEP è stato costruito su piazzole diverse, oppure sono
+cambiati solo colori o annotazioni, il rimedio è il pulsante di rigenerazione
+nella barra della scheda <a href="#modello3d">«Modello 3D»</a> (suggerimento
+<span class="ui">Rigenera modello 3D (STEP) con queste annotazioni</span>). Un
+progetto salvato da una versione precedente può richiedere un
+<span class="ui">Applica ai file</span>. I comandi sono bloccati anche mentre gira
+un lavoro in background. Usano i file <strong>applicati</strong>: una bozza del
+footprint o del simbolo non applicata non blocca i comandi, non viene installata e
+la segnala <span class="ui">Verifica componente per KiCad</span>.</p>
+<p>Il riquadro richiudibile <span class="ui">Metadati del componente</span> contiene
+designatore di riferimento (solo lettere: il numero lo aggiunge KiCad; la proposta
+in grigio conta come compilata), descrizione, parole chiave, datasheet (URL o
+file) e filtri footprint. Designatore, descrizione, parole chiave e datasheet
+sono <strong>obbligatori</strong>: senza, l'installazione è bloccata e il
+suggerimento dei comandi dice quali campi mancano. L'elenco
+<span class="ui">Controlli KiCad (KLC)</span> si aggiorna mentre scrivi (⛔ errore,
+⚠ avviso) e <span class="ui">Applica ai file</span> scrive i valori nel footprint e
+nel simbolo; un errore ⛔ fa rifiutare l'applicazione.</p>
+<p>In <span class="ui">Verifica prima dell'installazione</span> ci sono tre icone:
+<span class="ui">Guida rapida per usare il componente in KiCad</span> (una procedura
+in cinque pagine: installare, posizionare il footprint, esportare e registrare il
+simbolo, collegarli, aggiornare il PCB), <span class="ui">Verifica componente per
+KiCad</span> (vedi sotto) e <span class="ui">Prova in KiCad...</span>. In
+<span class="ui">Installazione nella libreria</span> le due installazioni.</p>
 <table>
   <tr><th>Comando</th><th>Che cosa fa</th></tr>
   <tr><td class="ui">Prova in KiCad...</td>
@@ -487,16 +600,41 @@ operazioni.</p>
       (<code>${KIPRJMOD}</code>), quindi il progetto resta portabile.</td></tr>
   <tr><td class="ui">Installa come libreria globale...</td>
       <td>Rende il footprint disponibile in tutti i progetti di questo computer.
-      Richiede che KiCad sia installato; scegli la cartella delle librerie e la
-      libreria viene registrata nella tabella globale di KiCad. Le altre librerie
-      della tabella restano come sono.</td></tr>
+      Richiede che KiCad sia installato (la tabella globale dell'utente viene
+      trovata con <code>kicad-cli</code>); scegli la cartella delle librerie e la
+      libreria viene registrata nella <code>fp-lib-table</code> globale di KiCad
+      con percorsi assoluti. Le altre librerie della tabella restano come sono.
+      Se KiCad non è mai stato avviato quella tabella non esiste ancora e
+      l'installazione viene rifiutata: avvia KiCad una volta, completa la
+      configurazione iniziale delle librerie e riprova.</td></tr>
 </table>
 <p>Prima di sovrascrivere un componente già installato, o di spostare una libreria
-<code>KiCadGen</code> già registrata altrove, il programma chiede conferma.
+<code>KiCadGen</code> già registrata altrove, il programma chiede conferma. Prima
+di cambiare una tabella ne conserva una copia <code>.kicadgen-backup</code> e, se un
+passo fallisce, rimette a posto tutto ciò che aveva toccato. Il simbolo non viene
+registrato in nessuna tabella: si esporta con <span class="ui">Esporta simbolo
+KiCad…</span> (anche dalla riga del simbolo di questa scheda) e si aggiunge in
+KiCad con <em>Gestisci librerie di simboli</em>.
 <span class="ui">Apri cartella componente</span> apre la cartella con footprint,
-modello STEP e documenti.</p>
+modello STEP e documenti. La scheda <span class="ui">Esportazioni</span>
+(<kbd>Ctrl</kbd>+<kbd>6</kbd>) conserva lo storico delle installazioni e delle
+esportazioni del simbolo fatte da questo computer.</p>
+<h3>Verifica del componente</h3>
+<p>Nel tab <span class="ui">KiCad</span>, l'icona <span class="ui">Verifica componente per KiCad</span>
+controlla i file generati, la corrispondenza dei numeri pin-pad e, se <code>kicad-cli</code> è
+disponibile, prova la lettura di footprint, simbolo e STEP con KiCad CLI, usando una cartella
+temporanea (senza, quella prova risulta non eseguita). Il rapporto copiabile distingue
+controlli superati, errori, avvisi e controlli non eseguiti. Il simbolo applicato viene provato
+anche se non ancora esportato; le bozze non applicate sono escluse e segnalate.
+Questa verifica non certifica pinout, misure, allineamento visivo 3D o librerie installate;
+ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
+<p>La verifica resta disponibile quando esiste il footprint ma manca lo STEP;
+l'installazione resta disabilitata finché i file richiesti non sono presenti.
+I riferimenti e le trasformazioni 3D originali sono controllati separatamente dalla
+copia temporanea normalizzata. Percorsi relativi o variabili KiCad non risolti
+richiedono verifica nel progetto di destinazione.</p>
 
-<h2 id="log">13. Dove sono i log</h2>
+<h2 id="log">14. Dove sono i log</h2>
 <table>
   <tr><th>File</th><th>Dove</th><th>Contenuto</th></tr>
   <tr><td><code>analisi-ai.log</code></td><td>Nella cartella del progetto</td>
@@ -508,14 +646,14 @@ modello STEP e documenti.</p>
   <tr><td><code>crash-reports</code></td><td>Cartella <code>logs</code> dei dati del
       programma (installato: <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
       <td>Un file per ogni errore imprevisto del programma, con versione, sistema e
-      traccia dell'errore. Sono tenuti solo i più recenti.</td></tr>
+      traccia dell'errore. Sono tenuti solo i 20 più recenti.</td></tr>
 </table>
 <p>Il menu <span class="ui">? → Apri cartella dei log</span> apre la cartella del
 progetto aperto, dove sono <code>analisi-ai.log</code> e <code>freecad.log</code>;
 senza un progetto aperto apre la cartella <code>logs</code> dei dati del
 programma.</p>
 
-<h2 id="aiuto">14. Segnalare un problema e aggiornamenti</h2>
+<h2 id="aiuto">15. Segnalare un problema e aggiornamenti</h2>
 <ul>
   <li><span class="ui">? → Segnala un problema</span> apre nel browser una nuova
   segnalazione sul repository GitHub del progetto, già compilata con la versione di
@@ -528,7 +666,7 @@ programma.</p>
 </ul>
 <p>Il progetto: <a href="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator">github.com/MirkoUgoliniDev/KiCad-ComponentGenerator</a>.</p>
 
-<h2 id="limiti">15. Limiti da conoscere</h2>
+<h2 id="limiti">16. Limiti da conoscere</h2>
 <ul>
   <li>L'analisi AI può sbagliare: controlla sempre footprint e modello 3D nelle
   anteprime prima di usarli.</li>
@@ -538,30 +676,6 @@ programma.</p>
   <li>L'inventario fotografico non garantisce di aver trovato tutti i corpi: per
   questo esistono la revisione e <span class="ui">Modifica componenti…</span>.</li>
 </ul>
-
-<h2>Verifica del componente e tipi elettrici AI</h2>
-<p>Nel tab <span class="ui">KiCad</span>, l'icona <span class="ui">Verifica componente per KiCad</span>
-controlla i file generati, la corrispondenza dei numeri pin-pad e prova la lettura di footprint,
-simbolo e STEP con KiCad CLI, usando una cartella temporanea. Il rapporto copiabile distingue
-controlli superati, errori, avvisi e controlli non eseguiti. Il simbolo applicato viene provato
-anche se non ancora esportato; le bozze non applicate sono escluse e segnalate.
-Questa verifica non certifica pinout, misure, allineamento visivo 3D o librerie installate;
-ERC e DRC vanno eseguiti sullo schema e sulla scheda finali.</p>
-<p>La verifica resta disponibile quando esiste il footprint ma manca lo STEP;
-l'installazione resta disabilitata finché i file richiesti non sono presenti.
-I riferimenti e le trasformazioni 3D originali sono controllati separatamente dalla
-copia temporanea normalizzata. Percorsi relativi o variabili KiCad non risolti
-richiedono verifica nel progetto di destinazione.</p>
-<p>Nel tab <span class="ui">Simbolo elettrico</span>, <span class="ui">Suggerisci tipi pin con AI</span>
-usa i documenti dichiarati pinout o datasheet e il modello AI configurato. Prima della chiamata
-sono mostrati modello e documenti; l'analisi può comportare costi. Le proposte includono fonte
-e motivazione: controllarle e selezionare quelle da usare. I casi incerti restano da verificare;
-i tipi già confermati non sono preselezionati. Le modifiche entrano nella bozza come una sola
-operazione annullabile e vengono salvate con <span class="ui">Applica</span>.</p>
-<p>È possibile annullare l'analisi AI: una richiesta già inviata deve terminare,
-ma non vengono effettuati ulteriori tentativi e la risposta viene scartata.
-Rinominare un pin revoca la conferma del suo tipo precedente. Per confermare
-un tipo già visualizzato, selezionarlo nuovamente nel menu della tabella.</p>
 
 <footer>KiCadGen — guida d'uso. Il programma è distribuito con licenza GNU AGPL-3.0;
 le licenze dei componenti di terze parti sono nel menu

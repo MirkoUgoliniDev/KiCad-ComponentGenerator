@@ -98,6 +98,15 @@ docstring whenever behavior, inputs, outputs or side effects change. New public
 APIs without Doxygen-compatible documentation are not complete and must not be
 merged. Run the documentation test together with the relevant functional tests.
 
+**Comments in English — user rule, binding (2026-10-16).** Every `#` and `#:`
+comment in production code, tools, examples and `main.py` is written in
+English, exactly like the docstrings. Verbatim user quotes, UI labels and
+literal program output stay in Italian inside «…» on ONE line, with an English
+gloss next to them. `tests/test_documentation.py`
+(`test_comments_are_written_in_english`) enforces it: an Italian comment fails
+the suite. Write new comments in English from the start; never translate a
+quote or reword English only to satisfy the checker.
+
 Use the project skills in `.claude/skills/` for generation and verification workflows. Use the reviewer agent for read-only audits before publishing a component.
 
 # Strategia del progetto e consegna agli agenti
@@ -244,8 +253,15 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8557 passed,
-12 skipped, 2 expected failures and 19 subtests (2026-10-16 night, after the full-codebase
+is 8826 passed,
+12 skipped and 19 subtests (2026-10-16 evening, branch `ADVANCED`, not merged: designator
+in grey counts as filled, medium findings 12-16 closed, two full adversarial reviews and
+their fixes, lead attachment declared by the vision model, default model chosen only from
+the interface, every comment and docstring in English enforced by the documentation test,
+detector's own strong/weak count, bottom-left anchors for the symbol and footprint property
+texts with KiCad fixed, texts drawn at KiCad's width, pin numbers at KiCad's position, anchor
+square on hover in both tabs). Before that, 8557 passed,
+12 skipped, 2 expected failures and 19 subtests (the night between 2026-10-15 and 2026-10-16, after the full-codebase
 audit and the fixes of its 11 medium findings: generated files aligned with the parameters,
 every KiCad block naming an enabled remedy, user pin names kept across analyses, no invented
 3D body, rename carrying the symbol, KiCad library robustness, photos uploaded without

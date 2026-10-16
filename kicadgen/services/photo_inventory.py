@@ -1,10 +1,8 @@
 """@brief Photo inventory: local boxes, metric conversion and visual verification.
 
-Inventario fotografico: rettangoli locali, conversione metrica e verifica visiva.
-
-La geometria usa bounding box normalizzati sul crop (0..1). L'AI non deve
-calcolare offset e scala del modulo. Un passaggio sulla scheda intera conserva
-i componenti grandi che nei dettagli attraversano i confini dei crop.
+Geometry uses bounding boxes normalized on the crop (0..1). The AI must not
+compute the module's offset and scale. A pass on the whole board keeps the
+large components that cross the crop boundaries in the detail views.
 """
 from __future__ import annotations
 
@@ -23,7 +21,7 @@ from .openrouter import OpenRouterError
 from .ai_diagnostics import CallCancelled
 from .document_roles import PHOTO_SUFFIXES
 from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
-# Solo costanti: photo_refine regge l'assenza di OpenCV da se'.
+# Constants only: photo_refine handles the absence of OpenCV on its own.
 from ..core.validation import positive_number
 from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
 
@@ -74,13 +72,13 @@ def copy_mechanical_metadata(target, source, *, overwrite=True, geometry=True):
 
 
 class ReviewCancelled(Exception):
-    """@brief Chi rivede le proposte del rilevatore ha annullato.
+    """@brief The person reviewing the detector proposals cancelled.
 
-    @note Volutamente non e' un ValueError: chi chiama degrada gli errori
-        dell'inventario fotografico in una nota e prosegue, mentre un annullo
-        e' una decisione di chi guarda e deve fermare l'estrazione. Trattarlo
-        come un guasto significherebbe proseguire lo stesso, cioe' pagare la
-        riconciliazione sulle proposte che sono appena state rifiutate.
+    @note Deliberately not a ValueError: callers degrade photo-inventory errors
+        into a note and carry on, whereas a cancellation is a decision of the
+        reviewer and must stop the extraction. Treating it as a failure would mean
+        carrying on anyway, that is, paying for the reconciliation of the
+        proposals that were just rejected.
     """
 
 
@@ -96,7 +94,11 @@ class InventoryResult:
 
 
 def detection_tool(kinds):
-    """@brief Return the tool schema asking for normalized component boxes with kind, rotation, height and colour."""
+    """@brief Return the tool schema asking for normalized component boxes with kind, rotation, height and colour.
+
+    @param kinds Allowed component kinds, used as the enum of the `kind` field.
+    @return Function-tool dictionary named `report_photo_components`.
+    """
     properties = {
         "name": {"type": "string"},
         "kind": {"type": "string", "enum": list(kinds)},
@@ -149,7 +151,19 @@ def detection_tool(kinds):
 def decode_detections(raw, region, body_length, body_width, source, log):
     """@brief Convert crop boxes to board-normalized boxes and millimetres, discarding unmeasurable entries.
 
-    Converte box crop -> PCB normalizzata -> mm; scarta voci non misurabili.
+    The chain is crop box -> normalized board box -> mm.
+
+    @param raw Component list returned by the model for one view.
+    @param region (x0, y0, x1, y1) of the view on the board, normalized 0..1.
+    @param body_length Board extent along X, in mm.
+    @param body_width Board extent along Y, in mm.
+    @param source Label of the view, used in the log and stored as `_source`.
+    @param log Progress callback receiving every discard or correction.
+    @return List of component dictionaries with x_mm, y_mm, length_mm, width_mm,
+        height_mm, rotation_deg and `_box`; empty when `raw` is not a list.
+    @note No exception escapes: the ValueError raised for an invalid entry is
+        caught together with KeyError, TypeError and OverflowError, logged,
+        and that entry is discarded.
     """
     result = []
     if not isinstance(raw, list):
@@ -185,10 +199,10 @@ def decode_detections(raw, region, body_length, body_width, source, log):
             for key in mechanical_metadata_properties():
                 item.pop(key, None)
             copy_mechanical_metadata(item, entry)
-            # Un angolo incoerente non rende inutilizzabile il rettangolo. Per
-            # forme chiaramente allungate conserviamo la geometria misurata,
-            # normalizziamo gli assi locali e segnaliamo il verso come dubbio.
-            # Sui quasi quadrati resta invece l'orientamento letto dall'AI.
+            # An inconsistent angle does not make the rectangle unusable. For
+            # clearly elongated shapes we keep the measured geometry,
+            # normalise the local axes and flag the orientation as doubtful.
+            # On almost square ones the orientation read by the AI stays.
             if width > length * 1.2:
                 length, width = width, length
                 angle = (angle + 90) % 360
@@ -228,17 +242,17 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     return result
 
 
-#: Incertezza di posizione di UN bordo di riquadro, in pixel della foto
-#: calibrata su cui i riquadri sono normalizzati. E' il limite inferiore
-#: fisico, la quantizzazione: nessun rilevatore colloca un bordo meglio di un
-#: pixel dell'immagine che ha visto (le strisce di dettaglio sono ritagliate
-#: dalla stessa foto, stessi pixel). Ripiego dichiarato: il vero errore di
-#: localizzazione di un modello di visione e' di solito piu' grande, ma non e'
-#: misurato; con questo minimo due riquadri si fondono solo quando coincidono
-#: davvero, e i doppioni meno precisi restano distinti e segnalati come
-#: «possibile doppione» per la revisione invece di essere fusi in silenzio.
-#: Una stima dell'errore del rilevatore (per esempio dal confronto con bordi
-#: misurati) lo renderebbe superfluo.
+#: Position uncertainty of ONE box edge, in pixels of the calibrated photo on
+#: which the boxes are normalised. It is the physical lower limit, the
+#: quantisation: no detector places an edge better than one pixel of the
+#: image it saw (the detail strips are cropped from the same photo, same
+#: pixels). Declared fallback: the true localisation error of a vision model
+#: is usually larger, but it is not measured; with this minimum two boxes are
+#: merged only when they really coincide, and the less precise duplicates stay
+#: distinct and flagged as «possibile doppione» (possible duplicate) for the
+#: review instead of being silently merged.
+#: An estimate of the detector error (for instance from the comparison with
+#: measured edges) would make it unnecessary.
 DETECTION_EDGE_UNCERTAINTY_PX = 1.0
 
 
@@ -272,7 +286,7 @@ def same_body(first, second, tolerance):
     """@brief True when two boxes are one physical body seen twice, within the measurement uncertainty.
 
     @param first Item with `_box` (or mm geometry, see box_of).
-    @param second Idem.
+    @param second The other item, same contract as @p first.
     @param tolerance (tx, ty) from detection_tolerance, in the units of the boxes.
     @return True when the centres coincide within the tolerance on both axes
         AND either every edge agrees within it (same size) or one box contains
@@ -297,29 +311,29 @@ def same_body(first, second, tolerance):
         return (inner[0] >= outer[0] - tol_x and inner[2] <= outer[2] + tol_x
                 and inner[1] >= outer[1] - tol_y and inner[3] <= outer[3] + tol_y)
 
-    # Due riquadri con tutti i bordi entro la tolleranza (stessa misura) sono
-    # il caso particolare in cui ciascuno contiene l'altro: basta il contenimento.
+    # Two boxes with all edges within the tolerance (same measurement) are the
+    # special case in which each contains the other: containment is enough.
     a, b = (ax0, ay0, ax1, ay1), (bx0, by0, bx1, by1)
     return inside(a, b) or inside(b, a)
 
 
-#: Soglia indicativa sul lato corto, condivisa con photo_refine e la GUI.
-#: E' un avviso sulla leggibilita', non una prova di rilevamento impossibile.
+#: Indicative threshold on the short side, shared with photo_refine and the
+#: GUI. It is a warning on readability, not proof that detection is impossible.
 MIN_PACKAGE_PIXELS = MIN_PACKAGE_PIXELS_HINT
 
 
 def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
-    """Segnala una risoluzione sotto la soglia indicativa per i pezzi piccoli.
+    """Warn when the resolution is below the indicative threshold for small parts.
 
-    L'inventario non e' limitato dall'algoritmo ma dai pixel disponibili: a
-    12 px/mm un corpo con il lato corto di 0.5 mm occupa 6 px. Senza questo
-    avviso il rischio di perdere dettagli non sarebbe visibile. La soglia
-    non certifica ne' esclude la completezza dell'inventario.
+    The inventory is limited not by the algorithm but by the available pixels: at
+    12 px/mm a body with a 0.5 mm short side covers 6 px. Without this warning
+    the risk of losing detail would not be visible. The threshold neither
+    certifies nor rules out the completeness of the inventory.
 
-    @param smallest_part_mm Lato corto del corpo piu' piccolo che ci si aspetta
-        sulla scheda, in mm; None = photo_refine.SMALLEST_EXPECTED_PART_MM, che
-        e' un'IPOTESI dichiarata (non una misura di questa scheda). L'avviso la
-        riporta, cosi' chi lo legge sa rispetto a quale taglia e' stato dato.
+    @param smallest_part_mm Short side of the smallest body expected on the
+        board, in mm; None = photo_refine.SMALLEST_EXPECTED_PART_MM, which is a
+        declared ASSUMPTION (not a measurement of this board). The warning reports
+        it, so the reader knows against which size it was issued.
     """
     if smallest_part_mm is None:
         smallest_part_mm = SMALLEST_EXPECTED_PART_MM
@@ -347,7 +361,13 @@ def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
 
 
 def box_of(item):
-    """@brief Return the item's normalized `_box`, or its axis-aligned box computed from mm centre and size."""
+    """@brief Return the item's normalized `_box`, or its axis-aligned box computed from mm centre and size.
+
+    @param item Component dictionary with `_box`, or with x_mm, y_mm, length_mm,
+        width_mm and an optional rotation_deg.
+    @return (x0, y0, x1, y1): the stored `_box` when present, otherwise the box
+        in mm around the centre (length and width swapped for 90/270 degrees).
+    """
     if "_box" in item:
         return item["_box"]
     x, y, length, width = (item[k] for k in ("x_mm", "y_mm", "length_mm", "width_mm"))
@@ -356,7 +376,12 @@ def box_of(item):
 
 
 def overlap(a, b):
-    """@brief Return (IoU, intersection over the smaller area) of two items' boxes."""
+    """@brief Return (IoU, intersection over the smaller area) of two items' boxes.
+
+    @param a First item, in any form accepted by box_of.
+    @param b Second item, in any form accepted by box_of.
+    @return Tuple (IoU, intersection / smaller area), both in 0..1.
+    """
     ax0, ay0, ax1, ay1 = box_of(a)
     bx0, by0, bx1, by1 = box_of(b)
     intersection = max(0, min(ax1,bx1)-max(ax0,bx0))*max(0, min(ay1,by1)-max(ay0,by0))
@@ -413,19 +438,27 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
                      image_px=None):
     """@brief Associate detections across views one-to-one by overlap and physical coincidence.
 
-    Associazione uno-a-uno tra viste: IoU, oppure (con `containment`) stesso
-    corpo entro l'incertezza di misura (vedi same_body).
+    One-to-one association between views: IoU, or (with `containment`) the same
+    body within the measurement uncertainty (see same_body).
 
+    Two pieces of the same view remain distinct. A resistor next to an IC is not
+    absorbed by a radius proportional to the IC's long side.
+
+    @param groups Iterable of views, each an iterable of detections with `_box`,
+        in merge order.
+    @param log Callback for the per-merge messages and warnings; no-op by default.
+    @param containment True to also merge pairs that same_body() considers the
+        same body.
+    @param summary Callback receiving the final summary line (defaults to `log`):
+        callers that treat the other lines as warnings separate it this way,
+        instead of recognizing it from the text, which has been translated since
+        2026-09-24.
     @param image_px (width, height) in pixels of the calibrated photo the
         normalized boxes refer to; it sets the measurement uncertainty of the
         containment criterion (detection_tolerance). None = unknown: only
         coinciding boxes are merged by containment.
-
-    Due pezzi della stessa vista rimangono distinti. Una resistenza accanto a un
-    IC non viene assorbita dal raggio proporzionale al lato lungo dell'IC.
-    `summary` riceve la riga finale di riepilogo (per default `log`): chi
-    tratta le altre righe come avvisi la separa cosi', invece di riconoscerla
-    dal testo, che dal 2026-09-24 e' tradotto.
+    @return The merged component list; possible duplicates and overlaps are kept
+        distinct and flagged `_uncertain`.
     """
     merged = []
     duplicates = 0
@@ -454,7 +487,7 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
                        get2=item.get('name')))
                 existing["_uncertain"] = True
                 item = dict(item, _uncertain=True)
-            # Alta confidenza prima; a parità, la vista locale misura più pixel.
+            # High confidence first; on a tie, the local view measures more pixels.
             rank = {"low": 0, "medium": 1, "high": 2}
             if rank.get(item.get("confidence"), 1) >= rank.get(existing.get("confidence"), 1):
                 replacement = dict(item)
@@ -518,8 +551,8 @@ def read_photo(path):
         from PIL import Image
         with Image.open(path) as image:
             return np.asarray(image.convert('RGB'))[:, :, ::-1].copy()
-    # imdecode supporta anche percorsi Unicode su Windows; IMREAD_COLOR
-    # applica il tag di orientamento.
+    # imdecode also supports Unicode paths on Windows; IMREAD_COLOR applies
+    # the orientation tag.
     encoded = np.fromfile(str(path), dtype=np.uint8)
     return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
 
@@ -545,9 +578,10 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
         return None
 
     def not_found(original):
-        # Il motivo (scheda ruotata di 90 gradi rispetto alle quote, oppure
-        # nessuna regione distinta dallo sfondo) arriva al log invece del
-        # generico «nessuna vista calibrabile» (26/09).
+        # The reason (board rotated by 90 degrees relative to the dimensions,
+        # or no region distinct from the background) reaches the log instead
+        # of the generic «nessuna vista calibrabile» (no calibratable view)
+        # (26/09).
         if metadata is not None:
             metadata["board_failure"] = locate_board(original, length, width).message(length, width)
         return None
@@ -555,9 +589,9 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
     original = image
     frame = find_board(image, length, width)
     if frame is None:
-        # Una foto scattata a mano libera e' quasi sempre storta di qualche
-        # grado, e find_board ne tollera meno di uno. Si raddrizza e si
-        # riprova: e' una rotazione rigida, la scala resta quella vera.
+        # A freehand photo is almost always skewed by a few degrees, and
+        # find_board tolerates less than one. It is straightened and retried:
+        # it is a rigid rotation, the scale stays the true one.
         from .photo_refine import deskew_board
         straight = deskew_board(image, length, width)
         if straight is None:
@@ -565,10 +599,10 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
         image, frame = straight, find_board(straight, length, width)
         if frame is None:
             return not_found(original)
-    # find_board non rettifica la prospettiva ne' scambia gli assi: la
-    # lunghezza dichiarata corre lungo X (orizzontale nella foto). Una scheda
-    # dichiarata con lunghezza < larghezza e' attesa verticale (26/09); una
-    # scheda fotografata ruotata di 90 gradi rispetto alle quote e' rifiutata.
+    # find_board does not correct perspective nor swap axes: the declared
+    # length runs along X (horizontal in the photo). A board declared with
+    # length < width is expected vertical (26/09); a board photographed
+    # rotated by 90 degrees relative to the dimensions is rejected.
     x0, y0 = round(frame.cx-frame.width_px/2), round(frame.cy-frame.height_px/2)
     x1, y1 = round(frame.cx+frame.width_px/2), round(frame.cy+frame.height_px/2)
     if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
@@ -576,11 +610,12 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
     if metadata is not None:
         from .photo_refine import MAX_BOARD_ASPECT_ERROR, _aspect_error, aspect_deformation
         if _aspect_error(frame.width_px, frame.height_px, length, width) > MAX_BOARD_ASPECT_ERROR:
-            # Accettata dalla seconda passata di locate_board: la scala vale per
-            # asse. Le quote dei documenti COMANDANO (utente, 2026-09-30, HANDOFF
-            # 171: nessuna misura a mano): la foto viene corretta su di esse, e
-            # l'avviso dice questo, non che le quote siano in dubbio. Resta un
-            # avviso perche' i ritagli inviati all'AI portano la deformazione.
+            # Accepted by the second pass of locate_board: the scale is per
+            # axis. The document dimensions RULE (user, 2026-09-30, HANDOFF
+            # 171: no hand measurement): the photo is corrected on them, and
+            # the warning says this, not that the dimensions are in doubt. It
+            # stays a warning because the crops sent to the AI carry the
+            # distortion.
             metadata["board_warning"] = tx(
                 "{name}: quote dei documenti applicate ({length:.2f} x {width:.2f} mm); la scheda "
                 "nella foto ha proporzioni diverse (deformazione {deform:+.1f}%), quindi la foto e' "
@@ -590,32 +625,32 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
                 sx=frame.width_px / length, sy=frame.height_px / width,
                 deform=100.0 * aspect_deformation(frame, length, width))
         import hashlib
-        # Stessi byte che `read_photo` decodifica: l'impronta non cambia.
+        # Same bytes that `read_photo` decodes: the fingerprint does not change.
         with open(path, 'rb') as stream:
             source_bytes = stream.read()
         metadata.update(source_sha256=hashlib.sha256(source_bytes).hexdigest(),
                         crop_bbox_original_px=[x0,y0,x1,y1],
                         image_width=x1-x0,image_height=y1-y0)
-        # Profili dello sfondo lungo i bordi, per contare i semi-fori
-        # (edge_notches): servono l'immagine intera e il suo sfondo, che dopo
-        # il ritaglio non ci sono piu'. Chiave privata: chi la usa la toglie.
+        # Background profiles along the edges, to count the half-holes
+        # (edge_notches): they need the whole image and its background, which
+        # are gone after the crop. Private key: whoever uses it removes it.
         from .edge_notches import MAX_NOTCH_DEPTH_MM, depth_profiles
         from .photo_refine import (MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO,
                                    _background_distance, estimate_background)
         background = estimate_background(image)
         if background is not None:
-            # La profondita' di una tacca si misura ATTRAVERSO il bordo: scala
-            # X per i bordi sinistro/destro, Y per superiore/inferiore (la foto
-            # e' calibrata asse per asse, punto 139 G1 b).
+            # The depth of a notch is measured ACROSS the edge: X scale for the
+            # left/right edges, Y for top/bottom (the photo is calibrated axis
+            # by axis, point 139 G1 b).
             across = {"left": (x1 - x0) / length, "right": (x1 - x0) / length,
                       "top": (y1 - y0) / width, "bottom": (y1 - y0) / width}
-            # Il contorno vero puo' stare dentro o fuori dal riquadro: di quanto
-            # l'inclinazione residua che find_board accetta (la sua deriva
-            # massima sul lato lungo), e ancora altrettanto perche' il riquadro
-            # e' preso a meta' del salto sfondo -> scheda mentre la maschera
-            # dello sfondo ne prende il piede (la sfocatura). Il raddoppio e'
-            # un'EURISTICA dichiarata: la sfocatura non e' misurata; la
-            # renderebbe superflua una stima del raggio di sfocatura del bordo.
+            # The true contour can lie inside or outside the box: by as much as
+            # the residual tilt find_board accepts (its maximum drift on the
+            # long side), and as much again because the box is taken halfway
+            # through the background -> board step while the background mask
+            # takes its foot (the blur). The doubling is a declared
+            # HEURISTIC: the blur is not measured; an estimate of the edge
+            # blur radius would make it unnecessary.
             slack = 2 * max(MAX_BOARD_EDGE_DRIFT_PX,
                             MAX_BOARD_EDGE_DRIFT_RATIO * max(x1 - x0, y1 - y0))
             metadata["_edge_depth_px"] = depth_profiles(
@@ -630,11 +665,18 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
 
 
 def regions(image):
-    """@brief Yield (label, normalized region, pixels) for the full view and six overlapping 3x2 crops."""
+    """@brief Yield (label, normalized region, pixels) for the full view and six overlapping 3x2 crops.
+
+    @param image Calibrated board photo (BGR array).
+    @return A generator of (label, (x0, y0, x1, y1), pixels) tuples: first
+        the label «Vista completa» (full view) with (0, 0, 1, 1) and the whole
+        image, then «Crop n/6» for each crop, its corners normalised to the
+        image size (0..1) and its pixels as a view into @p image.
+    """
     h, w = image.shape[:2]
     yield "Vista completa", (0.,0.,1.,1.), image
-    # Contesto extra attorno a una griglia 3x2. Il passaggio completo conserva
-    # gli oggetti che rimangono tagliati in tutte le finestre locali.
+    # Extra context around a 3x2 grid. The full pass keeps the objects that
+    # remain cut in all the local windows.
     for row in range(2):
         for col in range(3):
             x0, x1 = max(0, round((col/3-.08)*w)), min(w, round(((col+1)/3+.08)*w))
@@ -642,22 +684,22 @@ def regions(image):
             yield f"Crop {row*3+col+1}/6", (x0/w,y0/h,x1/w,y1/h), image[y0:y1,x0:x1]
 
 def save_inventory_evidence(cache_dir, photo_png, overlay_png, components, log, label='inventory'):
-    """@brief Salva su disco cio' che l'inventario ha trovato, per poterlo guardare.
+    """@brief Save to disk what the inventory found, so that it can be inspected.
 
-    @param cache_dir Cartella dell'analisi; senza, non si scrive nulla.
-    @param photo_png Fotografia calibrata usata per la richiesta.
-    @param overlay_png Stessa fotografia con sopra i rettangoli trovati.
-    @param components Ipotesi di componente, come arrivano dall'inventario.
-    @param log Callback di avanzamento: riceve i percorsi scritti.
-    @param label Prefisso dei nomi: distingue l'anteprima del rilevatore da
-        quella dell'inventario finale, che convivono nella stessa cartella.
-    @return I percorsi scritti, in ordine: foto, sovrapposizione, JSON.
-    @note Il modello non restituisce immagini: l'annotazione la disegniamo noi
-        dal JSON, che resta l'unica cosa che il modello ha davvero detto. I due
-        file servono a poter contestare un risultato guardandolo, invece di
-        fidarsi di un conteggio.
-    @note Scrivere non deve mai far fallire un'analisi gia' pagata: un errore
-        di disco viene riportato e basta.
+    @param cache_dir Analysis folder; without it, nothing is written.
+    @param photo_png Calibrated photograph used for the request.
+    @param overlay_png Same photograph with the found boxes drawn on top.
+    @param components Component hypotheses, as they come from the inventory.
+    @param log Progress callback: receives the written paths.
+    @param label Name prefix: distinguishes the detector preview from the final
+        inventory one, which live in the same folder.
+    @return The written paths, in order: photo, overlay, JSON.
+    @note The model returns no images: we draw the annotation ourselves from the
+        JSON, which remains the only thing the model actually said. The two files
+        make it possible to challenge a result by looking at it, instead of
+        trusting a count.
+    @note Writing must never make an already paid analysis fail: a disk error is
+        only reported.
     """
     if not cache_dir:
         return []
@@ -729,7 +771,13 @@ def image_block(image):
 
 
 def draw_inventory(image, components, use_ids=False):
-    """@brief Return a PNG of the image with numbered component boxes (orange when uncertain), or None."""
+    """@brief Return a PNG of the image with numbered component boxes (orange when uncertain), or None.
+
+    @param image Calibrated board photo (BGR array).
+    @param components Components with a normalized `_box`.
+    @param use_ids True to label each box with its `_id` instead of its position.
+    @return Encoded PNG bytes, or None when the encoding fails.
+    """
     import cv2
     canvas = image.copy()
     h, w = canvas.shape[:2]
@@ -748,15 +796,15 @@ def draw_inventory(image, components, use_ids=False):
 
 
 def _normalized_box(component, length_mm, width_mm):
-    """@brief Riquadro normalizzato che racchiude un corpo posato comunque.
+    """Normalized box enclosing a body placed in any orientation.
 
-    @param component Ipotesi con x_mm, y_mm, length_mm, width_mm, rotation_deg.
-    @param length_mm Estensione della scheda lungo X.
-    @param width_mm Estensione lungo Y.
-    @return Tupla (x0, y0, x1, y1) in 0..1 sul ritaglio della scheda.
-    @note Per una posa cardinale si riduce a scambiare lunghezza e larghezza;
-        per una posa obliqua e' il rettangolo allineato agli assi che contiene
-        il corpo, che e' quello che il disegno e la revisione mostrano.
+    @param component Hypothesis with x_mm, y_mm, length_mm, width_mm, rotation_deg.
+    @param length_mm Board extent along X.
+    @param width_mm Extent along Y.
+    @return Tuple (x0, y0, x1, y1) in 0..1 on the board crop.
+    @note For a cardinal pose it reduces to swapping length and width; for an
+        oblique pose it is the axis-aligned rectangle containing the body, which
+        is what the drawing and the review show.
     """
     rotation = math.radians(float(component.get('rotation_deg') or 0.0))
     body_length = float(component['length_mm'])
@@ -772,44 +820,43 @@ def _normalized_box(component, length_mm, width_mm):
 
 
 def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log):
-    """@brief Misura i bordi reali delle proposte del rilevatore, con OpenCV.
+    """@brief Measure the real edges of the detector proposals, with OpenCV.
 
-    @param photo Ritaglio calibrato della scheda.
-    @param proposals Proposte del rilevatore, in millimetri e con `_box`.
-    @param positions Contatti dichiarati, da contact_positions.
-    @param length_mm Estensione della scheda lungo X.
-    @param width_mm Estensione lungo Y.
-    @param log Callback di avanzamento.
-    @return La lista delle proposte, con la geometria misurata dove possibile.
-    @note Divisione del lavoro: il rilevatore dice DOVE c'e' un corpo, cosa che
-        richiede addestramento; i bordi li misura il gradiente, che non ne
-        richiede. Quando il contorno non e' chiaro o non e' compatibile con la
-        proposta, la proposta resta com'era: la misura non puo' fare peggio di
-        non misurare.
-    @note Le piazzole dichiarate vengono escluse dalla ricerca: il loro bordo
-        metallico e' netto quanto quello di un componente ed e' la sorgente
-        principale di contorni falsi. Era il pezzo che mancava quando questa
-        misura fu tolta dal percorso standard.
-    @note Le marcature di taglio (`_yolo_clipped_sides`, `_yolo_clipped_recovery`)
-        NON vengono tolte da una misura riuscita: il filtro sull'area accetta
-        contorni fra 0.4 e 1.8 volte l'ipotesi, quindi un corpo troncato a meta'
-        non puo' essere ricostruito per intero da qui, e dichiararlo misurato
-        sarebbe falso.
+    @param photo Calibrated board crop.
+    @param proposals Detector proposals, in millimetres and with `_box`.
+    @param positions Declared contacts, from contact_positions.
+    @param length_mm Board extent along X.
+    @param width_mm Extent along Y.
+    @param log Progress callback.
+    @return The list of proposals, with the measured geometry where possible.
+    @note Division of labour: the detector says WHERE a body is, which requires
+        training; the edges are measured by the gradient, which does not. When
+        the contour is unclear or incompatible with the proposal, the proposal
+        stays as it was: measuring cannot do worse than not measuring.
+    @note The declared pads are excluded from the search: their metal edge is as
+        sharp as a component's and is the main source of false contours. It was
+        the missing piece when this measurement was removed from the standard
+        path.
+    @note The clipping marks (`_yolo_clipped_sides`, `_yolo_clipped_recovery`)
+        are NOT removed by a successful measurement: the area filter accepts
+        contours between 0.4 and 1.8 times the hypothesis, so a body truncated in
+        half cannot be rebuilt in full from here, and declaring it measured would
+        be false.
     """
     from .contact_zones import contact_rects_mm
     from .photo_refine import isotropic_crop_frame, refine_on_frame
-    # Il ritaglio conserva il rapporto della scheda TROVATA, che puo' scostarsi
-    # da quello dichiarato; le proposte sono in mm per asse. Si misura su
-    # un'immagine a pixel quadrati, altrimenti la scala unica della misura
-    # sposterebbe e stirerebbe ogni Y (vedi photo_refine.isotropic_board).
+    # The crop keeps the ratio of the FOUND board, which may differ from the
+    # declared one; the proposals are in mm per axis. Measurement is done on
+    # a square-pixel image, otherwise the single scale of the measurement
+    # would shift and stretch every Y (see photo_refine.isotropic_board).
     image, frame = isotropic_crop_frame(photo, length_mm, width_mm)
     if frame is None:
         return proposals
     measured, report = refine_on_frame(image, frame, proposals,
                                        contact_rects_mm(positions, length_mm, width_mm))
     if report.failed:
-        # Un errore inatteso non e' un contorno poco chiaro: e' un difetto,
-        # e il log lo deve dire con il suo nome invece di confonderlo.
+        # An unexpected error is not an unclear contour: it is a defect, and
+        # the log must call it by its name instead of confusing it.
         log(warning("Bordi con OpenCV: {n_failed} proposte non misurate per un errore "
                     "inatteso (difetto del programma, stima conservata): {detail}",
                     n_failed=len(report.failed), detail='; '.join(report.failed)))
@@ -840,16 +887,16 @@ def measure_proposal_edges(photo, proposals, positions, length_mm, width_mm, log
 
 
 def draw_detector_proposals(image, kept, dropped=()):
-    """@brief Disegna cio' che il rilevatore locale ha proposto, e cio' che e' stato tolto.
+    """@brief Draw what the local detector proposed, and what was removed.
 
-    @param image Fotografia calibrata (BGR).
-    @param kept Proposte sopravvissute, con `_box` normalizzato.
-    @param dropped Proposte scartate perche' cadute su un contatto dichiarato.
-    @return PNG codificato, o None se la codifica fallisce.
-    @note Serve a guardare il rilevatore, non il risultato finale: le deboli
-        sono tratteggiate come nella vista di revisione e le scartate restano
-        visibili in rosso, perche' un filtro che toglie la cosa sbagliata si
-        vede solo se si vede anche cosa ha tolto.
+    @param image Calibrated photograph (BGR).
+    @param kept Surviving proposals, with a normalized `_box`.
+    @param dropped Proposals discarded because they fell on a declared contact.
+    @return Encoded PNG, or None if the encoding fails.
+    @note It serves to inspect the detector, not the final result: the weak ones
+        are dashed as in the review view and the discarded ones stay visible in
+        red, because a filter that removes the wrong thing can only be seen if
+        what it removed is seen too.
     """
     import cv2
     canvas = image.copy()
@@ -864,7 +911,7 @@ def draw_detector_proposals(image, kept, dropped=()):
         weak = bool(proposal.get('_yolo_review_only'))
         color = (0, 200, 255) if weak else (40, 230, 70)
         if weak:
-            # Tratteggio povero ma leggibile: segmenti sui quattro lati.
+            # Poor but readable dashing: segments on the four sides.
             for start, end in (((p0[0], p0[1]), (p1[0], p0[1])), ((p0[0], p1[1]), (p1[0], p1[1])),
                                ((p0[0], p0[1]), (p0[0], p1[1])), ((p1[0], p0[1]), (p1[0], p1[1]))):
                 steps = max(2, int(max(abs(end[0]-start[0]), abs(end[1]-start[1])) / 6))
@@ -882,10 +929,10 @@ def draw_detector_proposals(image, kept, dropped=()):
     return encoded.tobytes() if ok else None
 
 
-#: Frazione del lato del riquadro, per parte, che delimita la finestra di
-#: campionamento del colore attorno al centro: 0.2 per parte = 40% centrale.
-#: Esclude serigrafie di bordo, terminazioni metalliche e ombre del contorno,
-#: che stanno sul perimetro; non e' una soglia tarata su un componente.
+#: Fraction of the box side, per part, delimiting the colour sampling window
+#: around the centre: 0.2 per part = central 40%.
+#: It excludes edge silkscreen, metal terminations and contour shadows, which
+#: lie on the perimeter; it is not a threshold tuned on a component.
 COLOR_SAMPLE_HALF_FRACTION = 0.2
 
 
@@ -1019,7 +1066,7 @@ def _phase_announcer(phase, log):
                 phase(tool, detail, done, total)
             else:
                 phase(tool, detail)
-        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'estrazione
+        except Exception as exc:  # noqa: BLE001 - the GUI must not be able to abort the extraction
             log(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
                    exc=exc))
     return announce
@@ -1075,21 +1122,21 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
     @throws CallCancelled (or subclass) when the user cancels a paid call.
     """
     if report.components:
-        # Rilettura di ogni corpo tenuto dal SUO ritaglio ingrandito, due volte
-        # (utente, 28/09, HANDOFF 144): l'inventario globale decide QUALI corpi
-        # ci sono, ma su una foto intera un modello a token grossi legge
-        # package e piedini a caso. Si adotta solo cio' su cui le due letture
-        # concordano. Prima di colori, altezze e sigle, che leggono la classe.
+        # Rereading of every kept body from ITS enlarged crop, twice (user,
+        # 28/09, HANDOFF 144): the global inventory decides WHICH bodies are
+        # there, but on a whole photo a coarse-token model reads package and
+        # leads at random. Only what the two readings agree on is adopted.
+        # Before colours, heights and markings, which read the class.
         from .photo_crop_reading import read_bodies
         reader = (crop_model or '').strip() or model
         if reader != model:
             log(tx("Lettura dei singoli componenti affidata al modello {model} (Modello "
                    "lettura ritagli del profilo) invece del modello della foto {photo_model}: "
                    "il costo va al suo fornitore.", model=reader, photo_model=model))
-        # Fase con il suo nome (HANDOFF 156): il dettaglio e' il modello che
-        # legge i ritagli e, corpo dopo corpo, le richieste pagate finora; il
-        # conteggio (corpi letti, corpi da leggere) va alla barra e alla riga
-        # della fase.
+        # Phase with its own name (HANDOFF 156): the detail is the model
+        # reading the crops and, body after body, the paid requests so far;
+        # the count (bodies read, bodies to read) goes to the bar and to the
+        # phase line.
         announce('llm_crops', reader)
 
         def progress(done, total, calls):
@@ -1098,22 +1145,22 @@ def read_retained_bodies(photo, report, length, width, model, call, log, cache_d
         summary = read_bodies(photo, report.components, length, width, reader, call, log,
                               cache_dir, system_prompt=crop_prompt, progress=progress)
         if summary.warning:
-            # Gia' registrato nel log da read_bodies come avviso: qui entra
-            # solo fra gli avvisi del risultato, che la revisione mostra.
+            # Already logged by read_bodies as a warning: here it only enters
+            # the warnings of the result, which the review shows.
             report.warnings.append(summary.warning)
-        # Cio' che segue e' locale (pixel del ritaglio): annunciarlo come
-        # «Modello AI» metteva in elenco una seconda fase a pagamento
-        # fittizia. Solo con dei corpi: senza lavoro, nessuna fase.
+        # What follows is local (crop pixels): announcing it as
+        # «Modello AI» (AI model) listed a fictitious second paid phase.
+        # Only with some bodies: with no work, no phase.
         announce('opencv', tx("campionamento dei colori dalla foto"))
-    # Il colore si misura QUI e non prima: la riconciliazione fonde e
-    # sposta i riquadri, e un colore campionato sulle proposte grezze
-    # descriverebbe un rettangolo che non esiste piu'. Il rilevatore e il
-    # parser globale scrivono solo un segnaposto (#303030): senza questo
-    # passo ogni corpo, chiaro o scuro, arrivava a FreeCAD dello stesso
-    # grigio. Nessuna chiamata AI: solo pixel del ritaglio.
+    # The colour is measured HERE and not earlier: the reconciliation merges
+    # and moves the boxes, and a colour sampled on the raw proposals would
+    # describe a rectangle that no longer exists. The detector and the global
+    # parser only write a placeholder (#303030): without this step every body,
+    # light or dark, reached FreeCAD in the same grey. No AI call: only crop
+    # pixels.
     sample_body_colors(photo, report.components, log)
-    # Sigle rilette su ritagli ingranditi, solo per i corpi che ne hanno
-    # una e solo se la foto ha piu' pixel di quelli visti dal modello.
+    # Markings reread on enlarged crops, only for the bodies that have one
+    # and only if the photo has more pixels than those seen by the model.
     from .photo_markings import read_markings
     read_markings(photo, report.components, length, width, model, call, log, cache_dir,
                   announce)
@@ -1162,8 +1209,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     from .smd_component_classifier import classify_photo_boxes
     from ..app_paths import smd_model_path as default_smd_path
     network = Path(model_path) if model_path is not None else default_smd_path()
-    # La modale dice COSA fa il passaggio (utente, 2026-10-02), non con quale
-    # file: il file resta nel log, prima della frase che la riga della fase mostra.
+    # The modal says WHAT the step does (user, 2026-10-02), not with which
+    # file: the file stays in the log, before the sentence the phase line shows.
     log(tx("File della rete: {name}.", name=network))
     what = tx("classifica i corpi trovati da YOLO (tipo, package e verso), senza inviare la foto.")
     announce('smd', what)
@@ -1176,7 +1223,7 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
             box_frame_px=frame_px, mm_per_pixel=mm_per_pixel, model_path=network,
             log=log, cancel=cancel, phase=announce) if inside else []
     except Exception as exc:
-        # Si decide dal canale di annullamento, non dal tipo o dal testo.
+        # It is decided from the cancellation channel, not from the type or text.
         if _cancel_requested(cancel):
             raise CallCancelled(tx("Classificazione SMD annullata")) from exc
         raise
@@ -1187,8 +1234,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
         row['_smd_prediction'] = prediction
         row['_source'] = 'YOLO + SMD local'
         row['_smd_class'] = prediction['class']
-        # Verdetto della rete in un campo suo: arriva fino all'abbinatore KiCad,
-        # che non vede `_smd_prediction` (kicad_models._local_classifier_identity).
+        # Network verdict in a field of its own: it reaches the KiCad matcher,
+        # which does not see `_smd_prediction` (kicad_models._local_classifier_identity).
         row['_smd_accepted'] = bool(prediction['accepted'])
         row['_smd_body'] = prediction.get('body')
         row['_smd_rotation_kind'] = prediction.get('rotation_kind')
@@ -1196,8 +1243,8 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
         row['_smd_terminal_count'] = prediction.get('terminal_count')
         row['_smd_rotation_deg'] = prediction['rotation_deg']
         row['_smd_rotation_confidence'] = prediction['rotation_confidence']
-        # A parole come in ogni altro percorso: la rete e' un solo modello non
-        # calibrato, quindi mai 'high'; la probabilita' resta in _smd_prediction.
+        # In words as in every other path: the network is a single uncalibrated
+        # model, so never 'high'; the probability stays in _smd_prediction.
         row['class_confidence'] = 'medium' if prediction['accepted'] else 'low'
         row['_category_source'] = 'smd_classifier.pt v3'
         row['_category_status'] = 'proposed' if prediction['accepted'] else 'undetermined'
@@ -1226,7 +1273,7 @@ def _cancel_requested(cancel):
         return False
     try:
         return bool(cancel.is_set() if hasattr(cancel, 'is_set') else cancel())
-    except Exception:  # noqa: BLE001 - un canale guasto non e' una richiesta di annullo
+    except Exception:  # noqa: BLE001 - a broken channel is not a cancellation request
         return False
 
 
@@ -1262,9 +1309,9 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         otherwise never be adopted.
     @throws CallCancelled (or subclass) when the user cancels a paid call.
     """
-    # Un riquadro senza area dentro la foto non ha un ritaglio da leggere:
-    # contarlo fra quelli «mandati alla riverifica AI» era falso (verifica
-    # avversariale A6, 2026-10-02). Resta generico, da rivedere.
+    # A box with no area inside the photo has no crop to read: counting it
+    # among those «mandati alla riverifica AI» (sent to the AI recheck) was
+    # false (adversarial review A6, 2026-10-02). It stays generic, to review.
     outside = [row for row in rows
                if isinstance(row.get('_smd_prediction'), dict)
                and row['_smd_prediction'].get('class') == '_outside']
@@ -1296,8 +1343,9 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         row['_smd_accepted'] = False
         row['class'] = 'unknown'
         row['class_confidence'] = 'low'
-        # Il motivo «tipo non riconosciuto» della rete si mette da parte: se la
-        # riverifica trova il tipo, ripeterlo contraddirebbe la riga.
+        # The network's «tipo non riconosciuto» (type not recognised) reason is
+        # set aside: if the recheck finds the type, repeating it would
+        # contradict the line.
         network_reasons[id(row)] = row.pop('_review_reason', None)
     from .photo_crop_reading import read_bodies
     reader = (crop_model or '').strip() or model
@@ -1316,8 +1364,8 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         if cls and cls not in _NONSPECIFIC_INVENTORY_CLASSES:
             row['_source'] = 'YOLO + SMD local + AI crop recheck'
             row['name'] = f"{cls} {row.get('_id')}"
-            # In testa, non al posto: read_bodies puo' avervi gia' scritto perche'
-            # ha svuotato un package (taglia, SOIC) o cambiato classe.
+            # At the head, not in place: read_bodies may already have written
+            # there because it emptied a package (size, SOIC) or changed class.
             reason = tx("Rete locale: tipo non riconosciuto; tipo letto dalla riverifica AI "
                         "del ritaglio, da verificare.")
             previous = row.get('_review_reason')
@@ -1325,14 +1373,15 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
             row['_uncertain'] = True
         else:
             if not cls or cls in ('unknown', 'other'):
-                # Nessuna lettura concorde: il corpo resta generico, come prima.
+                # No agreeing reading: the body stays generic, as before.
                 row['class'] = 'generic'
             network = network_reasons.get(id(row))
             if network:
                 previous = row.get('_review_reason')
                 row['_review_reason'] = f'{previous} | {network}' if previous else network
-        # 'semiconductor_unknown' resta: e' piu' di 'generic' (piedini visti),
-        # ma non e' un tipo, quindi non si dice «tipo letto dall'AI».
+        # 'semiconductor_unknown' stays: it is more than 'generic' (leads
+        # seen), but it is not a type, so «tipo letto dall'AI» (type read by
+        # the AI) is not said.
     return pending
 
 
@@ -1345,6 +1394,38 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                       recount_contacts=None, crop_prompt=None, crop_model=None, cancel=None,
                       smd_model_path=None):
     """@brief Calibrate the photo and extract reviewed component envelopes.
+
+    @param paths Attached file paths; only photographs (PHOTO_SUFFIXES) are
+        considered as top-view candidates.
+    @param model Vision model identifier of the paid calls.
+    @param length Board extent along X, in mm (calibration dimension).
+    @param width Board extent along Y, in mm (calibration dimension).
+    @param kinds Allowed component kinds, forwarded to the detection schemas.
+    @param call Logged AI call function (model, system_prompt, content_blocks, tool, ...).
+    @param progress Optional callable(message) receiving the log lines; None is a no-op.
+    @param top_photo_index Index, or collection of indices, of the photos declared
+        as top views; None lets the program pick heuristically and warns about it;
+        an empty set or {-1} skips the inventory.
+    @param extra_instructions Optional user notes on the component, appended to the prompts.
+    @param grounding True (default) for the grounded localization with detector
+        'ai'; False keeps the legacy crop path, retained only for reproducible
+        comparisons.
+    @param cache_dir Analysis folder for the AI cache and the evidence files; None writes nothing.
+    @param classifier_model Optional model of the reconciliation and classification
+        calls; None uses `model`.
+    @param mechanical Forwarded to grounded_components to request the mechanical metadata.
+    @param grounding_prompt Optional replacement of the grounding instructions.
+    @param verification_prompt Optional replacement of the verification instructions.
+    @param top_photo_source Who chose the top view (for the log), 'AI' by default.
+    @param cancel Cancellation channel (event, predicate or None) checked by the
+        local SMD network, which makes no paid call.
+    @return InventoryResult with components, warnings, calibrated photo, overlay
+        and calibration details.
+    @throws ValueError When `detector` is not supported, or the full photo is
+        missing for the SMD crops.
+    @throws ReviewCancelled When `review_proposals` returns None.
+    @throws CallCancelled (or subclass) when the user cancels a paid call or the
+        SMD classification.
 
     @param crop_prompt Instructions of the per-body crop reading (profile
         field 'crop_prompt'), forwarded to photo_crop_reading.read_bodies as
@@ -1419,16 +1500,16 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)
-        # Marcato come avviso: chi mostra l'avanzamento lo distingue senza
-        # leggerne le parole (la modale lo mette in evidenza, punto 136).
+        # Marked as a warning: whoever shows the progress tells it apart
+        # without reading its words (the modal highlights it, point 136).
         log(as_warning(message))
     if not all(math.isfinite(v) and v > 0 for v in (length,width)):
         warn(tx("Quote PCB non valide: inventario fotografico saltato."))
         return report
-    # L'utente puo' indicare piu' viste dall'alto: la foto ad alta risoluzione
-    # per i componenti piccoli e la vista superiore come riserva. Si provano
-    # tutte e vince la piu' dettagliata FRA QUELLE CALIBRABILI: un primo piano
-    # parziale o storto non deve lasciare l'inventario senza alcuna vista.
+    # The user can indicate several top views: the high-resolution photo for
+    # the small components and the top view as a fallback. All are tried and
+    # the most detailed AMONG THE CALIBRATABLE ONES wins: a partial or skewed
+    # close-up must not leave the inventory without any view.
     allowed = ({top_photo_index} if type(top_photo_index) is int
                else set(top_photo_index) if top_photo_index is not None else None)
     if allowed is not None and (not allowed or allowed == {-1}):
@@ -1440,7 +1521,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     if allowed is not None:
         photos = [(i,p) for i,p in photos if i in allowed]
     if photos:
-        # OpenCV lavora qui, in locale: cerca la scheda nella foto e la calibra.
+        # OpenCV works here, locally: it looks for the board in the photo and calibrates it.
         announce('opencv', tx("ricerca e calibrazione della scheda"))
     try:
         candidates = []
@@ -1460,8 +1541,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             warn(failure)
         if not candidates:
             if photos:
-                # Nessuno strumento lavora piu' sulla foto: la modale non deve
-                # restare sulla calibrazione fallita.
+                # No tool works on the photo any more: the modal must not stay
+                # on the failed calibration.
                 announce('', '')
             warn(tx("Nessuna vista dall'alto calibrabile con le quote {length:.2f} x "
                     "{width:.2f} mm.", length=length, width=width)
@@ -1484,13 +1565,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         warn(report.calibration["board_warning"])
     edge_profiles = report.calibration.pop("_edge_depth_px", None)
     if isinstance(declared, dict) and declared.get("layout") == "castellated":
-        # Un conteggio dei contatti diverso da quello dichiarato va verificato:
-        # qui si segnala; il ricontrollo, se c'e', lo fa chi ha i documenti.
+        # A contact count different from the declared one must be verified:
+        # here it is flagged; the recheck, if any, is done by whoever has the
+        # documents.
         from .edge_notches import check_declared_contacts, count_disagreements
         disagreements = count_disagreements(edge_profiles, photo.shape, length, width,
                                             declared.get("castellated_sides"))
-        # Un bordo LISCIO smentisce lo stile a semi-foro, non la fila: la
-        # presenza dei contatti e' un fatto del rame lungo il bordo.
+        # A SMOOTH edge contradicts the half-hole style, not the row: the
+        # presence of the contacts is a fact of the copper along the edge.
         if any(item.no_notch for item in disagreements):
             from .edge_lands import count_edge_copper
             from .edge_notches import normalized_sides
@@ -1507,21 +1589,22 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                            edge=item.edge, found=copper.found if copper.found is not None else "?",
                            reason=f" ({copper.reason})" if copper.reason else ""))
         if disagreements and recount_contacts is not None:
-            # Ricontrollo AI dei soli lati in disaccordo (utente, 28/09, punto
-            # 137); poi il confronto si ripete sui lati in vigore, riletti da
-            # `declared` DOPO la chiamata (il ricontrollo li aggiorna li').
-            # La chiamata si paga e spedisce i documenti: la modale deve dirlo
-            # mentre parte, non mostrarla sotto OpenCV (punto 139, C1).
+            # AI recheck of the disagreeing sides only (user, 28/09, point
+            # 137); then the comparison is repeated on the sides in force,
+            # reread from `declared` AFTER the call (the recheck updates them
+            # there). The call is paid and sends the documents: the modal must
+            # say so as it starts, not show it under OpenCV (point 139, C1).
             announce('llm', tx("ricontrollo dei contatti"))
             recount_contacts(disagreements)
             announce('opencv', tx("confronto dei contatti con la foto"))
         for kind, message in check_declared_contacts(
                 edge_profiles, photo.shape, length, width, declared.get("castellated_sides")):
             (warn if kind == "warning" else log)(message)
-        # Piazzole misurate sulla foto (HANDOFF 169): sui lati che la foto
-        # conferma, il rame di ogni contatto viene misurato lungo il bordo e
-        # verso l'interno; il risultato va nella risposta come `_measured_lands`
-        # e l'estrazione lo adotta al posto delle stime (mai di una quota letta).
+        # Lands measured on the photo (HANDOFF 169): on the sides the photo
+        # confirms, the copper of each contact is measured along the edge and
+        # inwards; the result goes into the response as `_measured_lands` and
+        # the extraction adopts it instead of the estimates (never instead of
+        # a read dimension).
         from .edge_lands import land_lines, measure_lands
         from .edge_notches import confirmed_rows
         rows = confirmed_rows(edge_profiles, photo.shape, length, width,
@@ -1532,12 +1615,12 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                            if land.width_mm is not None}
             for kind, message in land_lines(lands):
                 (warn if kind == "warning" else log)(message)
-        # Tipo di contatto letto dalla foto (utente, 2026-10-08): il modello
-        # dichiara a volte «half_hole», a volte «half_and_through» sugli
-        # stessi documenti, e dal tipo dipendono i pin del 3D. La geometria
-        # delle piazzole sul bordo (apertura sul bordo, foro chiuso dietro)
-        # decide; l'estrazione sostituisce lo stile dichiarato solo quando la
-        # foto lo contraddice, con nota (_apply_measured_holes).
+        # Contact type read from the photo (user, 2026-10-08): the model
+        # sometimes declares «half_hole», sometimes «half_and_through» on the
+        # same documents, and the 3D pins depend on the type. The geometry of
+        # the lands on the edge (opening on the edge, closed hole behind)
+        # decides; the extraction replaces the declared style only when the
+        # photo contradicts it, with a note (_apply_measured_holes).
         from .edge_lands import measure_edge_holes
         from .edge_notches import normalized_sides
         holes = {}
@@ -1570,11 +1653,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         if detector in LOCAL_DETECTORS:
             from .photo_yolo import detect_yolo_components, model_label
             audit = Path(cache_dir)/'yolo-audit' if cache_dir else None
-            # La fase locale va annunciata QUI, non prima: la calibrazione che
-            # precede non e' rilevamento, e la modale non deve mostrare una
-            # fase che non sta girando. Il dettaglio e' il modello VERO (file e
-            # formato): prima diceva sempre «ONNX», anche con un .pt (utente,
-            # 2026-09-25).
+            # The local phase must be announced HERE, not earlier: the
+            # preceding calibration is not detection, and the modal must not
+            # show a phase that is not running. The detail is the REAL model
+            # (file and format): before, it always said «ONNX», even with a
+            # .pt (user, 2026-09-25).
             announce('yolo', model_label(yolo_model_path))
             log(tx("YOLO locale: localizzazione senza invio della foto; verifica package "
                    "AI successiva.") if detector == 'yolo' else
@@ -1587,24 +1670,26 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                               confidence=yolo_confidence, settings=yolo_settings)
             report.calibration['detector_proposal_count'] = len(proposals)
             if not proposals and detector == 'yolo':
-                # Il rilevatore HA girato e non ha trovato nulla: l'enumerazione
-                # a pagamento puo' partire, ma deve dirlo com'e', non come se il
-                # rilevatore non ci fosse (vedi review_global_inventory,
+                # The detector HAS run and found nothing: the paid enumeration
+                # may start, but it must say it as it is, not as if the
+                # detector were absent (see review_global_inventory,
                 # detector_ran).
                 log(tx("Il rilevatore locale non ha trovato corpi: i corpi li enumera il "
                        "modello di visione, in una sola richiesta."))
         else:
-            # Nessun rilevatore locale: la foto va al modello di visione, che
-            # enumera i corpi da solo. Stessa richiesta, stesso schema, stessa
-            # conversione in millimetri: cambia solo chi propone i rettangoli.
+            # No local detector: the photo goes to the vision model, which
+            # enumerates the bodies on its own. Same request, same schema, same
+            # conversion to millimetres: only who proposes the rectangles
+            # changes.
             log(tx("Nessun rilevatore locale: i corpi li enumera il modello di visione, "
                    "in una sola richiesta."))
         if proposals and detector == 'yolo_only':
-            # «Solo YOLO» e' solo YOLO (utente, 2026-10-08): i riquadri escono
-            # dal rilevatore cosi' come sono. Niente filtro sui contatti
-            # dichiarati e niente misura dei bordi col gradiente, che li
-            # modificano: la GUI non coincideva piu' con il rilevatore. Resta
-            # la calibrazione (serve per i millimetri) e il colore dei corpi.
+            # «Solo YOLO» (YOLO only) is only YOLO (user, 2026-10-08): the
+            # boxes come out of the detector as they are. No filter on the
+            # declared contacts and no edge measurement with the gradient,
+            # which modify them: the GUI no longer matched the detector. The
+            # calibration (needed for the millimetres) and the body colour
+            # remain.
             log(tx("Solo YOLO: riquadri del rilevatore senza filtro dei contatti ne' misura "
                    "dei bordi."))
             detector_png = draw_detector_proposals(photo, proposals, [])
@@ -1614,17 +1699,18 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             from .contact_zones import contact_positions, contact_proposals
             from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
             positions = contact_positions(declared, length, width)
-            # Incertezza di un bordo misurato sulla foto: la tolleranza con cui
-            # un riquadro «tocca» il bordo della scheda al contatto.
+            # Uncertainty of an edge measured on the photo: the tolerance with
+            # which a box «tocca» (touches) the board edge at the contact.
             tolerance, _source = edge_uncertainty_mm(
                 scale_px_per_mm=min(photo.shape[1] / length, photo.shape[0] / width))
             dropped = contact_proposals(proposals, positions, length, width,
                                         edge_tolerance_mm=tolerance)
             before_filter = list(proposals)
             if dropped:
-                # Non e' un filtro per classe: il rilevatore chiama le file di
-                # piazzole «switch» o «battery», quindi la classe non aiuta.
-                # Qui si usa dove i contatti SONO, secondo le quote dichiarate.
+                # It is not a per-class filter: the detector calls the rows of
+                # lands «switch» or «battery», so the class does not help.
+                # Here what is used is where the contacts ARE, according to
+                # the declared dimensions.
                 proposals = [row for i, row in enumerate(proposals) if i not in dropped]
                 log(tx("Contatti dichiarati: {n_dropped} proposte cadevano sulle piazzole del "
                        "modulo ({n_positions} contatti su quote dichiarate) e sono state "
@@ -1634,25 +1720,25 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             elif positions:
                 log(tx("Contatti dichiarati: {n_positions}; nessuna proposta ci cadeva sopra.",
                        n_positions=len(positions)))
-            # Il rilevatore dice dove c'e' un corpo; i bordi li misura il
-            # gradiente, che non ha bisogno di addestramento. Si fa qui, prima
-            # dell'anteprima e della revisione, perche' e' la geometria che
-            # l'utente deve poter contestare guardandola.
+            # The detector says where a body is; the edges are measured by the
+            # gradient, which needs no training. It is done here, before the
+            # preview and the review, because it is the geometry the user must
+            # be able to contest by looking at it.
             announce('opencv', tx("misura dei bordi dei corpi proposti"))
             proposals = measure_proposal_edges(photo, proposals, positions,
                                                length, width, log)
-            # L'anteprima di cio' che ha proposto il rilevatore, prima della
-            # riconciliazione: e' l'unico modo per capire se il filtro dei
-            # contatti ha tolto le piazzole o qualcosa di buono.
+            # The preview of what the detector proposed, before the
+            # reconciliation: it is the only way to understand whether the
+            # contact filter removed the lands or something good.
             detector_png = draw_detector_proposals(
                 photo, proposals, [row for i, row in enumerate(before_filter) if i in dropped])
             save_inventory_evidence(cache_dir, None, detector_png, proposals, log,
                                     label='detector')
         if proposals and review_proposals is not None:
-            # Potare qui, non dopo: la riconciliazione che segue si paga, e
-            # riceverla piu' pulita costa meno e le da' meno rumore da
-            # smaltire. Annullare significa non procedere: nessuno deve pagare
-            # una chiamata su proposte che non sono state approvate.
+            # Prune here, not later: the reconciliation that follows is paid,
+            # and receiving it cleaner costs less and gives it less noise to
+            # get rid of. Cancelling means not proceeding: nobody must pay for
+            # a call on proposals that have not been approved.
             kept = review_proposals(report.photo_png, proposals, length, width)
             if kept is None:
                 raise ReviewCancelled(tx("Revisione dei corpi rilevati annullata."))
@@ -1661,10 +1747,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                    n_proposals=len(proposals)))
             report.calibration['reviewed_proposal_count'] = len(kept)
             if not kept and detector in ('yolo', 'yolo_smd'):
-                # Chi ha rivisto ha tolto TUTTO, di proposito: non e' «nessun
-                # rilevatore», e pagare un'enumerazione da zero rifarebbe il
-                # lavoro appena rifiutato. Ci si ferma qui, senza chiamate, e lo
-                # si dice; l'inventario fotografico resta vuoto.
+                # The reviewer removed EVERYTHING, on purpose: it is not
+                # «nessun rilevatore» (no detector), and paying for an
+                # enumeration from scratch would redo the work just rejected.
+                # It stops here, without calls, and says so; the photo
+                # inventory stays empty.
                 warn(tx("Revisione dei corpi: tutte le {n_proposals} proposte sono state "
                         "tolte; nessuna richiesta a pagamento, l'inventario fotografico "
                         "resta vuoto.", n_proposals=len(proposals)))
@@ -1697,10 +1784,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             announce('', '')
             return report
         if detector == 'yolo_only':
-            # Scelta dell'utente (25/09): «si fermi li' e basta, fa vedere solo
-            # i rettangoli individuati». Nessuna riconciliazione a pagamento:
-            # cio' che il rilevatore ha proposto e la revisione ha tenuto e'
-            # l'inventario. Solo passi gratuiti sui pixel del ritaglio.
+            # User's choice (25/09):
+            # «si fermi li' e basta, fa vedere solo i rettangoli individuati»
+            # (stop there and that is all, it shows only the rectangles found).
+            # No paid reconciliation: what the detector proposed and the
+            # review kept is the inventory. Only free steps on the crop pixels.
             report.components = yolo_only_components(
                 proposals, reviewed=review_proposals is not None, log=log)
             sample_body_colors(photo, report.components, log)
@@ -1713,17 +1801,17 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             log(tx("Inventario solo YOLO: {n_components} riquadri, nessuna verifica AI "
                    "della foto; tipi dalla classe del rilevatore, altezze segnaposto da "
                    "rivedere.", n_components=len(report.components)))
-            # Il rilevatore ha finito e nessuno strumento prende il suo posto:
-            # tool vuoto = nessuna fase rivendicata, altrimenti la modale
-            # resterebbe su YOLO per il resto della corsa.
+            # The detector has finished and no tool takes its place: empty
+            # tool = no phase claimed, otherwise the modal would stay on YOLO
+            # for the rest of the run.
             announce('', '')
             return report
-        # Da qui si paga: la revisione delle proposte e' finita e la richiesta
-        # sta per partire, quindi la modale deve tornare a dichiarare il
-        # modello remoto anche quando il rilevamento locale ha girato.
-        # 'llm_inventory': stessa chiamata remota di 'llm', ma cio' che parte e'
-        # la foto della scheda con le proposte, non i documenti (la modale
-        # disegna la sorgente giusta).
+        # From here on it is paid: the review of the proposals is over and the
+        # request is about to start, so the modal must again declare the
+        # remote model even when the local detection has run.
+        # 'llm_inventory': same remote call as 'llm', but what is sent is the
+        # board photo with the proposals, not the documents (the modal draws
+        # the right source).
         announce('llm_inventory', classifier_model or model)
         report.components = review_global_inventory(
             photo, proposals, length, width, classifier_model or model, call, log,
@@ -1732,10 +1820,10 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             **({'detector_ran': True} if detector in LOCAL_DETECTORS else {}))
         flag_ai_bodies_on_edge_contacts(photo, report.components, declared, length, width, log,
                                         enumerated=not _sent_to_ai(proposals))
-        # Lettura per ritaglio, colori e sigle: la stessa coda del rilancio
-        # (reconcile_saved_proposals). Vale per 'yolo' e 'vlm', che passano
-        # entrambi dall'inventario globale; 'ai' ha la sua verifica per
-        # ritagli (grounded_components).
+        # Per-crop reading, colours and markings: the same tail as the rerun
+        # (reconcile_saved_proposals). It applies to 'yolo' and 'vlm', which
+        # both pass through the global inventory; 'ai' has its own per-crop
+        # check (grounded_components).
         read_retained_bodies(photo, report, length, width, classifier_model or model, call,
                              log, cache_dir, crop_prompt, announce, crop_model=crop_model)
         report.calibration['detector'] = detector
@@ -1763,14 +1851,14 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         from .photo_grounding import grounded_components
         def report_progress(message):
             log(message)
-            # Gli avvisi si riconoscono dal tipo, non dalle parole: dal
-            # 2026-09-24 il testo e' nella lingua dell'utente.
+            # Warnings are recognised by their type, not by their words: since
+            # 2026-09-24 the text is in the user's language.
             if kind_of(message) == WARNING:
                 report.warnings.append(message)
-        # Da qui la foto va al modello di visione, a pagamento: la fase si
-        # annuncia ora, dopo la calibrazione, non prima (punto 139, C1: con
-        # 'ai' l'annuncio anticipato era subito coperto da OpenCV e le chiamate
-        # di localizzazione comparivano sotto OpenCV).
+        # From here the photo goes to the vision model, paid: the phase is
+        # announced now, after the calibration, not before (point 139, C1:
+        # with 'ai' the early announcement was immediately covered by OpenCV
+        # and the localisation calls appeared under OpenCV).
         announce('llm_inventory', model)
         report.components = grounded_components(photo,model,length,width,kinds,call,
                                                report_progress,cache_dir,extra_instructions,classifier_model,mechanical,
@@ -1839,22 +1927,22 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     return report
 
 
-#: Rilevatori fotografici accettati da extract_inventory. `yolo_only` e'
-#: `yolo` senza la riconciliazione a pagamento (utente, 2026-09-25).
+#: Photo detectors accepted by extract_inventory. `yolo_only` is `yolo`
+#: without the paid reconciliation (user, 2026-09-25).
 PHOTO_DETECTORS = ('ai', 'yolo', 'yolo_only', 'vlm', 'yolo_smd')
-#: Rilevatori che fanno girare il modello YOLO locale.
+#: Detectors that run the local YOLO model.
 LOCAL_DETECTORS = ('yolo', 'yolo_only', 'yolo_smd')
 
-#: Classe del rilevatore -> tipo del componente, per il percorso senza
-#: riconciliazione. Tabella DICHIARATA, non dedotta: le classi che hanno un
-#: tipo omonimo restano tali; transistor -> ic come fa gia' la riconciliazione
-#: (photo_global_inventory._normalize); clock (oscillatori e quarzi) ->
-#: crystal; button (pulsanti tattili) -> switch. Batterie, buzzer, display,
-#: trimmer (potentiometer) e rele' hanno un tipo omonimo in
-#: datasheet_extractor.COMPONENT_KINDS e lo usano. Fusibili e dissipatori non
-#: hanno una forma 3D dedicata: restano generic (l'altezza la stima comunque
-#: photo_yolo dalla classe). pads e pins non sono corpi: generic. Il tipo
-#: sceglie solo la forma generica del volume, non un package.
+#: Detector class -> component kind, for the path without reconciliation.
+#: DECLARED table, not deduced: the classes that have a kind of the same name
+#: stay so; transistor -> ic as the reconciliation already does
+#: (photo_global_inventory._normalize); clock (oscillators and crystals) ->
+#: crystal; button (tactile buttons) -> switch. Batteries, buzzers, displays,
+#: trimmers (potentiometer) and relays have a kind of the same name in
+#: datasheet_extractor.COMPONENT_KINDS and use it. Fuses and heat sinks have
+#: no dedicated 3D shape: they stay generic (photo_yolo estimates the height
+#: from the class anyway). pads and pins are not bodies: generic. The kind
+#: only chooses the generic shape of the volume, not a package.
 YOLO_CLASS_KINDS = {
     'capacitor': 'capacitor', 'resistor': 'resistor', 'inductor': 'inductor',
     'diode': 'diode', 'led': 'led', 'connector': 'connector', 'switch': 'switch',
@@ -1888,8 +1976,8 @@ def yolo_only_components(proposals, *, reviewed, log=None):
         inventory the user asked for and must become generic 3D volumes.
     """
     log = log or (lambda message: None)
-    # Le proposte a bassa confidenza entrano solo se chi rivede le ha tenute,
-    # anche quando la revisione restituisce tutto (26/09).
+    # Low-confidence proposals enter only if the reviewer kept them, even
+    # when the review returns everything (26/09).
     from .photo_yolo import split_ai_candidates
     proposals = split_ai_candidates(list(proposals))[0]
     rows = [row for row in proposals if reviewed or not row.get('_yolo_review_only')]
@@ -1913,9 +2001,9 @@ def yolo_only_components(proposals, *, reviewed, log=None):
     return components
 
 
-#: Prefissi dei file di evidenza scritti da save_inventory_evidence: il
-#: rilevatore (proposte prima della revisione) e l'inventario finale (foto
-#: calibrata pulita). Sono gli stessi nomi che extract_inventory produce.
+#: Prefixes of the evidence files written by save_inventory_evidence: the
+#: detector (proposals before the review) and the final inventory (clean
+#: calibrated photo). They are the same names extract_inventory produces.
 DETECTOR_EVIDENCE_LABEL = 'detector'
 INVENTORY_EVIDENCE_LABEL = 'inventory'
 _EVIDENCE_STAMP = re.compile(r'^(?P<label>[a-z]+)-(?P<stamp>\d{8}-\d{6})(?P<suffix>-photo\.png|-overlay\.png|\.json)$')
@@ -1985,30 +2073,31 @@ def load_saved_detector_proposals(cache_dir):
     return None
 
 
-#: Sotto-cartella del componente in cui la GUI conserva le proposte riviste
-#: e la foto su cui furono misurate. Sta NELLA cartella del componente, non
-#: nella cache comune: cosi' la revisione si riapre al riavvio con il solo
-#: nome digitato, senza cercare fra i file di altri componenti e senza
-#: rifare alcuna chiamata AI.
+#: Component subfolder in which the GUI keeps the reviewed proposals and the
+#: photo on which they were measured. It lies IN the component folder, not in
+#: the shared cache: so the review reopens at restart with just the typed
+#: name, without searching among other components' files and without redoing
+#: any AI call.
 REVIEW_BUNDLE_SUBDIR = 'photo-review'
-#: Cartella, DENTRO la cartella del progetto, delle risposte AI in cache e
-#: delle evidenze di ogni analisi (decisione dell'utente del 2026-09-24:
-#: «ogni interrogazione AI e' specifica del progetto»). Prima stava in
-#: `generated/photo-cache`, comune a tutti i progetti.
+#: Folder, INSIDE the project folder, of the cached AI responses and of the
+#: evidence of every analysis (user decision of 2026-09-24:
+#: «ogni interrogazione AI e' specifica del progetto» (every AI query is
+#: project-specific)). Before, it was `generated/photo-cache`, shared by all
+#: projects.
 PHOTO_CACHE_SUBDIR = 'photo-cache'
 
 
 def photo_cache_dir(project_dir):
-    """@brief Cartella della cache AI e delle evidenze di un progetto.
+    """@brief Folder of the AI cache and of the evidence of a project.
 
-    @param project_dir Cartella del progetto (del componente).
+    @param project_dir Project (component) folder.
     @return `project_dir/photo-cache`.
     """
     return Path(project_dir) / PHOTO_CACHE_SUBDIR
 REVIEW_BUNDLE_JSON = 'proposals.json'
 REVIEW_BUNDLE_PHOTO = 'photo.png'
-#: Formato del pacchetto scritto da save_review_bundle: chi legge un file di
-#: un formato che non conosce lo scarta invece di interpretarlo a meta'.
+#: Format of the bundle written by save_review_bundle: a reader of a file in
+#: a format it does not know discards it instead of half-interpreting it.
 REVIEW_BUNDLE_FORMAT = 1
 
 
@@ -2229,8 +2318,8 @@ def load_review_bundle(project_dir):
                         stamp=str(document.get('stamp') or ''),
                         detector=str(document.get('detector') or 'yolo'),
                         source_json=str(document.get('source_json') or ''),
-                        # Assente nei pacchetti scritti prima del campo: quelli
-                        # venivano tutti dalla finestra di revisione.
+                        # Absent in the bundles written before the field: those
+                        # all came from the review window.
                         reviewed=document.get('reviewed') is not False,
                         photo_path=photo_path if photo_path and photo_path.is_file() else None)
 
@@ -2347,9 +2436,9 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
         # the board again. Reject before any model or SMD classifier runs.
         raise ValueError(tx("Nessuna proposta valida (serve almeno un riquadro con _id e _box)."))
     if declared:
-        # Solo una nota di coerenza: le quote con cui le proposte furono
-        # misurate devono essere quelle della scheda estratta, altrimenti i
-        # riquadri normalizzati finiscono su una scala diversa.
+        # Only a consistency note: the dimensions with which the proposals
+        # were measured must be those of the extracted board, otherwise the
+        # normalised boxes end up on a different scale.
         for key, value in (('body_length_mm', length), ('body_width_mm', width)):
             stated = declared.get(key)
             if isinstance(stated, (int, float)) and not isinstance(stated, bool) \
@@ -2368,9 +2457,9 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
               manual=manual) if manual else '')
         + tx("; nessun rilevatore locale e nessun documento vengono rieseguiti."))
     if detector == 'yolo_smd':
-        # Il pacchetto e' nato con la rete SMD (utente, 2026-10-02: solo cio'
-        # che la rete non risolve va all'AI): il rilancio rifa' la stessa
-        # strada invece dell'inventario globale a pagamento su tutti i corpi.
+        # The bundle was born with the SMD network (user, 2026-10-02: only
+        # what the network does not resolve goes to the AI): the rerun takes
+        # the same road instead of the paid global inventory on all bodies.
         return _reconcile_with_smd_network(photo, report, proposals, length, width, model,
                                            call, log, cache_dir, crop_prompt, phase,
                                            crop_model, cancel, reviewed, smd_model_path)
@@ -2389,9 +2478,9 @@ def reconcile_saved_proposals(photo, proposals, length, width, model, call, log,
     if replayed:
         log(tx("Rilancio dell'inventario: proposte e foto identiche a una richiesta "
                "gia' pagata; risposta rigiocata dalla cache, nessun nuovo addebito."))
-    # Stessa coda del percorso normale, nello stesso punto (HANDOFF 146 V2):
-    # senza la lettura per ritaglio il rilancio perdeva le correzioni delle
-    # letture concordi.
+    # Same tail as the normal path, at the same point (HANDOFF 146 V2):
+    # without the per-crop reading the rerun lost the corrections of the
+    # agreeing readings.
     read_retained_bodies(photo, report, length, width, model, call, log, cache_dir,
                          crop_prompt, _phase_announcer(phase, log), crop_model=crop_model)
     report.calibration.update(detector=detector, proposal_count=len(proposals),

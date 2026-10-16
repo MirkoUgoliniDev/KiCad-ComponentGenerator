@@ -109,6 +109,9 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         unapplied draft: the footprint checked is the applied one on disk,
         and a warning says the draft is not included.
     @return The list of Check results.
+    @note No exception escapes for a footprint without electrical pads or an
+        incomplete STEP file: the ValueError raised internally is caught and
+        reported as an ERROR check.
     """
     results = []
     def add(status, title, detail):

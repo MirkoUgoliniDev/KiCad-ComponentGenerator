@@ -167,7 +167,10 @@ class ProjectNameDialog(QDialog):
         super().accept()
 
     def project_name(self) -> str:
-        """@brief The accepted name, without surrounding spaces."""
+        """@brief The accepted name, without surrounding spaces.
+
+        @return The stripped text of the name field.
+        """
         return self.field.text().strip()
 
 
@@ -213,7 +216,10 @@ class OpenProjectDialog(QDialog):
             self.list.currentItem() is not None)
 
     def selected_name(self) -> str:
-        """@brief Name of the chosen project, or "" when nothing is chosen."""
+        """@brief Name of the chosen project, or "" when nothing is chosen.
+
+        @return The project name stored in the current list item, or "".
+        """
         item = self.list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
 

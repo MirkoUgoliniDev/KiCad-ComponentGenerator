@@ -118,24 +118,25 @@ def _prompt_snapshot(arguments: dict) -> tuple[str, list[str]]:
 
 
 def _usage_snapshot():
-    """@brief Consuntivo dei token al momento della chiamata, se disponibile."""
+    """@brief Token totals at the moment of the call, when available (None otherwise)."""
     try:
         from .openrouter import usage_totals
         totals = usage_totals()
         return (totals.prompt_tokens, totals.completion_tokens, totals.cost_usd)
-    except Exception:  # noqa: BLE001 - la diagnostica non deve mai far cadere una chiamata
+    except Exception:  # noqa: BLE001 - diagnostics must never bring down a call
         return None
 
 
 def _usage_delta(before):
-    """@brief Token e costo attribuibili alla chiamata appena conclusa.
+    """@brief Tokens and cost attributable to the call that just ended.
 
-    @param before Istantanea presa prima della chiamata, o None.
-    @return Testo da accodare alla riga di diagnostica, eventualmente vuoto.
-    @note Differenza di un totale globale: con chiamate in parallelo
-        attribuirebbe a una cio' che ha speso un'altra. Oggi le chiamate
-        dell'analisi sono in sequenza; se un giorno non lo fossero, questa
-        riga andrebbe ricavata dalla risposta invece che dal totale.
+    @param before Snapshot taken before the call, or None.
+    @return Text to append to the diagnostic line, possibly empty.
+    @note This is the difference of a global total: with parallel calls it
+        would attribute to one call what another one spent. Today the calls
+        of an analysis run in sequence; should they ever run in parallel,
+        this line would have to be derived from the response instead of
+        from the total.
     """
     after = _usage_snapshot()
     if before is None or after is None:
@@ -281,11 +282,11 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         if log_prompt:
             log_prompt_lines(context, arguments)
         started = perf_counter()
-        # Il consuntivo dei token e' globale: la differenza prima/dopo e'
-        # l'unico modo per sapere quanto e' entrato in QUESTA chiamata. Serve
-        # a vedere subito se un fornitore ha scartato le immagini: una
-        # richiesta con quattro fotografie che costa poche migliaia di token
-        # non le ha ricevute, per quanto la risposta sembri legittima.
+        # The token tally is global: the before/after difference is the only
+        # way to know how much went into THIS call. It shows at once whether
+        # a provider dropped the images: a request with four photographs that
+        # costs a few thousand tokens did not receive them, however legitimate
+        # the answer looks.
         before = _usage_snapshot()
         attempt_kwargs = kwargs
         attempt = 1

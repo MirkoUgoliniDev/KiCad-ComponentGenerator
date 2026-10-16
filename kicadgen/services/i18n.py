@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
-    QAbstractItemView,
     QAbstractButton,
-    QAbstractSpinBox,
     QComboBox,
     QDialog,
     QGroupBox,
@@ -36,6 +36,21 @@ LANGUAGES = {
 }
 
 DEFAULT_TRANSLATIONS = {
+    # Question of the pause after the AI inventory (audit 2026-10-15, medium 12:
+    # the key was used by main_window but had no entry, so the question was
+    # always Italian). Dotted key: `{count}` is formatted by `I18n.tr`.
+    "inventory_pause.question": {
+        "it": "L'inventario AI ha prodotto {count} ingombri.\n\nVuoi rivederli adesso (sposta, ridimensiona, aggiungi, elimina, cambia tipo e modello KiCad) PRIMA dell'abbinamento dei modelli e della generazione 3D?\n\nLa revisione è gratuita: nessuna chiamata AI. Rispondendo No si prosegue con i corpi come li ha proposti l'AI; puoi comunque riaprirla dopo con «Revisione componenti…».",
+        "en": "The AI inventory produced {count} outlines.\n\nDo you want to review them now (move, resize, add, delete, change type and KiCad model) BEFORE the model matching and the 3D generation?\n\nThe review is free: no AI call. Answering No continues with the bodies as the AI proposed them; you can still reopen it later with «Component review…».",
+        "fr": "L’inventaire IA a produit {count} encombrements.\n\nVoulez-vous les revoir maintenant (déplacer, redimensionner, ajouter, supprimer, changer le type et le modèle KiCad) AVANT l’appariement des modèles et la génération 3D ?\n\nLa révision est gratuite : aucun appel IA. En répondant Non, on continue avec les corps tels que l’IA les a proposés ; vous pourrez la rouvrir ensuite avec « Révision des composants… ».",
+        "de": "Das KI-Inventar hat {count} Umrisse ergeben.\n\nMöchten Sie sie jetzt prüfen (verschieben, Größe ändern, hinzufügen, löschen, Typ und KiCad-Modell ändern), BEVOR die Modelle zugeordnet werden und das 3D-Modell erzeugt wird?\n\nDie Prüfung ist kostenlos: kein KI-Aufruf. Mit Nein geht es mit den Körpern weiter, wie die KI sie vorgeschlagen hat; Sie können die Prüfung später mit «Bauteilprüfung…» erneut öffnen.",
+    },
+    # Paths of the KiCad tab with their file (the «—» variants exist below):
+    # composed once in Italian, they stayed Italian after a language switch.
+    "ui:Percorso footprint: {path}": {"it": "Percorso footprint: {path}", "en": "Footprint path: {path}", "fr": "Chemin de l’empreinte : {path}", "de": "Footprint-Pfad: {path}"},
+    "ui:Percorso modello STEP: {path}": {"it": "Percorso modello STEP: {path}", "en": "STEP model path: {path}", "fr": "Chemin du modèle STEP : {path}", "de": "Pfad des STEP-Modells: {path}"},
+    "ui:Percorso simbolo elettrico: {path}": {"it": "Percorso simbolo elettrico: {path}", "en": "Electrical symbol path: {path}", "fr": "Chemin du symbole électrique : {path}", "de": "Pfad des Schaltsymbols: {path}"},
+    "ui:Percorso simbolo elettrico previsto: {path}": {"it": "Percorso simbolo elettrico previsto: {path}", "en": "Expected electrical symbol path: {path}", "fr": "Chemin prévu du symbole électrique : {path}", "de": "Erwarteter Pfad des Schaltsymbols: {path}"},
     "ui:Componente singolo: analisi AI dei documenti · {model}": {
         "it": "Componente singolo: analisi AI dei documenti · {model}",
         "en": "Single component: AI document analysis · {model}",
@@ -512,11 +527,11 @@ DEFAULT_TRANSLATIONS = {
     "ui:Modello:": {"it": "Modello:", "en": "Model:", "fr": "Modèle :", "de": "Modell:"},
     "ui:Chiave:": {"it": "Chiave:", "en": "Key:", "fr": "Clé :", "de": "Schlüssel:"},
     "ui:Prompt di sistema:": {"it": "Prompt di sistema:", "en": "System prompt:", "fr": "Prompt système :", "de": "System-Prompt:"},
-    # Una ripetizione per la risposta illeggibile dei documenti (2026-10-02 sera).
+    # One retry for the unreadable answer of the documents (2026-10-02 evening).
     'ui:Analisi dei documenti: la risposta del modello non era un JSON leggibile (testo nel log AI, riga AI_RESPONSE_UNREADABLE); un solo nuovo tentativo a pagamento con la stessa richiesta.': {'it': 'Analisi dei documenti: la risposta del modello non era un JSON leggibile (testo nel log AI, riga AI_RESPONSE_UNREADABLE); un solo nuovo tentativo a pagamento con la stessa richiesta.', 'en': "Document analysis: the model's answer was not readable JSON (text in the AI log, line AI_RESPONSE_UNREADABLE); one single new paid attempt with the same request.", 'fr': 'Analyse des documents : la réponse du modèle n’était pas un JSON lisible (texte dans le journal IA, ligne AI_RESPONSE_UNREADABLE) ; une seule nouvelle tentative payante avec la même requête.', 'de': 'Dokumentenanalyse: die Antwort des Modells war kein lesbares JSON (Text im KI-Protokoll, Zeile AI_RESPONSE_UNREADABLE); ein einziger neuer kostenpflichtiger Versuch mit derselben Anfrage.'},
     "ui:Analisi dei documenti: il nuovo tentativo e' leggibile; si usa quello.": {'it': "Analisi dei documenti: il nuovo tentativo e' leggibile; si usa quello.", 'en': 'Document analysis: the new attempt is readable; it is used.', 'fr': 'Analyse des documents : la nouvelle tentative est lisible ; elle est utilisée.', 'de': 'Dokumentenanalyse: der neue Versuch ist lesbar und wird verwendet.'},
     "ui:Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}": {'it': "Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}", 'en': 'The new attempt also returned unreadable arguments; the text of both answers is in the AI log (lines AI_RESPONSE_UNREADABLE). {exc}', 'fr': 'La nouvelle tentative a aussi renvoyé des arguments illisibles ; le texte des deux réponses est dans le journal IA (lignes AI_RESPONSE_UNREADABLE). {exc}', 'de': 'Auch der neue Versuch lieferte unlesbare Argumente; der Text beider Antworten steht im KI-Protokoll (Zeilen AI_RESPONSE_UNREADABLE). {exc}'},
-    # Verifica avversariale del 2026-10-02 sera (fori, rete SMD).
+    # Adversarial verification of 2026-10-02 evening (holes, SMD network).
     "ui:Lato {label}: il semi-foro stimato di {value:.2f}mm non sta nella piazzola larga {pad:.2f}mm con {wall}mm di rame per parte, e ridurlo lo porterebbe sotto {smallest:.2f}mm: la piazzola misurata o la stima del foro e' sbagliata. Indica il diametro misurato.": {'it': "Lato {label}: il semi-foro stimato di {value:.2f}mm non sta nella piazzola larga {pad:.2f}mm con {wall}mm di rame per parte, e ridurlo lo porterebbe sotto {smallest:.2f}mm: la piazzola misurata o la stima del foro e' sbagliata. Indica il diametro misurato.", 'en': 'Side {label}: the estimated {value:.2f}mm half-hole does not fit the {pad:.2f}mm wide pad with {wall}mm of copper on each part, and reducing it would take it below {smallest:.2f}mm: either the measured pad or the hole estimate is wrong. Enter the measured diameter.', 'fr': 'Côté {label} : le demi-trou estimé de {value:.2f}mm ne tient pas dans la pastille large de {pad:.2f}mm avec {wall}mm de cuivre de chaque côté, et le réduire le ferait descendre sous {smallest:.2f}mm : la pastille mesurée ou l’estimation du trou est fausse. Indiquez le diamètre mesuré.', 'de': 'Seite {label}: das geschätzte Halbloch von {value:.2f}mm passt nicht in das {pad:.2f}mm breite Pad mit {wall}mm Kupfer auf jeder Seite, und eine Verkleinerung brächte es unter {smallest:.2f}mm: entweder das gemessene Pad oder die Lochschätzung ist falsch. Geben Sie den gemessenen Durchmesser an.'},
     "ui:Lato {label}: la corona del foro passante ({value:.2f}mm) e' piu' larga della piazzola ({pad:.2f}mm) di cui fa parte, perche' deve avvolgere il foro di {drill:.2f}mm: la piazzola o il foro va verificato.": {'it': "Lato {label}: la corona del foro passante ({value:.2f}mm) e' piu' larga della piazzola ({pad:.2f}mm) di cui fa parte, perche' deve avvolgere il foro di {drill:.2f}mm: la piazzola o il foro va verificato.", 'en': 'Side {label}: the through-hole ring ({value:.2f}mm) is wider than the pad ({pad:.2f}mm) it belongs to, because it must surround the {drill:.2f}mm hole: check the pad or the hole.', 'fr': 'Côté {label} : la couronne du trou traversant ({value:.2f}mm) est plus large que la pastille ({pad:.2f}mm) dont elle fait partie, car elle doit entourer le trou de {drill:.2f}mm : vérifiez la pastille ou le trou.', 'de': 'Seite {label}: der Ring der Durchkontaktierung ({value:.2f}mm) ist breiter als das Pad ({pad:.2f}mm), zu dem er gehört, weil er das Loch von {drill:.2f}mm umschließen muss: Pad oder Loch prüfen.'},
     'ui:Rete SMD locale: {n} riquadri fuori dalla foto, senza ritaglio da leggere: restano generici da rivedere.': {'it': 'Rete SMD locale: {n} riquadri fuori dalla foto, senza ritaglio da leggere: restano generici da rivedere.', 'en': 'Local SMD network: {n} boxes outside the photo, with no crop to read: they stay generic, to be reviewed.', 'fr': 'Réseau SMD local : {n} cadres hors de la photo, sans découpe à lire : ils restent génériques, à revoir.', 'de': 'Lokales SMD-Netz: {n} Rahmen außerhalb des Fotos, ohne lesbaren Ausschnitt: sie bleiben generisch und sind zu prüfen.'},
@@ -627,11 +642,11 @@ DEFAULT_TRANSLATIONS = {
     "app.configuration": {"en": "Configuration", "it": "Configurazione", "fr": "Configuration", "de": "Konfiguration"},
     "app.help": {"en": "Help", "it": "?", "fr": "Aide", "de": "Hilfe"},
     "app.tools": {"en": "Tools", "it": "Strumenti", "fr": "Outils", "de": "Werkzeuge"},
-    # Titoli delle schede SENZA emoji ne' simboli (utente, 2026-09-24): l'icona
-    # e' un SVG a linea impostato con setTabIcon. Chiavi NUOVE apposta: il
-    # catalogo SQLite aggiunge a ogni avvio le chiavi mancanti ma non riscrive
-    # quelle esistenti, quindi cambiare il testo delle vecchie «tab.*» non
-    # sarebbe mai arrivato a un database gia' creato.
+    # Tab titles WITHOUT emoji or symbols (user, 2026-09-24): the icon is a
+    # line SVG set with setTabIcon. NEW keys on purpose: the SQLite catalogue
+    # adds the missing keys at every start but does not rewrite the existing
+    # ones, so changing the text of the old «tab.*» keys would never have
+    # reached an already created database.
     "tab.project.name": {"en": "Project", "it": "Progetto", "fr": "Projet", "de": "Projekt"},
     "tab.preview.name": {"en": "Footprint preview", "it": "Anteprima footprint", "fr": "Aperçu empreinte", "de": "Footprint-Vorschau"},
     "tab.model3d.name": {"en": "3D model", "it": "Modello 3D", "fr": "Modèle 3D", "de": "3D-Modell"},
@@ -807,7 +822,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Non verificato": {"it": "Non verificato", "en": "Not checked", "fr": "Non vérifié", "de": "Nicht geprüft"},
     "ui:Suggerisci tipi pin con AI": {"it": "Suggerisci tipi pin con AI", "en": "Suggest pin types with AI", "fr": "Suggérer les types de broches avec l’IA", "de": "Pin-Typen mit KI vorschlagen"},
     "ui:Attendi la fine del lavoro in corso.": {"it": "Attendi la fine del lavoro in corso.", "en": "Wait for the current task to finish.", "fr": "Attendez la fin de la tâche en cours.", "de": "Warten Sie auf den Abschluss der laufenden Aufgabe."},
-    # Nomi dei pin scritti a mano, quote del corpo, dubbi di geometria, rinomina (audit 2026-10-15, punti 2, 3, 4, 9, 11).
+    # Hand-written pin names, body dimensions, geometry doubts, rename (audit 2026-10-15, points 2, 3, 4, 9, 11).
     "ui:Nomi dei pin": {"it": "Nomi dei pin", "en": "Pin names", "fr": "Noms des broches", "de": "Pin-Namen"},
     "ui:La nuova analisi sostituirebbe o toglierebbe {count} nomi dei pin scritti da te nell'editor del simbolo:": {"it": "La nuova analisi sostituirebbe o toglierebbe {count} nomi dei pin scritti da te nell'editor del simbolo:", "en": "The new analysis would replace or remove {count} pin names you typed in the symbol editor:", "fr": "La nouvelle analyse remplacerait ou supprimerait {count} noms de broches que vous avez saisis dans l’éditeur de symbole :", "de": "Die neue Analyse würde {count} Pin-Namen ersetzen oder entfernen, die Sie im Symbol-Editor eingegeben haben:"},
     "ui:Mantieni i miei nomi": {"it": "Mantieni i miei nomi", "en": "Keep my names", "fr": "Conserver mes noms", "de": "Meine Namen behalten"},
@@ -989,7 +1004,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Assegna un file a ogni ruolo, oppure indica “Non disponibile”.": {"en": "Assign one file to each role, or choose ‘Not available’.", "it": "Assegna un file a ogni ruolo, oppure indica “Non disponibile”.", "fr": "Attribuez un fichier à chaque rôle ou choisissez « Non disponible ».", "de": "Weisen Sie jeder Rolle eine Datei zu oder wählen Sie „Nicht verfügbar“."},
     "ui:Pinout / disposizione contatti": {"en": "Pinout / contact layout", "it": "Pinout / disposizione contatti", "fr": "Brochage / disposition des contacts", "de": "Pinbelegung / Kontaktanordnung"},
     "ui:Vista superiore": {"en": "Top view", "it": "Vista superiore", "fr": "Vue de dessus", "de": "Draufsicht"},
-    # Menu contestuale della vista 3D (tasto destro su un componente).
+    # Context menu of the 3D view (right click on a component).
     "ui:Elimina dal modello 3D (falso positivo)": {"en": "Remove from the 3D model (false positive)", "it": "Elimina dal modello 3D (falso positivo)", "fr": "Retirer du modèle 3D (faux positif)", "de": "Aus dem 3D-Modell entfernen (Fehlerkennung)"},
     "ui:Rimetti nel modello 3D": {"en": "Put back into the 3D model", "it": "Rimetti nel modello 3D", "fr": "Remettre dans le modèle 3D", "de": "Wieder ins 3D-Modell aufnehmen"},
     "ui:Ruota il solido": {"en": "Rotate the solid", "it": "Ruota il solido", "fr": "Faire pivoter le solide", "de": "Körper drehen"},
@@ -1546,16 +1561,15 @@ DEFAULT_TRANSLATIONS = {
     "ui:1 modello": {"en": "1 model", "it": "1 modello", "fr": "1 modèle", "de": "1 Modell"},
     "ui:libreria KiCad non trovata": {"en": "KiCad library not found", "it": "libreria KiCad non trovata", "fr": "bibliothèque KiCad introuvable", "de": "KiCad-Bibliothek nicht gefunden"},
     "ui:Scegli un candidato, filtra la libreria KiCad, scegli un file STEP oppure conserva il segnaposto.": {"en": "Choose a candidate, filter the KiCad library, choose a STEP file or keep the placeholder.", "it": "Scegli un candidato, filtra la libreria KiCad, scegli un file STEP oppure conserva il segnaposto.", "fr": "Choisissez un candidat, filtrez la bibliothèque KiCad, choisissez un fichier STEP ou conservez le substitut.", "de": "Wählen Sie einen Kandidaten, filtern Sie die KiCad-Bibliothek, wählen Sie eine STEP-Datei oder behalten Sie den Platzhalter."},
-    # Voci aggiunte dal controllo di copertura del catalogo
+    # Entries added by the catalogue coverage check
     # (tests/test_i18n.py::test_every_ui_string_has_a_four_language_entry):
-    # ogni testo visibile della GUI deve avere qui la sua voce nelle quattro
-    # lingue, altrimenti l'interfaccia mescola le lingue invece di tradurre.
+    # every visible GUI text must have its entry here in the four
+    # languages, otherwise the interface mixes languages instead of translating.
     "ui:Documenti precedenti conservati: usa Carica per assegnarli ai ruoli disponibili.": {"en": "Previous documents kept: use Load to assign them to the available roles.", "it": "Documenti precedenti conservati: usa Carica per assegnarli ai ruoli disponibili.", "fr": "Documents précédents conservés : utilisez Charger pour les affecter aux rôles disponibles.", "de": "Frühere Dokumente behalten: Weisen Sie sie mit Laden den verfügbaren Rollen zu."},
     "ui:Scrivi il nome del componente: da qui nascono cartella, footprint e modello 3D": {"en": "Type the component name: the folder, the footprint and the 3D model come from it", "it": "Scrivi il nome del componente: da qui nascono cartella, footprint e modello 3D", "fr": "Saisissez le nom du composant : le dossier, l’empreinte et le modèle 3D en découlent", "de": "Geben Sie den Komponentennamen ein: Ordner, Footprint und 3D-Modell entstehen daraus"},
     "ui:Unico modello AI usato per datasheet, analisi foto e verifica. Il default si imposta da Configurazione -> Gestione tipologie e profili AI.": {"en": "The single AI model used for datasheet, photo analysis and verification. The default is set from Configuration -> Manage AI types and profiles.", "it": "Unico modello AI usato per datasheet, analisi foto e verifica. Il default si imposta da Configurazione -> Gestione tipologie e profili AI.", "fr": "Modèle IA unique utilisé pour la fiche technique, l’analyse photo et la vérification. La valeur par défaut se règle dans Configuration -> Gérer les types et profils IA.", "de": "Einziges KI-Modell für Datenblatt, Fotoanalyse und Prüfung. Der Standard wird unter Konfiguration -> KI-Typen und -Profile verwalten gesetzt."},
     "ui:Change the AI model for this session": {"en": "Change the AI model for this session", "it": "Cambia il modello AI per questa sessione", "fr": "Changer le modèle IA pour cette session", "de": "KI-Modell für diese Sitzung ändern"},
     "ui:Change AI model": {"en": "Change AI model", "it": "Cambia modello AI", "fr": "Changer de modèle IA", "de": "KI-Modell wechseln"},
-    "ui:Modifica la revisione dei componenti…": {"en": "Edit the component review…", "it": "Modifica la revisione dei componenti…", "fr": "Modifier la révision des composants…", "de": "Komponentenprüfung bearbeiten …"},
     "ui:Riapre la revisione della fase completata: ingombri sulla foto, quote e scelta dei modelli KiCad. Non avvia la generazione e non fa richieste AI.": {"en": "Reopens the review of the completed stage: outlines on the photo, dimensions and KiCad model choice. It does not start generation and makes no AI requests.", "it": "Riapre la revisione della fase completata: ingombri sulla foto, quote e scelta dei modelli KiCad. Non avvia la generazione e non fa richieste AI.", "fr": "Rouvre la révision de l’étape terminée : encombrements sur la photo, cotes et choix des modèles KiCad. Ne lance pas la génération et n’effectue aucune requête IA.", "de": "Öffnet die Prüfung der abgeschlossenen Phase erneut: Umrisse auf dem Foto, Maße und Auswahl der KiCad-Modelle. Startet keine Generierung und stellt keine KI-Anfragen."},
     "ui:Genera prima il footprint del componente corrente": {"en": "Generate the current component's footprint first", "it": "Genera prima il footprint del componente corrente", "fr": "Générez d’abord l’empreinte du composant courant", "de": "Erzeugen Sie zuerst den Footprint der aktuellen Komponente"},
     "ui:Nome componente": {"en": "Component name", "it": "Nome componente", "fr": "Nom du composant", "de": "Komponentenname"},
@@ -1595,7 +1609,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Elimina il riquadro scelto": {"en": "Delete the selected box", "it": "Elimina il riquadro scelto", "fr": "Supprimer le cadre sélectionné", "de": "Ausgewählten Rahmen löschen"},
     "ui:Proposte del rilevatore locale": {"en": "Local detector proposals", "it": "Proposte del rilevatore locale", "fr": "Propositions du détecteur local", "de": "Vorschläge des lokalen Detektors"},
     "ui:Traccia un rettangolo sulla foto per aggiungere un corpo che il rilevatore non ha visto; trascina l'interno del riquadro scelto per spostarlo e le sue maniglie per ridimensionarlo. I tratteggiati sono le proposte su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di assenza.": {"en": "Draw a rectangle on the photo to add a body the detector missed; drag inside the selected box to move it and its handles to resize it. The dashed ones are the proposals it did not trust: they are there because low confidence is not evidence of absence.", "it": "Traccia un rettangolo sulla foto per aggiungere un corpo che il rilevatore non ha visto; trascina l'interno del riquadro scelto per spostarlo e le sue maniglie per ridimensionarlo. I tratteggiati sono le proposte su cui non si e' fidato: ci sono perche' una confidenza bassa non e' prova di assenza.", "fr": "Tracez un rectangle sur la photo pour ajouter un corps que le détecteur n’a pas vu ; faites glisser l’intérieur du cadre sélectionné pour le déplacer et ses poignées pour le redimensionner. Les pointillés sont les propositions auxquelles il ne s’est pas fié : elles sont là parce qu’une faible confiance n’est pas une preuve d’absence.", "de": "Zeichnen Sie ein Rechteck auf dem Foto, um einen vom Detektor übersehenen Körper zu ergänzen; ziehen Sie im ausgewählten Rahmen, um ihn zu verschieben, und an seinen Griffen, um seine Größe zu ändern. Gestrichelt sind die Vorschläge, denen er nicht vertraut hat: Sie sind da, weil geringe Konfidenz kein Beweis für Abwesenheit ist."},
-    # Barre di icone e popup delle finestre di revisione (utente, 2026-09-24).
+    # Icon bars and popups of the review windows (user, 2026-09-24).
     "ui:Seleziona e sposta": {"en": "Select and move", "it": "Seleziona e sposta", "fr": "Sélectionner et déplacer", "de": "Auswählen und verschieben"},
     "ui:Clic su un riquadro per sceglierlo, trascinalo per spostarlo. Clic nel vuoto: toglie la scelta. Trascinamento nel vuoto: sposta la vista.": {"en": "Click a box to select it, drag it to move it. Click on empty space: clears the selection. Drag on empty space: moves the view.", "it": "Clic su un riquadro per sceglierlo, trascinalo per spostarlo. Clic nel vuoto: toglie la scelta. Trascinamento nel vuoto: sposta la vista.", "fr": "Cliquez sur un cadre pour le sélectionner, faites-le glisser pour le déplacer. Clic dans le vide : annule la sélection. Glisser dans le vide : déplace la vue.", "de": "Klicken Sie auf einen Rahmen, um ihn auszuwählen, ziehen Sie ihn zum Verschieben. Klick ins Leere: hebt die Auswahl auf. Ziehen ins Leere: verschiebt die Ansicht."},
     "ui:Disegna un riquadro nuovo": {"en": "Draw a new box", "it": "Disegna un riquadro nuovo", "fr": "Dessiner un nouveau cadre", "de": "Neuen Rahmen zeichnen"},
@@ -1667,18 +1681,18 @@ DEFAULT_TRANSLATIONS = {
     "ui:Questo nome e' riservato da Windows.": {"en": "This name is reserved by Windows.", "it": "Questo nome e' riservato da Windows.", "fr": "Ce nom est réservé par Windows.", "de": "Dieser Name ist von Windows reserviert."},
     "ui:Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…».": {"en": "A project with this name already exists: open it from «Open project…».", "it": "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…».", "fr": "Un projet portant ce nom existe déjà : ouvrez-le depuis « Ouvrir un projet… ».", "de": "Ein Projekt mit diesem Namen existiert bereits: Öffnen Sie es über „Projekt öffnen…“."},
     "ui:E' gia' il nome del progetto.": {"en": "It is already the project's name.", "it": "E' gia' il nome del progetto.", "fr": "C’est déjà le nom du projet.", "de": "Das ist bereits der Projektname."},
-    # Dettagli del componente scelto in un popup (utente, 2026-09-24 sera).
+    # Details of the chosen component in a popup (user, 2026-09-24 evening).
     "ui:Dettagli del componente scelto": {"en": "Details of the selected component", "it": "Dettagli del componente scelto", "fr": "Détails du composant sélectionné", "de": "Details des ausgewählten Bauteils"},
     "ui:Il componente scelto ha avvisi: aprili qui.": {"en": "The selected component has warnings: open them here.", "it": "Il componente scelto ha avvisi: aprili qui.", "fr": "Le composant sélectionné a des avertissements : ouvrez-les ici.", "de": "Das ausgewählte Bauteil hat Warnungen: hier öffnen."},
     "ui:Stato del modello KiCad, avvisi e legenda dei colori.": {"en": "KiCad model status, warnings and colour legend.", "it": "Stato del modello KiCad, avvisi e legenda dei colori.", "fr": "État du modèle KiCad, avertissements et légende des couleurs.", "de": "Status des KiCad-Modells, Warnungen und Farblegende."},
-    # Filtro anche sulla foto, icona dei dubbi (utente, 2026-09-24 notte).
+    # Filter on the photo too, doubts icon (user, 2026-09-24 night).
     "ui:Filtra per categoria la lista e i riquadri sulla foto.": {"en": "Filter the list and the boxes on the photo by category.", "it": "Filtra per categoria la lista e i riquadri sulla foto.", "fr": "Filtrer par catégorie la liste et les cadres sur la photo.", "de": "Liste und Rahmen auf dem Foto nach Kategorie filtern."},
     "ui:Filtra per categoria la lista e i rettangoli sulla foto.": {"en": "Filter the list and the rectangles on the photo by category.", "it": "Filtra per categoria la lista e i rettangoli sulla foto.", "fr": "Filtrer par catégorie la liste et les rectangles sur la photo.", "de": "Liste und Rechtecke auf dem Foto nach Kategorie filtern."},
     "ui:Le frasi del modello sulle incertezze dell'inventario, in una finestra.": {"en": "The model's sentences about the inventory's uncertainties, in a window.", "it": "Le frasi del modello sulle incertezze dell'inventario, in una finestra.", "fr": "Les phrases du modèle sur les incertitudes de l’inventaire, dans une fenêtre.", "de": "Die Sätze des Modells zu den Unsicherheiten des Inventars, in einem Fenster."},
-    # Pausa dopo l'inventario nelle Opzioni di generazione (utente, 2026-09-24).
+    # Pause after the inventory in the generation Options (user, 2026-09-24).
     "ui:Analisi AI": {"en": "AI analysis", "it": "Analisi AI", "fr": "Analyse IA", "de": "KI-Analyse"},
     "help.generation.pause_after_inventory": {"en": "When the AI inventory has finished, the pipeline stops and offers the component review before KiCad model matching and 3D generation: there the bodies can be moved, resized, added and deleted. The review makes no AI requests: it is free.\n\nUnchecked, the analysis goes on by itself with the bodies proposed by the AI; the review stays available from the buttons at the bottom of the Project tab.", "it": "Quando l'inventario AI ha finito, la pipeline si ferma e propone la revisione dei componenti prima dell'abbinamento dei modelli KiCad e della generazione 3D: da li' si spostano, ridimensionano, aggiungono ed eliminano i corpi. La revisione non fa richieste AI: e' gratuita.\n\nTogliendo la spunta l'analisi prosegue da sola con i corpi proposti dall'AI; la revisione resta disponibile dai pulsanti in fondo al tab Progetto.", "fr": "Quand l’inventaire IA est terminé, la chaîne s’arrête et propose la révision des composants avant l’association des modèles KiCad et la génération 3D : on peut y déplacer, redimensionner, ajouter et supprimer les corps. La révision ne fait aucune requête IA : elle est gratuite.\n\nSans la coche, l’analyse continue seule avec les corps proposés par l’IA ; la révision reste disponible depuis les boutons en bas de l’onglet Projet.", "de": "Wenn das KI-Inventar fertig ist, hält die Pipeline an und bietet die Bauteilprüfung vor der KiCad-Modellzuordnung und der 3D-Erzeugung an: Dort lassen sich Körper verschieben, in der Größe ändern, hinzufügen und löschen. Die Prüfung stellt keine KI-Anfragen: Sie ist kostenlos.\n\nOhne Häkchen läuft die Analyse mit den von der KI vorgeschlagenen Körpern allein weiter; die Prüfung bleibt über die Schaltflächen unten im Tab Projekt verfügbar."},
-    # Link della finestra About (utente, 2026-09-24).
+    # Links of the About window (user, 2026-09-24).
     "ui:Repository GitHub": {"en": "GitHub repository", "it": "Repository GitHub", "fr": "Dépôt GitHub", "de": "GitHub-Repository"},
     "ui:Sviluppatore": {"en": "Developer", "it": "Sviluppatore", "fr": "Développeur", "de": "Entwickler"},
     # Testi rimasti in italiano in en/fr/de (revisore 3, difetto 10, 2026-09-24).
@@ -2099,7 +2113,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Impossibile contattare GitHub: controlla la connessione e riprova. ({error})": {"en": "Cannot reach GitHub: check the connection and try again. ({error})", "it": "Impossibile contattare GitHub: controlla la connessione e riprova. ({error})", "fr": "Impossible de joindre GitHub : vérifiez la connexion et réessayez. ({error})", "de": "GitHub ist nicht erreichbar: Verbindung prüfen und erneut versuchen. ({error})"},
     "ui:Risposta di GitHub non utilizzabile ({error}).": {"en": "Unusable answer from GitHub ({error}).", "it": "Risposta di GitHub non utilizzabile ({error}).", "fr": "Réponse de GitHub inutilisable ({error}).", "de": "Unbrauchbare Antwort von GitHub ({error})."},
     "ui:Account AI...": {"en": "AI account...", "it": "Account AI...", "fr": "Compte IA...", "de": "KI-Konto..."},
-    "ui:Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel Gestore credenziali di Windows.": {"en": "OpenRouter key, credit and limits: paste, verify and save the key in the Windows Credential Manager.", "it": "Chiave OpenRouter, credito e limiti: incolla, verifica e salva la chiave nel Gestore credenziali di Windows.", "fr": "Clé OpenRouter, crédit et limites : collez, vérifiez et enregistrez la clé dans le Gestionnaire d’identification Windows.", "de": "OpenRouter-Schlüssel, Guthaben und Limits: Schlüssel einfügen, prüfen und in der Windows-Anmeldeinformationsverwaltung speichern."},
+    "ui:Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le chiavi nel Gestore credenziali di Windows.": {"en": "OpenRouter and DeepSeek keys, credit and limits: paste, verify and save the keys in the Windows Credential Manager.", "it": "Chiavi OpenRouter e DeepSeek, credito e limiti: incolla, verifica e salva le chiavi nel Gestore credenziali di Windows.", "fr": "Clés OpenRouter et DeepSeek, crédit et limites : collez, vérifiez et enregistrez les clés dans le Gestionnaire d’identification Windows.", "de": "OpenRouter- und DeepSeek-Schlüssel, Guthaben und Limits: Schlüssel einfügen, prüfen und in der Windows-Anmeldeinformationsverwaltung speichern."},
     "ui:Nessuna chiave OpenRouter configurata. Aprire «Account AI...» per inserirla?": {"en": "No OpenRouter key is configured. Open «AI account...» to enter it?", "it": "Nessuna chiave OpenRouter configurata. Aprire «Account AI...» per inserirla?", "fr": "Aucune clé OpenRouter n’est configurée. Ouvrir « Compte IA... » pour la saisir ?", "de": "Kein OpenRouter-Schlüssel eingerichtet. „KI-Konto...“ öffnen, um ihn einzugeben?"},
     "ui:Chiave OpenRouter non configurata: inseriscila da Configurazione → «Account AI...». In alternativa imposta la variabile d'ambiente {API_KEY_ENV} o scrivila nel file {path} (vedi .env.example).": {"en": "OpenRouter key not configured: enter it from Configuration → «AI account...». Alternatively set the environment variable {API_KEY_ENV} or write it in the file {path} (see .env.example).", "it": "Chiave OpenRouter non configurata: inseriscila da Configurazione → «Account AI...». In alternativa imposta la variabile d'ambiente {API_KEY_ENV} o scrivila nel file {path} (vedi .env.example).", "fr": "Clé OpenRouter non configurée : saisissez-la depuis Configuration → « Compte IA... ». Vous pouvez aussi définir la variable d’environnement {API_KEY_ENV} ou l’écrire dans le fichier {path} (voir .env.example).", "de": "OpenRouter-Schlüssel nicht eingerichtet: Geben Sie ihn unter Konfiguration → „KI-Konto...“ ein. Alternativ setzen Sie die Umgebungsvariable {API_KEY_ENV} oder tragen ihn in die Datei {path} ein (siehe .env.example)."},
     "ui:Gestore credenziali di Windows non leggibile: {error}": {"en": "Windows Credential Manager not readable: {error}", "it": "Gestore credenziali di Windows non leggibile: {error}", "fr": "Gestionnaire d’identification Windows illisible : {error}", "de": "Windows-Anmeldeinformationsverwaltung nicht lesbar: {error}"},
@@ -2366,8 +2380,8 @@ DEFAULT_TRANSLATIONS = {
     "ui:Spessore PCB dai documenti: {value} mm.": {"en": "PCB thickness from the documents: {value} mm.", "it": "Spessore PCB dai documenti: {value} mm.", "fr": "Épaisseur du PCB d'après les documents : {value} mm.", "de": "Leiterplattendicke aus den Dokumenten: {value} mm."},
     "ui:Lettura dei singoli componenti: cache non scrivibile ({exc}).": {"en": "Reading of the single components: cache not writable ({exc}).", "it": "Lettura dei singoli componenti: cache non scrivibile ({exc}).", "fr": "Lecture des composants individuels : cache non inscriptible ({exc}).", "de": "Lesen der einzelnen Bauteile: Cache nicht beschreibbar ({exc})."},
     "ui:Lettura dei singoli componenti: {read} corpi letti due volte su ritagli ingranditi; {agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere); {cached} letture riprese dalla cache, {calls} richieste a pagamento.": {"en": "Reading of the single components: {read} bodies read twice on enlarged crops; {agreed} with agreeing readings (adopted), {disagreed} disagreeing (to review); {cached} readings from the cache, {calls} paid requests.", "it": "Lettura dei singoli componenti: {read} corpi letti due volte su ritagli ingranditi; {agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere); {cached} letture riprese dalla cache, {calls} richieste a pagamento.", "fr": "Lecture des composants individuels : {read} corps lus deux fois sur des découpes agrandies ; {agreed} avec lectures concordantes (adoptées), {disagreed} discordantes (à revoir) ; {cached} lectures reprises du cache, {calls} requêtes payantes.", "de": "Lesen der einzelnen Bauteile: {read} Körper zweimal auf vergrößerten Ausschnitten gelesen; {agreed} mit übereinstimmenden Lesungen (übernommen), {disagreed} abweichend (zu prüfen); {cached} Lesungen aus dem Cache, {calls} kostenpflichtige Anfragen."},
-    # HANDOFF 149: ritaglio in minoranza contro rilevatore e inventario, e
-    # package dichiarato che la misura esclude.
+    # HANDOFF 149: crop in the minority against detector and inventory, and
+    # declared package that the measurement excludes.
     "ui:Lettura dei singoli componenti: {read} corpi letti due volte su ritagli ingranditi; {agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere), {outvoted} in minoranza contro rilevatore e inventario (riga tenuta); {cached} letture riprese dalla cache, {calls} richieste a pagamento.": {"en": "Reading of the single components: {read} bodies read twice on enlarged crops; {agreed} with agreeing readings (adopted), {disagreed} disagreeing (to review), {outvoted} outvoted by detector and inventory (row kept); {cached} readings from the cache, {calls} paid requests.", "it": "Lettura dei singoli componenti: {read} corpi letti due volte su ritagli ingranditi; {agreed} con letture concordi (adottate), {disagreed} discordi (da rivedere), {outvoted} in minoranza contro rilevatore e inventario (riga tenuta); {cached} letture riprese dalla cache, {calls} richieste a pagamento.", "fr": "Lecture des composants individuels : {read} corps lus deux fois sur des découpes agrandies ; {agreed} avec lectures concordantes (adoptées), {disagreed} discordantes (à revoir), {outvoted} minoritaires face au détecteur et à l'inventaire (ligne conservée) ; {cached} lectures reprises du cache, {calls} requêtes payantes.", "de": "Lesen der einzelnen Bauteile: {read} Körper zweimal auf vergrößerten Ausschnitten gelesen; {agreed} mit übereinstimmenden Lesungen (übernommen), {disagreed} abweichend (zu prüfen), {outvoted} von Detektor und Inventar überstimmt (Zeile behalten); {cached} Lesungen aus dem Cache, {calls} kostenpflichtige Anfragen."},
     "ui:Il ritaglio mostra due terminali ma il rilevatore locale («{yolo}», confidenza {conf:.2f}) e l'inventario (classe «{cls}», piedini {leads}) concordano su un package a piedini: letture del ritaglio in minoranza, riga tenuta; da verificare.": {"en": "The crop shows two terminals but the local detector («{yolo}», confidence {conf:.2f}) and the inventory (class «{cls}», leads {leads}) agree on a leaded package: crop readings outvoted, row kept; to be checked.", "it": "Il ritaglio mostra due terminali ma il rilevatore locale («{yolo}», confidenza {conf:.2f}) e l'inventario (classe «{cls}», piedini {leads}) concordano su un package a piedini: letture del ritaglio in minoranza, riga tenuta; da verificare.", "fr": "La découpe montre deux bornes mais le détecteur local (« {yolo} », confiance {conf:.2f}) et l'inventaire (classe « {cls} », broches {leads}) s'accordent sur un boîtier à broches : lectures de la découpe minoritaires, ligne conservée ; à vérifier.", "de": "Der Ausschnitt zeigt zwei Anschlüsse, aber der lokale Detektor («{yolo}», Konfidenz {conf:.2f}) und das Inventar (Klasse «{cls}», Anschlüsse {leads}) stimmen auf ein Gehäuse mit Anschlussbeinen überein: Ausschnittlesungen überstimmt, Zeile behalten; zu prüfen."},
     "ui:Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: famiglia «{family}» derivata da {n} piedini contati da entrambe le letture del ritaglio e misura; da verificare.": {"en": "Package «{declared}» incompatible with the measurement {long:.2f} x {short:.2f} mm: family «{family}» derived from {n} leads counted by both crop readings and the measurement; to be checked.", "it": "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: famiglia «{family}» derivata da {n} piedini contati da entrambe le letture del ritaglio e misura; da verificare.", "fr": "Boîtier « {declared} » incompatible avec la mesure {long:.2f} x {short:.2f} mm : famille « {family} » déduite des {n} broches comptées par les deux lectures du recadrage et de la mesure ; à vérifier.", "de": "Gehäuse «{declared}» unvereinbar mit der Messung {long:.2f} x {short:.2f} mm: Familie «{family}» aus {n} von beiden Ausschnittlesungen gezählten Beinchen und der Messung abgeleitet; zu prüfen."},
@@ -2379,8 +2393,8 @@ DEFAULT_TRANSLATIONS = {
     "ui:Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: nessuna famiglia univoca da {n} piedini e misura ({families}); package lasciato vuoto, da verificare.": {"en": "Package «{declared}» incompatible with the measurement {long:.2f} x {short:.2f} mm: no unique family from {n} leads and the measurement ({families}); package left empty, to be checked.", "it": "Package «{declared}» incompatibile con la misura {long:.2f} x {short:.2f} mm: nessuna famiglia univoca da {n} piedini e misura ({families}); package lasciato vuoto, da verificare.", "fr": "Boîtier « {declared} » incompatible avec la mesure {long:.2f} x {short:.2f} mm : aucune famille unique à partir de {n} broches et de la mesure ({families}) ; boîtier laissé vide, à vérifier.", "de": "Gehäuse «{declared}» unvereinbar mit der Messung {long:.2f} x {short:.2f} mm: keine eindeutige Familie aus {n} Anschlüssen und Messung ({families}); Gehäuse leer gelassen, zu prüfen."},
     "ui:Lettura delle sigle: una richiesta a pagamento con {n} ritagli ingranditi dei soli corpi con una scritta; il modello legge le immagini a blocchi grossi e sul ritaglio dedica piu' dettaglio a ogni corpo.": {"en": "Marking reading: one paid request with {n} enlarged crops of the bodies carrying text only; the model reads images in coarse blocks and gives each body more detail on the crop.", "it": "Lettura delle sigle: una richiesta a pagamento con {n} ritagli ingranditi dei soli corpi con una scritta; il modello legge le immagini a blocchi grossi e sul ritaglio dedica piu' dettaglio a ogni corpo.", "fr": "Lecture des marquages : une requête payante avec {n} découpes agrandies des seuls corps portant un texte ; le modèle lit les images par gros blocs et accorde plus de détail à chaque corps sur la découpe.", "de": "Lesen der Aufdrucke: eine kostenpflichtige Anfrage mit {n} vergrößerten Ausschnitten nur der Körper mit Aufschrift; das Modell liest Bilder in groben Blöcken und widmet jedem Körper auf dem Ausschnitt mehr Detail."},
     "ui:Letture del ritaglio discordi ({aspects}): 1) {first}; 2) {second}. Package e piedini dell'inventario da verificare.": {"en": "Crop readings disagree ({aspects}): 1) {first}; 2) {second}. Package and leads of the inventory to be checked.", "it": "Letture del ritaglio discordi ({aspects}): 1) {first}; 2) {second}. Package e piedini dell'inventario da verificare.", "fr": "Lectures de la découpe discordantes ({aspects}) : 1) {first} ; 2) {second}. Boîtier et broches de l'inventaire à vérifier.", "de": "Lesungen des Ausschnitts abweichend ({aspects}): 1) {first}; 2) {second}. Gehäuse und Anschlüsse des Inventars zu prüfen."},
-    # Lettura ritagli: letture fallite e interruzione, nota sul modello (HANDOFF 146 V4, V7).
-    # Modello lettura ritagli: campo di profilo crop_model, vuoto = modello della foto (29/09, HANDOFF 150).
+    # Crop reading: failed readings and interruption, note on the model (HANDOFF 146 V4, V7).
+    # Crop reading model: profile field crop_model, empty = the photo's model (29/09, HANDOFF 150).
     "ui:Modello lettura ritagli (vuoto = modello della foto)": {"en": "Crop reading model (blank = photo model)", "it": "Modello lettura ritagli (vuoto = modello della foto)", "fr": "Modèle de lecture des découpes (vide = modèle de la photo)", "de": "Modell der Ausschnitt-Lesung (leer = Fotomodell)"},
     "ui:Con il campo vuoto questa lettura usa il modello della chiamata a pagamento sulla foto (scelto nel tab Progetto, altrimenti il modello dell'estrazione), non il Modello LLM di questa pagina. Con un modello impostato, quel modello viene usato solo per le letture dei ritagli e il loro costo va al suo fornitore.": {"en": "With the field blank this reading uses the model of the paid call on the photo (chosen in the Project tab, otherwise the extraction model), not the LLM model of this page. With a model set, that model is used for the crop readings only and their cost goes to its provider.", "it": "Con il campo vuoto questa lettura usa il modello della chiamata a pagamento sulla foto (scelto nel tab Progetto, altrimenti il modello dell'estrazione), non il Modello LLM di questa pagina. Con un modello impostato, quel modello viene usato solo per le letture dei ritagli e il loro costo va al suo fornitore.", "fr": "Avec le champ vide, cette lecture utilise le modèle de l’appel payant sur la photo (choisi dans l’onglet Projet, sinon le modèle de l’extraction), et non le modèle LLM de cette page. Avec un modèle défini, ce modèle sert uniquement aux lectures des découpes et leur coût est imputé à son fournisseur.", "de": "Bei leerem Feld verwendet diese Lesung das Modell des kostenpflichtigen Aufrufs auf dem Foto (in der Registerkarte Projekt gewählt, sonst das Extraktionsmodell), nicht das LLM-Modell dieser Seite. Mit einem gesetzten Modell wird dieses nur für die Ausschnitt-Lesungen verwendet, und ihre Kosten gehen an dessen Anbieter."},
     "ui:Lettura dei singoli componenti affidata al modello {model} (Modello lettura ritagli del profilo) invece del modello della foto {photo_model}: il costo va al suo fornitore.": {"en": "Reading of the single components entrusted to the model {model} (Crop reading model of the profile) instead of the photo model {photo_model}: its cost goes to that provider.", "it": "Lettura dei singoli componenti affidata al modello {model} (Modello lettura ritagli del profilo) invece del modello della foto {photo_model}: il costo va al suo fornitore.", "fr": "Lecture des composants individuels confiée au modèle {model} (Modèle de lecture des découpes du profil) au lieu du modèle de la photo {photo_model} : son coût est imputé à ce fournisseur.", "de": "Lesen der einzelnen Bauteile dem Modell {model} (Modell der Ausschnitt-Lesung des Profils) statt dem Fotomodell {photo_model} übertragen: die Kosten gehen an diesen Anbieter."},
@@ -2389,7 +2403,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Ritaglio di {name}: crop_reading={status}; {first}; {second}": {"en": "Crop of {name}: crop_reading={status}; {first}; {second}", "it": "Ritaglio di {name}: crop_reading={status}; {first}; {second}", "fr": "Découpe de {name} : crop_reading={status} ; {first} ; {second}", "de": "Ausschnitt von {name}: crop_reading={status}; {first}; {second}"},
     "ui:Taglia {code} letta due volte ma incompatibile con l'ingombro misurato {long:.2f} x {short:.2f} mm (tolleranza {tol:.2f} mm): package dell'inventario da verificare.": {"en": "Size {code} read twice but incompatible with the measured envelope {long:.2f} x {short:.2f} mm (tolerance {tol:.2f} mm): inventory package to be checked.", "it": "Taglia {code} letta due volte ma incompatibile con l'ingombro misurato {long:.2f} x {short:.2f} mm (tolleranza {tol:.2f} mm): package dell'inventario da verificare.", "fr": "Taille {code} lue deux fois mais incompatible avec l'encombrement mesuré {long:.2f} x {short:.2f} mm (tolérance {tol:.2f} mm) : boîtier de l'inventaire à vérifier.", "de": "Größe {code} zweimal gelesen, aber unvereinbar mit dem gemessenen Umriss {long:.2f} x {short:.2f} mm (Toleranz {tol:.2f} mm): Gehäuse des Inventars zu prüfen."},
     "ui:Taglia {code} letta due volte ma nessun ingombro misurato per confermarla: package dell'inventario da verificare.": {"en": "Size {code} read twice but no measured envelope to confirm it: inventory package to be checked.", "it": "Taglia {code} letta due volte ma nessun ingombro misurato per confermarla: package dell'inventario da verificare.", "fr": "Taille {code} lue deux fois mais aucun encombrement mesuré pour la confirmer : boîtier de l'inventaire à vérifier.", "de": "Größe {code} zweimal gelesen, aber kein gemessener Umriss zur Bestätigung: Gehäuse des Inventars zu prüfen."},
-    # Lettura ritagli come questionario visivo con classe derivata dal programma (29/09, HANDOFF 148).
+    # Crop reading as a visual questionnaire with the class derived by the program (29/09, HANDOFF 148).
     "ui:Letture del ritaglio inconcludenti ({aspects}): 1) {first}; 2) {second}. Package e piedini dell'inventario da verificare.": {"en": "Crop readings inconclusive ({aspects}): 1) {first}; 2) {second}. Package and leads of the inventory to be checked.", "it": "Letture del ritaglio inconcludenti ({aspects}): 1) {first}; 2) {second}. Package e piedini dell'inventario da verificare.", "fr": "Lectures de la découpe non concluantes ({aspects}) : 1) {first} ; 2) {second}. Boîtier et broches de l'inventaire à vérifier.", "de": "Lesungen des Ausschnitts nicht schlüssig ({aspects}): 1) {first}; 2) {second}. Gehäuse und Anschlüsse des Inventars zu prüfen."},
     "ui:Numero di terminali del ritaglio in contraddizione con l'inventario (classe «{cls}», package «{package}», piedini {leads}): 1) {first}; 2) {second}. Classe e package dell'inventario da verificare.": {"en": "Terminal count of the crop contradicts the inventory (class «{cls}», package «{package}», leads {leads}): 1) {first}; 2) {second}. Class and package of the inventory to be checked.", "it": "Numero di terminali del ritaglio in contraddizione con l'inventario (classe «{cls}», package «{package}», piedini {leads}): 1) {first}; 2) {second}. Classe e package dell'inventario da verificare.", "fr": "Nombre de bornes de la découpe en contradiction avec l'inventaire (classe « {cls} », boîtier « {package} », broches {leads}) : 1) {first} ; 2) {second}. Classe et boîtier de l'inventaire à vérifier.", "de": "Anschlusszahl des Ausschnitts widerspricht dem Inventar (Klasse «{cls}», Gehäuse «{package}», Anschlüsse {leads}): 1) {first}; 2) {second}. Klasse und Gehäuse des Inventars zu prüfen."},
     "ui:Il ritaglio mostra una scritta stampata ({marking}) ma l'inventario dice condensatore ceramico: da verificare.": {"en": "The crop shows printed text ({marking}) but the inventory says ceramic capacitor: to be checked.", "it": "Il ritaglio mostra una scritta stampata ({marking}) ma l'inventario dice condensatore ceramico: da verificare.", "fr": "La découpe montre un texte imprimé ({marking}) mais l'inventaire indique un condensateur céramique : à vérifier.", "de": "Der Ausschnitt zeigt einen Aufdruck ({marking}), aber das Inventar sagt Keramikkondensator: zu prüfen."},
@@ -2408,7 +2422,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Allegati all'AI gli ingrandimenti dei bordi della foto, per contare i contatti fisici: {count} immagini.": {"en": "Enlarged strips of the photo edges attached for the AI, to count the physical contacts: {count} images.", "it": "Allegati all'AI gli ingrandimenti dei bordi della foto, per contare i contatti fisici: {count} immagini.", "fr": "Agrandissements des bords de la photo joints pour l'IA, pour compter les contacts physiques : {count} images.", "de": "Vergrößerte Randstreifen des Fotos für die KI angehängt, um die physischen Kontakte zu zählen: {count} Bilder."},
     "ui:Inventario globale: {count} righe con osservazione dei piedini incoerente ({reasons}): piedini registrati come non osservati; classe, package e sigla tenuti. Nessuna nuova richiesta a pagamento.": {"en": "Global inventory: {count} rows with an incoherent lead observation ({reasons}): leads recorded as not observed; class, package and marking kept. No new paid request.", "it": "Inventario globale: {count} righe con osservazione dei piedini incoerente ({reasons}): piedini registrati come non osservati; classe, package e sigla tenuti. Nessuna nuova richiesta a pagamento.", "fr": "Inventaire global : {count} lignes avec une observation des broches incohérente ({reasons}) : broches enregistrées comme non observées ; classe, boîtier et marquage conservés. Aucune nouvelle requête payante.", "de": "Globales Inventar: {count} Zeilen mit widersprüchlicher Anschlussbeobachtung ({reasons}): Anschlüsse als nicht beobachtet erfasst; Klasse, Gehäuse und Beschriftung behalten. Keine neue kostenpflichtige Anfrage."},
     "ui:Inventario globale: {count} corpi aggiunti dal solo modello, senza proposte del rilevatore: proposti ma esclusi dalla tabella e dal 3D finché non li tieni nella revisione fotografica.": {"en": "Global inventory: {count} bodies added by the model alone, without detector proposals: proposed but left out of the table and the 3D until you keep them in the photo review.", "it": "Inventario globale: {count} corpi aggiunti dal solo modello, senza proposte del rilevatore: proposti ma esclusi dalla tabella e dal 3D finché non li tieni nella revisione fotografica.", "fr": "Inventaire global : {count} corps ajoutés par le seul modèle, sans propositions du détecteur : proposés mais exclus du tableau et de la 3D tant que vous ne les gardez pas dans la revue photo.", "de": "Globales Inventar: {count} nur vom Modell hinzugefügte Körper ohne Detektorvorschläge: vorgeschlagen, aber aus Tabelle und 3D ausgeschlossen, bis Sie sie in der Fotoprüfung behalten."},
-    "ui:{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano fuori dalla tabella e dal 3D: per tenerli riapri «Modifica la revisione dei componenti…» e premi T su ciascuno.": {"en": "{count} bodies added by the model alone, without a detector proposal, stay out of the table and the 3D: to keep them reopen «Edit the component review…» and press T on each.", "it": "{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano fuori dalla tabella e dal 3D: per tenerli riapri «Modifica la revisione dei componenti…» e premi T su ciascuno.", "fr": "{count} corps ajoutés par le seul modèle, sans proposition du détecteur, restent hors du tableau et de la 3D : pour les garder rouvrez « Modifier la revue des composants… » et appuyez sur T sur chacun.", "de": "{count} nur vom Modell hinzugefügte Körper ohne Detektorvorschlag bleiben außerhalb von Tabelle und 3D: um sie zu behalten, öffnen Sie «Bauteilprüfung bearbeiten…» erneut und drücken Sie bei jedem T."},
+    "ui:{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano fuori dalla tabella e dal 3D: per tenerli riapri «Revisione componenti…» e premi T su ciascuno.": {"en": "{count} bodies added by the model alone, without a detector proposal, stay out of the table and the 3D: to keep them reopen «Component review…» and press T on each.", "it": "{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano fuori dalla tabella e dal 3D: per tenerli riapri «Revisione componenti…» e premi T su ciascuno.", "fr": "{count} corps ajoutés par le seul modèle, sans proposition du détecteur, restent hors du tableau et de la 3D : pour les garder rouvrez « Révision des composants… » et appuyez sur T sur chacun.", "de": "{count} nur vom Modell hinzugefügte Körper ohne Detektorvorschlag bleiben außerhalb von Tabelle und 3D: um sie zu behalten, öffnen Sie «Bauteilprüfung…» erneut und drücken Sie bei jedem T."},
     "ui:Tieni o lascia il corpo aggiunto dal solo modello": {"en": "Keep or leave the body added by the model alone", "it": "Tieni o lascia il corpo aggiunto dal solo modello", "fr": "Garder ou laisser le corps ajouté par le seul modèle", "de": "Nur vom Modell hinzugefügten Körper behalten oder weglassen"},
     "ui:I corpi aggiunti dal solo modello (gialli tratteggiati) partono esclusi: tenuti, vanno nella tabella e nel 3D.": {"en": "Bodies added by the model alone (dashed yellow) start left out: once kept, they go to the table and the 3D.", "it": "I corpi aggiunti dal solo modello (gialli tratteggiati) partono esclusi: tenuti, vanno nella tabella e nel 3D.", "fr": "Les corps ajoutés par le seul modèle (jaunes en pointillés) partent exclus : gardés, ils vont dans le tableau et la 3D.", "de": "Nur vom Modell hinzugefügte Körper (gelb gestrichelt) sind zunächst ausgeschlossen: behalten, kommen sie in Tabelle und 3D."},
     "ui:Aggiunti dal solo modello: {total}. Ne tieni {kept}; {left_out} restano fuori dalla tabella e dal 3D (T per tenerli).": {"en": "Added by the model alone: {total}. You keep {kept}; {left_out} stay out of the table and the 3D (T to keep them).", "it": "Aggiunti dal solo modello: {total}. Ne tieni {kept}; {left_out} restano fuori dalla tabella e dal 3D (T per tenerli).", "fr": "Ajoutés par le seul modèle : {total}. Vous en gardez {kept} ; {left_out} restent hors du tableau et de la 3D (T pour les garder).", "de": "Nur vom Modell hinzugefügt: {total}. Sie behalten {kept}; {left_out} bleiben außerhalb von Tabelle und 3D (T zum Behalten)."},
@@ -2714,6 +2728,10 @@ DEFAULT_TRANSLATIONS = {
     "ui:componente {get}, terminale {terminal}: dettaglio reoforo ignorato (separazione senza evidenza esplicita ad alta confidenza); terminale originale conservato": {"en": "component {get}, terminal {terminal}: lead detail ignored (separation without explicit high-confidence evidence); original terminal kept", "it": "componente {get}, terminale {terminal}: dettaglio reoforo ignorato (separazione senza evidenza esplicita ad alta confidenza); terminale originale conservato", "fr": "composant {get}, terminaison {terminal} : détail de broche ignoré (séparation sans preuve explicite de haute confiance) ; terminaison d’origine conservée", "de": "Bauteil {get}, Anschluss {terminal}: Beinchendetail ignoriert (Trennung ohne ausdrücklichen Nachweis hoher Konfidenz); ursprünglicher Anschluss behalten"},
     "ui:componente {get}, terminale {terminal}: dettaglio reoforo ignorato (reoforo oltre l'ingombro del terminale originale); terminale originale conservato": {"en": "component {get}, terminal {terminal}: lead detail ignored (lead beyond the original terminal envelope); original terminal kept", "it": "componente {get}, terminale {terminal}: dettaglio reoforo ignorato (reoforo oltre l'ingombro del terminale originale); terminale originale conservato", "fr": "composant {get}, terminaison {terminal} : détail de broche ignoré (broche au-delà de l’encombrement de la terminaison d’origine) ; terminaison d’origine conservée", "de": "Bauteil {get}, Anschluss {terminal}: Beinchendetail ignoriert (Beinchen außerhalb der ursprünglichen Anschlusshülle); ursprünglicher Anschluss behalten"},
     "ui:componente {get}, terminale {terminal}: dettaglio reoforo ignorato (il reoforo deve toccare esattamente una faccia del corpo); terminale originale conservato": {"en": "component {get}, terminal {terminal}: lead detail ignored (the lead must touch exactly one body face); original terminal kept", "it": "componente {get}, terminale {terminal}: dettaglio reoforo ignorato (il reoforo deve toccare esattamente una faccia del corpo); terminale originale conservato", "fr": "composant {get}, terminaison {terminal} : détail de broche ignoré (la broche doit toucher exactement une face du boîtier) ; terminaison d’origine conservée", "de": "Bauteil {get}, Anschluss {terminal}: Beinchendetail ignoriert (das Beinchen muss genau eine Gehäusefläche berühren); ursprünglicher Anschluss behalten"},
+    "ui:#{id}, terminale {terminal}: il modello lo vede attaccato al corpo, ma nella foto c'è uno spazio oltre la tolleranza; disegnato staccato, da verificare.": {"en": "#{id}, terminal {terminal}: the model sees it attached to the body, but the photo shows a gap beyond the tolerance; drawn detached, to be checked.", "it": "#{id}, terminale {terminal}: il modello lo vede attaccato al corpo, ma nella foto c'è uno spazio oltre la tolleranza; disegnato staccato, da verificare.", "fr": "#{id}, terminaison {terminal} : le modèle la voit reliée au boîtier, mais la photo montre un espace au-delà de la tolérance ; dessinée détachée, à vérifier.", "de": "#{id}, Anschluss {terminal}: das Modell sieht ihn am Gehäuse anliegen, aber das Foto zeigt einen Spalt jenseits der Toleranz; getrennt gezeichnet, zu prüfen."},
+    "ui:componente {get}, terminale {terminal}: il modello vede il reoforo attaccato al corpo ma la foto mostra uno spazio oltre la tolleranza; disegnato staccato, da verificare": {"en": "component {get}, terminal {terminal}: the model sees the lead attached to the body but the photo shows a gap beyond the tolerance; drawn detached, to be checked", "it": "componente {get}, terminale {terminal}: il modello vede il reoforo attaccato al corpo ma la foto mostra uno spazio oltre la tolleranza; disegnato staccato, da verificare", "fr": "composant {get}, terminaison {terminal} : le modèle voit la broche reliée au boîtier mais la photo montre un espace au-delà de la tolérance ; dessinée détachée, à vérifier", "de": "Bauteil {get}, Anschluss {terminal}: das Modell sieht das Beinchen am Gehäuse anliegen, aber das Foto zeigt einen Spalt jenseits der Toleranz; getrennt gezeichnet, zu prüfen"},
+    "ui:componente {get}, terminale {terminal}: reoforo attaccato senza spazio per toccare una faccia del corpo senza entrare in un altro reoforo; disegnato come in foto, staccato, da verificare": {"en": "component {get}, terminal {terminal}: attached lead with no room to touch a body face without entering another lead; drawn as in the photo, detached, to be checked", "it": "componente {get}, terminale {terminal}: reoforo attaccato senza spazio per toccare una faccia del corpo senza entrare in un altro reoforo; disegnato come in foto, staccato, da verificare", "fr": "composant {get}, terminaison {terminal} : broche reliée sans place pour toucher une face du boîtier sans entrer dans une autre broche ; dessinée comme sur la photo, détachée, à vérifier", "de": "Bauteil {get}, Anschluss {terminal}: anliegendes Beinchen ohne Platz, um eine Gehäusefläche zu berühren, ohne in ein anderes Beinchen einzudringen; wie im Foto gezeichnet, getrennt, zu prüfen"},
+    "ui:componente {get}, terminale {terminal}: indicato come attaccato ma lontano dal corpo oltre la tolleranza; disegnato staccato, nessun metallo inventato": {"en": "component {get}, terminal {terminal}: marked as attached but farther from the body than the tolerance; drawn detached, no metal invented", "it": "componente {get}, terminale {terminal}: indicato come attaccato ma lontano dal corpo oltre la tolleranza; disegnato staccato, nessun metallo inventato", "fr": "composant {get}, terminaison {terminal} : indiquée comme reliée mais plus éloignée du boîtier que la tolérance ; dessinée détachée, aucun métal inventé", "de": "Bauteil {get}, Anschluss {terminal}: als anliegend angegeben, aber weiter vom Gehäuse entfernt als die Toleranz; getrennt gezeichnet, kein Metall erfunden"},
     "ui:componente {get}, terminale {terminal}: dettaglio reoforo ignorato (dettaglio malformato); terminale originale conservato": {"en": "component {get}, terminal {terminal}: lead detail ignored (malformed detail); original terminal kept", "it": "componente {get}, terminale {terminal}: dettaglio reoforo ignorato (dettaglio malformato); terminale originale conservato", "fr": "composant {get}, terminaison {terminal} : détail de broche ignoré (détail mal formé) ; terminaison d’origine conservée", "de": "Bauteil {get}, Anschluss {terminal}: Beinchendetail ignoriert (fehlerhaftes Detail); ursprünglicher Anschluss behalten"},
     "ui:colori nativi {path} non disponibili (il numero dei colori delle facce non corrisponde alla geometria); si conserva la geometria con colore fotografico": {"en": "native colours of {path} unavailable (the number of face colours does not match the geometry); geometry kept with the photo colour", "it": "colori nativi {path} non disponibili (il numero dei colori delle facce non corrisponde alla geometria); si conserva la geometria con colore fotografico", "fr": "couleurs natives de {path} indisponibles (le nombre de couleurs des faces ne correspond pas à la géométrie) ; géométrie conservée avec la couleur de la photo", "de": "native Farben von {path} nicht verfügbar (die Anzahl der Flächenfarben passt nicht zur Geometrie); Geometrie mit der Fotofarbe beibehalten"},
     "ui:colori nativi {path} non disponibili (il modello contiene geometria non valida o non solida); si conserva la geometria con colore fotografico": {"en": "native colours of {path} unavailable (the model contains invalid or non-solid geometry); geometry kept with the photo colour", "it": "colori nativi {path} non disponibili (il modello contiene geometria non valida o non solida); si conserva la geometria con colore fotografico", "fr": "couleurs natives de {path} indisponibles (le modèle contient une géométrie non valide ou non solide) ; géométrie conservée avec la couleur de la photo", "de": "native Farben von {path} nicht verfügbar (das Modell enthält ungültige oder nicht feste Geometrie); Geometrie mit der Fotofarbe beibehalten"},
@@ -3161,14 +3179,14 @@ DEFAULT_TRANSLATIONS = {
     "ui:Modello 3D rinviato: mancano le quote documentate del corpo ({fields}). Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti l'analisi per completare il 3D.": {"it": "Modello 3D rinviato: mancano le quote documentate del corpo ({fields}). Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti l'analisi per completare il 3D.", "en": "3D model deferred: documented body dimensions are missing ({fields}). The footprint will still be generated. Add a dimensioned drawing and repeat the analysis to complete the 3D model.", "fr": "Modèle 3D différé : les dimensions documentées du boîtier manquent ({fields}). L’empreinte sera tout de même générée. Ajoutez un dessin coté et relancez l’analyse pour terminer le modèle 3D.", "de": "3D-Modell zurückgestellt: dokumentierte Gehäusemaße fehlen ({fields}). Der Footprint wird trotzdem erzeugt. Fügen Sie eine bemaßte Zeichnung hinzu und wiederholen Sie die Analyse, um das 3D-Modell zu vervollständigen."},
     "ui:quote 3D mancanti: completa il datasheet": {"it": "quote 3D mancanti: completa il datasheet", "en": "3D dimensions missing: complete the datasheet", "fr": "dimensions 3D manquantes : complétez la fiche technique", "de": "3D-Maße fehlen: ergänzen Sie das Datenblatt"},
     "ui:Completa le quote documentate di lunghezza, larghezza e altezza del corpo per generare il modello 3D.": {"it": "Completa le quote documentate di lunghezza, larghezza e altezza del corpo per generare il modello 3D.", "en": "Provide documented body length, width and height to generate the 3D model.", "fr": "Renseignez les dimensions documentées du boîtier pour générer le modèle 3D.", "de": "Geben Sie die dokumentierten Gehäusemaße ein, um das 3D-Modell zu erzeugen."},
-    # Metadati del componente (scheda KiCad), regole KLC e foro del pad (2026-10-10).
+    # Component metadata (KiCad tab), KLC rules and pad hole (2026-10-10).
     "ui:Metadati del componente": {"it": "Metadati del componente", "en": "Component metadata", "fr": "Métadonnées du composant", "de": "Bauteil-Metadaten"},
     "ui:Designatore di riferimento:": {"it": "Designatore di riferimento:", "en": "Reference designator:", "fr": "Désignateur de référence :", "de": "Referenzbezeichner:"},
     "ui:Parole chiave:": {"it": "Parole chiave:", "en": "Keywords:", "fr": "Mots-clés :", "de": "Schlüsselwörter:"},
     "ui:Datasheet (URL o file):": {"it": "Datasheet (URL o file):", "en": "Datasheet (URL or file):", "fr": "Fiche technique (URL ou fichier) :", "de": "Datenblatt (URL oder Datei):"},
     "ui:Filtri footprint:": {"it": "Filtri footprint:", "en": "Footprint filters:", "fr": "Filtres d’empreinte :", "de": "Footprint-Filter:"},
     "ui:Applica ai file": {"it": "Applica ai file", "en": "Apply to files", "fr": "Appliquer aux fichiers", "de": "Auf Dateien anwenden"},
-    # Aiuto per riga dei metadati (icona ⓘ -> finestra modale, 2026-10-12).
+    # Per-row help of the metadata (ⓘ icon -> modal window, 2026-10-12).
     "ui:Aiuto: {field}": {"it": "Aiuto: {field}", "en": "Help: {field}", "fr": "Aide : {field}", "de": "Hilfe: {field}"},
     "ui:Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano.": {"it": "Che cosa inserire, dove finisce nei file KiCad e quali regole KLC lo riguardano.", "en": "What to enter, where it goes in the KiCad files and which KLC rules concern it.", "fr": "Quoi saisir, où cela va dans les fichiers KiCad et quelles règles KLC s’appliquent.", "de": "Was einzutragen ist, wohin es in den KiCad-Dateien kommt und welche KLC-Regeln gelten."},
     "ui:Designatore di riferimento": {"it": "Designatore di riferimento", "en": "Reference designator", "fr": "Désignateur de référence", "de": "Referenzbezeichner"},
@@ -3293,9 +3311,9 @@ DEFAULT_TRANSLATIONS = {
     "ui:Pinout aggiornato: la bozza non applicata modifica gli stessi dati ed è conservata, usa Recupera bozza per riprenderla.": {"it": "Pinout aggiornato: la bozza non applicata modifica gli stessi dati ed è conservata, usa Recupera bozza per riprenderla.", "en": "Pinout updated: the unapplied draft changes the same data and is kept, use Recover draft to resume it.", "fr": "Brochage mis à jour : le brouillon non appliqué modifie les mêmes données et est conservé, utilisez Récupérer le brouillon pour le reprendre.", "de": "Pinbelegung aktualisiert: der nicht übernommene Entwurf ändert dieselben Daten und bleibt erhalten, mit Entwurf wiederherstellen fortsetzen."},
     "ui:Pinout aggiornato: la bozza non applicata, riportata sui nuovi dati, darebbe una disposizione non valida ed è conservata, usa Recupera bozza per riprenderla.": {"it": "Pinout aggiornato: la bozza non applicata, riportata sui nuovi dati, darebbe una disposizione non valida ed è conservata, usa Recupera bozza per riprenderla.", "en": "Pinout updated: the unapplied draft, carried over to the new data, would give an invalid layout and is kept, use Recover draft to resume it.", "fr": "Brochage mis à jour : le brouillon non appliqué, reporté sur les nouvelles données, donnerait une disposition non valide et est conservé, utilisez Récupérer le brouillon pour le reprendre.", "de": "Pinbelegung aktualisiert: der nicht übernommene Entwurf ergäbe, auf die neuen Daten übertragen, eine ungültige Anordnung und bleibt erhalten, mit Entwurf wiederherstellen fortsetzen."},
     "ui:Bozza superata da un pinout successivo disponibile: usa Recupera bozza per riprenderla sui dati attuali.": {"it": "Bozza superata da un pinout successivo disponibile: usa Recupera bozza per riprenderla sui dati attuali.", "en": "Draft superseded by a later pinout available: use Recover draft to resume it on the current data.", "fr": "Brouillon remplacé par un brochage ultérieur disponible : utilisez Récupérer le brouillon pour le reprendre sur les données actuelles.", "de": "Von einer späteren Pinbelegung abgelöster Entwurf verfügbar: mit Entwurf wiederherstellen auf den aktuellen Daten fortsetzen."},
-    # Campi obbligatori dei metadati: installazione bloccata (2026-10-15).
+    # Required metadata fields: installation blocked (2026-10-15).
     "ui:Installazione bloccata: compila i campi obbligatori in «Metadati del componente»: {fields}.": {"it": "Installazione bloccata: compila i campi obbligatori in «Metadati del componente»: {fields}.", "en": "Installation blocked: fill in the required fields in «Component metadata»: {fields}.", "fr": "Installation bloquée : remplissez les champs obligatoires dans «Métadonnées du composant» : {fields}.", "de": "Installation gesperrt: füllen Sie die Pflichtfelder in «Bauteil-Metadaten» aus: {fields}."},
-    # «Controlli KiCad (KLC)» e rimedi dei controlli (klc_checks.FIX_HINTS), 2026-10-15.
+    # «Controlli KiCad (KLC)» (KiCad checks (KLC)) and remedies of the checks (klc_checks.FIX_HINTS), 2026-10-15.
     "ui:Controlli KiCad (KLC)": {"it": "Controlli KiCad (KLC)", "en": "KiCad checks (KLC)", "fr": "Contrôles KiCad (KLC)", "de": "KiCad-Prüfungen (KLC)"},
     "ui:Il componente non ha nome: il nome è quello del progetto. Dagli un nome con File › «Rinomina progetto...».": {"it": "Il componente non ha nome: il nome è quello del progetto. Dagli un nome con File › «Rinomina progetto...».", "en": "The component has no name: its name is the project's. Give it one with File › «Rename project...».", "fr": "Le composant n’a pas de nom : son nom est celui du projet. Donnez-lui un nom avec Fichier › «Renommer le projet...».", "de": "Das Bauteil hat keinen Namen: sein Name ist der des Projekts. Vergeben Sie einen mit Datei › «Projekt umbenennen...»."},
     "ui:Rinomina il progetto con File › «Rinomina progetto...» togliendo i caratteri indicati: il nome del progetto è il nome di footprint e simbolo.": {"it": "Rinomina il progetto con File › «Rinomina progetto...» togliendo i caratteri indicati: il nome del progetto è il nome di footprint e simbolo.", "en": "Rename the project with File › «Rename project...» removing the characters shown: the project name is the name of footprint and symbol.", "fr": "Renommez le projet avec Fichier › «Renommer le projet...» en retirant les caractères indiqués : le nom du projet est celui de l’empreinte et du symbole.", "de": "Benennen Sie das Projekt mit Datei › «Projekt umbenennen...» um und entfernen Sie die genannten Zeichen: der Projektname ist der Name von Footprint und Symbol."},
@@ -3325,12 +3343,12 @@ DEFAULT_TRANSLATIONS = {
     "ui:Nella scheda «Simbolo elettrico» separa i pin sovrapposti (o lascia visibile uno solo dei pin con lo stesso nome), premi Applica e riesporta il simbolo.": {"it": "Nella scheda «Simbolo elettrico» separa i pin sovrapposti (o lascia visibile uno solo dei pin con lo stesso nome), premi Applica e riesporta il simbolo.", "en": "In the «Electrical symbol» tab separate the overlapping pins (or keep only one of the pins with the same name visible), press Apply and export the symbol again.", "fr": "Dans l’onglet «Symbole électrique», séparez les broches superposées (ou ne laissez visible qu’une des broches de même nom), appuyez sur Appliquer et réexportez le symbole.", "de": "Trennen Sie im Tab «Schaltplansymbol» die überlappenden Pins (oder lassen Sie nur einen der gleichnamigen Pins sichtbar), drücken Sie Übernehmen und exportieren Sie das Symbol erneut."},
     "ui:Il footprint non ha pad: controlla i contatti nella scheda «Anteprima footprint» (o ripeti l’analisi nella scheda «Progetto»), poi rigenera con «Applica ai file».": {"it": "Il footprint non ha pad: controlla i contatti nella scheda «Anteprima footprint» (o ripeti l’analisi nella scheda «Progetto»), poi rigenera con «Applica ai file».", "en": "The footprint has no pads: check the contacts in the «Footprint preview» tab (or repeat the analysis in the «Project» tab), then regenerate with «Apply to files».", "fr": "L’empreinte n’a pas de pastilles : vérifiez les contacts dans l’onglet «Aperçu empreinte» (ou relancez l’analyse dans l’onglet «Projet»), puis régénérez avec «Appliquer aux fichiers».", "de": "Der Footprint hat keine Pads: prüfen Sie die Kontakte im Tab «Footprint-Vorschau» (oder wiederholen Sie die Analyse im Tab «Projekt»), dann mit «Auf Dateien anwenden» neu erzeugen."},
     "ui:Compila «Descrizione» in «Metadati del componente» e premi «Applica ai file»: la stessa riga va nel campo descr del footprint.": {"it": "Compila «Descrizione» in «Metadati del componente» e premi «Applica ai file»: la stessa riga va nel campo descr del footprint.", "en": "Fill in «Description» in «Component metadata» and press «Apply to files»: the same line goes into the descr field of the footprint.", "fr": "Remplissez «Description» dans «Métadonnées du composant» et appuyez sur «Appliquer aux fichiers» : la même ligne va dans le champ descr de l’empreinte.", "de": "Füllen Sie «Beschreibung» in «Bauteil-Metadaten» aus und drücken Sie «Auf Dateien anwenden»: dieselbe Zeile kommt in das Feld descr des Footprints."},
-    # Metadati non ancora applicati ai file: installazione bloccata (revisione, 2026-10-15).
+    # Metadata not yet applied to the files: installation blocked (review, 2026-10-15).
     "ui:Installazione bloccata: i metadati non sono ancora nei file del componente. Premi «Applica ai file» in «Metadati del componente».": {"it": "Installazione bloccata: i metadati non sono ancora nei file del componente. Premi «Applica ai file» in «Metadati del componente».", "en": "Installation blocked: the metadata are not in the component files yet. Press «Apply to files» in «Component metadata».", "fr": "Installation bloquée : les métadonnées ne sont pas encore dans les fichiers du composant. Appuyez sur «Appliquer aux fichiers» dans «Métadonnées du composant».", "de": "Installation gesperrt: die Metadaten sind noch nicht in den Bauteildateien. Drücken Sie «Auf Dateien anwenden» in «Bauteil-Metadaten»."},
-    # Aiuto dei metadati: blocco finché i valori non sono nei file (revisione, 2026-10-15).
+    # Metadata help: blocked until the values are in the files (review, 2026-10-15).
     "ui:Anche con il campo compilato, l’installazione resta bloccata finché il valore non è scritto nei file con «Applica ai file», che rigenera il footprint; un progetto salvato prima di questo controllo richiede un «Applica ai file» prima della prima installazione, e il footprint viene rigenerato con la versione attuale del programma.": {"it": "Anche con il campo compilato, l’installazione resta bloccata finché il valore non è scritto nei file con «Applica ai file», che rigenera il footprint; un progetto salvato prima di questo controllo richiede un «Applica ai file» prima della prima installazione, e il footprint viene rigenerato con la versione attuale del programma.", "en": "Even with the field filled in, the installation stays blocked until the value is written into the files with «Apply to files», which regenerates the footprint; a project saved before this check needs one «Apply to files» before its first installation, and the footprint is regenerated with the current version of the program.", "fr": "Même avec le champ rempli, l’installation reste bloquée tant que la valeur n’est pas écrite dans les fichiers avec «Appliquer aux fichiers», qui régénère l’empreinte ; un projet enregistré avant ce contrôle demande un «Appliquer aux fichiers» avant sa première installation, et l’empreinte est régénérée avec la version actuelle du programme.", "de": "Auch mit ausgefülltem Feld bleibt die Installation gesperrt, bis der Wert mit «Auf Dateien anwenden», das den Footprint neu erzeugt, in die Dateien geschrieben ist; ein vor dieser Prüfung gespeichertes Projekt braucht ein «Auf Dateien anwenden» vor seiner ersten Installation, und der Footprint wird mit der aktuellen Programmversion neu erzeugt."},
     "ui:Anche con i campi compilati, l’installazione resta bloccata finché descrizione, parole chiave e datasheet non sono scritti nei file con «Applica ai file», che rigenera il footprint; un progetto salvato prima di questo controllo richiede un «Applica ai file» prima della prima installazione, e il footprint viene rigenerato con la versione attuale del programma.": {"it": "Anche con i campi compilati, l’installazione resta bloccata finché descrizione, parole chiave e datasheet non sono scritti nei file con «Applica ai file», che rigenera il footprint; un progetto salvato prima di questo controllo richiede un «Applica ai file» prima della prima installazione, e il footprint viene rigenerato con la versione attuale del programma.", "en": "Even with the fields filled in, the installation stays blocked until description, keywords and datasheet are written into the files with «Apply to files», which regenerates the footprint; a project saved before this check needs one «Apply to files» before its first installation, and the footprint is regenerated with the current version of the program.", "fr": "Même avec les champs remplis, l’installation reste bloquée tant que description, mots-clés et fiche technique ne sont pas écrits dans les fichiers avec «Appliquer aux fichiers», qui régénère l’empreinte ; un projet enregistré avant ce contrôle demande un «Appliquer aux fichiers» avant sa première installation, et l’empreinte est régénérée avec la version actuelle du programme.", "de": "Auch mit ausgefüllten Feldern bleibt die Installation gesperrt, bis Beschreibung, Schlüsselwörter und Datenblatt mit «Auf Dateien anwenden», das den Footprint neu erzeugt, in die Dateien geschrieben sind; ein vor dieser Prüfung gespeichertes Projekt braucht ein «Auf Dateien anwenden» vor seiner ersten Installation, und der Footprint wird mit der aktuellen Programmversion neu erzeugt."},
-    # Robustezza installazione KiCad (audit 2026-10-15, punto 6): tabella non UTF-8, anteprima rifiutata.
+    # KiCad installation robustness (audit 2026-10-15, point 6): non-UTF-8 table, preview refused.
     "kicad.error.file_not_utf8": {"en": "The file is not saved as UTF-8 text, the encoding KiCad uses:\n{path}\n\nIt was probably saved by another editor in a different encoding. Open it in a text editor, save it with UTF-8 encoding and retry. No file was changed.", "it": "Il file non è salvato come testo UTF-8, la codifica usata da KiCad:\n{path}\n\nProbabilmente è stato salvato da un altro editor con una codifica diversa. Aprilo in un editor di testo, salvalo con codifica UTF-8 e riprova. Nessun file è stato modificato.", "fr": "Le fichier n’est pas enregistré en texte UTF-8, l’encodage utilisé par KiCad :\n{path}\n\nIl a probablement été enregistré par un autre éditeur dans un encodage différent. Ouvrez-le dans un éditeur de texte, enregistrez-le en UTF-8 puis réessayez. Aucun fichier n’a été modifié.", "de": "Die Datei ist nicht als UTF-8-Text gespeichert, die Kodierung, die KiCad verwendet:\n{path}\n\nSie wurde vermutlich von einem anderen Editor in einer anderen Kodierung gespeichert. Öffnen Sie sie in einem Texteditor, speichern Sie sie mit UTF-8-Kodierung und versuchen Sie es erneut. Es wurde keine Datei geändert."},
     "kicad.error.preview_write_refused": {"en": "Unable to write the preview file:\n{path}\n\nThe file is read-only or held open by another program ({error}). Close it in KiCad or in the other program, or clear its read-only attribute (Properties > Read-only), then retry.", "it": "Impossibile scrivere il file di anteprima:\n{path}\n\nIl file è in sola lettura o è tenuto aperto da un altro programma ({error}). Chiudilo in KiCad o nell’altro programma, oppure togli l’attributo di sola lettura (Proprietà > Sola lettura), poi riprova.", "fr": "Impossible d’écrire le fichier d’aperçu :\n{path}\n\nLe fichier est en lecture seule ou maintenu ouvert par un autre programme ({error}). Fermez-le dans KiCad ou dans l’autre programme, ou retirez son attribut lecture seule (Propriétés > Lecture seule), puis réessayez.", "de": "Die Vorschaudatei kann nicht geschrieben werden:\n{path}\n\nDie Datei ist schreibgeschützt oder von einem anderen Programm geöffnet ({error}). Schließen Sie sie in KiCad oder im anderen Programm oder entfernen Sie den Schreibschutz (Eigenschaften > Schreibgeschützt) und versuchen Sie es erneut."},
     "kicad.error.install_write_refused": {"en": "The installation could not write:\n{path}\n\nThe file is read-only or held open by another program ({error}). The installation was undone and the previous files and library table were left as they were. Close the file in KiCad or in the other program, or clear its read-only attribute (Properties > Read-only), then retry.", "it": "L’installazione non ha potuto scrivere:\n{path}\n\nIl file è in sola lettura o è tenuto aperto da un altro programma ({error}). L’installazione è stata annullata e i file precedenti e la tabella delle librerie sono rimasti com’erano. Chiudi il file in KiCad o nell’altro programma, oppure togli l’attributo di sola lettura (Proprietà > Sola lettura), poi riprova.", "fr": "L’installation n’a pas pu écrire :\n{path}\n\nLe fichier est en lecture seule ou maintenu ouvert par un autre programme ({error}). L’installation a été annulée et les fichiers précédents ainsi que la table des bibliothèques sont restés inchangés. Fermez le fichier dans KiCad ou dans l’autre programme, ou retirez son attribut lecture seule (Propriétés > Lecture seule), puis réessayez.", "de": "Die Installation konnte nicht schreiben:\n{path}\n\nDie Datei ist schreibgeschützt oder von einem anderen Programm geöffnet ({error}). Die Installation wurde rückgängig gemacht, die vorherigen Dateien und die Bibliothekstabelle blieben unverändert. Schließen Sie die Datei in KiCad oder im anderen Programm oder entfernen Sie den Schreibschutz (Eigenschaften > Schreibgeschützt) und versuchen Sie es erneut."},
@@ -3386,18 +3404,18 @@ DEFAULT_TRANSLATIONS = {
         "fr": "DOUTE ordre des broches ({family}) : vues de dessus, les broches sont numérotées dans le sens horaire, alors que la numérotation standard de cette famille est antihoraire. Le dessin a peut-être été lu avec l’axe Y vers le haut ou mis en miroir deux fois ; il existe toutefois des boîtiers à brochage inversé. À confirmer sur le dessin.",
         "de": "ZWEIFEL Pinreihenfolge ({family}): Von oben gesehen sind die Pins im Uhrzeigersinn nummeriert, während die Standardnummerierung dieser Familie gegen den Uhrzeigersinn läuft. Die Zeichnung wurde möglicherweise mit nach oben zeigender Y-Achse gelesen oder zweimal gespiegelt; es gibt jedoch Gehäuse mit umgekehrter Pinbelegung. Anhand der Zeichnung zu bestätigen.",
     },
-    # Editor del simbolo: recupero bozza disattivato per cartella di progetto assente (revisione L9, 2026-10-15).
+    # Symbol editor: draft recovery disabled for a missing project folder (review L9, 2026-10-15).
     "ui:Bozza non salvata: la cartella del progetto non esiste più (rinominata o eliminata), il recupero dopo un arresto è disattivato. Riapri il progetto per riattivarlo.": {"it": "Bozza non salvata: la cartella del progetto non esiste più (rinominata o eliminata), il recupero dopo un arresto è disattivato. Riapri il progetto per riattivarlo.", "en": "Draft not saved: the project folder no longer exists (renamed or deleted), so crash recovery is off. Reopen the project to turn it back on.", "fr": "Brouillon non enregistré : le dossier du projet n’existe plus (renommé ou supprimé), la récupération après un plantage est désactivée. Rouvrez le projet pour la réactiver.", "de": "Entwurf nicht gespeichert: der Projektordner existiert nicht mehr (umbenannt oder gelöscht), die Wiederherstellung nach einem Absturz ist deaktiviert. Öffnen Sie das Projekt erneut, um sie wieder einzuschalten."},
 }
 
-#: Testi predefiniti SOSTITUITI, per chiave e lingua. Il catalogo SQLite
-#: aggiunge le chiavi nuove a ogni avvio ma non riscrive quelle esistenti,
-#: per non perdere le modifiche dell'utente: cosi' un testo corretto non
-#: arrivava mai a un database gia' creato. All'apertura, una voce che contiene
-#: ESATTAMENTE uno di questi vecchi testi viene aggiornata al testo attuale;
-#: una voce modificata dall'utente non coincide e resta com'e'.
+#: REPLACED default texts, by key and language. The SQLite catalogue adds
+#: the new keys at every start but does not rewrite the existing ones, so as
+#: not to lose the user's edits: that way a corrected text never reached an
+#: already created database. On opening, an entry that holds EXACTLY one of
+#: these old texts is updated to the current text; an entry edited by the
+#: user does not match and stays as it is.
 SUPERSEDED_DEFAULTS = {
-    # Modello unico (2026-10-02): l'aiuto della verifica non parla piu' di un modello suo.
+    # Single model (2026-10-02): the verification help no longer speaks of a model of its own.
     "help.settings.stage.2": {"en": ["Confirms only the presence of mounted bodies in the proposed rectangles. It does not change coordinates or add IDs. It uses an independent model, including any session-specific verification selection. The JSON schema and geometric checks remain managed by code."], "it": ["Conferma solo la presenza dei corpi montati nei rettangoli proposti. Non modifica coordinate né aggiunge ID. Usa un modello indipendente, inclusa l’eventuale scelta di verifica per la sessione. Lo schema JSON e i controlli geometrici restano gestiti dal codice."], "fr": ["Confirme uniquement la présence des corps montés dans les rectangles proposés. Ne modifie pas les coordonnées et n’ajoute aucun ID. Utilise un modèle indépendant, y compris une éventuelle sélection propre à la session. Le schéma JSON et les contrôles géométriques restent gérés par le code."], "de": ["Bestätigt nur bestückte Gehäuse in den vorgeschlagenen Rechtecken. Koordinaten werden nicht geändert und IDs nicht hinzugefügt. Verwendet ein unabhängiges Modell einschließlich einer sitzungsspezifischen Prüfauswahl. JSON-Schema und Geometrieprüfungen bleiben unter Kontrolle des Codes."]},
     "ui:Categoria sconosciuta": {'fr': ('Cat?gorie inconnue',)},
     "ui:Categoria proposta, non confermata": {'fr': ('Cat?gorie propos?e, non confirm?e',), 'de': ('Vorgeschlagene Kategorie, unbest?tigt',)},
@@ -3429,7 +3447,7 @@ SUPERSEDED_DEFAULTS = {
     "ui:Resoconto consolidati: {path}": {'fr': ('Rapport des associations accept?es : {path}',), 'de': ('Bericht best?tigter Zuordnungen: {path}',)},
     "ui:Resoconto consolidati non salvato: {error}": {'fr': ('Rapport des associations accept?es non enregistr? : {error}',), 'de': ('Bericht best?tigter Zuordnungen nicht gespeichert: {error}',)},
     "ui:Sono mostrati solo i componenti con un modello KiCad associato. Conferma quelli verificati: modello e ritaglio saranno disponibili anche negli altri progetti. Togli la spunta a quelli che non ti convincono.": {'fr': ('Seuls les composants associ?s ? un mod?le KiCad sont affich?s. Confirmez ceux que vous avez v?rifi?s : leur mod?le et leur d?coupe seront disponibles dans les autres projets. D?cochez ceux dont vous doutez.',), 'de': ('Es werden nur Bauteile mit zugeordnetem KiCad-Modell angezeigt. Best?tigen Sie die gepr?ften Bauteile: Modell und Ausschnitt stehen auch in anderen Projekten zur Verf?gung. Entfernen Sie bei unsicheren Eintr?gen das H?kchen.',)},
-    # Documenti con piu' ruoli per file (26/09).
+    # Documents with several roles per file (26/09).
     "help.guided_documents": {"en": ["Use the pinout document for contacts, numbering and pinout dimensions; do not assume the drawing is a top view. Use the dimensioned drawing for mechanical measurements: body length and width, hole positions, contact row offsets. Use the high-resolution photo to locate mounted components, especially small passives: it must be a photograph of the real part, not line art, and it does not need dimensions.\n\nThe app copies files into docs using the names pinout, top and hires while preserving their real extension. Originals remain unchanged; replacements and removals are recoverable from docs/.history. Photographic detection needs PNG/JPEG/WEBP images: the sharpest top-down view among those that can be calibrated is used. Resolution decides which components are distinguishable: below the useful threshold the analysis reports the limitation. A PDF is read during general analysis and its first page is shown in the preview. The AI receives the roles explicitly, and unavailable documents are not replaced with other files.", "Each document can have several roles: tick all those it contains. Pinout (pinout): contacts, numbering and pinout dimensions; do not assume it is a top view. Dimensions (top): dimensioned top-view drawing, for body length and width, holes and contact rows. Photo (hires): photograph of the real part seen from above, to locate the mounted components; only files ticked as photo go to component detection and calibration, and they must be PNG/JPEG/WEBP images, not PDFs. Land pattern (land_pattern): footprint recommended by the manufacturer, for pad shape and position. Side view (side_view): heights of the body, of the components and board thickness.\n\nA PDF datasheet is often pinout, dimensions and land pattern together. A file with no role blocks the analysis until you choose one or remove it. The app copies the files into docs with their name; the originals stay unchanged and replacements and removals can be recovered in docs/.history. The AI receives the roles explicitly: a role not provided is not replaced by other files.", "Each document can have several roles: tick all those it contains. Pinout (pinout): contacts, numbering and pinout dimensions; do not assume it is a top view. Dimensions (top): dimensioned top-view drawing, for body length and width, holes and contact rows. High-res photo (hires): photograph of the real part seen from above, to locate the mounted components; only files ticked as photo go to component detection and calibration, and they must be PNG/JPEG/WEBP images, not PDFs. Land pattern (land_pattern): footprint recommended by the manufacturer, for pad shape and position. Side view (side_view): heights of the body, of the components and board thickness. Datasheet (datasheet): complete manufacturer datasheet, PDF or images; the AI looks in it for pinout, dimensions, land pattern and side view and reports the missing sections; it is not a photo.\n\nA PDF datasheet is often pinout, dimensions and land pattern together: tick Datasheet. A file with no role blocks the analysis until you choose one or remove it. The app copies the files into docs with their name; the originals stay unchanged and replacements and removals can be recovered in docs/.history. The AI receives the roles explicitly: a role not provided is not replaced by other files."], "it": ["Usa il documento pinout per contatti, numerazione e quote; non assumere che il disegno sia visto dall’alto. Usa l’immagine con quote per le misure meccaniche: lunghezza e larghezza del corpo, posizione dei fori, offset delle file di contatti. Usa la foto ad alta risoluzione per individuare i componenti montati, soprattutto i passivi piccoli: deve essere una fotografia del pezzo reale, non un disegno a tratto, e non serve che sia quotata.\n\nL’app copia i file in docs con i nomi pinout, top e hires, mantenendo l’estensione reale. Gli originali restano invariati; sostituzioni e rimozioni sono recuperabili in docs/.history. Per il rilevamento fotografico servono immagini PNG/JPEG/WEBP: viene usata la vista dall’alto più dettagliata fra quelle calibrabili. La risoluzione decide quali componenti sono distinguibili: sotto la soglia utile l’analisi segnala il limite. Un PDF viene letto nell’analisi generale e l’anteprima mostra la prima pagina. L’AI riceve i ruoli esplicitamente e i documenti non disponibili non vengono sostituiti con altri file.", "Ogni documento può avere più ruoli: spunta tutti quelli che contiene. Pinout (pinout): contatti, numerazione e quote del pinout; non assumere che sia una vista dall’alto. Quote (top): disegno quotato visto dall’alto, per lunghezza e larghezza del corpo, fori e file di contatti. Foto (hires): fotografia del pezzo reale vista dall’alto, per individuare i componenti montati; solo i file spuntati come foto vanno al riconoscimento dei componenti e alla calibrazione, e devono essere immagini PNG/JPEG/WEBP, non PDF. Land pattern (land_pattern): impronta consigliata dal costruttore, per forma e posizione delle piazzole. Vista laterale (side_view): altezze del corpo, dei componenti e spessore della scheda.\n\nUn datasheet PDF è spesso pinout, quote e land pattern insieme. Un file senza ruoli blocca l’analisi finché non ne scegli uno o lo rimuovi. L’app copia i file in docs con il loro nome; gli originali restano invariati e sostituzioni e rimozioni sono recuperabili in docs/.history. L’AI riceve i ruoli esplicitamente: un ruolo non fornito non viene sostituito con altri file.", "Ogni documento può avere più ruoli: spunta tutti quelli che contiene. Pinout (pinout): contatti, numerazione e quote del pinout; non assumere che sia una vista dall’alto. Quote (top): disegno quotato visto dall’alto, per lunghezza e larghezza del corpo, fori e file di contatti. Foto (hires): fotografia del pezzo reale vista dall’alto, per individuare i componenti montati; solo i file spuntati come foto vanno al riconoscimento dei componenti e alla calibrazione, e devono essere immagini PNG/JPEG/WEBP, non PDF. Piazzole consigliate (land_pattern): disegno delle piazzole consigliate dal costruttore (land pattern), per forma e posizione delle piazzole e dei fori. Vista laterale (side_view): altezze del corpo, dei componenti e spessore della scheda.\n\nUn datasheet PDF è spesso pinout, quote e piazzole consigliate insieme. Un file senza ruoli blocca l’analisi finché non ne scegli uno o lo rimuovi. L’app copia i file in docs con il loro nome; gli originali restano invariati e sostituzioni e rimozioni sono recuperabili in docs/.history. L’AI riceve i ruoli esplicitamente: un ruolo non fornito non viene sostituito con altri file.", "Ogni documento può avere più ruoli: spunta tutti quelli che contiene. Pinout (pinout): contatti, numerazione e quote del pinout; non assumere che sia una vista dall’alto. Quote (top): disegno quotato visto dall’alto, per lunghezza e larghezza del corpo, fori e file di contatti. Foto alta risoluzione (hires): fotografia del pezzo reale vista dall’alto, per individuare i componenti montati; solo i file spuntati come foto vanno al riconoscimento dei componenti e alla calibrazione, e devono essere immagini PNG/JPEG/WEBP, non PDF. Piazzole consigliate (land_pattern): disegno delle piazzole consigliate dal costruttore (land pattern), per forma e posizione delle piazzole e dei fori. Vista laterale (side_view): altezze del corpo, dei componenti e spessore della scheda. Datasheet (datasheet): datasheet completo del costruttore, PDF o immagini; l’AI vi cerca pinout, quote, piazzole e vista laterale e segnala le sezioni che mancano; non è una foto.\n\nUn datasheet PDF è spesso pinout, quote e piazzole consigliate insieme: spunta Datasheet. Un file senza ruoli blocca l’analisi finché non ne scegli uno o lo rimuovi. L’app copia i file in docs con il loro nome; gli originali restano invariati e sostituzioni e rimozioni sono recuperabili in docs/.history. L’AI riceve i ruoli esplicitamente: un ruolo non fornito non viene sostituito con altri file."], "fr": ["Utilisez le document de brochage pour les contacts, la numérotation et les cotes ; ne supposez pas que le dessin est une vue de dessus. Utilisez l’image cotée pour les mesures mécaniques et la photo haute résolution pour repérer les composants montés, surtout les petits passifs.\n\nL’application copie les fichiers dans docs sous les noms pinout, top et hires tout en conservant leur extension réelle. Les originaux restent inchangés ; les remplacements et suppressions sont récupérables dans docs/.history. La détection utilise la vue de dessus calibrable la plus détaillée et signale les limites de résolution. Un PDF est lu pendant l’analyse générale et sa première page apparaît dans l’aperçu. Les rôles sont transmis explicitement à l’IA.", "Chaque document peut avoir plusieurs rôles : cochez tous ceux qu’il contient. Brochage (pinout) : contacts, numérotation et cotes du brochage ; ne supposez pas qu’il s’agit d’une vue de dessus. Cotes (top) : dessin coté vu de dessus, pour la longueur et la largeur du corps, les trous et les rangées de contacts. Photo (hires) : photographie de la pièce réelle vue de dessus, pour localiser les composants montés ; seuls les fichiers cochés comme photo vont à la détection des composants et à la calibration, et ils doivent être des images PNG/JPEG/WEBP, pas des PDF. Empreinte (land_pattern) : empreinte recommandée par le fabricant, pour la forme et la position des pastilles. Vue latérale (side_view) : hauteurs du corps, des composants et épaisseur de la carte.\n\nUne fiche technique PDF est souvent brochage, cotes et empreinte à la fois. Un fichier sans rôle bloque l’analyse tant que vous n’en choisissez pas un ou ne le retirez pas. L’application copie les fichiers dans docs avec leur nom ; les originaux restent inchangés et les remplacements et suppressions sont récupérables dans docs/.history. L’IA reçoit les rôles explicitement : un rôle non fourni n’est pas remplacé par d’autres fichiers.", "Chaque document peut avoir plusieurs rôles : cochez tous ceux qu’il contient. Brochage (pinout) : contacts, numérotation et cotes du brochage ; ne supposez pas qu’il s’agit d’une vue de dessus. Cotes (top) : dessin coté vu de dessus, pour la longueur et la largeur du corps, les trous et les rangées de contacts. Photo haute résolution (hires) : photographie de la pièce réelle vue de dessus, pour localiser les composants montés ; seuls les fichiers cochés comme photo vont à la détection des composants et à la calibration, et ils doivent être des images PNG/JPEG/WEBP, pas des PDF. Empreinte (land_pattern) : empreinte recommandée par le fabricant, pour la forme et la position des pastilles. Vue latérale (side_view) : hauteurs du corps, des composants et épaisseur de la carte. Fiche technique (datasheet) : fiche technique complète du fabricant, PDF ou images ; l’IA y cherche brochage, cotes, empreinte et vue latérale et signale les sections absentes ; ce n’est pas une photo.\n\nUne fiche technique PDF est souvent brochage, cotes et empreinte à la fois : cochez Fiche technique. Un fichier sans rôle bloque l’analyse tant que vous n’en choisissez pas un ou ne le retirez pas. L’application copie les fichiers dans docs avec leur nom ; les originaux restent inchangés et les remplacements et suppressions sont récupérables dans docs/.history. L’IA reçoit les rôles explicitement : un rôle non fourni n’est pas remplacé par d’autres fichiers."], "de": ["Verwenden Sie das Pinbelegungsdokument für Kontakte, Nummerierung und Maße. Die bemaßte Zeichnung liefert mechanische Maße, das hochauflösende Foto lokalisiert bestückte Bauteile und kleine Passive.\n\nDie App kopiert Dateien unter den Namen pinout, top und hires nach docs und behält die tatsächliche Erweiterung bei. Originale bleiben unverändert; Ersetzungen und Löschungen können aus docs/.history wiederhergestellt werden. Die Erkennung verwendet die detaillierteste kalibrierbare Draufsicht und meldet Auflösungsgrenzen. PDFs werden in der allgemeinen Analyse gelesen und auf der ersten Seite als Vorschau angezeigt. Die Rollen werden der KI ausdrücklich übermittelt.", "Jedes Dokument kann mehrere Rollen haben: Haken Sie alle an, die es enthält. Pinbelegung (pinout): Kontakte, Nummerierung und Maße der Pinbelegung; nicht von einer Draufsicht ausgehen. Maße (top): bemaßte Zeichnung von oben, für Länge und Breite des Körpers, Bohrungen und Kontaktreihen. Foto (hires): Foto des echten Teils von oben, um die bestückten Bauteile zu finden; nur als Foto angehakte Dateien gehen an die Bauteilerkennung und die Kalibrierung, und sie müssen PNG/JPEG/WEBP-Bilder sein, keine PDFs. Land Pattern (land_pattern): vom Hersteller empfohlener Footprint, für Form und Lage der Pads. Seitenansicht (side_view): Höhen des Körpers, der Bauteile und Platinendicke.\n\nEin PDF-Datenblatt ist oft Pinbelegung, Maße und Land Pattern zugleich. Eine Datei ohne Rolle blockiert die Analyse, bis Sie eine wählen oder sie entfernen. Die App kopiert die Dateien mit ihrem Namen nach docs; die Originale bleiben unverändert, Ersetzungen und Entfernungen sind in docs/.history wiederherstellbar. Die KI erhält die Rollen ausdrücklich: eine nicht gelieferte Rolle wird nicht durch andere Dateien ersetzt.", "Jedes Dokument kann mehrere Rollen haben: Haken Sie alle an, die es enthält. Pinbelegung (pinout): Kontakte, Nummerierung und Maße der Pinbelegung; nicht von einer Draufsicht ausgehen. Maße (top): bemaßte Zeichnung von oben, für Länge und Breite des Körpers, Bohrungen und Kontaktreihen. Hochauflösendes Foto (hires): Foto des echten Teils von oben, um die bestückten Bauteile zu finden; nur als Foto angehakte Dateien gehen an die Bauteilerkennung und die Kalibrierung, und sie müssen PNG/JPEG/WEBP-Bilder sein, keine PDFs. Land Pattern (land_pattern): vom Hersteller empfohlener Footprint, für Form und Lage der Pads. Seitenansicht (side_view): Höhen des Körpers, der Bauteile und Platinendicke. Datenblatt (datasheet): vollständiges Herstellerdatenblatt, PDF oder Bilder; die KI sucht darin Pinbelegung, Maße, Land Pattern und Seitenansicht und meldet fehlende Abschnitte; es ist kein Foto.\n\nEin PDF-Datenblatt ist oft Pinbelegung, Maße und Land Pattern zugleich: Datenblatt anhaken. Eine Datei ohne Rolle blockiert die Analyse, bis Sie eine wählen oder sie entfernen. Die App kopiert die Dateien mit ihrem Namen nach docs; die Originale bleiben unverändert, Ersetzungen und Entfernungen sind in docs/.history wiederherstellbar. Die KI erhält die Rollen ausdrücklich: eine nicht gelieferte Rolle wird nicht durch andere Dateien ersetzt."]},
     # La chiave OpenRouter si gestisce da «Account AI...» (PIANO-FIX 2, 2026-09-26).
     "help.settings.stage.0": {"en": ["Choose the model from the OpenRouter list, which can be filtered by cost. This is the general default inherited by types without an override. A more capable model can be selected in the Project tab for one session without changing this default. OPENROUTER_API_KEY is required in .env.\n\nThe system prompt is sent to the model during datasheet extraction. These general defaults are stored in SQLite and can be customized per type under Manage AI types and profiles. The returned-field schema is fixed in code and is not changed here; this ensures a valid structured JSON response.", "Choose the model from the OpenRouter list, which can be filtered by cost. This is the general default inherited by types without an override. A more capable model can be selected in the Project tab for one session without changing this default. The OpenRouter key is entered from Configuration → «AI account...».\n\nThe system prompt is sent to the model during datasheet extraction. These general defaults are stored in SQLite and can be customized per type under Manage AI types and profiles. The returned-field schema is fixed in code and is not changed here; this ensures a valid structured JSON response."], "it": ["Scegli il modello dall’elenco OpenRouter, filtrabile per costo. È il default generale ereditato dalle tipologie senza override. Dal tab Progetto puoi scegliere per una sessione un modello più potente senza cambiare questo default. Serve OPENROUTER_API_KEY nel file .env.\n\nIl prompt di sistema viene inviato al modello durante l’estrazione del datasheet. Questi default generali sono salvati in SQLite e possono essere personalizzati per tipologia da Gestione tipologie e profili AI. Lo schema dei campi restituiti è fisso nel codice e non viene modificato qui; ciò garantisce una risposta JSON strutturata valida.", "Scegli il modello dall’elenco OpenRouter, filtrabile per costo. È il default generale ereditato dalle tipologie senza override. Dal tab Progetto puoi scegliere per una sessione un modello più potente senza cambiare questo default. La chiave OpenRouter si inserisce da Configurazione → «Account AI...».\n\nIl prompt di sistema viene inviato al modello durante l’estrazione del datasheet. Questi default generali sono salvati in SQLite e possono essere personalizzati per tipologia da Gestione tipologie e profili AI. Lo schema dei campi restituiti è fisso nel codice e non viene modificato qui; ciò garantisce una risposta JSON strutturata valida."], "fr": ["Choisissez le modèle dans la liste OpenRouter, filtrable par coût. Il s’agit de la valeur générale héritée par les types sans remplacement. Un modèle plus puissant peut être sélectionné dans l’onglet Projet pour une session sans modifier cette valeur. OPENROUTER_API_KEY est requis dans .env.\n\nLe prompt système est envoyé au modèle pendant l’extraction de la fiche technique. Ces valeurs générales sont enregistrées dans SQLite et peuvent être personnalisées par type dans Gérer les types et profils IA. Le schéma des champs retournés est fixé par le code et n’est pas modifié ici, afin de garantir une réponse JSON structurée valide.", "Choisissez le modèle dans la liste OpenRouter, filtrable par coût. Il s’agit de la valeur générale héritée par les types sans remplacement. Un modèle plus puissant peut être sélectionné dans l’onglet Projet pour une session sans modifier cette valeur. La clé OpenRouter se saisit depuis Configuration → « Compte IA... ».\n\nLe prompt système est envoyé au modèle pendant l’extraction de la fiche technique. Ces valeurs générales sont enregistrées dans SQLite et peuvent être personnalisées par type dans Gérer les types et profils IA. Le schéma des champs retournés est fixé par le code et n’est pas modifié ici, afin de garantir une réponse JSON structurée valide."], "de": ["Wählen Sie das Modell aus der nach Kosten filterbaren OpenRouter-Liste. Dies ist der allgemeine Standard für Typen ohne Überschreibung. In der Registerkarte Projekt kann für eine Sitzung ein leistungsfähigeres Modell gewählt werden, ohne diesen Standard zu ändern. OPENROUTER_API_KEY muss in .env vorhanden sein.\n\nDer System-Prompt wird während der Datenblattextraktion an das Modell gesendet. Diese allgemeinen Standards werden in SQLite gespeichert und können unter KI-Typen und -Profile verwalten je Typ angepasst werden. Das Schema der zurückgegebenen Felder ist im Code festgelegt und wird hier nicht geändert; so bleibt eine gültige strukturierte JSON-Antwort gewährleistet.", "Wählen Sie das Modell aus der nach Kosten filterbaren OpenRouter-Liste. Dies ist der allgemeine Standard für Typen ohne Überschreibung. In der Registerkarte Projekt kann für eine Sitzung ein leistungsfähigeres Modell gewählt werden, ohne diesen Standard zu ändern. Der OpenRouter-Schlüssel wird unter Konfiguration → „KI-Konto...“ eingegeben.\n\nDer System-Prompt wird während der Datenblattextraktion an das Modell gesendet. Diese allgemeinen Standards werden in SQLite gespeichert und können unter KI-Typen und -Profile verwalten je Typ angepasst werden. Das Schema der zurückgegebenen Felder ist im Code festgelegt und wird hier nicht geändert; so bleibt eine gültige strukturierte JSON-Antwort gewährleistet."]},
@@ -3437,14 +3455,14 @@ SUPERSEDED_DEFAULTS = {
     # Identita' coerente (PIANO-FIX 3, 2026-09-26).
     "about.description": {"en": ["KiCadGen-Tool\n\nGenerates KiCad components (2D footprint + 3D model) from dimensions and drawings.\n\nActive module: 2D footprint generator (.kicad_mod)."], "it": ["KiCadGen-Tool\n\nGenera componenti KiCad (impronta 2D + modello 3D) a partire da dimensioni e quote.\n\nModulo attivo: generatore footprint 2D (.kicad_mod)."], "fr": ["KiCadGen-Tool\n\nGénère des composants KiCad (empreinte 2D + modèle 3D) à partir de dimensions et de plans.\n\nModule actif : générateur d’empreinte 2D (.kicad_mod)."], "de": ["KiCadGen-Tool\n\nErzeugt KiCad-Komponenten (2D-Footprint + 3D-Modell) aus Abmessungen und Zeichnungen.\n\nAktives Modul: 2D-Footprint-Generator (.kicad_mod)."]},
     "tab.preview.name": {"it": ["Anteprima FootPrint"]},
-    # Nomi delle tipologie chiariti (utente, 2026-09-26): «Scheda con componenti».
+    # Type names clarified (user, 2026-09-26): «Scheda con componenti» (board with components).
     "component_type.aggregate_tht": {"en": ["Through-hole module / board"], "it": ["Componente aggregato a fori passanti (modulo/scheda)"], "fr": ["Module / carte à trous traversants"], "de": ["Durchsteckmodul / Platine"]},
     "component_type.aggregate_castellated": {"en": ["Module with castellated half-hole pads"], "it": ["Componente aggregato con piazzole a mezzo foro (castellated holes)"], "fr": ["Module avec pastilles castellées à demi-trou"], "de": ["Modul mit castellated Halbloch-Pads"]},
-    # Titoli delle finestre di revisione (utente, 2026-09-29, HANDOFF 153):
-    # «Revisione AI» senza nome del file; i DB gia' seminati tenevano la
-    # vecchia frase e mostravano il segnaposto {source} non piu' riempito.
+    # Titles of the review windows (user, 2026-09-29, HANDOFF 153):
+    # «Revisione AI» (AI review) without the file name; the already seeded DBs
+    # kept the old sentence and showed the {source} placeholder no longer filled.
     "photo_review.title": {"en": ["Review components: {source}", "AI review"], "it": ["Revisione componenti: {source}", "Revisione AI"], "fr": ["Révision des composants : {source}", "Révision IA"], "de": ["Komponenten prüfen: {source}", "KI-Prüfung"]},
-    # Lettura ritagli nella pagina Localizzazione foto (28/09, HANDOFF 146).
+    # Crop reading in the photo Localisation page (28/09, HANDOFF 146).
     "help.profile.stage.1": {
         "en": ("Locates component outlines in calibrated photos. The same model is used for terminal details. Photo instructions are appended to the photographic prompts, including verification. The advanced Terminal and Lead prompts do not re-enable hidden manual actions. XY values are calibrated estimates and heights require confirmation. The cache under generated/photo-cache distinguishes input, model and prompt.\n\nGeneral defaults and profile inheritance follow the same rules as the Datasheet stage. JSON schemas and geometric checks remain controlled by code.", "Locates component outlines in calibrated photos. The same model is used for terminal details. Photo instructions are appended to the photographic prompts, including verification. The advanced Terminal and Lead prompts do not re-enable hidden manual actions. XY values are calibrated estimates and heights require confirmation. The cache in the project's photo-cache folder distinguishes input, model and prompt.\n\nGeneral defaults and profile inheritance follow the same rules as the Datasheet stage. JSON schemas and geometric checks remain controlled by code.", "Locates component outlines in calibrated photos. The same model is used for terminal details. Photo instructions are appended to the photographic prompts, including verification. The advanced Terminal and Lead prompts do not re-enable hidden manual actions. The Crop reading prompt guides the re-reading of every body from its own enlarged crop (detectors «Local YOLO + AI verification» and «Vision model only»), with the same model as the call on the photograph. XY values are calibrated estimates and heights require confirmation. The cache in the project's photo-cache folder distinguishes input, model and prompt.\n\nGeneral defaults and profile inheritance follow the same rules as the Datasheet stage. JSON schemas and geometric checks remain controlled by code.", "Locates component outlines in calibrated photos. The same model is used for terminal details. Photo instructions are appended to the photographic prompts, including verification, but not to the Crop reading prompt: they describe the whole board, not a single body. The advanced Terminal and Lead prompts do not re-enable hidden manual actions. The Crop reading prompt guides the re-reading of every body from its own enlarged crop (detectors «Local YOLO + AI verification» and «Vision model only»), with the same model as the call on the photograph. XY values are calibrated estimates and heights require confirmation. The cache in the project's photo-cache folder distinguishes input, model and prompt.\n\nGeneral defaults and profile inheritance follow the same rules as the Datasheet stage. JSON schemas and geometric checks remain controlled by code."),
         "it": ("Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. I prompt tecnici Terminali e Reofori non riattivano le azioni manuali nascoste. XY sono stime calibrate e le altezze richiedono conferma. La cache in generated/photo-cache distingue input, modello e prompt.\n\nDefault generali ed ereditarietà seguono le stesse regole dello stadio Datasheet. Schemi JSON e controlli geometrici restano gestiti dal codice.", "Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. I prompt tecnici Terminali e Reofori non riattivano le azioni manuali nascoste. XY sono stime calibrate e le altezze richiedono conferma. La cache nella cartella photo-cache del progetto distingue input, modello e prompt.\n\nDefault generali ed ereditarietà seguono le stesse regole dello stadio Datasheet. Schemi JSON e controlli geometrici restano gestiti dal codice.", "Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica. I prompt tecnici Terminali e Reofori non riattivano le azioni manuali nascoste. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»), con lo stesso modello della chiamata sulla fotografia. XY sono stime calibrate e le altezze richiedono conferma. La cache nella cartella photo-cache del progetto distingue input, modello e prompt.\n\nDefault generali ed ereditarietà seguono le stesse regole dello stadio Datasheet. Schemi JSON e controlli geometrici restano gestiti dal codice.", "Localizza gli ingombri nelle foto calibrate. Lo stesso modello è usato per i dettagli dei terminali. Le istruzioni foto sono aggiunte ai prompt fotografici, inclusa la verifica, ma non al prompt Lettura ritagli: descrivono la scheda intera, non il singolo corpo. I prompt tecnici Terminali e Reofori non riattivano le azioni manuali nascoste. Il prompt Lettura ritagli guida la rilettura di ogni corpo dal suo ritaglio ingrandito (rilevatori «YOLO locale + verifica AI» e «Solo modello di visione»), con lo stesso modello della chiamata sulla fotografia. XY sono stime calibrate e le altezze richiedono conferma. La cache nella cartella photo-cache del progetto distingue input, modello e prompt.\n\nDefault generali ed ereditarietà seguono le stesse regole dello stadio Datasheet. Schemi JSON e controlli geometrici restano gestiti dal codice."),
@@ -3460,10 +3478,10 @@ SUPERSEDED_DEFAULTS = {
 }
 
 
-# Testi gia' seminati nel database e superati (verifica avversariale del
-# 2026-10-02, B5/B8): gli aiuti sui modelli per fase del modello unico,
-# etichette e messaggi di versioni precedenti, due frasi con i caratteri
-# persi. Uniti alle voci sopra, senza sostituirle.
+# Texts already seeded in the database and superseded (adversarial
+# verification of 2026-10-02, B5/B8): the per-phase model help of the single
+# model, labels and messages of earlier versions, two sentences with lost
+# characters. Merged with the entries above, without replacing them.
 _LATER_SUPERSEDED = {
     'generation.blocked': {
         'de': ('{reason}\n\nEs wurden keine Dateien erzeugt. Vervollständigen Sie die Dokumente und wiederholen Sie die Analyse, oder aktivieren Sie Erweiterter Benutzer unter Konfiguration → Generierungsoptionen und wiederholen Sie die Analyse zur Prüfung der Parameter.',),
@@ -3532,12 +3550,65 @@ _LATER_SUPERSEDED = {
         'it': ('YOLO (rilevamento locale)',),
     },
 }
+# The inventory pause question once sent the user to «Modifica la revisione
+# dei componenti…» (and, in German and French, to other wordings), a label no
+# control carries: it now quotes the catalogue rendering of the real button,
+# «Revisione componenti…» (`btn_component_review`; reviews 2026-10-16, I5 and
+# R2I1). The former wordings are derived from the current text by swapping
+# the quoted label, so the two cannot drift apart. The log line about the
+# AI-only bodies changed key instead (its Italian source is the key): the
+# new key is seeded as a new row, so it needs no entry here.
+_REVIEW_BUTTON_KEY = "ui:Revisione componenti…"
+_FORMER_REVIEW_LABELS = {
+    "it": ("Modifica la revisione dei componenti…",),
+    "en": ("Edit the component review…",),
+    "fr": ("Modifier la révision des composants…", "Modifier la revue des composants…"),
+    "de": ("Komponentenprüfung bearbeiten …", "Bauteilprüfung bearbeiten…"),
+}
+for _language, _old_labels in _FORMER_REVIEW_LABELS.items():
+    _current = DEFAULT_TRANSLATIONS["inventory_pause.question"][_language]
+    _label = DEFAULT_TRANSLATIONS[_REVIEW_BUTTON_KEY][_language]
+    _quoted = f"« {_label} »" if _language == "fr" else f"«{_label}»"
+    _LATER_SUPERSEDED.setdefault("inventory_pause.question", {})[_language] = tuple(
+        _current.replace(_quoted, _quoted.replace(_label, _old))
+        for _old in _old_labels if _quoted in _current)
+del _language, _old_labels, _current, _label, _quoted, _REVIEW_BUTTON_KEY, _FORMER_REVIEW_LABELS
 for _key, _languages in _LATER_SUPERSEDED.items():
     for _language, _olds in _languages.items():
         _known = tuple(SUPERSEDED_DEFAULTS.setdefault(_key, {}).get(_language, ()))
         SUPERSEDED_DEFAULTS[_key][_language] = _known + tuple(
             old for old in _olds if old not in _known)
 del _key, _languages, _language, _olds, _known
+
+
+class _TextSlot:
+    """Dynamic-property stand-in for a text that is not a QObject (a tab, a header section).
+
+    Gives `I18n._refresh_property` the `property`/`setProperty` pair it reads
+    the recorded source and rendering through.
+    """
+
+    __slots__ = ("_values",)
+
+    def __init__(self) -> None:
+        self._values: dict = {}
+
+    def property(self, name: str):
+        return self._values.get(name)
+
+    def setProperty(self, name: str, value) -> None:  # noqa: N802 - Qt's spelling
+        self._values[name] = value
+
+
+def _text_slots(widget, attribute: str, count: int) -> list:
+    """The `count` text slots stored on `widget` under `attribute`, extended as needed."""
+    slots = getattr(widget, attribute, None)
+    if slots is None:
+        slots = []
+        setattr(widget, attribute, slots)
+    while len(slots) < count:
+        slots.append(_TextSlot())
+    return slots
 
 
 @dataclass
@@ -3551,12 +3622,19 @@ class I18n:
         """@brief Normalize unsupported language codes to English."""
         if self.language not in LANGUAGES:
             self.language = "en"
+        # Language the interface showed before the last `set_language`: the
+        # texts a retranslation pass reads were most probably written in it.
+        self._previous_language = self.language
+        # (catalogue dicts the reverse index was built from, the index).
+        self._index_cache = None
 
     def tr(self, key: str, default: str | None = None, **values: object) -> str:
         """@brief Return a translated string with English and key fallbacks.
 
         @param key Stable translation key.
         @param default Optional source text used when the key is unknown.
+        @param values Named substitutions applied with str.format; a text
+            that cannot be formatted is returned unformatted.
         @return Localized text with optional named substitutions applied.
         """
         value = self.raw(key, default)
@@ -3575,30 +3653,251 @@ class I18n:
         @return The stored text, with its placeholders and doubled braces as
             written; `messages.tx` formats it once, with its own values.
         """
+        return self._raw_in(key, self.language, default)
+
+    def _raw_in(self, key: str, language: str, default: str | None = None,
+                catalogs: tuple | None = None) -> str:
+        """`raw` for an explicit language; with `catalogs` it reads those dicts, not the store.
+
+        `catalogs` are the store's per-language dicts in LANGUAGES order
+        (`_store_catalogs`); reading them directly gives the same text as
+        `store.translation` with a non-None fallback, without one file check
+        per key while the reverse index is built.
+        """
         bundled = DEFAULT_TRANSLATIONS.get(key, {})
-        # Un default VUOTO e' un valore, non un'assenza: `text("")` deve dare
-        # "" e non la chiave «ui:», che finiva scritta in un tooltip
-        # (motivo del blocco vuoto a progetto aperto, 2026-09-24).
-        fallback = (bundled.get(self.language) or bundled.get("en")
+        # An EMPTY default is a value, not an absence: `text("")` must give
+        # "" and not the key «ui:», which ended up written in a tooltip
+        # (cause of the empty block with a project open, 2026-09-24).
+        fallback = (bundled.get(language) or bundled.get("en")
                     or (default if default is not None else key))
         if not fallback and default is not None:
             return default
-        return self.store.translation(key, self.language, fallback)
+        if catalogs is not None:
+            stored = catalogs[_LANGUAGE_ORDER.index(language)].get(key)
+            return stored if stored is not None else fallback
+        return self.store.translation(key, language, fallback)
 
     def set_language(self, language: str) -> None:
-        """@brief Select a supported language for subsequent lookups."""
+        """@brief Select a supported language for subsequent lookups.
+
+        @param language Language code, one of LANGUAGES.
+        @throws ValueError When the language is not supported.
+        """
         if language not in LANGUAGES:
             raise ValueError(f"Unsupported language: {language}")
+        if language != self.language:
+            self._previous_language = self.language
         self.language = language
 
     def text(self, source: str) -> str:
-        """@brief Translate a visible source string from the UI catalog."""
+        """@brief Translate a visible source string from the UI catalog.
+
+        @param source Italian source text as written in the GUI code.
+        @return The catalog text of key "ui:<source>", or the source itself.
+        """
         return self.tr("ui:" + source, default=source)
 
     def component_type(self, key: str, fallback: str) -> str:
-        """@brief Translate a built-in component type while preserving custom labels."""
+        """@brief Translate a built-in component type while preserving custom labels.
+
+        @param key Component type key; empty means "no type".
+        @param fallback Label shown when the catalog has no entry (custom types).
+        @return The translated label, or `fallback`.
+        """
         translation_key = "component_type." + key if key else "component_type.none"
         return self.tr(translation_key, default=fallback)
+
+    # ── Registration of translatable texts outside widget text ─────────
+
+    def add_item(self, combo: QComboBox, source: str, data=None, icon=None,
+                 tooltip: str | None = None) -> int:
+        """@brief Append a catalogued entry to a combo box so a language switch retranslates it.
+
+        @param combo Target combo box.
+        @param source Italian catalogue source of the entry text.
+        @param data User data of the entry (Qt.ItemDataRole.UserRole); unchanged by a switch.
+        @param icon Optional QIcon shown before the text.
+        @param tooltip Optional Italian catalogue source of the entry tooltip.
+        @return Index of the new entry.
+        @note `retranslate_widgets` leaves combo entries alone unless they carry
+            their source (`ITEM_SOURCE_ROLE`): most entries are data (model
+            names, file names) and a switch must never alter them. Entries
+            added here are catalogue texts, so they follow the language while
+            their data, the current index and the signals stay untouched.
+        """
+        if icon is not None:
+            combo.addItem(icon, self.text(source), data)
+        else:
+            combo.addItem(self.text(source), data)
+        index = combo.count() - 1
+        set_item_source(combo, index, source, tooltip)
+        if tooltip:
+            combo.setItemData(index, self.text(tooltip), Qt.ItemDataRole.ToolTipRole)
+        return index
+
+    def source_of(self, text: str, index: dict | None = None,
+                  recorded: str | None = None) -> str | None:
+        """@brief The Italian catalogue source of a text read from a widget, action or item.
+
+        @param text The text as it is shown now, in any catalogue language.
+        @param index Reverse index of `_rendered_sources()`; built when omitted.
+        @param recorded Source the target declared earlier (its `i18n_*_source`
+            property), preferred whenever it renders as `text`.
+        @return The source to look up on the next switch; `text` itself when no
+            catalogue entry renders as it; None when the text is ambiguous, that
+            is several sources render as it and no rule below picks one.
+        @note A text set with `i18n.text(...)` while the interface was in
+            English is read back as English; without this reverse step the next
+            switch would look up an English sentence in an Italian-keyed
+            catalogue and leave it unchanged (the «started in English» class of
+            leaks, audit 2026-10-15). The index covers every catalogue
+            language, so a text written in another language between two
+            switches is recovered too.
+        @note Two sources can share a rendering («Fit» is both «Adatta» and
+            «Centra» in English, with different French texts), and an English
+            rendering can equal a catalogue key («Apply»). Such a text is never
+            guessed: the recorded source wins, then the candidates rendering it
+            in the language shown before the switch (or in Italian); an Italian
+            text that is itself a source (rendering as itself) stands for
+            itself, since GUI code writes Italian sources literally; otherwise
+            the result is None.
+        """
+        if not text:
+            return text
+        if index is None:
+            index = self._rendered_sources()
+        entry = index.get(text)
+        if not entry:
+            return text
+        candidates = set().union(*entry.values())
+        if recorded is not None and recorded in candidates:
+            return recorded
+        pool = self._candidate_pool(entry)
+        if len(pool) == 1:
+            return next(iter(pool))
+        if pool is entry.get("it") and text in pool and _is_italian_source(text):
+            return text
+        return None
+
+    def _candidate_pool(self, entry: dict) -> set:
+        """Sources of one index entry in the language shown before the switch, else Italian, else all."""
+        return (entry.get(self._previous_language) or entry.get("it")
+                or set().union(*entry.values()))
+
+    def _resolve(self, text: str, index: dict, recorded: str | None) -> tuple:
+        """(source to record, text to show) for `text`; (None, None) leaves it unchanged.
+
+        An ambiguous text whose candidates all render the same in the active
+        language is shown in that rendering but keeps no source, so the next
+        pass resolves it again from what is shown; when they differ, no
+        candidate is chosen and the text stays as it is.
+        """
+        source = self.source_of(text, index, recorded)
+        if source is not None:
+            return source, self.text(source)
+        renderings = {self.text(candidate) for candidate in self._candidate_pool(index[text])}
+        if len(renderings) == 1:
+            return None, renderings.pop()
+        return None, None
+
+    def _store_catalogs(self) -> tuple | None:
+        """The store's per-language catalogue dicts in LANGUAGES order, or None.
+
+        `ProfileStore` keeps one dict per language and replaces it whenever the
+        database changes; the identity of these dicts is therefore the version
+        of the catalogue the reverse index is cached against. A store without
+        that cache (a test double) gives None and the index is rebuilt.
+        """
+        loader = getattr(self.store, "_language_catalog", None)
+        if not callable(loader):
+            return None
+        catalogs = tuple(loader(language) for language in _LANGUAGE_ORDER)
+        return catalogs if all(isinstance(catalog, dict) for catalog in catalogs) else None
+
+    def _rendered_sources(self) -> dict:
+        """Reverse index {shown text: {language: set of sources}} of the `ui:` keys.
+
+        Built over every catalogue language (a text may have been written in
+        any of them since the last switch), plus the Italian literal of each
+        source that renders as itself. Cached per catalogue version
+        (`_store_catalogs`): a catalogue edited in the database is never
+        served stale, and a switch does not rebuild it four languages over.
+        """
+        catalogs = self._store_catalogs()
+        cache = getattr(self, "_index_cache", None)
+        if (catalogs is not None and cache is not None
+                and all(old is new for old, new in zip(cache[0], catalogs))):
+            return cache[1]
+        index: dict = {}
+        for key in DEFAULT_TRANSLATIONS:
+            if not key.startswith("ui:") or len(key) == 3:
+                continue
+            source = key[3:]
+            if _is_italian_source(source):
+                index.setdefault(source, {}).setdefault("it", set()).add(source)
+            for language in _LANGUAGE_ORDER:
+                rendered = self._raw_in(key, language, source, catalogs)
+                if rendered:
+                    index.setdefault(rendered, {}).setdefault(language, set()).add(source)
+        self._index_cache = (catalogs, index) if catalogs is not None else None
+        return index
+
+    def _refresh(self, target, current: str, name: str, index: dict) -> str | None:
+        """Resolve the text to show for one property of `target`, keeping its source.
+
+        The source is captured in the dynamic property `i18n_<name>_source`
+        and the rendering in `i18n_<name>_rendered`. Returns None when there
+        is nothing to set.
+        """
+        return self._refresh_property(target, current, f"i18n_{name}_source",
+                                      f"i18n_{name}_rendered", index)
+
+    def _refresh_text(self, target, index: dict) -> str | None:
+        """Main text of a button, label or action through `i18n_source`/`i18n_rendered`.
+
+        Same discipline as `_refresh`; the property names are the ones the
+        first version used, which widgets and tests declare their source with.
+        """
+        return self._refresh_property(target, target.text(), "i18n_source", "i18n_rendered", index)
+
+    def _refresh_property(self, target, current: str, source_property: str,
+                          rendered_property: str, index: dict) -> str | None:
+        """Shared body of `_refresh` and `_refresh_text`.
+
+        A later pass that finds a text different from the recorded rendering
+        treats it as new (the program set it since), so repeated switches
+        never use an already translated value as the lookup key; the recorded
+        source is still preferred when it renders as the new text. An
+        ambiguous text keeps no source (see `_resolve`).
+        """
+        source = target.property(source_property)
+        previous = target.property(rendered_property)
+        recorded = None
+        if source is not None and previous is not None and current != previous:
+            recorded, source = source, None
+        if source is None:
+            if not current:
+                return None
+            source, rendered = self._resolve(current, index, recorded)
+            target.setProperty(source_property, source)
+            if source is None:
+                target.setProperty(rendered_property, rendered if rendered is not None else current)
+                return rendered
+        if not source:
+            return None
+        rendered = self.text(source)
+        target.setProperty(rendered_property, rendered)
+        return rendered
+
+    def _retranslate_items(self, combo: QComboBox) -> None:
+        """Translate again the entries that carry their source; the others are data."""
+        for index in range(combo.count()):
+            source = combo.itemData(index, ITEM_SOURCE_ROLE)
+            if isinstance(source, str) and source:
+                combo.setItemText(index, self.text(source))
+            tooltip = combo.itemData(index, ITEM_TOOLTIP_SOURCE_ROLE)
+            if isinstance(tooltip, str) and tooltip:
+                combo.setItemData(index, self.text(tooltip), Qt.ItemDataRole.ToolTipRole)
 
     def retranslate_widgets(self, root) -> None:
         """@brief Refresh catalogued widget text without touching user data.
@@ -3606,142 +3905,162 @@ class I18n:
         @details Source strings are captured once in dynamic Qt properties. This
         allows repeated language changes without using an already translated
         value as the next lookup key. Data-bearing controls such as model combo
-        boxes and table cells are deliberately left untouched.
+        boxes and table cells are deliberately left untouched: a combo entry
+        follows the language only when it carries its source (`add_item`,
+        `set_item_source`). The tooltip, status tip, «what's this» and
+        accessible name of EVERY widget and the text, tooltip and status tip
+        of every QAction are covered whatever their class: those texts are
+        prose, never data (audit 2026-10-15, medium 12: palette tooltips,
+        combo entries and actions stayed Italian). A widget or action whose
+        property `i18n_skip` is True is skipped entirely.
+        @param root Widget (or QObject) whose descendants are refreshed.
         """
         if not hasattr(root, "findChildren"):
             return
+        index = self._rendered_sources()
         widgets = [root] if isinstance(root, QWidget) else []
         widgets.extend(root.findChildren(QWidget))
-        # Le viste a elenco entrano solo per tooltip e nome accessibile: le loro
-        # righe sono dati e restano intatte (revisore 3, difetto 10: il tooltip
-        # della lista degli elementi restava in italiano).
-        translatable_types = (
-            QAbstractItemView,
-            QAbstractButton,
-            QAbstractSpinBox,
-            QComboBox,
-            QDialog,
-            QGroupBox,
-            QLabel,
-            QLineEdit,
-            QMainWindow,
-            QPlainTextEdit,
-            QTableWidget,
-            QTabWidget,
-            QTextEdit,
-            QTreeWidget,
-        )
         for widget in widgets:
             if widget.property("i18n_skip") is True:
                 continue
-            if not isinstance(widget, translatable_types):
-                continue
 
             if isinstance(widget, (QDialog, QMainWindow)):
-                title = widget.property("i18n_window_title_source")
-                if title is None and widget.windowTitle():
-                    title = widget.windowTitle()
-                    widget.setProperty("i18n_window_title_source", title)
-                if title:
-                    widget.setWindowTitle(self.text(title))
+                rendered = self._refresh(widget, widget.windowTitle(), "window_title", index)
+                if rendered is not None:
+                    widget.setWindowTitle(rendered)
 
             if isinstance(widget, QGroupBox):
-                source = widget.property("i18n_title_source")
-                if source is None:
-                    source = widget.title()
-                    if source:
-                        widget.setProperty("i18n_title_source", source)
-                if source:
-                    rendered = self.text(source)
+                # A collapsible group draws a state arrow before its title and
+                # exposes the bare text as `baseTitle()`: the decorated text
+                # must never be re-read as the source.
+                current = widget.baseTitle() if hasattr(widget, "baseTitle") else widget.title()
+                rendered = self._refresh(widget, current, "title", index)
+                if rendered is not None:
                     widget.setTitle(rendered)
-                    widget.setProperty("i18n_title_rendered", rendered)
 
             if isinstance(widget, (QAbstractButton, QLabel)):
-                source = widget.property("i18n_source")
-                previous = widget.property("i18n_rendered")
-                if source is not None and previous is not None and widget.text() != previous:
-                    source = widget.text()
-                    widget.setProperty("i18n_source", source)
-                if source is None and widget.text():
-                    source = widget.text()
-                    widget.setProperty("i18n_source", source)
-                if source:
-                    rendered = self.text(source)
+                rendered = self._refresh_text(widget, index)
+                if rendered is not None:
                     widget.setText(rendered)
-                    widget.setProperty("i18n_rendered", rendered)
 
             if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox)):
-                placeholder = widget.property("i18n_placeholder_source")
-                previous = widget.property("i18n_placeholder_rendered")
-                if (placeholder is not None and previous is not None
-                        and widget.placeholderText() != previous):
-                    placeholder = widget.placeholderText()
-                    widget.setProperty("i18n_placeholder_source", placeholder)
-                if placeholder is None and widget.placeholderText():
-                    placeholder = widget.placeholderText()
-                    widget.setProperty("i18n_placeholder_source", placeholder)
-                if placeholder:
-                    rendered = self.text(placeholder)
+                rendered = self._refresh(widget, widget.placeholderText(), "placeholder", index)
+                if rendered is not None:
                     widget.setPlaceholderText(rendered)
-                    widget.setProperty("i18n_placeholder_rendered", rendered)
 
+            if isinstance(widget, QComboBox):
+                self._retranslate_items(widget)
+
+            # Tab texts and header sections are not QObjects: each position
+            # keeps its source and rendering in a `_TextSlot`, resolved through
+            # `source_of` like every other property. Capturing the text shown
+            # at the first pass as the source froze a window started in
+            # English, and overwrote the header symbol_tab had just written in
+            # the new language (review 2026-10-16, R2I2).
             if isinstance(widget, QTabWidget) and widget.property("i18n_skip_tabs") is not True:
-                sources = getattr(widget, "_i18n_tab_sources", None)
-                if sources is None:
-                    sources = tuple(widget.tabText(index) for index in range(widget.count()))
-                    widget._i18n_tab_sources = sources
-                for index, source in enumerate(sources[:widget.count()]):
-                    widget.setTabText(index, self.text(source))
+                slots = _text_slots(widget, "_i18n_tab_slots", widget.count())
+                for position in range(widget.count()):
+                    rendered = self._refresh_property(
+                        slots[position], widget.tabText(position), "source", "rendered", index)
+                    if rendered is not None:
+                        widget.setTabText(position, rendered)
 
             if isinstance(widget, QTableWidget):
-                sources = getattr(widget, "_i18n_header_sources", None)
-                if sources is None:
-                    sources = tuple(
-                        widget.horizontalHeaderItem(index).text()
-                        if widget.horizontalHeaderItem(index) else ""
-                        for index in range(widget.columnCount())
-                    )
-                    widget._i18n_header_sources = sources
-                for index, source in enumerate(sources[:widget.columnCount()]):
-                    item = widget.horizontalHeaderItem(index)
-                    if item is not None and source:
-                        item.setText(self.text(source))
+                slots = _text_slots(widget, "_i18n_header_slots", widget.columnCount())
+                for position in range(widget.columnCount()):
+                    item = widget.horizontalHeaderItem(position)
+                    if item is None:
+                        continue
+                    rendered = self._refresh_property(
+                        slots[position], item.text(), "source", "rendered", index)
+                    if rendered is not None:
+                        item.setText(rendered)
 
             if isinstance(widget, QTreeWidget):
-                sources = getattr(widget, "_i18n_header_sources", None)
-                if sources is None:
-                    header = widget.headerItem()
-                    sources = tuple(header.text(index) for index in range(widget.columnCount()))
-                    widget._i18n_header_sources = sources
+                slots = _text_slots(widget, "_i18n_header_slots", widget.columnCount())
                 header = widget.headerItem()
-                for index, source in enumerate(sources[:widget.columnCount()]):
-                    if source:
-                        header.setText(index, self.text(source))
+                for position in range(widget.columnCount()):
+                    rendered = self._refresh_property(
+                        slots[position], header.text(position), "source", "rendered", index)
+                    if rendered is not None:
+                        header.setText(position, rendered)
 
-            tooltip = widget.property("i18n_tooltip_source")
-            previous = widget.property("i18n_tooltip_rendered")
-            if tooltip is not None and previous is not None and widget.toolTip() != previous:
-                tooltip = widget.toolTip()
-                widget.setProperty("i18n_tooltip_source", tooltip)
-            if tooltip is None:
-                tooltip = widget.toolTip()
-                if tooltip:
-                    widget.setProperty("i18n_tooltip_source", tooltip)
-            if tooltip:
-                rendered = self.text(tooltip)
+            # Prose properties of every widget, containers and custom classes
+            # included (the symbol palette is a plain QWidget with a tooltip).
+            rendered = self._refresh(widget, widget.toolTip(), "tooltip", index)
+            if rendered is not None:
                 widget.setToolTip(rendered)
-                widget.setProperty("i18n_tooltip_rendered", rendered)
-
-            accessible_name = widget.property("i18n_accessible_name_source")
-            previous = widget.property("i18n_accessible_name_rendered")
-            if (accessible_name is not None and previous is not None
-                    and widget.accessibleName() != previous):
-                accessible_name = widget.accessibleName()
-                widget.setProperty("i18n_accessible_name_source", accessible_name)
-            if accessible_name is None and widget.accessibleName():
-                accessible_name = widget.accessibleName()
-                widget.setProperty("i18n_accessible_name_source", accessible_name)
-            if accessible_name:
-                rendered = self.text(accessible_name)
+            rendered = self._refresh(widget, widget.statusTip(), "statustip", index)
+            if rendered is not None:
+                widget.setStatusTip(rendered)
+            rendered = self._refresh(widget, widget.whatsThis(), "whatsthis", index)
+            if rendered is not None:
+                widget.setWhatsThis(rendered)
+            rendered = self._refresh(widget, widget.accessibleName(), "accessible_name", index)
+            if rendered is not None:
                 widget.setAccessibleName(rendered)
-                widget.setProperty("i18n_accessible_name_rendered", rendered)
+
+        # Actions live in menus and toolbars and are not widgets: their text
+        # is what the user reads in a menu, their tooltip on a tool button.
+        # An action without its own tooltip reports one derived by Qt from its
+        # text; capturing it would freeze an explicit copy that no longer
+        # follows the text (review 2026-10-16, I1). A parentless probe with
+        # the same text gives Qt's own derivation, whatever its stripping rules.
+        probe = QAction()
+        for action in root.findChildren(QAction):
+            if action.property("i18n_skip") is True:
+                continue
+            probe.setText(action.text())
+            derived = action.toolTip() == probe.toolTip()
+            if derived:
+                # An explicit tooltip equal to the text reads the same as none:
+                # clearing it lets it follow the translated text.
+                action.setToolTip("")
+                action.setProperty("i18n_tooltip_source", None)
+                action.setProperty("i18n_tooltip_rendered", None)
+            rendered = self._refresh_text(action, index)
+            if rendered is not None:
+                action.setText(rendered)
+            if not derived:
+                rendered = self._refresh(action, action.toolTip(), "tooltip", index)
+                if rendered is not None:
+                    action.setToolTip(rendered)
+            rendered = self._refresh(action, action.statusTip(), "statustip", index)
+            if rendered is not None:
+                action.setStatusTip(rendered)
+
+
+#: Catalogue languages in a fixed order (index of `I18n._store_catalogs`).
+_LANGUAGE_ORDER = tuple(LANGUAGES)
+
+
+def _is_italian_source(text: str) -> bool:
+    """True when `text` is a `ui:` key whose Italian text is the key itself.
+
+    Such a key is an Italian literal of the GUI code; keys like «Apply» or
+    «project_kind.title» render differently in Italian and are not.
+    """
+    bundled = DEFAULT_TRANSLATIONS.get("ui:" + text)
+    return bundled is not None and bundled.get("it", text) == text
+
+
+#: Item data role holding the Italian catalogue source of a combo entry text.
+ITEM_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 0x100
+#: Item data role holding the Italian catalogue source of a combo entry tooltip.
+ITEM_TOOLTIP_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 0x101
+
+
+def set_item_source(combo: QComboBox, index: int, source: str, tooltip: str | None = None) -> None:
+    """@brief Declare the catalogue source of an existing combo entry.
+
+    @param combo Combo box owning the entry.
+    @param index Index of the entry.
+    @param source Italian catalogue source of its text.
+    @param tooltip Optional Italian catalogue source of its tooltip.
+    @note For code that adds entries with a bare translation callable (the
+        symbol tab's `tx`) instead of an `I18n` object; `I18n.add_item` uses it
+        too. `I18n.retranslate_widgets` reads these roles on every switch.
+    """
+    combo.setItemData(index, source, ITEM_SOURCE_ROLE)
+    if tooltip:
+        combo.setItemData(index, tooltip, ITEM_TOOLTIP_SOURCE_ROLE)

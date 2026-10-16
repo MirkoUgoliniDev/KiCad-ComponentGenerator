@@ -81,7 +81,11 @@ class WorkflowBar(QWidget):
         self._render()
 
     def state(self):
-        """@brief Return (done keys, current key, skipped keys) as last set."""
+        """@brief Return (done keys, current key, skipped keys) as last set.
+
+        @return A tuple (set of done step keys, current step key or None,
+            set of skipped step keys); the sets are copies.
+        """
         return (set(self._state["done"]), self._state["current"], set(self._state["skipped"]))
 
     def _render(self):
@@ -110,16 +114,16 @@ class WorkflowBar(QWidget):
                 label.setText(f"○ {text}")
                 label.setStyleSheet(f"color: {_TODO};")
                 label.setToolTip("")
-            # Mai tagliata: «Revisione corpi» finiva sotto la freccia perche'
-            # la barra non ricalcolava la sua larghezza dopo il cambio dei
-            # testi (vedi sotto). Larghezza dal testo stesso piu' una «M» di
-            # margine per i segni ✓ ● ○ presi da un carattere di riserva; non da
-            # sizeHint, che includerebbe la larghezza del giro precedente.
+            # Never truncated: «Revisione corpi» (body review) ended up under
+            # the arrow because the bar did not recompute its width after the
+            # texts changed (see below). Width from the text itself plus an
+            # «M» of margin for the ✓ ● ○ marks taken from a fallback font;
+            # not from sizeHint, which would include the previous round's width.
             metrics = label.fontMetrics()
             label.setFixedWidth(metrics.horizontalAdvance(label.text())
                                 + metrics.horizontalAdvance("M"))
-        # La barra ha dimensione fissa: dopo aver cambiato le etichette va
-        # ricalcolata, altrimenti il layout le sovrappone nello spazio vecchio.
+        # The bar has a fixed size: after changing the labels it must be
+        # recomputed, otherwise the layout overlaps them in the old space.
         self.layout().invalidate()
         self.adjustSize()
         self.updateGeometry()

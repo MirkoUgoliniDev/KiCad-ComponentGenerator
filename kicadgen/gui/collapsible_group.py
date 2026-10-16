@@ -57,11 +57,17 @@ class CollapsibleGroupBox(QGroupBox):
         super().setTitle(f"{ARROW_EXPANDED if self._expanded else ARROW_COLLAPSED} {title}")
 
     def baseTitle(self) -> str:  # noqa: N802 - Qt naming
-        """@brief The title without the arrow."""
+        """@brief The title without the arrow.
+
+        @return The title text last given to `setTitle`, without the arrow prefix.
+        """
         return self._base_title
 
     def isExpanded(self) -> bool:  # noqa: N802 - Qt naming
-        """@brief True when the body is shown."""
+        """@brief True when the body is shown.
+
+        @return True while the body is visible, False when collapsed.
+        """
         return self._expanded
 
     def setExpanded(self, expanded: bool) -> None:  # noqa: N802 - Qt naming
@@ -89,7 +95,10 @@ class CollapsibleGroupBox(QGroupBox):
             QStyle.SubControl.SC_GroupBoxLabel, self)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """@brief A left click on the title toggles the body; elsewhere, default."""
+        """@brief A left click on the title toggles the body; elsewhere, default.
+
+        @param event Qt mouse event; accepted when it toggled the body.
+        """
         if (event.button() == Qt.MouseButton.LeftButton
                 and self._title_rect().contains(event.position().toPoint())):
             self.toggle()

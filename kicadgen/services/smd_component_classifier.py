@@ -220,9 +220,9 @@ def _rotation(orientation, probs, box):
     if orientation == "axis":
         horizontal, vertical = probs[0] + probs[2], probs[1] + probs[3]
         width, height = box[2] - box[0], box[3] - box[1]
-        # L'asse lo decide la forma del riquadro; la confidenza resta quella
-        # che la rete da' a quell'asse (audit 2026-10-02: un 0.99 imposto
-        # mostrava in revisione una certezza che la rete non aveva).
+        # The axis is decided by the shape of the box; the confidence stays
+        # the one the network gives that axis (audit 2026-10-02: an imposed
+        # 0.99 showed in review a certainty the network did not have).
         if width >= 1.25 * height:
             return 0, horizontal
         if height >= 1.25 * width:
@@ -300,8 +300,8 @@ def _kind_package(label):
         "chip_LED": ("led", "SMD chip LED"),
         "LED_RGB": ("led", "SMD RGB LED"),
         "crystal": ("crystal", "SMD crystal"),
-        # 'fuse' non e' un tipo del programma (COMPONENT_KINDS): generico,
-        # come la normalizzazione lo renderebbe comunque.
+        # 'fuse' is not a type of the program (COMPONENT_KINDS): generic,
+        # as the normalisation would make it anyway.
         "fuse": ("generic", "SMD fuse"),
         "inductor": ("inductor", "SMD inductor"),
         "module": ("module", "module"),
@@ -508,9 +508,9 @@ def classify_photo_boxes(
                 raise RuntimeError(tx("Classificazione SMD annullata"))
             chunk = crops[start:start + batch_size]
             class_sum = rotation_sum = None
-            # Posa scelta da ciascuna delle quattro viste ruotate, riportata
-            # all'orientamento iniziale: se non concordano, la media nasconde
-            # un sorteggio (audit 2026-10-02: SOD-123F a 0.54/0.46).
+            # Pose chosen by each of the four rotated views, brought back to
+            # the initial orientation: if they do not agree, the mean hides a
+            # coin toss (audit 2026-10-02: SOD-123F at 0.54/0.46).
             view_poses = []
             for turn in range(4):
                 views = [crop.rotate(90 * turn, expand=True) if turn else crop for crop in chunk]

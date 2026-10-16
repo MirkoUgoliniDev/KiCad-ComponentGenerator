@@ -358,7 +358,7 @@ def _triangle_colors(runs, count):
     return colors if native and len(colors) == count else None
 
 
-#: Chiave di config.json con la scelta «Colori» dell'anteprima (predefinito si').
+#: config.json key holding the preview's «Colori» (colours) choice (default yes).
 #: Meshes that FreeCAD tessellated for the preview, the slow part of it (about
 #: 7.5 s for an ESP32 module, measured 2026-09-26). The view and a manual
 #: rotation are applied afterwards in Python, so switching them must not read
@@ -469,7 +469,7 @@ def _preview_colors_enabled(owner=None) -> bool:
             from .app_config import load_config
             config = load_config()
         return config.get(PREVIEW_COLORS_KEY, True) is not False
-    except Exception:  # noqa: BLE001 - una preferenza illeggibile non ferma la finestra
+    except Exception:  # noqa: BLE001 - an unreadable preference does not stop the window
         return True
 
 
@@ -491,7 +491,7 @@ def _remember_preview_colors(enabled: bool, owner=None) -> None:
         config = load_config()
         config[PREVIEW_COLORS_KEY] = bool(enabled)
         save_config(config)
-    except Exception:  # noqa: BLE001 - la scelta resta per questa finestra
+    except Exception:  # noqa: BLE001 - the choice stays for this window
         pass
 
 
@@ -581,10 +581,10 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
         if length is None or width is None or min(length, width) <= 0:
             raise ValueError('Automatic orientation requires positive component dimensions')
         component = dict(model_path=str(path), length_mm=length, width_mm=width)
-        # Le stesse correzioni del CAD finale (`freecad_parts._placement_angle`
-        # e la correzione di verso del riferimento fotografico): senza,
-        # l'anteprima automatica poteva mostrare il modello girato di 180 gradi
-        # rispetto al 3D generato (audit 25/09).
+        # The same corrections as the final CAD (`freecad_parts._placement_angle`
+        # and the orientation correction of the photographic reference): without
+        # them, the automatic preview could show the model turned by 180 degrees
+        # with respect to the generated 3D (audit 25/09).
         component.update(_PREVIEW_PLACEMENT.get() or {})
         # Use the actual placement helper so body-section / total-envelope
         # comparisons and tie-breaking cannot diverge from generated CAD.
@@ -599,7 +599,7 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
             + ('' if colors else 'parts = [(shape, None) for shape, _ in parts]\n'))
         rotation = 0.0  # _library_model already applied inferred native rotation.
     elif not colors:
-        # Tinta unica chiesta: niente lettura dei colori, che e' la parte lenta.
+        # Single tint requested: no reading of the colours, which is the slow part.
         geometry_source = f'parts = [(Part.read({str(path)!r}), None)]\n'
     else:
         # Same reader as the production import, so the colours are the ones
@@ -671,11 +671,11 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
     depth_min = min(p[2] for p in points)
     depth_span = max(p[2] for p in points) - depth_min
     scale = 280 / max(xmax-xmin, ymax-ymin, 0.001)
-    # Solo con i colori del modello: serve a far vincere la faccia vicina fra
-    # colori diversi. Senza colori non cambia nulla di visibile e, con
-    # l'antialiasing, i tanti bordi interni in piu' spargerebbero errori di
-    # arrotondamento di un'unita' sulle tinte (test_model_preview_view_mode):
-    # il disegno a tinta unica resta quello di prima.
+    # Only with the model's colours: it makes the near face win among
+    # different colours. Without colours nothing visible changes and, with
+    # antialiasing, the many extra inner edges would scatter rounding errors
+    # of one unit over the tints (test_model_preview_view_mode): the
+    # single-tint drawing stays as before.
     if native_colors is not None:
         triangles, native_colors = _split_large_triangles(
             points, triangles, native_colors, _SORT_EDGE_PX / scale)
@@ -800,8 +800,8 @@ class _Preview(QRunnable):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
         _PREVIEW_PLACEMENT.set(self.placement)
         try:
-            # Solo quando serve: senza rotazione la chiamata resta quella di
-            # prima (e le sue sostituzioni nei test non la vedono arrivare).
+            # Only when needed: without rotation the call stays the same as
+            # before (and its substitutes in the tests do not see it arrive).
             extra = {"board_rotation": self.board_rotation} if self.board_rotation else {}
             if not self.colors:
                 extra["colors"] = False
@@ -880,16 +880,16 @@ class ModelCandidatesDialog(QDialog):
         self._closed = False
         self._workers = {}
         self._dimensions = (component.get('length_mm'), component.get('width_mm'))
-        # Rotazione del rettangolo sulla foto, nel verso del CAD: il generatore
-        # ribalta Y e con essa il segno dell'angolo (freecad_build_body._flip_y),
-        # poi ruota il componente DOPO l'angolo locale scelto qui.
+        # Rotation of the rectangle on the photo, in the CAD sense: the generator
+        # flips Y and with it the sign of the angle (freecad_build_body._flip_y),
+        # then rotates the component AFTER the local angle chosen here.
         self._board_rotation = -float(component.get('rotation_deg') or 0.0)
         self._placement = {key: component[key] for key in PREVIEW_PLACEMENT_KEYS
                            if component.get(key) not in (None, '')}
-        # La correzione di verso del CAD usa la stessa rotazione, gia' nel verso
-        # del CAD (freecad_parts._verse_correction dopo _flip_y): l'anteprima
-        # automatica la riceve uguale, altrimenti poteva mostrare il modello
-        # girato di 180 gradi rispetto al 3D generato.
+        # The CAD orientation correction uses the same rotation, already in the
+        # CAD sense (freecad_parts._verse_correction after _flip_y): the
+        # automatic preview receives it unchanged, otherwise it could show the
+        # model turned by 180 degrees with respect to the generated 3D.
         if self._board_rotation:
             self._placement['rotation_deg'] = self._board_rotation
         # The photo pipeline samples the body colour into color_hex; shading the
@@ -951,30 +951,29 @@ class ModelCandidatesDialog(QDialog):
             label.setMinimumSize(340, 220)
             label.setWordWrap(True)
         images.addWidget(self.photo_label)
-        # Scelta della vista: pianta (predefinita, confrontabile con la foto a
-        # sinistra, che e' una vista dall'alto) o isometrica (per ispezione).
-        # Un solo pulsante a levetta nell'angolo in alto a destra dell'anteprima:
-        # label e pulsante condividono la stessa cella di una griglia, cosi' il
-        # pulsante resta agganciato all'angolo qualunque sia la dimensione.
-        # La scelta vale per la vita del dialogo, senza persistenza.
+        # Choice of the view: plan (default, comparable with the photo on the
+        # left, which is a top view) or isometric (for inspection).
+        # A single toggle button in the top-right corner of the preview:
+        # label and button share the same cell of a grid, so the button
+        # stays anchored to the corner whatever the size.
+        # The choice lasts for the life of the dialog, without persistence.
         self._view = DEFAULT_PREVIEW_VIEW
         self._shown_path = None
         self._preview_image = None
-        # La miniatura e' 340x340 ma il label puo' essere piu' basso: senza
-        # adattarla, un pezzo ruotato di 90 gradi perdeva le estremita' tagliate.
+        # The thumbnail is 340x340 but the label may be shorter: without
+        # fitting it, a part rotated by 90 degrees lost its ends, clipped.
         self.preview_label.installEventFilter(self)
         preview_box = QWidget()
         preview_grid = QGridLayout(preview_box)
         preview_grid.setContentsMargins(0, 0, 0, 0)
         preview_grid.addWidget(self.preview_label, 0, 0)
-        # Rotazione del modello direttamente sull'anteprima (utente,
-        # 2026-09-24): sotto il cubo due frecce a passi di 90 gradi e
-        # «torna all'automatico». Il campo numerico e la casella restano come
-        # stato interno, nascosti: le frecce li comandano.
-        # Il cubo e' costruito come le icone che gli stanno sotto (stessa
-        # misura, stesso stile, tooltip nome + spiegazione): un pulsante a
-        # parte con la misura predefinita di Qt risultava piu' piccolo e fuori
-        # colonna (utente, 2026-09-24).
+        # Rotation of the model directly on the preview (user,
+        # 2026-09-24): under the cube two arrows in 90-degree steps and
+        # «torna all'automatico» (back to automatic). The numeric field and
+        # the check box stay as hidden internal state: the arrows drive them.
+        # The cube is built like the icons below it (same size, same style,
+        # tooltip name + explanation): a separate button with Qt's default
+        # size turned out smaller and out of column (user, 2026-09-24).
         from .review_tools import tool_button
         self.view_button = tool_button(
             'step-view-iso.svg', 'Vista isometrica', '',
@@ -1011,8 +1010,8 @@ class ModelCandidatesDialog(QDialog):
         self.rotation_angle_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.rotation_angle_label.setProperty('i18n_skip', True)
         tools_column.addWidget(self.rotation_angle_label)
-        # Colori del file STEP nell'anteprima (utente, 2026-09-26): piu'
-        # realistica ma piu' lenta sui modelli grandi. Ricordata in config.json.
+        # Colours of the STEP file in the preview (user, 2026-09-26): more
+        # realistic but slower on large models. Remembered in config.json.
         self.colors_checkbox = QCheckBox("Colori")
         self.colors_checkbox.setObjectName("preview_colors_toggle")
         self.colors_checkbox.setToolTip(
@@ -1025,12 +1024,12 @@ class ModelCandidatesDialog(QDialog):
         preview_grid.addWidget(preview_tools, 0, 0,
                                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         preview_tools.raise_()
-        # Anello animato mentre FreeCAD legge il modello o l'anteprima si
-        # ridisegna (utente, 2026-09-26: «qui ci vuole un loader»): lo stesso
-        # anello della finestra di avanzamento, col segno e il colore di
-        # FreeCAD. Sta sopra la scritta di caricamento (lo spazio sotto lo
-        # tiene staccato) e, quando si ridisegna un'immagine gia' mostrata,
-        # sopra l'immagine vecchia finche' arriva la nuova.
+        # Animated ring while FreeCAD reads the model or the preview is
+        # redrawn (user, 2026-09-26: «qui ci vuole un loader» (a loader is
+        # needed here)): the same ring as the progress window, with FreeCAD's
+        # mark and colour. It sits above the loading caption (the space below
+        # keeps it apart) and, when an image already shown is redrawn, over
+        # the old image until the new one arrives.
         from .analysis_overlay import TOOLS, AnalysisSpinner
         self.preview_loader = QWidget(preview_box)
         self.preview_loader.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -1095,9 +1094,9 @@ class ModelCandidatesDialog(QDialog):
         self.rotation_hint = QLabel()
         self.rotation_hint.setWordWrap(True)
         layout.addWidget(self.rotation_hint)
-        # Riga dedicata alla rotazione. Tenere manopola, stato e pulsanti sulla
-        # stessa riga portava la larghezza minima del dialogo da 750 a 963 px:
-        # lo stato deve stare accanto al campo, non costringere la finestra.
+        # Row dedicated to the rotation. Keeping knob, state and buttons on the
+        # same row raised the minimum width of the dialog from 750 to 963 px:
+        # the state must sit beside the field, not force the window.
         rotation_row = QHBoxLayout()
         rotation_row.addWidget(QLabel('Rotazione Z locale del CAD nativo'))
         self.rotation = _RotationSpinBox()
@@ -1110,17 +1109,18 @@ class ModelCandidatesDialog(QDialog):
         self.rotation.setValue(_number(initial_rotation))
         rotation_row.addWidget(self.rotation)
         # Which of the two modes is in charge, written beside the knob itself.
-        # La frase lunga di rotation_hint non bastava: chi gira la manopola non
-        # collega il campo a una spiegazione staccata, e nessuno passa il mouse
-        # per un tooltip. Lo stato va letto dove si guarda, accanto al campo.
+        # The long sentence of rotation_hint was not enough: whoever turns the
+        # knob does not connect the field to a detached explanation, and nobody
+        # hovers for a tooltip. The state must be read where one looks, beside
+        # the field.
         self.rotation_state = QLabel()
         self.rotation_state.setObjectName('rotation_state')
         self.rotation_state.setTextFormat(Qt.TextFormat.PlainText)
         rotation_row.addWidget(self.rotation_state)
         rotation_row.addStretch(1)
         self._update_rotation_controls()
-        # Stato interno, non piu' comandi a vista (utente, 2026-09-24): le
-        # frecce sull'anteprima li sostituiscono.
+        # Internal state, no longer visible controls (user, 2026-09-24): the
+        # arrows on the preview replace them.
         self._rotation_controls = QWidget()
         self._rotation_controls.setLayout(rotation_row)
         self._rotation_controls.hide()
@@ -1128,9 +1128,10 @@ class ModelCandidatesDialog(QDialog):
         self.auto_rotation.hide()
         self.rotation_hint.hide()
         controls = QHBoxLayout()
-        # Icone con tooltip (utente, 2026-09-24). Le conferme in fondo («Usa il
-        # modello selezionato», «Annulla») restano scritte: sono la decisione
-        # della finestra e devono dire cosa confermano senza passarci sopra.
+        # Icons with tooltips (user, 2026-09-24). The confirmations at the
+        # bottom («Usa il modello selezionato» (use the selected model),
+        # «Annulla» (cancel)) stay as text: they are the window's decision and
+        # must say what they confirm without hovering.
         from .review_tools import tool_button
         self.manual_button = tool_button(
             "docs-open.svg", "Scegli file STEP…", "",
@@ -1146,9 +1147,9 @@ class ModelCandidatesDialog(QDialog):
         controls.addStretch()
         layout.addLayout(controls)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        # Anche le conferme sono icone con nome e spiegazione nel tooltip
-        # (utente, 2026-09-25); restano i pulsanti OK/Annulla della finestra,
-        # quindi Invio ed Esc funzionano come prima.
+        # The confirmations too are icons with name and explanation in the
+        # tooltip (user, 2026-09-25); the window's OK/Cancel buttons remain,
+        # so Enter and Esc work as before.
         from .review_tools import asset_icon, set_tool_texts
         for role, asset, title, detail in (
                 (QDialogButtonBox.StandardButton.Ok, 'confirm-use.svg',
@@ -1257,7 +1258,7 @@ class ModelCandidatesDialog(QDialog):
         if not checked and self.auto_rotation.isChecked():
             known = self._known_auto_angle()
             if known is not None and self.rotation.value() != known:
-                self.rotation.setValue(known)  # esce dall'automatico da solo
+                self.rotation.setValue(known)  # leaves automatic mode by itself
         if self.auto_rotation.isChecked() != checked:
             self.auto_rotation.setChecked(checked)
 
@@ -1415,8 +1416,8 @@ class ModelCandidatesDialog(QDialog):
         self._path = candidate['path']
         reasons = candidate.get('reasons') or []
         if isinstance(reasons, (list, tuple)):
-            # Tradotti al momento di mostrarli: i report salvati restano come
-            # sono (audit 25/09: «Family and dimension discovery» in italiano).
+            # Translated when shown: saved reports stay as they are
+            # (audit 25/09: «Family and dimension discovery» in Italian).
             from ..cad3d.kicad_models import localized_reason
             reasons = '\n'.join(localized_reason(reason) for reason in reasons)
         error = _number(candidate.get('relative_xy_error'), float('nan'))
@@ -1547,8 +1548,8 @@ class ModelCandidatesDialog(QDialog):
         self._set_loading(True)
         if self._workers:
             return
-        # Un angolo scelto e' assoluto, ma il delta del menu 3D si somma anche a
-        # lui nel CAD finale (`_placement_angle`): l'anteprima fa lo stesso.
+        # A chosen angle is absolute, but the delta of the 3D menu is also added
+        # to it in the final CAD (`_placement_angle`): the preview does the same.
         delta = float(self._placement.get('model_rotation_delta_deg') or 0)
         worker = _Preview(self._token, self._path,
                           None if self.auto_rotation.isChecked()

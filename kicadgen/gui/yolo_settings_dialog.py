@@ -74,8 +74,8 @@ class YoloSettingsDialog(QDialog):
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
-        # I pulsanti standard di Qt restano in inglese senza le traduzioni di
-        # Qt: si scrivono con il catalogo (utente, 2026-09-25: «Cancel»).
+        # Qt's standard buttons stay in English without Qt's translations:
+        # they are written with the catalogue (user, 2026-09-25: «Cancel»).
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("OK"))
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Annulla"))
         self.btn_defaults = QPushButton(tr("Ripristina predefiniti"))

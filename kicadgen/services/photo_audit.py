@@ -27,10 +27,10 @@ AUDIT_RETENTION_PER_KIND = 20
 def valid_fraction_box(value):
     """@brief Validate a normalized [x0, y0, x1, y1] rectangle in image fractions.
 
-    @param value Candidate rectangle; each coordinate must be a finite
-        non-boolean real in [0, 1].
+    @param value Candidate rectangle; each coordinate must be a finite real
+        (not a boolean) in [0, 1].
     @return The rectangle as a new list.
-    @throws ValueError If the value is missing, non-finite, outside the image,
+    @throws ValueError If the value is missing, not finite, outside the image,
         empty or inverted.
     """
     if not isinstance(value, (list, tuple)) or len(value) != 4:

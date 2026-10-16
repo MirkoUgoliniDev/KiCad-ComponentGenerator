@@ -49,7 +49,13 @@ def _find_i18n(widget):
 
 
 def icon_button(text, asset, callback):
-    """@brief Create a non-default push button with a 20 px asset icon wired to `callback`."""
+    """@brief Create a non-default push button with a 20 px asset icon wired to `callback`.
+
+    @param text Button caption.
+    @param asset File name of the icon inside the GUI assets folder.
+    @param callback Slot connected to the button's `clicked` signal.
+    @return The configured QPushButton.
+    """
     button = QPushButton(text)
     button.setIcon(QIcon(str(ASSETS / asset)))
     button.setIconSize(QSize(20, 20))
@@ -59,7 +65,15 @@ def icon_button(text, asset, callback):
 
 
 def show_info(parent, title, text, *, text_key=None, **values):
-    """@brief Show a modal read-only information dialog, translated when an i18n catalogue is reachable."""
+    """@brief Show a modal read-only information dialog, translated when an i18n catalogue is reachable.
+
+    @param parent Widget whose ancestry is searched for an i18n catalogue;
+        also the dialog's parent.
+    @param title Window title (translated as a source string when possible).
+    @param text Body text, used verbatim when no catalogue or no `text_key`.
+    @param text_key Catalogue key of the body text; `text` is its default.
+    @param values Placeholder values formatted into the translated body.
+    """
     i18n = _find_i18n(parent)
     dialog = QDialog(parent)
     dialog.setWindowTitle(
@@ -126,8 +140,8 @@ class ProfileEditor(QDialog):
             column = QVBoxLayout(page)
             self.tabs.addTab(page, title)
             header = QHBoxLayout()
-            # Nessun modello per tipologia (utente, 2026-10-02): il modello e'
-            # unico, si sceglie nel tab «Modello» delle impostazioni LLM.
+            # No model per component type (user, 2026-10-02): the model is
+            # unique, chosen in the «Modello» (model) tab of the LLM settings.
             header.addStretch(1)
             info = icon_button('', 'info.svg', lambda checked=False, i=index: self._info(i))
             info_label = (

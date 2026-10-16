@@ -250,8 +250,8 @@ class RecentProjectDelegate(QStyledItemDelegate):
         kind = self._page.component_type_text(summary)
         stamp = summary.modified.strftime("%d/%m/%Y %H:%M") if summary.modified else ""
 
-        # Destra prima della sinistra: il nome e il percorso si accorciano,
-        # tipo e data no (sono corti e dicono cose che il nome non dice).
+        # Right before left: name and path get shortened, type and date do
+        # not (they are short and say things the name does not say).
         painter.setFont(detail_font)
         painter.setPen(QColor(SUBTEXT))
         kind_width = _text_width(detail_font, painter, kind)
@@ -349,9 +349,9 @@ class StartPage(QWidget):
         #: Tooltip of «Apri» while there is something to open (catalogue source).
         self._open_tooltip = "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
 
-        # «Nuovo» e «Apri» lavorano nella cartella di lavoro, il cui campo sta
-        # nella scheda Progetto, nascosta finche' non c'e' un progetto: senza
-        # questa riga la pagina iniziale la renderebbe irraggiungibile.
+        # «Nuovo» (new) and «Apri» (open) work in the working folder, whose
+        # field is in the Project tab, hidden until there is a project:
+        # without this row the start page would make it unreachable.
         self.root_caption = QLabel("Area di lavoro:")
         self.root_caption.setObjectName("rootCaption")
         self.root_path = QLabel()
@@ -359,8 +359,8 @@ class StartPage(QWidget):
         self.root_path.setProperty("i18n_skip", True)
         self.root_path.setTextFormat(Qt.TextFormat.PlainText)
         self.root_path.setMinimumWidth(1)
-        # Il percorso si riaccorcia quando cambia la larghezza dell'etichetta
-        # (eventFilter), non della pagina: il layout la ridimensiona dopo.
+        # The path is shortened again when the width of the label changes
+        # (eventFilter), not of the page: the layout resizes it afterwards.
         self.root_path.installEventFilter(self)
         self._root_text = ""
         self.btn_root = QPushButton(asset_icon("docs-open.svg"), "")
@@ -487,7 +487,10 @@ class StartPage(QWidget):
         self._elide_root()
 
     def library_root_text(self) -> str:
-        """@brief Return the full working folder last given to `set_library_root`."""
+        """@brief Return the full working folder last given to `set_library_root`.
+
+        @return The unelided folder text, "" before any root was set.
+        """
         return self._root_text
 
     def set_projects_available(self, available: bool) -> None:
@@ -528,7 +531,10 @@ class StartPage(QWidget):
             self._root_text, Qt.TextElideMode.ElideMiddle, width))
 
     def recent_paths(self) -> list:
-        """@brief Folders currently listed, top to bottom."""
+        """@brief Folders currently listed, top to bottom.
+
+        @return The project paths stored in the recent-list items, in list order.
+        """
         return [self.recent_list.item(row).data(Qt.ItemDataRole.UserRole)
                 for row in range(self.recent_list.count())]
 

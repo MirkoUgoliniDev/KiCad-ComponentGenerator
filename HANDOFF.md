@@ -1,5 +1,17 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 16/10 sera — STATO: branch `ADVANCED`, commit di oggi (vedi riga sotto), NON mergiato in `main`, PC spento
+
+Chiusi oggi: domanda designatore (grigio = compilato), MEDI 12-16, due
+revisioni avversariali complete con le loro correzioni, T2 (aggancio dei
+piedini dichiarato dal modello), U1 (DeepSeek flash resta nel database;
+modello scelto solo dall'interfaccia), commenti tutti in inglese con regola
+nel test e in CLAUDE.md, riepilogo sicure/deboli del rilevatore; poi, dalla
+prova dell'utente, ancoraggio in basso a sinistra anche per le proprieta'
+(simbolo e footprint, KiCad fermo) e testi disegnati alla larghezza di KiCad.
+Poi numeri dei pin alla posizione di KiCad, quadratino al passaggio del mouse anche nel footprint, date corrette (oggi e' il 16/10). Suite 8826 verdi, 12 saltati, 19 sottotest, 0 falliti. Dettaglio di ogni punto nella sezione 16/10 piu' sotto
+(cerca «16/10»). Segnalati e non autorizzati: vedi le righe «SEGNALATI».
+
 ## FINE SESSIONE 16/10 notte — branch `ADVANCED`, commit `50791d3` (+ handoff), NON mergiato in `main`, PC spento
 
 Istruzione dell'utente: «fai un report, non mergiare in main, puoi
@@ -25,8 +37,767 @@ della documentazione (225 funzioni senza @param, ~310 docstring italiane);
 README/docs superati; codice morto gui/yolo_review_dialog.py (1366 righe,
 rimozione da autorizzare); piedini staccati nel 3D da «Rileva terminali».
 Bassi residui elencati nelle sezioni di verifica. Preesistente: tasto
-nell'editor del simbolo con 900 righe 174 ms. Domanda ancora aperta:
-designatore in grigio «U» conta come compilato.
+nell'editor del simbolo con 900 righe 174 ms. DECISO dall'utente (16/10): il designatore proposto in grigio «U»
+CONTA come compilato (comportamento attuale confermato, nessuna modifica).
+16/10: l'utente vuole chiudere tutti i punti aperti, una domanda alla volta;
+in corso le domande sui MEDI 12-16.
+AUTORIZZATO 16/10 — MEDIO 12: ritraduzione immediata di tutti i testi al
+cambio lingua (4 lingue) + chiave `inventory_pause.question` nel catalogo.
+AUTORIZZATO 16/10 — MEDIO 13: tutte le funzioni pubbliche con @brief/@param/
+@return, docstring italiane tradotte in inglese, test della documentazione
+reso vincolante.
+AUTORIZZATO 16/10 — MEDIO 14: README e tutte le pagine in docs/ riscritte
+allineate al programma attuale (in italiano come oggi).
+AUTORIZZATO 16/10 — MEDIO 15: rimozione di gui/yolo_review_dialog.py con
+test e import, SOLO dopo aver verificato che e' davvero morto («se e'
+effettivamente morto rimuovi»). VERIFICATO 16/10: nessun import in
+kicadgen/ (solo un commento in photo_review_dialog.py); riferimenti nei
+test test_yolo_review_dialog.py, test_review_windows_fixes.py,
+test_photo_detection_generality.py.
+AUTORIZZATO 16/10 — MEDIO 16: terminali osservati ancorati al corpo nello
+STEP in modo generale (faccia piu' vicina, qualunque package/rotazione); lo
+xfail del 13/09 diventa un test che deve passare.
+
+## 16/10 — IN CORSO: chiusura dei MEDI 12-16 (tutti autorizzati sopra)
+Piano: fase 1 in parallelo su file disgiunti — agente i18n (medio 12:
+kicadgen/gui/*, catalogo traduzioni), agente docs (medio 14: README.md,
+docs/*), coordinatore (medio 15 rimozione yolo_review_dialog + test; medio
+16 in kicadgen/cad3d/). Fase 2, dopo: medio 13 docstring su tutto il codice
+(tocca ogni file, quindi va per ultimo). Commit solo con OK dell'utente.
+Fase 1 avviata: fatto `git rm` di kicadgen/gui/yolo_review_dialog.py e
+tests/test_yolo_review_dialog.py, commento in photo_review_dialog.py
+ripulito; agenti: A test residui del dialogo morto (test_review_windows_fixes,
+test_photo_detection_generality), B i18n (gui/*, services/i18n.py, catalogo,
+test i18n), C terminali ancorati (cad3d/freecad_parts.py,
+services/photo_terminals.py, test_terminal_render_contract.py), D README e
+docs/. Se si riprende a meta': `git status` dice cosa e' stato toccato; la
+suite completa NON e' ancora stata eseguita dopo queste modifiche.
+FATTO medio 15 (agente A): test del dialogo morto rimossi o riscritti sul
+PhotoReviewDialog (stage=STAGE_DETECTOR): riga «bassa confidenza/non tenuta»,
+penna DashLine AI_ONLY_EXCLUDED_COLOR, toggle_keep, modifica di x_mm che
+tiene la proposta, box minimo in mm (MIN_HANDLE_SIZE_MM), riepilogo del
+rilevatore che segue la lingua. Copertura persa solo per comportamenti del
+vecchio dialogo senza equivalente (rifiuto del box troppo piccolo, scorciatoie
+R/P, cancella-durante-trascinamento). 38 verdi nei 3 file toccati.
+FATTO medio 16 (agente C): causa — decoder (photo_terminals) e renderer
+(freecad_parts._observed_terminals) usavano DUE criteri diversi di
+«attaccato»: il decoder tollerava gap/angolo entro TERMINAL_ATTACH_GAP_MAX
+(.06), il renderer alzava il riser solo dove il box gia' toccava il corpo ->
+isola o contatto su una linea. Ora un solo criterio in
+cad3d/lead_geometry.py (is_attached, anchor_face, anchored_terminal): il
+terminale attaccato viene allungato SOLO verso il corpo fino alla faccia da
+cui sporge di piu' (in mm), lato esterno mai spostato, allungamento laterale
+al massimo 0,12 mm (impronta del riser, dichiarato in @note); i terminali
+lontani restano isole senza ponte inventato. xfail -> 4 test positivi, test
+a 45/33/-120 gradi, test negativo dell'isola; test_observed_terminals: corpo
+del test di composizione delle rotazioni cambiato da [.1,.2,.6,.8] a
+[.1,.2,.7,.8] perche' toccava un terminale solo nell'angolo (contratto
+aggiornato, non allentato). 584 verdi nei 13 file cad/terminali. Prova
+reale FreeCAD 1.1: gap/angolo fondono in UN solido, isola resta a 0,8 mm.
+Soglia .06 invariata (euristica dichiarata, mai calibrata).
+FATTO medio 14 (agente D): riscritti README.md, README.it.md (ora lo
+stesso documento in due lingue; prima era una mappa dei moduli obsoleta),
+docs/photo-mechanical-workflow.md, yolo-photo-workflow.md,
+interactive-kicad-models.md, CLASSIFICATORE_SMD.md, INSTALLATION-WINDOWS.md,
+PACKAGING-WINDOWS-MSI.md; ogni funzione verificata sul sorgente (menu,
+wizard, ruoli documenti, rilevatori, Account AI due provider, revisione a
+due stadi, bozze, scheda KiCad con rimedi, tabelle librerie, build/MSI).
+Tolte le cose che non esistono piu' (finestra «Classificazione YOLO»,
+modello foto gemini separato, «Confronta foto», modalita' «Advanced»...).
+Non confermati e lasciati fuori: pulsante ⓘ accanto alla cartella, spin box
+«Soglia YOLO». IN CORSO: stesso allineamento della guida interna
+kicadgen/gui/assets/help/guida.html (capitolo 7 descriveva ancora la
+finestra YOLO e un solo provider).
+FATTO medio 12 (agente B): retranslate_widgets ora ricalcola voci dei
+combo (ruolo dati ITEM_SOURCE_ROLE, I18n.add_item / set_item_source),
+QAction (testo/tooltip/statusTip), tooltip/statusTip/whatsThis di OGNI
+widget, e testi resi in inglese alla costruzione (I18n.source_of: indice
+inverso del catalogo). Combo montaggio/anteprima/livello di disegno via
+add_item; i18n_skip tolto dove nascondeva la fuga; etichette dei percorsi
+della scheda KiCad passate dal catalogo (4 chiavi nuove);
+inventory_pause.question in 4 lingue; guided_docs.refresh() al cambio
+lingua. data/analysis_profiles.sqlite3 riseminato: +20 righe (5 chiavi x 4
+lingue), da committare col codice. Test: 11 nuovi in
+test_untranslated_texts (positivi e negativi, falliscono sul vecchio
+modulo), scanner statico di test_i18n esteso; 145 + 498 verdi nei file GUI
+toccati. Nota: i «50 tooltip della tavolozza» dell'audit erano i vecchi
+pulsanti in attesa di deleteLater, non una fuga; fughe reali 33 -> 0.
+FATTO medio 14 anche per la guida interna gui/assets/help/guida.html
+(16 ancore invariate; capitolo 7 riscritto sulla finestra a due stadi;
+Account AI con due provider; scheda KiCad con blocco e rimedi, metadati,
+KLC; bozza footprint; log 20 report). test_help_guide + test_help_menu: 70
+verdi. Non confermato: se l'altezza si modifica nel modale «Parametri
+componente» o solo in «Modifica componenti…».
+MEDIO 13 IN CORSO: tests/test_documentation.py reso vincolante (nuovo test
+test_public_api_documents_parameters_returns_exceptions_in_english: @param
+per ogni parametro, @return se ritorna un valore diverso da None, @throws se
+solleva, nessuna docstring italiana — euristica a stopword dichiarata nel
+docstring del test; test sintetico positivo/negativo). Scansione iniziale:
+935 violazioni (italiano 430, return 247, param 219, throws 39). Agenti per
+pacchetto: gui/, services/, resto (cad3d, core, generators, tools, examples,
+main.py). FINCHE' NON SONO A ZERO QUEL TEST E' ROSSO.
+16/10 tarda mattina: diversi agenti caduti per limite di sessione (lavoro
+salvato). Stato: zero violazioni ovunque TRANNE gui/main_window.py (107) e
+services/photo_inventory.py, photo_grounding.py, datasheet_extractor.py
+(33): due agenti rilanciati su quei file. Verifica AST (codice senza
+docstring == HEAD) su tutti gli altri file: identico, salvo i 5 file con
+correzioni volute (freecad_parts, lead_geometry, symbol_tab, i18n,
+photo_terminals). Regex italiana del test: tolte «per/non/con/crea»
+(segnalavano inglese). Prossimo: suite completa in due meta', poi report.
+FATTO medio 13: scanner a ZERO su tutto il codice coperto (kicadgen/,
+tools/, examples/, main.py); main_window.py 127 docstring tradotte (20 in
+piu' sfuggite allo scanner), services 33 righe chiuse; AST senza docstring
+identico prima/dopo per ogni file di sola documentazione. Alcune citazioni
+dell'utente in italiano rese in inglese con «(translated)». IN CORSO: suite
+completa in due meta' (log .venv/run_A.log e .venv/run_B.log).
+SUITE COMPLETA 16/10, MEDI 12-16 CHIUSI, NON COMMITTATI (attesa OK utente):
+A 5260 verdi, 10 saltati, 19 sottotest; B 3301 verdi, 2 saltati; 0 falliti,
+0 xfail (i 2 xfail strict dei terminali sono diventati test veri). Totale
+8561 verdi. Nota: le due meta' hanno dimensioni diverse da ieri perche' il
+punto di taglio e' per nome file; la somma e' quella che conta.
+16/10 — RICHIESTA UTENTE: niente commit per ora, «un ulteriore controllo
+avversariale con agenti esperti». IN CORSO: 5 revisori in sola lettura sul
+diff non committato, uno per area: (1) i18n/ritraduzione, (2) terminali
+ancorati nel 3D, (3) fedelta' delle docstring tradotte e regole del test
+della documentazione, (4) rimozione del dialogo morto e test riscritti,
+(5) README/docs/guida.html contro il codice + righe nuove del database dei
+profili. Poi verifica dei reperti, correzione dei confermati SOLO con OK
+dell'utente se cambiano il comportamento, nuova suite.
+REVISORE TERMINALI 3D — reperti CONFERMATI (riprodotti anche dal
+coordinatore, scratchpad/rev_leads/test_probe.py: 4 falliti su 9):
+ T1 MEDIO-ALTO: decoder e renderer rivalutano is_attached in due frame
+    diversi (foto vs locale ruotato con 1-x) senza epsilon: a gap = 0,06
+    esatto il decoder accetta e a 180/270 gradi il renderer disegna
+    un'isola (piedino staccato). 160 490 casi su 200k casuali al confine.
+    Rimedio: decidere una volta e portare la decisione (flag per
+    terminale), non rivalutare.
+ T2 MEDIO: tolleranza normalizzata .06 -> fino a 2,2 mm di metallo
+    inventato su un modulo 40x2 mm (anisotropa fra gli assi); separazione
+    attaccato/isola su UNA soglia mai tarata: va detta all'utente; serve un
+    limite in mm o una risposta esplicita del modello.
+ T3 MEDIO-BASSO: l'allungamento laterale puo' sovrapporre il piedino al
+    vicino (passo fine), nessun controllo dopo.
+ T4 BASSO: faccia scelta in mm puo' differire da quella certificata da
+    validated_lead_bbox (crescita nascosta sotto il corpo).
+ Tenuto: OCC reale, import nel processo FreeCAD, bordo scheda, rotazioni
+ cardinali, nessuna regressione senza terminali; cambio del corpo di test
+ [.6->.7] giudicato aggiornamento legittimo del contratto.
+REVISORE I18N — reperti (sonde in scratchpad/rev_i18n, rilanciate dal
+coordinatore: 2 test che esprimono il comportamento atteso falliscono):
+ I1 MEDIO: il giro sulle QAction legge il tooltip «derivato» (Qt rende il
+    testo dell'azione quando il tooltip non e' impostato) e lo fissa con
+    setToolTip: 109 azioni su 130 hanno ora un tooltip che ripete la voce,
+    visibile nei menu con setToolTipsVisible(True), e stantio se il testo
+    cambia; le 4 voci della barra menu restano coi tooltip italiani.
+ I2 MEDIO: source_of con setdefault sceglie la sorgente sbagliata quando
+    due sorgenti hanno la stessa resa (49 casi, es. en «Fit» -> fr
+    Ajuster/Centrer; 12 casi in cui la resa inglese e' essa stessa una
+    sorgente, es. «Apply»): finestra avviata in inglese -> tooltip di
+    «Archivio abbinamenti accettati» sbagliato in it/de. Il docstring di
+    source_of dice il falso («both translate the text»).
+ I3 BASSO-MEDIO: indice inverso solo della lingua nuova: testo scritto in
+    inglese fra due cambi non si recupera (nascosto in pratica dai refresh).
+ I4 BASSO: valore dell'utente uguale a una resa del catalogo «tradotto»
+    (nessun caso reale trovato: le etichette con dati hanno i18n_skip).
+ I5/I6 BASSI: tedesco «Bauteilprüfung bearbeiten…» != voce di menu
+    «Komponentenprüfung bearbeiten …»; «Pfad des STEP-Modells» vs
+    «STEP-Modellpfad». I7 import inutilizzati (QAbstractItemView,
+    QAbstractSpinBox). I8 _rendered_sources ~50 ms ricostruito a ogni giro
+    (24 chiamanti), cambio lingua completo 0,2 s: accettabile.
+ Tenuto: combo di dati intatti, nessun segnale di stato, nessuna fuga dopo
+ it->en->fr->de, database +20 righe esatte e nessun segreto.
+REVISORE DOCSTRING — codice invariato CONFERMATO (AST) salvo i file con
+correzioni volute; 788 coppie controllate: nessun riferimento HANDOFF,
+data, numero o negazione persi. Reperti CONFERMATI:
+ D1 MEDIO-BASSO: «per lato / lato per lato» reso «side by side» (in
+    inglese = affiancati, significato cambiato) in freecad_parts:2247,
+    contact_zones:145, castellated_module:37-38/49/1033, photo_refine:503.
+ D2 BASSO-MEDIO: citazioni testuali dell'utente accorciate o parafrasate
+    per aggirare il controllo (contact_zones, main_window 6038/5410/6942,
+    datasheet_extractor 5594) e l'etichetta «Aggiorna il file del simbolo»
+    sostituita da una perifrasi (main_window 12090): vanno ripristinate.
+ D3 BASSO: compare_vision_models:113 cita «Differences: 0», l'uscita e'
+    «Differenze:». D4 evaluate_photo_inventory.main @throws ValueError
+    falso (esce SystemExit). D5 «@throws Nothing escapes» in 3 punti: il
+    test dovrebbe ignorare i raise catturati nella stessa funzione e quelle
+    righe andrebbero in @note.
+ D6 MEDIO (test): regola della lingua cieca alle funzioni annidate (3
+    docstring italiane: process_log/kicad_models kill_child,
+    datasheet_extractor announce), ai blocchi For/While/Match; ~20
+    docstring/paragrafi ITALIANI ancora non rilevati (forme e', piu', gia'
+    non in lista; es. kicad_models._candidate_roots, step_generator,
+    preview_3d_vtk, openrouter, main_window._about_html, footprint.FpLine);
+    il testo dentro «…» conta e spinge ad alterare le citazioni. Proposta:
+    togliere «…» e `…` prima di contare, aggiungere forme con apostrofo,
+    includere le funzioni annidate, ignorare i raise catturati.
+REVISORE DOCUMENTAZIONE UTENTE — ~90 affermazioni controllate; invarianti
+e segreti a posto. Reperti CONFERMATI:
+ U1 MEDIO-ALTO: i documenti dicono predefinito anthropic/claude-opus-5 via
+    OpenRouter, ma data/analysis_profiles.sqlite3 TRACCIATO ha model,
+    vision_model e verification_model = deepseek-api/deepseek-flash
+    (verificato dal coordinatore): da sorgenti serve una chiave DeepSeek.
+    Solo l'MSI rigenera il seme dal codice (opus-5). DECISIONE UTENTE:
+    quale predefinito deve stare nel database tracciato.
+ U2 MEDIO: README.md e i docs inglesi usano le etichette italiane
+    dell'interfaccia (Account AI…, «?», Canc, «Gestisci librerie di
+    simboli»).
+ U3 MEDIO: guida.html (cap. 8 e 12) dice che una bozza non applicata blocca
+    i comandi KiCad: FALSO (verificato: _install_block_reason & co. non la
+    guardano; solo «Verifica componente» la segnala).
+ U4 la rotazione NON si corregge trascinando (solo campo rotation_deg).
+ U5 «Rigenera 3D» non e' un pulsante della scheda KiCad (e' l'icona della
+    scheda Modello 3D). U6 il progetto NON ricorda il rilevatore scelto.
+ U7 percorsi personali nei docs (C:\Lavori\..., TorchObjectDetection,
+    C:/App/Screenshot_1.png, generated/RS485 non tracciato).
+ U8 kicad-cli non serve a «Prova in KiCad» (serve pcbnew). U9 README.it:
+    «cartelle escluse da Git» (solo i pesi), «non approvano» -> «non
+    avallano», Documenti vs Documents. U10 albero cartella progetto senza
+    project_config.json, consolidated-matches.json, yolo-pretest/,
+    .header-model-reuse.json. U11 guida: capitolo «Simbolo elettrico» senza
+    numero, sezione dopo «Limiti» fuori indice, «tre passi» vs ~10 fasi.
+REVISORE CODICE MORTO — CONFERMATO morto (nessun riferimento, nemmeno nel
+build; --check-runtime OK). Reperti CONFERMATI per mutazione:
+ M1 MEDIO: nella fase del rilevatore un trascinamento col mouse non e' mai
+    testato end to end (mutazione che salta _geometry_changed solo in
+    STAGE_DETECTOR: 1371 test verdi); il test riscritto usa fields['x_mm'],
+    che nella fase rilevatore e' nascosto (gap gia' presente prima).
+ M2 MEDIO: ridimensionamento con maniglia nella fase rilevatore non testato
+    (lato tagliato _yolo_clipped_sides non rilasciato: va nella chiamata a
+    pagamento); i test cancellati lo coprivano.
+ Comportamenti solo del vecchio dialogo (barra di stato in mm, Esc,
+ trascinamento per spostare la vista): differenze di progetto, non
+ regressioni. Proposta: 2 test con gesti veri (_drag) + caso negativo.
+STATO 16/10: 5 revisioni chiuse, nulla corretto, nulla committato. In
+attesa dell'utente: (1) OK a correggere i difetti confermati; poi decisioni
+U1 (modello predefinito nel database tracciato) e T2 (tolleranza di
+aggancio dei piedini: limite in mm o risposta del modello).
+16/10 — UTENTE: «ok procedi in modo chirurgico». IN CORSO, 5 agenti su
+file disgiunti, solo i reperti confermati:
+ A terminali T1 (decisione di aggancio presa una volta dal decoder e
+   portata al renderer, niente rivalutazione) + T3 (nessuna sovrapposizione
+   col vicino dopo l'allungamento) + D1 in freecad_parts:2247. File:
+   cad3d/lead_geometry.py, cad3d/freecad_parts.py,
+   services/photo_terminals.py, test dei terminali. T2 e T4 NON toccati
+   (T2 = decisione utente).
+ B i18n I1 (non fissare il tooltip derivato dal testo), I2+I3 (indice
+   inverso su tutte le lingue, sorgente ambigua = non tradurre a caso), I5
+   tedesco, I7 import. File: services/i18n.py, test i18n.
+ C docstring D1-D5 e test D6 (funzioni annidate, forme con apostrofo,
+   «…» esclusi dal conteggio, raise catturati ignorati) + traduzione delle
+   docstring italiane che il test rafforzato trova. Tutti i file TRANNE
+   lead_geometry, freecad_parts, photo_terminals, i18n.py.
+ D docs U2-U11 (U1 NON toccato: decisione utente). File: README*, docs/*,
+   gui/assets/help/guida.html.
+ E test M1+M2 (gesti veri nella fase rilevatore) in un file di test nuovo.
+Poi suite completa, poi (richiesta utente «poi rifai un controllo
+completo») NUOVA revisione avversariale completa sul diff, poi le due
+domande U1 e T2.
+FATTO E (test gesti fase rilevatore): tests/test_detector_stage_gestures.py,
+8 test con gesti veri (trascinamento, clic fermo, spostamento puro,
+maniglie destra/sinistra/lato non tagliato, entrambi i lati, proposta
+ruotata 90); ogni mutazione dei revisori fa fallire almeno un test; nessun
+bug reale trovato. Nota: Qt non ha soglia di trascinamento per le sagome.
+FATTO A (terminali): T1 — il decoder scrive attached: True su ogni
+terminale accettato, il renderer (_terminal_attachment) lo prende come
+definitivo; payload vecchi senza flag decisi UNA volta con
+TERMINAL_ATTACH_GAP_MAX + ATTACH_FRAME_EPS (1e-9, solo arrotondamento della
+rotazione 1-x); soglia .06 invariata. T3 — anchored_terminal(obstacles=):
+l'allungamento laterale si ferma al bordo del primo piedino vicino; senza
+spazio resta solo la chiusura verso la faccia (riser dentro il piede,
+contatto su uno spigolo: dichiarato, nessun avviso per non toccare i18n).
+D1 freecad_parts: «for each side». Sonde 9/9, 214 verdi, FreeCAD: solidi
+validi, distanza 0, nessun volume condiviso fra piedini. Restano: un
+attached: True scritto a mano e' preso per buono; T2/T4 non toccati.
+FATTO C (docstring + test): D1 «side by side» corretto in 9 punti (anche
+photo_crop_reading 951/1593/1789 e main_window ~10096); D2 citazioni
+originali ripristinate in «…» con glossa inglese; D3 «--- Differenze: 0»;
+D4 @throws SystemExit; D5 spostati in @note. Test della documentazione:
+lingua controllata in TUTTE le definizioni (annidate, for/while/match),
+testo fra «…», “…”, "…", `…` escluso, forme con apostrofo/accento,
+soglia 1 parola (misurata: 3187 docstring, 9 segnalate, tutte italiane, 0
+falsi positivi; aggiunte «il, un, cui, ecc»; scartate di/le/la/come);
+@throws richiesto solo per raise non catturati nella stessa funzione;
+@param a, b accettato; 3 test sintetici nuovi. Tradotte ~20 docstring
+residue. Snapshot AST di 134 file: codice e fine riga invariati. 7 verdi.
+Limiti dichiarati: prosa italiana senza parole della lista passa ancora;
+alcune etichette UI italiane non fra «» in main_window passano solo
+perche' «di» non e' nella lista.
+FATTO D (documentazione utente): U2 etichette inglesi nei documenti inglesi
+(«Help» = «?» in italiano, Del, Manage Symbol Libraries); U3 la guida dice
+ora che i comandi usano i file APPLICATI e la bozza la segnala «Verifica
+componente»; U4 rotazione solo dal campo numerico; U5 rigenerazione 3D =
+pulsante della scheda Modello 3D; U7 percorsi personali tolti; U8 pcbnew
+per «Prova in KiCad», kicad-cli per globale e verifica reale; U9 README.it;
+U10 albero cartella completato; U11 guida rinumerata (Simbolo = cap. 9,
+16 ancore invariate). U6 NON cambiato: CORREZIONE del reperto del
+revisore — il rilevatore E' ricordato dal progetto (combo_photo_detector
+in PROJECT_WIDGETS, main_window ~191; verificato dal coordinatore).
+Coordinatore: test_help_guide chiedeva «Modelli 3D dalla libreria KiCad»,
+etichetta che nell'interfaccia NON esiste (il passo e' «Modelli dalla
+libreria KiCad», GENERATION_STEPS): contratto del test allineato
+all'etichetta reale e guida semplificata. 70 verdi.
+FATTO B (i18n): I1 tooltip derivato mai catturato (confronto con il
+tooltip che Qt deriva da una QAction sonda; azioni senza tooltip proprio
+restano senza); I2 indice inverso {resa: {lingua: sorgenti}}, sorgente
+registrata sul widget prima, poi lingua precedente, poi italiano; se
+ambiguo e i candidati danno testi diversi il widget NON si tocca; I3 indice
+su tutte e 4 le lingue, in cache per versione del catalogo (0,046 s ->
+0,0001 s; cambio lingua 0,1 s); I5 tedesco/francese allineati
+all'etichetta del catalogo, vecchi testi in SUPERSEDED (database: 3 righe
+cambiate); I7 import tolti. 6 test nuovi, 178 verdi. Convenzione dichiarata:
+un testo italiano che e' sorgente di se' stesso vale come se' stesso in
+italiano.
+SEGNALATO, NON AUTORIZZATO (preesistente): la domanda dopo l'inventario
+(inventory_pause.question) e il messaggio «{count} corpi aggiunti dal solo
+modello…» rimandano a «Modifica la revisione dei componenti…», comando che
+NELL'INTERFACCIA NON ESISTE (chiave orfana, i18n ~1573); il pulsante vero e'
+«Revisione componenti…» (main_window 3785). Da chiedere all'utente.
+Altri residui segnalati dal fix B, preesistenti: due finestre nello stesso
+processo -> la prima resta una lingua indietro sui testi composti (traduttore
+globale); tooltip di scorrimento delle schede di Qt non tradotti; 3 righe
+del database diverse dal catalogo (ui:Pad Ø: de, ui:Foro Ø: fr/de).
+SUITE COMPLETA dopo le correzioni chirurgiche: A 5271 verdi, 10 saltati,
+19 sottotest; B 3333 verdi, 2 saltati; 0 falliti (totale 8604).
+IN CORSO: seconda revisione avversariale COMPLETA (richiesta utente «poi
+rifai un controllo completo»), 5 revisori nuovi, non ancorati ai reperti
+precedenti, sull'intero diff non committato.
+REVISIONE 2 — TERMINALI 3D, CONFERMATI (sonde scratchpad/rev2_leads,
+rilanciate dal coordinatore: 6 fallite su 13; OCC reale):
+ R2T1 MEDIO: con allungamento laterale bloccato da un vicino il riser va
+   «sul bordo piu' vicino» del piede ma nulla controlla che tocchi il
+   corpo: piedino accettato e staccato di 0,06 mm (freecad_parts ~383-390).
+ R2T2 MEDIO: il caso «nessuno spazio» del test spedito da' contatto su uno
+   SPIGOLO e il test non controlla il contatto col corpo; docstring
+   contraddittori (faccia vs spigolo).
+ R2T3 MEDIO: la chiusura del gap verso la faccia ignora gli altri
+   piedini: due piedini in fila lungo la normale si compenetrano
+   (0,0095 mm3 in OCC).
+ R2T4 BASSO: attached: True preso per buono senza limite geometrico: un
+   payload alterato inventa 4 mm di metallo.
+ R2T5 (progetto, = T2): la tolleranza .06 normalizzata ora diventa metallo
+   disegnato (fino a 1,5 mm su un modulo di 25 mm); la faccia scelta cambia
+   con il rapporto dei lati.
+ GIUDIZIO DEL COORDINATORE: ogni giro di correzioni sull'ancoraggio apre
+ casi limite nuovi; la radice e' T2 (una soglia normalizzata mai tarata
+ trasformata in geometria). Da portare all'utente insieme alla domanda T2.
+REVISIONE 2 — DOCUMENTAZIONE UTENTE (~130 affermazioni; invarianti e
+segreti a posto). CONFERMATI:
+ R2U1 MEDIO: «nessuna chiamata di rete all'avvio» FALSO: main() chiama
+   ai_account.refresh_balance() (main_window ~19025, verificato) e legge il
+   saldo se c'e' una chiave. Affermazione di privacy: va corretta.
+ R2U2 MEDIO: il rilevatore predefinito da sorgenti (yolo_smd) richiede pesi
+   NON tracciati (models/smd/smd_classifier.pt, models/yolo/...) e
+   requirements-smd + requirements-yolo-pt; i docs non dicono dove
+   prenderli. Si ferma prima di pagare.
+ R2U3 FreeCAD NON e' cercato nel PATH (solo FREECAD_CMD_PATH e Program
+   Files; verificato): docs e testo finale dell'MSI (KiCadGen.wxs:70)
+   dicono il contrario.
+ R2U4 installazione globale rifiutata se KiCad non e' mai stato avviato
+   (global_table_missing): non documentato.
+ R2U5 i due selettori YOLO/SMD descritti come uno solo.
+ R2U6 etichette italiane accorciate («Rigenera modello 3D», «Guida
+   rapida»). R2U7 activate/.ps1 bloccati dalla policy di default.
+ R2U8 la riproduzione di photo-mechanical non puo' girare: la foto di
+   riferimento non e' nel repository. R2U9 riferimenti a progetti privati
+   (employee-scheduling, TorchObjectDetection). R2U11 «non le cartelle» in
+   README.it impreciso (le cartelle non esistono in un checkout).
+ Fuori ambito, codice: tooltip di «Account AI...» dice solo «Chiave
+ OpenRouter» (main_window ~1930).
+REVISIONE 2 — DOCSTRING: codice invariato CONFERMATO (solo i 6 file voluti
+differiscono); 810 coppie: numeri, date, unita', negazioni, euristiche
+dichiarate preservati; nessuna docstring italiana in prosa residua.
+CONFERMATI (bassi/medi):
+ R2D1 MEDIO: castellated_module (modulo, ~497/501) decisioni dell'utente
+   tradotte: «una regola generale, non per questo PCB», «Riduci e
+   segnala» -> ripristinare l'originale fra «» con glossa.
+ R2D2 bassi: freecad_build_body._flip_y «Fronte» -> "Front"; process_log
+   «nessun output per 300 s» tradotto; etichette italiane senza «» in
+   main_window 2067/5599/6136/7721; datasheet_extractor «menu
+   Configurazione» tradotto; «(utente, 2026-09-25)» residuo;
+   photo_inventory:289 «@param second Idem.»; workers.py:925 @throws
+   RuntimeError che non esce; component_state.py:103 manca TypeError.
+ R2D3 test: falsi negativi residui (@brief vuoto, generatori senza @return,
+   catch-and-re-raise, @throws come sottostringa, regole dei tag non
+   applicate sotto for/while/match); falsi positivi latenti («Arduino
+   Uno», «del»). MEDIO di portata: i commenti non sono controllati, 3698
+   su 9126 ancora italiani, 975 sono «#:» che documentano costanti:
+   DECISIONE UTENTE se i «#:» rientrano nella regola.
+ R2D4 HANDOFF dice «git rm» ma la cancellazione non e' in stage (` D`):
+   correzione, il file e' cancellato solo nel working tree.
+REVISIONE 2 — I18N (confronto finestra avviata vs commutata, 12
+sequenze, anche su copia di HEAD). Testi visibili: ~40 differenze di HEAD
+tutte chiuse; stato del progetto, segnali, dati, prestazioni (0,1 s),
+segnaposto, database (solo translations) a posto. CONFERMATI:
+ R2I1 MEDIO: inventory_pause.question e «{count} corpi aggiunti…»
+   citano «Modifica la revisione dei componenti…» che NON esiste (bottone
+   vero «Revisione componenti…»); preesistente in italiano, il diff lo ha
+   copiato in en/fr/de e il nuovo test
+   test_texts_naming_the_component_review_use_its_label_in_each_language
+   BLOCCA l'etichetta sbagliata. Va corretto (era gia' SEGNALATO sopra).
+ R2I2 BASSO-MEDIO (anche in HEAD): intestazione della tabella dei pin del
+   simbolo resta nella lingua di avvio se si parte in en/fr/de
+   (_i18n_header_sources catturato dal testo tradotto senza source_of;
+   stesso schema per i titoli delle schede).
+ R2I3 BASSO (HEAD): riepilogo strumenti AI una lingua indietro (letto
+   prima di _refresh_model_combo). R2I4 BASSO (HEAD): tooltip del pulsante
+   del wizard riscritto al cambio lingua anche se bloccato. R2I5 BASSO
+   (HEAD): riga spessore PCB 0,10 -> 1,60 al primo cambio (solo vista).
+ R2I6 per progetto: 290 rese ambigue restano invariate; 8 vanno alla
+   traduzione di una chiave sorella (es. «Componente singolo» -> fr
+   «Composant seul»); nessun caso nella finestra principale.
+ R2I7 cosmetico tedesco dei percorsi (gia' noto I6).
+REVISIONE 2 — TEST E FINESTRA DI REVISIONE: nessun difetto bloccante;
+modulo morto senza riferimenti (--check-runtime OK, import di tutti i
+moduli OK); test cambiati reali, nessuna asserzione allentata; nessuna
+dipendenza da ordine/tempi. Mutazione (36 mutanti, 9 sopravvissuti) ->
+lacune di copertura, BASSE/BASSO-MEDIE:
+ R2M1 frase di riepilogo del rilevatore con M aggiunte a mano e «di {low} a
+   bassa confidenza ne tieni {low_kept}» mai verificata (dice cosa va alla
+   chiamata a pagamento); R2M2 avvisi «Proposta debole» e «lati sul
+   confine di una tessera» rimovibili; R2M3 toggle_keep su gruppo misto
+   (any->all); R2M4 detector_disagrees senza casefold; R2M5 riga «ritoccata
+   a mano»; R2M6 ripristino dello scroll dopo l'eliminazione; R2M7 il test
+   test_moving_a_low_confidence_proposal_keeps_it usa un campo nascosto
+   nella fase rilevatore (percorso non utente; il vero gesto e' coperto).
+ R2M8 SOSPETTO infrastruttura: un QThread di abbinamento modelli lasciato
+   vivo a fine sessione non e' coperto dal watchdog di conftest (solo sotto
+   mutante).
+STATO: seconda revisione COMPLETA, nulla corretto. Domande all'utente in
+coda (una alla volta): (1) correggere i confermati del secondo giro;
+(2) T2 soglia dei piedini (radice di R2T1-R2T5); (3) U1 modello
+predefinito nel database; (4) «#:» italiani dentro la regola o no.
+16/10 — UTENTE: «ok correggi» (i confermati del secondo giro, ESCLUSI i
+piedini 3D R2T*, che dipendono dalla domanda T2). IN CORSO, 4 agenti:
+ G1 docs R2U1-R2U9, R2U11 (README*, docs/*, guida.html) + testo finale
+   dell'MSI packaging/KiCadGen.wxs:70 (FreeCAD «nel PATH»), con la skill
+   installer-change.
+ G2 i18n/GUI R2I1 (etichetta inesistente -> «Revisione componenti…» +
+   test), R2I2 intestazioni tabella pin e titoli schede, R2I3 riepilogo
+   strumenti AI, R2I4 tooltip del wizard, R2I5 riga spessore PCB, tooltip
+   «Account AI...» con entrambi i provider; + R2D2 etichette senza «» nelle
+   docstring di main_window. File: services/i18n.py, gui/main_window.py,
+   gui/symbol_tab.py, gui/project_wizard.py, database profili, test i18n.
+ G3 docstring R2D1/R2D2 (tranne main_window) + test R2D3 (falsi negativi).
+   I «#:» NON toccati (domanda aperta).
+ G4 test R2M1-R2M7 (file nuovo + test_photo_detection_generality,
+   test_unified_review). R2M8 (sospetto) non toccato.
+FATTO G1 (docs): R2U1 chiamata all'avvio dichiarata (solo il saldo del
+provider con chiave); R2U2 pesi e requirements del rilevatore predefinito da
+sorgenti, analisi ferma prima di pagare; R2U3 FreeCAD solo via
+FREECAD_CMD_PATH o Program Files (anche testo finale dell'MSI,
+KiCadGen.wxs:70: XML valido, test_packaging/app_paths verdi, MSI NON
+ricostruito ne' installato); R2U4 globale rifiutata prima del primo avvio di
+KiCad; R2U5 selettori YOLO/SMD separati; R2U6 etichette complete; R2U7
+python.exe diretto e -ExecutionPolicy Bypass; R2U8 foto di riferimento
+assente detta; R2U9 riferimenti privati tolti (coordinatore: anche
+CLASSIFICATORE_SMD:10); R2U11. 94 verdi.
+FATTO G4 (test): tests/test_review_window_coverage.py, 13 test con gesti
+veri; mutanti D4, D5, D16, D10, E7, E5, E9 ora UCCISI. R2M7: i due test che
+usavano il campo nascosto ora trascinano davvero (asserzioni invariate).
+G9 (ripristino dello scroll dopo l'eliminazione) NON uccidibile: in 13
+scenari il codice di ripristino non cambia nulla (sotto Qt6 e' in pratica
+codice morto; il docstring «kept exactly as they were» non e' vero in un
+caso a zoom 2, dove si sposta di 7 px identico con o senza ripristino):
+segnalato, non testato. 189/189 verdi nei file toccati.
+DUBBIO PER L'UTENTE (in coda): nel riepilogo della fase rilevatore, tenere
+una proposta sotto soglia con T (o spostarla) la fa passare da «deboli» a
+«sicure» (conteggio da _yolo_review_only); il docstring dice «conteggio
+del rilevatore». Quale lettura e' voluta? -> DECISO 16/10: opzione 1, sicure/deboli
+restano il conteggio del RILEVATORE, non cambiano con T o con uno spostamento.
+FATTO G3 (docstring + test): R2D1 decisioni dell'utente ripristinate in
+castellated_module; R2D2 «Fronte», «nessun output per {timeout} s»,
+«Configurazione», «(user, …)», @param second, workers.run in @note,
+component_state.setValue @throws ValueError+TypeError. Test della
+documentazione (13 test, 6 nuovi): @brief con testo sulla stessa riga;
+generatori con @return (Doxygen non ha @yield); raise nudo in except X
+richiede @throws X; @throws deve NOMINARE la classe (o un genitore, anche
+importato via mappa delle basi); regole dei tag anche sotto
+for/while/match/try*/with; «il/uno/ecc/del» sensibili a maiuscole e
+«del» non come istruzione Python (misurato: 3196 docstring, 0 segnalate;
+recall su HEAD 427 -> 427). Separazione FRAGILE dichiarata: classe
+sconosciuta vs fabbrica/variabile decisa dalla convenzione dei nomi
+(CapWords). Codice invariato (AST). NOTA: altri agenti hanno portato
+alcuni file da CRLF a LF (main_window, i18n, alcuni test): innocuo con
+text=auto, il repository normalizza a LF.
+FATTO G2 (i18n/GUI): R2I1 domanda e riga di log nominano «Revisione
+componenti…» in 4 lingue, chiave orfana tolta, vecchi testi migrati
+(_FORMER_REVIEW_LABELS), test che legge l'etichetta dal pulsante vero +
+test di migrazione; R2I2 schede e intestazioni (anche QTreeWidget) con
+slot di sorgente e source_of; R2I3 riepilogo AI dopo il riempimento dei
+combo; R2I4 tooltip del pulsante bloccato conserva il motivo; R2I5 riga
+spessore PCB riempita alla costruzione (1,60 FR-4 e' il valore giusto);
+tooltip «Account AI...» con entrambi i provider; etichette fra «» nelle
+docstring. Database: 13244 -> 13252 righe. tests/test_language_switch_followups.py
+nuovo; test_ai_only_bodies_window:58 aggiornato alla nuova etichetta.
+213 + 328 verdi. Coordinatore: due docstring storiche (main_window ~3335,
+~6968) aggiornate col nome attuale del pulsante (AST invariato).
+SEGNALATI, NON AUTORIZZATI (preesistenti, stessa classe di R2I5): barra di
+stato «Nessun progetto aperto» vuota all'avvio fino al primo cambio
+lingua; passo 2 della barra del flusso ○ in finestra nuova e ✓ dopo un
+cambio lingua (stato ricalcolato solo al cambio); pulsanti di
+scorrimento delle schede di Qt nella lingua di avvio di Qt.
+SUITE COMPLETA dopo il secondo giro di correzioni: A 5283 verdi, 10
+saltati, 19 sottotest; B 3347 verdi, 2 saltati; 0 falliti (totale 8630).
+NULLA COMMITTATO. Domande in coda, una alla volta: (1) T2 soglia dei
+piedini -> DECISO dall'utente 16/10: opzione 2, lo dice il modello AI per ogni
+piedino (campo nella stessa chiamata, come `mating`); da confermare il
+comportamento prima di costruire; (2) U1 modello predefinito nel database -> DECISO 16/10:
+opzione 1, resta DeepSeek flash nel database tracciato; i documenti (README*,
+INSTALLATION, interactive-kicad-models, photo-mechanical, guida) dicono sorgenti =
+deepseek-api/deepseek-flash, MSI = anthropic/claude-opus-5; e, su indicazione
+dell'utente («la scelta del modello deve essere fatta dall'interfaccia»), che il
+modello si sceglie SOLO dall'interfaccia (Configurazione -> Default generali AI...,
+scheda Modello; riquadro Modello AI per la sessione), mai modificando il database; (3) «#:»
+DECISO 16/10 (3): opzione 2, TUTTI i commenti (# e #:) del codice coperto dalla
+regola vanno in inglese, e il test della documentazione li controlla. IN CORSO.
+Piano: snapshot dei token senza commenti (scratchpad/comments/snap_before.json,
+script tokcheck.py) per provare che cambia solo il testo dei commenti; 3697
+righe italiane su 9170 in 69 file; 7 agenti su file disgiunti (main_window;
+analysis_overlay+photo_review_dialog; resto gui; cad3d; generators+core+tools+
+main+__init__; services foto grandi; services resto); il coordinatore estende
+tests/test_documentation.py ai commenti (# e #:), con «…» esclusi.
+Utente: «per le prossime volte devi mettere in test di mettere commenti in
+inglese» -> regola nel test + memoria comments-in-english.
+Coordinatore: tests/test_documentation.py ha ora test_comments_are_written_in_english
+(blocchi di commenti consecutivi giudicati insieme, «…» esclusi) + test
+sintetico positivo/negativo; «Del» maiuscolo non piu' contato (tasto Del;
+misurato: 0 occorrenze nelle 3232 docstring di HEAD). Il test e' ROSSO
+finche' i 7 agenti non finiscono.
+FATTO commenti: 7 agenti finiti; ~3700 righe di commento tradotte + ~170
+commenti italiani che lo scanner non vedeva (titoli di sezione, motivi dei
+noqa). tokcheck: bad 0 (solo testo dei commenti cambiato, fine riga
+invariata). Coordinatore: «Del» maiuscolo conta di nuovo tranne davanti a
+«key» (il test sintetico «Del file.» lo richiede); glossa inglese aggiunta a
+5 citazioni (footprint_view 108/475, symbol_tab 399/404, ai_account 639).
+tests/test_documentation.py: 15 verdi, regola dei commenti VERDE su tutto il
+codice. Regola scritta anche in .claude/CLAUDE.md («Comments in English —
+user rule, binding») su richiesta dell'utente («mettilo come regola»).
+Restano 4 citazioni divise su due righe in main_window (11557, 14247, 15526,
+15887): il test le accetta (giudica il blocco), lasciate cosi'.
+FATTO riepilogo fase rilevatore (decisione 1): campo _detector_review_only
+(NON _yolo_*: photo_global_inventory ~1664 manda ogni _yolo_* nella richiesta
+a pagamento come detector_metadata, avrebbe cambiato richiesta e cache),
+scritto una volta dal nuovo photo_yolo.set_review_only, unico scrittore di
+_yolo_review_only dopo il rilevatore (T, modifica, spostamento,
+ridimensionamento); il riepilogo conta sicure/deboli con
+detector_review_only (ripiego dichiarato: progetti salvati da versioni
+vecchie dopo una modifica non recuperabili). Sopravvive al bundle di
+revisione. 4 test (anche andata/ritorno del bundle); 249 + 223 verdi.
+Coordinatore: il controllo della lingua non conta piu' una parola seguita
+da trattino («un-keep», «un-applied»), caso sintetico aggiunto; 15 verdi.
+SUITE COMPLETA FINALE 16/10: A 5287 verdi, 10 saltati, 19 sottotest; B 3461
+verdi, 2 saltati; 0 falliti (totale 8748). Database dei profili: 0 valori
+con forma di segreto. NULLA COMMITTATO: in attesa dell'OK dell'utente per
+commit (e push?) su ADVANCED; merge in main NON richiesto.
+UTENTE 16/10: «prima fammi testare, lo faro' questa sera»: NIENTE commit
+finche' l'utente non ha provato il programma e dato l'OK. Le modifiche sono
+SOLO nel working tree (anche 4 file di test nuovi non tracciati:
+test_detector_stage_gestures, test_language_switch_followups,
+test_review_window_coverage, test_terminal_attachment_statement): non fare
+stash, checkout o reset.
+PROVA DELL'UTENTE 16/10 sera — segnalazione 1 (screenshot scheda Simbolo
+elettrico, frecce su «U?» e «RS485»): «non si vedono i punti di ancoraggio,
+avevamo detto che deve essere in basso a SX». Diagnosi: la decisione del
+14/10 (ancoraggio vero in basso a sinistra) vale SOLO per i testi disegnati
+dall'utente; quel giorno Reference/Value del simbolo furono esclusi
+esplicitamente («NON toccati ... testi delle proprieta' del simbolo»), e
+nel footprint REF**/Valore hanno una crocetta al CENTRO (decisione 13/10).
+In symbol_tab (~4626) Reference/Value sono disegnati centrati, trascinabili,
+senza alcun segno di ancoraggio. Domanda posta all'utente: come vuole i
+testi delle proprieta'.
+Segnalazione 2 (screenshot anteprima footprint): REF** e RS485 con la crocetta
+al centro, «anche qui!!». DECISO dall'utente («ok procedi» sull'opzione 1
+consigliata): ANCORAGGIO VERO in basso a sinistra anche per Reference/Value
+del simbolo e REF**/Valore del footprint, come i testi disegnati del 14/10:
+quadratino nell'angolo in basso a sinistra, testo che cresce a destra e in
+alto, aggancio alla griglia su quel punto, file KiCad con (justify left
+bottom); posizioni gia' salvate E posizioni predefinite convertite dalla
+dimensione del testo, cosi' nulla si sposta a schermo ne' in KiCad. Stessa
+UX nelle due schede, riuso degli helper del 14/10 (migrate_text_anchor nel
+simbolo, migrate_centred_text nel footprint). IN CORSO: agente S (simbolo:
+symbol_tab.py, generators/symbol.py, symbol_glyphs.py) e agente F
+(footprint: main_window.py parte anteprima/REF-Valore, footprint_view.py,
+core/footprint.py); i18n.py lo tocca solo il coordinatore.
+FATTO S (simbolo): Reference/Value disegnati dall'ancora in basso a
+sinistra con lo stesso quadratino dei testi disegnati (al passaggio del
+puntatore e durante il trascinamento); .kicad_sym con (justify left bottom).
+Conversione centro -> angolo con la LARGHEZZA DI KICAD misurata con kicad-cli
+10 (avanzamento di ogni carattere = multiplo di 1/21 della size; larghezza =
+size x somma + 0,2005 mm entro 0,001 mm; centro -> base 0,585 x size;
+caratteri fuori tabella = 1 size, euristica dichiarata). In KiCad NULLA si
+sposta (kicad-cli prima/dopo entro 0,01 mm); A SCHERMO un testo puo'
+spostarsi poco (il font dell'editor e' piu' stretto di quello di KiCad):
+orizzontale 0-0,42 mm, verticale 0,108 mm (convenzione del 14/10: base
+dell'editor sull'ancora, KiCad ~0,128 x size sopra) -> DA DIRE ALL'UTENTE.
+Posizioni vecchie lette come centri e convertite al volo, scritte come
+ancore col marcatore al primo spostamento (una volta sola). 16 test nuovi,
+427 verdi. SEGNALATO: kicad_library ~273 alla rinomina riscrive solo il
+testo del Value: un Value predefinito tiene il vecchio angolo finche' il
+simbolo non viene rigenerato.
+FATTO F (footprint): REF**/Valore con ancora in basso a sinistra e lo
+stesso quadratino dei testi disegnati (sempre visibile), croce tolta;
+.kicad_mod con (justify left bottom) quando posizionati dalla finestra; testo
+${REFERENCE} del Fab resta centrato (geometria generata, precedente 14/10);
+predefiniti NON agganciati alla griglia (lo fa il trascinamento); nessuna
+rotazione nel modello dati; CLI/esempi restano centrati (niente font Qt);
+bozze di recupero precedenti con posizioni scelte non piu' offerte.
+Conversione con la metrica dell'ANTEPRIMA (Qt): a schermo nulla si muove, IN
+KICAD REF** si sposta fino a ~0,5 mm a destra (font desktop reale), -0,085 mm
+in verticale. 14 test nuovi; 596 + 396 + 210 verdi.
+INCOERENZA FRA LE SCHEDE (da decidere con l'utente, regola «stessa UX»): il
+simbolo tiene fermo KiCad (tabella delle larghezze di KiCad, a schermo fino a
+0,4 mm), il footprint tiene fermo lo schermo (in KiCad fino a 0,5 mm).
+Consiglio del coordinatore: KiCad fermo in entrambe, riusando la tabella
+delle larghezze del simbolo (toglie anche il limite CLI/esempi).
+DECISO dall'utente 16/10: opzione 1, KICAD FERMO in entrambe le schede. IN
+CORSO: il footprint converte centro -> angolo con la tabella delle larghezze
+di KiCad (generators/symbol.py kicad_text_width / costante centro->base),
+anche fuori dalla finestra (CLI, esempi: anchor scritto anche li'?
+decidere con giudizio documentato); il quadratino resta sull'angolo KiCad.
+FATTO (agente K): kicadgen/core/kicad_text.py con la geometria del font di
+KiCad (tabella degli avanzamenti spostata da symbol.py, ri-esportata);
+misurato con kicad-cli: la tabella vale anche per il footprint, il margine
+NO -> margin = 25/19 x min(spessore, 0,25 x size) (simbolo: penna 0,1524 ->
+0,20053; footprint: 0,15 -> 0,1974), centro -> base 0,585 x size in entrambe
+(segno diverso: y su nel simbolo, y giu' nel footprint). Footprint convertito
+con la geometria di KiCad: kicad-cli centrato vs convertito = 0,0000 mm.
+Anche CLI/esempi (place_default_texts) ora scrivono ancore in basso a
+sinistra: stessa forma del file ovunque; regole D1 verificate sui centri.
+949 + 2410 verdi. Coordinatore: docstring di package.py ~85 e pin_header.py
+~348 aggiornate. SPOSTAMENTO A SCHERMO (una volta, font Segoe UI): fino a
+-0,5 mm su REF**, -1,4 mm su «ESP32-WROOM-32E», -2,1 mm su
+«SOIC-8_3.9x4.9mm_P1.27mm» (l'anteprima disegna i testi piu' stretti di
+KiCad: la differenza c'era gia', ora si vede sull'ancora). DA DIRE
+ALL'UTENTE + proposta: disegnare i testi dell'anteprima alla larghezza di
+KiCad (allungamento per testo, ora misurabile esattamente).
+SEGNALATI: rinomina in kicad_library ~273 riscrive solo il testo del Value
+(tiene il bordo sinistro); sulla scheda il Value mostra il valore dello
+schema, di larghezza diversa, quindi un Value predefinito non e' piu'
+centrato sotto il pezzo.
+DECISO dall'utente 16/10 («ok procedi»): i testi disegnati nell'editor del
+simbolo e nell'anteprima del footprint alla LARGHEZZA DI KICAD, testo per
+testo (allungamento orizzontale = kicad_text_width / larghezza Qt), anche in
+verticale allineati alla scatola di KiCad dove misurabile, con UN helper
+comune alle due schede (regola «stessa UX»). Vale per proprieta', testi
+disegnati, nomi e numeri dei pin, testi dei glifi.
+FATTO: helper comune kicadgen/gui/kicad_text_item.py (maiuscole = size,
+allungamento lungo la direzione di lettura fino alla somma degli avanzamenti
+di KiCad, inizio dopo mezza penna come KiCad; base 0,125 x size sopra
+un'ancora «bottom», 0,585 e 1,17 per centro/alto; rotazione 90 uguale).
+Misure contro kicad-cli, peggior caso su 8 testi x 2 size x 2 rotazioni:
+Segoe UI fine 5,17 -> 0,082 mm, larghezza 5,01 -> 0,156 mm; Courier New
+3,64 -> 0,214 mm (tolleranza dei test 0,2 x size sulle estremita',
+FRAGILE con Courier); base -0,125 x size -> 0. Le due schede coincidono
+entro 0,003 mm. Ridisegno di un simbolo da 80 pin 14,6 ms. 35 test nuovi
+(tests/test_kicad_width_texts.py), 912 + 64 verdi. Coordinatore: docstring
+di symbol.py ~521 e footprint.py ~88 aggiornate.
+SEGNALATI: (1) i NUMERI DEI PIN stanno ~0,18 mm troppo in basso (prima
+0,34): KiCad mette la base a 0,36 + 0,125 x size sopra la linea del pin,
+l'editor usa PIN_NUMBER_GAP_MM = 0,178; gli stessi numeri superano dal size
+1,27 il limite _PIN_NUMBER_GAP_BOUND_MM = 0,508 di generators/symbol.py
+(stima di ingombro che puo' venire troppo piccola) -> da chiedere
+all'utente. (2) testi con marcatura KiCad (~{}, ^{}, _{}) approssimati.
+Suite completa: 1 fallito, test_overlay_phase_resize (card 1 px piu' alta),
+DIPENDENTE DALL'ORDINE. Causa (misurata dal coordinatore): sotto offscreen
+registrare un font con addApplicationFont fa risolvere il font predefinito
+dell'applicazione a quella famiglia (12 -> 15-16 px) e rimuoverlo NON torna
+indietro; test_kicad_width_texts registrava Segoe UI e Courier New nella
+sessione condivisa. Correzione: i controlli con i font di sistema girano in
+un processo pytest separato (test_desktop_fonts_in_a_separate_process,
+variabile KICADGEN_TEST_DESKTOP_FONTS); la sessione condivisa non registra
+piu' font. 49 verdi nella coppia + documentazione.
+TRAPPOLA per chi riprende: tests/test_preview_review.py registra Segoe UI
+nella sessione condivisa senza toglierlo (preesistente); oggi non fa danni
+perche' e' nella seconda meta', ma e' la stessa classe di problema.
+SUITE COMPLETA 16/10 dopo ancoraggi delle proprieta' e larghezza KiCad: A
+5337 verdi, 10 saltati, 19 sottotest; B 3477 verdi, 2 saltati; 0 falliti
+(totale 8814). NULLA COMMITTATO. In attesa: risposta sui numeri dei pin
+(0,18 mm troppo in basso) e OK al commit dopo la prova dell'utente.
+DECISO dall'utente 16/10 («ok»): numeri dei pin alla posizione di KiCad
+(base a 0,36 + 0,125 x size sopra la linea del pin, misurato) e stima di
+ingombro _PIN_NUMBER_GAP_BOUND_MM aggiornata.
+FATTO: regola misurata con kicad-cli 10 e trovata nel sorgente di KiCad
+(eeschema/pin_layout_cache.cpp getNumberBlockOffset: 4 + 4 + 6 mil = 14 mil
+= 0,3556 mm dal filo del pin al bordo inferiore del numero; base 0,125 x size
+piu' su); identica a 0/90/180/270; costanti in core/kicad_text.py
+(kicad_pin_number_baseline, kicad_pin_number_extent con «4» = 22/21 x size).
+Editor entro 0,007 mm da kicad-cli. _PIN_NUMBER_GAP_BOUND_MM tolto: l'unico
+uso (_pin_drawing_top) decide solo le posizioni PREDEFINITE di
+Reference/Value; con numeri a 1,27 mm (predefinito) file identico; con numeri
+da 1,8 mm in su sulla riga in alto Reference/Value predefiniti salgono di un
+passo di griglia (1,27 mm); le posizioni scelte dall'utente non si toccano.
+Limite dichiarato: misure con le impostazioni di libreria predefinite di
+KiCad. 7 test nuovi (tests/test_pin_number_position.py), 542 verdi.
+SUITE COMPLETA 16/10 (ultima): A 5337 verdi, 10 saltati, 19 sottotest; B
+3484 verdi, 2 saltati; 0 falliti (totale 8821). NULLA COMMITTATO: l'utente
+sta provando il programma; commit + push su ADVANCED solo con il suo OK.
+PROVA DELL'UTENTE, segnalazione 3: «nel simbolo il quadratino di ancoraggio
+si vede solo col mouse sopra, nell'anteprima footprint e' sempre visibile:
+adegua al funzionamento del simbolo». IN CORSO: quadratino di REF**/Valore
+nel footprint visibile solo al passaggio del puntatore (e durante il
+trascinamento), come nel simbolo, riusando il meccanismo di comparsa delle
+maniglie dei disegni del footprint.
+FATTO: quadratino di REF**/Valore nascosto a riposo, visibile entro 12 px
+schermo dal testo e dalla sua ancora (stesso HANDLE_HOVER_MARGIN del simbolo,
+test che li tiene uguali) e durante il trascinamento; nascosto all'uscita
+del puntatore e in modalita' disegno. footprint_view: TEXT_ANCHOR_ROLE,
+segnale text_hovered, _near_scene_rect condiviso con le maniglie dei
+disegni. 377 verdi. Suite completa NON ancora rilanciata dopo questa.
+CORREZIONE DI QUESTO HANDOFF: la sessione di oggi e' del 16/10/2026 (data
+di sistema), NON del 17/10 come scritto per errore dal coordinatore per
+tutta la giornata; qui corretto ovunque. Restano con «2026-10-17» o «17/10»
+33 file di codice, test e documentazione toccati oggi (commenti, docstring,
+marcatori CONTRACT CHANGED, CLAUDE.md): la sostituzione in blocco e' stata
+bloccata dal sistema di permessi, chiesto all'utente come procedere.
+UTENTE: «1» (permesso) -> corretti 34 file (2026-10-17 e 17/10 -> 16/10).
+ISTRUZIONE DELL'UTENTE 16/10 sera: «quando hai finito committa e pusha, ma
+non mergiare in main; poi spegni il PC». Quindi: suite verde -> numeri in
+testa all'handoff e in CLAUDE.md -> controllo segreti del database ->
+commit (database profili incluso) + push su ADVANCED -> spegnimento.
+SUITE COMPLETA FINALE 16/10 sera: A 5342 verdi, 10 saltati, 19 sottotest;
+B 3484 verdi, 2 saltati; 0 falliti (totale 8826). Numeri allineati in
+CLAUDE.md.
+italiani nella regola; (4) conteggio sicure/deboli nel riepilogo; poi
+commit con OK.
+16/10 — T2 CONFERMATO dall'utente («ok») con questo comportamento:
+ 1. observe_package_terminals: ogni terminale ha il campo richiesto
+    attachment = attached | separate | unclear (stessa chiamata).
+ 2. attached + gap entro TERMINAL_ATTACH_GAP_MAX -> ancorato alla faccia
+    piu' vicina, metallo solo sul gap visto; attached + gap oltre -> NIENTE
+    ponte, piedino come in foto + dubbio segnalato (la soglia resta solo
+    controllo di coerenza).
+ 3. separate -> come in foto, mai ponte.
+ 4. unclear o risposte vecchie senza campo -> geometria come oggi
+    (ripiego dichiarato).
+ 5. Chiusi insieme R2T1 (nessun attaccato staccato), R2T3 (nessuna
+    compenetrazione, anche in fila lungo la normale), R2T2 (il test
+    verifica il contatto col corpo). R2T4: attached True senza riscontro
+    geometrico non inventa metallo.
+ Conseguenze dette all'utente: cache dei terminali invalidata (rilettura a
+ pagamento); terminal_prompt nel database aggiornato solo se uguale al
+ predefinito, i profili personalizzati non si toccano.
+FATTO T2: campo attachment richiesto nello schema e nel PROMPT («unclear,
+never guess»); _attachment_decision nel decoder (attached entro soglia ->
+ancorato; attached oltre -> isola + attachment_doubt; separate -> isola,
+accettato anche lontano; unclear/assente -> ripiego geometrico con il
+rifiuto di oggi). Renderer: face_contact_anchor prova le facce in ordine e
+accetta solo contatto su FACCIA che non entra in altri piedini (R2T1,
+R2T3); se nessuna faccia, isola + avviso; attached True falsificato ->
+isola + avviso (R2T4). Il dubbio arriva all'utente nel registro AI
+(«#id, terminale n: …») e a ogni generazione 3D come avviso (KICADGEN_WARN).
+4 testi nuovi in 4 lingue. Database: terminal_prompt aggiornato (era
+identico al predefinito), traduzioni 13252 -> 13268. Coordinatore:
+migrazione del vecchio prompt cablata in
+analysis_profiles._replace_superseded_texts + 2 test (positivo/negativo);
+2 mock di test vecchi con attachment; docs/photo-mechanical-workflow.md
+aggiornato. Test: 111 nuovi (tests/test_terminal_attachment_statement.py,
+40x25 disposizioni casuali), 7 mutanti tutti uccisi; OCC reale 29 casi: ogni
+attaccato condivide una faccia, volumi fra piedini 0. FRAGILITA' dichiarate:
+a parita' di spazio vince il piedino prima nel payload (deterministico);
+contatti molto sottili accettati (0,0015 mm2); un pad del vicino chiamato
+«separate» diventa un'isola invece di far scartare il componente; il ramo
+unclear dipende ancora da .06; due frasi del prompt dicono ancora «attached
+terminal». Sonde vecchie B/B2/C asseriscono il comportamento superato.
 
 ## 2026-10-15 notte — IN CORSO: correzione dei MEDI 1-11 della verifica (utente: «ok correggi i medi da 1 a 11»)
 

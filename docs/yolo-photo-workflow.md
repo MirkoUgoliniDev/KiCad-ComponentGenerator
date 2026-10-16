@@ -1,167 +1,139 @@
-# Local YOLO + AI review + KiCad / FreeCAD
+# Local YOLO detector, AI review and KiCad / FreeCAD
 
-The default photo detector **YOLO locale + verifica AI** is available in the
-analysis panel. Restart the application after updating Python sources.
-YOLO plus AI review is selected on every new app window, as requested by the
-user. The previous AI-only detector remains selectable. Alternative detector
-and ONNX file choices apply only to the current session; saved LLM model
-settings are not changed. Starting analysis still requires an explicit click.
+The photo inventory of a board starts with a **local detector** that proposes
+the mounted bodies on the calibrated top photograph; the paid AI calls come
+after it, on what the user kept. This page describes the detector choices,
+the weights files, their settings and what the program does with the
+proposals. The whole pipeline is in `photo-mechanical-workflow.md` (Italian);
+the local SMD network in `CLASSIFICATORE_SMD.md` (Italian).
 
-Launch normally with `python main.py`: when the project's `.venv` Python exists,
-the launcher uses it automatically before importing GUI dependencies. No global
-packages are installed. With no local environment it keeps the current Python.
-`python main.py --check-runtime` checks imports without opening the GUI, reading
-`.env` or making AI calls.
+Launch normally with `python main.py`: when the project's `.venv` Python
+exists, the launcher uses it before importing GUI dependencies; no global
+packages are installed. `python main.py --check-runtime` checks imports
+without opening the GUI, reading `.env` or making AI calls.
 
-## Running it
+## Choosing the detector
 
-1. Select the populated-board component type and provide mechanical dimensions,
-   pinout and a high-resolution top-side photograph in their appropriate roles.
-2. Select **YOLO locale + verifica AI**. The optional model picker overrides the
-   default `models/yolo/pcb_yolov8s.onnx` or `KICADGEN_YOLO_MODEL` environment setting
-   (the «YOLO + rete SMD» route uses the `.pt` default of the same folder; the SMD
-   network itself lives in `models/smd`).
-   It accepts `.onnx` models (onnxruntime) and `.pt` checkpoints (PyTorch through
-   Ultralytics; install `requirements-yolo-pt.txt`). See «ONNX and PyTorch models».
-3. Check **Verifica foto**: this configured visual AI model reviews coverage
-   and the crops. The initial document analysis still uses its configured model.
-4. Start extraction, inspect the photographic overlay and uncertain bodies,
-   correct measurements where necessary, then generate and inspect the 3D model.
+In the Project tab, step **Mounting and analysis**, the collapsible box
+**AI tools** has the row **Photo detection** (boards only; the two
+single-component types never run the inventory):
 
-An incompatible/missing local model or runtime is rejected before paid calls;
-previous displayed results remain available. After local inference, the overview
-and component crops are sent to OpenRouter. This hybrid flow was explicitly
-authorized by the user. AI calls consume provider credit; local inference does
-not. Existing API credit/error checks remain in use. Do not interpret a local
-YOLO selection as an offline-only analysis or a cost cap.
+| Entry | What runs |
+|---|---|
+| **YOLO + local SMD network (v3)** | default from the sources. YOLO proposes, the local SMD network classifies the kept bodies, only unresolved bodies go to the paid crop reading. Disabled in the installed Windows program (no PyTorch, no checkpoint) with the reason in its tooltip. |
+| **Local YOLO + AI verification** | default in the installed program. YOLO proposes, the AI inventory and the crop reading verify. |
+| **AI (current)** | no local detector: the AI localizes on the full view and detail grid. |
+| **Vision model only (no local detector)** | the vision model alone. |
+| **Local YOLO only (pretest, no AI)** | a pretest of the detector: shows how the bodies are found and nothing else. No AI call of any kind. |
 
-## Local YOLO only (pretest)
+The row **YOLO model** gives the weights file; empty, the program uses
+`models/yolo/pcb_yolov8s.onnx` (or the `KICADGEN_YOLO_MODEL` variable) for
+the ONNX routes and `models/yolo/pcb_component_detector_yolov8m_best.pt` for
+«YOLO + local SMD network». The button beside it opens **Choose the YOLO
+model**: on the left the weights files of the models folder (plus the one in
+use and any file added with «Other file...»), on the right format, size, date,
+origin, family, licence and training data when the project knows the file by
+SHA-256, the classes it detects and whether the detector can use it. An ONNX
+file is checked as soon as it is selected; a `.pt` file is a Python pickle
+that runs code when loaded, so it is checked only when you press **Check
+compatibility**, never because it sits in a folder. An incompatible or
+missing model or runtime is rejected before any paid call.
 
-**Solo YOLO locale (pretest, nessuna AI)** (user's request, 2026-09-25) is a
-pretest of the detector, not an extraction: it shows how the components are
-found, and does nothing else. No AI call of any kind is made, neither on the
-documents nor on the photograph.
+**YOLO settings** (button next to the threshold) opens the detector's
+settings: confidence (default 0.25), overlap / NMS IoU (default 0.5) and the
+magnified tiles (640 and/or 1280 px) that make this detector differ from a
+single pass. They apply to every YOLO route. Detector and weights choices are
+per session; projects remember the detector entry by value.
 
-- In «Strumenti AI» the «Rilevamento foto» row comes first; with this entry
-  the «Modello AI» and «Modello di visione» rows are hidden (the YOLO model
-  row stays, `.onnx` or `.pt`).
-- The extraction button starts `YoloPretestWorker`: the declared top views
-  (roles `hires`, `top`) are calibrated with the **Body length / Body width
-  fields**, since without the document analysis there is no other source of
-  the board dimensions. If the photo cannot be calibrated, check those two
-  fields.
-- The detector's boxes open in the component review («Revisione componenti»,
-  detector stage: the same window that later shows the AI inventory). On OK
-  the kept boxes are saved in `photo-review/` exactly as after an extraction:
-  they can be reopened for free, or sent to the paid «Rilancia inventario AI»
-  later.
-- Fields, component table and 3D are not touched.
-- «Interrompi» abandons the local detection; nothing is charged.
+Starting an analysis always requires an explicit click on **Extract parameters
+with AI**. A local detector selection is not an offline-only analysis nor a
+cost cap: after it, the routes with AI send the overview and the crops to the
+provider and spend credit; the pretest does not.
 
-`photo_inventory.extract_inventory(detector='yolo_only')` is the service
-behind it: it stops after the review and turns the kept boxes into
-component rows (`yolo_only_components`: `kind` from the declared table
-`YOLO_CLASS_KINDS`, 1.0 mm placeholder height, colour sampled from the photo,
-every row uncertain; without a reviewer, weak proposals are dropped). The AI
-extraction (`extract_pin_header_params`) does not accept `yolo_only`. The
-combo entry is appended at the end; projects store the choice by value.
+## What happens after the detection
+
+1. The declared top photo (role **High resolution**) is calibrated on the
+   board dimensions (axis by axis); the pretest, which reads no documents,
+   calibrates it with the **Body length / Body width** fields and asks for
+   them when they are not known.
+2. YOLO runs on the full overview and on overlapping magnified tiles. Classes,
+   scores, input hash, discarded proposals and recipe are written to
+   `<project>/photo-cache/yolo-audit/`.
+3. The **review window** opens in its **detector stage** with the proposals:
+   remove the rectangles that fall on prints, holes or empty pads, draw the
+   missing ones (R), use the lasso (L) for groups, then **OK** sends the kept
+   proposals on; **Cancel** stops the analysis before paying. The kept
+   proposals are saved in `<project>/photo-review/` and can be reopened for
+   free with **Component review…**, or sent later to the paid **Rerun AI
+   inventory (paid)…**. In the pretest the window is the end: fields,
+   table and 3D are not touched.
+4. With the AI routes: one global inventory call on the whole board proposes
+   the bodies and complete assemblies where YOLO returned fragments; the
+   detector's and the AI's readings are reconciled one-to-one (IoU or
+   containment with coincident centres). The detector's own reading — class,
+   confidence, box — is kept beside the AI's and never overwritten; bodies
+   proposed by the AI alone start excluded until kept. Unresolved bodies are
+   re-read twice from their enlarged crops with a visual questionnaire; only
+   agreeing readings are adopted.
+5. With the pause after the inventory (default on), the same window opens in
+   its **inventory stage**: reconciled rows, the detector's box as a dotted
+   ghost where it differs, markers for warnings, undetermined types and
+   detector/AI disagreements, **Parameters…** with the detector, AI and KiCad
+   sections, **Choose KiCad model…**.
+6. Real library STEP solids are imported without rescaling; unmatched entries
+   use generic volumes. A dimensional match is not a verified electrical
+   identity.
+
+Top photographs do not establish height, hidden contacts, pin 1, polarity or
+SOT-versus-TSOT variants. The photographic long-axis orientation is not a
+certified native-model rotation: reviewed rotation and Z overrides are kept
+through the table and the CAD payload. An observed edge-mating connector may
+overhang the PCB and is not shifted to force its envelope inside the board.
 
 ## Local runtime
 
 ```powershell
-.venv/Scripts/python.exe -m pip install -r requirements-yolo.txt
+.venv/Scripts/python.exe -m pip install -r requirements-yolo.txt      # .onnx (onnxruntime)
+.venv/Scripts/python.exe -m pip install -r requirements-yolo-pt.txt   # .pt (Ultralytics / PyTorch)
 ```
 
-The tested environment uses ONNX Runtime 1.30.0 on CPU (four threads). The model
-contract is a fixed float32 input `[1,3,640,640]`, a raw output
-`[1, 4 + classes, 8400]`, and classes among the detector's 21 PCB classes
-(see «Class tables» below). An arbitrary YOLO ONNX export is not necessarily
-compatible. No automatic model download is performed.
+ONNX Runtime runs on CPU. The ONNX contract is a fixed float32 input
+`[1,3,640,640]` and a raw output `[1, 4 + classes, 8400]`; an arbitrary YOLO
+ONNX export is not necessarily compatible. No model is downloaded
+automatically.
 
-The locally tested weight originated from `Arshia82sbn/pcb-yolov8s-detection`:
-SHA-256 `bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29`.
-It is ignored by Git. Model-card MIT and embedded AGPL metadata conflict;
-resolve licensing before redistribution. The binary is not part of this change.
-
-## Evidence flow
-
-- The existing photo preparation checks/calibration convert image coordinates
-  to millimetres. Production does not use the manually rectified trial photo.
-- Local YOLO uses the full overview and overlapping 640/1280-pixel windows;
-  generic thresholds are confidence 0.25 and class-agnostic NMS IoU 0.5.
-  Classes, scores, input hash, discarded proposals and recipe are audited.
-- One overview AI call proposes missing bodies or complete assemblies where
-  YOLO returned fragments. These remain labelled AI proposals. Similar envelopes
-  are deduplicated; contained boxes are not blindly deleted.
-- Batches of eight padded crops are reviewed for mounted-body presence, physical
-  family, visible markings, body-versus-lead bounds, contact arrangement and
-  package evidence. Invalid/missing answers retain uncertain candidates. Only
-  explicit high-confidence non-component votes delete a proposal.
-- Optional crop-relative boundary refinement is checked against the original
-  target and converted deterministically back to board coordinates. It cannot
-  manufacture nominal dimensions from a desired package name.
-- The existing terminal observation and KiCad resolver stages remain in use.
-  Real library STEP solids are imported without rescaling; unmatched entries use
-  approximations. A dimensional match is not a verified electrical identity.
-
-Top photographs do not establish height, hidden contacts, pin 1, polarity or
-SOT-versus-TSOT variants. Photographic long-axis orientation is not a certified
-native-model rotation. Reviewed native rotation/Z overrides are retained through
-the table and CAD payload; absent rotation overrides keep existing axis inference.
-An observed edge-mating connector may overhang the PCB and is not shifted merely
-to force its whole envelope inside the substrate.
-
-## Logs and reproducibility
-
-The component's `analisi-ai.log` receives the existing GUI progress stream and
-is flushed for reading while work continues. `<project>/photo-cache/yolo-audit/`
-(or the supplied cache directory) contains unique detector, coverage and review
-JSON files. Review audits preserve the exact prompt, model, individual crop
-coordinate transforms, parsed responses and resulting hypotheses. They do not
-contain API keys or encoded source images. Cached responses are content-addressed
-by model, prompt, schema and images; malformed or incomplete responses are not
-reused as complete successes. Audit write failures are reported in progress logs.
-
-## Actual validation and limits (2026-09-19)
-
-The app-calibrated ESP32 photo produced 63 local **proposals** from 30 views in
-6.827 seconds. The whole RF module scored below 0.25, while fragments and false
-positives remained. This motivated the explicit AI coverage check; it is not
-evidence that YOLO found all components. The new AI calls have been exercised
-with offline mocks, not a fresh paid end-to-end analysis.
-
-The separate FreeCAD demonstration replays 43 reviewed observations: 41 real
-STEP dimensional candidates from 14 distinct local files, and two explicit
-placeholders because exact WROOM-1U and RGB2020 STEP files are absent locally.
-It does not substitute WROOM-1 for WROOM-1U. Actual STEP/FCStd reopening, native
-volumes and selected lead orientations were checked. Positions, package choice
-and rotation in that demonstration include manual review; automatic production
-output is not guaranteed to reproduce it. No global KiCad installation occurred.
+The locally tested ONNX weight originated from
+`Arshia82sbn/pcb-yolov8s-detection`, SHA-256
+`bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29`. It is
+ignored by Git and **not shipped** in the Windows installer by default: its
+model-card MIT licence and its embedded AGPL metadata conflict, and the
+`build-windows.ps1 -IncludeYoloModel` switch must be used only once
+redistribution is allowed (see `PACKAGING-WINDOWS-MSI.md`). Without weights
+the program works and asks for a file in the «YOLO model» field.
 
 ## ONNX and PyTorch models
 
-Since 2026-09-25 the detector loads both formats, chosen by the file
-extension (user's request):
+The detector loads both formats, chosen by the file extension:
 
 | Extension | Runtime | Output read by the detector |
 |---|---|---|
-| `.onnx` | onnxruntime (CPU) | raw `[1, 25, 8400]`, unchanged contract |
-| `.pt` | PyTorch through Ultralytics (`requirements-yolo-pt.txt`) | standard head (YOLOv8): raw `[1, 25, 8400]`; end-to-end head (YOLO26, YOLOv10): the official one-to-one output, `[1, 25, 300]` |
+| `.onnx` | onnxruntime (CPU) | raw `[1, 4 + classes, 8400]` |
+| `.pt` | PyTorch through Ultralytics (`requirements-yolo-pt.txt`) | standard head (YOLOv8): raw `[1, 4 + classes, 8400]`; end-to-end head (YOLO26, YOLOv10): the official one-to-one output `[1, 4 + classes, 300]` |
 
 Every model goes through the same letterbox, thresholds, NMS, audit and
 review code; only the object running the network differs
-(`photo_yolo._TorchSession` for `.pt`). The class table of both formats is
-read by name (see «Class tables»).
+(`photo_yolo._TorchSession` for `.pt`). PyTorch is not part of the Windows
+installer (size; licence still to be decided): there a `.pt` model gives a
+clear error and an `.onnx` export of the same model is the way to go.
 
 ### Class tables
 
-Since 2026-09-25 (user's request, after a 16-class YOLO26 Large model was
-refused) the detector reads the classes a model declares **by name**, not by
-position (`photo_yolo.class_mapping`):
+The detector reads the classes a model declares **by name**, not by position
+(`photo_yolo.class_mapping`):
 
 - names match ignoring case (`IC` is `ic`);
-- the scores are reordered into the detector's order; classes the model
-  does not have stay at zero and are listed in the log and in the audit
+- the scores are reordered into the detector's order; classes the model does
+  not have stay at zero and are listed in the log and in the audit
   (`missing_classes`, `class_order`);
 - a model is refused if it declares a class the detector does not know, the
   same class twice, or indexes that do not start at 0: reading an unknown
@@ -169,18 +141,32 @@ position (`photo_yolo.class_mapping`):
 - a model with the detector's own table keeps the plain onnxruntime session.
 
 Limit: without the `pads` and `pins` classes, the recovery of bodies that the
-model confused with pads or pins has nothing to compare, so it stays
-inactive. The log says so.
+model confused with pads or pins has nothing to compare and stays inactive;
+the log says so. End-to-end heads always use the official one-to-one output
+(forced explicitly, because Ultralytics changed its default between 8.4.37
+and 8.4.163); this head gives only the best class of each detection, so the
+same recovery stays inactive there too.
 
-End-to-end heads: the official one-to-one head is always used, forced
-explicitly because Ultralytics changed its default between versions (8.4.37
-on, 8.4.163 off). Checked on `AltaRisoluzione2.jpg`: the one-to-many branch
-with this module's NMS found 38 bodies and matched only 39 of the 46 found by
-the one-to-one head; the one-to-one path matches 46/46 (45 same class). Limit:
-this head gives only the best class of each detection, so the «pads/pins with
-a competing body» recovery has nothing to compare and stays inactive.
+## Logs and reproducibility
 
-A `.pt` file is a Python pickle: loading it runs code from the file. Only
-files the user chose are loaded. PyTorch is not part of the Windows
-installer (size; license still to be decided): there, a `.pt` model gives a
-clear error and an `.onnx` export of the same model is the way to go.
+The project's `analisi-ai.log` receives the progress stream and is flushed
+while work continues. `<project>/photo-cache/yolo-audit/` holds the detector,
+coverage and review JSON files: exact prompt, model, per-crop coordinate
+transforms, parsed responses and resulting hypotheses, without API keys or
+encoded source images. Cached responses are content-addressed by model,
+prompt, schema and images; malformed or incomplete responses are not reused
+as complete successes. Audit write failures are reported in the progress log.
+
+## Validation notes and limits
+
+- On the ESP32 sample photo (2026-09-19) the detector gave 63 local
+  proposals from 30 views in under 7 seconds; the whole RF module scored
+  below 0.25 while fragments and false positives remained. This is why the AI
+  coverage call and the review stage exist; it is not evidence that YOLO
+  finds every component.
+- On `AltaRisoluzione2.jpg` the one-to-one head of a YOLO26 `.pt` model
+  matched 46/46 bodies against 39/46 for the one-to-many branch with this
+  module's NMS: the reason the one-to-one output is forced.
+- The software tests replay cached answers: they do not certify that every
+  body of a new photograph is found. Verify the rectangles on the photo
+  before accepting the CAD.

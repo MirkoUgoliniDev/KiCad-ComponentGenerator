@@ -1,12 +1,12 @@
 """@brief Shared Catppuccin Mocha theme: palette and style sheets of the application.
 
-Espone la QSS applicata all'intera applicazione (`APP_QSS`) e quella delle
-schede (`TAB_QSS`), e la misura della larghezza che una casella numerica
-con quei pulsanti richiede per mostrare intero il suo valore piu' largo
-(`spin_box_width_for_values`). La palette e' la stessa di Pm3ToWav; le schede non sono
-piu' identiche alle sue (2026-09-24: scelta in grassetto e piu' chiara, le
-altre scure, le disabilitate quasi nere). La scheda scelta si allarga di
-qualche pixel per il grassetto: e' il prezzo accettato della scelta grafica.
+Exposes the QSS applied to the whole application (`APP_QSS`) and the one of
+the tabs (`TAB_QSS`), and the measure of the width a spin box with those
+buttons needs to show its widest value in full (`spin_box_width_for_values`).
+The palette is the same as Pm3ToWav's; the tabs are no longer identical to
+its (2026-09-24: the chosen one bold and lighter, the others dark, the
+disabled ones almost black). The chosen tab widens by a few pixels because of
+the bold face: that is the accepted price of the graphic choice.
 """
 
 from pathlib import Path
@@ -17,28 +17,29 @@ from PyQt6.QtWidgets import QStyle, QStyleOptionSpinBox
 _COMBO_ARROW = (Path(__file__).resolve().parent / "assets" / "combo-arrow.svg").as_posix()
 _SPIN_UP = (Path(__file__).resolve().parent / "assets" / "spin-arrow-up.svg").as_posix()
 _SPIN_DOWN = (Path(__file__).resolve().parent / "assets" / "spin-arrow-down.svg").as_posix()
-#: Segno di spunta delle caselle accese: senza, una casella accesa era solo
-#: un quadrato pieno di blu, che non si legge come «acceso» (utente, 2026-09-24).
+#: Check mark of the checked boxes: without it, a checked box was only a
+#: square filled with blue, which does not read as «acceso» (on) (user, 2026-09-24).
 _CHECK_MARK = (Path(__file__).resolve().parent / "assets" / "check-mark.svg").as_posix()
 
-# Palette Catppuccin Mocha (stessi valori esadecimali usati in Pm3ToWav)
-BASE = "#1e1e2e"       # sfondo finestra
-MANTLE = "#181825"     # sfondo piu' scuro (menu, barre)
-SURFACE0 = "#313244"   # sfondo widget (input, tab non selezionati)
-SURFACE1 = "#45475a"   # bordi
-SURFACE2 = "#585b70"   # bordi hover
-TEXT = "#cdd6f4"       # testo principale
-SUBTEXT = "#a6adc8"    # testo secondario / disabled
-BLUE = "#89b4fa"       # accento (selezione, focus, progress)
-GREEN = "#a6e3a1"      # successo
-RED = "#f38ba8"        # errore
+# Catppuccin Mocha palette (same hexadecimal values used in Pm3ToWav)
+BASE = "#1e1e2e"       # window background
+MANTLE = "#181825"     # darkest background (menus, bars)
+SURFACE0 = "#313244"   # widget background (inputs, unselected tabs)
+SURFACE1 = "#45475a"   # borders
+SURFACE2 = "#585b70"   # hover borders
+TEXT = "#cdd6f4"       # main text
+SUBTEXT = "#a6adc8"    # secondary / disabled text
+BLUE = "#89b4fa"       # accent (selection, focus, progress)
+GREEN = "#a6e3a1"      # success
+RED = "#f38ba8"        # error
 YELLOW = "#f9e2af"     # warning
 
-#: Schede: quella SCELTA e' la piu' evidente (sfondo chiaro, sottolineatura
-#: blu, testo in grassetto); le altre sono attenuate, le disabilitate ancora di
-#: piu'. Prima la scelta aveva lo sfondo scuro della pagina e le altre uno
-#: piu' chiaro: con Anteprima e Modello 3D disabilitate all'avvio, la scheda
-#: KiCad era la piu' chiara e sembrava lei quella scelta (utente, 2026-09-24).
+#: Tabs: the SELECTED one is the most prominent (light background, blue
+#: underline, bold text); the others are dimmed, the disabled ones even
+#: more. Previously the selected one had the dark page background and the
+#: others a lighter one: with Anteprima (preview) and Modello 3D (3D model)
+#: disabled at start-up, the KiCad tab was the lightest and looked like the
+#: selected one (user, 2026-09-24).
 TAB_QSS = f"""
     QTabWidget::pane {{
         border: 1px solid {SURFACE1};

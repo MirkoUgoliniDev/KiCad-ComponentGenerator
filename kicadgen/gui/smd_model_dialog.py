@@ -52,7 +52,7 @@ class _Job(QRunnable):
             else:
                 from ..services.smd_component_classifier import describe_smd_checkpoint
                 result = dict(describe_smd_checkpoint(self.path), ok=True)
-        except Exception as exc:  # noqa: BLE001 - mostrato nella finestra
+        except Exception as exc:  # noqa: BLE001 - shown in the window
             result = ({"ok": False, "error": str(exc)} if self.kind == "smd_check" else None)
         except BaseException as exc:  # noqa: BLE001 - nothing may leave a QRunnable
             result = ({"ok": False, "error": type(exc).__name__} if self.kind == "smd_check"
@@ -133,7 +133,7 @@ class SmdModelDialog(QDialog):
         layout.addLayout(bottom)
         self._fill()
 
-    # ── elenco ────────────────────────────────────────────────────────
+    # ── list ──────────────────────────────────────────────────────────
 
     def _files(self):
         """The .pt files of the folder plus the extra ones, without duplicates."""
@@ -182,7 +182,10 @@ class SmdModelDialog(QDialog):
             == os.path.normcase(os.path.abspath(str(second))))
 
     def selected_path(self) -> str:
-        """@brief Path of the selected file, or "" when the list is empty."""
+        """@brief Path of the selected file, or "" when the list is empty.
+
+        @return The checkpoint path stored in the current list item, or "".
+        """
         item = self.model_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
 
@@ -194,7 +197,7 @@ class SmdModelDialog(QDialog):
             self._extra.append(selected)
             self._fill(select=selected)
 
-    # ── dettagli ──────────────────────────────────────────────────────
+    # ── details ───────────────────────────────────────────────────────
 
     def _start(self, kind: str, path: str) -> None:
         if self._closed:
@@ -228,8 +231,8 @@ class SmdModelDialog(QDialog):
             if _remembered(path, kind) is None and not self._running(path, kind):
                 self._start(kind, path)
         check = _remembered(path, "smd_check")
-        # Una rete che il classificatore rifiuta non si sceglie: fallirebbe
-        # all'analisi, dopo aver preparato tutto il resto.
+        # A network that the classifier rejects cannot be chosen: it would
+        # fail at analysis time, after everything else has been prepared.
         ok_button.setEnabled(not (check and not check.get("ok")))
         self.details.setText(self.details_html(path, _remembered(path, "sha256"), check))
 

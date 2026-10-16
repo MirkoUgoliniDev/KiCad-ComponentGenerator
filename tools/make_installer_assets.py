@@ -46,7 +46,12 @@ def _rtf(text: str) -> str:
 
 
 def main(argv):
-    """@brief Write the three files; return the process exit status."""
+    """@brief Write the three files; return the process exit status.
+
+    @param argv Command-line arguments; `argv[1]` is the optional target
+        folder.
+    @return 0 on success.
+    """
     from PIL import Image, ImageDraw
     from PyQt6.QtWidgets import QApplication
     target = Path(argv[1]) if len(argv) > 1 else ROOT / "build" / "msi"

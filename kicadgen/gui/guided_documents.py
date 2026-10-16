@@ -91,16 +91,16 @@ def document_pixmap(path, size, upscale=True):
         except ImportError:
             pass
         return QPixmap()
-    # Le foto dei telefoni salvano i pixel in un verso e il verso giusto nel
-    # tag EXIF di orientamento. L'analisi (OpenCV, imread e imdecode) lo
-    # applica; QPixmap no, e la foto orizzontale compariva verticale nella
-    # card (utente, 2026-09-24). L'anteprima deve mostrare cio' che l'analisi
-    # vede: il lettore applica il tag.
+    # Phone photos store the pixels in one orientation and the right
+    # orientation in the EXIF orientation tag. The analysis (OpenCV, imread
+    # and imdecode) applies it; QPixmap does not, and the landscape photo
+    # appeared portrait in the card (user, 2026-09-24). The preview must show
+    # what the analysis sees: the reader applies the tag.
     reader = QImageReader(str(path))
     reader.setAutoTransform(True)
-    # Riduzione GIA' in lettura: decodificare a piena risoluzione e poi
-    # ridurre falliva oltre il limite di memoria di Qt (256 MB, ~8192x8192):
-    # una foto da 108 MP dava un'anteprima vuota (audit 25/09).
+    # Downscaling ALREADY while reading: decoding at full resolution and then
+    # downscaling failed beyond Qt's memory limit (256 MB, ~8192x8192): a
+    # 108 MP photo gave an empty preview (audit 25/09).
     reader.setScaledSize(_decode_size(reader, size, upscale))
     image = reader.read()
     if image.isNull():
@@ -160,22 +160,22 @@ class GuidedDocuments(QWidget):
         super().__init__(parent)
         self.directory = directory
         self.i18n = i18n
-        # Dizionario vivo delle preferenze della finestra, per ricordare la
-        # cartella di provenienza dei documenti. None nei test e negli usi
-        # isolati del widget: il dialogo parte allora dalla cartella docs.
+        # Live dictionary of the window preferences, to remember the folder
+        # the documents come from. None in tests and in isolated uses of the
+        # widget: the dialog then starts from the docs folder.
         self.config = config
-        # Quote del corpo (lunghezza, larghezza) per verificare se una
-        # foto e' calibrabile. None quando non sono note.
+        # Body dimensions (length, width) to check whether a photo can be
+        # calibrated. None when they are not known.
         self.body_size = body_size
-        # La verifica costa ~150 ms su una foto da 4 Mpx: si ricalcola
-        # solo quando cambiano file o quote, non a ogni refresh.
+        # The check costs ~150 ms on a 4 Mpx photo: it is recomputed only
+        # when files or dimensions change, not at every refresh.
         self._calibration_cache = {}
         self.cards = {}
-        # Card attualmente in caricamento, per non sbilanciare lo stack dei
-        # cursori di override di Qt.
+        # Card currently loading, so as not to unbalance Qt's stack of
+        # override cursors.
         self._busy_role = None
-        # Avviso di un'operazione appena fatta (file gia' presente), mostrato
-        # nella riga di stato fino all'azione successiva.
+        # Notice of an operation just performed (file already present), shown
+        # in the status row until the next action.
         self._notice = ''
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -191,7 +191,7 @@ class GuidedDocuments(QWidget):
         info.setToolTip(info_label)
         top.addWidget(info)
         layout.addLayout(top)
-        # Striscia dei ruoli: quali sono coperti e da quale file.
+        # Strip of the roles: which ones are covered and by which file.
         badges = QHBoxLayout()
         badges.setSpacing(16)
         self.role_badges = {}
@@ -216,7 +216,7 @@ class GuidedDocuments(QWidget):
         layout.addWidget(self.scroll)
         self.refresh()
 
-    # ── Costruzione ─────────────────────────────────────────────────
+    # ── Construction ────────────────────────────────────────────────
 
     def _make_add_card(self):
         card = QGroupBox('Nuovo documento')
@@ -238,7 +238,7 @@ class GuidedDocuments(QWidget):
 
     def _make_card(self, name):
         card = QGroupBox()
-        # Il titolo e' il nome del file: un dato, non un testo da tradurre.
+        # The title is the file name: a piece of data, not a text to translate.
         card.setProperty('i18n_skip', True)
         card.setFixedWidth(CARD_WIDTH)
         column = QVBoxLayout(card)
@@ -264,14 +264,14 @@ class GuidedDocuments(QWidget):
             boxes[role] = box
         column.addLayout(grid)
         actions = QHBoxLayout()
-        # Solo icone, come anteprima e rimozione: la card e' stretta e
-        # «Sostituisci…» per esteso veniva troncato.
+        # Icons only, like preview and removal: the card is narrow and
+        # «Sostituisci…» (Replace…) spelled out was truncated.
         replace = icon_button('', 'docs-open.svg', lambda checked=False, n=name: self._replace(n))
         replace.setToolTip(self._tr('Sostituisci il file…\nMantiene i ruoli spuntati; la copia '
                                     'precedente resta in docs/.history.'))
         replace.setAccessibleName(self._tr('Sostituisci il file…'))
-        # Occhio, non cartella (utente, 2026-09-24): il pulsante apre
-        # un'anteprima nel programma, non sfoglia file sul disco.
+        # Eye, not folder (user, 2026-09-24): the button opens a preview in
+        # the program, it does not browse files on disk.
         view = icon_button('', 'tab-preview.svg', lambda checked=False, n=name: self._preview(n))
         remove = icon_button('', 'docs-remove.svg', lambda checked=False, n=name: self._remove(n))
         view.setToolTip(self._tr('Anteprima documento\nApre il documento in una finestra con lo '
@@ -294,7 +294,7 @@ class GuidedDocuments(QWidget):
             widgets = self.cards.pop(name)
             self._row.removeWidget(widgets['group'])
             widgets['group'].hide()
-            # deleteLater: la card puo' essere quella il cui segnale e' in corso.
+            # deleteLater: the card may be the one whose signal is in progress.
             widgets['group'].deleteLater()
         for index, name in enumerate(names):
             if name not in self.cards:
@@ -304,10 +304,13 @@ class GuidedDocuments(QWidget):
                 self._row.removeWidget(group)
                 self._row.insertWidget(index, group)
 
-    # ── Stato ───────────────────────────────────────────────────────
+    # ── State ───────────────────────────────────────────────────────
 
     def store(self):
-        """@brief Return a DocumentSet for the folder currently provided by the `directory` callable."""
+        """@brief Return a DocumentSet for the folder currently provided by the `directory` callable.
+
+        @return A new DocumentSet bound to the current project folder.
+        """
         return DocumentSet(self.directory())
 
     def _tr(self, source):
@@ -319,11 +322,11 @@ class GuidedDocuments(QWidget):
 
         @param key File name of the card, or ADD_KEY for the «new document» card.
         @param busy True while the work runs.
-        @note La copia e' immediata, ma generare l'anteprima costa decine di
-            millisecondi per una foto e puo' arrivare a secondi su un PDF: senza
-            un segnale la card resta muta e sembra che il pulsante non abbia
-            fatto nulla. I comandi vengono disabilitati per non accodare una
-            seconda richiesta.
+        @note The copy is immediate, but generating the preview costs tens of
+            milliseconds for a photo and can reach seconds on a PDF: without a
+            signal the card stays mute and the button seems to have done
+            nothing. The controls are disabled so that a second request is
+            not queued.
         """
         if key == ADD_KEY:
             controls, label = [self.add_button], self.add_hint
@@ -335,15 +338,15 @@ class GuidedDocuments(QWidget):
                         *widgets['roles'].values()]
             label = widgets['preview']
         if busy == (self._busy_role == key):
-            # Ripristinare un cursore mai impostato -- il caso dell'utente che
-            # annulla la conferma di sostituzione -- toglierebbe dallo stack
-            # quello di qualcun altro.
+            # Restoring a cursor never set -- the case of the user who cancels
+            # the replacement confirmation -- would remove someone else's from
+            # the stack.
             return
         for control in controls:
             control.setEnabled(not busy)
         if busy:
             if key != ADD_KEY:
-                # L'anteprima precedente sparisce subito: e' gia' superata.
+                # The previous preview disappears at once: it is already stale.
                 label.setPixmap(QPixmap())
             label.setText(self._tr('Caricamento…'))
             QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
@@ -353,23 +356,24 @@ class GuidedDocuments(QWidget):
                 label.setText(self._tr('Un file può avere più ruoli: dopo averlo aggiunto '
                                        'spunta tutti quelli che contiene.'))
         self._busy_role = key if busy else None
-        # Il lavoro blocca il thread della GUI: senza questo la card non
-        # verrebbe ridisegnata prima della fine, e l'attesa non si vedrebbe.
+        # The work blocks the GUI thread: without this the card would not be
+        # redrawn before the end, and the wait would not be visible.
         QApplication.processEvents()
 
     def _calibration_verdict(self, roles, path):
-        """Esito per la card di un documento: (icona, testo, spiegazione, colore).
+        """@brief Verdict for a document's card: (icon, text, explanation, colour).
 
-        Risponde alla domanda che conta guardando la card: questa immagine
-        verra' davvero usata per individuare i componenti? Solo un file
-        dichiarato foto (`PHOTO_ROLE`) viene calibrato; per gli altri si dice
-        che il file e' a posto e a cosa serve, perche' «nessun segno» non
-        distingue «non serve» da «non l'ho guardata». Un file senza ruoli
-        viene segnalato: blocca l'analisi finche' non se ne spunta uno.
+        Answers the question that matters when looking at the card: will this
+        image really be used to locate the components? Only a file declared
+        as a photo (`PHOTO_ROLE`) is calibrated; for the others the card says
+        that the file is fine and what it is for, because «no mark» does not
+        distinguish «not needed» from «not looked at». A file without roles
+        is flagged: it blocks the analysis until one is ticked.
 
-        @param roles Ruoli del file (lista; una stringa vale come un ruolo).
-        @param path File, o None se manca.
-        @return La quaterna, o None senza file.
+        @param roles Roles of the file (list; a string counts as one role).
+        @param path File, or None when missing.
+        @return The 4-tuple, or None without a file (also when the file
+            cannot be stat'ed).
         """
         roles = role_list(roles)
         if path is None:
@@ -409,8 +413,8 @@ class GuidedDocuments(QWidget):
             return ('✗', '',
                     self._tr('non calibrabile: la scheda non è riconoscibile qui'), _BAD)
         scale = crop.shape[1] / length
-        # Pixel sul lato corto del corpo piu' piccolo che si assume montato:
-        # ipotesi dichiarata una sola volta in photo_refine (0402, 0.5 mm).
+        # Pixels on the short side of the smallest body assumed to be mounted:
+        # an assumption declared only once in photo_refine (0402, 0.5 mm).
         readable = scale * getattr(photo_refine, 'SMALLEST_EXPECTED_PART_MM', 0.5)
         summary = f'{scale:.0f} px/mm'
         if readable < MIN_PACKAGE_PIXELS_HINT:
@@ -419,13 +423,13 @@ class GuidedDocuments(QWidget):
         return ('✓', summary, self._tr('utilizzabile:') + f' {summary}', _OK)
 
     def refresh(self):
-        """@brief Rilegge i documenti e i loro ruoli e aggiorna le card.
+        """@brief Re-read the documents and their roles and update the cards.
 
-        @note La cartella puo' non esistere ancora: finche' il componente non
-            ha un nome non c'e' un posto dove i documenti andrebbero, e
-            chiederlo solleva. Qui non e' un errore da segnalare come guasto:
-            e' lo stato normale di un lavoro appena cominciato, e le card
-            restano vuote finche' il nome non c'e'.
+        @note The folder may not exist yet: until the component has a name
+            there is no place where the documents would go, and asking for it
+            raises. That is not an error to report as a failure here: it is
+            the normal state of a job just begun, and the cards stay empty
+            until the name is there.
         """
         directory, documents, status = None, [], ''
         try:
@@ -466,7 +470,7 @@ class GuidedDocuments(QWidget):
         self.status.setText(status)
         if self.i18n is not None:
             self.i18n.retranslate_widgets(self)
-        # L'area scorre solo in orizzontale: la sua altezza segue le card.
+        # The area scrolls only horizontally: its height follows the cards.
         bar = self.scroll.horizontalScrollBar().sizeHint().height()
         self.scroll.setFixedHeight(self.scroll.widget().sizeHint().height() + bar + 2)
 
@@ -485,13 +489,13 @@ class GuidedDocuments(QWidget):
             box.blockSignals(False)
             tip = self._tr(ROLES[role]) + '\n' + self._tr(ROLE_HELP[role])
             if role == PHOTO_ROLE and is_pdf:
-                # Il rilevamento dei componenti decodifica immagini, non PDF.
+                # Component detection decodes images, not PDFs.
                 tip = self._tr('Una foto deve essere un’immagine, non un PDF.')
             elif role not in allowed:
-                # Utente, 27/09: un PDF e' solo un datasheet.
+                # User, 27/09: a PDF is only a datasheet.
                 tip = self._tr('Un PDF può avere solo il ruolo Datasheet: le viste che '
                                'contiene le cerca l’AI.')
-            # Esplicito in entrambi i versi: set_busy riaccende tutte le caselle.
+            # Explicit in both directions: set_busy re-enables all the boxes.
             box.setEnabled(role in allowed)
             box.setToolTip(tip)
         verdict = self._calibration_verdict(roles, path)
@@ -501,8 +505,8 @@ class GuidedDocuments(QWidget):
             widgets['verdict'].setStyleSheet(f'color: {_BAD};')
         else:
             icon, summary, explanation, colour = verdict
-            # La card e' stretta: resta l'icona con il dato che conta, la
-            # spiegazione si legge passandoci sopra.
+            # The card is narrow: the icon with the datum that matters stays,
+            # the explanation is read by hovering over it.
             widgets['verdict'].setText(f'{icon}  {summary}'.rstrip())
             widgets['verdict'].setToolTip(explanation)
             widgets['verdict'].setStyleSheet(f'color: {colour};')
@@ -538,7 +542,7 @@ class GuidedDocuments(QWidget):
                                           'individuati.')
                 badge.setToolTip(tip)
 
-    # ── Azioni ──────────────────────────────────────────────────────
+    # ── Actions ─────────────────────────────────────────────────────
 
     def _choose_file(self, title):
         from .app_config import browse_start_dir, remember_browse_dir
@@ -640,9 +644,9 @@ class GuidedDocuments(QWidget):
             dialog.setProperty('i18n_skip', True)
             dialog.resize(900, 700)
             layout = QVBoxLayout(dialog)
-            # Pixel veri, non la miniatura ingrandita: si puo' zoomare
-            # (utente, 2026-09-24). Un'immagine piu' grande di 8192 px viene
-            # ridotta gia' in lettura (`_decode_size`), non rifiutata.
+            # Real pixels, not the enlarged thumbnail: it can be zoomed
+            # (user, 2026-09-24). An image larger than 8192 px is downscaled
+            # already while reading (`_decode_size`), not rejected.
             pixmap = document_pixmap(path, QSize(8192, 8192), upscale=False)
             if pixmap.isNull():
                 label = QLabel('Anteprima non disponibile. Usa “Apri file completo” per consultare il documento.')

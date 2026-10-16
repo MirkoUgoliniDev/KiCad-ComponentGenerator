@@ -56,6 +56,8 @@ def install_crash_reports(exit_process=os._exit):
         state. Until the user decides otherwise, the program stops as it did
         before, after the report and the usual traceback. Exceptions in
         worker threads keep ending only their thread, as before.
+    @return The installed hook (report, flush, exit), so tests can call it
+        directly.
     """
     from kicadgen import crash_report
     from kicadgen.app_paths import logs_dir
@@ -67,7 +69,7 @@ def install_crash_reports(exit_process=os._exit):
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
-            except Exception:  # noqa: BLE001 - uscire resta la cosa importante
+            except Exception:  # noqa: BLE001 - exiting remains what matters
                 pass
         exit_process(1)
 
@@ -235,8 +237,8 @@ def main():
     try:
         from dotenv import load_dotenv
         from kicadgen.app_paths import env_files
-        # Da sorgente il .env del repository; installato, quello nella
-        # cartella dati dell'utente (Program Files e' in sola lettura).
+        # From source, the repository's .env; installed, the one in the user's
+        # data folder (Program Files is read-only).
         key_names = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY")
         preset = {name for name in key_names if name in os.environ}
         for env_file in env_files():

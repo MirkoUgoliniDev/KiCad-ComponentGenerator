@@ -16,17 +16,22 @@ from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QFontMetricsF, QPaint
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
-                                 default_property_positions, symbol_inputs, layout_symbol,
-                                 symbol_property_positions)
+                                 PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
+                                 property_texts, symbol_inputs, layout_symbol, symbol_property_positions)
+from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM
+from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
 from .pinout_dialog import pin_sort_key
+from ..services.i18n import set_item_source
 from ..generators.symbol_edit import transform_selection
 
 SCENE_UNITS_PER_MM = 10.0
-#: Distance (mm) from a pin line to the baseline of its number. KiCad draws
-#: the number bottom-aligned at its text margin (4 mil = 0.1016 mm) plus half
-#: the default pin pen (6 mil / 2 = 0.0762 mm) above the line: an
-#: approximation of KiCad's own drawing, which also follows the pen width.
-PIN_NUMBER_GAP_MM = 0.1016 + 0.0762
+#: Distance (mm) from a pin line to the bottom anchor of its number, as
+#: KiCad 10 draws it (user decision 2026-10-16): text offset 4 mil + pin text
+#: margin 4 mil + pin pen 6 mil = 0.3556 mm, measured with kicad-cli (see
+#: `kicadgen.core.kicad_text.KICAD_PIN_NUMBER_ANCHOR_MM`). The baseline lies
+#: KICAD_BOTTOM_TO_BASELINE x size higher (`kicad_pin_number_baseline`).
+#: Before 2026-10-16 it was 0.178 mm, about 0.18 mm too low.
+PIN_NUMBER_GAP_MM = KICAD_PIN_NUMBER_ANCHOR_MM
 GRID_MM = PIN_GRID_MM
 
 #: Superseded drafts kept per project beside the recovery file (one file per
@@ -192,8 +197,10 @@ FILL_LABELS = (('none', 'Nessuno'), ('outline', 'Contorno'), ('background', 'Sfo
 DRAWING_GRIDS_MM = (2.54, 1.27, 0.635, 0.254)
 
 #: Default step of the drawing grid, mm: one tenth of the pin grid (user,
-#: 2026-10-13: «una griglia puntinata a un decimo di quella attuale per
-#: ancorare gli elementi grafici»). Pins keep snapping to GRID_MM.
+#: 2026-10-13:
+#: «una griglia puntinata a un decimo di quella attuale per ancorare gli elementi grafici»
+#: (a dotted grid at one tenth of the current one to anchor the graphic
+#: elements)). Pins keep snapping to GRID_MM.
 DEFAULT_DRAWING_GRID_MM = GRID_MM / 10
 
 #: Smallest on-screen spacing, in viewport pixels, at which the dots of the
@@ -296,7 +303,10 @@ class TextDialog(QDialog):
         self.text_edit.selectAll()
 
     def values(self):
-        """@brief (text, size in mm) as typed."""
+        """@brief (text, size in mm) as typed.
+
+        @return Tuple (text, size): the text string and its height in mm.
+        """
         return (self.text_edit.text(), float(self.size_box.value()))
 
 #: Colours of the symbol canvas. "dark": the application's own theme.
@@ -390,12 +400,14 @@ class PalettePanel(QWidget):
         self._actions = []
         self._tool_actions = {}
         self._groups = {}
-        # Tools first (user, 2026-10-10: «il filo lo vorrei nella palette»).
+        # Tools first (user, 2026-10-10: «il filo lo vorrei nella palette», I
+        # would like the wire in the palette).
         from ..generators.symbol_glyphs import Glyph, Primitive
         wire_glyph = Glyph('wire', 'Filo', (Primitive('polyline', ((0, 0), (2.54, 0), (2.54, 2.54), (5.08, 2.54)),
                                                       0.0, 'none', 0.254),), (), 'tool')
         self._add_section('tools', 'Collegamenti', [wire_glyph], open_state.get('tools', True), tool=True)
-        # Free drawing (user, 2026-10-12: «tracciare disegni, linee curve»):
+        # Free drawing (user, 2026-10-12: «tracciare disegni, linee curve»,
+        # draw drawings, curved lines):
         # shapes without terminals, closed by a fixed number of clicks.
         from ..generators.symbol_glyphs import shape_tool_glyphs
         self._add_section('drawing', 'Disegno', shape_tool_glyphs(), open_state.get('drawing', True), tool=True)
@@ -457,7 +469,11 @@ class PalettePanel(QWidget):
             self._groups[key] = (header, body)
 
     def set_tool_checked(self, key, checked):
-        """@brief Show a palette tool as active or not; unknown keys are ignored."""
+        """@brief Show a palette tool as active or not; unknown keys are ignored.
+
+        @param key Catalogue key of the tool action.
+        @param checked True to show the tool as active.
+        """
         action = self._tool_actions.get(key)
         if action is not None:
             action.setChecked(bool(checked))
@@ -468,7 +484,10 @@ class PalettePanel(QWidget):
         self.chosen.emit(key)
 
     def actions(self):
-        """@brief Every element action, in palette order (checkable, data = catalogue key)."""
+        """@brief Every element action, in palette order (checkable, data = catalogue key).
+
+        @return New list of QAction objects.
+        """
         return list(self._actions)
 
     def release(self):
@@ -477,13 +496,21 @@ class PalettePanel(QWidget):
             action.setChecked(False)
 
     def set_group_open(self, key, open_):
-        """@brief Open or close one group; unknown keys are ignored."""
+        """@brief Open or close one group; unknown keys are ignored.
+
+        @param key Group key as registered by `rebuild`.
+        @param open_ True to expand the group, False to collapse it.
+        """
         section = self._groups.get(key)
         if section is not None:
             section[0].setChecked(bool(open_))
 
     def group_is_open(self, key):
-        """@brief Whether a group is open; False for an unknown key."""
+        """@brief Whether a group is open; False for an unknown key.
+
+        @param key Group key as registered by `rebuild`.
+        @return True when the group header is checked (expanded).
+        """
         section = self._groups.get(key)
         return bool(section is not None and section[0].isChecked())
 
@@ -1124,8 +1151,9 @@ class SymbolTab(QWidget):
         # element terminal, or between any grid points.
         self.wire_button = icon_button('wf-contact.svg', 'Filo: clic sui punti, doppio clic o tasto destro per chiudere, Esc per annullare', self.start_wire)
         self.wire_button.defaultAction().setCheckable(True)
-        # Orthogonal wires like KiCad (user, 2026-10-10: «deve essere un CAD
-        # un po' come KiCad»): each segment horizontal or vertical, Shift frees it.
+        # Orthogonal wires like KiCad (user, 2026-10-10:
+        # «deve essere un CAD un po' come KiCad» (it must be a CAD a bit
+        # like KiCad)): each segment horizontal or vertical, Shift frees it.
         self.orthogonal_button = icon_button('symbol-align.svg', 'Fili ortogonali (Maiusc libera il segmento)')
         self.orthogonal_button.defaultAction().setCheckable(True)
         self.orthogonal_button.defaultAction().setChecked(True)
@@ -1138,7 +1166,6 @@ class SymbolTab(QWidget):
             self.grid_combo.addItem(f'{step:g} mm', step)
         self.grid_combo.setCurrentIndex(self.grid_combo.findData(DEFAULT_DRAWING_GRID_MM))
         self.grid_combo.setToolTip(self.tx('Passo della griglia del disegno (i pin restano sulla griglia da 2.54 mm)'))
-        self.grid_combo.setProperty('i18n_skip', True)
         self.grid_combo.currentIndexChanged.connect(lambda _i: self.set_drawing_grid(self.grid_combo.currentData()))
         toolbar.addWidget(self.grid_combo)
         self.snap_button = icon_button('symbol-grid.svg', 'Aggancio alla griglia del disegno')
@@ -1761,6 +1788,7 @@ class SymbolTab(QWidget):
             types = QComboBox()
             for kind in ELECTRICAL_TYPES:
                 types.addItem(self.tx(_TYPE_LABELS[kind]), kind)
+                set_item_source(types, types.count() - 1, _TYPE_LABELS[kind])
             types.setToolTip(self.tx('Il tipo elettrico viene usato da KiCad per il controllo ERC.'))
             types.setCurrentIndex(max(0, types.findData(row.get('electrical_type', 'passive'))))
             types.currentIndexChanged.connect(lambda value, i=index: self._type_changed(i))
@@ -2055,7 +2083,10 @@ class SymbolTab(QWidget):
             self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
 
     def review_issues(self):
-        """@brief Report invalid geometry, missing names, unreviewed roles and overlapping labels."""
+        """@brief Report invalid geometry, missing names, unreviewed roles and overlapping labels.
+
+        @return List of translated issue strings, empty when nothing is wrong.
+        """
         issues = []
         rows = self.draft_rows()
         if not rows or self._symbol is None or self._error:
@@ -2078,7 +2109,12 @@ class SymbolTab(QWidget):
         return issues
 
     def show_review(self, exporting=False):
-        """@brief Display symbol findings and return whether export may continue."""
+        """@brief Display symbol findings and return whether export may continue.
+
+        @param exporting True when called before an export: no issues skip the
+            dialog, and the user may choose «Esporta comunque».
+        @return True when export may continue (no issues, or accepted by the user).
+        """
         issues = self.review_issues()
         if exporting and not issues:
             return True
@@ -2102,15 +2138,25 @@ class SymbolTab(QWidget):
             dialog.deleteLater()
 
     def confirm_export_review(self):
-        """@brief Require acceptance of outstanding symbol findings before export."""
+        """@brief Require acceptance of outstanding symbol findings before export.
+
+        @return True when export may continue.
+        """
         return self.show_review(exporting=True)
 
     def rows(self):
-        """@brief Return independent applied rows for persistence/export."""
+        """@brief Return independent applied rows for persistence/export.
+
+        @return Deep copy of the applied baseline rows (list of dicts).
+        """
         return deepcopy(self._baseline)
 
     def use_pin_type_suggestions(self, proposals):
-        """@brief One undoable draft operation, preserving all pin and body geometry."""
+        """@brief One undoable draft operation, preserving all pin and body geometry.
+
+        @param proposals Iterable of dicts with 'pin', 'electrical_type',
+            'source' and 'reason'; types outside ELECTRICAL_TYPES are ignored.
+        """
         rows = self.draft_rows()
         by_number = {str(p['pin']): p for p in proposals}
         for row in rows:
@@ -2138,7 +2184,10 @@ class SymbolTab(QWidget):
         self.palette.rebuild()
 
     def palette_actions(self):
-        """@brief The element actions of the palette, in order."""
+        """@brief The element actions of the palette, in order.
+
+        @return List of QAction objects (see PalettePanel.actions).
+        """
         return self.palette.actions()
 
     def _palette_chosen(self, key):
@@ -2156,21 +2205,36 @@ class SymbolTab(QWidget):
         except ValueError:
             return []
 
-    @staticmethod
-    def _property_positions(rows, symbol):
-        """Positions of Reference and Value, mm: the rows' choice, else the file's defaults."""
-        positions = default_property_positions(symbol)
+    def _property_texts(self):
+        """The texts of Reference and Value as KiCad shows them (`property_texts`)."""
+        return property_texts(self._reference, self._name)
+
+    def _chosen_properties(self, rows):
+        """The positions the rows carry (`symbol_property_positions`), {} when malformed."""
         try:
-            positions.update(symbol_property_positions(rows))
+            return symbol_property_positions(rows)
         except ValueError:
-            pass
-        return positions
+            return {}
+
+    def _property_positions(self, rows, symbol):
+        """Bottom-left anchors of Reference and Value, mm: the rows' choice, else the file's defaults.
+
+        Exactly the points `serialize_symbol` writes (`property_anchors`):
+        centres (defaults, projects saved before 2026-10-16) are converted
+        with the current texts, anchors are used as stored.
+        """
+        return property_anchors(symbol, self._property_texts(), self._chosen_properties(rows))
 
     @staticmethod
     def _with_properties(rows, positions):
-        """Rows with `symbol_properties` set to the same mapping on every row (like `symbol_body`)."""
+        """Rows with `symbol_properties` set to the same mapping on every row (like `symbol_body`).
+
+        `positions` are bottom-left anchors: the mapping is marked
+        PROPERTY_ANCHOR_BOTTOM_LEFT, so they are never converted again.
+        """
         rows = deepcopy(rows)
         mapping = {key: [round(x, 4), round(y, 4)] for key, (x, y) in positions.items()}
+        mapping[PROPERTY_ANCHOR_FIELD] = PROPERTY_ANCHOR_BOTTOM_LEFT
         for row in rows:
             row[PROPERTIES_KEY] = deepcopy(mapping)
         return rows
@@ -2185,7 +2249,10 @@ class SymbolTab(QWidget):
 
     @property
     def theme(self):
-        """@brief The colour table of the canvas in use (see CANVAS_THEMES)."""
+        """@brief The colour table of the canvas in use (see CANVAS_THEMES).
+
+        @return Dict mapping colour roles to hex colour strings.
+        """
         return CANVAS_THEMES[self._theme_key]
 
     def set_kicad_colors(self, enabled):
@@ -2387,7 +2454,10 @@ class SymbolTab(QWidget):
         return True
 
     def shape_tool(self):
-        """@brief The key of the shape tool in use, None when none is armed."""
+        """@brief The key of the shape tool in use, None when none is armed.
+
+        @return Shape tool key string, or None.
+        """
         return self._shape_tool
 
     def _grid_point(self, x, y):
@@ -2408,11 +2478,17 @@ class SymbolTab(QWidget):
             self.grid_combo.setCurrentIndex(self.grid_combo.findData(step))
 
     def drawing_grid(self):
-        """@brief The current drawing grid step in mm."""
+        """@brief The current drawing grid step in mm.
+
+        @return Float grid step in mm (one of DRAWING_GRIDS_MM).
+        """
         return self._grid_mm
 
     def set_snap(self, enabled):
-        """@brief Turn the snapping of shape points to the drawing grid on or off."""
+        """@brief Turn the snapping of shape points to the drawing grid on or off.
+
+        @param enabled True to snap shape points to the drawing grid.
+        """
         self._snap = bool(enabled)
         action = self.snap_button.defaultAction()
         if action.isChecked() != self._snap:
@@ -2528,6 +2604,7 @@ class SymbolTab(QWidget):
     def edit_text(self, index):
         """@brief Open the text dialog on a text element and apply the answer.
 
+        @param index Index of the text element in the draft graphics list.
         @return True when the element was changed.
         """
         graphics = self._graphics()
@@ -2660,7 +2737,10 @@ class SymbolTab(QWidget):
         return True
 
     def graphics(self):
-        """@brief The placed glyph records of the current draft."""
+        """@brief The placed glyph records of the current draft.
+
+        @return List of graphic record dicts (glyphs, shapes and wires).
+        """
         return self._graphics()
 
     def _select_graphic(self, index, additive=False):
@@ -2675,7 +2755,10 @@ class SymbolTab(QWidget):
         self._draw(self._symbol)
 
     def selected_graphics(self):
-        """@brief The indices of every selected element, ascending (the primary included)."""
+        """@brief The indices of every selected element, ascending (the primary included).
+
+        @return Sorted list of indices into the draft graphics list.
+        """
         count = len(self._graphics())
         chosen = {i for i in self._selected_graphics if 0 <= i < count}
         if self._selected_graphic is not None and 0 <= self._selected_graphic < count:
@@ -2790,7 +2873,10 @@ class SymbolTab(QWidget):
         return True
 
     def duplicate_selected(self):
-        """@brief Duplicate the selected elements one grid step away (Ctrl+D); True when done."""
+        """@brief Duplicate the selected elements one grid step away (Ctrl+D); True when done.
+
+        @return True when the copies were placed, False when nothing was selected.
+        """
         kept = list(self._clipboard)
         if not self.copy_selected():
             return False
@@ -3087,7 +3173,13 @@ class SymbolTab(QWidget):
         return wire_local_point(wire, x, y)
 
     def fit_body_to_graphic(self, index):
-        """@brief Resize the body to the outline the library symbol had, when it had one."""
+        """@brief Resize the body to the outline the library symbol had, when it had one.
+
+        @param index Index of the glyph in the draft graphics list.
+        @return True when the body was resized (or already matched); False when
+            the index is invalid, the glyph has no body hint, or the geometry
+            was rejected.
+        """
         graphics = self._graphics()
         if not 0 <= index < len(graphics):
             return False
@@ -3259,7 +3351,10 @@ class SymbolTab(QWidget):
                                 'per confermare.').format(pins=', '.join(sorted(absent, key=lambda pin: pin_sort_key({'pin': pin})))))
 
     def draft_rows(self):
-        """@brief Copy draft metadata and merge table names and electrical types."""
+        """@brief Copy draft metadata and merge table names and electrical types.
+
+        @return Deep copy of the draft rows with the table's names and electrical types merged in.
+        """
         result = deepcopy(self._draft)
         for index, row in enumerate(result):
             row['name'] = self.table.item(index, 1).text().strip()
@@ -3267,7 +3362,10 @@ class SymbolTab(QWidget):
         return result
 
     def has_pending_edits(self):
-        """@brief Compare editable rows with the applied baseline."""
+        """@brief Compare editable rows with the applied baseline.
+
+        @return True when the draft differs from the applied baseline.
+        """
         return self.draft_rows() != self._baseline
 
     def can_apply(self):
@@ -3287,7 +3385,10 @@ class SymbolTab(QWidget):
         self._populate(self._baseline)
 
     def footprint(self):
-        """@brief Return the associated footprint library identifier."""
+        """@brief Return the associated footprint library identifier.
+
+        @return Footprint library identifier string (may be empty).
+        """
         return self._footprint
 
     def source_revision(self) -> int:
@@ -3345,12 +3446,18 @@ class SymbolTab(QWidget):
                 self._draw(self._symbol)
 
     def set_error(self, message):
-        """@brief Record a blocking error and refresh editor action states."""
+        """@brief Record a blocking error and refresh editor action states.
+
+        @param message Error text; converted to str and kept until cleared.
+        """
         self._error = str(message)
         self._changed()
 
     def set_status(self, message):
-        """@brief Show a nonblocking export result without changing draft validity."""
+        """@brief Show a nonblocking export result without changing draft validity.
+
+        @param message Status text shown in the status label.
+        """
         self.status.setText(str(message))
 
     def apply(self):
@@ -3367,7 +3474,10 @@ class SymbolTab(QWidget):
         self._checkpoint_draft()
 
     def reject_apply(self, message):
-        """@brief Keep the editable draft and its history when persistence fails."""
+        """@brief Keep the editable draft and its history when persistence fails.
+
+        @param message Status text explaining why the apply was rejected.
+        """
         self._applying = False
         self._baseline = deepcopy(self._apply_previous_baseline)
         self._source_revision = getattr(self, '_source_revision', 0) + 1
@@ -3657,7 +3767,15 @@ class SymbolTab(QWidget):
         return True
 
     def move_pin(self, number, side, offset, *, swap=False):
-        """@brief Snap a pin to a body side and offset, optionally swapping an occupied position."""
+        """@brief Snap a pin to a body side and offset, optionally swapping an occupied position.
+
+        @param number Pin number (compared as a string).
+        @param side Body side name the pin is attached to.
+        @param offset Position along that side, mm; snapped to the 2.54 mm pin grid.
+        @param swap True to exchange places with a pin already at the target position.
+        @return True when the draft was updated (or already there); False when there
+            is no symbol, the pin is unknown, or the geometry was rejected.
+        """
         if self._symbol is None:
             return False
         # Rebuild each drag preview from its starting state, so crossing occupied
@@ -3697,7 +3815,15 @@ class SymbolTab(QWidget):
         return rows
 
     def place_pin(self, number, x, y):
-        """@brief Place a pin at snapped free coordinates and swap any occupied terminal."""
+        """@brief Place a pin at snapped free coordinates and swap any occupied terminal.
+
+        @param number Pin number (compared as a string).
+        @param x Target X, mm in symbol coordinates; snapped to the 2.54 mm pin grid
+            or to a nearby glyph terminal.
+        @param y Target Y, mm in symbol coordinates (y up); snapped likewise.
+        @return True when the draft was updated (or already there); False when there
+            is no symbol, the pin is unknown, or the geometry was rejected.
+        """
         if self._symbol is None:
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
@@ -3728,22 +3854,28 @@ class SymbolTab(QWidget):
         return self._accept_geometry(rows)
 
     def move_property(self, key, x, y):
-        """@brief Put a visible property (Reference or Value) at a point, snapped to the pin grid.
+        """@brief Put the bottom-left anchor of a visible property (Reference or Value) at a point, snapped to the pin grid.
 
         @param key One of `PROPERTY_KEYS`.
-        @param x Target x, mm in symbol coordinates.
-        @param y Target y, mm in symbol coordinates (y up).
+        @param x Target x of the anchor, mm in symbol coordinates.
+        @param y Target y of the anchor, mm in symbol coordinates (y up).
         @return True when the draft was updated (or already there), False on an unknown key.
+        @note The anchor is the bottom-left corner of the text (user,
+            2026-10-16, like the drawn texts): that corner snaps to the grid
+            and the text grows right and up from it. The stored mapping is
+            marked PROPERTY_ANCHOR_BOTTOM_LEFT; a key the rows held as a
+            legacy centre is converted to its anchor in the same write, so
+            it stays where KiCad drew it and is never converted twice.
         @note Only the moved key is written on every row (`symbol_properties`)
             and reaches the file through `symbol_property_positions`; the
             other property keeps its own choice when it has one and otherwise
             stays absent, so it keeps following `default_property_positions`
             (e.g. it still clears a top pin added later). Writing its default
             too would freeze it there for good (review M3, 2026-10-15).
-        @note Moving a property that has no choice back onto its current
-            default writes nothing: the position equals the default and the
-            property keeps following it. A drag that ends where it began must
-            not pin the text.
+        @note Moving a property that has no choice back onto the grid point
+            of its current default anchor writes nothing: the property keeps
+            following the default (whose converted anchor is generally off
+            the grid). A drag that ends where it began must not pin the text.
         @note Projects saved before 2026-10-15 may hold BOTH keys although the
             user moved only one (the old code persisted the other's default).
             They cannot be told apart from an explicit choice of both, so
@@ -3753,15 +3885,18 @@ class SymbolTab(QWidget):
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
         symbol = self._gesture_layout if self._gesture_before is not None else self._symbol
-        snapped = tuple(round(round(v / GRID_MM) * GRID_MM, 4) for v in (x, y))
-        try:
-            chosen = symbol_property_positions(source)
-        except ValueError:
-            # A malformed mapping is not a choice: it is replaced by the
-            # moved key alone (the editor already draws defaults for it).
-            chosen = {}
-        unchanged = chosen.get(key) == snapped or (
-            key not in chosen and default_property_positions(symbol)[key] == snapped)
+        def snap(point):
+            return tuple(round(round(v / GRID_MM) * GRID_MM, 4) for v in point)
+        snapped = snap((x, y))
+        # A malformed mapping is not a choice: it is replaced by the moved key
+        # alone (the editor already draws defaults for it).
+        stored = self._chosen_properties(source)
+        anchors = self._property_positions(source, symbol)
+        chosen = {name: anchors[name] for name in stored}
+        # A property without a choice sits at its (converted, generally off
+        # grid) default anchor: a drag that snaps back to the grid point of
+        # that anchor is no move and must not pin the text.
+        unchanged = chosen.get(key) == snapped or (key not in chosen and snap(anchors[key]) == snapped)
         if unchanged:
             self._draft = deepcopy(source)
             self._changed()
@@ -3770,7 +3905,13 @@ class SymbolTab(QWidget):
         return self._accept_geometry(self._with_properties(source, chosen))
 
     def rotate_pin(self, number, degrees):
-        """@brief Rotate a pin or selected group in grid-preserving quarter turns."""
+        """@brief Rotate a pin or selected group in grid-preserving quarter turns.
+
+        @param number Pin number; when it belongs to a multi-pin selection the whole group turns.
+        @param degrees Rotation in degrees (multiples of 90), added modulo 360.
+        @return True when the draft was updated; False when there is no symbol, a
+            gesture is in progress, the pin is unknown, or the geometry was rejected.
+        """
         if self._symbol is None or self._gesture_before is not None:
             return False
         if number in self._selection_ids() and len(self._selection_ids()) > 1:
@@ -3987,7 +4128,14 @@ class SymbolTab(QWidget):
             menu.deleteLater()
 
     def resize_body(self, width, height):
-        """@brief Resize the unlocked body on the grid while preserving free pin positions."""
+        """@brief Resize the unlocked body on the grid while preserving free pin positions.
+
+        @param width Wanted body width, mm; rounded to an even multiple of the 2.54 mm
+            pin grid, at least 4 grid units.
+        @param height Wanted body height, mm; rounded likewise.
+        @return True when the draft was updated (or already that size); False when
+            there is no symbol, the body is locked, or the geometry was rejected.
+        """
         if self._symbol is None or self._body_locked:
             return False
         source = self._gesture_before if self._gesture_before is not None else self.draft_rows()
@@ -4273,7 +4421,8 @@ class SymbolTab(QWidget):
         dragged = None
         if gesture is not None:
             dragged = ('body',) if gesture[0] == 'resize' else \
-                ('graphic', gesture[1]) if gesture[0] in ('graphic', 'shape_point', 'vertex') else None
+                ('graphic', gesture[1]) if gesture[0] in ('graphic', 'shape_point', 'vertex') else \
+                ('property', gesture[1]) if gesture[0] == 'property' else None
         for items, base, ring, owner in self._handle_groups:
             if dragged is not None and owner == dragged:
                 visible = True
@@ -4300,14 +4449,10 @@ class SymbolTab(QWidget):
         """Distance, item units, from the top of a QGraphicsSimpleTextItem to its baseline.
 
         The item lays its single line out with QTextLayout from y = 0, so the
-        baseline is that line's ascent (fallback fonts included).
+        baseline is that line's ascent (fallback fonts included); computed
+        and cached by `kicad_text_item.text_baseline_px`.
         """
-        from PyQt6.QtGui import QTextLayout
-        layout = QTextLayout(text, font)
-        layout.beginLayout()
-        line = layout.createLine()
-        layout.endLayout()
-        return line.ascent() if line.isValid() else QFontMetricsF(font).ascent()
+        return text_baseline_px(text, font)
 
     def text_metrics(self, text, size):
         """@brief LEGACY width, line height and baseline depth of a symbol text (font em = size).
@@ -4331,9 +4476,9 @@ class SymbolTab(QWidget):
         return bounds.width() / scale, bounds.height() / scale, self._text_baseline(text, font) / scale
 
     #: Pixel size of the reference font texts are laid out with; the item is
-    #: then scaled (`_kicad_text_font`). Large, so the measured cap height
-    #: is precise and the scale is not quantised by integer pixel sizes.
-    _TEXT_REFERENCE_PX = 100
+    #: then scaled (`_kicad_text_font`). Shared with the footprint preview
+    #: (`kicad_text_item.REFERENCE_PX`).
+    _TEXT_REFERENCE_PX = REFERENCE_PX
 
     def _kicad_text_font(self, size):
         """(font, scale) that draw a symbol text at KiCad's size: capitals `size` mm tall.
@@ -4341,19 +4486,11 @@ class SymbolTab(QWidget):
         KiCad's text size is the glyph (cap) height (user decision,
         2026-10-14, shared with the footprint tab); the editor font's em is
         not, so the text is laid out at `_TEXT_REFERENCE_PX` and the item
-        scaled by size / measured cap height. The cap height is the height
-        of the outline of «H» (what is painted), with the tight bounding
-        rect and QFontMetricsF.capHeight as fallbacks.
+        scaled by size / measured cap height (`kicad_text_item.cap_height_px`,
+        the outline of «H»).
         """
-        from PyQt6.QtGui import QPainterPath
-        font = QFont(self.font())
-        font.setPixelSize(self._TEXT_REFERENCE_PX)
-        outline = QPainterPath()
-        outline.addText(0, 0, font, 'H')
-        metrics = QFontMetricsF(font)
-        cap = (outline.boundingRect().height() or metrics.tightBoundingRect('H').height()
-               or metrics.capHeight() or 0.7 * self._TEXT_REFERENCE_PX)
-        return font, size * SCENE_UNITS_PER_MM / cap
+        font = reference_font(self.font())
+        return font, size * SCENE_UNITS_PER_MM / cap_height_px(font)
 
     def drawn_text_metrics(self, text, size):
         """@brief Width, line height, baseline depth and cap height of a symbol text as drawn now.
@@ -4361,20 +4498,23 @@ class SymbolTab(QWidget):
         @param text The text (one line).
         @param size KiCad text size in mm (= cap height).
         @return (width, height, ascent, cap) in mm, at KiCad's size
-            (`_kicad_text_font`): cap equals `size` by construction.
-        @note The width is the editor font's, not KiCad's stroke font: on the
-            2026-10-14 measure (Segoe UI against kicad-cli 10) it is about
-            0.83-0.89 of KiCad's for ordinary texts, with wider spread for
-            «iiii» (0.73) or «MMMM» (1.13); no horizontal stretch is applied
-            because a single factor does not bring every text within 5%.
+            (`_kicad_text_font`): cap equals `size` by construction; the
+            width is KiCad's summed advance cells
+            (`core.kicad_text.kicad_advance_width`), since the item is
+            stretched to it (`kicad_text_item`).
+        @note CONTRACT CHANGED 2026-10-16 (user, «ok procedi»): the width
+            was the editor font's own (0.73-1.13 of KiCad's); it is now
+            KiCad's for every text.
         """
         from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        from ..core.kicad_text import kicad_advance_width
         font, factor = self._kicad_text_font(size)
         item = QGraphicsSimpleTextItem(text)
         item.setFont(font)
         bounds = item.boundingRect()
         unit = factor / SCENE_UNITS_PER_MM
-        return (bounds.width() * unit, bounds.height() * unit, self._text_baseline(text, font) * unit, size)
+        width = kicad_advance_width(text, size) if bounds.width() > 0 else 0.0
+        return (width, bounds.height() * unit, text_baseline_px(text, font) * unit, size)
 
     def _draw_text_primitive(self, scene, scale, p, selected):
         """A text primitive as a scene item: capitals `p.size` mm tall (KiCad's
@@ -4390,33 +4530,25 @@ class SymbolTab(QWidget):
             QColor(theme['selected']) if selected else QColor(theme['graphic']))
 
     def _kicad_text_item(self, scene, text, size, x, y, vertical, justify, vjustify, color):
-        """A text as KiCad draws it: capitals `size` mm tall, anchored at scene point (x, y).
+        """A text as KiCad draws it, added to `scene`: size, width and place of KiCad's stroke text.
 
-        The anchor is, in the text's own frame (reading direction, glyph
-        up), at the left end, centre or right end (`justify`) of the line
-        and on its baseline ("bottom"), half a cap height above it
-        ("center") or a cap height above it ("top"), as KiCad places its
-        texts (`vjustify`). A bottom-left text therefore starts at its
-        anchor and grows right and up; `vertical` (turned 90 degrees), up
-        and to the left. Shared by the drawn texts, the Reference/Value
-        properties and the pin names and numbers (user, 2026-10-15: every
-        text of the editor at the size the file gives it).
+        Built by the helper shared with the footprint preview
+        (`kicad_text_item.kicad_text_item`, user 2026-10-16: KiCad's width,
+        text by text, same UX in both tabs): capitals `size` mm tall, the
+        layout stretched to KiCad's advance cells, cells and baseline where
+        KiCad lays them out from the anchor (x, y) for `justify`
+        (left/center/right) and `vjustify` (bottom/center/top), with the
+        schematic default pen every symbol text is written with. A
+        bottom-left text therefore grows right and up from its anchor, its
+        baseline 0.125 x size above it as in KiCad; `vertical` (turned 90
+        degrees) reads up the page. Shared by the drawn texts, the glyph
+        texts, the Reference/Value properties and the pin names and numbers
+        (user, 2026-10-15: every text at the size the file gives it).
         """
-        font, factor = self._kicad_text_font(size)
-        item = scene.addSimpleText(text, font)
-        item.setBrush(color)
-        item.setScale(factor)
-        bounds = item.boundingRect()
-        cap = size * SCENE_UNITS_PER_MM / factor
-        along = bounds.width() if justify == 'right' else bounds.width() / 2 if justify == 'center' else 0
-        baseline = self._text_baseline(text, font)
-        down = baseline if vjustify == 'bottom' else baseline - cap if vjustify == 'top' else baseline - cap / 2
-        along, down = along * factor, down * factor
-        if vertical:
-            item.setRotation(-90)
-            item.setPos(x - down, y + along)
-        else:
-            item.setPos(x - along, y - down)
+        item = kicad_text_item(text, size, x, y, base_font=self.font(), mm_to_px=SCENE_UNITS_PER_MM,
+                               thickness=SCHEMATIC_DEFAULT_PEN_MM, justify=justify, vjustify=vjustify,
+                               vertical=vertical, colour=color)
+        scene.addItem(item)
         return item
 
     def _forget_scene_items(self):
@@ -4505,14 +4637,25 @@ class SymbolTab(QWidget):
         # Reference and Value where the file puts them (user, 2026-10-13):
         # the editor shows what KiCad will show, and both can be dragged.
         positions = self._property_positions(self.draft_rows(), symbol)
-        texts = {'Reference': f'{self._reference}?', 'Value': self._name}
+        texts = self._property_texts()
         hints = {'Reference': self.tx('Riferimento (U?): trascinalo dove deve stare nello schema.'),
                  'Value': self.tx('Nome del simbolo (Value): trascinalo dove deve stare nello schema.')}
         for key in PROPERTY_KEYS:
             px, py = positions[key]
-            # The generator writes the properties at TEXT_SIZE.
-            item = label(texts[key], px * scale, -py * scale, TEXT_SIZE, 'center', target=('property', key))
+            # The generator writes the properties at TEXT_SIZE, anchored at
+            # their bottom-left corner like the drawn texts (user,
+            # 2026-10-16): the text grows right and up from the anchor,
+            # whose square is the same handle the drawn texts show.
+            item = label(texts[key], px * scale, -py * scale, TEXT_SIZE, 'left', 'bottom',
+                         target=('property', key))
             item.setToolTip(hints[key])
+            anchor_handles = []
+            square = self._add_handle(scene, px * scale, -py * scale, anchor_handles)
+            square.setData(0, ('property', key))
+            square.setToolTip(hints[key])
+            area = item.sceneBoundingRect().united(QRectF(square.pos(), square.pos()))
+            self._handle_groups.append((anchor_handles, area, False, ('property', key)))
+        self._update_handle_visibility(self._cursor_position)
         for placed in symbol.pins:
             pin = placed.pin
             x, y = placed.x * scale, -placed.y * scale
@@ -4532,9 +4675,11 @@ class SymbolTab(QWidget):
             hit = scene.addLine(x, y, end_x, end_y, QPen(QColor(0, 0, 0, 0), 12))
             tag(hit, target)
             # As KiCad places them with the names inside the body: the number
-            # over the middle of the pin, its baseline PIN_NUMBER_GAP_MM above
-            # the line; the name centred on the line, PIN_NAME_OFFSET past the
-            # inner end.
+            # over the middle of the pin (left of it on a vertical pin),
+            # bottom-justified at PIN_NUMBER_GAP_MM from the line, so its
+            # baseline is KiCad's (`kicad_pin_number_baseline`); the
+            # name vertically centred on the line, PIN_NAME_OFFSET past the
+            # inner end (both drawn by `_kicad_text_item`).
             gap = PIN_NUMBER_GAP_MM * scale
             offset = PIN_NAME_OFFSET * scale
             if vx:
