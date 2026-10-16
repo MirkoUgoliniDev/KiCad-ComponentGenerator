@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 16/10 sera — STATO: branch `ADVANCED`, commit di oggi (vedi riga sotto), NON mergiato in `main`, PC spento
+## 16/10 sera — STATO: branch `ADVANCED`, commit `2fbbbe7` (+ handoff), pushato, NON mergiato in `main`, PC spento
 
 Chiusi oggi: domanda designatore (grigio = compilato), MEDI 12-16, due
 revisioni avversariali complete con le loro correzioni, T2 (aggancio dei
