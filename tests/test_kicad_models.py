@@ -275,7 +275,7 @@ def test_an_explicit_inclusion_overrides_the_detector_only_omission(no_library):
     """La scelta vale in entrambi i versi, non solo per nascondere."""
     omitted = {"name": "YOLO candidate 12", "package": "", "length_mm": 1.0, "width_mm": 0.5}
     km.attach_models([omitted])
-    assert omitted["render_3d"] is False, "ipotesi del solo rilevatore: fuori dal 3D"
+    assert omitted["render_3d"] is False, "ipotesi del solo rilevatore: fuori dal modello STEP"
 
     forced = dict(omitted, render_3d_override=True)
     km.attach_models([forced])

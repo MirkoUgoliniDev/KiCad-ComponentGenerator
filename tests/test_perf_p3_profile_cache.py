@@ -136,3 +136,38 @@ def test_translation_catalog_identity_is_kept_until_a_change(tmp_path):
     store.save_translation("tab.project", "de", "Projekt X")
     second = store._language_catalog("de")
     assert second is not first and second["tab.project"] == "Projekt X"
+
+
+def test_an_outside_write_in_the_same_tick_with_the_same_size_is_seen(tmp_path):
+    """@brief Precise invalidation (2026-10-17): SQLite's file change counter enters the key.
+
+    Another process rewrites one label to a text of the same length and the
+    file keeps its size; the modification time is then put back, as when
+    both writes land in the same tick of a coarse clock. With modification
+    time and size alone the store kept serving the old label.
+    """
+    import os
+    import sqlite3
+    path = tmp_path / "p.sqlite3"
+    store = ProfileStore(path)
+    key = _first_key(store)
+    label = store.get_type(key)["label"]
+    stamp = path.stat()
+    replacement = ("X" if label[0] != "X" else "Y") + label[1:]
+    with sqlite3.connect(path) as outside:
+        outside.execute("UPDATE component_types SET label=? WHERE key=?", (replacement, key))
+    outside.close()
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert path.stat().st_size == stamp.st_size and path.stat().st_mtime_ns == stamp.st_mtime_ns
+    assert store.get_type(key)["label"] == replacement
+
+
+def test_an_unchanged_file_keeps_serving_the_cache(tmp_path, monkeypatch):
+    """@brief Negative: reading the header counter does not turn every read into a query."""
+    store = ProfileStore(tmp_path / "p.sqlite3")
+    key = _first_key(store)
+    store.get_type(key)
+    calls = _counting(store, monkeypatch)
+    for _ in range(5):
+        store.get_type(key)
+    assert calls == []

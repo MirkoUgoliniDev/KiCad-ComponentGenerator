@@ -386,12 +386,29 @@ class ProfileStore:
             db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
 
     def _database_signature(self):
-        """Modification time and size of the database file; None when it cannot be read."""
+        """Identity of the database contents now; None when the file cannot be read.
+
+        Modification time and size, plus SQLite's own «file change counter»
+        (4 big-endian bytes at offset 24 of the header), which every commit
+        in rollback-journal mode increments, and the stamp of a `-wal` file,
+        which carries the commits in WAL mode. The counter makes a write by
+        another process visible even when it lands in the same mtime tick and
+        keeps the file size (2026-10-17: mtime and size alone missed it).
+        """
         try:
             stat = self.path.stat()
+            with open(self.path, 'rb') as handle:
+                handle.seek(24)
+                counter = handle.read(4)
         except OSError:
             return None
-        return (stat.st_mtime_ns, stat.st_size)
+        wal = self.path.with_name(self.path.name + '-wal')
+        try:
+            wal_stat = wal.stat()
+            wal_stamp = (wal_stat.st_mtime_ns, wal_stat.st_size)
+        except OSError:
+            wal_stamp = None
+        return (stat.st_mtime_ns, stat.st_size, counter, wal_stamp)
 
     def _language_catalog(self, language):
         """All translations of `language` as a dict, read with one query and cached.

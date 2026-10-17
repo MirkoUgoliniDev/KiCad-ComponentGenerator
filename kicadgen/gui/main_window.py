@@ -1021,7 +1021,9 @@ def _drawing_text_item(record, mm_to_px):
     from ..core.footprint import USER_TEXT_ANCHOR
     anchored = record.get("anchor") == USER_TEXT_ANCHOR
     x, y = (v * mm_to_px for v in record["points"][0])
-    return _kicad_text_item(record["text"], record.get("size", 1.0), x, y, base_font=QFont(),
+    from ..core.kicad_text import kicad_unescape
+    # KiCad shows a footprint text unescaped («{slash}» drawn as «/»).
+    return _kicad_text_item(kicad_unescape(record["text"]), record.get("size", 1.0), x, y, base_font=QFont(),
                             mm_to_px=mm_to_px, thickness=_drawn_text_thickness(),
                             justify="left" if anchored else "center",
                             vjustify="bottom" if anchored else "center",
@@ -1047,6 +1049,7 @@ def _kicad_size_text_item(text, size, colour, mm_to_px, thickness=None):
     if thickness is None:
         from ..core.footprint import PROPERTY_TEXT_THICKNESS
         thickness = PROPERTY_TEXT_THICKNESS
+    # `text` is already the shown (unescaped) text: `_footprint_property_texts`.
     return _kicad_text_item(text, size, 0.0, 0.0, base_font=QFont(), mm_to_px=mm_to_px,
                             thickness=thickness, justify="left", vjustify="bottom", colour=colour)
 
@@ -3562,6 +3565,8 @@ class MainWindow(QMainWindow):
             lambda value: self._set_single_tht_footprint_value("field_pad", value))
         self.spin_single_tht_drill.valueChanged.connect(
             lambda value: self._set_single_tht_footprint_value("field_drill", value))
+        for spin in (self.spin_single_tht_pad, self.spin_single_tht_drill):
+            spin.editingFinished.connect(lambda: self._save_project_config())
         single_tht_layout.addWidget(QLabel("Pad Ø:"))
         single_tht_layout.addWidget(self.spin_single_tht_pad)
         single_tht_layout.addWidget(QLabel("Foro Ø:"))
@@ -3582,7 +3587,7 @@ class MainWindow(QMainWindow):
         self.chk_header_pins.setToolTip(
             "Aggiunge sotto la scheda gli strip maschi a pin quadrati, come una scheda "
             "con gli strip gia' saldati. Sulle schede castellated solo sui contatti con "
-            "foro passante. Non cambia l'analisi ne' il footprint: basta rigenerare il 3D.")
+            "foro passante. Non cambia l'analisi ne' il footprint: basta rigenerare il modello STEP.")
         self.chk_header_pins.toggled.connect(self._on_header_pins_toggled)
         self.group_mounting = QGroupBox("Montaggio sulla scheda principale")
         mounting_layout = QVBoxLayout(self.group_mounting)
@@ -3641,7 +3646,7 @@ class MainWindow(QMainWindow):
         self.spin_pcb_thickness.setKeyboardTracking(False)
         self.spin_pcb_thickness.setToolTip(
             "Spessore della sola scheda, senza componenti. Un valore scritto qui vale per "
-            "il progetto e una nuova analisi non lo cambia. Basta rigenerare il 3D.")
+            "il progetto e una nuova analisi non lo cambia. Basta rigenerare il modello STEP.")
         self.spin_pcb_thickness.valueChanged.connect(self._on_pcb_thickness_edited)
         self.label_pcb_thickness_source = QLabel()
         # Text already translated by _refresh_pcb_thickness_row: the generic
@@ -4323,11 +4328,19 @@ class MainWindow(QMainWindow):
             spin.blockSignals(blocked)
 
     def _set_single_tht_footprint_value(self, field_name: str, value: float) -> None:
-        """Apply a reviewed THT pad/drill value to the shared footprint parameters."""
+        """@brief Apply a reviewed THT pad/drill value to the shared footprint parameters.
+
+        @param field_name Attribute name of the footprint field it mirrors.
+        @param value New diameter, mm.
+        @note No save per step (2026-10-17): a held spin arrow wrote the whole
+            project state on every step (~67 ms with a photo). The value is
+            saved like every other field, by the project autosave
+            (`PROJECT_AUTOSAVE_MS`) and on leaving the project, and at once
+            when the edit ends (`editingFinished`: Enter or focus out).
+        """
         getattr(self, field_name).setValue(value)
         self._draw_preview()
         self._invalidate_generated_mesh()
-        self._save_project_config()
 
     def _on_header_pins_toggled(self, checked: bool) -> None:
         """@brief Record the pins choice for the project; the solid on screen is stale.
@@ -4690,7 +4703,7 @@ class MainWindow(QMainWindow):
             if complete_available and _step_older_than_footprint(footprint, step):
                 status += "\n" + self.i18n.text(
                     "ATTENZIONE: il modello STEP è più vecchio del footprint. Se dopo "
-                    "l'ultimo 3D hai cambiato il corpo, rigenera il modello STEP prima di "
+                    "l'ultimo modello STEP hai cambiato il corpo, rigenera il modello STEP prima di "
                     "installare.")
             if self.has_pending_footprint_edits():
                 # Test, export and installation copy the .kicad_mod on disk,
@@ -6218,7 +6231,7 @@ class MainWindow(QMainWindow):
         self._remember_inventory_pause(checked)
         self._append_log(
             tx("Pausa dopo l'inventario AI: attiva. La revisione dei componenti verrà "
-               "proposta prima dell'abbinamento modelli e del 3D (gratuita).")
+               "proposta prima dell'abbinamento modelli e del modello STEP (gratuita).")
             if checked else
             tx("Pausa dopo l'inventario AI: disattivata. L'analisi proseguirà da sola "
                "con i corpi proposti dall'AI; la revisione resta disponibile dai "
@@ -7596,8 +7609,8 @@ class MainWindow(QMainWindow):
             "Componenti corretti dalla foto. Modello STEP da rigenerare: "
             "premi \"Rigenera modello STEP\" per aggiornare STEP e anteprima."
         ), STATUS_INFO)
-        self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; 3D da "
-                            "rigenerare.",
+        self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; "
+                            "modello STEP da rigenerare.",
                             n_components=len(components)))
 
     def _run_pending_regen_3d(self) -> None:
@@ -7630,7 +7643,7 @@ class MainWindow(QMainWindow):
                 "Componenti corretti dalla foto. Modello STEP da rigenerare: "
                 "premi \"Rigenera modello STEP\" per aggiornare STEP e anteprima."
             ), STATUS_INFO)
-            self._append_log(tx("Rigenerazione automatica del 3D non avviata: il gruppo "
+            self._append_log(tx("Rigenerazione automatica del modello STEP non avviata: il gruppo "
                                 "«Modello STEP» è spento."))
             return
         # Automatic retry: no question (`_regenerate_3d` still gives the
@@ -10252,7 +10265,7 @@ class MainWindow(QMainWindow):
         if not self.castellated_components:
             self._append_log(
                 tx("ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
-                   "(components_3d vuoto): nel 3D andra' un blocco unico. Rilancia "
+                   "(components_3d vuoto): nel modello STEP andra' un blocco unico. Rilancia "
                    "l'estrazione con la foto del lato superiore selezionata, oppure "
                    "aggiungi i componenti a mano nel tab Modello STEP.")
             )
@@ -10567,7 +10580,7 @@ class MainWindow(QMainWindow):
         if chosen:
             self._append_log(
                 tx("ATTENZIONE: il generatore installato non conosce ancora il tipo di "
-                   "contatto: la scelta viene ignorata e footprint e 3D restano «{get}».",
+                   "contatto: la scelta viene ignorata e footprint e modello STEP restano «{get}».",
                    get=CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())))
 
     def _sides_from_table(self) -> list[CastellatedSide]:
@@ -13950,7 +13963,7 @@ class MainWindow(QMainWindow):
                 self._append_log(tx(
                     "Modello STEP rinviato: mancano le quote documentate del corpo ({fields}). "
                     "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
-                    "l'analisi per completare il 3D.", fields=", ".join(missing)))
+                    "l'analisi per completare il modello STEP.", fields=", ".join(missing)))
 
         self._last_params = params
         self._worker = GenerateWorker(
@@ -16340,7 +16353,7 @@ class MainWindow(QMainWindow):
         self.field_top_text_3d.setPlaceholderText("nessuna scritta")
         self.field_top_text_3d.setToolTip(
             "Testo stampato al centro della faccia superiore del componente, come una "
-            "serigrafia. Vuoto: nessuna scritta. Si salva con il progetto; rigenera il 3D "
+            "serigrafia. Vuoto: nessuna scritta. Si salva con il progetto; rigenera il modello STEP "
             "per vederla.")
         self.field_top_text_3d.setMaximumWidth(220)
         self.field_top_text_3d.editingFinished.connect(self._on_top_text_edited)
@@ -16350,7 +16363,7 @@ class MainWindow(QMainWindow):
         self.chk_pin_numbers_3d.setToolTip(
             "Stampa il numero di ogni pin sulla faccia inferiore del componente, accanto al "
             "reoforo, leggibile guardando da sotto. Non cambia il footprint: basta rigenerare "
-            "il 3D.")
+            "il modello STEP.")
         self.chk_pin_numbers_3d.toggled.connect(self._on_pin_numbers_3d_toggled)
         toolbar.addWidget(self.chk_pin_numbers_3d)
         self._sync_header_pins_3d()
@@ -17121,7 +17134,7 @@ class MainWindow(QMainWindow):
         self._set_3d_status(
             self.i18n.text("Generazione STEP in corso tramite FreeCAD..."), STATUS_INFO)
         self._append_log(
-            tx("Rigenerazione 3D {name}: {n_fillet_annotations} fillet, "
+            tx("Rigenerazione del modello STEP {name}: {n_fillet_annotations} fillet, "
                "{n_face_text_annotations} testi incisi",
                name=params.name,
                n_fillet_annotations=len(self.fillet_annotations),
@@ -17549,7 +17562,7 @@ class MainWindow(QMainWindow):
         """
         self._append_log(tx(
             "{count} corpi aggiunti dal solo modello, senza proposta del rilevatore, restano "
-            "fuori dalla tabella e dal 3D: per tenerli riapri «Revisione componenti…» e "
+            "fuori dalla tabella e dal modello STEP: per tenerli riapri «Revisione componenti…» e "
             "premi T su ciascuno.", count=len(self._photo_excluded_rows)))
 
     def _refresh_components_editor_button(self) -> None:
@@ -17645,7 +17658,7 @@ class MainWindow(QMainWindow):
             self._show_format_outlines()
             self.statusBar().showMessage(tx(
                 "Formato di {name} copiato: clic sui componenti su cui incollarlo, poi "
-                "spegni l'icona per rigenerare il 3D.", name=name))
+                "spegni l'icona per rigenerare il modello STEP.", name=name))
             self._format_toast_message(
                 tx("Formato di {name} copiato", name=name),
                 self.i18n.text("Misure, altezza, tipologia, package e modello KiCad."),
@@ -17661,7 +17674,7 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Copia formato: {source} -> {name}.",
                             source=self._format_source.get("source_name") or "?", name=name))
         self.statusBar().showMessage(tx(
-            "Formato di {source} incollato su: {targets}. Spegni l'icona per rigenerare il 3D.",
+            "Formato di {source} incollato su: {targets}. Spegni l'icona per rigenerare il modello STEP.",
             source=self._format_source.get("source_name") or "?",
             targets=", ".join(self._format_targets)))
         self._format_toast_message(
@@ -18691,8 +18704,10 @@ class MainWindow(QMainWindow):
         @return {"Reference": "REF**", "Value": component name, or the
             placeholder «Value» while the project has no name}.
         """
-        # An unnamed project still shows (and can drag) its Value text.
-        return {"Reference": "REF**", "Value": self._component_name() or "Value"}
+        # An unnamed project still shows (and can drag) its Value text,
+        # unescaped as KiCad shows a property («{slash}» drawn as «/»).
+        from ..core.kicad_text import kicad_unescape
+        return {"Reference": "REF**", "Value": kicad_unescape(self._component_name() or "Value")}
 
     def _load_footprint_text_positions(self, raw) -> dict:
         """@brief Chosen Reference/Value positions from a saved mapping, as bottom-left anchors.

@@ -746,9 +746,11 @@ class Footprint:
         """@brief The texts KiCad shows for the Reference and Value properties of this footprint.
 
         @return {"Reference": `REFERENCE_TEXT`, "Value": the footprint name},
-            the texts `to_sexpr` writes.
+            the texts `to_sexpr` writes, as KiCad shows them: unescaped
+            (`kicad_text.kicad_unescape`, «{slash}» shown as «/»).
         """
-        return {"Reference": REFERENCE_TEXT, "Value": self.name}
+        from .kicad_text import kicad_unescape
+        return {"Reference": kicad_unescape(REFERENCE_TEXT), "Value": kicad_unescape(self.name)}
 
     def _text_points(self) -> dict:
         """{key: (point, bottom-left?)} of the Reference/Value properties as written."""

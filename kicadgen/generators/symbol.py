@@ -537,8 +537,11 @@ def property_texts(reference: str, name: str) -> dict:
     @return {'Reference': reference + '?', 'Value': name}: kicad-cli and the
         schematic show an unannotated Reference with «?», so that is the
         width the anchor conversion uses.
+    @note Shown unescaped (`kicad_text.kicad_unescape`): KiCad draws a
+        property's «{slash}» as «/» (measured with kicad-cli 10, 2026-10-17).
     """
-    return {'Reference': f'{reference}?', 'Value': name}
+    return {'Reference': _kicad_text.kicad_unescape(f'{reference}?'),
+            'Value': _kicad_text.kicad_unescape(name)}
 
 
 class PropertyPositions(dict):

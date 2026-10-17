@@ -1859,7 +1859,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # Proposed but not chosen (HANDOFF 141): a note, not an _Issue, so the
         # response stays in the cache and a rerun does not pay again.
         log(tx("Inventario globale: {count} corpi aggiunti dal solo modello, senza proposte "
-               "del rilevatore: proposti ma esclusi dalla tabella e dal 3D finché non li "
+               "del rilevatore: proposti ma esclusi dalla tabella e dal modello STEP finché non li "
                "tieni nella revisione fotografica.", count=len(ai_only_excluded)))
     # A qualifier-only omission is accepted as «not declared» and never paid for
     # twice (NON_BLOCKING_QUALIFIERS); say so, with the count, so the log does

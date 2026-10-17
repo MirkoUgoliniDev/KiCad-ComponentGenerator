@@ -234,7 +234,7 @@ def test_a_deliberate_2d_only_run_still_produces_the_footprint(window, monkeypat
     params = _castellated_raw()
     window._auto_after_extraction = True
     window._on_extracted(params)
-    assert not window.group_3d.isChecked(), "senza FreeCAD il 3D resta spento"
+    assert not window.group_3d.isChecked(), "senza FreeCAD il modello STEP resta spento"
     assert window._current_body_params() is None
 
     window._start_automatic_generation(window._auto_generation_params)
