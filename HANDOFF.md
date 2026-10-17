@@ -1,5 +1,14 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 17/10 notte — FATTO e committato `29056de` su ADVANCED, mergiato in main `e2f0363`, pushati: gestione dei gesti UNIFICATA (canvas_gestures.py) nelle due schede, suite 9075 (A 5523/10/19, B 3552/2, 0 falliti)
+
+Prossimo (deciso, vedi «DOMANDA UTENTE 17/10 sera» piu' sotto): fase C
+camera (zoom/rotella/pan/fit con limiti e scala come parametri), poi fase B
+strumenti a clic (filo, forme, simboli grafici nel simbolo; modalita'
+disegno nel footprint). Stesso metodo: prove di parita' PRIMA, agenti su
+file disgiunti (modulo / simbolo / footprint), revisione avversariale,
+suite in due meta', commit solo con OK.
+
 ## 17/10 sera — PROSSIMO LAVORO (utente: «uniformare il funzionamento della gestione grafica nelle due tab ... scatena agenti esperti ... ma prima fai un piano»)
 
 Obiettivo: UN solo componente comune per i gesti del mouse (pressione,
