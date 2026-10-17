@@ -98,6 +98,48 @@ WRITE_BLOCKING_CODES = frozenset({
 })
 
 
+#: Field of «Metadati del componente» each metadata finding is about
+#: (`MainWindow.METADATA_HELP_TITLES` keys). The GUI marks that field with
+#: the finding's severity (user, 2026-10-17: «if it is empty, why not
+#: highlight it instead of only writing it below?»). Every code
+#: `check_metadata` can emit is here except `metadata_type`, which concerns
+#: no single field (tests/test_klc_field_marks.py keeps the list complete).
+METADATA_FIELD_OF_CODE = {
+    'reference_empty': 'reference',
+    'reference_letters': 'reference',
+    'description_empty': 'description',
+    'description_multiline': 'description',
+    'keywords_empty': 'keywords',
+    'keywords_multiline': 'keywords',
+    'datasheet_empty': 'datasheet',
+    'datasheet_format': 'datasheet',
+    'datasheet_blanks': 'datasheet',
+    'fp_filters_empty': 'fp_filters',
+    'fp_filters_format': 'fp_filters',
+}
+
+
+def field_findings(findings) -> dict:
+    """@brief The metadata findings grouped by the field they are about.
+
+    @param findings Iterable of `Finding`, e.g. the result of `check_all`.
+    @return {field key: (severity, [messages])}: 'error' when any finding of
+        that field is an error, else 'warning'; messages in finding order.
+        Fields without findings, and findings of no field (symbol, files,
+        names), are left out.
+    """
+    grouped = {}
+    for finding in findings:
+        field = METADATA_FIELD_OF_CODE.get(finding.code)
+        if field is None:
+            continue
+        severity, messages = grouped.get(field, ('warning', []))
+        if finding.severity == 'error':
+            severity = 'error'
+        grouped[field] = (severity, messages + [finding.message])
+    return grouped
+
+
 def missing_required_fields(findings) -> list[str]:
     """@brief The required metadata fields that the findings report as empty.
 

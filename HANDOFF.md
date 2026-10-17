@@ -1,6 +1,30 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 17/10 — STATO: tutto FATTO e verificato, NULLA COMMITTATO (in attesa dell'OK dell'utente), branch `ADVANCED` su `71c55e9`
+## 17/10 — STATO: committato `54c44dd` su `ADVANCED`, pushato; MERGIATO in `main` (`ac1e5c8`, pushato); di nuovo su `ADVANCED`
+
+Istruzione dell'utente: «committa in questo branch, pusha e fai il merge in
+main, pusha e torna qui».
+AUTORIZZATO 17/10 («ok», «procedi»): bordo rosso (errore) / giallo
+(avviso) sui campi dei metadati con un risultato KLC, motivo nel tooltip,
+segnaposto del Datasheet «URL, percorso del file, oppure ~ se non c'e'».
+IN CORSO. Piano: klc_checks.METADATA_FIELD_OF_CODE (tutti i codici di
+check_metadata -> campo, test che nessun codice resti senza campo) +
+field_findings(); main_window marca i 5 campi con la proprieta' dinamica
+`klc` = error/warning/'' a ogni _refresh_klc_findings e al cambio lingua;
+theme.APP_QSS `QLineEdit[klc="error"]` RED, `[klc="warning"]` YELLOW (dopo
+:focus, cosi' resta visibile mentre si scrive); tooltip = testo base
+tradotto + messaggi; voce i18n nuova per il segnaposto (4 lingue, DB).
+FATTO (non committato): klc_checks.METADATA_FIELD_OF_CODE + field_findings;
+main_window._mark_metadata_fields (chiamata da _refresh_klc_findings),
+_metadata_fields, DATASHEET_HINT, refresh dei KLC al cambio lingua;
+theme.APP_QSS bordi RED/YELLOW dopo :focus; i18n +1 voce, DB riaperto (+4
+righe). tests/test_klc_field_marks.py (6: ogni codice ha il campo,
+errore > avviso, rosso + motivo, «~» toglie il segno e ripristina il
+tooltip, giallo, cambio lingua). Verificato a schermo sulla copia di RS485
+(scratchpad marks.png). SUITE COMPLETA: A 5422 verdi, 10 saltati, 19
+sottotest; B 3493 verdi, 2 saltati; 0 falliti (totale 8915). In attesa
+dell'OK al commit. Database dei profili controllato: nessun
+segreto, incluso nel commit. Numeri in CLAUDE.md riallineati.
 
 SUITE COMPLETA FINALE 17/10 (dopo S1-S4, «modello STEP», S3 centrato,
 grigio pieno, verifica prestazioni P1/P2/P3 + coordinatore): A 5416 verdi,
