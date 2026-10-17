@@ -1,9 +1,22 @@
-"""@brief Footprint navigation: camera changes never modify geometry; only the texts can be dragged."""
+"""@brief Footprint navigation: camera changes never modify geometry; texts and drawing handles are dragged through the shared controller.
+
+The drags (a Reference/Value text live, a drawing point or a whole drawing
+stepped on the grid) run through `canvas_gestures.GestureController`, the
+same state machine as the symbol editor's: the view only decides WHAT was
+pressed, the window (the `GestureHost`) snaps and commits. Escape and Hide
+cancel through `CancelOnEscapeAndHide`; the text anchor squares are hover
+groups (`HoverGroups`) with the symbol editor's reveal margin.
+"""
 import math
 
 from PyQt6.QtCore import Qt, QLineF, QPointF, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtGui import QColor, QPen
 from PyQt6.QtWidgets import QApplication, QGraphicsView
+
+from .canvas_gestures import (
+    HOVER_MARGIN_PX, CancelOnEscapeAndHide, GestureController, HoverGroups, KeyRepeatFilter,
+    install_canvas_filters,
+)
 
 #: Item data role carrying the key of a draggable text (Reference, Value).
 TEXT_KEY_ROLE = 0x544558
@@ -44,21 +57,21 @@ HIT_MARGIN_PX = 4
 #: the hovered drawing's bounds, as the symbol editor's HANDLE_HOVER_MARGIN:
 #: without it the handles vanish on the way from the stroke to a handle.
 #: The anchor square of a Reference/Value text uses the same margin around
-#: the text and its anchor, as the symbol editor's property anchors.
-HOVER_KEEP_MARGIN_PX = 12
+#: the text and its anchor, as the symbol editor's property anchors. An
+#: alias of the shared `canvas_gestures.HOVER_MARGIN_PX`.
+HOVER_KEEP_MARGIN_PX = HOVER_MARGIN_PX
 
 
 class FootprintView(QGraphicsView):
-    """@brief Navigate the footprint with anchored zoom and mouse panning; drag its texts.
+    """@brief Navigate the footprint with anchored zoom and mouse panning; drag its texts and drawing handles.
 
-    @note Geometry is never changed here: a dragged text only moves its item
-        and reports the drop point (`text_moved`); the window decides, saves
-        and redraws (user, 2026-10-13).
+    @note Geometry is never changed here: a drag only names its target
+        (`('text', key)`, `('handle', drawing index, point index)` with point
+        index -1 for the whole drawing) to the `GestureController`, whose host
+        (the window, see `attach_host`) snaps, commits and redraws (user,
+        2026-10-13). Without a host the view only pans and zooms.
     """
     pad_context_requested = pyqtSignal(str)
-    #: A text was dropped: key and its anchor (the item's position: the
-    #: bottom-left corner of the text since 2026-10-16), scene units.
-    text_moved = pyqtSignal(str, float, float)
     #: Right click on a text: key.
     text_context_requested = pyqtSignal(str)
     #: Draw mode: a left click landed at this scene point.
@@ -77,14 +90,12 @@ class FootprintView(QGraphicsView):
     drawing_hovered = pyqtSignal(int)
     #: The text whose anchor square must show changed: its key ("" for none).
     text_hovered = pyqtSignal(str)
-    #: A handle was pressed: drawing index, point index (-1: whole drawing), scene point.
-    handle_pressed = pyqtSignal(int, int, float, float)
-    #: A handle is being dragged: drawing index, point index, scene point.
-    handle_dragged = pyqtSignal(int, int, float, float)
-    #: A handle was dropped: drawing index, point index, scene point.
-    handle_dropped = pyqtSignal(int, int, float, float)
 
     def __init__(self, scene):
+        """@brief A view without a gesture host: pan and zoom only until `attach_host`.
+
+        @param scene The footprint scene.
+        """
         super().__init__(scene)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
@@ -92,8 +103,15 @@ class FootprintView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._pan = None
         self._grid = None
-        #: (item, key, press scene point, item position at press) while a text is dragged.
-        self._text_drag = None
+        #: The shared drag state machine, created by `attach_host`; None until then.
+        self.gestures: GestureController | None = None
+        #: Hover groups of the Reference/Value anchor squares, registered by
+        #: the window when it draws the texts (owner `('text', key)`).
+        self.hover = HoverGroups(self)
+        #: Records whether a shortcut came from an auto-repeated key (D8):
+        #: the window's deferred checkpoint reads it. Installed by `attach_host`.
+        self.key_repeat = KeyRepeatFilter(self)
+        self._cancel_filter = None
         #: True while a palette tool collects clicks: left clicks become
         #: points instead of pans, and the keyboard closes or cancels.
         self._draw_mode = False
@@ -103,8 +121,6 @@ class FootprintView(QGraphicsView):
         # Hover without a button pressed: the snap marker follows the pointer.
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
-        #: (drawing index, point index) of the handle being dragged, or None.
-        self._handle_drag = None
         #: Drawing index last reported as hovered (-1: none).
         self._hovered_drawing = -1
         #: Scene bounds of the hovered drawing (handles kept while the
@@ -121,6 +137,65 @@ class FootprintView(QGraphicsView):
         #: keep the zoom and changes it).
         self.auto_fit = True
 
+    def attach_host(self, host):
+        """@brief Bind the drags to their host and install the cancel and key-repeat filters.
+
+        @param host The `canvas_gestures.GestureHost` (the main window):
+            `gesture_begin` returns a live plan for `('text', key)` and a
+            stepped plan for `('handle', index, point)`; `gesture_step` and
+            `gesture_end` snap and commit.
+        @note Qt's implicit grab is enough here (`grab_mouse=False`, as
+            before the shared controller). Escape cancels a drag (decision
+            D1) and so does Hide; the key filter goes in first so Hide
+            cancels the drag before a deferred checkpoint is flushed.
+        """
+        self.gestures = GestureController(self, host, grab_mouse=False)
+        self._cancel_filter = CancelOnEscapeAndHide(self.gestures, escape=True)
+        install_canvas_filters(self, self.key_repeat, self._cancel_filter)
+
+    def _dragging(self):
+        """True while the controller runs a drag."""
+        return self.gestures is not None and self.gestures.active
+
+    @property
+    def _text_drag(self):
+        """Read-only view of a running text drag: (item, key, press point, origin), or None.
+
+        Kept for the tests that read the old attribute; the state lives in
+        the controller. Assigning None cancels the drag (`cancel_interaction`).
+        """
+        gestures = self.gestures
+        if gestures is None or not gestures.active or gestures.target[0] != 'text':
+            return None
+        items = gestures.live_items
+        item, origin = items[0] if items else (None, None)
+        return (item, gestures.target[1], gestures.start_point, origin)
+
+    @_text_drag.setter
+    def _text_drag(self, value):
+        if value is not None:
+            raise AttributeError("_text_drag is read-only: drags start with a press")
+        if self._text_drag is not None:
+            self.cancel_interaction()
+
+    @property
+    def _handle_drag(self):
+        """Read-only view of a running handle drag: (drawing index, point index), or None.
+
+        Kept for the tests that read the old attribute. Assigning None cancels the drag.
+        """
+        gestures = self.gestures
+        if gestures is None or not gestures.active or gestures.target[0] != 'handle':
+            return None
+        return (gestures.target[1], gestures.target[2])
+
+    @_handle_drag.setter
+    def _handle_drag(self, value):
+        if value is not None:
+            raise AttributeError("_handle_drag is read-only: drags start with a press")
+        if self._handle_drag is not None:
+            self.cancel_interaction()
+
     def set_draw_mode(self, active):
         """@brief Enter or leave drawing mode; the cursor shows the change.
 
@@ -130,7 +205,7 @@ class FootprintView(QGraphicsView):
         self._draw_mode = bool(active)
         if self._draw_mode:
             self._pan = None
-            self._text_drag = None
+            self.cancel_interaction()
             self._report_text_hover("")
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
             self.setFocus()
@@ -273,10 +348,18 @@ class FootprintView(QGraphicsView):
         self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
 
     def wheelEvent(self, event):
-        """@brief Zoom toward the mouse position using the wheel delta.
+        """@brief Zoom toward the mouse position using the wheel delta; refused while a drag runs.
 
         @param event Qt wheel event; angle delta and pointer position are used.
+        @note Decision D2 (2026-10-17, as the symbol editor): a rescale under
+            a live drag would re-measure the drag's delta in the new scene
+            and make the text jump, and a rescale under a pan would move the
+            camera by a delta measured in two scales; the wheel waits for
+            the drop (drag) or the release (pan).
         """
+        if self._dragging() or self._pan is not None:
+            event.accept()
+            return
         self.zoom(1.2 ** (event.angleDelta().y() / 120), event.position().toPoint())
         event.accept()
 
@@ -365,22 +448,16 @@ class FootprintView(QGraphicsView):
         return area
 
     def _text_near(self, pos):
-        """Key of the text whose reveal area holds a viewport point, or ""."""
-        # Candidates: items within the margin (+1 px for the anchor point at
-        # the glyphs' edge); the exact test is the reveal area itself.
-        m = HOVER_KEEP_MARGIN_PX + 1
-        seen = set()
-        for item in self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1)):
-            key = item.data(TEXT_KEY_ROLE)
-            if key is None:
-                continue
-            while item.parentItem() is not None:
-                item = item.parentItem()
-            if id(item) in seen:
-                continue
-            seen.add(id(item))
-            if self._near_scene_rect(self._text_reveal_area(item), pos):
-                return str(key)
+        """Key of the first registered text whose hover group reveals at a viewport point, or "".
+
+        The window registers one group per text (`hover.add`, owner
+        `('text', key)`, base = `_text_reveal_area`); the shared rule grows
+        the base by HOVER_KEEP_MARGIN_PX screen px at any zoom.
+        """
+        shown = self.hover.revealed(self.mapToScene(pos), None)
+        for _items, _base, _ring, owner in self.hover.groups:
+            if owner in shown and owner[0] == 'text':
+                return str(owner[1])
         return ""
 
     def _report_text_hover(self, key):
@@ -423,19 +500,18 @@ class FootprintView(QGraphicsView):
         self._hover_bounds = None
 
     def cancel_interaction(self):
-        """@brief End a handle or text drag in progress, without reporting a drop.
+        """@brief Cancel a handle or text drag in progress, without reporting a drop.
 
         @note For the window, when the drawings list changes while the mouse
             button is still down (Delete, Ctrl+Z, Ctrl+Y, Ctrl+D): the drag
             holds indices into the old list, and its release would move a
-            different drawing. The release that follows then does nothing.
+            different drawing. The controller tells the host once
+            (`gesture_end(commit=False)`: a dragged text goes back where it
+            was, decision D5) and the release that follows does nothing.
             Panning and draw mode are untouched: they hold no index.
         """
-        dragging = self._handle_drag is not None or self._text_drag is not None
-        self._handle_drag = None
-        self._text_drag = None
-        if dragging:
-            self.viewport().unsetCursor()
+        if self.gestures is not None:
+            self.gestures.cancel()
 
     def mousePressEvent(self, event):
         """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
@@ -456,6 +532,11 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
         if event.button() == Qt.MouseButton.RightButton:
+            if self._dragging():
+                # Decision D3 (2026-10-17, as the symbol editor): no menu over
+                # a drag in progress; the drop or Escape comes first.
+                event.accept()
+                return
             item, key = self._text_item_at(event.pos())
             if item is not None:
                 self.text_context_requested.emit(key)
@@ -482,12 +563,11 @@ class FootprintView(QGraphicsView):
             # body of a drawing.
             handle = self._handle_at(event.pos())
             item, key = (None, None) if handle is not None else self._text_item_at(event.pos())
-            if item is not None:
-                self._text_drag = (item, key, self.mapToScene(event.pos()), item.pos())
+            point = self.mapToScene(event.pos())
+            if item is not None and self.gestures is not None and self.gestures.press(('text', key), point):
                 # The dragged text keeps its anchor square wherever the
                 # pointer goes, as a dragged property in the symbol editor.
                 self._report_text_hover(key)
-                self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
                 event.accept()
                 return
             if handle is None:
@@ -495,15 +575,17 @@ class FootprintView(QGraphicsView):
                 # element of the symbol editor (user, 2026-10-13).
                 index = self._drawing_at(event.pos())
                 handle = (index, -1) if index >= 0 else None
-            if handle is not None:
+            if (handle is not None and self.gestures is not None
+                    and self.gestures.press(('handle', *handle), point)):
                 # The window moves the point (or the whole drawing) on the
-                # grid and redraws the shape.
-                self._handle_drag = handle
-                self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
-                point = self.mapToScene(event.pos())
-                self.handle_pressed.emit(*handle, point.x(), point.y())
+                # grid and redraws the shape at every step.
                 event.accept()
                 return
+        if self._dragging() and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
+            # As the symbol editor: another button pressed over a running
+            # drag neither pans nor starts a second gesture.
+            event.accept()
+            return
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._pan = event.pos()
             self._pan_button = event.button()
@@ -513,19 +595,15 @@ class FootprintView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """@brief Move the dragged text, or pan the camera, without changing footprint geometry.
+        """@brief Feed a drag, or pan the camera, without changing footprint geometry.
 
         @param event Qt mouse move event.
+        @note A text follows live (the controller moves the item; a redraw
+            under the drag re-binds the new item, decision D4); a handle
+            step goes to the host, which snaps it and shows the ghost.
         """
-        if self._text_drag is not None:
-            item, _key, start, origin = self._text_drag
-            try:
-                item.setPos(origin + (self.mapToScene(event.pos()) - start))
-            except RuntimeError:
-                # The scene was redrawn under the drag (crash report
-                # 2026-10-13 08:29): the item is gone, so is the drag.
-                self._text_drag = None
-                self.viewport().unsetCursor()
+        if self._dragging():
+            self.gestures.move(self.mapToScene(event.pos()))
             event.accept()
             return
         if self._pan is not None:
@@ -538,10 +616,6 @@ class FootprintView(QGraphicsView):
         elif self._draw_mode:
             point = self.mapToScene(event.pos())
             self.draw_hovered.emit(point.x(), point.y())
-            event.accept()
-        elif self._handle_drag is not None:
-            point = self.mapToScene(event.pos())
-            self.handle_dragged.emit(*self._handle_drag, point.x(), point.y())
             event.accept()
         else:
             # Hovering a drawing reveals its handles (user, 2026-10-13:
@@ -571,7 +645,7 @@ class FootprintView(QGraphicsView):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """@brief Report the dropped text, or apply the final pan displacement; release the cursor.
+        """@brief Drop a drag through the controller, or apply the final pan displacement.
 
         @param event Qt mouse release event.
         @note In draw mode a release away from its press is a DRAG: the
@@ -580,12 +654,14 @@ class FootprintView(QGraphicsView):
             only click-click (user, 2026-10-13: «non funziona»). A release
             at the press point is a plain click and adds nothing.
         """
-        if self._handle_drag is not None and event.button() == Qt.MouseButton.LeftButton:
-            drawing, point_index = self._handle_drag
-            self._handle_drag = None
-            self.viewport().unsetCursor()
-            point = self.mapToScene(event.pos())
-            self.handle_dropped.emit(drawing, point_index, point.x(), point.y())
+        if self._dragging() and event.button() == Qt.MouseButton.LeftButton:
+            kind = self.gestures.target[0]
+            # The release passes through a last move at the drop point, then
+            # the host commits once (`gesture_end`).
+            self.gestures.release(self.mapToScene(event.pos()))
+            if kind == 'text':
+                # After the drop the square follows the pointer rule again.
+                self._report_text_hover(self._text_near(event.pos()))
             event.accept()
             return
         if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
@@ -593,19 +669,6 @@ class FootprintView(QGraphicsView):
             if press is not None and (event.pos() - press).manhattanLength()                     >= QApplication.startDragDistance():
                 point = self.mapToScene(event.pos())
                 self.draw_clicked.emit(point.x(), point.y())
-            event.accept()
-            return
-        if self._text_drag is not None and event.button() == Qt.MouseButton.LeftButton:
-            item, key, start, origin = self._text_drag
-            self._text_drag = None
-            self.viewport().unsetCursor()
-            try:
-                item.setPos(origin + (self.mapToScene(event.pos()) - start))
-                self.text_moved.emit(key, item.pos().x(), item.pos().y())
-            except RuntimeError:
-                pass  # redrawn under the drag: nothing to report
-            # After the drop the square follows the pointer rule again.
-            self._report_text_hover(self._text_near(event.pos()))
             event.accept()
             return
         if self._pan is not None and event.button() == self._pan_button:
@@ -641,7 +704,17 @@ class FootprintView(QGraphicsView):
         """@brief Qt override: in draw mode Esc cancels and Enter closes the shape.
 
         @param event Qt key press event.
+        @note Escape also cancels a camera pan in progress, as the symbol
+            editor does (2026-10-17): the camera stays where it is, the
+            release that follows does nothing, and the key is consumed, so
+            it does not also cancel an armed drawing tool. With no pan
+            running, Escape reaches the draw tool as before.
         """
+        if event.key() == Qt.Key.Key_Escape and self._pan is not None:
+            self._pan = None
+            self.viewport().unsetCursor()
+            event.accept()
+            return
         if self._draw_mode:
             if event.key() == Qt.Key.Key_Escape:
                 self.draw_cancelled.emit()
@@ -654,13 +727,16 @@ class FootprintView(QGraphicsView):
         super().keyPressEvent(event)
 
     def hideEvent(self, event):
-        """@brief Discard an unfinished camera or text drag when the view is hidden.
+        """@brief Discard an unfinished camera drag, and cancel a text or handle drag, when the view is hidden.
 
         @param event Qt hide event, forwarded to the base class.
+        @note The cancel filter already cancels on the Hide event; the direct
+            call here covers a `hideEvent` invoked without the event loop
+            (tests) and is a no-op when the drag is already gone. The host
+            puts the dragged text back and drops the handle ghost.
         """
         self._pan = None
-        self._text_drag = None
-        self._handle_drag = None
+        self.cancel_interaction()
         self._report_text_hover("")
         if self._draw_mode:
             # The window disarms the tool and cleans its click markers.

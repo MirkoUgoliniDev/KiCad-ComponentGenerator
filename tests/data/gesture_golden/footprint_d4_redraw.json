@@ -1,0 +1,88 @@
+{
+  "handle_redraw": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 2,
+      "_refresh_drawing_handles": 7,
+      "save_footprint_draft": 1
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            6.0,
+            12.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              6.0,
+              12.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {
+        "Reference": [
+          4.0,
+          -1.0
+        ],
+        "anchor": "left_bottom"
+      }
+    },
+    "redo": 0,
+    "texts": {
+      "Reference": [
+        4.0,
+        -1.0
+      ]
+    },
+    "undo": 2
+  },
+  "text_redraw": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 2,
+      "_refresh_drawing_handles": 2,
+      "save_footprint_draft": 1
+    },
+    "drawings": [],
+    "recovery": {
+      "drawings": [],
+      "texts": {
+        "Reference": [
+          4.0,
+          -1.0
+        ],
+        "anchor": "left_bottom"
+      }
+    },
+    "redo": 0,
+    "texts": {
+      "Reference": [
+        4.0,
+        -1.0
+      ]
+    },
+    "undo": 1
+  }
+}

@@ -301,10 +301,12 @@ def test_the_anchor_square_shows_near_the_text_and_while_dragged(tab):
     far = QPointF(60 * S, 60 * S)
     tab._update_handle_visibility(far)
     assert not square.isVisible(), 'hidden with the pointer far'
-    tab.view.gesture = ('property', 'Value')
+    # The drag is driven through the shared controller, as a press would.
+    assert tab._gestures.press(('property', 'Value'), QPointF(0, 0))
     tab._update_handle_visibility(far)
     assert square.isVisible(), 'kept on screen while its property is dragged'
-    tab.view.gesture = None
+    tab._gestures.cancel()
+    assert tab.view.gesture is None
 
 
 def test_a_drag_snaps_the_corner_to_the_grid_and_marks_the_mapping(tab):

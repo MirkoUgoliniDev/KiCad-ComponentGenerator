@@ -1,0 +1,28 @@
+{
+  "refused": {
+    "calls": {
+      "_refresh_drawing_handles": 5
+    },
+    "drawings": [
+      {
+        "kind": "circle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            3.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  }
+}

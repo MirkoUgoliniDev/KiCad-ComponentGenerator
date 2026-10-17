@@ -53,13 +53,13 @@ def test_handles_stay_visible_while_a_handle_is_dragged(qapp):
         tab.add_shape_point(0, 0)
         tab.add_shape_point(5.08, 2.54)
         tab._select_graphic(0)
-        tab.view.gesture = ('shape_point', 0, 1)
+        # `_begin_gesture` presses the shared controller: the view's gesture follows it.
         tab._begin_gesture(('shape_point', 0, 1), QPointF(5.08 * SCENE_UNITS_PER_MM, -2.54 * SCENE_UNITS_PER_MM))
         tab._move_gesture(('shape_point', 0, 1), QPointF(12 * SCENE_UNITS_PER_MM, -2.54 * SCENE_UNITS_PER_MM))
         tab._update_readout(QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM))
         assert all(h.isVisible() for h in _handles(tab)), 'a drag keeps the handles on screen'
         tab._end_gesture(True)
-        tab.view.gesture = None
+        assert tab.view.gesture is None
         assert tab.graphics()[0]['primitives'][0]['points'][1][0] > 5.08, 'the corner was dragged'
     finally:
         tab.deleteLater()
@@ -121,15 +121,24 @@ def test_leaving_the_view_hides_the_handles_and_a_gesture_reveals_only_its_owner
         assert all(h.isVisible() for h in shape)
         tab.view.pointer_left.emit()
         assert not any(h.isVisible() for h in shape), 'the pointer left the drawing'
+        # The drags are driven through the shared controller, as a press
+        # would; the press and the cancel redraw, so the handles are fetched again.
+        far = QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM)
+
+        def body_handles():
+            return [i for i in tab.view.scene().items() if i.data(0) and i.data(0)[0] == 'resize']
+
         # A pin drag owns no handle group: nothing is revealed by it.
-        tab.view.gesture = ('pin', '1')
-        tab._update_readout(QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM))
-        assert not any(h.isVisible() for h in shape + body)
+        assert tab._gestures.press(('pin', '1'), QPointF(0, 0))
+        tab._update_readout(far)
+        assert not any(h.isVisible() for h in _handles(tab) + body_handles())
+        tab._gestures.cancel()
         # A body resize reveals the body handles only.
-        tab.view.gesture = ('resize', 1, 1)
-        tab._update_readout(QPointF(60 * SCENE_UNITS_PER_MM, 60 * SCENE_UNITS_PER_MM))
-        assert all(h.isVisible() for h in body) and not any(h.isVisible() for h in shape)
-        tab.view.gesture = None
+        assert tab._gestures.press(('resize', 1, 1), QPointF(0, 0))
+        tab._update_readout(far)
+        assert all(h.isVisible() for h in body_handles()) and not any(h.isVisible() for h in _handles(tab))
+        tab._gestures.cancel()
+        assert tab.view.gesture is None
     finally:
         tab.deleteLater()
 

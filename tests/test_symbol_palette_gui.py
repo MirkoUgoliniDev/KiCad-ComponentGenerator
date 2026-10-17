@@ -941,11 +941,11 @@ def test_shape_handles_are_drawn_for_the_selected_shape_and_dragged_on_the_drawi
         handles = [item.data(0) for item in tab.view.scene().items()
                    if item.data(0) and item.data(0)[0] == 'shape_point']
         assert sorted(handles) == [('shape_point', 0, 0), ('shape_point', 0, 1)]
-        # A drag of the far corner, through the view's gesture signals: one undo step.
-        tab.view.gesture_started.emit(('shape_point', 0, 1), QPointF(5.08 * SCENE_UNITS_PER_MM, -2.54 * SCENE_UNITS_PER_MM))
-        tab.view.gesture_moved.emit(('shape_point', 0, 1), QPointF(7.5 * SCENE_UNITS_PER_MM, -5.2 * SCENE_UNITS_PER_MM))
-        tab.view.gesture_moved.emit(('shape_point', 0, 1), QPointF(7.7 * SCENE_UNITS_PER_MM, -5.0 * SCENE_UNITS_PER_MM))
-        tab.view.gesture_finished.emit(True)
+        # A drag of the far corner, through the tab's gesture API: one undo step.
+        tab._begin_gesture(('shape_point', 0, 1), QPointF(5.08 * SCENE_UNITS_PER_MM, -2.54 * SCENE_UNITS_PER_MM))
+        tab._move_gesture(('shape_point', 0, 1), QPointF(7.5 * SCENE_UNITS_PER_MM, -5.2 * SCENE_UNITS_PER_MM))
+        tab._move_gesture(('shape_point', 0, 1), QPointF(7.7 * SCENE_UNITS_PER_MM, -5.0 * SCENE_UNITS_PER_MM))
+        tab._end_gesture(True)
         assert g.shape_handles(tab.graphics()[0]) == [(0.0, 0.0), (7.62, 5.08)]
         tab.undo()
         assert g.shape_handles(tab.graphics()[0]) == [(0.0, 0.0), (5.08, 2.54)], 'one step'
@@ -1014,9 +1014,9 @@ def test_several_elements_are_selected_together_and_moved_turned_deleted_as_a_gr
         assert handles == [], 'no handles while several are selected'
         assert tab._edit_selected_graphics('rotate', 90) and [r['rotation'] for r in tab.graphics()] == [90, 90]
         # Dragging one selected element moves the whole group.
-        tab.view.gesture_started.emit(('graphic', 0), QPointF(0, 0))
-        tab.view.gesture_moved.emit(('graphic', 0), QPointF(0, -5.08 * SCENE_UNITS_PER_MM))
-        tab.view.gesture_finished.emit(True)
+        tab._begin_gesture(('graphic', 0), QPointF(0, 0))
+        tab._move_gesture(('graphic', 0), QPointF(0, -5.08 * SCENE_UNITS_PER_MM))
+        tab._end_gesture(True)
         assert [r['y'] for r in tab.graphics()] == [7.62, 7.62] and tab.selected_graphics() == [0, 1]
         assert tab._edit_selected_graphics('delete') and tab.graphics() == [] and tab.selected_graphics() == []
         # A band without pins selects the elements wholly inside it (the

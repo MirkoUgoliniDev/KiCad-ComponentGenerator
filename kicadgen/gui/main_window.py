@@ -1233,12 +1233,18 @@ def _screen_handle(scene, x, y, size, solid):
     @return The rect item, tagged with role 0x48474F and a cross cursor;
         the caller sets its handle key and tooltip.
     """
-    from PyQt6.QtWidgets import QGraphicsItem
+    from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem
     fill = QColor(GREEN)
     if not solid:
         fill.setAlpha(150)
     half = size / 2
-    square = scene.addRect(-half, -half, size, size, QPen(QColor(YELLOW), 1.0), QBrush(fill))
+    # Built in Python and added with `addItem`, never `scene.addRect`: the
+    # text anchor squares are registered in the view's hover groups, and
+    # the shared objects may hold only Python-built items (kept-items rule).
+    square = QGraphicsRectItem(-half, -half, size, size)
+    square.setPen(QPen(QColor(YELLOW), 1.0))
+    square.setBrush(QBrush(fill))
+    scene.addItem(square)
     square.setPos(x, y)
     square.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
     square.setData(0x48474F, True)
@@ -1673,11 +1679,10 @@ class MainWindow(QMainWindow):
         self._fp_handle_drag: tuple | None = None
         #: Snapped grab point (mm) of a whole-drawing drag, or None.
         self._fp_handle_origin: tuple | None = None
-        #: True between a handle press and its drop.
-        self._fp_handle_active: bool = False
-        #: True when the drawings list changed during that drag: its drop
-        #: (and any further move) is ignored, its indices are stale.
-        self._fp_handle_cancelled: bool = False
+        #: Scene position of the dragged Reference/Value text at its press
+        #: and the press point itself, while a text drag runs (the drop
+        #: anchor is origin + (drop - press)); None otherwise.
+        self._fp_text_drag: tuple | None = None
         #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
         #: Consumed by `_flush_footprint_rewrite` just before its single
         #: attempt (a failed start is logged once, never retried in a loop)
@@ -2279,6 +2284,7 @@ class MainWindow(QMainWindow):
             if not self._can_leave_project():
                 event.ignore()
                 return
+            self._flush_footprint_checkpoint()
             self._window_closed = True
             self.ai_account.detach()
             # A window really closed is only about to be destroyed, and while
@@ -4786,6 +4792,7 @@ class MainWindow(QMainWindow):
         """
         if hasattr(self, "_open_project_folder"):
             previous = self._open_project_folder
+            self._flush_footprint_checkpoint()      # still the old project's recovery path
             self._open_project_folder = self._project_dir() if self._component_name() else None
             self._remember_recent_project(previous)
         self._update_project_path_label()
@@ -8027,6 +8034,7 @@ class MainWindow(QMainWindow):
 
     def _switch_project(self, name: str, state: dict) -> None:
         """@brief Open `name` with the settings `state`, without saving them half-way."""
+        self._flush_footprint_checkpoint()          # the closing project's deferred draft write
         self._restoring_project = True
         try:
             self._reset_project_runtime_state()
@@ -14403,9 +14411,11 @@ class MainWindow(QMainWindow):
 
         self.preview_scene = QGraphicsScene()
         self.preview_view = FootprintView(self.preview_scene)
+        # The window is the gesture host: `gesture_begin` / `gesture_step` /
+        # `gesture_end` snap and commit what the view's controller reports.
+        self.preview_view.attach_host(self)
         self.preview_view.set_fine_divisor(self.combo_fine_grid.currentData())
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
-        self.preview_view.text_moved.connect(self._on_footprint_text_moved)
         self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
         self.preview_view.setMinimumHeight(500)
         # The footprint is drawn at a relatively high scene scale (20 px/mm).
@@ -14484,18 +14494,21 @@ class MainWindow(QMainWindow):
         self.preview_view.draw_hover_left.connect(self._on_footprint_draw_hover_left)
         self.preview_view.drawing_hovered.connect(self._on_footprint_drawing_hovered)
         self.preview_view.text_hovered.connect(self._on_footprint_text_hovered)
-        from PyQt6.QtGui import QShortcut
-        for keys, slot in (('Ctrl+Z', self._undo_footprint_drawing),
-                           ('Ctrl+Y', self._redo_footprint_drawing),
-                           ('Ctrl+Shift+Z', self._redo_footprint_drawing),
-                           ('Ctrl+D', self._duplicate_hovered_drawing),
-                           ('Delete', self._delete_hovered_drawing)):
-            shortcut = QShortcut(QKeySequence(keys), self.preview_view)
-            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(slot)
-        self.preview_view.handle_pressed.connect(self._on_footprint_handle_pressed)
-        self.preview_view.handle_dragged.connect(self._on_footprint_handle_dragged)
-        self.preview_view.handle_dropped.connect(self._on_footprint_handle_dropped)
+        from .canvas_gestures import DeferredCheckpoint, bind_shortcuts
+        # Decision D8 (2026-10-17, as the symbol editor): a held Ctrl+Z /
+        # Ctrl+Y / Delete / Ctrl+D runs its handler on every repeat but
+        # writes the recovery file once, when the key is released.
+        self._fp_checkpoint = DeferredCheckpoint(self.preview_view.key_repeat,
+                                                 self._checkpoint_footprint_draft)
+        self._fp_shortcuts = bind_shortcuts(
+            self.preview_view,
+            [('Ctrl+Z', self._undo_footprint_drawing),
+             ('Ctrl+Y', self._redo_footprint_drawing),
+             ('Ctrl+Shift+Z', self._redo_footprint_drawing),
+             ('Ctrl+D', self._duplicate_hovered_drawing),
+             ('Delete', self._delete_hovered_drawing)],
+            runner=self._fp_checkpoint.run,
+            context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
 
         return tab
@@ -15150,6 +15163,20 @@ class MainWindow(QMainWindow):
             self._fp_recoverable_source = "kept"
         return True
 
+    def _flush_footprint_checkpoint(self) -> None:
+        """@brief Write a recovery checkpoint deferred by a held key, now.
+
+        @note Call BEFORE anything that changes the project the draft and
+            the recovery path belong to (open, new, rename, close of the
+            project or of the window): a write deferred while a key repeated
+            must land under the project that was edited, never under the
+            next one. A no-op without a pending write; the symbol editor
+            flushes the same way in `set_data` / `set_recovery_path`.
+        """
+        checkpoint = getattr(self, "_fp_checkpoint", None)
+        if checkpoint is not None:
+            checkpoint.flush()
+
     def _checkpoint_footprint_draft(self) -> None:
         """@brief Write the pending draft to the recovery file, or remove the file when nothing is pending.
 
@@ -15163,6 +15190,9 @@ class MainWindow(QMainWindow):
         path = self._footprint_recovery_path()
         if path is None:
             return
+        checkpoint = getattr(self, "_fp_checkpoint", None)
+        if checkpoint is not None and not checkpoint.request():
+            return      # a held key repeats: written once when it is released (D8)
         from ..services.footprint_draft import remove_footprint_draft, save_footprint_draft
         try:
             pending = self.has_pending_footprint_edits()
@@ -15314,12 +15344,10 @@ class MainWindow(QMainWindow):
         """
         view = getattr(self, "preview_view", None)
         if view is not None:
-            view.cancel_interaction()
-        if self._fp_handle_active:
-            self._fp_handle_cancelled = True
-        self._fp_handle_active = False
+            view.cancel_interaction()       # -> gesture_end(commit=False) when a drag runs
         self._fp_handle_drag = None
         self._fp_handle_origin = None
+        self._fp_text_drag = None
 
     def _schedule_footprint_rewrite(self, immediate: bool = False, pad_edit: bool = False) -> None:
         """@brief Mark the .kicad_mod as stale and rewrite it as soon as nothing else runs.
@@ -15756,10 +15784,148 @@ class MainWindow(QMainWindow):
         self._fp_hovered_drawing = index
         self._refresh_drawing_handles()
 
+    @property
+    def _fp_handle_active(self) -> bool:
+        """@brief True between a handle (or drawing body) press and its drop or cancel.
+
+        @return Whether the preview's controller runs a handle drag.
+        @note Read-only alias of the controller's state, kept for the tests
+            that read the flag the window used to keep by hand.
+        """
+        view = getattr(self, "preview_view", None)
+        gestures = getattr(view, "gestures", None)
+        return bool(gestures is not None and gestures.active and gestures.target[0] == "handle")
+
+    def _footprint_text_group(self, key: str):
+        """@brief The top-level scene group of a Reference/Value text, or None when not drawn.
+
+        @param key Text key.
+        @return The `QGraphicsItemGroup` whose position is the text anchor, or None.
+        """
+        from .footprint_view import TEXT_KEY_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return None
+        for item in scene.items():
+            if item.data(TEXT_KEY_ROLE) == key and item.parentItem() is None:
+                return item
+        return None
+
+    def _forget_preview_items(self) -> None:
+        """@brief Drop every reference to preview scene items held by the shared gesture objects.
+
+        @note Called right before each `preview_scene.clear()`: the hover
+            groups and a live text drag hold Python-built items of the
+            scene being cleared (kept-items rule). The drag itself goes on:
+            `_draw_footprint_texts` re-binds the new text item (D4).
+        """
+        view = getattr(self, "preview_view", None)
+        if view is None:
+            return
+        view.hover.clear()
+        if view.gestures is not None:
+            view.gestures.forget_items()
+
+    def gesture_begin(self, target: tuple, point: QPointF):
+        """@brief GestureHost: plan a drag the footprint view pressed.
+
+        @param target `('text', key)` for a Reference/Value text, or
+            `('handle', drawing index, point index)` with point index -1
+            for the whole drawing.
+        @param point Scene position (px) of the press.
+        @return A live `DragPlan` moving the text group, a stepped one for a handle, or None to refuse
+            (unknown target or a text not drawn): the press then pans.
+        """
+        from .canvas_gestures import DragPlan
+        if target[0] == "text":
+            group = self._footprint_text_group(str(target[1]))
+            if group is None:
+                return None
+            self._fp_text_drag = (QPointF(group.pos()), QPointF(point))
+            return DragPlan("live", live_items=[(group, group.pos())],
+                            cursor=Qt.CursorShape.SizeAllCursor)
+        if target[0] == "handle" and len(target) == 3:
+            self._on_footprint_handle_pressed(int(target[1]), int(target[2]), point.x(), point.y())
+            return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
+        return None
+
+    def gesture_step(self, target: tuple, point: QPointF) -> None:
+        """@brief GestureHost: one step of a handle drag (every move and the drop point).
+
+        @param target The `('handle', index, point index)` target.
+        @param point Scene position (px) of the pointer.
+        """
+        if target[0] == "handle":
+            self._on_footprint_handle_dragged(int(target[1]), int(target[2]), point.x(), point.y())
+
+    def gesture_end(self, target: tuple, last, commit: bool) -> None:
+        """@brief GestureHost: the drag ended; commit the drop once, or undo the picture of a cancel.
+
+        @param target The target the drag began on.
+        @param last Scene position (px) of the last move; the drop point on
+            a commit (the release always passes through a move).
+        @param commit True on a drop, False on a cancel (Escape, Hide, a
+            change of the drawings list, draw mode).
+        @note A cancelled text goes back where it was (decision D5, as the
+            symbol editor); a cancelled handle drag drops its ghost. Called
+            with the controller already idle, so the commit's redraw and
+            `_end_footprint_drawing_interaction` find nothing to cancel.
+        """
+        if target[0] == "text":
+            drag, self._fp_text_drag = self._fp_text_drag, None
+            key = str(target[1])
+            if commit:
+                if drag is not None and last is not None:
+                    self._drop_footprint_text(key, drag[0], QPointF(last) - drag[1])
+                return
+            group = self._footprint_text_group(key)
+            if group is not None and drag is not None:
+                group.setPos(drag[0])
+            return
+        if target[0] == "handle":
+            if commit and last is not None:
+                self._on_footprint_handle_dropped(int(target[1]), int(target[2]), last.x(), last.y())
+                return
+            self._fp_handle_drag = None
+            self._fp_handle_origin = None
+            self._refresh_drawing_handles()
+
+    def _drop_footprint_text(self, key: str, origin: QPointF, delta: QPointF) -> None:
+        """@brief Commit a text drop, unless it is not a move (as the symbol editor's property drop).
+
+        @param key Text key.
+        @param origin Scene position (px) of the text group at the press.
+        @param delta Scene displacement (px) from the press to the drop.
+        @note «A drop without a move changes nothing» (2026-10-17, same rule
+            as `SymbolTab.move_property`): a zero displacement, or a drop
+            whose snapped anchor is the SNAP of the default position of a
+            text not yet placed (the same grid rule, so a jiggle inside the
+            default's snap cell is not a move either), writes nothing (no
+            undo push, no checkpoint, no file): the item is only put back on
+            its anchor. A drop on the STORED position goes through
+            `_set_footprint_text_position`, which redraws without an edit;
+            a drop on another node commits once.
+        """
+        if delta.manhattanLength() < 1e-9:
+            return
+        anchor = origin + delta
+        snapped = self._snapped_draw_point(anchor.x(), anchor.y())
+        default_cell = self._snapped_draw_point(origin.x(), origin.y())
+        if key not in self.footprint_text_positions and snapped == default_cell:
+            group = self._footprint_text_group(key)
+            if group is not None:
+                group.setPos(origin)
+            return
+        self._on_footprint_text_moved(key, anchor.x(), anchor.y())
+
     def _on_footprint_handle_pressed(self, index: int, point_index: int, x: float, y: float) -> None:
-        """@brief A handle or a drawing body was grabbed: remember the grab node."""
-        self._fp_handle_active = True
-        self._fp_handle_cancelled = False
+        """@brief A handle or a drawing body was grabbed: remember the grab node.
+
+        @param index Drawing index.
+        @param point_index Point of the record, or -1 for the whole drawing.
+        @param x Scene x (px) of the press.
+        @param y Scene y (px) of the press.
+        """
         self._fp_handle_origin = self._snapped_draw_point(x, y) if point_index < 0 else None
         if 0 <= index < len(self.footprint_drawings):
             self._fp_hovered_drawing = index
@@ -15775,9 +15941,11 @@ class MainWindow(QMainWindow):
         """@brief A handle moves: snap it and show the shape it would give.
 
         @param point_index Point of the record, or -1 to move the whole drawing.
+        @note An identical snapped step (the pointer still within the same
+            grid node) redraws nothing: the controller's step memo remembers
+            what the previous step of THIS drag showed; outside a drag (a
+            direct call) every step goes through.
         """
-        if self._fp_handle_cancelled:
-            return      # the list changed under the drag: it was cancelled
         if not 0 <= index < len(self.footprint_drawings):
             return
         if point_index < 0:
@@ -15786,8 +15954,10 @@ class MainWindow(QMainWindow):
             drag = (index, point_index, self._snapped_draw_point(x, y))
         else:
             return
-        if drag == self._fp_handle_drag:
+        memo = self.preview_view.gestures.memo
+        if memo.repeats("handle", drag) or drag == self._fp_handle_drag:
             return      # pointer still within the same node: nothing to redraw
+        memo.remember("handle", drag)
         self._fp_handle_drag = drag
         self._fp_hovered_drawing = index
         self._refresh_drawing_handles()
@@ -15795,15 +15965,12 @@ class MainWindow(QMainWindow):
     def _on_footprint_handle_dropped(self, index: int, point_index: int, x: float, y: float) -> None:
         """@brief A handle was dropped: store the moved point if the shape stays valid.
 
-        @note A drop whose drag was cancelled (the list changed while the
-            button was down) is ignored: its indices refer to the old list.
+        @note A drag cancelled by a change of the drawings list never gets
+            here: the controller ends it once with `commit=False`
+            (`gesture_end`), so no stale index reaches the new list.
         """
         from ..core.footprint import validate_footprint_drawings
         self._fp_handle_drag = None
-        self._fp_handle_active = False
-        if self._fp_handle_cancelled:
-            self._fp_handle_cancelled = False
-            return
         if not 0 <= index < len(self.footprint_drawings):
             return
         record = deepcopy(self.footprint_drawings[index])
@@ -18162,6 +18329,7 @@ class MainWindow(QMainWindow):
         pad_positions(): the preview cannot diverge from the footprint that
         will be written.
         """
+        self._forget_preview_items()
         self.preview_scene.clear()
         mm_to_px = 20.0
         built = self._built_footprint(lambda: build_castellated_module(p))
@@ -18339,6 +18507,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "preview_pad_hint"):
             self.preview_pad_hint.setVisible(isinstance(params, PackageGeometry))
         if params is None:
+            self._forget_preview_items()
             self.preview_scene.clear()
             return
         if isinstance(params, PackageGeometry):
@@ -18348,6 +18517,7 @@ class MainWindow(QMainWindow):
             self._draw_preview_castellated(params)
             return
         p = params
+        self._forget_preview_items()
         self.preview_scene.clear()
 
         mm_to_px = 20.0
@@ -18489,6 +18659,7 @@ class MainWindow(QMainWindow):
 
     def _draw_preview_package(self, package: PackageGeometry) -> None:
         """@brief Draw package copper shapes and drill openings as exported to KiCad."""
+        self._forget_preview_items()
         self.preview_scene.clear()
         mm_to_px = 20.0
         built = self._built_footprint(lambda: build_package(package))
@@ -18790,7 +18961,7 @@ class MainWindow(QMainWindow):
         """
         from PyQt6.QtWidgets import QGraphicsItemGroup
         from ..core.footprint import PROPERTY_TEXT_SIZE, TEXT_KEYS
-        from .footprint_view import TEXT_ANCHOR_ROLE, TEXT_KEY_ROLE
+        from .footprint_view import TEXT_ANCHOR_ROLE, TEXT_KEY_ROLE, FootprintView
         anchors = self._footprint_text_anchors(footprint)
         texts = self._footprint_property_texts()
         colours = {"Reference": TEXT, "Value": SUBTEXT}
@@ -18828,6 +18999,16 @@ class MainWindow(QMainWindow):
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
                 item.setToolTip(tooltip)
             group.setZValue(50)
+            # The square is a hover group with the symbol editor's reveal
+            # rule (12 screen px around glyphs and anchor at any zoom).
+            self.preview_view.hover.add([square], FootprintView._text_reveal_area(group), False, ("text", key))
+            gestures = self.preview_view.gestures
+            if gestures is not None and gestures.active and gestures.target == ("text", key):
+                # Redrawn under a live drag (decision D4, as the symbol
+                # editor): the new item takes over at the pointer, and the
+                # drop anchor is measured from where it was drawn.
+                self._fp_text_drag = (QPointF(group.pos()), gestures.start_point)
+                gestures.rebind_live_items([group])
 
     def _set_footprint_text_position(self, key: str, position) -> bool:
         """@brief Put a text position (None: back to default) in the footprint draft and redraw.

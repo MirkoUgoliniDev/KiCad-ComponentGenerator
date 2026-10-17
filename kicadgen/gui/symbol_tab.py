@@ -10,16 +10,18 @@ import os
 import logging
 import tempfile
 import time
-from PyQt6.QtCore import Qt, pyqtSignal, QEvent, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
-from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QFontMetricsF, QPainter, QPen, QShortcut,
-                         QKeySequence, QIcon, QPolygonF)
-from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QPushButton, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
+from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
+from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QPainter, QPen, QIcon, QPolygonF)
+from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
                                  PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
                                  property_texts, symbol_inputs, layout_symbol, symbol_property_positions)
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
+from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
+                              DragPlan, GestureController, HoverGroups, Identity, KeyRepeatFilter,
+                              bind_shortcuts, install_canvas_filters)
 from .pinout_dialog import pin_sort_key
 from ..services.i18n import set_item_source
 from ..generators.symbol_edit import transform_selection
@@ -254,12 +256,12 @@ PEN_STYLES = {'default': Qt.PenStyle.SolidLine, 'solid': Qt.PenStyle.SolidLine, 
               'dash_dot_dot': Qt.PenStyle.DashDotDotLine}
 
 #: Palette tooltip of every tool, by key (Italian source, translated by `tx`).
-#: Side of a handle square and the margin around the selected element
-#: inside which its handles are shown, both in SCREEN pixels at any zoom:
-#: the squares ignore the view transform and the margin is divided by the
-#: view scale when the pointer is tested (review, 2026-10-12).
-HANDLE_SIZE_PX = 6
-HANDLE_HOVER_MARGIN = 12
+#: Margin around the selected element inside which its handles are shown,
+#: in SCREEN pixels at any zoom (the squares, `HANDLE_SIZE_PX`, ignore the
+#: view transform and the margin is divided by the view scale when the
+#: pointer is tested; review, 2026-10-12). Shared with the footprint preview
+#: through `canvas_gestures.HOVER_MARGIN_PX`: this name is its alias.
+HANDLE_HOVER_MARGIN = HOVER_MARGIN_PX
 
 #: Diagnostics of the symbol editor that are not shown to the user (a draft
 #: skipped because its project folder no longer exists).
@@ -559,10 +561,7 @@ class _SymbolView(QGraphicsView):
     #: The pointer left the viewport: hover-revealed handles go away.
     pointer_left = pyqtSignal()
     camera_changed = pyqtSignal()
-    gesture_started = pyqtSignal(object, object)
     pin_context_requested = pyqtSignal(str, object)
-    gesture_moved = pyqtSignal(object, object)
-    gesture_finished = pyqtSignal(bool)
     #: A click while placing a glyph (scene point), or None when placing is cancelled.
     place_requested = pyqtSignal(object)
     graphic_context_requested = pyqtSignal(int, object)
@@ -571,9 +570,6 @@ class _SymbolView(QGraphicsView):
     wire_point = pyqtSignal(object, bool)
     #: The wire is finished (True) or abandoned (False).
     wire_finished = pyqtSignal(bool)
-    #: A held key is no longer repeating: it was released, the view lost the
-    #: focus or was hidden (`SymbolTab._flush_checkpoint`).
-    key_repeat_ended = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -599,57 +595,32 @@ class _SymbolView(QGraphicsView):
         self.show_grid = True
         #: Step of the dotted drawing grid, mm; equal to GRID_MM means no dots.
         self.drawing_grid_mm = GRID_MM
-        self.gesture = None
-        #: Whether the key Qt is matching against the shortcuts right now is
-        #: an automatic repeat (`event`), read once by `take_key_repeat`.
-        self._key_repeat = False
+        #: `GestureController` of the drags, created by the tab that hosts
+        #: them (`SymbolTab.gesture_begin/step/end`); None until then.
+        self.controller = None
+        #: `KeyRepeatFilter` installed on this view by the tab (`take_key_repeat`).
+        self.key_filter = None
         #: Region (viewport pixels) of the paint event in progress, read by
         #: `drawBackground` through `_grid_indices`; None outside a paint.
         self._exposed_region = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
-    def event(self, event):
-        """@brief Qt override: note whether the key about to trigger a shortcut is an automatic repeat.
-
-        @param event Any event; handled by the base class as before.
-        @return The base class result.
-        @note Qt sends the focus widget a ShortcutOverride event, carrying the
-            key's auto-repeat flag, right before it activates a matching
-            shortcut; `QShortcut.activated` itself does not say whether the
-            key repeats. The flag is consumed by `take_key_repeat` in the
-            shortcut's handler.
-        """
-        if event.type() == QEvent.Type.ShortcutOverride:
-            self._key_repeat = event.isAutoRepeat()
-        return super().event(event)
-
     def take_key_repeat(self):
         """@brief Tell, once, whether the shortcut being handled was triggered by an auto-repeated key.
 
-        @return True when the ShortcutOverride that preceded this activation
-            was an automatic repeat; the flag is cleared, so a later
-            activation without its own key event never inherits it.
+        @return `KeyRepeatFilter.take()` of the filter the tab installed;
+            False when none is installed.
         """
-        repeat, self._key_repeat = self._key_repeat, False
-        return repeat
+        return self.key_filter.take() if self.key_filter is not None else False
 
-    def keyReleaseEvent(self, event):
-        """@brief Qt override: a real release (not one of the auto-repeat pairs) ends a key repeat.
+    @property
+    def gesture(self):
+        """@brief The target of the running drag (`('pin', n)`, `('property', key)`...), None when idle.
 
-        @param event The key event; the base class handles it as before.
+        @return `controller.target`; read-only, the controller owns the state.
         """
-        if not event.isAutoRepeat():
-            self.key_repeat_ended.emit()
-        super().keyReleaseEvent(event)
-
-    def focusOutEvent(self, event):
-        """@brief Qt override: losing the focus ends a key repeat (its release goes elsewhere).
-
-        @param event The focus event; the base class handles it as before.
-        """
-        self.key_repeat_ended.emit()
-        super().focusOutEvent(event)
+        return None if self.controller is None else self.controller.target
 
     def mouseDoubleClickEvent(self, event):
         """@brief Qt override: a left double click ends the wire being drawn.
@@ -729,17 +700,19 @@ class _SymbolView(QGraphicsView):
         if self._pan_last is not None:
             event.accept()
             return
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self.controller is not None:
             for item in self.items(event.pos()):
                 target = item.data(0)
                 if target is not None:
-                    self.gesture = target
-                    self.auto_fit = False
-                    self.setFocus()
-                    self.viewport().grabMouse()
-                    self.gesture_started.emit(target, self.mapToScene(event.pos()))
-                    event.accept()
-                    return
+                    # Auto-fit is off BEFORE the host begins (its selection
+                    # redraw must not refit the camera); back on if refused.
+                    auto_fit, self.auto_fit = self.auto_fit, False
+                    if self.controller.press(target, self.mapToScene(event.pos())):
+                        self.setFocus()
+                        event.accept()
+                        return
+                    self.auto_fit = auto_fit
+                    break
         super().mousePressEvent(event)
 
     def contextMenuEvent(self, event):
@@ -791,7 +764,7 @@ class _SymbolView(QGraphicsView):
             event.accept()
             return
         if self.gesture is not None:
-            self.gesture_moved.emit(self.gesture, self.mapToScene(event.pos()))
+            self.controller.move(self.mapToScene(event.pos()))
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -817,11 +790,9 @@ class _SymbolView(QGraphicsView):
             event.accept()
             return
         if self.gesture is not None and event.button() == Qt.MouseButton.LeftButton:
-            # Windows can coalesce move events: always use the actual drop point.
-            self.gesture_moved.emit(self.gesture, self.mapToScene(event.pos()))
-            self.gesture = None
-            self.viewport().releaseMouse()
-            self.gesture_finished.emit(True)
+            # Windows can coalesce move events: the controller re-sends the
+            # actual drop point as a move before the drop.
+            self.controller.release(self.mapToScene(event.pos()))
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -846,33 +817,40 @@ class _SymbolView(QGraphicsView):
             self.place_requested.emit(None)
             event.accept()
             return
-        if event.key() == Qt.Key.Key_Escape and (self.gesture is not None or self._pan_last is not None or self._rubber_start is not None):
+        # A running drag never gets here: `CancelOnEscapeAndHide` (installed
+        # on this view) consumes the Escape that cancels it; what is left is
+        # the pan and the rubber band, which the view owns.
+        if event.key() == Qt.Key.Key_Escape and (self._pan_last is not None or self._rubber_start is not None):
             self.cancel_interaction()
             event.accept()
             return
         super().keyPressEvent(event)
 
     def cancel_interaction(self):
-        """Release capture and roll back unfinished edits before leaving the view."""
-        editing = self.gesture is not None
-        active = editing or self._pan_last is not None or self._rubber_start is not None
+        """@brief Release capture and roll back unfinished edits before leaving the view.
+
+        @note The drag is cancelled through the controller (which releases
+            its capture and tells the host once); the rubber band and the
+            pan are the view's own and are dropped here.
+        """
+        active = self._pan_last is not None or self._rubber_start is not None
         self._rubber_start = None
         self._rubber.hide()
-        self.gesture = None
         self._pan_last = None
         if active:
             self.viewport().releaseMouse()
             self.viewport().unsetCursor()
-        if editing:
-            self.gesture_finished.emit(False)
+        if self.controller is not None:
+            self.controller.cancel()
 
     def hideEvent(self, event):
         """@brief Qt override: roll back an unfinished interaction before the view is hidden.
 
         @param event The hide event.
+        @note The end of a key repeat is reported by the `KeyRepeatFilter`
+            the tab installed, which sees the Hide event before this method.
         """
         self.cancel_interaction()
-        self.key_repeat_ended.emit()
         super().hideEvent(event)
 
     def set_grid_visible(self, visible):
@@ -1093,18 +1071,14 @@ class SymbolTab(QWidget):
         self._history = []
         self._history_index = -1
         self._replaying = False
+        #: Rows the running drag started from (its steps are rebuilt from
+        #: them), None outside a drag: the model snapshot stays in the tab,
+        #: the drag state itself is the controller's (`_gestures`).
         self._gesture_before = None
-        #: (kind, rows, draft, status) of the last step the running drag committed;
-        #: see `_gesture_step_repeats`.
-        self._gesture_last_step = None
-        #: Target of the running drag (`_begin_gesture`), None outside a drag.
+        #: Target of the running drag (`gesture_begin`), None outside a drag.
         self._gesture_target = None
-        #: Scene point of the last step of the running drag, None before the
-        #: first step: a property drag commits from it on release.
-        self._gesture_last_point = None
-        #: Items a property drag moves live, with their positions at the
-        #: press: [(item, QPointF), ...]; see `_move_gesture`.
-        self._gesture_live = []
+        #: Hover group owner the running drag keeps revealed (`_update_handle_visibility`).
+        self._gesture_owner = None
         #: Drawn Reference and Value texts with their anchor squares, kept
         #: between redraws for the live drag: key -> (text item, square).
         self._property_items = {}
@@ -1112,7 +1086,6 @@ class SymbolTab(QWidget):
         self._selected_pins = set()
         self._syncing_selection = False
         self._cursor_position = None
-        self._handle_groups = []
         self._pointer_inside = True
         self._body_locked = False
         self._recovery_path = None
@@ -1150,11 +1123,6 @@ class SymbolTab(QWidget):
         #: (pins, body, layout) `_accept_geometry` validated, read once by the
         #: `_changed` it calls (`_changed` lays out again on any difference).
         self._accepted_layout = None
-        #: True while a shortcut triggered by an auto-repeated key runs
-        #: (`_key_action`): its checkpoint is deferred.
-        self._defer_checkpoint = False
-        #: A checkpoint was deferred and not written yet (`_flush_checkpoint`).
-        self._checkpoint_deferred = False
         self._symbol = None
         #: Index of the selected placed glyph in the rows' `symbol_graphics`, or None.
         self._selected_graphic = None
@@ -1232,6 +1200,8 @@ class SymbolTab(QWidget):
             toolbar.addSeparator()
 
         self.view = _SymbolView()
+        #: Hover handle groups of the scene (`_handle_groups` is their list).
+        self._hover = HoverGroups(self.view, HANDLE_HOVER_MARGIN)
         self.view.set_drawing_grid(self._grid_mm)
         self.view.selection_toggled.connect(self._toggle_selection)
         self.view.graphic_toggled.connect(self._toggle_graphic)
@@ -1239,10 +1209,7 @@ class SymbolTab(QWidget):
         self.view.pointer_changed.connect(self._update_readout)
         self.view.pointer_left.connect(self._on_pointer_left)
         self.view.camera_changed.connect(self._update_readout)
-        self.view.gesture_started.connect(self._begin_gesture)
         self.view.pin_context_requested.connect(self._pin_context_menu)
-        self.view.gesture_moved.connect(self._move_gesture)
-        self.view.gesture_finished.connect(self._end_gesture)
         self.view.place_requested.connect(self._place_requested)
         self.view.graphic_context_requested.connect(self._graphic_context_menu)
         self.view.wire_point.connect(self._wire_point)
@@ -1381,33 +1348,34 @@ class SymbolTab(QWidget):
         canvas_row.addWidget(self.view, 1)
         canvas_row.addWidget(self.palette)       # on the right (user, 2026-10-10)
         preview_layout.addLayout(canvas_row, 1)
-        # Every key of the view goes through `_key_action`: an auto-repeated
-        # key defers the recovery-file write to the end of the repeat.
-        for key, callback in [('Ctrl+Z', self.undo), ('Ctrl+Shift+Z', self.redo), ('Ctrl+Y', self.redo)]:
-            shortcut = QShortcut(QKeySequence(key), self.view)
-            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-            shortcut.activated.connect(lambda c=callback: self._key_action(c))
-        for key, dx, dy in [('Left', -1, 0), ('Right', 1, 0), ('Up', 0, 1), ('Down', 0, -1)]:
-            shortcut = QShortcut(QKeySequence(key), self.view)
-            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-            shortcut.activated.connect(lambda x=dx, y=dy: self._key_action(lambda: self._nudge_selected(x, y)))
-        for key, degrees in [('R', -90), ('Shift+R', 90)]:
-            shortcut = QShortcut(QKeySequence(key), self.view)
-            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-            shortcut.activated.connect(lambda d=degrees: self._key_action(lambda: (
-                self._edit_selected_graphics('rotate', d)
-                if self._selected_pin is None and self._selected_graphic is not None
-                else self.rotate_pin(self._selected_pin, d))))
-        delete_shortcut = QShortcut(QKeySequence('Delete'), self.view)
-        delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-        delete_shortcut.activated.connect(lambda: self._key_action(self._delete_selected_graphic))
+        # Every key of the view goes through the deferred checkpoint
+        # (`_key_action`): an auto-repeated key defers the recovery-file
+        # write to the end of the repeat, which the key filter reports.
+        self._keys = KeyRepeatFilter(self.view)
+        self.view.key_filter = self._keys
+        self._checkpoint = DeferredCheckpoint(self._keys, self._checkpoint_draft)
+
+        def rotate_selected(degrees):
+            if self._selected_pin is None and self._selected_graphic is not None:
+                self._edit_selected_graphics('rotate', degrees)
+            else:
+                self.rotate_pin(self._selected_pin, degrees)
+
+        bindings = [('Ctrl+Z', self.undo), ('Ctrl+Shift+Z', self.redo), ('Ctrl+Y', self.redo)]
+        bindings += [(key, lambda x=dx, y=dy: self._nudge_selected(x, y))
+                     for key, dx, dy in [('Left', -1, 0), ('Right', 1, 0), ('Up', 0, 1), ('Down', 0, -1)]]
+        bindings += [(key, lambda d=degrees: rotate_selected(d)) for key, degrees in [('R', -90), ('Shift+R', 90)]]
+        bindings.append(('Delete', self._delete_selected_graphic))
         # Clipboard of elements (user, 2026-10-12): copy, paste, duplicate.
-        for key, callback in [('Ctrl+C', self.copy_selected), ('Ctrl+V', self.paste),
-                              ('Ctrl+D', self.duplicate_selected)]:
-            shortcut = QShortcut(QKeySequence(key), self.view)
-            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
-            shortcut.activated.connect(lambda c=callback: self._key_action(c))
-        self.view.key_repeat_ended.connect(self._flush_checkpoint)
+        bindings += [('Ctrl+C', self.copy_selected), ('Ctrl+V', self.paste), ('Ctrl+D', self.duplicate_selected)]
+        bind_shortcuts(self.view, bindings, self._checkpoint.run, Qt.ShortcutContext.WidgetShortcut)
+        # The drag state machine of the view, hosted by this tab
+        # (`gesture_begin/step/end`), and the filters cancelling a drag on
+        # Escape or Hide and reporting the end of a key repeat (rule 12: the
+        # key filter first, the cancel filter second).
+        self._gestures = GestureController(self.view, self, grab_mouse=True)
+        self.view.controller = self._gestures
+        install_canvas_filters(self.view, self._keys, CancelOnEscapeAndHide(self._gestures))
         splitter.addWidget(preview)
         splitter.setSizes([400, 800])
         splitter.setStretchFactor(1, 1)
@@ -1456,7 +1424,7 @@ class SymbolTab(QWidget):
             when the path is another project's.
         """
         # Steps of an auto-repeated key still unwritten belong to the current project.
-        self._flush_checkpoint()
+        self._checkpoint.flush()
         key = deepcopy((name, pinout, footprint, list(pad_ids) if pad_ids is not None else None))
         if not force and key == self._source_key:
             return
@@ -2039,7 +2007,7 @@ class SymbolTab(QWidget):
         if path == self._recovery_path:
             return
         # Steps of an auto-repeated key still unwritten go to the file they belong to.
-        self._flush_checkpoint()
+        self._checkpoint.flush()
         plain, self._unconfirmed_plain = self._unconfirmed_plain, None
         if path is None:
             self._recovery_path = None
@@ -2258,12 +2226,10 @@ class SymbolTab(QWidget):
         """
         if self._recovery_path is None or self._applying or self._gesture_before is not None:
             return
-        if self._defer_checkpoint:
-            # Part of an auto-repeated key: written when the repeat ends.
-            self._checkpoint_deferred = True
+        # Part of an auto-repeated key: written when the repeat ends; a
+        # write that goes on holds the whole draft, deferred steps included.
+        if not self._checkpoint.request():
             return
-        # The file is about to hold the whole draft, deferred steps included.
-        self._checkpoint_deferred = False
         from ..services.symbol_draft import save_draft
         if rows is None:
             rows = self.draft_rows()
@@ -2307,18 +2273,10 @@ class SymbolTab(QWidget):
             edit writes it (that write holds the whole draft). A crash in the
             middle of a held key loses at most the repeats of that key since
             its press; no other edit is ever deferred, because the deferral is
-            scoped to the handler of the auto-repeated key event itself.
+            scoped to the handler of the auto-repeated key event itself
+            (`DeferredCheckpoint.run`, the runner of every view shortcut).
         """
-        self._defer_checkpoint = self.view.take_key_repeat()
-        try:
-            action()
-        finally:
-            self._defer_checkpoint = False
-
-    def _flush_checkpoint(self):
-        """@brief Write the recovery file now if an auto-repeated key deferred it (`_key_action`)."""
-        if self._checkpoint_deferred:
-            self._checkpoint_draft()
+        self._checkpoint.run(action)
 
     def review_issues(self):
         """@brief Report invalid geometry, missing names, unreviewed roles and overlapping labels.
@@ -3950,16 +3908,83 @@ class SymbolTab(QWidget):
         return self._accept_geometry(rows)
 
     def _begin_gesture(self, target, point):
+        """@brief Programmatic press (tests, automation): begin a drag through the controller.
+
+        @param target Drag target tuple, as the pressed item's `data(0)`.
+        @param point Scene position of the press.
+        @return True when the drag began (see `GestureController.press`).
+        """
+        return self._gestures.press(target, point)
+
+    def _move_gesture(self, target, point):
+        """@brief Programmatic move (tests, automation): one move of the running drag.
+
+        @param target Ignored: the controller knows its target.
+        @param point Scene position of the pointer.
+        @return True when a drag was running.
+        """
+        return self._gestures.move(point)
+
+    def _end_gesture(self, commit):
+        """@brief Programmatic end (tests, automation): drop or cancel the running drag.
+
+        @param commit True drops at the last moved point (at the press point
+            when nothing moved), False cancels.
+        @return True when a drag was running.
+        """
+        if not commit:
+            return self._gestures.cancel()
+        last = self._gestures.last_point
+        return self._gestures.release(last if last is not None else self._gestures.start_point)
+
+    @property
+    def _gesture_live(self):
+        """@brief The (item, origin) pairs a live property drag moves (tests/test_kept_scene_items.py).
+
+        @return The controller's live list; empty outside a live drag.
+        """
+        return self._gestures.live_items
+
+    @property
+    def _handle_groups(self):
+        """@brief The hover handle groups (items, base rect, ring, owner) of the drawn scene.
+
+        @return `HoverGroups.groups` of the view.
+        """
+        return self._hover.groups
+
+    @staticmethod
+    def _hover_owner(target):
+        """The hover group a drag target keeps revealed: the body ring, the element's handles, the property's square."""
+        return ('body',) if target[0] == 'resize' else \
+            ('graphic', target[1]) if target[0] in ('graphic', 'shape_point', 'vertex') else \
+            ('property', target[1]) if target[0] == 'property' else None
+
+    def gesture_begin(self, target, point):
+        """@brief Host of `GestureController`: snapshot the rows, select the target and choose the drag policy.
+
+        @param target Drag target tuple: ('pin', number), ('graphic', index),
+            ('vertex', index, position), ('shape_point', index, position),
+            ('property', key) or ('resize', hx, hy).
+        @param point Scene position of the press.
+        @return A live `DragPlan` for a property (its text and anchor square
+            follow the pointer, committed once on the drop), a stepped one
+            for everything else (every move is snapped and committed by
+            `gesture_step`); None, refusing the press, without a symbol.
+        @note The dragged owner (`_gesture_owner`) is set before the
+            selection redraw, so that redraw already keeps its handles
+            revealed (`_update_handle_visibility`).
+        """
         if self._symbol is None:
-            return
+            return None
+        target = tuple(target)
         self._gesture_before = self.draft_rows()
-        self._gesture_last_step = None
-        self._gesture_target = tuple(target)
-        self._gesture_last_point = None
-        self._gesture_live = []
+        self._gesture_target = target
+        self._gesture_owner = self._hover_owner(target)
         self._gesture_layout = self._symbol
-        self._gesture_start = point
+        self._gesture_start = QPointF(point)
         self._gesture_scene_rect = self.view.scene().sceneRect()
+        live = []
         if target[0] == 'pin':
             chosen = self._selection_ids()
             if target[1] not in chosen:
@@ -3985,9 +4010,10 @@ class SymbolTab(QWidget):
             self._gesture_property_origin = self._property_positions(
                 self._gesture_before, self._gesture_layout).get(target[1])
             # The text and its anchor square follow the pointer live
-            # (`_move_gesture`) from where the last redraw put them.
-            self._gesture_live = [(item, QPointF(item.pos()))
-                                  for item in self._property_items.get(target[1], ())]
+            # (the controller moves them) from where the last redraw put them.
+            live = [(item, QPointF(item.pos())) for item in self._property_items.get(target[1], ())]
+            return DragPlan('live', live_items=live)
+        return DragPlan('stepped')
 
     def _editable_rows(self, rows, symbol):
         rows = copy_rows(rows)
@@ -4015,17 +4041,14 @@ class SymbolTab(QWidget):
             the whole scene (about 40 ms with 80 pins) to show the same
             picture. The key is the data itself, so any real change (another
             node, another target, an edit of the draft between two steps)
-            still goes through the full path.
+            still goes through the full path. The memo is the controller's
+            (`StepMemo`): it runs only between the press and the finish.
         """
-        last = self._gesture_last_step
-        return (self._gesture_before is not None and last is not None
-                and last[0] == kind and last[2] is self._draft
-                and last[3] == self.status.text() and last[1] == rows)
+        return self._gestures.memo.repeats(kind, rows, token=(Identity(self._draft), self.status.text()))
 
     def _remember_gesture_step(self, kind, rows):
         """Record what a drag step committed, for `_gesture_step_repeats`; nothing outside a drag."""
-        self._gesture_last_step = ((kind, rows, self._draft, self.status.text())
-                                   if self._gesture_before is not None else None)
+        self._gestures.memo.remember(kind, rows, token=(Identity(self._draft), self.status.text()))
 
     def _restore_gesture_source(self, source):
         """@brief Make the draft equal to `source` (a step that lands where the drag began).
@@ -4449,7 +4472,16 @@ class SymbolTab(QWidget):
             row['symbol_body'] = body[:]
         return self._accept_geometry(rows)
 
-    def _move_gesture(self, target, point):
+    def gesture_step(self, target, point):
+        """@brief Host of `GestureController`: snap and commit one step of a stepped drag (every move and the drop point).
+
+        @param target The target of the running drag.
+        @param point Scene position of the pointer.
+        @note Each step is rebuilt from the rows the drag started from
+            (`_gesture_before`), so the drop point alone decides the result
+            and the whole drag is one undo step; an identical step is skipped
+            (`_gesture_step_repeats`).
+        """
         if self._gesture_before is None:
             return
         symbol = self._gesture_layout
@@ -4525,22 +4557,11 @@ class SymbolTab(QWidget):
         if target[0] == 'property':
             # GUARANTEE (user, 2026-10-17: «il trascinamento di REF** in
             # Anteprima Footprint è molto smooth», the footprint text drag is
-            # very smooth, the symbol's was not): a property drag moves the
-            # drawn text and its anchor square live, like the footprint
-            # preview's `_text_drag`, and touches neither the draft nor the
-            # scene. Before, every step that reached another 2.54 mm node
-            # laid the symbol out again, redrew the elements, the handles and
-            # both properties and repainted a quarter of the viewport, while
-            # the steps in between showed nothing: the text stood still and
-            # then jumped a node. The snapped position is committed once, on
-            # release (`_end_gesture`), exactly as `move_property` would
-            # commit a single step there.
-            if getattr(self, '_gesture_property_origin', None) is None:
-                return
-            self._gesture_last_point = QPointF(point)
-            delta = point - self._gesture_start
-            for item, origin in self._gesture_live:
-                item.setPos(origin + delta)
+            # very smooth, the symbol's was not): a property drag is a LIVE
+            # plan (`gesture_begin`): the controller moves the drawn text
+            # and its anchor square with the pointer and never steps here;
+            # the draft and the scene are untouched until the drop, which
+            # `gesture_end` commits once through `move_property`.
             return
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
@@ -4556,27 +4577,28 @@ class SymbolTab(QWidget):
             self.resize_body(2 * abs(x) if horizontal else symbol.width,
                              2 * abs(y) if vertical else symbol.height)
 
-    def _end_gesture(self, commit):
-        """@brief Finish the running drag: commit its result once, or restore the rows it started from.
+    def gesture_end(self, target, last, commit):
+        """@brief Host of `GestureController`: the drag is over; commit its result once, or restore the rows it started from.
 
+        @param target The target of the drag that ended.
+        @param last Scene position of the last move (the drop point), None
+            when the pointer never moved.
         @param commit True on a drop, False on a cancel (Escape, the view
-            hidden, the body locked).
-        @note A property drag moved only the scene items (`_move_gesture`),
-            so the draft is still the drag's initial rows: the drop point is
-            committed here through `move_property`, outside the drag, which
-            writes the draft, the history entry and the recovery checkpoint
-            once, as a single step to that point would have. A cancelled
-            drag redraws the initial rows, which puts the items back.
+            hidden, the body locked, `set_data`).
+        @note Called with the controller already idle; the tab's own drag
+            state is cleared first, so the commit's redraw sees no drag. A
+            property drag moved only the scene items, so the draft is still
+            the drag's initial rows: the drop point is committed here through
+            `move_property`, outside the drag, which writes the draft, the
+            history entry and the recovery checkpoint once, as a single step
+            to that point would have. A cancelled drag redraws the initial
+            rows, which puts the items back.
         """
         before = self._gesture_before
-        target = self._gesture_target
-        last = self._gesture_last_point
         origin = getattr(self, '_gesture_property_origin', None)
         self._gesture_before = None
-        self._gesture_last_step = None
         self._gesture_target = None
-        self._gesture_last_point = None
-        self._gesture_live = []
+        self._gesture_owner = None
         if before is None:
             return
         if not commit:
@@ -4680,7 +4702,7 @@ class SymbolTab(QWidget):
                     area = area.united(item.sceneBoundingRect())
                 for handle in element_handles:
                     area = area.united(QRectF(handle.pos(), handle.pos()))
-                self._handle_groups.append((element_handles, area, False, ('graphic', index)))
+                self._hover.add(element_handles, area, False, ('graphic', index))
                 self._update_handle_visibility(self._cursor_position)
 
     def _add_handle(self, scene, sx, sy, group):
@@ -4746,28 +4768,12 @@ class SymbolTab(QWidget):
             its handles show only near its outline. While a gesture drags a
             target of the group, its handles stay visible wherever the
             pointer is (a handle hidden under the pointer that drags it
-            would be absurd); the other groups follow the pointer rule.
+            would be absurd); the other groups follow the pointer rule
+            (`HoverGroups.apply`, shared with the footprint preview).
         """
         if not self._pointer_inside:
             point = None
-        scale = self.view.transform().m11() or 1.0
-        m = HANDLE_HOVER_MARGIN / abs(scale)
-        gesture = self.view.gesture
-        dragged = None
-        if gesture is not None:
-            dragged = ('body',) if gesture[0] == 'resize' else \
-                ('graphic', gesture[1]) if gesture[0] in ('graphic', 'shape_point', 'vertex') else \
-                ('property', gesture[1]) if gesture[0] == 'property' else None
-        for items, base, ring, owner in self._handle_groups:
-            if dragged is not None and owner == dragged:
-                visible = True
-            elif point is None:
-                visible = False
-            else:
-                outer = base.adjusted(-m, -m, m, m)
-                visible = outer.contains(point) and not (ring and base.adjusted(m, m, -m, -m).contains(point))
-            for item in items:
-                item.setVisible(visible)
+        self._hover.apply(point, self._gesture_owner)
 
     def _legacy_text_font(self, size):
         """The font symbol texts were drawn with before 2026-10-14: em (pixel size) = `size` mm.
@@ -4905,11 +4911,11 @@ class SymbolTab(QWidget):
         here too; tests/test_kept_scene_items.py checks that no attribute of
         the tab still refers to a deleted item.
         """
-        self._handle_groups = []
+        self._hover.clear()
         self._text_bounds = []
         self._wire_cursor_item = None
         self._property_items = {}
-        self._gesture_live = []
+        self._gestures.forget_items()
 
     def _clear_scene(self, scene, keep=()):
         """Remove every top-level item of `scene` except the kept ones in `keep` (pin roots, body).
@@ -5179,21 +5185,17 @@ class SymbolTab(QWidget):
             square.setData(0, ('property', key))
             square.setToolTip(hints[key])
             area = item.sceneBoundingRect().united(QRectF(square.pos(), square.pos()))
-            self._handle_groups.append((anchor_handles, area, False, ('property', key)))
+            self._hover.add(anchor_handles, area, False, ('property', key))
             # Both built in Python (`kicad_text_item`, `_add_handle`): the
             # tab keeps them for the live drag (see `_add_kept_item`).
             self._property_items[key] = (item, square)
-            if self._gesture_before is not None and self._gesture_target == ('property', key):
+            if self._gesture_target == ('property', key):
                 # A redraw during the drag (a rename or a selection from the
                 # keyboard: the viewport holds the mouse) rebuilt the items
                 # where the drag began; the live move goes on with the new
                 # ones, resumed at the last pointer position, so the text
                 # neither freezes nor jumps at the drop (review, 2026-10-17).
-                self._gesture_live = [(item, QPointF(item.pos())), (square, QPointF(square.pos()))]
-                if self._gesture_last_point is not None:
-                    delta = self._gesture_last_point - self._gesture_start
-                    for live, origin in self._gesture_live:
-                        live.setPos(origin + delta)
+                self._gestures.rebind_live_items((item, square))
         self._update_handle_visibility(self._cursor_position)
         self._draw_pins(scene, symbol, keys)
         handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]
@@ -5208,7 +5210,7 @@ class SymbolTab(QWidget):
             # ring around the outline (same margin inside and outside), not
             # anywhere over the body (user, 2026-10-12).
             body = QRectF(-width / 2, -height / 2, width, height)
-            self._handle_groups.append((body_handles, body, True, ('body',)))
+            self._hover.add(body_handles, body, True, ('body',))
             self._update_handle_visibility(self._cursor_position)
         if self._gesture_before is not None:
             scene.setSceneRect(self._gesture_scene_rect)

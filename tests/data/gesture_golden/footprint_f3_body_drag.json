@@ -1,0 +1,221 @@
+{
+  "drop": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_refresh_drawing_handles": 2,
+      "save_footprint_draft": 1
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            9.0
+          ],
+          [
+            6.0,
+            11.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              9.0
+            ],
+            [
+              6.0,
+              11.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "undo": 1
+  },
+  "hover": {
+    "calls": {},
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "node_1": {
+    "calls": {
+      "_refresh_drawing_handles": 1
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "node_2": {
+    "calls": {
+      "_refresh_drawing_handles": 1
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "press": {
+    "calls": {
+      "_refresh_drawing_handles": 1
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "same_node": {
+    "calls": {},
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "zero_delta": {
+    "calls": {
+      "_refresh_drawing_handles": 3
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            9.0
+          ],
+          [
+            6.0,
+            11.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              9.0
+            ],
+            [
+              6.0,
+              11.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "undo": 1
+  }
+}
