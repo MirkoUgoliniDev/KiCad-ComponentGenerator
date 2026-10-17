@@ -219,7 +219,7 @@ def test_f1_a_text_follows_the_pointer_live_and_is_committed_once_on_the_drop(fp
     origin = QPointF(group.pos())
     start = _glyph_box(window, group).center()
     _press(window, start)
-    assert window.preview_view._text_drag is not None and window.preview_view._pan is None
+    assert window.preview_view._text_drag is not None and not window.preview_view.camera.pan_active
     assert _square(group).isVisible(), "the dragged text keeps its anchor square"
     rec.phase("press")
     pos = start
@@ -473,7 +473,7 @@ def test_f4_a_left_press_on_empty_space_pans_and_edits_nothing(fp, monkeypatch):
     assert view._text_item_at(start) == (None, None) and view._drawing_at(start) < 0
     before = view.mapToScene(centre)
     _press(window, start)
-    assert view._pan is not None and view._text_drag is None and view._handle_drag is None
+    assert view.camera.pan_active and view._text_drag is None and view._handle_drag is None
     assert view.auto_fit is False, "placed by hand in the fixture"
     view.auto_fit = True
     _release(window, start)
@@ -512,12 +512,12 @@ def test_d2_the_wheel_is_refused_during_a_pan_and_zooms_after_its_release(fp, mo
     start = QPoint(centre.x() - 300, centre.y() + 250)
     _press(window, start)
     _move(window, start + QPoint(20, 10))
-    assert view._pan is not None
+    assert view.camera.pan_active
     _wheel(window, start + QPoint(20, 10), 1)
     assert view.transform().m11() == pytest.approx(1.0), "refused during the pan"
-    assert view._pan is not None, "the pan goes on"
+    assert view.camera.pan_active, "the pan goes on"
     _release(window, start + QPoint(20, 10))
-    assert view._pan is None
+    assert not view.camera.pan_active
     _wheel(window, start, 1)
     assert view.transform().m11() == pytest.approx(1.2), "released: the wheel zooms again"
     assert window.footprint_text_positions == {} and window.footprint_drawings == []
@@ -535,16 +535,16 @@ def test_a_middle_press_during_a_drag_does_not_start_a_pan(fp, monkeypatch):
     _press(window, start)
     _move(window, start + QPoint(40, 20))
     _press(window, start + QPoint(40, 20), Qt.MouseButton.MiddleButton)
-    assert view._pan is None, "no pan over a drag"
+    assert not view.camera.pan_active, "no pan over a drag"
     assert view._text_drag is not None, "the drag goes on"
     _release(window, start + QPoint(40, 20), Qt.MouseButton.MiddleButton)
     _release(window, start + QPoint(40, 20))
-    assert view._text_drag is None and view._pan is None
+    assert view._text_drag is None and not view.camera.pan_active
     assert "Reference" in window.footprint_text_positions
     centre = view.viewport().rect().center()
     idle = QPoint(centre.x() - 300, centre.y() + 250)
     _press(window, idle, Qt.MouseButton.MiddleButton)
-    assert view._pan is not None, "idle: the middle button pans"
+    assert view.camera.pan_active, "idle: the middle button pans"
     _release(window, idle, Qt.MouseButton.MiddleButton)
 
 
@@ -561,19 +561,19 @@ def test_escape_cancels_a_pan_and_does_not_also_cancel_the_armed_tool(fp, monkey
     start = QPoint(centre.x() - 300, centre.y() + 250)
     _press(window, start)
     _move(window, start + QPoint(30, 10))
-    assert view._pan is not None
+    assert view.camera.pan_active
     at = view.mapToScene(centre)
     QTest.keyClick(view, Qt.Key.Key_Escape)
-    assert view._pan is None, "Escape cancelled the pan"
+    assert not view.camera.pan_active, "Escape cancelled the pan"
     _move(window, start + QPoint(80, 40))
     assert view.mapToScene(centre) == at, "the camera stays where it was and no longer follows"
     _release(window, start + QPoint(80, 40))
     # With a tool armed, a middle-button pan is cancelled first; the tool survives that Escape.
     window._toggle_footprint_draw_tool("circle")
     _press(window, start, Qt.MouseButton.MiddleButton)
-    assert view._pan is not None and window._fp_draw_tool == "circle"
+    assert view.camera.pan_active and window._fp_draw_tool == "circle"
     QTest.keyClick(view, Qt.Key.Key_Escape)
-    assert view._pan is None and window._fp_draw_tool == "circle", "the pan took the Escape"
+    assert not view.camera.pan_active and window._fp_draw_tool == "circle", "the pan took the Escape"
     _release(window, start, Qt.MouseButton.MiddleButton)
     QTest.keyClick(view, Qt.Key.Key_Escape)
     assert window._fp_draw_tool is None, "no pan running: Escape cancels the tool"

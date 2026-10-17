@@ -794,11 +794,11 @@ def test_a_handle_is_grabbed_a_few_screen_pixels_off_at_a_far_zoom(preview):
     view = window.preview_view
     window._on_footprint_drawing_hovered(0)
     _send(view, QEvent.Type.MouseButtonPress, 4 * 20, 3 * 20, Qt.MouseButton.LeftButton, offset=(3, 2))
-    assert view._handle_drag == (0, 1) and view._pan is None
+    assert view._handle_drag == (0, 1) and not view.camera.pan_active
     view._handle_drag = None    # no drop: a drop would redraw and refit the view
     _send(view, QEvent.Type.MouseButtonPress, 4 * 20, 3 * 20, Qt.MouseButton.LeftButton, offset=(12, 12))
-    assert view._handle_drag is None and view._pan is not None, "far away: the camera pans"
-    view._pan = None
+    assert view._handle_drag is None and view.camera.pan_active, "far away: the camera pans"
+    view.camera.pan_cancel()
 
 
 def test_handles_stay_while_the_pointer_is_near_the_drawing(preview):
@@ -1026,7 +1026,7 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     menus.clear()
     _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.RightButton)
     assert menus == [], "no drawing there: no drawing menu"
-    view._pan = None
+    view.camera.pan_cancel()
 
 
 def test_a_drawing_moves_by_its_body_without_a_component_body(preview):

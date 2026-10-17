@@ -1,0 +1,102 @@
+[
+ {
+  "auto_fit": true,
+  "cx": -0.794887,
+  "cy": -27.026152,
+  "emits": 0,
+  "h": -501,
+  "label": "fit",
+  "scale": 1.25804073,
+  "v": -343
+ },
+ {
+  "auto_fit": true,
+  "cx": -0.794887,
+  "cy": -27.026152,
+  "emits": 0,
+  "h": -501,
+  "label": "fit again",
+  "scale": 1.25804073,
+  "v": -343
+ },
+ {
+  "auto_fit": false,
+  "cx": -80.548531,
+  "cy": -69.420116,
+  "emits": 1,
+  "h": -652,
+  "label": "zoom 1.5 at 200,150",
+  "scale": 1.887061095,
+  "v": -440
+ },
+ {
+  "auto_fit": false,
+  "cx": -171.089926,
+  "cy": -135.509278,
+  "emits": 1,
+  "h": -726,
+  "label": "zoom 0.7 at 900,600",
+  "scale": 1.320942766,
+  "v": -488
+ },
+ {
+  "auto_fit": false,
+  "cx": -116.096235,
+  "cy": -209.557355,
+  "emits": 1,
+  "h": -818,
+  "label": "wheel +7 clamped to 4",
+  "scale": 2.73910692,
+  "v": -883
+ },
+ {
+  "auto_fit": false,
+  "cx": 3.785175,
+  "cy": -313.538692,
+  "emits": 1,
+  "h": -494,
+  "label": "wheel -3",
+  "scale": 1.58513132,
+  "v": -806
+ },
+ {
+  "auto_fit": false,
+  "cx": 3.8,
+  "cy": -313.55,
+  "emits": 1,
+  "h": -424,
+  "label": "zoom 1000 clamped",
+  "scale": 20.0,
+  "v": -6580
+ },
+ {
+  "auto_fit": false,
+  "cx": 1.05,
+  "cy": -312.45,
+  "emits": 0,
+  "h": -479,
+  "label": "middle pan",
+  "scale": 20.0,
+  "v": -6558
+ },
+ {
+  "auto_fit": true,
+  "cx": -0.794887,
+  "cy": -27.026152,
+  "emits": 1,
+  "h": -501,
+  "label": "fit after pan",
+  "scale": 1.25804073,
+  "v": -343
+ },
+ {
+  "auto_fit": true,
+  "cx": -0.975399,
+  "cy": -27.311171,
+  "emits": 1,
+  "h": -401,
+  "label": "resize",
+  "scale": 1.025221504,
+  "v": -280
+ }
+]

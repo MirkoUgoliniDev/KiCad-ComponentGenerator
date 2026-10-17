@@ -1,0 +1,57 @@
+{
+ "coarse_dark_x2": {
+  "grab": "592b42a5ef0ef58e962aaedf11293ff8a5a17369",
+  "legible": false,
+  "sparse": "2d157ad69ad6f271dc091d51c34fc2cf89fb8189"
+ },
+ "equal_dark_x1": {
+  "grab": "4d60a3e32e765d1dbe3f4c1d0bca94dc01e0b808",
+  "legible": false,
+  "sparse": "bda27a18132a5040a379cc4537b483aba01dbd26"
+ },
+ "equal_light_x3": {
+  "grab": "64696a4b91633614ac4ce7dac2b6f0ba5a16d15c",
+  "legible": false,
+  "sparse": "93b0cd5b5b3d6fbfc395d1434e47e0b022b2f411"
+ },
+ "fine_dark_illegible_x0_5": {
+  "grab": "7aacdd91718b601587433d595ec5d12852c6fa2e",
+  "legible": false,
+  "sparse": "e54ab8003d77dc8aee12b417b2fafcf9d96a25ed"
+ },
+ "fine_dark_legible_x1": {
+  "grab": "fe95184fdd2a05998736e4b6f474efeba434e2e9",
+  "legible": true,
+  "sparse": "4083a83db3a196c4e4c2bba76c11155e3b6157de"
+ },
+ "fine_dark_legible_x3": {
+  "grab": "19a5f5c20be2b40a0b5d6a9a5468483273c34718",
+  "legible": true,
+  "sparse": "53f9bfbab602163811352328befc0e4888574dd9"
+ },
+ "fine_dark_legible_x6": {
+  "grab": "930bdf6f4e81c6ba3ea30f9e981f4066af3517a0",
+  "legible": true,
+  "sparse": "44daad570dce09dedf2013f07f6aa21d5d2359d8"
+ },
+ "fine_light_illegible_x0_5": {
+  "grab": "ceb6f47b120f20f3b7e57a50746fe8fe83448ddd",
+  "legible": false,
+  "sparse": "8f150c1bc40ec13f216352021c4f573115371038"
+ },
+ "fine_light_legible_x6": {
+  "grab": "ec8c3e60c758dff38a65b467c884a19241126798",
+  "legible": true,
+  "sparse": "06bcfcd148336bbd8117eae59db9a2f4d2a41293"
+ },
+ "limit_high_light_x20": {
+  "grab": "910b293698ce0a922f0519f3c6beaab545572620",
+  "legible": true,
+  "sparse": "bef7d0a8eda9d4c70e1386d6234af229311b88b8"
+ },
+ "limit_low_dark_x0_15": {
+  "grab": "603b11a54fb93fdf41f9c2dfa2539e67fde9967c",
+  "legible": false,
+  "sparse": "d269a408afdfc3420474856088c9bba698f29cb7"
+ }
+}

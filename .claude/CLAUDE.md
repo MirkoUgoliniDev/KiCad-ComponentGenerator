@@ -253,8 +253,17 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 9075 passed,
-12 skipped and 19 subtests (2026-10-17 late night, branch `ADVANCED`: one shared gesture
+is 9361 passed,
+12 skipped and 19 subtests (2026-10-18 night, branch `ADVANCED`: the symbol editor and the
+footprint preview also share ONE camera (`kicadgen/gui/canvas_camera.py`: zoom clamped to
+per-tab limits, wheel ±4 notches, scrollbar pan without drift, memoised fit) and ONE grid
+painter (`kicadgen/gui/canvas_grid.py`: `ExposedRegion` + `paint_grid`, laid out only where
+Qt paints, pixel-identical to before); parity tests
+`tests/test_symbol_camera_grid_parity.py`, `tests/test_footprint_camera_grid_parity.py`,
+unit tests `tests/test_canvas_camera.py`, `tests/test_canvas_grid.py`; the pixel goldens
+under `tests/data/camera_golden/` are SHA hashes that depend on the Qt build; click tools
+(wire, shapes, draw mode) still to unify, see docs/canvas-camera-grid-plan.md and
+docs/canvas-gestures-plan.md; before that, 9075 passed, 2026-10-17 late night: one shared gesture
 component, `kicadgen/gui/canvas_gestures.py`, drives drags, hover handles, key repeat, deferred
 recovery writes and Escape/Hide cancel in BOTH the symbol editor and the footprint preview
 (parity tests `tests/test_symbol_gesture_parity.py`, `tests/test_footprint_gesture_parity.py`);

@@ -100,7 +100,7 @@ def test_footprint_zoom_anchor_pan_and_fit(window):
     QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=point + QPoint(100, 40))
     after = view.mapToScene(view.viewport().rect().center())
     assert after.x() < before.x()
-    assert view._pan is None
+    assert not view.camera.pan_active
     # A redraw after the user's zoom/pan keeps the camera (user, 2026-10-13);
     # «Adatta alla vista» forces the fit.
     window._fit_preview()

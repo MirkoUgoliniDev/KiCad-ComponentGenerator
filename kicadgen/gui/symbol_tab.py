@@ -10,8 +10,8 @@ import os
 import logging
 import tempfile
 import time
-from PyQt6.QtCore import Qt, pyqtSignal, QLineF, QSize, QRect, QRectF, QPointF, QItemSelectionModel
-from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QPainter, QPen, QIcon, QPolygonF)
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, QRectF, QPointF, QItemSelectionModel
+from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QPainter, QPen, QIcon)
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
@@ -19,6 +19,8 @@ from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, 
                                  property_texts, symbol_inputs, layout_symbol, symbol_property_positions)
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
+from .canvas_camera import Camera
+from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
                               DragPlan, GestureController, HoverGroups, Identity, KeyRepeatFilter,
                               bind_shortcuts, install_canvas_filters)
@@ -35,11 +37,8 @@ SCENE_UNITS_PER_MM = 10.0
 #: Before 2026-10-16 it was 0.178 mm, about 0.18 mm too low.
 PIN_NUMBER_GAP_MM = KICAD_PIN_NUMBER_ANCHOR_MM
 GRID_MM = PIN_GRID_MM
-#: Device pixels added around each rectangle of the region being painted
-#: before choosing the grid lines and dots to lay out
-#: (`_SymbolView._grid_indices`): a 1 px antialiased line spills one
-#: pixel on each side, a 1.5 px dot as well.
-GRID_PAINT_MARGIN_PX = 2
+#: Zoom limits of the symbol view (viewport px per scene unit).
+ZOOM_MIN, ZOOM_MAX = 0.15, 20.0
 
 #: Superseded drafts kept per project beside the recovery file (one file per
 #: pinout change that could not carry a pending draft over). Disk-usage bound,
@@ -573,6 +572,12 @@ class _SymbolView(QGraphicsView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        #: Zoom, wheel, pan and fit, shared with the footprint preview (`canvas_camera`);
+        #: `auto_fit` and `camera_changed` below are the view's public names for it.
+        self.camera = Camera(self, limits=(ZOOM_MIN, ZOOM_MAX))
+        self.camera.changed.connect(self.camera_changed)
+        #: Region of the paint event in progress, read by `drawBackground` (`canvas_grid`).
+        self.exposed = ExposedRegion(self)
         self.setScene(QGraphicsScene(self))
         #: True while the next left click places the chosen glyph.
         self.placing = False
@@ -585,13 +590,12 @@ class _SymbolView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Navigation space is independent from the symbol bounds used by Fit.
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
-        self._pan_last = None
         self.selection_mode = False
         self._rubber_start = None
         self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
         self.theme = CANVAS_THEMES['dark']
         self.setBackgroundBrush(QColor(self.theme['canvas']))
-        self.auto_fit = True
+        self.camera.auto_fit = True
         self.show_grid = True
         #: Step of the dotted drawing grid, mm; equal to GRID_MM means no dots.
         self.drawing_grid_mm = GRID_MM
@@ -600,9 +604,6 @@ class _SymbolView(QGraphicsView):
         self.controller = None
         #: `KeyRepeatFilter` installed on this view by the tab (`take_key_repeat`).
         self.key_filter = None
-        #: Region (viewport pixels) of the paint event in progress, read by
-        #: `drawBackground` through `_grid_indices`; None outside a paint.
-        self._exposed_region = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
@@ -689,15 +690,11 @@ class _SymbolView(QGraphicsView):
                         return
         background_drag = event.button() == Qt.MouseButton.LeftButton and not self.items(event.pos())
         if (event.button() == Qt.MouseButton.MiddleButton or background_drag) and self.gesture is None:
-            self._pan_button = event.button()
-            self._pan_last = event.pos()
-            self.auto_fit = False
+            self.camera.pan_begin(event.button(), event.pos(), grab_mouse=True)
             self.setFocus()
-            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-            self.viewport().grabMouse()
             event.accept()
             return
-        if self._pan_last is not None:
+        if self.camera.pan_active:
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self.controller is not None:
@@ -735,12 +732,6 @@ class _SymbolView(QGraphicsView):
                 return
         event.ignore()
 
-    def _pan_to(self, point):
-        delta = point - self._pan_last
-        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
-        self._pan_last = point
-
     def leaveEvent(self, event):
         """@brief Qt override: report that the pointer left the view (hides the hover handles).
 
@@ -759,8 +750,8 @@ class _SymbolView(QGraphicsView):
             self._rubber.setGeometry(QRect(self._rubber_start, event.pos()).normalized())
             event.accept()
             return
-        if self._pan_last is not None:
-            self._pan_to(event.pos())
+        if self.camera.pan_active:
+            self.camera.pan_move(event.pos())
             event.accept()
             return
         if self.gesture is not None:
@@ -782,11 +773,8 @@ class _SymbolView(QGraphicsView):
             self.region_selected.emit(self.mapToScene(rect).boundingRect(), self._rubber_add)
             event.accept()
             return
-        if self._pan_last is not None and event.button() == self._pan_button:
-            self._pan_to(event.pos())
-            self._pan_last = None
-            self.viewport().releaseMouse()
-            self.viewport().unsetCursor()
+        if self.camera.pan_active and event.button() == self.camera.pan_button:
+            self.camera.pan_end(event.pos())
             event.accept()
             return
         if self.gesture is not None and event.button() == Qt.MouseButton.LeftButton:
@@ -820,7 +808,7 @@ class _SymbolView(QGraphicsView):
         # A running drag never gets here: `CancelOnEscapeAndHide` (installed
         # on this view) consumes the Escape that cancels it; what is left is
         # the pan and the rubber band, which the view owns.
-        if event.key() == Qt.Key.Key_Escape and (self._pan_last is not None or self._rubber_start is not None):
+        if event.key() == Qt.Key.Key_Escape and (self.camera.pan_active or self._rubber_start is not None):
             self.cancel_interaction()
             event.accept()
             return
@@ -833,11 +821,13 @@ class _SymbolView(QGraphicsView):
             its capture and tells the host once); the rubber band and the
             pan are the view's own and are dropped here.
         """
-        active = self._pan_last is not None or self._rubber_start is not None
+        rubber = self._rubber_start is not None
         self._rubber_start = None
         self._rubber.hide()
-        self._pan_last = None
-        if active:
+        # The camera releases its own capture and cursor; the rubber band
+        # grabbed the viewport through the tab, so it is released here.
+        self.camera.pan_cancel()
+        if rubber:
             self.viewport().releaseMouse()
             self.viewport().unsetCursor()
         if self.controller is not None:
@@ -874,59 +864,7 @@ class _SymbolView(QGraphicsView):
         """
         if not self.show_grid or math.isclose(self.drawing_grid_mm, GRID_MM, abs_tol=1e-9):
             return False
-        return self.drawing_grid_mm * SCENE_UNITS_PER_MM * self.transform().m11() >= FINE_GRID_MIN_PX
-
-    def paintEvent(self, event):
-        """@brief Qt override: keep the region this paint covers while the base class paints.
-
-        @param event Paint event; the base class paints as before.
-        @note Qt hands `drawBackground` only the bounding rectangle of the
-            exposed region and clips the pixels to the region itself. A
-            name edit at 900 pins dirties one pin and the eight resize
-            handles at the body corners: ten small rectangles whose bounding
-            rectangle is most of the viewport, over which the whole grid was
-            laid out (2026-10-17: 19 ms of a 60 ms edit, for a few visible
-            pixels). `_grid_indices` reads the region kept here.
-        """
-        self._exposed_region = event.region()
-        try:
-            super().paintEvent(event)
-        finally:
-            self._exposed_region = None
-
-    def _grid_indices(self, rect, step, axis):
-        """@brief Indices of the grid positions at `step` inside `rect` along `axis` that reach the region being painted.
-
-        @param rect Exposed scene rectangle handed to `drawBackground`.
-        @param step Grid step, scene units.
-        @param axis 0 for x (columns, vertical lines), 1 for y (rows, horizontal lines).
-        @return The range the grid always used (floor of the low edge to ceil
-            of the high edge) outside a paint event (`render`, a grab), when
-            the region is empty or when it is the whole viewport; otherwise
-            only the indices whose line, grown by GRID_PAINT_MARGIN_PX device
-            pixels, intersects the region (`QRegion.intersects`: PyQt6 gives
-            no access to the region's rectangles).
-        @note A line or dot that reaches no part of the region has no pixel
-            inside the area Qt clips to, so leaving it out changes no pixel.
-        """
-        from PyQt6.QtCore import QRectF
-        low, high = (rect.left(), rect.right()) if axis == 0 else (rect.top(), rect.bottom())
-        indices = range(math.floor(low / step), math.ceil(high / step) + 1)
-        region = self._exposed_region
-        if region is None or region.isEmpty() or (
-                region.rectCount() == 1 and region.boundingRect().contains(self.viewport().rect())):
-            return list(indices)
-        transform = self.viewportTransform()
-        margin = GRID_PAINT_MARGIN_PX
-        kept = []
-        for index in indices:
-            at = index * step
-            line = (QRectF(at, rect.top(), 0.0, rect.height()) if axis == 0
-                    else QRectF(rect.left(), at, rect.width(), 0.0))
-            strip = transform.mapRect(line).toAlignedRect().adjusted(-margin, -margin, margin, margin)
-            if region.intersects(strip):
-                kept.append(index)
-        return kept
+        return dots_legible(self.drawing_grid_mm * SCENE_UNITS_PER_MM, self.transform().m11(), FINE_GRID_MIN_PX)
 
     def drawBackground(self, painter, rect):
         """@brief Paint the pin grid as lines and the drawing grid as dots.
@@ -938,87 +876,58 @@ class _SymbolView(QGraphicsView):
             drawing step equals the pin grid or is too dense on screen
             (`fine_grid_visible`).
         @note Only the lines, columns and rows that reach the region being
-            painted are laid out (`_grid_indices`); each line still spans
+            painted are laid out (`ExposedRegion.indices`); each line still spans
             `rect`, in the same order as before, so the pixels are those of
             the full grid (tests/test_symbol_grid_paint_region.py).
         """
         super().drawBackground(painter, rect)
         if not self.show_grid:
             return
-        painter.save()
-        if self.fine_grid_visible():
-            fine = self.drawing_grid_mm * SCENE_UNITS_PER_MM
-            # Every crossing of the columns and rows that reach the region: a
-            # superset of the dots inside it (two far rectangles make a
-            # cross), never one outside `rect`; the whole grid for a full paint.
-            ys = [row * fine for row in self._grid_indices(rect, fine, 1)]
-            dots = QPolygonF([QPointF(column * fine, y)
-                              for column in self._grid_indices(rect, fine, 0) for y in ys])
-            dot_pen = QPen(QColor(self.theme['grid_dots']), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            dot_pen.setCosmetic(True)
-            # Crisp dots: antialiasing would smear a 1.5 px point into a
-            # faint halo and lose the dot colour at the node itself.
-            antialiased = painter.testRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setPen(dot_pen)
-            painter.drawPoints(dots)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, antialiased)
-        step = GRID_MM * SCENE_UNITS_PER_MM
-        pen = QPen(QColor(self.theme['grid']))
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        for index in self._grid_indices(rect, step, 0):
-            x = index * step
-            painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
-        for index in self._grid_indices(rect, step, 1):
-            y = index * step
-            painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
-        painter.restore()
+        theme = self.theme
+        paint_grid(painter, rect, exposed=self.exposed, step=GRID_MM * SCENE_UNITS_PER_MM,
+                   style=GridStyle(QColor(theme['grid']), QColor(theme['grid_dots']), 1.5, False),
+                   fine_step=self.drawing_grid_mm * SCENE_UNITS_PER_MM if self.fine_grid_visible() else None,
+                   dots_first=True)
 
-    def _camera(self):
-        """Everything the picture of a fit depends on: scene rect, viewport size, transform, scroll."""
-        return (self.scene().sceneRect(), self.viewport().size(), self.transform(),
-                self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+    @property
+    def auto_fit(self):
+        """@brief Whether the picture follows the symbol bounds (until the user zooms or pans).
+
+        @return The camera's flag; writable (`main_window` and the press routing set it).
+        """
+        return self.camera.auto_fit
+
+    @auto_fit.setter
+    def auto_fit(self, value):
+        self.camera.auto_fit = bool(value)
 
     def fit(self):
         """@brief Fit the symbol in the view and keep fitting it (auto-fit) until the user zooms or pans.
 
-        @note Nothing is done when the camera is still the one the previous
-            fit left (same scene rect, viewport size, transform and scroll):
-            `fitInView` would give the same picture but resets and scales the
-            transform, which repaints the whole viewport. Every redraw of the
-            symbol calls this while auto-fit is on, so an edit that leaves the
-            bounds alone used to repaint the whole grid (2026-10-17: about
+        @note Nothing is refitted when the camera is still the one the previous
+            fit left (`Camera.fit` memo): `fitInView` resets and scales the
+            transform, which repaints the whole viewport, and every redraw of
+            the symbol calls this while auto-fit is on (2026-10-17: about
             60 ms of a name edit with 900 pins).
         """
-        self.auto_fit = True
-        bounds = self.scene().sceneRect()
-        if not bounds.isEmpty():
-            if self._camera() == getattr(self, '_fitted_camera', None):
-                return
-            self.fitInView(bounds, Qt.AspectRatioMode.KeepAspectRatio)
-            self._fitted_camera = self._camera()
-            self.camera_changed.emit()
+        self.camera.auto_fit = True
+        self.camera.fit(self.scene().sceneRect())
 
     def zoom(self, factor, position=None):
-        if 0.15 <= self.transform().m11() * factor <= 20:
-            self.auto_fit = False
-            position = position if position is not None else self.viewport().rect().center()
-            before = self.mapToScene(position)
-            self.scale(factor, factor)
-            after = self.mapToScene(position)
-            self.centerOn(self.mapToScene(self.viewport().rect().center()) + before - after)
-            self.camera_changed.emit()
+        """@brief Zoom by `factor` about the viewport point `position` (the centre when None).
+
+        @param factor Scale multiplier.
+        @param position Viewport point kept fixed, or None.
+        @note The result is clamped to [ZOOM_MIN, ZOOM_MAX] (`Camera.zoom`).
+        """
+        self.camera.zoom(factor, position)
 
     def wheelEvent(self, event):
         """@brief Qt override: zoom about the pointer, never during a drag or pan.
 
         @param event The wheel event; always accepted so the page does not scroll.
         """
-        delta = event.angleDelta().y()
-        if delta and self.gesture is None and self._pan_last is None:
-            self.zoom(1.2 ** max(-4, min(4, delta / 120)), event.position().toPoint())
-        event.accept()
+        self.camera.wheel(event, blocked=self.gesture is not None or self.camera.pan_active)
 
     def resizeEvent(self, event):
         """@brief Qt override: refit the symbol after a resize while auto-fit is on.

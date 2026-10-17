@@ -7,12 +7,12 @@ pressed, the window (the `GestureHost`) snaps and commits. Escape and Hide
 cancel through `CancelOnEscapeAndHide`; the text anchor squares are hover
 groups (`HoverGroups`) with the symbol editor's reveal margin.
 """
-import math
-
-from PyQt6.QtCore import Qt, QLineF, QPointF, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPen
+from PyQt6.QtCore import Qt, QRect, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QGraphicsView
 
+from .canvas_camera import Camera
+from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (
     HOVER_MARGIN_PX, CancelOnEscapeAndHide, GestureController, HoverGroups, KeyRepeatFilter,
     install_canvas_filters,
@@ -47,6 +47,14 @@ FINE_GRID_MIN_SCREEN_PX = 5.0
 #: Colours of the main grid lines and of the fine-grid dots (dark preview).
 GRID_LINE_COLOR = '#36364b'
 GRID_DOT_COLOR = '#4a4a63'
+
+#: Zoom limits of the footprint camera, view px per scene px. The scene is 20 px
+#: per mm; the symbol editor's 10 units per mm has its own limits (plan D13).
+ZOOM_LIMITS = (0.02, 40.0)
+
+#: How the grid is painted (the shared `paint_grid`): thin lines, round dots,
+#: the painter's antialiasing hint left as the view set it.
+GRID_STYLE = GridStyle(QColor(GRID_LINE_COLOR), QColor(GRID_DOT_COLOR), 1.5, None)
 
 #: Grab tolerance around the pointer, screen px: a press this close to a
 #: handle or to a drawing stroke still takes it. A UI tolerance (strokes
@@ -101,7 +109,13 @@ class FootprintView(QGraphicsView):
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._pan = None
+        #: Zoom, wheel, pan and fit, shared with the symbol editor.
+        self.camera = Camera(self, limits=ZOOM_LIMITS)
+        #: Where `drawBackground` learns which part of the viewport is being painted.
+        self._exposed = ExposedRegion(self)
+        #: Callable returning the scene rectangle the camera frames (or None):
+        #: set by the window, which owns the framing rule (`set_framing_provider`).
+        self._framing_provider = None
         self._grid = None
         #: The shared drag state machine, created by `attach_host`; None until then.
         self.gestures: GestureController | None = None
@@ -130,12 +144,52 @@ class FootprintView(QGraphicsView):
         self._hovered_text = ""
         #: Main grid step divided by this gives the drawing snap step.
         self._fine_divisor = DEFAULT_FINE_GRID_DIVISOR
-        #: True while the camera follows the footprint (every redraw fits
-        #: it); False once the user zooms or pans, as the symbol editor's
-        #: `auto_fit`: a redraw after an edit must not move the camera
-        #: (user, 2026-10-13: «non mantiene lo zoom e lo cambia», it does not
-        #: keep the zoom and changes it).
-        self.auto_fit = True
+
+    @property
+    def auto_fit(self):
+        """@brief True while the camera follows the footprint (every redraw fits it).
+
+        @return The camera's flag. False once the user zooms or pans, as the symbol
+            editor's `auto_fit`: a redraw after an edit must not move the camera
+            (user, 2026-10-13: «non mantiene lo zoom e lo cambia», it does not
+            keep the zoom and changes it). Read and written by the window.
+        """
+        return self.camera.auto_fit
+
+    @auto_fit.setter
+    def auto_fit(self, value):
+        """@brief Set whether the camera follows the footprint.
+
+        @param value True to follow it (the next fit applies), False to keep the user's camera.
+        """
+        self.camera.auto_fit = bool(value)
+
+    def set_framing_provider(self, provider):
+        """@brief Tell the view how to find the rectangle its camera frames.
+
+        @param provider Callable returning the scene `QRectF` to frame (the footprint
+            without the grid, plus margin) or None when there is nothing to frame.
+        @note Used by the resize refit while `auto_fit` is on (plan D15): the view
+            never inspects the scene's items itself, the window owns the rule and
+            `MainWindow._fit_preview` calls the same provider, so a resize frames
+            exactly what a redraw frames.
+        """
+        self._framing_provider = provider
+
+    def resizeEvent(self, event):
+        """@brief Qt override: while the camera follows the footprint, re-frame it for the new viewport size.
+
+        @param event Qt resize event, forwarded to the base class first.
+        @note D15 (2026-10-17, as the symbol editor): before, a resize left the
+            old scale, so the footprint could end up cropped or tiny. A user
+            camera (`auto_fit` False) is never touched. The camera's memo keeps
+            this free when the viewport size did not really change.
+        """
+        super().resizeEvent(event)
+        if self.camera.auto_fit and self._framing_provider is not None:
+            rect = self._framing_provider()
+            if rect is not None and not rect.isEmpty():
+                self.camera.fit(rect, reset=True)
 
     def attach_host(self, host):
         """@brief Bind the drags to their host and install the cancel and key-repeat filters.
@@ -204,7 +258,7 @@ class FootprintView(QGraphicsView):
         """
         self._draw_mode = bool(active)
         if self._draw_mode:
-            self._pan = None
+            self.camera.pan_cancel()
             self.cancel_interaction()
             self._report_text_hover("")
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -278,48 +332,24 @@ class FootprintView(QGraphicsView):
         return ox + round((x - ox) / step) * step, oy + round((y - oy) / step) * step
 
     def drawBackground(self, painter, rect):
-        """@brief Qt override: draw grid lines across the visible viewport, like the symbol editor.
+        """@brief Qt override: draw the grid lines (and fine dots) where Qt paints, like the symbol editor.
 
         @param painter Painter in scene coordinates.
         @param rect Exposed scene rectangle.
+        @note Lines every main step from the grid origin, then the dots at the fine
+            nodes (those on a main line are skipped). Only the lines and dots that
+            reach the paint event's region are laid out (`ExposedRegion`, D16): the
+            pixels are those of the whole-rectangle layout.
         """
         super().drawBackground(painter, rect)
         if not self._grid or not self._grid[2]:
             return
-        step, (origin_x, origin_y), _ = self._grid
+        step, origin, _ = self._grid
         if step <= 0:
             return
-        grid_pen = QPen(QColor(GRID_LINE_COLOR))
-        grid_pen.setCosmetic(True)
-        painter.save()
-        painter.setPen(grid_pen)
-        for index in range(math.floor((rect.left() - origin_x) / step),
-                           math.ceil((rect.right() - origin_x) / step) + 1):
-            x = origin_x + index * step
-            painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
-        for index in range(math.floor((rect.top() - origin_y) / step),
-                           math.ceil((rect.bottom() - origin_y) / step) + 1):
-            y = origin_y + index * step
-            painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
-        self._draw_fine_dots(painter, rect, step, origin_x, origin_y)
-        painter.restore()
-
-    def _draw_fine_dots(self, painter, rect, step, origin_x, origin_y):
-        """Dots at the fine-grid nodes, only when legible on screen (see FINE_GRID_MIN_SCREEN_PX)."""
-        if not self.fine_dots_visible():
-            return
-        n = self._fine_divisor
-        fine = step / n
-        dot_pen = QPen(QColor(GRID_DOT_COLOR), 1.5)
-        dot_pen.setCosmetic(True)
-        dot_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(dot_pen)
-        # Nodes on a main line are marked by the line itself: skip them.
-        i0, i1 = math.floor((rect.left() - origin_x) / fine), math.ceil((rect.right() - origin_x) / fine)
-        j0, j1 = math.floor((rect.top() - origin_y) / fine), math.ceil((rect.bottom() - origin_y) / fine)
-        xs = [origin_x + i * fine for i in range(i0, i1 + 1) if i % n]
-        ys = [origin_y + j * fine for j in range(j0, j1 + 1) if j % n]
-        painter.drawPoints([QPointF(x, y) for x in xs for y in ys])
+        paint_grid(painter, rect, exposed=self._exposed, step=step, origin=origin, style=GRID_STYLE,
+                   fine_step=self.fine_step() if self.fine_dots_visible() else None,
+                   skip_dots_on_lines=True)
 
     def fine_dots_visible(self):
         """@brief True when the fine-grid dots are drawn at the current zoom.
@@ -328,40 +358,32 @@ class FootprintView(QGraphicsView):
         """
         fine = self.fine_step()
         return (fine is not None and self._fine_divisor > 1
-                and fine * self.transform().m11() >= FINE_GRID_MIN_SCREEN_PX)
+                and dots_legible(fine, self.transform().m11(), FINE_GRID_MIN_SCREEN_PX))
 
     def zoom(self, factor, anchor=None):
         """@brief Scale the camera within limits while preserving the scene point under the anchor.
 
         @param factor Multiplier applied to the current scale (>1 zooms in);
-            the resulting scale is clamped to [0.02, 40] px per scene unit.
+            the resulting scale is clamped to `ZOOM_LIMITS`.
         @param anchor Viewport point (QPoint, px) kept fixed on screen;
             None uses the viewport centre.
+        @return True when the scale changed (and `auto_fit` went off); False, with
+            nothing touched, when the clamped scale equals the current one.
         """
-        anchor = anchor if anchor is not None else self.viewport().rect().center()
-        self.auto_fit = False
-        before = self.mapToScene(anchor)
-        current = self.transform().m11()
-        target = max(.02, min(40., current * factor))
-        self.scale(target / current, target / current)
-        delta = before - self.mapToScene(anchor)
-        self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
+        return self.camera.zoom(factor, anchor)
 
     def wheelEvent(self, event):
-        """@brief Zoom toward the mouse position using the wheel delta; refused while a drag runs.
+        """@brief Zoom toward the mouse position using the wheel delta; refused while a drag or a pan runs.
 
         @param event Qt wheel event; angle delta and pointer position are used.
         @note Decision D2 (2026-10-17, as the symbol editor): a rescale under
             a live drag would re-measure the drag's delta in the new scene
             and make the text jump, and a rescale under a pan would move the
             camera by a delta measured in two scales; the wheel waits for
-            the drop (drag) or the release (pan).
+            the drop (drag) or the release (pan). D14: one event zooms by at
+            most four notches (`Camera.wheel`).
         """
-        if self._dragging() or self._pan is not None:
-            event.accept()
-            return
-        self.zoom(1.2 ** (event.angleDelta().y() / 120), event.position().toPoint())
-        event.accept()
+        self.camera.wheel(event, blocked=self._dragging() or self.camera.pan_active)
 
     def _items_near(self, pos):
         """Items within HIT_MARGIN_PX of a viewport point, topmost first.
@@ -587,9 +609,8 @@ class FootprintView(QGraphicsView):
             event.accept()
             return
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
-            self._pan = event.pos()
-            self._pan_button = event.button()
-            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            # Qt's implicit grab is enough; a click without a move keeps auto_fit.
+            self.camera.pan_begin(event.button(), event.pos(), grab_mouse=False, keep_auto_fit=True)
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -606,12 +627,8 @@ class FootprintView(QGraphicsView):
             self.gestures.move(self.mapToScene(event.pos()))
             event.accept()
             return
-        if self._pan is not None:
-            delta = self.mapToScene(self._pan) - self.mapToScene(event.pos())
-            if not delta.isNull():
-                self.auto_fit = False       # the user placed the camera
-            self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
-            self._pan = event.pos()
+        if self.camera.pan_active:
+            self.camera.pan_move(event.pos())
             event.accept()
         elif self._draw_mode:
             point = self.mapToScene(event.pos())
@@ -671,11 +688,8 @@ class FootprintView(QGraphicsView):
                 self.draw_clicked.emit(point.x(), point.y())
             event.accept()
             return
-        if self._pan is not None and event.button() == self._pan_button:
-            delta = self.mapToScene(self._pan) - self.mapToScene(event.pos())
-            self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
-            self._pan = None
-            self.viewport().unsetCursor()
+        if self.camera.pan_active and event.button() == self.camera.pan_button:
+            self.camera.pan_end(event.pos())
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -710,9 +724,7 @@ class FootprintView(QGraphicsView):
             it does not also cancel an armed drawing tool. With no pan
             running, Escape reaches the draw tool as before.
         """
-        if event.key() == Qt.Key.Key_Escape and self._pan is not None:
-            self._pan = None
-            self.viewport().unsetCursor()
+        if event.key() == Qt.Key.Key_Escape and self.camera.pan_cancel():
             event.accept()
             return
         if self._draw_mode:
@@ -735,7 +747,7 @@ class FootprintView(QGraphicsView):
             (tests) and is a no-op when the drag is already gone. The host
             puts the dragged text back and drops the handle ghost.
         """
-        self._pan = None
+        self.camera.pan_cancel()
         self.cancel_interaction()
         self._report_text_hover("")
         if self._draw_mode:
