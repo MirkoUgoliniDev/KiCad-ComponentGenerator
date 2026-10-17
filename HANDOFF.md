@@ -1,6 +1,10 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 17/10 — STATO: tutto FATTO e verificato, NULLA COMMITTATO (in attesa dell'OK dell'utente), branch `ADVANCED` su `71c55e9`
+## 17/10 — STATO: committato `54c44dd` su `ADVANCED`, pushato; MERGIATO in `main` (`ac1e5c8`, pushato); di nuovo su `ADVANCED`
+
+Istruzione dell'utente: «committa in questo branch, pusha e fai il merge in
+main, pusha e torna qui». Database dei profili controllato: nessun
+segreto, incluso nel commit. Numeri in CLAUDE.md riallineati.
 
 SUITE COMPLETA FINALE 17/10 (dopo S1-S4, «modello STEP», S3 centrato,
 grigio pieno, verifica prestazioni P1/P2/P3 + coordinatore): A 5416 verdi,
