@@ -1,20 +1,18 @@
 """@brief Footprint parameter extraction from datasheets through the OpenRouter API.
 
-Estrazione parametri footprint da datasheet tramite l'API OpenRouter.
+The documentation files (PDF/images) are sent to OpenRouter -- which gives
+access to the models of every vendor through a single key -- with the request
+to fill in a tool (tool calling) whose schema is that of the pin header
+parameters, so the answer is always valid structured JSON, never free text
+to be parsed by hand.
 
-Manda i file di documentazione (PDF/immagini) a OpenRouter -- che con una
-sola chiave da' accesso ai modelli di tutti i fornitori -- e richiede di
-compilare uno strumento (tool calling) con lo schema dei parametri del
-pin header, cosi' la risposta e' sempre JSON strutturato valido, mai
-testo libero da fare il parsing a mano.
+The model is chosen from the GUI (OpenRouter id, e.g.
+"anthropic/claude-sonnet-5"): the GUI setting lives in the SQLite profiles,
+while a single extraction may use a more capable one without changing the
+default.
 
-Il modello si sceglie dalla GUI (id OpenRouter, es.
-"anthropic/claude-sonnet-5"): l'impostazione della GUI sta nei profili SQLite,
-mentre per una singola estrazione se ne puo' usare uno piu' potente senza
-cambiare il default.
-
-Richiede la variabile d'ambiente OPENROUTER_API_KEY (di norma nel file
-.env accanto a main.py). Nessuna chiave viene inserita nel codice.
+The environment variable OPENROUTER_API_KEY is required (normally in the
+.env file next to main.py). No key is ever written into the code.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
-from ..core.package_geometry import package_from_mapping
+from ..core.package_geometry import package_doubts, package_from_mapping
 from ..core.validation import finite_number
 from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
@@ -98,7 +96,7 @@ COMPONENT_KIND_DESCRIPTIONS: dict[str, str] = {
 
 #: The kinds, in the order the schemas offer them.
 COMPONENT_KINDS = tuple(COMPONENT_KIND_DESCRIPTIONS)
-MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, limite ragionevole per singolo file API
+MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB, reasonable limit per single API file
 
 _SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
@@ -225,31 +223,83 @@ _EXTRACTION_TOOL = {
                     "custom). Quando e' presente e' la fonte del footprint. Coordinate "
                     "locali del centro di ogni pad, come appaiono nella vista indicata "
                     "da source_view (la specchiatura della vista dal basso la fa il "
-                    "programma). Un pad esposto/termico e' un pin a se'. Non inventare "
+                    "programma). CONVENZIONE DEGLI ASSI, come il disegno appare sulla "
+                    "pagina: X cresce verso DESTRA e Y cresce verso il BASSO (un pad piu' "
+                    "in basso nel disegno ha y_mm MAGGIORE; non usare la convenzione "
+                    "matematica con Y verso l'alto, che specchierebbe il footprint e "
+                    "invertirebbe l'ordine dei pin). Ogni angolo (orientation_deg, "
+                    "rotation_deg) e' in gradi in senso ANTIORARIO come appare sulla "
+                    "pagina. Un pad esposto/termico e' un pin a se'. Non inventare "
                     "coordinate non supportate dal documento."
                 ),
                 "properties": {
                     "family": {"type": "string", "enum": [
                         "unknown", "dip", "sip", "soic", "tssop", "qfn", "qfp",
                         "module", "castellated", "custom"]},
-                    "body_length_mm": {"type": "number", "exclusiveMinimum": 0},
-                    "body_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "body_length_mm": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "description": (
+                            "Estensione del corpo lungo l'asse X di queste coordinate "
+                            "(orizzontale nella vista di source_view), qualunque nome le "
+                            "dia il datasheet (D, E, E1, length). Con i pin sui lati "
+                            "sinistro e destro (SOIC disegnato in verticale) e' la "
+                            "dimensione TRASVERSALE alle file di pin, non quella lungo le "
+                            "file."),
+                    },
+                    "body_width_mm": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "description": (
+                            "Estensione del corpo lungo l'asse Y di queste coordinate "
+                            "(verticale nella vista di source_view), qualunque nome le dia "
+                            "il datasheet. Con i pin sui lati sinistro e destro e' la "
+                            "dimensione LUNGO le file di pin."),
+                    },
                     "body_height_mm": {"type": "number", "exclusiveMinimum": 0},
+                    "lead_form": {
+                        "type": "string", "enum": ["gull_wing", "j_lead", "unknown"],
+                        "description": (
+                            "Forma dei terminali come appare nella vista laterale: "
+                            "\"gull_wing\" se escono dai fianchi e si piegano verso "
+                            "l'esterno ad ala di gabbiano, \"j_lead\" se si piegano a J "
+                            "sotto il bordo del corpo (le piazzole stanno sotto il bordo), "
+                            "\"unknown\" se il disegno non mostra la vista laterale. Non "
+                            "dedurlo dal nome del package."),
+                    },
                     "origin": {"type": "string", "enum": ["body_center", "pin1", "custom"]},
                     "source_view": {"type": "string", "enum": ["top", "bottom"]},
-                    "orientation_deg": {"type": "number"},
-                    "mirrored": {"type": "boolean"},
+                    "orientation_deg": {
+                        "type": "number",
+                        "description": (
+                            "Rotazione da applicare al disegno per ottenere il footprint, "
+                            "in gradi ANTIORARI come appare sulla pagina; 0 per disegnare "
+                            "il footprint come il disegno."),
+                    },
+                    "mirrored": {
+                        "type": "boolean",
+                        "description": (
+                            "true SOLO se il disegno stesso e' un'immagine speculare della "
+                            "vista dichiarata in source_view per un motivo DIVERSO dall'essere "
+                            "una vista dal basso (es. etichettato «mirror image» o «vista "
+                            "dall'alto in trasparenza»). Una BOTTOM VIEW si dichiara SOLO con "
+                            "source_view \"bottom\" e mirrored false: la specchiatura della "
+                            "vista dal basso la fa gia' il programma, e mirrored true la "
+                            "annullerebbe."),
+                    },
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "needs_review": {"type": "boolean"},
                     "pins": {"type": "array", "items": {"type": "object", "properties": {
                         "number": {"type": "string"}, "name": {"type": "string"},
                         "x_mm": {"type": "number"}, "y_mm": {"type": "number"},
-                        "pad_length_mm": {"type": "number", "exclusiveMinimum": 0},
-                        "pad_width_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
+                                          "description": "Dimensione del pad lungo X, prima di rotation_deg."},
+                        "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
+                                         "description": "Dimensione del pad lungo Y, prima di rotation_deg."},
                         "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
                         "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
                         "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid"]},
-                        "rotation_deg": {"type": "number"}, "drill_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "rotation_deg": {"type": "number",
+                                         "description": "Angolo del pad in gradi ANTIORARI come appare sulla pagina."},
+                        "drill_mm": {"type": "number", "exclusiveMinimum": 0},
                     }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
                 },
                 "required": ["family", "source_view", "pins"],
@@ -355,18 +405,24 @@ _EXTRACTION_TOOL = {
                 "type": "number",
                 "description": (
                     "SOLO se il datasheet ha un disegno meccanico (\"Outline Dimensions\" "
-                    "o simile) con l'ingombro del corpo del componente: lunghezza del "
-                    "corpo (asse X, stessa direzione del pitch) nell'unita' di "
-                    "drawing_unit. Ometti se "
+                    "o simile) con l'ingombro del corpo del componente: estensione del "
+                    "corpo lungo l'asse X del footprint (orizzontale nella vista), "
+                    "nell'unita' di drawing_unit, qualunque nome le dia il datasheet. "
+                    "In una matrice di pin X e' la direzione delle colonne, quindi del "
+                    "pitch; con pad espliciti (package_geometry, o pads) X e' l'asse X delle loro "
+                    "coordinate, anche quando le file di pin corrono in verticale (pin a "
+                    "sinistra e a destra: e' la dimensione trasversale alle file). Ometti se "
                     "il disegno meccanico non e' presente."
                 ),
             },
             "body_width_mm": {
                 "type": "number",
                 "description": (
-                    "Larghezza del corpo, asse Y (vista dall'alto/bottom view del "
-                    "disegno meccanico -- e' la dimensione del CONTORNO ESTERNO del "
-                    "case, NON la distanza tra le due righe di pin: e' quasi sempre "
+                    "Larghezza del corpo, estensione lungo l'asse Y del footprint "
+                    "(verticale nella vista; stessa convenzione di body_length_mm), "
+                    "dalla vista dall'alto o dal basso del disegno meccanico: e' la "
+                    "dimensione del CONTORNO ESTERNO del case. In una matrice di pin NON "
+                    "e' la distanza tra le due righe di pin: e' quasi sempre "
                     "un valore diverso e leggermente maggiore di row_spacing_mm, "
                     "perche' il case e' piu' largo della sola distanza tra i pin."
                 ),
@@ -839,13 +895,13 @@ _EXTRACTION_TOOL = {
                 "description": "Ambiguita', assunzioni fatte o valori non trovati nel datasheet",
             },
         },
-        # Obbligatori sempre; i campi della matrice e quelli dei lati
-        # castellated sono richiesti a seconda di cio' che la risposta e'
-        # (layout, pad espliciti, numero di righe e colonne), e il controllo
-        # si fa in _params_from_tool_arguments() dove si conoscono i valori.
-        # Unita' e vista sono obbligatorie perche' il modello le dichiari
-        # sempre; una risposta che le omette resta leggibile (millimetri,
-        # vista ignota dichiarata come dubbio nelle note).
+        # Always required; the matrix fields and the castellated-side fields
+        # are required depending on what the answer is (layout, explicit
+        # pads, number of rows and columns), and the check is made in
+        # _params_from_tool_arguments() where the values are known.
+        # Unit and view are required so that the model always declares them;
+        # an answer that omits them stays readable (millimetres, unknown view
+        # declared as a doubt in the notes).
         "required": ["layout", "confidence", "drawing_unit", "contacts_view"],
     },
 }
@@ -1490,11 +1546,11 @@ def single_answer_to_data(answer: dict) -> dict:
 
 
 def _openai_tool() -> dict:
-    """Lo stesso schema nel formato "function" richiesto da OpenRouter.
+    """The same schema in the "function" format required by OpenRouter.
 
-    Lo schema JSON dei parametri e' identico: cambia solo l'involucro
-    (Anthropic usa ``input_schema``, l'API OpenAI-compatible di OpenRouter
-    usa ``function.parameters``).
+    The JSON schema of the parameters is identical: only the wrapper changes
+    (Anthropic uses ``input_schema``, the OpenAI-compatible API of OpenRouter
+    uses ``function.parameters``).
     """
     return {
         "type": "function",
@@ -1588,8 +1644,8 @@ _SYSTEM_PROMPT = (
     "Rispondi SOLO chiamando lo strumento fornito."
 )
 
-# Alias pubblico: la GUI (tab "Prompt LLM") lo mostra come testo di partenza
-# editabile, e passa la versione modificata a extract_pin_header_params().
+# Public alias: the GUI ("Prompt LLM" tab) shows it as the editable starting
+# text, and passes the modified version to extract_pin_header_params().
 DEFAULT_SYSTEM_PROMPT = _SYSTEM_PROMPT
 
 #: SHA-256 (hex digest of the UTF-8 text) of every earlier built-in system
@@ -1620,12 +1676,10 @@ SUPERSEDED_SYSTEM_PROMPT_DIGESTS = frozenset({
 class ExtractedParams:
     """@brief Extraction result for matrix and castellated contact layouts.
 
-    Risultato dell'estrazione, per entrambe le disposizioni di contatti.
-
-    `layout` dice quali campi sono significativi: "matrix" valorizza
-    righe/colonne/passo/pad/drill, "castellated" valorizza
-    `castellated_sides` (un elemento per lato del modulo) e lascia a None i
-    campi della matrice, che per quei componenti non esistono.
+    `layout` says which fields are meaningful: "matrix" fills in
+    rows/columns/pitch/pad/drill, "castellated" fills in `castellated_sides`
+    (one element for each side of the module) and leaves the matrix fields
+    at None, since those components have none.
 
     @note Every length is in millimetres and every contact position is seen
         from above, whatever unit and view the model read (see
@@ -1652,6 +1706,11 @@ class ExtractedParams:
         (e.g. "castellated_sides.left.half_hole_diameter_mm"). A value the
         program itself estimated (e.g. `fit_body_to_pin_field`) is
         "estimated". Absent keys are values the result does not carry.
+    @note `geometry_doubts` lists the structural contradictions of
+        `package_geometry` (body covering the lead pads, with `swap_clears`
+        when swapping body length and width would resolve it; clockwise lead
+        numbering; bottom view also declared mirrored). The geometry is kept
+        as read; each doubt's message is also in `notes`.
     """
 
     name: str
@@ -1694,6 +1753,12 @@ class ExtractedParams:
     pin_map_conflict: Optional[str] = None
     #: One of LEAD_EXITS, None when the model did not say.
     lead_exit: Optional[str] = None
+    #: Structural doubts of `package_geometry` (core.package_geometry.package_doubts),
+    #: each as GeometryDoubt.as_dict(): {"code", "message", "pins", "swap_clears"}.
+    #: None when there is no package geometry or nothing is contradicted. The
+    #: geometry is never corrected: the same messages are in `notes`, and a
+    #: GUI can show `swap_clears` / the code to ask the user what is true.
+    geometry_doubts: Optional[Sequence[dict]] = None
 
     def values_to_review(self) -> list[str]:
         """@brief Return the keys of `value_sources` whose value was not read nor derived.
@@ -1715,18 +1780,22 @@ class ExtractedParams:
                 if side.get("contact_style") is None]
 
     def has_3d_body(self) -> bool:
-        """@brief Return whether body length, width and height are all known, so a 3D body can be built."""
+        """@brief Return whether body length, width and height are all known, so a 3D body can be built.
+
+        @return True when none of the three body dimensions (mm) is None.
+        """
         return self.body_length_mm is not None and self.body_width_mm is not None and self.body_height_mm is not None
 
     def is_castellated(self) -> bool:
-        """@brief Return whether the contacts use the castellated (per-edge) layout."""
+        """@brief Return whether the contacts use the castellated (edge-by-edge) layout.
+
+        @return True when `layout` is "castellated".
+        """
         return self.layout == "castellated"
 
 
 class ExtractionError(Exception):
     """@brief Application error of the extraction: missing key, invalid file or unexpected answer.
-
-    Errore applicativo (chiave mancante, file non valido, risposta inattesa).
 
     @note `raw_response`, when set, is the paid main answer that failed the
         validation, kept so a retry can be compared with it (it is also
@@ -1773,7 +1842,7 @@ def _log_rejected_response(data, exc: ExtractionError, progress) -> None:
                     "risposta resta nel log AI (riga AI_RESPONSE_REJECTED) per confrontarlo "
                     "con un nuovo tentativo.", exc=exc))
         progress("AI_RESPONSE_REJECTED " + text)
-    except Exception:  # noqa: BLE001 - il log non deve nascondere l'errore vero
+    except Exception:  # noqa: BLE001 - the log must not hide the real error
         pass
 
 
@@ -1792,7 +1861,7 @@ def _log_unreadable_arguments(exc: ToolArgumentsError, progress, attempt: int) -
         raw = raw[:_REJECTED_RESPONSE_MAX_CHARS] + " …[truncated]"
     try:
         progress(f"AI_RESPONSE_UNREADABLE attempt={attempt} {raw}")
-    except Exception:  # noqa: BLE001 - il log non deve nascondere l'errore vero
+    except Exception:  # noqa: BLE001 - the log must not hide the real error
         pass
 
 
@@ -1808,33 +1877,355 @@ def _guess_media_type(path: Path) -> str:
 #: EXIF tag of the orientation; 1 means «stored upright».
 _EXIF_ORIENTATION = 0x0112
 
+#: JPEG APP0 identifier kept: the JFIF header only declares density and colour
+#: space, never the camera or the place.
+_JPEG_JFIF_ID = b"JFIF\x00"
+#: JPEG APP14 identifier kept: Adobe's segment tells the decoder how to convert
+#: CMYK/YCCK colours, so dropping it would change the pixels.
+_JPEG_ADOBE_ID = b"Adobe"
+
+#: PNG chunks that describe pixels and are therefore kept; every other chunk
+#: (eXIf, tEXt, zTXt, iTXt, iCCP, tIME, C2PA and any private chunk) is dropped.
+#: acTL/fcTL/fdAT are the animation chunks of APNG, cICP/mDCv/cLLi the
+#: colour-encoding chunks of the third edition: none carries free text.
+_PNG_PIXEL_CHUNKS = frozenset({
+    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+    b"sBIT", b"bKGD", b"pHYs", b"hIST", b"acTL", b"fcTL", b"fdAT",
+    b"cICP", b"mDCv", b"cLLi",
+})
+
+#: WebP chunks that describe pixels and are therefore kept (an allow-list,
+#: like PNG): lossy and lossless bitstreams, the extended header, alpha and
+#: animation. EXIF, XMP, ICCP, C2PA and any private chunk are dropped.
+_WEBP_PIXEL_CHUNKS = frozenset({b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"})
+#: VP8X flag bits announcing the metadata chunks (ICC 0x20, EXIF 0x08, XMP
+#: 0x04): always cleared, since those chunks are never kept.
+_WEBP_METADATA_FLAGS = 0x20 | 0x08 | 0x04
+
+
+class _UncleanableImage(Exception):
+    """An image that cannot be sent safely: its metadata or orientation cannot be handled.
+
+    Private signal of the privacy boundary; `_file_to_content_block` turns it
+    into a translated ExtractionError naming the file.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        #: "metadata" (no cleaner understands the file) or "orientation"
+        #: (a rotation tag that no decoder can apply).
+        self.reason = reason
+
+
+def _jpeg_without_metadata(data: bytes) -> Optional[bytes]:
+    """The JPEG with its metadata segments removed, entropy-coded data untouched.
+
+    Lossless: the compressed pixels are copied byte for byte, so quality and
+    size do not change (re-encoding would lose quality at every upload).
+    Removed: every APPn segment except the JFIF APP0 and the Adobe APP14
+    (EXIF with GPS and device, XMP, ICC profile, IPTC, MPF and maker
+    segments), every COM comment, and everything after the end-of-image
+    marker (phones append there a second, full-metadata picture or a trailer).
+
+    A file cut short (no end-of-image marker, or a scan truncated by a copy
+    that did not finish) is cleaned up to the end of its data and closed with
+    an end-of-image marker: the cleaning fails closed, it never falls back to
+    the raw bytes, whose header still holds the metadata.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes, or None when the data is not a JPEG or ends
+        before its first scan (no pixels to send).
+    """
+    size = len(data)
+    if size < 4 or data[:2] != b"\xff\xd8":
+        return None
+    out = bytearray(b"\xff\xd8")
+    index = 2
+    scanned = False  # True once compressed pixels have been copied
+
+    def closed() -> Optional[bytes]:
+        """The cleaned bytes so far, closed, when they hold pixels."""
+        return bytes(out) + b"\xff\xd9" if scanned else None
+
+    while index < size:
+        if data[index] != 0xFF:
+            return closed()
+        while index < size and data[index] == 0xFF:  # fill bytes before a marker
+            index += 1
+        if index >= size:
+            return closed()
+        marker = data[index]
+        index += 1
+        if marker == 0xD9:  # end of image: whatever follows is not this picture
+            out += b"\xff\xd9"
+            return bytes(out)
+        if 0xD0 <= marker <= 0xD7 or marker == 0x01:  # markers without a length
+            out += bytes((0xFF, marker))
+            continue
+        if index + 2 > size:
+            return closed()
+        length = int.from_bytes(data[index:index + 2], "big")
+        if length < 2 or index + length > size:
+            return closed()
+        body = data[index + 2:index + length]
+        segment = data[index - 2:index + length]
+        index += length
+        if marker == 0xFE:
+            continue  # COM: free text
+        if 0xE0 <= marker <= 0xEF:
+            keep = ((marker == 0xE0 and body.startswith(_JPEG_JFIF_ID))
+                    or (marker == 0xEE and body.startswith(_JPEG_ADOBE_ID)))
+            if not keep:
+                continue
+        out += segment
+        if marker == 0xDA:
+            # Start of scan: entropy-coded data up to the next real marker
+            # (0xFF followed by neither a stuffed 0x00, a restart marker nor
+            # another fill byte). Progressive files have several scans: the
+            # outer loop handles the segments between them.
+            start = index
+            while True:
+                index = data.find(b"\xff", index)
+                if index < 0 or index + 1 >= size:
+                    # Scan cut short: keep the pixels that are there (a
+                    # lone trailing 0xFF is half a marker, not data).
+                    end = size - 1 if data.endswith(b"\xff") else size
+                    out += data[start:end]
+                    scanned = True
+                    return closed()
+                following = data[index + 1]
+                if following == 0x00 or 0xD0 <= following <= 0xD7 or following == 0xFF:
+                    index += 1
+                    continue
+                break
+            out += data[start:index]
+            scanned = True
+    return closed()
+
+
+def _png_without_metadata(data: bytes) -> Optional[bytes]:
+    """The PNG with only the chunks that describe pixels, compressed data untouched.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes (chunks of `_PNG_PIXEL_CHUNKS`, up to IEND; any
+        trailer after IEND dropped), or None when the data is not a PNG whose
+        chunk list ends with IEND (a truncated PNG is then decoded and
+        re-encoded, or refused).
+    """
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        return None
+    out = bytearray(signature)
+    index, size = len(signature), len(data)
+    while index + 12 <= size:
+        length = int.from_bytes(data[index:index + 4], "big")
+        kind = data[index + 4:index + 8]
+        end = index + 12 + length  # length + type + data + CRC
+        if end > size:
+            return None
+        if kind in _PNG_PIXEL_CHUNKS:
+            out += data[index:end]
+        index = end
+        if kind == b"IEND":
+            return bytes(out)
+    return None
+
+
+def _webp_without_metadata(data: bytes) -> Optional[bytes]:
+    """The WebP with only the chunks that describe pixels, compressed data untouched.
+
+    @param data Encoded bytes.
+    @return The cleaned bytes (chunks of `_WEBP_PIXEL_CHUNKS`) with the RIFF
+        size and the VP8X metadata flags updated, or None when the data is
+        not a well-formed RIFF/WEBP container holding a bitstream.
+    """
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    chunks = []
+    index, size = 12, len(data)
+    while index + 8 <= size:
+        kind = data[index:index + 4]
+        length = int.from_bytes(data[index + 4:index + 8], "little")
+        if index + 8 + length > size:
+            return None
+        end = index + 8 + length + (length & 1)  # chunks are padded to an even size
+        if kind in _WEBP_PIXEL_CHUNKS:
+            chunk = bytearray(data[index:min(end, size)])
+            if len(chunk) & 1:
+                chunk += b"\x00"  # a last chunk without its padding byte
+            chunks.append(chunk)
+        index = end
+    if not any(chunk[:4] in (b"VP8 ", b"VP8L", b"ANMF") for chunk in chunks):
+        return None
+    for chunk in chunks:
+        if chunk[:4] == b"VP8X" and len(chunk) > 8:
+            chunk[8] &= ~_WEBP_METADATA_FLAGS & 0xFF
+    body = b"WEBP" + b"".join(bytes(chunk) for chunk in chunks)
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+def _reencoded_without_metadata(data: bytes) -> Optional[bytes]:
+    """The image decoded and saved again from its bare pixels, for other formats.
+
+    Used for the formats without a lossless cleaner above (GIF), or for a
+    container the walkers reject but PIL can decode. The new image is built
+    from the pixel buffer alone, so no `info` entry (comment, XMP, ICC, EXIF)
+    can reach the encoder whatever the Pillow version copies by default; only
+    the palette and the transparency index, which define pixels, are copied.
+    An animated GIF becomes its first frame: the models read a still image.
+
+    @param data Encoded bytes.
+    @return The re-encoded bytes in the same format, or None when PIL cannot
+        decode the data.
+    """
+    try:
+        from io import BytesIO
+        from PIL import Image
+        with Image.open(BytesIO(data)) as image:
+            file_format = image.format or "PNG"
+            image.load()
+            bare = Image.frombytes(image.mode, image.size, image.tobytes())
+            if image.mode == "P" and image.palette is not None:
+                bare.putpalette(image.getpalette())
+            options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
+            if "transparency" in image.info and file_format.upper() in ("GIF", "PNG"):
+                options["transparency"] = image.info["transparency"]
+            out = BytesIO()
+            bare.save(out, format=file_format, **options)
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 - None tells the caller nothing could be cleaned
+        return None
+
+
+def _image_without_metadata(data: bytes) -> bytes:
+    """The image bytes with every metadata block removed, pixels unchanged.
+
+    Privacy boundary of every document upload (audit 2026-10-15, security
+    M2): a phone photo carries the GPS position, the device make and model
+    and capture times in EXIF/XMP, none of which the model needs to read a
+    board. JPEG, PNG and WebP are cleaned losslessly by walking their
+    container (`_jpeg_without_metadata`, `_png_without_metadata`,
+    `_webp_without_metadata`); any other format, or a container those
+    walkers reject, is decoded and re-encoded from its bare pixels.
+
+    @param data Encoded image bytes.
+    @return Metadata-free bytes in the same format.
+    @throws _UncleanableImage ("metadata") When no cleaner applies and PIL
+        cannot decode the data either (an HEIC photo renamed .jpg, a damaged
+        file): it FAILS CLOSED, because the raw bytes may still carry the
+        metadata (review 2026-10-15, M1). The caller refuses the upload.
+    @note The ICC profile is dropped too: it can name the device, and the
+        models read photos and drawings without colour management.
+    """
+    for cleaner in (_jpeg_without_metadata, _png_without_metadata,
+                    _webp_without_metadata, _reencoded_without_metadata):
+        cleaned = cleaner(data)
+        if cleaned is not None:
+            return cleaned
+    raise _UncleanableImage("metadata")
+
+
+def _sniffed_extension(data: bytes) -> Optional[str]:
+    """OpenCV file extension of the container, read from its magic bytes."""
+    if data[:2] == b"\xff\xd8":
+        return ".jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _oriented_with_opencv(data: bytes, orientation: int) -> Optional[bytes]:
+    """The image rotated by OpenCV when PIL read the tag but cannot decode the pixels.
+
+    A truncated phone photo still has its header: PIL reads the orientation
+    but refuses the cut pixels, while OpenCV decodes what is there. The tag
+    is applied here explicitly (decoding with IMREAD_IGNORE_ORIENTATION, so
+    no decoder version applies it twice) with the same transforms as
+    PIL's `ImageOps.exif_transpose`; OpenCV writes no metadata.
+
+    @param data Encoded bytes (JPEG, PNG or WebP).
+    @param orientation EXIF orientation 2..8.
+    @return Re-encoded upright bytes in the same container (JPEG/WebP at
+        quality 95, as the PIL path), or None when OpenCV cannot decode them.
+    """
+    try:
+        import cv2
+        import numpy as np
+        extension = _sniffed_extension(data)
+        if extension is None:
+            return None
+        pixels = cv2.imdecode(np.frombuffer(data, np.uint8),
+                              cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+        if pixels is None:
+            return None
+        transforms = {
+            2: lambda a: a[:, ::-1],                         # mirror left-right
+            3: lambda a: a[::-1, ::-1],                      # rotate 180
+            4: lambda a: a[::-1, :],                         # mirror top-bottom
+            5: lambda a: a.transpose(1, 0, 2),               # main diagonal
+            6: lambda a: np.rot90(a, -1),                    # rotate 90 clockwise
+            7: lambda a: a[::-1, ::-1].transpose(1, 0, 2),   # anti-diagonal
+            8: lambda a: np.rot90(a, 1),                     # rotate 90 counter-clockwise
+        }
+        upright = np.ascontiguousarray(transforms[orientation](pixels))
+        params = ([cv2.IMWRITE_JPEG_QUALITY, 95] if extension == ".jpg"
+                  else [cv2.IMWRITE_WEBP_QUALITY, 95] if extension == ".webp" else [])
+        ok, encoded = cv2.imencode(extension, upright, params)
+        return encoded.tobytes() if ok else None
+    except Exception:  # noqa: BLE001 - None: the caller refuses the image
+        return None
+
 
 def _upright_image_bytes(data: bytes) -> bytes:
-    """The image as the analysis and the preview see it, EXIF orientation applied.
+    """The image as the analysis and the preview see it, EXIF orientation applied, without metadata.
 
     Phones store the pixels one way and the right way in the orientation tag.
     OpenCV (the analysis) and the preview apply it; a provider may not, and
-    the model would then read a rotated photo (utente, 2026-09-25). A photo
-    without a rotation tag is returned byte for byte; one with it is rotated
-    and re-encoded in the same format, without the tag. Any decoding problem
-    returns the original bytes: sending the file as it is was the old
-    behaviour, never worse than failing.
+    the model would then read a rotated photo (user, 2026-09-25). A photo
+    with a rotation tag is rotated and re-encoded in the same format; every
+    photo, rotated or not, then loses its metadata (`_image_without_metadata`):
+    sending an unrotated phone photo byte for byte used to leak its GPS
+    position and device (audit 2026-10-15).
+
+    When PIL reads a rotation tag but cannot decode the pixels (a truncated
+    file), OpenCV rotates them (`_oriented_with_opencv`); when neither can,
+    the image is refused rather than sent with its tag stripped and its
+    pixels unrotated (review 2026-10-15, L7): the model would read it sideways
+    while the analysis and the preview show it upright.
+
+    @param data Encoded image bytes as read from the document file.
+    @return Upright, metadata-free bytes in the same format.
+    @throws _UncleanableImage "orientation" when a rotation tag cannot be
+        applied; "metadata" when the metadata cannot be removed.
     """
+    orientation = 1
     try:
         from io import BytesIO
         from PIL import Image, ImageOps
         with Image.open(BytesIO(data)) as image:
             orientation = image.getexif().get(_EXIF_ORIENTATION, 1)
-            if orientation in (None, 1):
-                return data
-            file_format = image.format or "PNG"
-            upright = ImageOps.exif_transpose(image)
-            out = BytesIO()
-            options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
-            upright.save(out, format=file_format, **options)
-            return out.getvalue()
-    except Exception:  # noqa: BLE001 - si ripiega sul file originale
-        return data
+            if orientation not in (None, 1):
+                file_format = image.format or "PNG"
+                upright = ImageOps.exif_transpose(image)
+                # The transposed copy may still hold EXIF/ICC/XMP in `info`;
+                # they are removed below from the encoded result.
+                out = BytesIO()
+                options = {"quality": 95} if file_format.upper() in ("JPEG", "WEBP") else {}
+                upright.save(out, format=file_format, **options)
+                data = out.getvalue()
+                orientation = 1
+    except Exception:  # noqa: BLE001 - handled below with the orientation still pending
+        pass
+    if orientation in range(2, 9):
+        # Cleaned first: the JPEG walker closes a truncated file with its
+        # end-of-image marker, which OpenCV needs to decode it at all.
+        rotated = _oriented_with_opencv(_image_without_metadata(data), orientation)
+        if rotated is None:
+            raise _UncleanableImage("orientation")
+        data = rotated
+    return _image_without_metadata(data)
 
 
 #: Component family whose contacts are the holes cut by the board edge.
@@ -1862,7 +2253,9 @@ def _edge_strip_blocks(doc_paths, document_roles) -> list:
             payload = _upright_image_bytes(Path(path).read_bytes())
             image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_COLOR)
             strips = edge_strips(image) if image is not None else []
-        except (OSError, ValueError, cv2.error):
+        except (OSError, ValueError, cv2.error, _UncleanableImage):
+            # An image refused by the privacy boundary gives no strips; the
+            # upload of the photo itself reports the reason.
             strips = []
         for edge, png in strips:
             blocks.append({"type": "text", "text": (
@@ -1933,16 +2326,20 @@ def _enlarged_image_bytes(data: bytes, model: Optional[str]) -> bytes:
 
 
 def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
-    """Un file di documentazione come blocco di contenuto per OpenRouter.
+    """A documentation file as an OpenRouter content block.
 
-    Le immagini viaggiano come ``image_url`` con una data-URL base64, i PDF
-    come blocco ``file``: sono i due formati previsti dall'API
-    OpenAI-compatible di OpenRouter.
+    Images travel as ``image_url`` with a base64 data URL, PDFs as a
+    ``file`` block: these are the two formats foreseen by the
+    OpenAI-compatible API of OpenRouter.
 
     @param path Document file (image or PDF).
     @param model Receiving model identifier, or None: an image is enlarged to
         that model's provider limits when the provider resolves more detail
         from an enlarged image (`_enlarged_image_bytes`); a PDF is sent as is.
+    @return The content block; an image always upright and without metadata.
+    @throws ExtractionError For an unsupported or too large file, and for an
+        image whose metadata cannot be removed or whose rotation tag cannot
+        be applied: such an image is refused, never sent raw (fail closed).
     """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
@@ -1959,10 +2356,28 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     media_type = _guess_media_type(path)
     payload = path.read_bytes()
     if media_type.startswith("image/"):
-        payload = _upright_image_bytes(payload)
-        enlarged = _enlarged_image_bytes(payload, model)
-        if enlarged is not payload:
-            payload, media_type = enlarged, "image/png"
+        try:
+            payload = _upright_image_bytes(payload)
+            enlarged = _enlarged_image_bytes(payload, model)
+            if enlarged is not payload:
+                payload, media_type = enlarged, "image/png"
+                # The enlarged PNG is built from a decoded image whose `info`
+                # may still carry an ICC profile: the privacy boundary is
+                # applied again on the bytes that actually leave the computer.
+                payload = _image_without_metadata(payload)
+        except _UncleanableImage as exc:
+            # Fail closed: nothing that may carry the GPS position or a
+            # sideways picture leaves the computer (review 2026-10-15, M1/L7).
+            if exc.reason == "orientation":
+                raise ExtractionError(tx(
+                    "{name}: immagine danneggiata con un'indicazione di rotazione che il "
+                    "programma non riesce ad applicare; non viene inviata all'AI, che la "
+                    "leggerebbe ruotata. Salvala di nuovo come JPEG o PNG e riprova.",
+                    name=path.name)) from exc
+            raise ExtractionError(tx(
+                "{name}: immagine che il programma non riesce a leggere; non viene inviata "
+                "all'AI perche' i suoi metadati (posizione GPS, dispositivo) non si possono "
+                "rimuovere. Salvala come JPEG o PNG e riprova.", name=path.name)) from exc
     data_b64 = base64.b64encode(payload).decode("ascii")
     data_url = f"data:{media_type};base64,{data_b64}"
 
@@ -1975,16 +2390,25 @@ def _pin_map_seen_from_top(
     pin_map: Optional[Sequence[dict]], cols: int, view: Optional[str],
     rows: Optional[int] = None,
 ) -> Optional[list]:
-    """Converte le posizioni lette dal disegno in coordinate viste dall'alto.
+    """Convert the positions read from the drawing into coordinates seen from above.
 
-    Il footprint KiCad si disegna dal lato componenti, mentre i datasheet dei
-    moduli mostrano quasi sempre una BOTTOM VIEW: senza specchiare si otterrebbe
-    un footprint speculare, con i fori in posizioni che non coincidono con il
-    componente reale.
+    The KiCad footprint is drawn from the component side, while module
+    datasheets almost always show a BOTTOM VIEW: without mirroring, the
+    footprint would be a mirror image, with holes in positions that do not
+    match the real component.
 
-    La trasformazione si fa qui e non nel prompt perche' e' una riflessione
-    geometrica esatta: il modello legge (compito percettivo), il codice ribalta
-    (compito deterministico).
+    The transformation is done here and not in the prompt because it is an
+    exact geometric reflection: the model reads (a perceptual task), the
+    code flips (a deterministic task).
+
+    @param pin_map Entries {"pin", "row", "col"} as read from the drawing,
+        or None/empty when the model gave no map.
+    @param cols Number of columns of the matrix.
+    @param view View the drawing shows ("bottom" mirrors the columns); any
+        other value or None keeps the positions as read.
+    @param rows Number of rows of the matrix when known, used only to
+        validate the entries; None skips that check.
+    @return The entries seen from above, or None when `pin_map` is empty.
 
     @throws ExtractionError When an entry is not an object with integral
         pin >= 1, row >= 0 and col >= 0 (booleans and fractions rejected),
@@ -2305,7 +2729,7 @@ def _canonicalize_answer(data: dict) -> None:
 
 
 def _merge_photo_components(groups):
-    """Compatibilita' per chiamanti che usano l'inventario in millimetri.
+    """Compatibility entry for callers that use the inventory in millimetres.
 
     The groups are inventories built by the program, so their internal flags
     are kept (trusted).
@@ -2314,20 +2738,20 @@ def _merge_photo_components(groups):
     return merge_components([_components_3d(g, trusted=True) or [] for g in groups])
 
 
-#: Massimo numero di caratteri con cui un nome file viene mostrato nella riga
-#: di avanzamento. E' un ripiego di PRESENTAZIONE, non una regola sui
-#: documenti: non dipende da estensione, contenuto o marca.
+#: Maximum number of characters with which a file name is shown in the
+#: progress line. It is a PRESENTATION fallback, not a rule on documents: it
+#: does not depend on extension, content or brand.
 #:
-#: La modale ora mette ogni documento su una riga propria
-#: (`analysis_overlay.enumeration_lines`), quindi un nome lungo non spinge piu'
-#: fuori i nomi successivi: accorcia soltanto SE STESSO. Il limite resta perche'
-#: una riga della scheda porta circa ottantotto caratteri (e' la larghezza su
-#: cui la scheda e' dimensionata), e una voce e' «nome — ruolo»: con i quaranta
-#: caratteri di qui piu' il separatore e l'etichetta di ruolo piu' lunga fra quelle
-#: dichiarate in `document_roles.ROLES` (trenta caratteri) si resta sotto quella
-#: larghezza, cioe' il ruolo si legge sempre. Oltre il limite la scheda
-#: accorcerebbe comunque la riga, ma tagliando la CODA, quindi il ruolo: qui si
-#: accorcia il nome nel mezzo, e l'estensione sopravvive.
+#: The modal now puts each document on its own line
+#: (`analysis_overlay.enumeration_lines`), so a long name no longer pushes the
+#: following names out: it shortens only ITSELF. The limit stays because a
+#: card line holds about eighty-eight characters (the width the card is sized
+#: for), and an entry is «nome — ruolo» (name — role): with the forty
+#: characters here plus the separator and the longest role label among those
+#: declared in `document_roles.ROLES` (thirty characters) the line stays below
+#: that width, i.e. the role is always readable. Beyond the limit the card
+#: would shorten the line anyway, but by cutting the TAIL, hence the role:
+#: here the name is shortened in the middle, and the extension survives.
 _LOG_NAME_CHARS = 40
 
 
@@ -2534,7 +2958,8 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict] = None) -> str
         - " — " (space, em dash, space) separates each file name from its role
           (`enumeration_term`): the card shows the name in bold, set apart from
           the role, as the user asked («i nomi dei file non sono evidenziati,
-          troppo attaccati al testo»). It replaced the comma, which the card
+          troppo attaccati al testo», the file names are not highlighted, too
+          close to the text). It replaced the comma, which the card
           could not tell apart from a comma inside a file name without guessing
           what a file name looks like.
 
@@ -2545,14 +2970,14 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict] = None) -> str
         name unless the name itself contains the sign.
     """
     if not doc_paths:
-        # Invariante difensiva dell'helper: la riga descrive un invio, e senza
-        # documenti non c'e' invio da descrivere. Un «Invio a AI 0 file»
-        # farebbe credere a una chiamata partita a vuoto, quindi pagata. Il
-        # chiamante dell'estrazione rifiuta prima l'elenco vuoto
-        # («Nessun file selezionato.»), percio' qui non e' un caso atteso in
-        # produzione: e' il comportamento definito dell'helper per chi lo
-        # riusa, cosi' il ramo resta esercitabile e non produce una frase
-        # sbagliata se un secondo chiamante arriva.
+        # Defensive invariant of the helper: the line describes a submission,
+        # and without documents there is no submission to describe. An
+        # «Invio a AI 0 file» (sending 0 files to the AI) would suggest a call
+        # that went out empty, hence paid. The extraction caller rejects the
+        # empty list earlier («Nessun file selezionato.» (no file selected)),
+        # so this is not an expected case in production: it is the defined
+        # behaviour of the helper for whoever reuses it, so the branch stays
+        # testable and does not produce a wrong sentence if a second caller arrives.
         return tx("Nessun documento da inviare a AI: layout, quote e pinout non sono "
                   "estraibili.")
     described = []
@@ -2563,8 +2988,8 @@ def _files_sent_message(doc_paths, document_roles: Optional[dict] = None) -> str
         described.append(f'{_log_name(name)} — {label}' if label
                          else tx("{log_name} — ruolo non dichiarato", log_name=_log_name(name)))
     count = len(described)
-    # Singolare e plurale sono due frasi intere: ogni lingua li accorda a modo
-    # suo, un suffisso «o»/«i» incollato vale solo per l'italiano.
+    # Singular and plural are two whole sentences: each language inflects
+    # them its own way, a pasted «o»/«i» suffix only works for Italian.
     lead = (tx("Invio a AI 1 documento per layout, quote e pinout: ") if count == 1 else
             tx("Invio a AI {count} documenti per layout, quote e pinout: ", count=count))
     return lead + ' · '.join(described) + '.'
@@ -2599,6 +3024,56 @@ def extract_pin_header_params(
 ) -> ExtractedParams:
     """@brief Extract dimensions and pinout, optionally using local YOLO photo proposals.
 
+    @param doc_paths Documentation files to send (PDF or images), at least one
+        and at most MAX_FILES; each is checked for format and size before any
+        paid call.
+    @param model Provider model identifier of the main document call (e.g.
+        the OpenRouter id "anthropic/claude-sonnet-5"): it allows a more
+        capable model on difficult datasheets without touching the global
+        default. None means DEFAULT_MODEL.
+    @param system_prompt Override of DEFAULT_SYSTEM_PROMPT (or of
+        DEFAULT_SINGLE_SYSTEM_PROMPT for a single-component family): the
+        GLOBAL setting (the «Configurazione» menu of the GUI), valid for every component.
+        None keeps the default. The tool schema stays fixed regardless: it is
+        what guarantees that the answer is always valid structured JSON.
+    @param extra_instructions Notes specific to THIS component ("the case is
+        metal", "ignore the side connector"), appended to the user message
+        together with the documents and forwarded to the photo inventory.
+        None or blank adds nothing.
+    @param include_nc_pins Whether the pins marked NC in the pinout are
+        generated anyway (default True): they are physically present on the
+        component, and without their pad the part would not fit the board.
+        False asks the model to leave them out of the populated pins.
+    @param progress Optional callable(str) receiving the log lines (documents
+        sent, warnings, cost); None discards them. A failing callback never
+        aborts the extraction.
+    @param vision_model Model of the paid localization calls on the board
+        photograph (photo inventory and terminal observation); None means
+        photo_grounding.DEFAULT_VISION_MODEL.
+    @param photo_cache_dir Folder of the photo response cache and of the
+        saved photo evidence; None writes nothing and caches nothing.
+    @param grounding_prompt Custom notes of the photo localization call
+        (profile field), forwarded to the photo inventory; None sends its
+        factory text.
+    @param verification_prompt Custom notes of the photo verification call
+        (profile field), forwarded to the photo inventory; None sends its
+        factory text.
+    @param verification_model Model of the paid verification/classification
+        call on the photograph; None falls back to `model`, then
+        DEFAULT_MODEL.
+    @param terminal_prompt System prompt of the terminal observation
+        (photo_terminals.observe_terminals), used only on the legacy 'ai'
+        detector path; None or blank keeps that module's default.
+    @param component_family Declared family of the chosen component type
+        (e.g. CASTELLATED_FAMILY, "aggregate_tht", one of
+        SINGLE_COMPONENT_FAMILIES): it selects the system prompt, the edge
+        enlargements of the photo and the pin-field check
+        (`fit_body_to_pin_field`). None means no family is declared.
+    @param review_proposals Optional callable(photo_png, proposals,
+        length_mm, width_mm) -> proposals kept, run between the local
+        detector and the paid reconciliation (see
+        photo_inventory.extract_inventory); returning None aborts the
+        inventory. None skips the review.
     @param numbering_prompt System prompt of the dedicated pin-numbering call
         (`read_pin_numbering`); None means DEFAULT_PIN_NUMBERING_PROMPT.
 
@@ -2643,35 +3118,26 @@ def extract_pin_header_params(
         inventory, which announces the local and the paid steps as they start.
         None disables the notification; a failing callback never aborts the
         extraction, exactly like `progress`.
+    @return The validated ExtractedParams, with the photo inventory in
+        `components_3d` when a photograph was available, and every
+        conversion, doubt and dropped value written in `notes`.
+    @throws ExtractionError For any application problem: missing key or
+        credit, unsupported or too large files, too many files, unknown photo
+        detector, local YOLO not available, network/API errors, an answer
+        without the tool call or unreadable even after the one retry, or an
+        answer rejected by the validation. A main answer rejected by the
+        validation keeps its content in `ExtractionError.raw_response` and in
+        the AI log.
+    @throws ExtractionCancelled When `cancel` is set before a paid call: no
+        further call is paid.
+    @note Two levels of instructions, both optional: `system_prompt` is the
+        GLOBAL setting valid for every component, `extra_instructions` are
+        the notes of the SINGLE component.
     @note YOLO localization is local; datasheet, package and terminal review still use AI.
-
-    Due livelli di istruzioni, entrambi opzionali:
-    - `system_prompt` sovrascrive DEFAULT_SYSTEM_PROMPT ed e' l'impostazione
-      GLOBALE (menu Configurazione della GUI), valida per ogni componente;
-    - `extra_instructions` sono note specifiche del SINGOLO componente
-      ("il case e' metallico", "ignora il connettore laterale"), accodate al
-      messaggio utente insieme ai documenti.
-
-    `include_nc_pins` (default True) decide se i pin marcati NC nel pinout
-    vanno comunque generati: sono fisicamente presenti sul componente, e senza
-    il loro pad il pezzo non entrerebbe nella scheda.
-
-    `model` e' un id OpenRouter (es. "anthropic/claude-sonnet-5"): serve a
-    usare un modello piu' capace sui datasheet difficili senza toccare il
-    default globale.
-
-    Lo schema del tool resta invece fisso: e' quello che garantisce che la
-    risposta sia sempre JSON strutturato valido.
-
-    Solleva ExtractionError per qualunque problema applicativo: chiave
-    mancante, file non supportati o troppo grandi, errori di rete/API,
-    risposta senza la chiamata allo strumento. A main answer rejected by the
-    validation keeps its content in `ExtractionError.raw_response` and in
-    the AI log.
     """
-    # Il consuntivo riguarda questa elaborazione: azzerarlo PRIMA di ogni
-    # controllo, cosi' anche un rifiuto in validazione (YOLO, ruoli, file)
-    # non lascia mostrare il costo della corsa precedente come se fosse suo.
+    # The cost tally concerns this run: reset it BEFORE any check, so that
+    # even a validation rejection (YOLO, roles, files) does not show the cost
+    # of the previous run as if it were its own.
     reset_usage()
     if not doc_paths:
         raise ExtractionError(tx("Nessun file selezionato."))
@@ -2684,7 +3150,7 @@ def extract_pin_header_params(
         from .photo_yolo import operating_confidence, validate_yolo_setup
         from .photo_yolo import yolo_settings as check_yolo_settings
         try:
-            # Anche soglia e parametri si controllano qui, prima di pagare.
+            # Threshold and parameters are also checked here, before paying.
             operating_confidence(yolo_confidence)
             check_yolo_settings(yolo_settings)
             validate_yolo_setup(yolo_model_path)
@@ -2694,8 +3160,8 @@ def extract_pin_header_params(
         except (ValueError, OSError, ImportError, RuntimeError) as exc:
             raise ExtractionError(tx("YOLO locale non disponibile: {exc}", exc=exc)) from exc
     from .ai_diagnostics import make_logged_call
-    # L'analisi applicativa deve essere auditabile: il log persistente conserva
-    # il testo esatto dei prompt/tool e gli hash delle immagini (mai i byte).
+    # The application analysis must be auditable: the persistent log keeps
+    # the exact text of the prompts/tools and the image hashes (never the bytes).
     cancelled = _cancel_predicate(cancel)
 
     def check_cancel():
@@ -2714,11 +3180,11 @@ def extract_pin_header_params(
 
     check_cancel()
     try:
-        # Il credito va verificato qui, prima del primo blocco di contenuto:
-        # l'estrazione e' una catena di decine di chiamate (analisi principale,
-        # crop, verifica, terminali) e restare a secco a meta' strada significa
-        # aver speso senza ottenere un componente. Si verifica ogni fornitore
-        # dei modelli usati (OpenRouter e/o DeepSeek diretto, 27/09).
+        # The credit must be checked here, before the first content block:
+        # the extraction is a chain of dozens of calls (main analysis, crops,
+        # verification, terminals) and running dry halfway means having spent
+        # without getting a component. Every provider of the models used is
+        # checked (OpenRouter and/or DeepSeek direct, 27/09).
         # The EFFECTIVE models, defaults applied exactly as the run applies
         # them below: a DeepSeek main model with no explicit vision model
         # still calls the default vision model, whose provider must be ready.
@@ -2740,25 +3206,25 @@ def extract_pin_header_params(
         raise ExtractionError(str(exc)) from exc
 
     def announce(tool, detail):
-        """Segnalare la fase e' informativo: una modale rotta non deve far
-        perdere un'elaborazione che si paga, quindi l'errore si registra e si
-        prosegue -- stesso trattamento riservato a `progress`."""
+        """Reporting the phase is informational: a broken modal must not lose a
+        paid processing, so the error is logged and the run goes on -- the
+        same treatment given to `progress`."""
         if phase is None:
             return
         try:
             phase(tool, detail)
-        except Exception as exc:  # noqa: BLE001 - la GUI non deve poter abortire l'analisi
+        except Exception as exc:  # noqa: BLE001 - the GUI must not be able to abort the analysis
             if progress:
                 progress(tx("Segnalazione della fase non riuscita ({exc}); elaborazione proseguita.",
                             exc=exc))
 
-    # Quale strumento sta lavorando non si deduce dai messaggi di
-    # avanzamento, e la differenza pesa: questa e' una chiamata remota che
-    # si paga, il rilevamento locale no.
+    # Which tool is working cannot be inferred from the progress messages,
+    # and the difference matters: this is a remote call that is paid for,
+    # local detection is not.
     announce("llm", model or DEFAULT_MODEL)
     if progress:
-        # L'utente deve poter verificare QUALI dei suoi documenti sono partiti
-        # nella chiamata a pagamento, e con quale ruolo dichiarato.
+        # The user must be able to check WHICH of their documents went into
+        # the paid call, and with which declared role.
         progress(_files_sent_message(doc_paths, document_roles))
     content_blocks = []
     for index, path in enumerate(doc_paths):
@@ -2768,8 +3234,8 @@ def extract_pin_header_params(
         content_blocks.append({"type": "text", "text": description})
         content_blocks.append(_file_to_content_block(path, model or DEFAULT_MODEL))
     if component_family == CASTELLATED_FAMILY and document_roles is not None:
-        # Il numero dei contatti lo riconosce l'AI in QUESTA chiamata (utente,
-        # 28/09, punto 142): i bordi della foto ingranditi, non una correzione dopo.
+        # The AI recognises the number of contacts in THIS call (user,
+        # 28/09, point 142): the photo edges enlarged, not a correction afterwards.
         strips = _edge_strip_blocks(doc_paths, document_roles)
         content_blocks.extend(strips)
         if strips and progress:
@@ -2841,11 +3307,11 @@ def extract_pin_header_params(
         try:
             data = main_call()
         except ToolArgumentsError as exc:
-            # Il modello ha risposto con lo strumento giusto, risposta completa
-            # (una troncata non arriva qui), ma argomenti illeggibili: la STESSA
-            # richiesta puo' tornare leggibile. Un solo nuovo tentativo a
-            # pagamento, come l'inventario globale (HANDOFF 137; utente,
-            # 2026-10-02: «ok procedi»). Rifiuti, rete e credito non passano di qui.
+            # The model answered with the right tool, a complete answer (a
+            # truncated one does not get here), but unreadable arguments: the
+            # SAME request may come back readable. A single new paid attempt,
+            # like the global inventory (HANDOFF 137; user, 2026-10-02:
+            # «ok procedi» (ok, go ahead)). Refusals, network and credit do not pass here.
             _log_unreadable_arguments(exc, progress, 1)
             check_cancel()
             if progress:
@@ -3329,12 +3795,12 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
         return changed
     repaired = copy.deepcopy(repaired)
     repaired["layout"] = "castellated"
-    # Chiavi private: una risposta del modello non e' mai gia' convertita.
+    # Private keys: a model answer is never already converted.
     repaired.pop("_canonical", None)
     repaired.pop("_canonical_notes", None)
     if repaired.get("contacts_view") is None and repaired.get("pin_map_view") is None:
-        # La richiesta chiede la vista dall'alto: una risposta che non dice la
-        # vista si legge cosi', senza il DUBBIO della risposta principale.
+        # The request asks for the top view: an answer that does not state
+        # the view is read that way, without the DOUBT of the main answer.
         repaired["contacts_view"] = "top"
     for entry in repaired["castellated_sides"]:
         if isinstance(entry, dict):
@@ -3344,15 +3810,15 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     for note in conversion:
         say(tx("Ricontrollo dei contatti: {note}", note=note))
     edges = [_side_edge(entry) for entry in repaired["castellated_sides"] if _side_edge(entry)]
-    # Un lato elencato due volte non dice quale conteggio valga: non si adotta.
+    # A side listed twice does not say which count applies: it is not adopted.
     recounted = {_side_edge(entry): entry for entry in repaired["castellated_sides"]
                  if _side_edge(entry) and edges.count(_side_edge(entry)) == 1}
     merged = list(data.get("castellated_sides") or ())
     index = {_side_edge(entry): i for i, entry in enumerate(merged) if _side_edge(entry)}
     length = _optional_number(data.get("body_length_mm"), positive=True)
     width = _optional_number(data.get("body_width_mm"), positive=True)
-    # Lati non verificabili sulla foto: zero (o lato assente) li esclude, un
-    # numero li lascia dichiarati con l'avviso. Mai adottato un numero nuovo.
+    # Sides not verifiable on the photo: zero (or a missing side) excludes
+    # them, a number leaves them declared with the warning. A new number is never adopted.
     from .messages import as_warning
     not_there = []
     for item in unverifiable:
@@ -3561,8 +4027,8 @@ def _recount_contradictory_sides(data, content_blocks, diagnostic_call, model, s
     sides = repaired.get("castellated_sides") if isinstance(repaired, dict) else None
     repaired_unit = repaired.get("drawing_unit") if isinstance(repaired, dict) else None
     if not isinstance(sides, list) or not sides or repaired_unit not in (None, unit):
-        # Lati mancanti o in un'altra unita': non confrontabili con corpo e
-        # passo della risposta principale, che restano quelli.
+        # Sides missing or in another unit: not comparable with the body and
+        # pitch of the main answer, which stay as they are.
         raise ExtractionError(tx("Il ricontrollo dei contatti non ha restituito lati "
                                  "utilizzabili; analisi foto non avviata."))
     recounted_edges = [_side_edge(entry) for entry in sides if _side_edge(entry)]
@@ -3755,9 +4221,9 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         if progress:
             for note in data["_canonical_notes"]:
                 progress(note)
-    # Dopo l'eventuale correzione, cosi' le righe descrivono i lati definitivi:
-    # stile dei contatti non osservato e valori stimati vanno nel log subito,
-    # e restano nelle note del risultato (_params_from_tool_arguments).
+    # After the possible correction, so the lines describe the final sides:
+    # unobserved contact style and estimated values go into the log at once,
+    # and stay in the notes of the result (_params_from_tool_arguments).
     params = _params_from_tool_arguments(data)
     if progress:
         for line in _review_notes(params.castellated_sides, params.value_sources):
@@ -3778,9 +4244,9 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
     `cancelled` is the zero-argument cancellation predicate of extract_params
     (None: no cancellation channel); the SMD network polls it between crops.
     """
-    # La foto richiede un passaggio separato: nell'estrazione globale il modello
-    # deve anche leggere quote, pinout e layout, e tende a sacrificare i passivi
-    # piccoli. I crop sono best-effort: se falliscono, resta il risultato globale.
+    # The photo needs a separate pass: in the global extraction the model
+    # must also read dimensions, pinout and layout, and tends to sacrifice the
+    # small passives. The crops are best-effort: if they fail, the global result stays.
     photo_report = None
     top_index = data.get('top_photo_index')
     if document_roles is not None:
@@ -3801,18 +4267,18 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
             and data.get("body_width_mm")):
         from .photo_inventory import ReviewCancelled, extract_inventory
         from .photo_grounding import DEFAULT_VISION_MODEL
-        # La fase del rilevatore locale NON si annuncia qui: il contratto di
-        # `extract_inventory` (vedi photo_inventory.extract_inventory, @param
-        # phase) e' che 'yolo' arrivi immediatamente prima del rilevatore, e
-        # qui siamo prima della calibrazione. Annunciarlo adesso mostrava una
-        # fase che poteva non partire mai -- senza vista calibrabile
-        # l'inventario esce prima di caricare l'ONNX -- e la modale restava sul
-        # rilevatore locale per il resto della corsa.
-        # Nemmeno la chiamata a pagamento al modello di visione ('ai', 'vlm')
-        # si annuncia qui (punto 139, C1): prima viene la calibrazione con
-        # OpenCV, che `extract_inventory` annuncia da se', e l'annuncio
-        # anticipato restava una fase «✓» vuota subito coperta da OpenCV.
-        # 'llm_inventory' lo annuncia `extract_inventory` quando la foto parte.
+        # The local detector phase is NOT announced here: the contract of
+        # `extract_inventory` (see photo_inventory.extract_inventory, @param
+        # phase) is that 'yolo' arrives immediately before the detector, and
+        # here we are before the calibration. Announcing it now showed a phase
+        # that might never start -- without a calibratable view the inventory
+        # exits before loading the ONNX -- and the modal stayed on the local
+        # detector for the rest of the run.
+        # Nor is the paid call to the vision model ('ai', 'vlm') announced
+        # here (point 139, C1): first comes the OpenCV calibration, which
+        # `extract_inventory` announces itself, and the early announcement
+        # stayed as an empty «✓» phase immediately covered by OpenCV.
+        # 'llm_inventory' is announced by `extract_inventory` when the photo starts.
         check_cancel()
         try:
             photo_report = extract_inventory(
@@ -3836,27 +4302,26 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
                    if photo_detector == 'yolo_smd' and smd_model_path is not None else {}),
             )
         except ReviewCancelled as exc:
-            # Un annullo non e' un guasto dell'inventario: proseguire qui
-            # vorrebbe dire pagare la riconciliazione sulle proposte rifiutate.
+            # A cancellation is not an inventory failure: continuing here
+            # would mean paying the reconciliation on the rejected proposals.
             raise ExtractionError(str(exc)) from exc
         except ExtractionCancelled:
             raise
         except CallCancelled as exc:
-            # Annullo nato fuori da una chiamata a pagamento (rete SMD,
-            # abbinamento KiCad): stesso tipo documentato di ogni altro annullo.
+            # Cancellation raised outside a paid call (SMD network, KiCad
+            # matching): same documented type as every other cancellation.
             raise ExtractionCancelled(str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001 - l'inventario e' facoltativo
-            # Qualunque guasto dell'inventario (anche KeyError/TypeError di
-            # una risposta malformata) non deve far perdere la risposta
-            # principale, gia' pagata e valida: diventa una nota, con la
-            # traccia completa nel log per chi deve correggerlo.
-            # L'errore viene inghiottito nelle note e l'elaborazione prosegue
-            # senza inventario: bisogna chiudere la fase annunciata, altrimenti
-            # la modale resta per tutto il resto della corsa sull'ultimo
-            # strumento annunciato dall'inventario (il rilevatore locale, se il
-            # file ONNX e' sparito fra la validazione e il rilevamento) mentre
-            # quello strumento non sta piu' lavorando. Tool vuoto = nessuna
-            # fase rivendicata, non una fase sbagliata.
+        except Exception as exc:  # noqa: BLE001 - the inventory is optional
+            # Any inventory failure (even KeyError/TypeError from a malformed
+            # answer) must not lose the main answer, already paid and valid:
+            # it becomes a note, with the full traceback in the log for
+            # whoever has to fix it.
+            # The error is swallowed into the notes and processing continues
+            # without inventory: the announced phase must be closed, otherwise
+            # the modal stays for the whole rest of the run on the last tool
+            # announced by the inventory (the local detector, if the ONNX file
+            # vanished between validation and detection) while that tool is no
+            # longer working. Empty tool = no phase claimed, not a wrong phase.
             announce("", "")
             if progress:
                 import traceback
@@ -3930,8 +4395,8 @@ def _extract_photo_stage(data, doc_paths, *, progress, announce, check_cancel, d
     return params
 
 
-#: Tolleranza, in mm, con cui un centro di pin sul bordo conta come dentro:
-#: solo arrotondamento numerico, non un margine fisico.
+#: Tolerance, in mm, with which a pin centre on the edge counts as inside:
+#: numerical rounding only, not a physical margin.
 _PIN_FIELD_TOLERANCE_MM = 1e-6
 
 
@@ -3962,25 +4427,26 @@ def _pin_field_positions(params) -> list:
 
 
 def fit_body_to_pin_field(params, component_family) -> list[str]:
-    """@brief Tiene tutti i pin di una scheda popolata a fori passanti dentro la scheda.
+    """@brief Keep every pin of a populated through-hole board inside the board.
 
-    @param params ExtractedParams di layout «matrix»; corretto sul posto.
-    @param component_family Famiglia della tipologia scelta (attributo
-        dichiarato, non il nome del pezzo).
-    @return I messaggi da mostrare nel log: vuoto quando non c'era nulla da dire.
-    @note Solo per `aggregate_tht`: su una scheda popolata a fori passanti i
-        pin passano nei fori DELLA scheda, quindi ogni centro di pin sta dentro
-        il suo contorno. E' un vincolo fisico, non una stima. Un componente
-        singolo THT puo' invece avere gambe fuori dal corpo, e non si tocca.
-    @note Caso visto dall'utente il 2026-09-24 (TEST4): l'AI ha dato
-        `body_offset_y_mm = -12.7`, meta' larghezza, misurando dal centro della
-        scheda invece che dalla prima fila, e la seconda fila e' finita fuori.
-        Quando il campo dei pin esce dalla scheda ma ci sta, lo spostamento di
-        QUELL'asse viene ricentrato: e' una STIMA (il bordo non era quotato in
-        modo coerente) e lo si scrive nelle note, nel log e in
-        `params.value_sources` ("estimated"). Quando la scheda e'
-        piu' piccola del campo dei pin nessun valore e' giusto: nessuna
-        correzione, solo l'avviso di quote incoerenti.
+    @param params ExtractedParams of «matrix» layout; corrected in place.
+    @param component_family Family of the chosen component type (a declared
+        attribute, not the name of the part).
+    @return The messages to show in the log: empty when there was nothing to say.
+    @note Only for `aggregate_tht`: on a populated through-hole board the
+        pins go through the holes OF the board, so every pin centre lies
+        inside its outline. This is a physical constraint, not an estimate. A
+        single THT component may instead have legs outside its body, and is
+        left untouched.
+    @note Case seen by the user on 2026-09-24 (TEST4): the AI gave
+        `body_offset_y_mm = -12.7`, half the width, measuring from the centre
+        of the board instead of from the first row, and the second row ended
+        up outside. When the pin field leaves the board but would fit in it,
+        the offset of THAT axis is re-centred: it is an ESTIMATE (the edge was
+        not dimensioned consistently) and is written in the notes, in the log
+        and in `params.value_sources` ("estimated"). When the board is
+        smaller than the pin field no value is right: no correction, only the
+        warning about inconsistent dimensions.
     """
     if component_family != "aggregate_tht" or params.is_castellated():
         return []
@@ -3999,10 +4465,11 @@ def fit_body_to_pin_field(params, component_family) -> list[str]:
         offset = getattr(params, key)
         if offset is None:
             continue
-        # Campo dei pin PRESENTI (populated_pins, pin_map), non della matrice
-        # dichiarata: una colonna vuota in fondo non e' un pin fuori scheda
-        # (audit 25/09: un offset giusto veniva «corretto»). I pin occupano
-        # [low, high] sull'asse; la scheda [offset, offset + extent].
+        # Field of the PRESENT pins (populated_pins, pin_map), not of the
+        # declared matrix: an empty column at the end is not a pin off the
+        # board (audit 25/09: a correct offset was being «corretto»
+        # (corrected)). The pins occupy [low, high] on the axis; the board
+        # [offset, offset + extent].
         low = min(point[index] for point in positions)
         high = max(point[index] for point in positions)
         span = high - low
@@ -4157,12 +4624,12 @@ def _normalized_castellated_sides(raw, notes: Optional[list] = None) -> list[dic
                                 "scartati per non assegnarli ai pad sbagliati.",
                                 label=EDGE_LABELS.get(edge, edge), n_names=len(names),
                                 count=count))
-        # Il tipo di contatto si vede nella foto e non si ricava dalle quote:
-        # un valore fuori elenco non si corregge ne' si scarta in silenzio,
-        # perche' qualunque sostituzione sarebbe proprio la deduzione che il
-        # campo esiste per evitare. Assente diventa None, cioe' «sconosciuto»:
-        # nessun tipo predefinito (decisione dell'utente 26/09, era quello della
-        # scheda campione), lo sceglie l'utente (vedi
+        # The contact type is seen in the photo and cannot be derived from
+        # the dimensions: a value outside the list is neither corrected nor
+        # silently discarded, because any substitution would be exactly the
+        # deduction the field exists to avoid. Missing becomes None, i.e.
+        # «sconosciuto» (unknown): no default type (user decision 26/09, it was the
+        # sample board's), the user chooses it (see
         # _unobserved_contact_style_notice).
         side["contact_style"] = None
         if "contact_style" in entry and entry["contact_style"] is not None:
@@ -4223,14 +4690,15 @@ def _check_sides_fit_edges(sides, body_length, body_width) -> None:
 def _castellated_sides(raw: Optional[Sequence[dict]], *, body_length: Optional[float] = None,
                        body_width: Optional[float] = None,
                        notes: Optional[list] = None) -> list[dict]:
-    """Normalizza i lati di un modulo castellated, scartando quelli inutilizzabili.
+    """Normalize the sides of a castellated module, discarding the unusable ones.
 
-    Il modello puo' restituire un lato senza passo o con zero contatti: si
-    preferisce ignorarlo e dirlo (in `notes`, quando fornito), piuttosto che
-    propagare un lato che farebbe fallire la generazione con un errore
-    geometrico oscuro. Two sides on the same edge, or a side whose contacts
+    The model may return a side without pitch or with zero contacts: it is
+    better to ignore it and say so (in `notes`, when given) than to
+    propagate a side that would make the generation fail with an obscure
+    geometric error. Two sides on the same edge, or a side whose contacts
     cannot fit along the known board edge (`body_length`/`body_width`, mm),
-    raise ExtractionError.
+    raise ExtractionError; a pad number shared between sides raises
+    _PinNumberConflict.
 
     Pad ranges are compared as intervals and never materialized: a huge
     declared count must not allocate memory proportional to it.
@@ -4238,9 +4706,9 @@ def _castellated_sides(raw: Optional[Sequence[dict]], *, body_length: Optional[f
     sides = _normalized_castellated_sides(raw, notes)
     _check_sides_fit_edges(sides, body_length, body_width)
 
-    # Numerazione progressiva sui lati privi di first_pin, nell'ordine in cui
-    # sono stati elencati: meglio una numerazione coerente da correggere a
-    # mano che dei pad senza numero.
+    # Progressive numbering on the sides without first_pin, in the order in
+    # which they were listed: better a consistent numbering to fix by hand
+    # than pads without a number.
     used: list[tuple[int, int]] = []  # half-open [start, stop) pad ranges
     for side in sides:
         if "first_pin" in side:
@@ -4390,10 +4858,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
                    trusted: bool = False) -> Optional[list[dict]]:
     """@brief Components read from the photo, dropping those without a real footprint.
 
-    Sono stime visive: un blocco con una dimensione nulla o negativa non e'
-    un componente mal misurato, e' rumore, e nel solido 3D darebbe errore.
-    A `kind` outside COMPONENT_KINDS becomes "generic", with a line in
-    `notes` when given.
+    These are visual estimates: a block with a zero or negative dimension is
+    not a badly measured component, it is noise, and in the 3D solid it would
+    raise an error. A `kind` outside COMPONENT_KINDS becomes "generic", with
+    a line in `notes` when given.
 
     @param raw Entries of components_3d.
     @param notes Optional list that receives the review lines.
@@ -4411,10 +4879,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
     components = []
     for entry in raw:
         if not isinstance(entry, dict):
-            # Con liste lunghe il modello a volte
-            # deraglia dallo schema e infila una voce come semplice stringa
-            # invece che come oggetto: si scarta quella voce, non l'intera
-            # estrazione -- gli altri componenti restano validi.
+            # With long lists the model sometimes
+            # derails from the schema and slips in an entry as a plain string
+            # instead of an object: that entry is discarded, not the whole
+            # extraction -- the other components stay valid.
             continue
         if not trusted:
             entry = {key: value for key, value in entry.items()
@@ -4427,10 +4895,10 @@ def _components_3d(raw: Optional[Sequence[dict]],
         if any(value is None for value in geometry.values()):
             continue
         component = {"name": str(entry.get("name") or "Componente"), **geometry}
-        # Il modello vede anche elementi della PCB che non sono componenti
-        # montati: pad, via, semi-fori e contatti del bordo. Se passano dallo
-        # schema, eliminarli qui evita che finiscano nella tabella 3D come
-        # scatole. I componenti reali devono avere un package sopra la scheda.
+        # The model also sees PCB elements that are not mounted components:
+        # pads, vias, half-holes and edge contacts. If they get through the
+        # schema, removing them here keeps them from ending up in the 3D table
+        # as boxes. Real components must have a package above the board.
         label = component["name"].strip().lower()
         # Global component IDs are arbitrary display labels; retained detector
         # proposals are physical hypotheses, even when their class is unknown.
@@ -4467,9 +4935,9 @@ def _components_3d(raw: Optional[Sequence[dict]],
             # literal substrings and the source observation remain untouched.
             component["marking"] = "" if marking.casefold() in ("none", "?") else marking
         component["rotation_deg"] = (_optional_number(entry.get("rotation_deg")) or 0.0) % 360
-        # Verso di innesto dichiarato dal modello guardando la foto. Senza,
-        # la forma 3D dovrebbe indovinarlo dalle sole dimensioni, che per un
-        # connettore non bastano. Valori diversi da questi due si ignorano.
+        # Mating direction declared by the model looking at the photo.
+        # Without it, the 3D shape would have to guess it from the dimensions
+        # alone, which for a connector are not enough. Other values are ignored.
         if entry.get("mating") in ("edge", "top", "none"):
             component["mating"] = entry["mating"]
         # Keep the complete description: the matcher extracts declared tokens,
@@ -4492,40 +4960,43 @@ def _components_3d(raw: Optional[Sequence[dict]],
                     'model_match', 'footprint', 'footprint_candidates', '_presence_reviewed_by_user',
                     'presence_confidence', 'class_confidence', '_yolo_proposal_id',
                     '_yolo_class_ambiguous', '_yolo_review_only', '_yolo_origin',
-                    # Riquadro tracciato o ritoccato da una persona: e' la
-                    # decisione di presenza del revisore e deve arrivare al
-                    # componente finale, non fermarsi ai candidati inviati.
+                    # Box drawn or retouched by a person: it is the reviewer's
+                    # presence decision and must reach the final component,
+                    # not stop at the submitted candidates.
                     '_yolo_manual_box',
-                    # Corpo aggiunto dal solo modello, escluso finche' l'utente
-                    # non lo tiene (punto 141): senza, la prima estrazione lo
-                    # consegnava come un corpo qualunque, dentro il 3D.
+                    # Body added by the model alone, excluded until the user
+                    # keeps it (point 141): without this, the first extraction
+                    # delivered it like any other body, into the 3D.
                     '_ai_only_excluded',
                     '_package_verified', '_orientation_verified', 'pin_count_confidence', 'pin_count_source',
                     'class', 'component_id', 'source_candidate_ids', 'terminal_count', 'terminal_layout',
                     'terminal_count_basis', 'lead_count', 'lead_count_complete', 'lead_count_confidence',
                     '_reported_rotation_deg', '_height_estimated', '_global_inventory_status',
-                    # Misura dai bordi, regola dell'altezza stimata e scelta
-                    # dell'utente sulle proposte deboli: la GUI li mostra.
+                    # Measurement from the edges, estimated-height rule and the
+                    # user's choice on weak proposals: the GUI shows them.
                     '_edges_measured', '_height_basis', '_yolo_low_confidence', '_yolo_user_kept',
+                    # Detector's own weak/strong verdict before the reviewer
+                    # changed `_yolo_review_only` (photo_yolo.set_review_only).
+                    '_detector_review_only',
                     '_global_inventory_errors', '_global_inventory_uncertainties',
                     '_global_inventory_prompt_version', '_global_inventory_prompt_hash',
-                    # Il riferimento asimmetrico serve al costruttore 3D per
-                    # stabilire il verso del modello nativo. Senza questa riga
-                    # veniva scartato qui, e ogni componente arrivava al
-                    # matching dichiarando "nessun riferimento osservato" anche
-                    # quando il modello ne aveva visto uno ad alta confidenza.
+                    # The asymmetric reference lets the 3D builder establish
+                    # the orientation of the native model. Without this line
+                    # it was discarded here, and every component reached the
+                    # matching declaring "no observed reference" even when
+                    # the model had seen one with high confidence.
                     'landmark_feature', 'landmark_side', 'landmark_confidence',
-                    # Rilettura per ritaglio (HANDOFF 144): esito, le due
-                    # letture e i valori dell'inventario sostituiti devono
-                    # arrivare alla revisione, altrimenti una riga «da
-                    # rivedere» non direbbe piu' perche'.
+                    # Crop re-reading (HANDOFF 144): outcome, the two readings
+                    # and the replaced inventory values must reach the review,
+                    # otherwise a «da rivedere» (to review) row would no longer
+                    # say why.
                     'package_confidence', '_crop_reading', '_crop_readings',
                     '_crop_observations', '_crop_class_status', '_crop_class_decided',
                     '_crop_terminal_review_required', '_crop_image_evidence',
                     '_category_source', '_category_status', '_ai_class_proposal',
                     '_ai_class_confidence', '_terminal_status',
-                    # Evidenza del rilevatore locale della proposta sorgente e
-                    # provenienza di un package derivato (HANDOFF 149).
+                    # Local detector evidence of the source proposal and
+                    # provenance of a derived package (HANDOFF 149).
                     '_detector_evidence', 'package_source',
                     '_crop_reading_version', '_crop_reading_prompt_digest',
                     '_package_inventory', '_class_inventory',
@@ -4817,8 +5288,8 @@ def _footprint_matrix(data: dict, notes: list) -> dict:
 def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False) -> ExtractedParams:
     """@brief Build ExtractedParams from the tool arguments, without any network access.
 
-    Costruisce ExtractedParams dagli argomenti dello strumento. Separato
-    dalla chiamata di rete per poterlo collaudare senza API.
+    Kept separate from the network call so that it can be tested without
+    the API.
 
     @param data Tool arguments as the model returned them, or as
         `_validate_main_response` canonicalized them. The input is never
@@ -4862,23 +5333,29 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
 
     package_geometry = data.get("package_geometry")
     if isinstance(package_geometry, dict) and not package_geometry.get("pins"):
-        # Campo facoltativo tornato vuoto ({} o «pins»: []): nessun pad
-        # esplicito, quindi nessuna geometria package. Non e' un errore della
-        # risposta -- lo schema non impone un minimo di pin -- e rifiutarla
-        # butterebbe un'estrazione pagata con dati di matrice o modulo validi.
-        # La regola «senza pad non c'e' footprint» resta in
-        # PackageGeometry.validate, dove si genera.
+        # Optional field that came back empty ({} or «pins»: []): no explicit
+        # pad, hence no package geometry. It is not an error of the answer
+        # -- the schema imposes no minimum of pins -- and rejecting it would
+        # throw away a paid extraction with valid matrix or module data.
+        # The rule «senza pad non c'e' footprint» (no pads, no footprint)
+        # stays in PackageGeometry.validate, where it is generated.
         if package_geometry:
             notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
                             "parametri a matrice o del modulo."))
         package_geometry = None
+    geometry_doubts = None
     if package_geometry is not None:
         try:
             # Validate now, while the source response and its warnings are still
             # available; the GUI must never receive malformed pad coordinates.
-            package_from_mapping(package_geometry)
+            geometry = package_from_mapping(package_geometry)
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
+        # Structural contradictions (body over the pads, clockwise numbering,
+        # bottom view also declared mirrored) are exposed, never repaired:
+        # which reading is true is a question for the user (audit 2026-10-15).
+        geometry_doubts = [doubt.as_dict() for doubt in package_doubts(geometry)] or None
+        notes.extend(doubt["message"] for doubt in geometry_doubts or ())
 
     if layout == "castellated":
         sides = _castellated_sides(
@@ -4899,9 +5376,9 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     rows, cols = matrix["rows"], matrix["cols"]
 
     pin_map = None
-    # La specchiatura di pin_map e' gia' stata fatta (_canonicalize_answer):
-    # qui la mappa e' vista dall'alto e si ricontrolla soltanto. Per i moduli
-    # castellated le posizioni vengono dai lati, non da righe/colonne.
+    # The mirroring of pin_map has already been done (_canonicalize_answer):
+    # here the map is seen from the top and is only checked again. For
+    # castellated modules the positions come from the sides, not from rows/columns.
     if layout == "matrix" and data.get("pin_map") and cols:
         try:
             pin_map = _pin_map_seen_from_top(data.get("pin_map"), cols, "top", rows)
@@ -4964,6 +5441,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         lead_diameter_mm=_opt_float("lead_diameter_mm"),
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
         pin_map_conflict=pin_map_conflict,
+        geometry_doubts=geometry_doubts,
     )
     if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
         notes.append(data["_numbering_note"])
@@ -5013,12 +5491,12 @@ def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
     @param notes Extraction notes; every dropped or repaired entry adds one.
     @return The kept entries, each with only the two keys the schema
         declares, in the source order; None when none is kept.
-    @note ``pin`` is a non-negative integer (an integral float such as 3.0
+    @note ``pin`` is a nonnegative integer (an integral float such as 3.0
         included; 0 is a real pad number on some packages and the symbol
-        and pinout tables accept any pin text) or a non-empty label such as
+        and pinout tables accept any pin text) or a nonempty label such as
         "A2" for grid packages. An entry without a usable pin id is dropped
         with a note: there is no pin to keep (review D2).
-    @note A missing or non-text ``name`` does not drop the pin: the symbol
+    @note A missing ``name``, or one that is not text, does not drop the pin: the symbol
         must keep every pin of the source pinout, so the pin stays with an
         empty name and a note names the discarded ``pinout[i].name`` (review G5).
     """
@@ -5122,8 +5600,9 @@ def _drop_unread_row_spacing(params: "ExtractedParams", notes: list) -> None:
     castellated module across the board: the generator places them at
     (extent - spacing) / 2 from the edge. A value the model derived or
     estimated is not that measurement -- on the RS485 run of 2026-09-30 it
-    reported the pitch of one side as `row_spacing_mm` («derivato,
-    coincidente col passo, non e' una distanza fra file») and the holes
+    reported the pitch of one side as `row_spacing_mm` (its own words:
+    «derivato, coincidente col passo, non e' una distanza fra file», derived,
+    equal to the pitch, not a distance between rows) and the holes
     landed 18.86 mm in, with copper lands across half the board (HANDOFF
     point 167). Provenance is a declared attribute of the answer, not a
     threshold: only "read" keeps the value; derived, estimated and

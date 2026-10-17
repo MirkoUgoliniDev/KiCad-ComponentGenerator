@@ -34,14 +34,30 @@ def test_a_rotated_phone_photo_is_sent_upright(tmp_path):
 
 
 @pytest.mark.parametrize("orientation", [None, 1])
-def test_a_photo_without_rotation_is_sent_byte_for_byte(tmp_path, orientation):
-    """Negativo: nessun tag di rotazione -> il file originale, identico."""
+def test_a_photo_without_rotation_is_not_rotated_nor_reencoded(tmp_path, orientation):
+    """Negative: no rotation tag -> same size and the same compressed pixels.
+
+    The contract used to be «the original file, byte for byte»; since the
+    privacy fix (audit 2026-10-15) the EXIF segment is removed, so only the
+    pixels and the absence of re-encoding are compared (test_upload_privacy).
+    """
     path = _photo(tmp_path / "plain.jpg", orientation)
-    assert _sent(path) == path.read_bytes()
+    sent_bytes = _sent(path)
+    sent = Image.open(BytesIO(sent_bytes))
+    original = Image.open(path)
+    assert sent.size == (20, 40)
+    assert sent.tobytes() == original.tobytes()
+    assert len(sent_bytes) <= len(path.read_bytes())
 
 
-def test_an_undecodable_image_is_sent_as_it_is(tmp_path):
-    """Un file che PIL non legge non blocca l'analisi: parte com'era prima."""
+def test_an_undecodable_image_is_refused(tmp_path):
+    """A file no decoder reads is refused, never sent raw (contract changed 2026-10-15).
+
+    It used to leave as it was; its metadata could not be removed, so the
+    privacy boundary now fails closed (see test_upload_privacy).
+    """
+    from kicadgen.services.datasheet_extractor import ExtractionError
     path = tmp_path / "strano.png"
     path.write_bytes(b"\x89PNG\r\n\x1a\nnon-una-immagine")
-    assert _sent(path) == path.read_bytes()
+    with pytest.raises(ExtractionError, match="strano.png"):
+        _sent(path)

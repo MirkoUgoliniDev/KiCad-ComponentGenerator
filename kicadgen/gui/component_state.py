@@ -94,14 +94,19 @@ class BoundedValue(_Observable):
         return int(number) if self._integer else number
 
     def value(self):
-        """@brief Return the stored value (int for counts, float otherwise)."""
+        """@brief Return the stored value (int for counts, float otherwise).
+
+        @return The current value, already rounded and clamped.
+        """
         return self._value
 
     def setValue(self, value) -> None:
         """@brief Store `value` rounded and clamped; notify when it changed.
 
         @param value New value; converted with float() first.
-        @throws ValueError When `value` is not a number.
+        @throws ValueError When `value` is a string that float() cannot parse.
+        @throws TypeError When `value` is neither a number nor a string
+            (None included).
         """
         normalised = self._normalise(value)
         if normalised != self._value:
@@ -109,11 +114,17 @@ class BoundedValue(_Observable):
             self._notify(normalised)
 
     def minimum(self):
-        """@brief Return the lowest accepted value."""
+        """@brief Return the lowest accepted value.
+
+        @return The lower clamp bound given at construction.
+        """
         return self._minimum
 
     def maximum(self):
-        """@brief Return the highest accepted value."""
+        """@brief Return the highest accepted value.
+
+        @return The upper clamp bound given at construction.
+        """
         return self._maximum
 
 
@@ -129,7 +140,10 @@ class TextValue(_Observable):
         self._text = str(text)
 
     def text(self) -> str:
-        """@brief Return the stored text."""
+        """@brief Return the stored text.
+
+        @return The current text, "" when empty.
+        """
         return self._text
 
     def setText(self, text) -> None:
@@ -159,7 +173,10 @@ class FlagValue(_Observable):
         self._checked = bool(checked)
 
     def isChecked(self) -> bool:
-        """@brief Return the stored state."""
+        """@brief Return the stored state.
+
+        @return True when the flag is on.
+        """
         return self._checked
 
     def setChecked(self, checked) -> None:
@@ -203,16 +220,16 @@ def normalised_side(side: dict | None, default_style: str | None = None) -> dict
                 contact_style=side.get("contact_style") or default_style,
                 half_hole_diameter_mm=_optional_size(side.get("half_hole_diameter_mm")),
                 through_hole_drill_mm=_optional_size(side.get("through_hole_drill_mm")),
-                # Vero SOLO se l'analisi dice di aver letto o ricavato il
-                # diametro dai documenti: una stima, un valore senza provenienza
-                # o un progetto salvato prima di questa chiave restano stime,
-                # che il generatore puo' ridurre dichiarandolo (26/09).
+                # True ONLY if the analysis says it read or derived the
+                # diameter from the documents: an estimate, a value without
+                # provenance or a project saved before this key stay
+                # estimates, which the generator may reduce, declaring it (26/09).
                 half_hole_diameter_declared=side.get("half_hole_diameter_declared") is True,
                 through_hole_drill_declared=side.get("through_hole_drill_declared") is True,
-                # Piazzole del lato (28/09): stessa regola dei fori. Dichiarate
-                # solo se lette o ricavate dai documenti (o scritte
-                # dall'utente); una stima il generatore la riduce se fa
-                # toccare due contatti, e lo scrive nelle note.
+                # Pads of the side (28/09): same rule as the holes. Declared
+                # only if read or derived from the documents (or typed by the
+                # user); the generator reduces an estimate if it makes two
+                # contacts touch, and writes so in the notes.
                 pad_length_mm=_optional_size(side.get("pad_length_mm")),
                 pad_width_mm=_optional_size(side.get("pad_width_mm")),
                 pad_length_declared=side.get("pad_length_declared") is True,

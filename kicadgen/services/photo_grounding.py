@@ -18,9 +18,9 @@ from .photo_inventory import copy_mechanical_metadata, mechanical_metadata_prope
 from .photo_heights import estimate_body_height
 from .messages import tx, warning
 
-#: Altezza segnaposto, in mm, di un corpo la cui famiglia non ha una stima
-#: (generic, o un tipo senza regola): lo stesso valore usato finora. Esce
-#: sempre marcato come segnaposto non misurato.
+#: Placeholder height, in mm, of a body whose family has no estimate
+#: (generic, or a type without a rule): the same value used so far. It is
+#: always output marked as an unmeasured placeholder.
 UNKNOWN_FAMILY_HEIGHT_MM = 1.5
 
 MECHANICAL_EVIDENCE_PROMPT = (
@@ -48,10 +48,10 @@ MECHANICAL_EVIDENCE_PROMPT = (
 )
 
 DEFAULT_VISION_MODEL = "anthropic/claude-opus-5"
-#: Modello predefinito quando a rilevare i corpi e' il modello di visione e non
-#: un rilevatore locale. E' una scelta di prodotto, non una regola: si cambia
-#: dal pannello dell'analisi, e qualunque modello con risposta strutturata e
-#: lettura di immagini va bene al suo posto.
+#: Default model when the bodies are detected by the vision model and not by
+#: a local detector. It is a product choice, not a rule: it is changed from
+#: the analysis panel, and any model with structured answers and image
+#: reading will do in its place.
 DEFAULT_PHOTO_DETECTOR_MODEL = "qwen/qwen3-vl-235b-a22b-instruct"
 MECHANICAL_MAX_TOKENS = 16384
 GROUNDING_PROMPT = (
@@ -69,7 +69,11 @@ GROUNDING_PROMPT = (
 
 
 def grounding_tool(kinds):
-    """@brief Return the locate_components tool schema: 0-1000 box_2d, label, kind and mechanical metadata."""
+    """@brief Return the locate_components tool schema: 0-1000 box_2d, label, kind and mechanical metadata.
+
+    @param kinds Allowed values of the `kind` enum (physical family names).
+    @return Tool definition dict in the provider's function-calling format.
+    """
     metadata = mechanical_metadata_properties()
     return {"type": "function", "function": {
         "name": "locate_components", "description": "PCB component bounding boxes",
@@ -126,8 +130,8 @@ def decode_boxes(data, region, length, width, kinds, source, log):
                 name=str(entry.get("label") or "Componente"), kind=kind if kind in kinds else "generic",
                 x_mm=((x0+x1)/2-.5)*length, y_mm=((y0+y1)/2-.5)*width,
                 length_mm=max(sx,sy), width_mm=min(sx,sy), rotation_deg=0 if sx >= sy else 90,
-                # Segnaposto dichiarato: la verifica successiva lo sostituisce
-                # con una stima di famiglia; se non arriva, resta marcato.
+                # Declared placeholder: the following verification replaces it
+                # with a family estimate; if none arrives, it stays marked.
                 height_mm=.6, _height_source="estimated_placeholder_not_measured",
                 _height_estimated=True,
                 color_hex="#303030", marking="", confidence="low",
@@ -142,30 +146,29 @@ def decode_boxes(data, region, length, width, kinds, source, log):
     return out
 
 
-#: Lato corto, in mm, del package piu' piccolo che le viste di dettaglio devono
-#: rendere leggibile: il chip 0402 imperiale (1.0 x 0.5 mm). ASSUNZIONE
-#: DICHIARATA sul contenuto di una scheda qualunque, non misura della scheda
-#: in lavorazione: uno 0201 (0.3 mm) resterebbe sotto l'obiettivo.
+#: Short side, in mm, of the smallest package the detail views must make
+#: readable: the imperial 0402 chip (1.0 x 0.5 mm). DECLARED ASSUMPTION about
+#: the content of any board, not a measurement of the board being processed:
+#: an 0201 (0.3 mm) would stay below the target.
 SMALLEST_PACKAGE_SHORT_SIDE_MM = 0.5
-#: Pixel che quel lato corto deve occupare nell'immagine COME IL MODELLO LA
-#: RICEVE. Scelta di compromesso fra risoluzione e costo, non limite fisico:
-#: sopra la soglia minima di distinguibilita' usata dall'inventario
-#: (photo_inventory.MIN_PACKAGE_PIXELS, 12 px) con margine per il
-#: ricampionamento del fornitore, e sotto un token visivo intero (~28 px),
-#: il cui costo in riquadri crescerebbe col quadrato. Dichiarato anche questo:
-#: con 20 px una scheda come quella di prova (63.3 x 25.4 mm) riceve gli
-#: stessi tre dettagli delle vecchie strisce fisse, cioe' lo stesso numero di
-#: chiamate; e' un vincolo di costo chiesto dall'utente, non una taratura
-#: della geometria. Diventerebbe superfluo se il modello dichiarasse la
-#: risoluzione a cui ha davvero guardato.
+#: Pixels that short side must occupy in the image AS THE MODEL RECEIVES IT.
+#: A compromise between resolution and cost, not a physical limit: above the
+#: minimum distinguishability threshold used by the inventory
+#: (photo_inventory.MIN_PACKAGE_PIXELS, 12 px) with margin for the provider's
+#: resampling, and below one whole visual token (~28 px), whose cost in tiles
+#: would grow with the square. This too is declared: with 20 px a board like
+#: the test one (63.3 x 25.4 mm) receives the same three details as the old
+#: fixed strips, i.e. the same number of calls; it is a cost constraint asked
+#: for by the user, not a calibration of the geometry. It would become
+#: unnecessary if the model declared the resolution it actually looked at.
 DETAIL_TARGET_PX = 20
-#: Budget d'immagine del modello di visione: lato lungo e pixel totali oltre
-#: i quali il fornitore riduce l'immagine prima di guardarla. Sono i limiti
-#: documentati del modello di verifica predefinito (Anthropic: 1568 px sul
-#: lato lungo, ~1.15 megapixel), il piu' restrittivo fra i predefiniti: un
-#: modello che conserva piu' pixel riceve piu' dell'obiettivo, mai meno.
-#: Correzione (HANDOFF 144): valgono per i modelli Claude/OpenRouter, NON per
-#: ogni fornitore; i limiti per fornitore li da' model_image_limits.
+#: Image budget of the vision model: long side and total pixels beyond which
+#: the provider downscales the image before looking at it. They are the
+#: documented limits of the default verification model (Anthropic: 1568 px on
+#: the long side, ~1.15 megapixels), the most restrictive among the defaults:
+#: a model that keeps more pixels receives more than the target, never less.
+#: Correction (HANDOFF 144): they hold for the Claude/OpenRouter models, NOT
+#: for every provider; the per-provider limits come from model_image_limits.
 MODEL_IMAGE_LONG_SIDE_PX = 1568
 MODEL_IMAGE_MAX_PIXELS = 1_150_000
 #: Side, in pixels, of one visual token of the reference model: Anthropic
@@ -268,29 +271,29 @@ def fit_to_model(image, limits):
     import cv2
     return cv2.resize(image, (max(1, int(width * scale)), max(1, int(height * scale))),
                       interpolation=cv2.INTER_CUBIC)
-#: Frazione di cella condivisa da due dettagli adiacenti (mezza per lato
-#: interno): la stessa sovrapposizione del rilevatore locale
-#: (photo_yolo._TILE_OVERLAP_FRACTION). Un corpo a cavallo di un confine di
-#: proprieta' resta intero nel dettaglio che lo possiede finche' e' piu'
-#: piccolo di meta' della sovrapposizione; quelli piu' grandi li risolve gia'
-#: la vista completa, che non ha confini interni.
+#: Fraction of a cell shared by two adjacent details (half per inner side):
+#: the same overlap as the local detector (photo_yolo._TILE_OVERLAP_FRACTION).
+#: A body straddling an ownership boundary stays whole in the detail that
+#: owns it as long as it is smaller than half the overlap; larger ones are
+#: already resolved by the full view, which has no inner boundaries.
 DETAIL_OVERLAP_FRACTION = 0.25
-#: Tetto di sicurezza sul numero di celle per asse: impedisce una ricerca
-#: senza fine su quote assurde, non limita schede reali (100 x 80 mm ne usa 6).
+#: Safety cap on the number of cells per axis: it prevents an endless search
+#: on absurd dimensions, it does not limit real boards (100 x 80 mm uses 6).
 _MAX_CELLS_PER_AXIS = 64
 
 
 def model_px_per_mm(tile_length_mm, tile_width_mm, limits=None):
-    """@brief Scala, in px/mm, a cui il modello vede una zona della scheda.
+    """@brief Scale, in px/mm, at which the model sees a zone of the board.
 
-    @param tile_length_mm Estensione della zona lungo X, in mm.
-    @param tile_width_mm Estensione lungo Y, in mm.
-    @param limits ModelImageLimits del modello (model_image_limits), o None
-        per i limiti di riferimento (comportamento storico).
-    @return I pixel per millimetro dopo la riduzione del fornitore, se la foto
-        ne ha abbastanza, espressi in pixel del modello di riferimento: un
-        modello a token piu' grossi (token_px) risolve meno dagli stessi
-        pixel, e la scala si riduce nella stessa proporzione.
+    @param tile_length_mm Extent of the zone along X, in mm.
+    @param tile_width_mm Extent of the zone along Y, in mm.
+    @param limits ModelImageLimits of the model (model_image_limits), or None
+        for the reference limits (historical behaviour).
+    @return Pixels for each millimetre after the provider's downscaling,
+        assuming the photo has enough of them, expressed in pixels of the
+        reference model: a model with coarser tokens (token_px) resolves
+        less from the same pixels, and the scale shrinks in the same
+        proportion.
     """
     limits = limits or REFERENCE_IMAGE_LIMITS
     long_side = max(tile_length_mm, tile_width_mm)
@@ -300,30 +303,29 @@ def model_px_per_mm(tile_length_mm, tile_width_mm, limits=None):
 
 
 def detail_grid(length_mm, width_mm, image_size_px=None, limits=None):
-    """@brief Griglia delle viste di dettaglio, su entrambi gli assi, dalle quote reali della scheda.
+    """@brief Grid of the detail views, on both axes, from the real board dimensions.
 
-    @param length_mm Estensione della scheda lungo X, in mm.
-    @param width_mm Estensione lungo Y, in mm.
-    @param image_size_px (larghezza, altezza) della foto calibrata in pixel, o
-        None. Serve a non ingrandire oltre la risoluzione della foto: un
-        ritaglio non aggiunge pixel che la foto non ha.
-    @return Lista di (region, ownership), entrambi (x0, y0, x1, y1) normalizzati
-        sulla foto intera. region include la sovrapposizione; ownership sono
-        celle disgiunte che coprono la scheda: un corpo appartiene al dettaglio
-        che contiene il suo centro. Lista vuota quando la vista completa
-        raggiunge gia' l'obiettivo.
-    @throws ValueError Per quote non finite o non positive.
-    @note Obiettivo: SMALLEST_PACKAGE_SHORT_SIDE_MM a DETAIL_TARGET_PX pixel
-        nell'immagine che il modello riceve (model_px_per_mm), ma mai oltre la
-        risoluzione della foto. Fra le griglie che lo raggiungono si sceglie
-        quella con meno celle (ogni dettaglio e' una chiamata), a parita' la
-        piu' quadrata. Si misura sul dettaglio peggiore: quello interno, che
-        ha sovrapposizione su entrambi i lati.
-    @param limits ModelImageLimits del modello che ricevera' le viste, o None
-        (limiti di riferimento, comportamento storico). Con un modello che
-        guadagna dall'ingrandimento (limits.enlarges) la vista completa parte
-        ai pixel della foto, mentre i dettagli vengono ingranditi fino ai
-        limiti (fit_to_model): lo decide chi li spedisce.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @param image_size_px (width, height) of the calibrated photo in pixels, or
+        None. It prevents enlarging beyond the photo's resolution: a crop
+        adds no pixels the photo does not have.
+    @param limits ModelImageLimits of the model that will receive the views,
+        or None (reference limits, historical behaviour). With a model that
+        gains from enlargement (limits.enlarges) the full view starts at the
+        photo's pixels, while the details are enlarged up to the limits
+        (fit_to_model): the sender decides.
+    @return List of (region, ownership), both (x0, y0, x1, y1) normalized on
+        the whole photo. region includes the overlap; ownership are disjoint
+        cells covering the board: a body belongs to the detail that contains
+        its centre. Empty list when the full view already reaches the target.
+    @throws ValueError For dimensions that are not finite or not positive.
+    @note Target: SMALLEST_PACKAGE_SHORT_SIDE_MM at DETAIL_TARGET_PX pixels in
+        the image the model receives (model_px_per_mm), but never beyond the
+        photo's resolution. Among the grids that reach it, the one with the
+        fewest cells is chosen (every detail is a call), the squarest on a
+        tie. It is measured on the worst detail: the inner one, which has
+        overlap on both sides.
     """
     limits = limits or REFERENCE_IMAGE_LIMITS
     for value in (length_mm, width_mm):
@@ -337,8 +339,8 @@ def detail_grid(length_mm, width_mm, image_size_px=None, limits=None):
         if photo_scale > 0:
             target = min(target, photo_scale)
             if limits.enlarges:
-                # La foto intera parte com'e', non ingrandita: il modello la
-                # vede ai suoi pixel, con i suoi token (HANDOFF 144).
+                # The whole photo goes as it is, not enlarged: the model
+                # sees it at its own pixels, with its own tokens (HANDOFF 144).
                 full_view = min(full_view,
                                 photo_scale * REFERENCE_TOKEN_PX / limits.token_px)
     if full_view >= target:
@@ -408,11 +410,26 @@ def grounding_regions(photo, length_mm, width_mm, model=None):
 def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     """@brief Content-addressed parsed response cache; never stores API keys/images.
 
-    Changing model, prompt, schema, image pixels or parameters invalidates it.
-    Network/API errors are not cached. Corrupt or partial cache entries are
-    ignored. Fresh partial responses still reach the per-entry decoders without
-    a retry. expected_ids is local validation metadata, not part of the key.
-
+    @param call Application API callable invoked as call(**kwargs) on a cache
+        miss (the logged paid call).
+    @param kwargs Keyword arguments of the request (model, messages, images,
+        tool schema, parameters): their JSON serialization is the cache key.
+    @param cache_dir Folder of the cache files, or None/empty for no cache.
+    @param stage Short label of the pipeline stage, used in log lines and
+        stored in the cache record.
+    @param log Progress callback receiving one line on a cache hit, on a
+        stored empty answer and on an unwritable cache.
+    @param expected_ids Iterable of the entry IDs a reusable answer must
+        contain exactly once each, or None for no ID check: local validation
+        metadata, not part of the key.
+    @return The parsed response dict, replayed from the cache or freshly
+        obtained from `call`.
+    @throws ValueError When `call` returns something that is not a dict
+        (unstructured AI answer).
+    @note Changing model, prompt, schema, image pixels or parameters
+        invalidates the cache. Network/API errors are not cached. Corrupt or
+        partial cache entries are ignored. Fresh partial responses still
+        reach the entry decoders without a retry.
     @note Empty answers. An empty `components` list is never stored as a
         success, with one declared exception: the localization tool
         (`locate_components`), where "no mounted body in this region" is a
@@ -514,9 +531,9 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     return data
 
 
-#: Descrizione del campo `package` negli strumenti fotografici. Gli esempi sono
-#: famiglie generiche e diverse fra loro, scelti apposta fuori dalla scheda di
-#: prova: un esempio preso dal campione e' un suggerimento di risposta.
+#: Description of the `package` field in the photo tools. The examples are
+#: generic families, different from one another, chosen on purpose outside
+#: the test board: an example taken from the sample is a hint at the answer.
 PACKAGE_DESCRIPTION = (
     "Sigla standard del CORPO come si usa nelle librerie (per esempio SOT-23, "
     "SOIC-8, QFN-32, R_0603, C_0805). E' una forma fisica, non una funzione "
@@ -525,7 +542,11 @@ PACKAGE_DESCRIPTION = (
 
 
 def classification_tool(kinds):
-    """@brief Return the tool schema used to verify and classify fixed package crops by ID."""
+    """@brief Return the tool schema used to verify and classify fixed package crops by ID.
+
+    @param kinds Allowed values of the `kind` enum (physical family names).
+    @return Tool definition dict in the provider's function-calling format.
+    """
     properties = {
         "id": {"type": "integer"},
         "is_component": {"type": "boolean"},
@@ -536,14 +557,14 @@ def classification_tool(kinds):
         "color_hex": {"type": "string"},
         "confidence": {"type": "string", "enum": ["high","medium","low"]},
         "observation": {"type": "string", "description": "Short visible evidence or ambiguity, not internal reasoning"},
-        # Il verso di innesto NON si deduce dall'ingombro: un coassiale U.FL e
-        # un jack da bordo possono misurare uguale. Dalla foto invece si vede.
-        # Chiederlo evita di indovinarlo con soglie sulle dimensioni.
-        # Il nome standard del package apre la libreria 3D di KiCad, che
-        # contiene il modello vero gia' disegnato. `kind` non basta: e' una
-        # lista chiusa di famiglie, e "ic" non corrisponde ad alcun file.
-        # Esempi generici di famiglie diverse, NON presi dalla scheda di prova
-        # (utente, 26/09: gli esempi del campione orientavano il modello).
+        # The mating direction is NOT deduced from the footprint: a U.FL
+        # coaxial and an edge jack can measure the same. From the photo it is
+        # visible instead. Asking for it avoids guessing it with size thresholds.
+        # The standard package name opens the KiCad 3D library, which holds
+        # the real model already drawn. `kind` is not enough: it is a closed
+        # list of families, and "ic" matches no file.
+        # Generic examples of different families, NOT taken from the test
+        # board (user, 26/09: the sample's examples steered the model).
         "package": {"type": "string",
                     "description": PACKAGE_DESCRIPTION},
         "mating": {"type": "string", "enum": ["edge", "top", "none"],
@@ -567,7 +588,15 @@ def classification_tool(kinds):
 
 
 def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns=4):
-    """@brief Return a BGR contact sheet with one padded, ID-labelled crop per component and its box outlined."""
+    """@brief Return a BGR contact sheet with one padded, ID-labelled crop for each component and its box outlined.
+
+    @param photo Calibrated BGR photograph the boxes refer to.
+    @param components Candidates with `_id` and a normalized `_box`.
+    @param cell_width Width of one sheet cell, in px.
+    @param cell_height Height of one sheet cell, in px.
+    @param columns Number of cells in each row of the sheet.
+    @return BGR numpy image of the sheet, rows of `columns` cells.
+    """
     import cv2
     import numpy as np
     cell_w, cell_h = cell_width, cell_height
@@ -661,8 +690,8 @@ def apply_classifications(components, response, kinds, length, width, log):
                      rotation_deg=angle,length_mm=long,width_mm=short,color_hex=color,
                      marking="",confidence=entry["confidence"],
                      _uncertain=inconsistent or entry["confidence"]=="low",_review_reason=observation,
-                     # Stima del modello guardando il package dall'alto: mai
-                     # una misura, e la revisione deve poterlo dire.
+                     # The model's estimate looking at the package from above:
+                     # never a measurement, and the review must be able to say so.
                      _height_source="visual_package_estimate", _height_estimated=True)
             copy_mechanical_metadata(c, entry)
             c['_classification_validated'] = True
@@ -793,6 +822,21 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
     A valid family vote updates public kind and _detected_kind, with confidence
     retained separately. Omitted/invalid votes keep generic public kind and a
     tentative detection hint, never a verification claim.
+    @param photo Calibrated board photo (BGR array).
+    @param components Localized components carrying `_id` and `_box`.
+    @param model Vision model identifier of the verification calls.
+    @param call Logged AI call function, wrapped by cached_call.
+    @param log Progress callback receiving the per-body verdicts.
+    @param cache_dir Analysis folder of the AI cache, or None.
+    @param verification_prompt Optional replacement of the verification
+        instructions; None or blank uses VERIFICATION_PROMPT. The mechanical
+        contract is always appended.
+    @return The components still present, with confidence, family, package
+        evidence and estimated height updated; bodies voted absent are dropped,
+        those without a usable verdict are kept as uncertain.
+    @note No exception escapes for incomplete answers: the ValueError raised
+        when presence verdicts are missing is caught with OpenRouterError,
+        logged, and the batch is kept as uncertain.
     @note The height follows the FINAL family (after the vote), estimated by
         photo_heights.estimate_body_height from family and plan (for a generic
         body, the height family of its inventory class, see _height_family): a body
@@ -814,10 +858,10 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
             else (UNKNOWN_FAMILY_HEIGHT_MM, "estimated_placeholder_not_measured"))
         c["_height_source"] = "coarse_visual_prior_not_measured"
         c["_height_estimated"] = True
-    # `package` e' una identificazione MECCANICA, non elettrica: dice quale
-    # corpo standard e' quel volume, non che funzione svolge nel circuito.
-    # Sta quindi dentro il mandato di questa verifica, e apre la libreria 3D
-    # di KiCad dove il modello vero esiste gia' disegnato.
+    # `package` is a MECHANICAL identification, not an electrical one: it
+    # says which standard body that volume is, not what function it performs
+    # in the circuit. It therefore lies within the mandate of this check, and
+    # opens the KiCad 3D library where the real model already exists, drawn.
     tool = {"type":"function","function":{"name":"verify_mounted_bodies",
         "description":"Verify physical mounted bodies, not electrical identities",
         "parameters":{"type":"object","properties":{"components":{"type":"array","items":{
@@ -851,7 +895,7 @@ def mechanical_envelopes(photo, components, model, call, log, cache_dir, verific
         hint = c.get("_detected_kind", c["kind"])
         c["_detected_kind"] = hint if isinstance(hint, str) else "generic"
         estimate_height(c)
-        # La verifica meccanica non certifica l'identita' elettrica: la
+        # The mechanical check does not certify the electrical identity:
         # Stay generic until an explicit visual family vote supersedes the
         # tentative hint; this does not claim an exact electrical identity.
         c["kind"] = "generic"
@@ -942,6 +986,27 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                         grounding_prompt=None, verification_prompt=None):
     """@brief Localize packages over the full view and a mm-sized detail grid, then verify them in batches; returns renumbered components.
 
+    @param photo Calibrated board photo (BGR array).
+    @param model Vision model identifier of the grounding calls.
+    @param length Board extent along X, in mm.
+    @param width Board extent along Y, in mm.
+    @param kinds Allowed component kinds, forwarded to the tool schemas.
+    @param call Logged AI call function, wrapped by cached_call.
+    @param log Progress callback; failed views are logged as warnings and skipped.
+    @param cache_dir Analysis folder of the AI cache, or None.
+    @param extra_instructions Optional user notes appended to the classification
+        prompt (legacy path with `mechanical` False).
+    @param classifier_model Model of the verification or classification calls;
+        None uses DEFAULT_MODEL.
+    @param mechanical True (default) to verify through mechanical_envelopes;
+        False keeps the separate semantic classification.
+    @param grounding_prompt Optional replacement of the grounding instructions;
+        None or blank uses GROUNDING_PROMPT.
+    @param verification_prompt Optional replacement of the verification
+        instructions, forwarded to mechanical_envelopes.
+    @return List of the verified components; on the mechanical path they are
+        renumbered 1..n in `_id`, the previous id kept in `_candidate_id`.
+
     @note The detail grid comes from detail_grid (both axes, sized from the
         board's millimetres); each detail is one grounding call, and the
         count is written to the log before the calls start.
@@ -963,7 +1028,7 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                 content_blocks=[image_block(crop)],tool=grounding_tool(kinds),max_tokens=8192,has_pdf=False),
                 cache_dir,label,log)
             group = decode_boxes(data,region,length,width,kinds,label,log)
-            # Proprieta' per centro in celle disgiunte, su entrambi gli assi.
+            # Ownership by centre in disjoint cells, on both axes.
             group = [c for c in group
                      if ownership[0] <= (c['_box'][0]+c['_box'][2])/2 < ownership[2]
                      and ownership[1] <= (c['_box'][1]+c['_box'][3])/2 < ownership[3]]
@@ -976,9 +1041,9 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                    "disponibili.",
                    label=label,
                    exc=exc))
-    # Doppioni riconosciuti entro l'incertezza di misura della foto calibrata
-    # (photo_inventory.same_body): senza la risoluzione solo i riquadri
-    # coincidenti si fondono per contenimento.
+    # Duplicates recognised within the measurement uncertainty of the
+    # calibrated photo (photo_inventory.same_body): without the resolution
+    # only coinciding boxes merge by containment.
     merged = merge_components(groups,log,containment=True,
                               image_px=(photo.shape[1], photo.shape[0]))
     for index,component in enumerate(merged,1):

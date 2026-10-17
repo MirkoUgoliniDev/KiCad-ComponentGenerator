@@ -20,8 +20,10 @@ from test_contact_style import dev_kit
 
 
 def _shapes(window, params):
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
     window._draw_preview_castellated(params)
-    items = window.preview_scene.items()
+    # The REF**/Value groups (their anchor square is a rect) are not pads.
+    items = [i for i in window.preview_scene.items() if i.data(TEXT_KEY_ROLE) is None]
     return ([i for i in items if isinstance(i, QGraphicsPathItem)],
             [i for i in items if isinstance(i, QGraphicsEllipseItem)],
             [i for i in items if isinstance(i, QGraphicsRectItem)])

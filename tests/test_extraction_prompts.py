@@ -19,6 +19,23 @@ from unittest.mock import Mock
 
 import pytest
 
+
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    Document images must be decodable: since 2026-10-15 an upload whose
+    metadata cannot be removed is refused (fail closed), so fake bytes named
+    .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
 from kicadgen.services import component_types
 from kicadgen.services import datasheet_extractor as ext
 from kicadgen.services.datasheet_extractor import (
@@ -56,7 +73,7 @@ def _run_extraction(monkeypatch, tmp_path, names, roles, answer=None):
     paths = []
     for name in names:
         path = tmp_path / name
-        path.write_bytes(b"%PDF-1.4 offline" if name.endswith(".pdf") else b"offline fixture")
+        path.write_bytes(b"%PDF-1.4 offline" if name.endswith(".pdf") else _TINY_PNG)
         paths.append(path)
     call = Mock(return_value=answer or dict(
         layout="castellated", confidence="high", body_length_mm=40, body_width_mm=20,

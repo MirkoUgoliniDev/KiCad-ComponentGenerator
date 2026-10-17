@@ -76,8 +76,13 @@ def test_the_worker_writes_the_chosen_position_in_the_file(tmp_path, qapp):
     assert _property_at(text, "Value") == (0.0, 6.5)
     # CONTRACT CHANGED 2026-10-14 (decision D1): the text without a choice
     # takes the geometry-derived default, no longer the fixed (0, -2).
+    # CONTRACT CHANGED 2026-10-16 («KiCad fermo»): that default is written
+    # as the bottom-left anchor KiCad draws the D1-centred text from.
     from kicadgen.generators.pin_header import build_pin_header
-    assert _property_at(text, "Reference") == default_text_positions(build_pin_header(params))["Reference"]
+    built = build_pin_header(params)
+    assert _property_at(text, "Reference") == built.reference_at
+    assert built.text_centres()["Reference"] == pytest.approx(
+        default_text_positions(built)["Reference"], abs=1e-4)
 
 
 # ── Window ───────────────────────────────────────────────────────────
@@ -129,16 +134,23 @@ def test_both_texts_are_drawn_at_their_default_position(preview):
              else build_pin_header(params))
     defaults = default_text_positions(built)
     assert defaults != DEFAULT_TEXT_POSITIONS
+    # CONTRACT CHANGED 2026-10-16 (user): the group position is the
+    # BOTTOM-LEFT corner of the text: the anchor the generator writes,
+    # converted from the D1 centre with KiCad's text geometry so KiCad
+    # draws the text where it drew it centred (see test_footprint_property_anchor).
+    anchors = built.text_anchors()
     for key, item in items.items():
-        assert (item.pos().x(), item.pos().y()) == pytest.approx(tuple(v * 20 for v in defaults[key]))
-        # The anchor is visible: a cross of two lines centred on it, and the
-        # text centred on it too.
-        from PyQt6.QtWidgets import QGraphicsLineItem
-        lines = [c for c in item.childItems() if isinstance(c, QGraphicsLineItem)]
-        assert len(lines) == 2
-        assert all(line.line().center().isNull() for line in lines)
-        centre = item.sceneBoundingRect().center()
-        assert centre.x() == pytest.approx(item.pos().x(), abs=1) and centre.y() == pytest.approx(item.pos().y(), abs=1)
+        expected = (anchors[key][0] * 20, anchors[key][1] * 20)
+        assert (item.pos().x(), item.pos().y()) == pytest.approx(expected, abs=0.01)
+        assert built.text_centres()[key] == pytest.approx(defaults[key], abs=1e-4)
+        # The anchor carries the drawn texts' handle square. CONTRACT
+        # CHANGED 2026-10-16 (user): hidden at rest, shown only near the
+        # text or while dragging, as in the symbol tab
+        # (see test_footprint_property_anchor hover tests).
+        from PyQt6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem
+        assert not [c for c in item.childItems() if isinstance(c, QGraphicsLineItem)], "no cross"
+        (square,) = [c for c in item.childItems() if isinstance(c, QGraphicsRectItem)]
+        assert square.pos().isNull() and not square.isVisible()
         assert "Ancoraggio" in item.toolTip() and all(c.toolTip() == item.toolTip() for c in item.childItems())
 
 
@@ -158,7 +170,9 @@ def test_a_drop_snaps_to_the_preview_grid_saves_redraws_and_rewrites(preview):
     assert window._project_state()["footprint_texts"] == {}, "the file keeps the applied state"
     assert window.apply_footprint_draft()
     assert saves == [True] and generations == [{"footprint_only": True}]
-    assert window._project_state()["footprint_texts"] == {"Reference": [3.4, -4.6]}
+    # Marked as bottom-left anchors (2026-10-16): loading it converts nothing.
+    assert window._project_state()["footprint_texts"] == {"Reference": [3.4, -4.6],
+                                                          "anchor": "left_bottom"}
     window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
     window._on_footprint_text_moved("Reference", 3.43 * 20, -4.58 * 20)
     assert window.footprint_text_positions == {"Reference": (3.0, -5.0)}
@@ -240,7 +254,10 @@ def test_an_unknown_key_is_ignored(preview):
 
 def test_the_choice_survives_the_project_file_and_malformed_entries_are_dropped(window):
     state = deepcopy(window._project_state())
-    state["footprint_texts"] = {"Reference": [2.5, -7], "Value": "nope", "Other": [0, 0]}
+    # Marked anchors (2026-10-16): read as they are; unmarked ones are
+    # converted once (test_footprint_property_anchor).
+    state["footprint_texts"] = {"Reference": [2.5, -7], "Value": "nope", "Other": [0, 0],
+                                "anchor": "left_bottom"}
     window._apply_project_state(state)
     assert window.footprint_text_positions == {"Reference": (2.5, -7.0)}
     state["footprint_texts"] = None
@@ -256,6 +273,9 @@ def test_the_generation_worker_receives_the_positions(window, monkeypatch):
     monkeypatch.setattr(gui.GenerateWorker, "start", lambda worker: started.append(worker))
     window.footprint_text_positions = {"Value": (0.0, 9.0)}
     window._generate(footprint_only=True)
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): only the
+    # chosen anchor; the unmoved Reference keeps the generator's centred
+    # default (from 2026-10-16 both anchors were passed).
     assert started and started[0].text_positions == {"Value": (0.0, 9.0)}
     started[0].text_positions["Value"] = (1.0, 1.0)
     assert window.footprint_text_positions == {"Value": (0.0, 9.0)}, "the worker got a copy"

@@ -118,7 +118,11 @@ def set_widget_value(widget, value) -> bool:
 
 
 def project_config_path(project_dir) -> Path:
-    """@brief Path of the project file inside a project folder."""
+    """@brief Path of the project file inside a project folder.
+
+    @param project_dir Project folder (str or Path).
+    @return `project_dir / PROJECT_CONFIG_NAME`.
+    """
     return Path(project_dir) / PROJECT_CONFIG_NAME
 
 

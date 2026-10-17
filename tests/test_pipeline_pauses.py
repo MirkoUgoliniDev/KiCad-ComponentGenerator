@@ -475,7 +475,7 @@ def test_every_long_phase_offers_the_abort_button(window, monkeypatch, tmp_path)
     window._on_extracted(_extracted())
     window._generate(automatic=False)
     assert window._worker is not None and window._worker.body is not None
-    assert started[-1][1] is True, "generazione manuale con modello 3D"
+    assert started[-1][1] is True, "generazione manuale con modello STEP"
     assert window.analysis_overlay.is_abortable()
     window._worker.finished.emit()
     assert window.analysis_overlay.isHidden(), "chi apre la modale la chiude"
@@ -529,7 +529,7 @@ def test_a_generator_without_the_channel_withdraws_the_promise_to_stop(
     la finestra deve togliere il comando e dirlo.
     """
     _ready(window, monkeypatch)
-    window.analysis_overlay.start("Generazione modello 3D", "…", abortable=True)
+    window.analysis_overlay.start("Generazione modello STEP", "…", abortable=True)
     try:
         assert window.analysis_overlay.is_abortable()
         window._on_cad_cancellable(False)
@@ -760,6 +760,10 @@ def test_the_bottom_row_reads_as_one_pipeline_with_the_price_of_each_step(window
     assert "a pagamento" not in window.btn_component_review.toolTip().lower()
     assert "A PAGAMENTO" in window.btn_relaunch_inventory.toolTip()
     assert "Non avvia la generazione" in window.btn_component_review.toolTip()
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): «gratuito» is the tooltip of the
+    # AVAILABLE command; without documented body sizes it says why it is off.
+    window._body_size_declared = True
+    window._refresh_output_actions()
     assert "gratuito" in window.btn_regen_3d.toolTip()
     assert "A PAGAMENTO" in window.btn_extract_ai.toolTip()
     assert "Passi 1 e 3" in window.btn_component_review.toolTip()

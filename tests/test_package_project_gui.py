@@ -78,13 +78,28 @@ def test_legacy_project_without_package_keeps_matrix_support(window):
     acquire(window)
     legacy = deepcopy(window._general_project_state)
     legacy.pop("package_geometry", None)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): «Rigenera 3D» needs
+    # documented body dimensions; the startup state only holds the
+    # 10 x 10 x 5 mm placeholder. A legacy project (no `body_size_declared`
+    # key) whose analysis wrote its body keeps the matrix 3D available.
+    legacy.pop("body_size_declared", None)
+    legacy["widgets"] = dict(legacy.get("widgets") or {}, field_body_length=12.0,
+                             field_body_width=6.0, field_body_height=4.0)
     footprint = window._library_root() / "Legacy" / "Legacy.pretty" / "Legacy.kicad_mod"
     footprint.parent.mkdir(parents=True)
     footprint.write_text("(footprint)")
     window._switch_project("Legacy", legacy)
+    window.group_3d.setChecked(True)
+    window._refresh_output_actions()
     assert window.package_geometry is None
     assert isinstance(window._preview_params(), gui.PinHeaderParams)
     assert window.btn_regen_3d.isEnabled()
+    # Negative: the same legacy project with the placeholder body only.
+    legacy["widgets"].update(field_body_length=10.0, field_body_width=10.0,
+                             field_body_height=5.0)
+    window._apply_project_state(legacy)
+    window._refresh_output_actions()
+    assert not window.btn_regen_3d.isEnabled()
 
 
 def test_renamed_package_reopens_under_the_current_project_name(window, monkeypatch):

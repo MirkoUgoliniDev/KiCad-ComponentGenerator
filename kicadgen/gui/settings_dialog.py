@@ -1,7 +1,7 @@
 """@brief LLM settings dialog: the single AI model with its source, and the system prompts.
 
-Impostazioni LLM: il modello unico con la sua sorgente (DeepSeek o OpenRouter)
-e i prompt di sistema dell'estrazione.
+The model source is DeepSeek or OpenRouter; the system prompts are those
+of the extraction.
 """
 
 from __future__ import annotations
@@ -34,15 +34,16 @@ SOURCE_DEFAULT_MODEL = {PROVIDER_DEEPSEEK: "deepseek-api/deepseek-flash"}
 class LlmSettingsDialog(QDialog):
     """@brief Editor of the single AI model (with its source) and of the system prompts.
 
-    Il primo tab, «Modello», sceglie la sorgente (DeepSeek, API diretta, o
-    OpenRouter) e l'UNICO modello di tutte le interrogazioni: documenti, foto,
-    ritagli e sigle (utente, 2026-10-02: prima tre tab mostravano tre modelli,
-    ma l'analisi ne usava uno solo). Gli altri tab tengono solo i prompt.
-    La scelta di sessione nella finestra principale resta una scorciatoia
-    che vale fino alla chiusura.
+    The first tab, «Modello», chooses the source (DeepSeek, direct API, or
+    OpenRouter) and the ONE model of every query: documents, photos, crops
+    and markings (user, 2026-10-02: before, three tabs showed three models,
+    but the analysis used only one). The other tabs hold only the prompts.
+    The session choice in the main window remains a shortcut that lasts
+    until the program closes.
 
-    @note `vision_model()` e `verification_model()` restano per compatibilita'
-        con chi salva i default: restituiscono lo stesso modello unico.
+    @note `vision_model()` and `verification_model()` remain for
+        compatibility with callers that save the defaults: they return the
+        same single model.
     """
 
     #: Entries of the «Prompt di sistema per» selector of the Datasheet tab:
@@ -87,11 +88,11 @@ class LlmSettingsDialog(QDialog):
         model_layout, datasheet_layout, photo_layout, verify_layout = pages
         self.info_buttons = []
 
-        # ── Tab «Modello»: sorgente + modello unico + stato della chiave ──
+        # ── «Modello» (model) tab: source + single model + key status ──
         form = QFormLayout()
         self.combo_source = QComboBox()
         for provider in PROVIDERS:
-            # Tradotta qui: retranslate_widgets non tocca le voci dei combo (B7).
+            # Translated here: retranslate_widgets does not touch combo items (B7).
             self.combo_source.addItem(tx(PROVIDER_LABELS[provider]), provider)
         self.combo_source.setCurrentIndex(
             max(0, self.combo_source.findData(provider_of(self._model))))
@@ -149,7 +150,7 @@ class LlmSettingsDialog(QDialog):
                        "Lo schema JSON e i controlli geometrici restano gestiti dal codice.")
         self._help_texts = (model_note, intro, vision_note, verify_note)
 
-        # ── Tab dei prompt ──
+        # ── Prompts tab ──
         for prompt_layout, help_index in ((datasheet_layout, 1), (photo_layout, 2),
                                           (verify_layout, 3)):
             header = QHBoxLayout()
@@ -262,7 +263,11 @@ class LlmSettingsDialog(QDialog):
             dialog.deleteLater()
 
     def source(self) -> str:
-        """@brief The source chosen in the «Modello» tab (providers.PROVIDERS)."""
+        """@brief The source chosen in the «Modello» tab (providers.PROVIDERS).
+
+        @return The provider key of the current combo entry, or the first
+            provider when the combo carries no data.
+        """
         return self.combo_source.currentData() or PROVIDERS[0]
 
     def _source_changed(self, _index) -> None:
@@ -281,7 +286,7 @@ class LlmSettingsDialog(QDialog):
             else:
                 from ..services.openrouter import api_key_source
                 kind = api_key_source().kind
-        except Exception:  # noqa: BLE001 - uno stato illeggibile non blocca la finestra
+        except Exception:  # noqa: BLE001 - an unreadable state does not block the window
             kind = "none"
         source = tx(PROVIDER_LABELS.get(self.source(), self.source()))
         text = ("Chiave {source} presente." if kind != "none" else
@@ -295,8 +300,8 @@ class LlmSettingsDialog(QDialog):
         if chosen:
             self._model = chosen
             self.field_model.setText(chosen)
-            # Il selettore mostra solo la sorgente scelta; se mai tornasse un
-            # modello dell'altra, la sorgente lo segue.
+            # The selector shows only the chosen source; if a model of the
+            # other one ever came back, the source follows it.
             index = self.combo_source.findData(provider_of(chosen))
             if index >= 0 and index != self.combo_source.currentIndex():
                 blocked = self.combo_source.blockSignals(True)
@@ -324,19 +329,31 @@ class LlmSettingsDialog(QDialog):
             self.verification_editor.setPlainText(VERIFICATION_PROMPT)
 
     def verification_model(self):
-        """@brief The single model (kept for callers that save the default per stage)."""
+        """@brief The single model (kept for callers that save the default per stage).
+
+        @return The same value as `model()`.
+        """
         return self.model()
 
     def grounding_prompt(self):
-        """@brief Return the edited grounding prompt, or the built-in one when left empty."""
+        """@brief Return the edited grounding prompt, or the built-in one when left empty.
+
+        @return The stripped editor text, or GROUNDING_PROMPT when empty.
+        """
         return self.grounding_editor.toPlainText().strip() or GROUNDING_PROMPT
 
     def verification_prompt(self):
-        """@brief Return the edited verification prompt, or the built-in one when left empty."""
+        """@brief Return the edited verification prompt, or the built-in one when left empty.
+
+        @return The stripped editor text, or VERIFICATION_PROMPT when empty.
+        """
         return self.verification_editor.toPlainText().strip() or VERIFICATION_PROMPT
 
     def vision_model(self) -> str:
-        """@brief The single model (kept for callers that save the default per stage)."""
+        """@brief The single model (kept for callers that save the default per stage).
+
+        @return The same value as `model()`.
+        """
         return self.model()
 
     def _on_prompt_kind_changed(self, _index: int) -> None:
@@ -352,21 +369,33 @@ class LlmSettingsDialog(QDialog):
         return self._prompt_texts[field]
 
     def prompt(self) -> str:
-        """@brief Return the edited datasheet prompt of boards and modules, stripped."""
+        """@brief Return the edited datasheet prompt of boards and modules, stripped.
+
+        @return The stripped text of the "system_prompt" entry; may be "".
+        """
         return self._prompt_text("system_prompt").strip()
 
     def single_prompt(self) -> str:
-        """@brief Return the edited single-component prompt, or the factory one when left empty."""
+        """@brief Return the edited single-component prompt, or the factory one when left empty.
+
+        @return The stripped text, or DEFAULT_SINGLE_SYSTEM_PROMPT when empty.
+        """
         return self._prompt_text("system_prompt_single").strip() or DEFAULT_SINGLE_SYSTEM_PROMPT
 
     def numbering_prompt(self) -> str:
-        """@brief Return the edited pin-numbering prompt, or the factory one when left empty."""
+        """@brief Return the edited pin-numbering prompt, or the factory one when left empty.
+
+        @return The stripped text, or DEFAULT_PIN_NUMBERING_PROMPT when empty.
+        """
         return self._prompt_text("numbering_prompt").strip() or DEFAULT_PIN_NUMBERING_PROMPT
 
     def model(self) -> str:
-        """@brief Return the single chosen model, or DEFAULT_MODEL when empty."""
+        """@brief Return the single chosen model, or DEFAULT_MODEL when empty.
+
+        @return The stripped model identifier, or DEFAULT_MODEL.
+        """
         return self._model.strip() or DEFAULT_MODEL
 
 
-#: Nome storico della classe, prima che il dialogo ospitasse anche il modello.
+#: Historical name of the class, before the dialog also hosted the model.
 SystemPromptDialog = LlmSettingsDialog

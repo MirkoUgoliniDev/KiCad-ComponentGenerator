@@ -7,6 +7,9 @@ select candidates before these visual scores are considered.
 from __future__ import annotations
 
 import base64
+import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import cv2
@@ -14,6 +17,19 @@ import numpy as np
 
 
 _SIZE = 96
+#: Keys of a component row that `extract_component_crop` reads. Callers that
+#: memoise a crop or its descriptor key it on these values (main_window), so
+#: a key the crop starts reading must be added here (a test reads the crop's
+#: accesses and keeps this list exact).
+CROP_GEOMETRY_KEYS = ("x_mm", "y_mm", "length_mm", "width_mm", "rotation_deg")
+#: Quarter-turn descriptors of reference PNGs, keyed on a digest of the PNG
+#: bytes: digest -> (descriptors, complete). Every body of a board is
+#: compared with every stored example, so without it each example was
+#: decoded and described four times per body.
+_ROTATED = OrderedDict()
+_ROTATED_LOCK = threading.Lock()
+#: Memory bound of _ROTATED (about 2.3 kB per entry), not a tuning value.
+_ROTATED_MAX = 4096
 
 
 @dataclass(frozen=True)
@@ -33,6 +49,20 @@ def extract_component_crop(image, component: dict, board_length_mm: float,
     The component is deskewed using its recorded rotation. Only its measured
     body and a small physical margin are retained; the remaining square area
     is neutral padding so adjacent components cannot enter the descriptor.
+
+    @param image Decoded OpenCV array of the calibrated board crop (the board
+        fills the whole frame).
+    @param component Component row with x_mm, y_mm, length_mm, width_mm and
+        optionally rotation_deg (degrees, counterclockwise).
+    @param board_length_mm Board extent along X, in mm (the image width).
+    @param board_width_mm Board extent along Y, in mm (the image height).
+    @param margin Physical margin kept around the body, as a fraction of each
+        body side (0.12 = 12 % per side).
+    @return Square array of _SIZE x _SIZE pixels: the deskewed body with its
+        margin, centred on neutral grey padding.
+    @throws ValueError When the image is not a decoded OpenCV array, a board or
+        component dimension is not finite or not positive, the margin is
+        negative, or the crop falls entirely outside the image.
     """
     if image is None or not isinstance(image, np.ndarray) or image.ndim < 2:
         raise ValueError("image must be a decoded OpenCV image")
@@ -56,14 +86,7 @@ def extract_component_crop(image, component: dict, board_length_mm: float,
     crop_h_mm = (sine * length_mm + cosine * width_mm) * (1.0 + 2.0 * margin)
     crop_w, crop_h = max(8, int(round(crop_w_mm * sx))), max(8, int(round(crop_h_mm * sy)))
     left, top = int(round(cx - crop_w / 2)), int(round(cy - crop_h / 2))
-    right, bottom = left + crop_w, top + crop_h
-    pad_left, pad_top = max(0, -left), max(0, -top)
-    padded = cv2.copyMakeBorder(image, pad_top, max(0, bottom - h),
-                                pad_left, max(0, right - w),
-                                cv2.BORDER_CONSTANT, value=(127, 127, 127))
-    left += pad_left
-    top += pad_top
-    crop = padded[top:top + crop_h, left:left + crop_w]
+    crop = _window_with_border(image, left, top, crop_w, crop_h)
     if crop.size == 0:
         raise ValueError("component crop falls outside the board image")
     # Rectify the photo's x/y pixel scales before rotation and final cropping.
@@ -105,8 +128,58 @@ def extract_component_crop(image, component: dict, board_length_mm: float,
     return cv2.resize(square, (_SIZE, _SIZE), interpolation=cv2.INTER_AREA)
 
 
+def _window_with_border(image, left: int, top: int, width: int, height: int):
+    """Return image pixels [top, top+height) x [left, left+width), grey outside the image.
+
+    Only the part of the window that overlaps the image is sliced and padded,
+    so the cost follows the window size instead of the whole board photo.
+    The fill goes through cv2.copyMakeBorder on that slice, which keeps the
+    exact constant-border semantics of padding the whole image (grey on
+    every colour channel, 0 on alpha, a single-channel 3-D image returned
+    as 2-D) and therefore a bit-identical result.
+    """
+    h, w = image.shape[:2]
+    right, bottom = left + width, top + height
+    row0, row1 = min(max(top, 0), h), max(min(bottom, h), 0)
+    col0, col1 = min(max(left, 0), w), max(min(right, w), 0)
+    if row1 <= row0 or col1 <= col0:
+        # Window entirely outside the image: pad one real pixel past the
+        # window and drop it, so the fill keeps the cv2 semantics above.
+        filled = cv2.copyMakeBorder(image[:1, :1], height, 0, width, 0,
+                                    cv2.BORDER_CONSTANT, value=(127, 127, 127))
+        return filled[:height, :width]
+    return cv2.copyMakeBorder(image[row0:row1, col0:col1],
+                              row0 - top, bottom - row1, col0 - left, right - col1,
+                              cv2.BORDER_CONSTANT, value=(127, 127, 127))
+
+
+_CELL_INDEX = None
+
+
+def _cell_bin_offsets(size: int, cells: int, bins: int) -> np.ndarray:
+    """Per-pixel offset cell*bins of the spatial cell each pixel belongs to (row-major cells).
+
+    `size` must be a multiple of `cells` (describe_crop uses 96 and 4), so
+    every pixel falls in exactly one cell, as in the per-cell scan.
+    """
+    global _CELL_INDEX
+    key = (size, cells, bins)
+    if _CELL_INDEX is None or _CELL_INDEX[0] != key:
+        cell = np.arange(size) // (size // cells)
+        offsets = ((cell[:, None] * cells + cell[None, :]) * bins).astype(np.int64)
+        offsets.setflags(write=False)
+        _CELL_INDEX = (key, offsets)
+    return _CELL_INDEX[1]
+
+
 def describe_crop(crop) -> np.ndarray:
-    """@brief Return a unit-length spatial gradient-histogram descriptor."""
+    """@brief Return a unit-length spatial gradient-histogram descriptor.
+
+    @param crop Nonempty OpenCV image (BGR or grey) of one component crop.
+    @return float32 vector of 4 x 4 cells x 9 orientation bins (144 values),
+        L2-normalized unless the crop has no gradient at all.
+    @throws ValueError When the crop is not a nonempty OpenCV array.
+    """
     if crop is None or not isinstance(crop, np.ndarray) or crop.size == 0:
         raise ValueError("crop must be a non-empty OpenCV image")
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
@@ -121,16 +194,13 @@ def describe_crop(crop) -> np.ndarray:
     orientation = np.mod(angle, np.pi) * (bins / np.pi)
     quantized = np.floor(orientation).astype(np.int32) % bins
     cells = 4
-    cell_size = _SIZE // cells
-    pieces = []
-    for row in range(cells):
-        for col in range(cells):
-            ys = slice(row * cell_size, (row + 1) * cell_size)
-            xs = slice(col * cell_size, (col + 1) * cell_size)
-            hist = np.bincount(quantized[ys, xs].ravel(),
-                               weights=magnitude[ys, xs].ravel(), minlength=bins)
-            pieces.append(hist.astype(np.float32))
-    vector = np.concatenate(pieces)
+    # One bincount over (cell, bin) pairs instead of one per cell. The
+    # raster scan visits each cell's pixels in the same row-major order as a
+    # per-cell scan, so every bin accumulates the same values in the same
+    # order and the descriptor is bit-identical to the per-cell histograms.
+    index = _cell_bin_offsets(_SIZE, cells, bins) + quantized
+    vector = np.bincount(index.ravel(), weights=magnitude.ravel(),
+                         minlength=cells * cells * bins).astype(np.float32)
     norm = float(np.linalg.norm(vector))
     if norm > 1e-12:
         vector /= norm
@@ -138,7 +208,12 @@ def describe_crop(crop) -> np.ndarray:
 
 
 def descriptor_bytes(descriptor: np.ndarray) -> bytes:
-    """@brief Serialize a descriptor for transient component metadata or SQLite."""
+    """@brief Serialize a descriptor for transient component metadata or SQLite.
+
+    @param descriptor Descriptor produced by describe_crop.
+    @return The 144 little-endian float32 values as raw bytes.
+    @throws ValueError When the descriptor has not exactly 144 finite values.
+    """
     vector = np.asarray(descriptor, dtype="<f4").reshape(-1)
     if vector.size != 4 * 4 * 9 or not np.isfinite(vector).all():
         raise ValueError("unexpected component-image descriptor")
@@ -146,7 +221,14 @@ def descriptor_bytes(descriptor: np.ndarray) -> bytes:
 
 
 def descriptor_from_bytes(payload: bytes) -> np.ndarray:
-    """@brief Read a descriptor serialized by :func:`descriptor_bytes`."""
+    """@brief Read a descriptor serialized by :func:`descriptor_bytes`.
+
+    @param payload Raw bytes (or bytearray/memoryview) written by
+        descriptor_bytes, or a text "base64:<data>" wrapping them.
+    @return The descriptor as a new float32 vector.
+    @throws ValueError When the base64 text is invalid, the payload is not
+        bytes, or it does not hold exactly 144 finite values.
+    """
     if isinstance(payload, str) and payload.startswith("base64:"):
         try:
             payload = base64.b64decode(payload[7:], validate=True)
@@ -161,7 +243,14 @@ def descriptor_from_bytes(payload: bytes) -> np.ndarray:
 
 
 def similarity(first: np.ndarray, second: np.ndarray) -> float:
-    """@brief Return cosine similarity in [0, 1] for component descriptors."""
+    """@brief Return cosine similarity in [0, 1] for component descriptors.
+
+    @param first First descriptor (any array-like of floats).
+    @param second Second descriptor, same shape as `first`.
+    @return Cosine similarity clipped to [0, 1]; 0.0 when either vector is
+        (numerically) null.
+    @throws ValueError When the two descriptors differ in shape or are empty.
+    """
     a, b = np.asarray(first, dtype=np.float32).reshape(-1), np.asarray(second, dtype=np.float32).reshape(-1)
     if a.shape != b.shape or not a.size:
         raise ValueError("descriptors must have the same non-empty shape")
@@ -172,21 +261,68 @@ def similarity(first: np.ndarray, second: np.ndarray) -> float:
 
 
 def rank_references(query_descriptor: np.ndarray, references, category: str) -> list[ImageMatch]:
-    """@brief Rank category-compatible references by visual score."""
+    """@brief Rank category-compatible references by visual score.
+
+    @param query_descriptor Descriptor of the crop being matched.
+    @param references Iterable of (reference, category, descriptor) triples.
+    @param category Category the query belongs to; references of another
+        category (case-insensitive) are left out.
+    @return ImageMatch list sorted by decreasing score.
+    """
     matches = [ImageMatch(reference, similarity(query_descriptor, descriptor))
                for reference, ref_category, descriptor in references
                if str(ref_category).casefold() == str(category).casefold()]
     return sorted(matches, key=lambda match: match.score, reverse=True)
 
 
-def rotated_image_similarity(query_descriptor, image_png):
-    """@brief Compare crop appearance independently of the local quarter-turn angle."""
+def _quarter_turn_descriptors(image_png):
+    """Descriptors of a PNG rotated by 0, 90, 180 and 270 degrees, cached on its bytes.
+
+    Returns (descriptors, complete): `complete` is False when the PNG cannot
+    be decoded or described, and `descriptors` then holds those computed
+    before the failure, exactly as an uncached loop would have produced
+    them. The arrays are shared and read-only. TypeError when `image_png`
+    is not bytes-like, as np.frombuffer raised before.
+    """
+    key = hashlib.blake2b(image_png, digest_size=20).digest()
+    with _ROTATED_LOCK:
+        cached = _ROTATED.get(key)
+        if cached is not None:
+            _ROTATED.move_to_end(key)
+            return cached
+    descriptors = []
+    complete = False
     try:
         crop = cv2.imdecode(np.frombuffer(image_png, np.uint8), cv2.IMREAD_COLOR)
-        if crop is None:
+        if crop is not None:
+            for k in range(4):
+                descriptor = describe_crop(np.rot90(crop, k).copy())
+                descriptor.setflags(write=False)
+                descriptors.append(descriptor)
+            complete = True
+    except (ValueError, TypeError, cv2.error):
+        pass
+    result = (tuple(descriptors), complete)
+    with _ROTATED_LOCK:
+        _ROTATED[key] = result
+        while len(_ROTATED) > _ROTATED_MAX:
+            _ROTATED.popitem(last=False)
+    return result
+
+
+def rotated_image_similarity(query_descriptor, image_png):
+    """@brief Compare crop appearance independently of the local quarter-turn angle.
+
+    @param query_descriptor Descriptor of the crop being matched.
+    @param image_png PNG bytes of the reference crop.
+    @return Best similarity over the four quarter-turn rotations of the
+        reference; 0.0 when the image cannot be decoded or described.
+    """
+    try:
+        descriptors, complete = _quarter_turn_descriptors(image_png)
+        if not complete:
             return 0.0
-        return max(similarity(query_descriptor, describe_crop(np.rot90(crop, k).copy()))
-                   for k in range(4))
+        return max(similarity(query_descriptor, descriptor) for descriptor in descriptors)
     except (ValueError, TypeError, cv2.error):
         return 0.0
 
@@ -199,6 +335,16 @@ def match_orientation(query_descriptor, examples):
     LOCAL model angle; the CAD caller separately applies the PCB rotation.
     Old examples without an individual angle never vote. Near-equal votes for
     different angles (including symmetric crops) require manual review.
+
+    @param query_descriptor Descriptor of the crop being matched; anything
+        that is not a numpy array yields the unresolved result.
+    @param examples Iterable of stored crop examples, each a mapping with
+        `id`, `image_png` and `model_rotation_deg` (degrees); examples
+        without a usable angle or image are skipped.
+    @return dict with `status` ("matched" or "unverified") and
+        `rotation_deg` (the transferred local angle, or None); a match also
+        carries `image_id`, `relative_rotation_deg`, `score` and `margin`,
+        and a rejected best vote carries its `score` and `margin`.
     """
     unresolved = {"status": "unverified", "rotation_deg": None}
     if not isinstance(query_descriptor, np.ndarray):
@@ -209,11 +355,11 @@ def match_orientation(query_descriptor, examples):
             angle = float(example["model_rotation_deg"])
             if not np.isfinite(angle):
                 continue
-            crop = cv2.imdecode(np.frombuffer(example["image_png"], np.uint8), cv2.IMREAD_COLOR)
-            if crop is None:
-                continue
-            for k in range(4):
-                score = similarity(query_descriptor, describe_crop(np.rot90(crop, k).copy()))
+            descriptors, _complete = _quarter_turn_descriptors(example["image_png"])
+            # An incomplete set stops where the uncached loop raised: the
+            # votes of the turns before the failure are kept, as before.
+            for k, descriptor in enumerate(descriptors):
+                score = similarity(query_descriptor, descriptor)
                 votes.append((score, (angle + k * 90) % 360, int(example["id"]), k * 90))
         except (ValueError, TypeError, KeyError, cv2.error):
             continue

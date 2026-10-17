@@ -106,6 +106,7 @@ def tool_button(asset: str, title: str, shortcut: str = "", detail: str = "",
 def toolbar_divider() -> QFrame:
     """@brief Thin vertical line between groups of toolbar icons.
 
+    @return A 9 px wide plain QFrame vertical line in the SURFACE1 colour.
     @note The one divider of every icon bar (3D tab and review windows), so
         the bars stay uniform.
     """
@@ -123,6 +124,11 @@ class _TypingGoesToCombos(QObject):
     def eventFilter(self, watched, event):  # noqa: N802 - Qt override
         """@brief Accept ShortcutOverride for plain printable keys on a non-editable combo.
 
+        @param watched Object the event is addressed to; only a non-editable
+            QComboBox is handled.
+        @param event The Qt event.
+        @return True when the override was accepted here, otherwise the
+            base class result.
         @note Accepting the override is how a widget tells Qt that it wants the
             key itself: the window shortcut does not fire and the combo gets
             the key press, which it uses to jump to the entry with that
@@ -197,7 +203,10 @@ class AnchoredPopup(QFrame):
         self._anchor = None
 
     def hideEvent(self, event):  # noqa: N802 - Qt override
-        """@brief Remember when the popup closed, for the reopen guard."""
+        """@brief Remember when the popup closed, for the reopen guard.
+
+        @param event Qt hide event, forwarded to the base class.
+        """
         self._hidden_at = monotonic()
         super().hideEvent(event)
 
@@ -238,14 +247,15 @@ class AnchoredPopup(QFrame):
         needed = (content.totalHeightForWidth(inner) if content.hasHeightForWidth()
                   else content.totalSizeHint().height()) + top + bottom
         available = area.height() - 2 * INFO_POPUP_MARGIN_PX
-        # Piu' alto della finestra: si ferma al suo bordo e il resto scorre.
+        # Taller than the window: it stops at its edge and the rest scrolls.
         height = min(needed, available)
         self.scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if needed > available
             else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFixedHeight(height)
-        # Sotto l'icona, dal suo bordo sinistro; se uscirebbe a destra rientra
-        # (per l'icona «i» in fondo alla barra finisce allineato a destra).
+        # Below the icon, from its left edge; if it would go out on the right
+        # it comes back in (for the «i» icon at the end of the bar it ends up
+        # right-aligned).
         below = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
         x = below.x()
         y = below.y()

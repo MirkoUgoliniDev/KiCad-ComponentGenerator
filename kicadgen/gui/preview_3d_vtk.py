@@ -1,15 +1,17 @@
 """@brief Interactive 3D preview based on VTK/PyVista with a real z-buffer.
 
-Anteprima 3D con VTK/PyVista: renderer con z-buffer reale e interattivo.
+3D preview with VTK/PyVista: a renderer with a real, interactive z-buffer.
 
-Sostituisce l'anteprima matplotlib (kicadgen.gui.preview_3d), che usa
-l'algoritmo del pittore ordinando i poligoni per centroide: sulle geometrie
-a filo -- le serigrafie appoggiate sulla superficie del corpo -- quell'ordine
-sbaglia e "mangia" pezzi della scritta. VTK fa hidden-surface removal per
-pixel, quindi il problema non si pone, e in piu' la vista si ruota col mouse.
+It replaces the matplotlib preview (kicadgen.gui.preview_3d), which uses
+the painter's algorithm sorting the polygons by centroid: on flush
+geometries -- the silkscreen texts lying on the body surface -- that order
+goes wrong and "eats" pieces of the text. VTK does hidden-surface removal
+per pixel, so the problem does not arise, and the view also turns with the
+mouse.
 
-Se pyvista/pyvistaqt non sono installati, main_window ricade sulla versione
-matplotlib: l'anteprima e' comodita', non deve essere un requisito duro.
+If pyvista/pyvistaqt are not installed, main_window falls back to the
+matplotlib version: the preview is a convenience, it must not be a hard
+requirement.
 """
 
 from __future__ import annotations
@@ -33,9 +35,9 @@ from pyvistaqt import QtInteractor
 from ..cad3d.body_params import Body3DParams
 from ..generators.pin_header import PinHeaderParams, pin_positions
 
-#: Spostamento massimo, in pixel, perche' un tasto destro conti ancora come
-#: clic e non come l'inizio di uno zoom a trascinamento. E' la tolleranza di
-#: mano ferma, non una soglia legata a un contenuto particolare.
+#: Maximum movement, in pixels, for a right press to still count as a click
+#: and not as the start of a drag zoom. It is the steady-hand tolerance,
+#: not a threshold tied to any particular content.
 _CLICK_TOLERANCE_PX = 4
 
 _BG_COLOR = "#1e1e2e"
@@ -133,15 +135,15 @@ def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
         if len(vertices) == 0 or len(triangles) == 0:
             continue
 
-        # I pezzi dei piedini si chiamano "Pin<numero>" (vedi
-        # freecad_build_body.py): da li' si ricava l'etichetta, ancorata
-        # alla punta del pin.
+        # The lead pieces are named "Pin<number>" (see
+        # freecad_build_body.py): the label is derived from there, anchored
+        # to the tip of the pin.
         name = str(part.get("name", ""))
         if name.startswith("Pin") and name[3:].isdigit():
             label = part.get("label")
             if label:
-                # Punto scelto da chi ha costruito il pezzo (es. accanto al
-                # semi-foro di un modulo, non sopra): il numero non copre il metallo.
+                # Point chosen by whoever built the piece (e.g. beside the
+                # half-hole of a module, not over it): the number does not cover the metal.
                 point = _spaced_label(label, vertices)
                 anchors.append((int(name[3:]), *point))
             else:
@@ -150,12 +152,12 @@ def _prepare_mesh_scene(mesh_path) -> _PreparedScene:
                     (int(name[3:]), float(centre[0]), float(centre[1]),
                      float(vertices[:, 2].min()))
                 )
-        # PyVista vuole le facce come [n_punti, i, j, k, n_punti, ...]
+        # PyVista wants the faces as [n_points, i, j, k, n_points, ...]
         faces = np.hstack([np.full((len(triangles), 1), 3), triangles]).ravel()
         mesh = pv.PolyData(vertices, faces)
-        # Normali con feature angle: gli spigoli vivi restano netti, mentre
-        # raccordi e cilindri dei pin vengono sfumati e si leggono come curvi
-        # (con l'ombreggiatura piatta i fillet piccoli sparivano sul nero).
+        # Normals with a feature angle: sharp edges stay crisp, while fillets
+        # and pin cylinders are smoothed and read as curved (with flat
+        # shading the small fillets vanished into the black).
         mesh = mesh.compute_normals(
             feature_angle=30, split_vertices=True, consistent_normals=True,
         )
@@ -197,9 +199,9 @@ class _MeshPrepareJob(QRunnable):
         try:
             scene, error = _prepare_mesh_scene(self.mesh_path), ""
         except BaseException as exc:  # noqa: BLE001 - see below
-            # Riportato al visore come ogni errore di lettura. BaseException:
-            # un'eccezione che esce da un QRunnable termina il processo, e
-            # senza risposta l'indicatore di caricamento resterebbe acceso.
+            # Reported to the viewer like every read error. BaseException:
+            # an exception escaping a QRunnable terminates the process, and
+            # without an answer the loading indicator would stay on.
             scene, error = None, str(exc) or type(exc).__name__
         self.signals.finished.emit(self.token, self.key, scene, error)
 
@@ -265,12 +267,12 @@ class Preview3DVtk(QtInteractor):
     """@brief Interactive 3D view: the real generated mesh or the parametric approximation."""
 
     component_requested = pyqtSignal(int)
-    #: Clic sinistro fermo su un componente mentre la «copia formato» e' accesa
-    #: (`format_painter_active`): la riga del componente.
+    #: Steady left click on a component while «copia formato» (format painter)
+    #: is on (`format_painter_active`): the component's row.
     component_clicked = pyqtSignal(int)
-    #: Tasto destro su un componente: indice di riga e punto globale dove
-    #: aprire il menu. La vista non sa cosa si possa fare su un componente --
-    #: le voci le costruisce la finestra, che ha la tabella e i modelli.
+    #: Right press on a component: row index and global point where to open
+    #: the menu. The view does not know what can be done on a component --
+    #: the window builds the entries, since it has the table and the models.
     component_menu_requested = pyqtSignal(int, object)
     #: Request token of `prepare_mesh`: the scene of that file is ready, and
     #: `render_mesh` on it now only builds actors (no parsing, no normals).
@@ -301,19 +303,19 @@ class Preview3DVtk(QtInteractor):
         #: Outline actors of the «copia formato» mode now on screen.
         self._format_outlines = []
         self._right_press = None
-        #: Modalita' «copia formato» (utente, 2026-09-27): un clic sinistro fermo
-        #: su un componente emette `component_clicked`; spenta, il clic resta
-        #: solo l'inizio di una rotazione, come sempre.
+        #: «copia formato» (format painter) mode (user, 2026-09-27): a steady
+        #: left click on a component emits `component_clicked`; when off, the
+        #: click stays only the start of a rotation, as always.
         self.format_painter_active = False
         self._left_press = None
         self._menu_served = False
-        # Scena mostrata e scene gia' preparate, per chiave d'identita' del file.
+        # Scene shown and scenes already prepared, by identity key of the file.
         self._mesh_cache = OrderedDict()
         self._shown_mesh_key = None
         self._mesh_anchors = ()
-        # Preparazione fuori dal thread GUI (`prepare_mesh`): numero
-        # dell'ultima richiesta, lavori in volo (tengono vivi i loro segnali
-        # finche' la risposta non e' consegnata), visore chiuso.
+        # Preparation off the GUI thread (`prepare_mesh`): number of the
+        # latest request, jobs in flight (they keep their signals alive until
+        # the answer is delivered), viewer closed.
         self._prepare_token = 0
         self._prepare_jobs = {}
         #: Preparations in flight by file identity: a second request for the
@@ -325,7 +327,7 @@ class Preview3DVtk(QtInteractor):
         #: returns early when that flag is already set, and the render window
         #: would never be released (block D review, 131).
         self._viewer_closed = False
-        # Animazione della camera (cubo di navigazione).
+        # Camera animation (navigation cube).
         self._camera_animation = None
         self._camera_timer = None
         self._camera_clock = time.monotonic
@@ -340,28 +342,28 @@ class Preview3DVtk(QtInteractor):
         self.set_background(_BG_COLOR)
         self.show_pin_numbers = True
         try:
-            # Illuminazione a tre punti: da' rilievo ai pezzi scuri, dove la
-            # luce frontale singola appiattisce tutto.
+            # Three-point lighting: it gives relief to the dark parts, where
+            # the single frontal light flattens everything.
             self.enable_lightkit()
-        except Exception:  # noqa: BLE001 - illuminazione di default
+        except Exception:  # noqa: BLE001 - default lighting
             pass
         self._label_actor = None
-        # Cubo di navigazione in alto a destra (al posto della riga di
-        # pulsanti «Vista»). E' una comodita': se VTK non ha il modulo delle
-        # annotazioni la vista funziona lo stesso, si ruota col mouse.
+        # Navigation cube at the top right (in place of the row of «Vista»
+        # (view) buttons). It is a convenience: if VTK lacks the annotation
+        # module the view works anyway, it is rotated with the mouse.
         self.view_cube = None
         self._cube_press = False
         try:
             from .view_cube import ViewCube
             self.view_cube = ViewCube(self.ren_win, self.renderer)
             self.view_cube.layout(self.width(), self.height())
-        except Exception:  # noqa: BLE001 - il cubo e' accessorio
+        except Exception:  # noqa: BLE001 - the cube is an accessory
             self.view_cube = None
-        # Le etichette si aggiornano anche quando l'utente ruota col mouse, non
-        # solo premendo i pulsanti di vista.
+        # The labels update also when the user rotates with the mouse, not
+        # only when pressing the view buttons.
         try:
             self.iren.add_observer("EndInteractionEvent", self._on_interaction_end)
-        except Exception:  # noqa: BLE001 - senza interattore le etichette restano statiche
+        except Exception:  # noqa: BLE001 - without an interactor the labels stay static
             pass
 
     def _on_interaction_end(self, *_args) -> None:
@@ -377,7 +379,7 @@ class Preview3DVtk(QtInteractor):
             pass  # Optional interaction must not prevent rendering a model.
 
     def _component_actor_at(self, x, y):
-        """@brief Attore sotto un punto gia' espresso in coordinate VTK."""
+        """@brief Actor under a point already expressed in VTK display coordinates."""
         try:
             from vtkmodules.vtkRenderingCore import vtkPropPicker
             picker = vtkPropPicker()
@@ -388,11 +390,15 @@ class Preview3DVtk(QtInteractor):
             return None
 
     def _component_row_at_widget_point(self, x, y):
-        """@brief Riga della tabella sotto un punto in coordinate Qt.
+        """@brief Table row under a point in Qt coordinates.
 
-        L'asse Y va rovesciato: Qt conta dall'alto, VTK dal basso. Il
-        rapporto di scala serve sui monitor ad alta densita', dove i pixel
-        logici di Qt non sono quelli del framebuffer.
+        @param x Logical widget X, px.
+        @param y Logical widget Y, px (from the top).
+        @return The component row index under the point, or None when no
+            component actor is there.
+        @note The Y axis must be flipped: Qt counts from the top, VTK from the
+            bottom. The scale ratio is needed on high-density monitors, where
+            Qt's logical pixels are not those of the framebuffer.
         """
         try:
             ratio = float(self.devicePixelRatioF())
@@ -404,10 +410,13 @@ class Preview3DVtk(QtInteractor):
         return self._component_actors.get(actor.GetAddressAsString(''))
 
     def _request_component_menu(self, position, global_position) -> bool:
-        """@brief Emetti la richiesta di menu, se sotto il punto c'e' un componente.
+        """@brief Emit the menu request, if there is a component under the point.
 
-        @return True se la richiesta e' partita, cosi' il chiamante sa di aver
-                gia' servito questo clic e non lo serve una seconda volta.
+        @param position Cursor position in widget coordinates (QPoint).
+        @param global_position Cursor position in screen coordinates, where
+            the menu is to be opened.
+        @return True when the request was emitted, so the caller knows it has
+                already served this click and does not serve it a second time.
         """
         index = self._component_row_at_widget_point(position.x(), position.y())
         if index is None:
@@ -416,7 +425,7 @@ class Preview3DVtk(QtInteractor):
         self.component_menu_requested.emit(index, global_position)
         return True
 
-    # ── Cubo di navigazione ─────────────────────────────────────────
+    # ── Navigation cube ─────────────────────────────────────────────
 
     def set_view_cube_labels(self, labels: dict) -> None:
         """@brief Translate the face labels of the navigation cube.
@@ -440,7 +449,7 @@ class Preview3DVtk(QtInteractor):
         unit = np.asarray(direction, dtype=float) / norm
         focal = np.asarray(self.camera.focal_point, dtype=float)
         distance = float(np.linalg.norm(np.asarray(self.camera.position) - focal)) or 1.0
-        # Con la camera quasi verticale l'alto non puo' essere Z.
+        # With the camera almost vertical, up cannot be Z.
         up = (0.0, 0.0, 1.0) if abs(unit[2]) < 0.99 else (0.0, 1.0, 0.0)
         self.camera_position = [tuple(focal + unit * distance), tuple(focal), up]
         self.fit_view()
@@ -486,7 +495,7 @@ class Preview3DVtk(QtInteractor):
             self.render()
         self._animate_camera(apply)
 
-    # ── Animazione della camera ─────────────────────────────────────
+    # ── Camera animation ─────────────────────────────────────
 
     def animate_to_view(self, view: str) -> None:
         """@brief Turn the camera smoothly to a standard view.
@@ -506,7 +515,10 @@ class Preview3DVtk(QtInteractor):
         self._animate_camera(lambda: self.view_direction(direction))
 
     def is_camera_animating(self) -> bool:
-        """@brief Whether an animated view change is in progress."""
+        """@brief Whether an animated view change is in progress.
+
+        @return True between `_animate_camera` and the last frame (or a stop).
+        """
         return self._camera_animation is not None
 
     def stop_camera_animation(self) -> None:
@@ -576,7 +588,7 @@ class Preview3DVtk(QtInteractor):
         start = self._camera_pose()
         end = self._pose_after(apply)
         if all(np.allclose(a, b, rtol=1e-9, atol=1e-9) for a, b in zip(start, end)):
-            apply()  # gia' li': niente da animare, solo l'inquadratura finale
+            apply()  # already there: nothing to animate, only the final framing
             return
         self._camera_animation = (start, end, apply, self._camera_clock(), duration)
         self._camera_timer.start()
@@ -606,15 +618,19 @@ class Preview3DVtk(QtInteractor):
         point = event.position()
         return self.view_cube.contains(point.x(), point.y())
 
-    def resizeEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Keep the cube in the top-right corner at a fixed pixel size."""
+    def resizeEvent(self, event):  # noqa: N802 - Qt signature
+        """@brief Keep the cube in the top-right corner at a fixed pixel size.
+
+        @param event Qt resize event.
+        """
         super().resizeEvent(event)
         if self.view_cube is not None:
             self.view_cube.layout(self.width(), self.height())
 
-    def closeEvent(self, event):  # noqa: N802 - firma Qt
+    def closeEvent(self, event):  # noqa: N802 - Qt signature
         """@brief Stop the camera animation before the render window goes away.
 
+        @param event Qt close event.
         @note Mesh preparations still running in the pool finish on their own;
             their results are dropped (`_on_mesh_job_finished`), never drawn
             on a finalized render window.
@@ -623,13 +639,19 @@ class Preview3DVtk(QtInteractor):
         self.stop_camera_animation()
         super().closeEvent(event)
 
-    def wheelEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief A wheel zoom takes over the camera: stop a running view animation."""
+    def wheelEvent(self, event):  # noqa: N802 - Qt signature
+        """@brief A wheel zoom takes over the camera: stop a running view animation.
+
+        @param event Qt wheel event, forwarded to VTK after the stop.
+        """
         self.stop_camera_animation()
         super().wheelEvent(event)
 
-    def mouseMoveEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Pointing-hand cursor over the cube and its buttons, with their tooltip."""
+    def mouseMoveEvent(self, event):  # noqa: N802 - Qt signature
+        """@brief Pointing-hand cursor over the cube and its buttons, with their tooltip.
+
+        @param event Qt mouse move event, forwarded to VTK afterwards.
+        """
         from PyQt6.QtWidgets import QToolTip
         if self._on_cube(event):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -655,9 +677,10 @@ class Preview3DVtk(QtInteractor):
         if self.view_cube is not None:
             self.view_cube.set_tooltips(tooltips)
 
-    def mouseDoubleClickEvent(self, event):  # noqa: N802 - firma Qt
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt signature
         """@brief Open the component under the cursor; on the cube, nothing more.
 
+        @param event Qt mouse double-click event.
         @note Served here, from the Qt event, not by a VTK observer: the Qt
             interactor of VTK forwards a double click as a second
             LeftButtonPressEvent with repeat count 1 and never fires
@@ -686,9 +709,10 @@ class Preview3DVtk(QtInteractor):
         self.component_requested.emit(index)
         return True
 
-    def mousePressEvent(self, event):  # noqa: N802 - firma Qt
+    def mousePressEvent(self, event):  # noqa: N802 - Qt signature
         """@brief Serve clicks on the cube; remember where a right press starts.
 
+        @param event Qt mouse press event.
         @note A left click on the cube never reaches VTK: it would also start
             a camera rotation, and the view would turn under the cursor.
             Outside the cube's hit area (and in the empty corners of its
@@ -703,8 +727,8 @@ class Preview3DVtk(QtInteractor):
                 event.accept()
                 self._cube_clicked(target)
                 return
-        # Qualunque altro gesto prende la camera in mano: l'animazione del
-        # cubo non deve continuare a muoverla sotto il mouse.
+        # Any other gesture takes the camera in hand: the cube animation
+        # must not keep moving it under the mouse.
         self.stop_camera_animation()
         if event.button() == Qt.MouseButton.RightButton:
             self._right_press = event.pos()
@@ -713,22 +737,24 @@ class Preview3DVtk(QtInteractor):
             self._left_press = event.pos() if self.format_painter_active else None
         super().mousePressEvent(event)
 
-    def mouseReleaseEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Apri il menu su un clic destro fermo sopra un componente.
+    def mouseReleaseEvent(self, event):  # noqa: N802 - Qt signature
+        """@brief Open the menu on a still right click over a component.
 
-        Qt sintetizza `contextMenuEvent` dal messaggio di sistema, e sopra la
-        finestra nativa che VTK si crea non e' detto che arrivi; il rilascio
-        del pulsante invece passa sempre di qui, perche' l'interattore Qt di
-        VTK e' un QWidget normale che lo inoltra. Si serve quindi il clic qui,
-        e `contextMenuEvent` resta per il tasto menu della tastiera.
-
-        Il tasto destro di VTK e' anche lo zoom a trascinamento: si apre il
-        menu solo se il mouse non si e' spostato, altrimenti si e' chiesto
-        uno zoom e il menu sarebbe un fastidio.
+        @param event Qt mouse release event.
+        @note Qt synthesises `contextMenuEvent` from the system message, and
+            over the native window VTK creates for itself it is not certain to
+            arrive; the button release instead always passes through here,
+            because VTK's Qt interactor is an ordinary QWidget that forwards
+            it. The click is therefore served here, and `contextMenuEvent`
+            remains for the keyboard menu key.
+        @note VTK's right button is also the drag zoom: the menu opens only if
+            the mouse did not move (within _CLICK_TOLERANCE_PX), otherwise a
+            zoom was asked for and the menu would be a nuisance. A still left
+            click emits `component_clicked` with the same tolerance.
         """
         if getattr(self, "_cube_press", False) and event.button() == Qt.MouseButton.LeftButton:
-            # Il clic sul cubo e' gia' servito alla pressione: VTK non ha visto
-            # la pressione e non deve vedere nemmeno il rilascio.
+            # The click on the cube was already served on press: VTK did not
+            # see the press and must not see the release either.
             self._cube_press = False
             event.accept()
             return
@@ -739,7 +765,7 @@ class Preview3DVtk(QtInteractor):
         super().mouseReleaseEvent(event)
         if (event.button() == Qt.MouseButton.LeftButton and left_start is not None
                 and (event.pos() - left_start).manhattanLength() <= _CLICK_TOLERANCE_PX):
-            # Un clic fermo, non una rotazione: la stessa tolleranza del menu.
+            # A steady click, not a rotation: the same tolerance as the menu.
             index = self._component_row_at_widget_point(event.pos().x(), event.pos().y())
             if index is not None:
                 self.component_clicked.emit(index)
@@ -750,19 +776,23 @@ class Preview3DVtk(QtInteractor):
             return
         self._request_component_menu(event.pos(), event.globalPosition().toPoint())
 
-    def contextMenuEvent(self, event):  # noqa: N802 - firma Qt
-        """@brief Via alternativa al menu (tasto dedicato, o piattaforme che
-        consegnano questo evento invece del rilascio del pulsante)."""
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt signature
+        """@brief Alternative route to the menu (dedicated key, or platforms that
+        deliver this event instead of the button release).
+
+        @param event Qt context menu event; accepted when the menu was already
+            served by the release or is served here, forwarded to VTK otherwise.
+        """
         if getattr(self, "_menu_served", False):
-            # Il clic e' gia' stato servito dal rilascio: un secondo menu
-            # per lo stesso gesto sarebbe solo un doppione.
+            # The click was already served by the release: a second menu
+            # for the same gesture would only be a duplicate.
             self._menu_served = False
             event.accept()
             return
         if self._request_component_menu(event.pos(), event.globalPos()):
             event.accept()
             return
-        # Fuori dai componenti il tasto destro resta quello di VTK.
+        # Outside the components the right button stays VTK's.
         super().contextMenuEvent(event)
 
     def _component_picked(self, actor):
@@ -856,32 +886,33 @@ class Preview3DVtk(QtInteractor):
     def set_pin_numbers(self, enabled: bool) -> None:
         """@brief Enable or disable the pin number labels (still shown only from the pin side).
 
-        Attiva/disattiva le etichette dei pin (restano comunque limitate alla
-        vista dal lato piedini)."""
+        @param enabled True to show the labels when the camera looks from the
+            pin side (negative Z); False hides them in every view.
+        """
         self.show_pin_numbers = enabled
         self._update_label_visibility()
 
     def _viewing_from_below(self) -> bool:
-        """True se la camera guarda il componente da sotto (Z negativo).
+        """True when the camera looks at the component from below (negative Z).
 
-        Il piano Z=0 e' quello di saldatura: i piedini stanno sotto, il corpo
-        sopra, quindi una camera a Z negativo sta guardando il lato pin.
+        The Z=0 plane is the soldering plane: the leads are below, the body
+        above, so a camera at negative Z is looking at the pin side.
         """
         try:
             return float(self.camera.position[2]) < 0.0
-        except Exception:  # noqa: BLE001 - camera non disponibile
+        except Exception:  # noqa: BLE001 - camera not available
             return False
 
     def _update_label_visibility(self) -> None:
-        """I numeri compaiono solo dal lato dei pin: sopra il corpo li copre e
-        farebbero solo confusione."""
+        """The numbers appear only from the pin side: from above the body covers
+        them and they would only add confusion."""
         if self._label_actor is None:
             return
         self._label_actor.SetVisibility(self.show_pin_numbers and self._viewing_from_below())
         self.render()
 
     def _add_pin_labels(self, anchors) -> None:
-        """Numeri centrati sugli ancoraggi, visibili solo dal lato piedini."""
+        """Numbers centred on the anchors, visible only from the pin side."""
         self._pin_label_anchors = tuple(anchors)
         self._label_actor = None
         if not self.show_pin_numbers or not anchors:
@@ -899,7 +930,11 @@ class Preview3DVtk(QtInteractor):
         )
 
     def set_pin_functions(self, pinout) -> None:
-        """@brief Update view-only pin functions without rebuilding CAD or moving the camera."""
+        """@brief Update view-only pin functions without rebuilding CAD or moving the camera.
+
+        @param pinout Pin rows as dicts with `pin` and optional `name`; None
+            or empty clears the functions. Rows without `pin` are ignored.
+        """
         names = {str(row['pin']).strip(): str(row.get('name') or '').strip()
                  for row in pinout or () if isinstance(row, dict) and 'pin' in row}
         if names == getattr(self, '_pin_functions', {}):
@@ -919,32 +954,29 @@ class Preview3DVtk(QtInteractor):
 
     def _finish(self) -> None:
         self.show_axes()
-        # Tre luci invece della singola frontale: una superficie curva illuminata
-        # di fronte rende quasi piatta, e su un case scuro i raccordi sparirebbero.
+        # Three lights instead of the single frontal one: a curved surface lit
+        # from the front renders almost flat, and on a dark case the fillets would vanish.
         self.enable_3_lights()
         self.show_view("iso")
 
     def fit_view(self) -> None:
-        """@brief Frame the whole component with a margin after resynchronizing the render window size.
-
-        Inquadra tutto il componente lasciando un margine.
-        """
-        # VTK puo' avere in cache una dimensione della render window diversa
-        # da quella attuale del widget Qt -- capita quando il widget vive
-        # dentro un layout che cambia dimensione dopo il primo render.
-        # Il renderer non e' contenuto nell'area scorrevole delle impostazioni.
-        # Senza risincronizzarla,
-        # reset_camera() inquadra rispetto alla vecchia area: il modello
-        # finisce centrato in un riquadro che non e' piu' quello visibile,
-        # e appare spostato rispetto alla finestra vera.
+        """@brief Frame the whole component with a margin after resynchronizing the render window size."""
+        # VTK may have cached a render window size different from the current
+        # one of the Qt widget -- it happens when the widget lives inside a
+        # layout that changes size after the first render.
+        # The renderer is not contained in the scrolling area of the settings.
+        # Without resynchronising it,
+        # reset_camera() frames with respect to the old area: the model
+        # ends up centred in a box that is no longer the visible one,
+        # and appears shifted with respect to the real window.
         try:
             ratio = self.devicePixelRatioF()
             self.window_size = (max(1, round(self.width() * ratio)),
                                 max(1, round(self.height() * ratio)))
-        except Exception:  # noqa: BLE001 - risincronizzazione best-effort
+        except Exception:  # noqa: BLE001 - best-effort resynchronisation
             pass
         self.reset_camera()
-        self.camera.zoom(0.85)  # senza margine i pin restano fuori inquadratura
+        self.camera.zoom(0.85)  # without a margin the pins stay out of frame
         self._update_label_visibility()
         self.render()
 
@@ -1083,7 +1115,7 @@ class Preview3DVtk(QtInteractor):
         # when the latest request asked for the same unchanged file.
         current = token == self._prepare_token or key == self._latest_mesh_key
         if getattr(self, "_viewer_closed", False) or not current:
-            return  # superata da una richiesta piu' recente, o visore chiuso
+            return  # superseded by a more recent request, or viewer closed
         token = self._prepare_token
         if error:
             self.mesh_prepare_failed.emit(token, error)
@@ -1130,9 +1162,9 @@ class Preview3DVtk(QtInteractor):
         with self._rendering_suppressed():
             self._reset()
             for part in scene.parts:
-                # ambient alto: i moduli reali sono quasi neri (#1a1a1a) e con la
-                # sola luce diffusa, su sfondo scuro, diventavano una macchia
-                # indistinguibile.
+                # high ambient: real modules are almost black (#1a1a1a) and with
+                # diffuse light only, on a dark background, they became an
+                # indistinguishable blot.
                 actor = self.add_mesh(
                     part.mesh, color=part.color,
                     smooth_shading=True, specular=0.4, specular_power=20,

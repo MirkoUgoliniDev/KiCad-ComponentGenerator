@@ -1,28 +1,26 @@
-"""@brief Difetti 1-4 del revisore 1 (verifica del 2026-09-24) nelle due finestre di revisione.
+"""@brief Difetti 1-4 del revisore 1 (verifica del 2026-09-24) nella finestra di revisione.
 
 Ogni regola ha un caso positivo e uno negativo che la distinguono per ragioni
 strutturali: visibile o nascosto dal filtro, dentro o fuori dal riquadro
-scelto, gesto in corso o no, fuoco su un combo o su un'altra parte.
+scelto, fuoco su un combo o su un'altra parte.
+
+@note I gemelli di questi test sulla vecchia finestra «Corpi rilevati»
+      sono stati tolti con quel modulo, che era codice morto: la fase del
+      rilevatore e' oggi `PhotoReviewDialog` con `stage=STAGE_DETECTOR`,
+      coperta in `test_unified_review.py`.
 """
-from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, Qt
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QLabel
 
-from test_yolo_review_dialog import LENGTH_MM, WIDTH_MM, _Mouse, _proposal
-from kicadgen.gui.photo_review_dialog import PhotoReviewDialog
+from kicadgen.gui.photo_review_dialog import STAGE_DETECTOR, PhotoReviewDialog
 from kicadgen.gui.review_tools import INFO_POPUP_MARGIN_PX, InfoPopup
-from kicadgen.gui.yolo_review_dialog import (PHOTO_FULL, TOOL_DRAW, TOOL_SELECT,
-                                             YoloReviewDialog)
-from kicadgen.services.photo_yolo import detector_classes
+from kicadgen.services import photo_yolo
 
-
-def _yolo(app, proposals):
-    dialog = YoloReviewDialog(b"", proposals, LENGTH_MM, WIDTH_MM, detector_classes())
-    dialog.resize(900, 600)
-    dialog.show()
-    app.processEvents()
-    return dialog
+#: La scheda di prova: 40 mm lungo X, 20 mm lungo Y, diverse fra loro perche'
+#: uno scambio fra i due assi non passi inosservato.
+LENGTH_MM, WIDTH_MM = 40.0, 20.0
 
 
 def _png():
@@ -40,6 +38,23 @@ def _component(name, kind, x, y, length, width):
                 height_mm=1.0, rotation_deg=0.0, confidence="high")
 
 
+def _proposal(identity, box, **changes):
+    """@brief A detector proposal as `detect_yolo_components` writes it.
+
+    @param identity Proposal id.
+    @param box Normalised (x0, y0, x1, y1) box on the crop.
+    @param changes Extra or overriding keys.
+    @return Proposal dict with the geometry in mm derived from the box.
+    """
+    row = dict(_id=identity, _box=tuple(box), name=f"detector hypothesis {identity}",
+               kind="generic", **photo_yolo.box_geometry_mm(box, LENGTH_MM, WIDTH_MM),
+               height_mm=1.0, color_hex="#303030", _source="YOLO local",
+               _yolo_class="resistor", _yolo_confidence=.72, _yolo_review_only=False,
+               _yolo_origin="operating_threshold", _yolo_low_confidence=False)
+    row.update(changes)
+    return row
+
+
 def _focus(app, dialog, widget):
     """Porta il fuoco su `widget` con la finestra ATTIVA: le scorciatoie di
     finestra scattano solo li', e senza questa verifica il caso positivo
@@ -52,7 +67,7 @@ def _focus(app, dialog, widget):
 
 
 def _photo(app, components):
-    dialog = PhotoReviewDialog(_png(), components, 40, 20)
+    dialog = PhotoReviewDialog(_png(), components, LENGTH_MM, WIDTH_MM)
     dialog.show()
     app.processEvents()
     return dialog
@@ -60,41 +75,12 @@ def _photo(app, components):
 
 # ── 1: dopo Canc la scelta va a un vicino visibile ───────────────────────
 
-def test_yolo_delete_selects_a_visible_neighbour_or_nothing(app):
+def test_photo_delete_selects_a_visible_neighbour_or_nothing(app):
     """@brief Positivo: col filtro «resistor» il vicino scelto e' un resistore.
 
     Negativo: tolto l'ultimo resistore non si sceglie il condensatore che il
-    filtro nascondeva; la categoria sparita lascia il filtro su «tutte».
+    filtro nascondeva.
     """
-    dialog = _yolo(app, [_proposal(1, (.1, .1, .2, .2), _yolo_class="resistor"),
-                         _proposal(2, (.3, .1, .4, .2), _yolo_class="capacitor"),
-                         _proposal(3, (.5, .1, .6, .2), _yolo_class="resistor")])
-    dialog.category_filter.setCurrentIndex(dialog.category_filter.findData("resistor"))
-    dialog._select_row(0)
-    dialog._delete_selected()
-    chosen = dialog.view.selected
-    assert dialog.proposals[chosen]["_id"] == 3
-    dialog._delete_selected()
-    assert dialog.view.selected == -1
-    assert [p["_yolo_class"] for p in dialog.proposals] == ["capacitor"]
-    assert dialog.category_filter.currentData() is None
-    dialog._delete_selected()
-    assert len(dialog.proposals) == 1
-    dialog.close()
-
-
-def test_yolo_delete_without_filter_keeps_selecting_the_next(app):
-    """@brief Senza filtro resta il comportamento di prima: il successivo, poi il precedente."""
-    dialog = _yolo(app, [_proposal(i, (.1 * i, .1, .1 * i + .05, .2)) for i in range(1, 4)])
-    dialog._select_row(1)
-    dialog._delete_selected()
-    assert dialog.proposals[dialog.view.selected]["_id"] == 3
-    dialog._delete_selected()
-    assert dialog.proposals[dialog.view.selected]["_id"] == 1
-    dialog.close()
-
-
-def test_photo_delete_selects_a_visible_neighbour_or_nothing(app):
     dialog = _photo(app, [_component("R1", "resistor", -10, 0, 2, 1),
                           _component("C1", "capacitor", 0, 0, 2, 1),
                           _component("R2", "resistor", 10, 0, 2, 1)])
@@ -111,36 +97,6 @@ def test_photo_delete_selects_a_visible_neighbour_or_nothing(app):
 
 
 # ── 2: un riquadro piccolo dentro quello scelto si sceglie ───────────────
-
-def _nested(app):
-    return _yolo(app, [_proposal(1, (.1, .1, .8, .8), _yolo_class="ic"),
-                       _proposal(2, (.40, .40, .46, .46))])
-
-
-def test_yolo_a_small_box_inside_the_selected_one_can_be_chosen(app):
-    """@brief Positivo: clic sul piccolo dentro il grande scelto -> il piccolo.
-
-    Negativo: clic sull'interno del grande dove non c'e' altro -> resta il
-    grande, e il trascinamento lo sposta.
-    """
-    dialog = _nested(app)
-    view = dialog.view
-    dialog._select_row(0)
-    small = view.to_widget(dialog.proposals[1]["_box"]).center()
-    view.mousePressEvent(_Mouse(small))
-    view.mouseReleaseEvent(_Mouse(small))
-    assert view.selected == 1
-
-    dialog._select_row(0)
-    empty = view.to_widget((.2, .2, .25, .25)).center()
-    view.mousePressEvent(_Mouse(empty))
-    moved = QPointF(empty.x() + 30, empty.y() + 20)
-    view.mouseMoveEvent(_Mouse(moved))
-    view.mouseReleaseEvent(_Mouse(moved))
-    assert view.selected == 0
-    assert dialog.proposals[0]["_box"] != (.1, .1, .8, .8)
-    dialog.close()
-
 
 def test_photo_order_is_by_area_even_for_the_selected_outline(app):
     """@brief Positivo: scelto il grande, il piccolo resta sopra e il clic lo prende.
@@ -165,58 +121,13 @@ def test_photo_order_is_by_area_even_for_the_selected_outline(app):
     dialog.close()
 
 
-# ── 3: Canc durante un trascinamento ─────────────────────────────────────
-
-def test_yolo_delete_during_a_drag_leaves_the_next_box_alone(app):
-    """@brief Positivo: il corpo che prende il posto del cancellato non si muove.
-
-    Negativo: senza Canc lo stesso trascinamento sposta il corpo e lo marca.
-    """
-    dialog = _yolo(app, [_proposal(1, (.1, .1, .2, .2)), _proposal(2, (.5, .5, .7, .7)),
-                         _proposal(3, (.3, .3, .4, .4))])
-    view = dialog.view
-    dialog._select_row(1)
-    start = view.to_widget(dialog.proposals[1]["_box"]).center()
-    view.mousePressEvent(_Mouse(start))
-    dialog._delete_selected()
-    end = QPointF(start.x() + 40, start.y() + 30)
-    view.mouseMoveEvent(_Mouse(end))
-    view.mouseReleaseEvent(_Mouse(end))
-    assert dialog.proposals[1]["_id"] == 3
-    assert dialog.proposals[1]["_box"] == (.3, .3, .4, .4)
-    assert not dialog.proposals[1].get("_yolo_manual_box")
-
-    dialog._select_row(1)
-    start = view.to_widget(dialog.proposals[1]["_box"]).center()
-    view.mousePressEvent(_Mouse(start))
-    end = QPointF(start.x() + 40, start.y() + 30)
-    view.mouseMoveEvent(_Mouse(end))
-    view.mouseReleaseEvent(_Mouse(end))
-    assert dialog.proposals[1]["_box"] != (.3, .3, .4, .4)
-    assert dialog.proposals[1].get("_yolo_manual_box")
-    dialog.close()
-
-
 # ── 4: un combo con il fuoco tiene le sue lettere ────────────────────────
 
-def test_yolo_typing_in_a_combo_does_not_trigger_shortcuts(app):
-    """@brief Positivo: R e P dentro il filtro non cambiano strumento ne' foto.
-
-    Negativo: gli stessi tasti con il fuoco sulla lista li cambiano.
-    """
-    dialog = _yolo(app, [_proposal(1, (.1, .1, .2, .2))])
-    _focus(app, dialog, dialog.category_filter)
-    for key in "rp":
-        QTest.keyClick(dialog.category_filter, key)
-    assert dialog.view.tool == TOOL_SELECT and dialog.view.photo_state() == PHOTO_FULL
-    _focus(app, dialog, dialog.list)
-    for key in "rp":
-        QTest.keyClick(dialog.list, key)
-    assert dialog.view.tool == TOOL_DRAW and dialog.view.photo_state() != PHOTO_FULL
-    dialog.close()
-
-
 def test_photo_typing_in_a_combo_does_not_trigger_shortcuts(app):
+    """@brief Positivo: R, P, F, +, - dentro il filtro non cambiano strumento, foto ne' zoom.
+
+    Negativo: P con il fuoco sulla lista cambia lo stato della foto.
+    """
     dialog = _photo(app, [_component("R1", "resistor", -10, 0, 2, 1),
                           _component("C1", "capacitor", 0, 0, 2, 1)])
     _focus(app, dialog, dialog.category_filter)
@@ -231,7 +142,7 @@ def test_photo_typing_in_a_combo_does_not_trigger_shortcuts(app):
     dialog.close()
 
 
-# ── sospetti: popup alto, tremolio con Disegna ───────────────────────────
+# ── sospetti: popup alto ─────────────────────────────────────────────────
 
 def test_a_popup_taller_than_its_window_scrolls_inside_it(app):
     """@brief Positivo: testo lunghissimo -> popup alto quanto la finestra e barra attiva.
@@ -262,53 +173,25 @@ def test_a_popup_taller_than_its_window_scrolls_inside_it(app):
     window.close()
 
 
-def test_a_draw_tremor_is_a_click_and_a_real_drag_draws(app):
-    """@brief Positivo: con Disegna un movimento sotto startDragDistance sceglie.
-
-    Negativo: un trascinamento vero, anche corto ma oltre la soglia e sopra
-    MIN_NEW_BOX_MM, traccia un riquadro nuovo.
-    """
-    dialog = _yolo(app, [_proposal(1, (.1, .1, .5, .5))])
-    dialog.set_tool(TOOL_DRAW)
-    view = dialog.view
-    added = []
-    view.box_added.connect(added.append)
-    dialog._select_row(-1)
-    start = view.to_widget((.2, .2, .3, .3)).center()
-    jitter = QApplication.startDragDistance() - 1
-    end = QPointF(start.x() + jitter, start.y())
-    view.mousePressEvent(_Mouse(start))
-    view.mouseMoveEvent(_Mouse(end))
-    view.mouseReleaseEvent(_Mouse(end))
-    assert not added and view.selected == 0
-
-    frame = view._frame()
-    start = QPointF(frame.x() + .6 * frame.width(), frame.y() + .6 * frame.height())
-    end = QPointF(start.x() + .1 * frame.width(), start.y() + .1 * frame.height())
-    view.mousePressEvent(_Mouse(start))
-    view.mouseMoveEvent(_Mouse(end))
-    view.mouseReleaseEvent(_Mouse(end))
-    assert len(added) == 1
-    dialog.close()
-
-
 def test_the_detector_summary_follows_the_language(app, tmp_path):
     """@brief Utente, 2026-09-24: la riga di riepilogo restava italiana in inglese.
 
-    Positivo: con un genitore in inglese la frase e' inglese e porta i numeri.
-    Negativo: senza traduttore resta la sorgente italiana.
+    Positivo: con un genitore in inglese la frase della fase del rilevatore e'
+    inglese e porta i numeri. Negativo: senza traduttore resta la sorgente
+    italiana.
     """
     from PyQt6.QtWidgets import QWidget
     from kicadgen.services.analysis_profiles import ProfileStore
     from kicadgen.services.i18n import I18n
     parent = QWidget()
     parent.i18n = I18n(ProfileStore(tmp_path / "p.sqlite3"), "en")
-    english = YoloReviewDialog(b"", [_proposal(1, (.1, .1, .2, .2))], LENGTH_MM, WIDTH_MM,
-                               detector_classes(), parent)
-    assert english.summary.text().startswith("The detector proposed 1 (")
-    assert "You keep 1, plus 0 added by hand." in english.summary.text()
-    italian = _yolo(app, [_proposal(1, (.1, .1, .2, .2))])
-    assert italian.summary.text().startswith("Il rilevatore ne ha proposte 1 (")
+    english = PhotoReviewDialog(_png(), [_proposal(1, (.1, .1, .2, .2))], LENGTH_MM, WIDTH_MM,
+                                parent, stage=STAGE_DETECTOR)
+    assert english.ai_only_label.text().startswith("The detector proposed 1 (")
+    assert "You keep 1, plus 0 added by hand." in english.ai_only_label.text()
+    italian = PhotoReviewDialog(_png(), [_proposal(1, (.1, .1, .2, .2))], LENGTH_MM, WIDTH_MM,
+                                stage=STAGE_DETECTOR)
+    assert italian.ai_only_label.text().startswith("Il rilevatore ne ha proposte 1 (")
     # Distruzione in ordine, prima la finestra e poi il genitore temporaneo:
     # lasciata al garbage collector, la coppia faceva cadere il processo a
     # fine suite (codice 139, dopo che tutti i test erano passati).

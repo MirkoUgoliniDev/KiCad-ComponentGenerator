@@ -29,7 +29,8 @@ _TEXT_CONSTRUCTORS = {"QPushButton", "QLabel", "QCheckBox", "QRadioButton",
 #: Setter il cui primo argomento e' testo visibile. Sono gli stessi che
 #: `retranslate_widgets` rilegge dalle proprieta' `i18n_*_source`.
 _TEXT_SETTERS = {"setText", "setToolTip", "setWindowTitle", "setTitle",
-                 "setPlaceholderText", "setAccessibleName", "setTabText"}
+                 "setPlaceholderText", "setAccessibleName", "setTabText",
+                 "setStatusTip", "setWhatsThis"}
 
 #: Proprieta' con cui un widget dichiara da se' la propria sorgente i18n.
 _SOURCE_PROPERTIES = {"i18n_source", "i18n_tooltip_source", "i18n_window_title_source",
@@ -133,6 +134,16 @@ def ui_source_literals():
                 for argument in node.args[1:]:
                     if value := constant(argument):
                         remember(value, path, node.lineno)
+            elif name in ("add_item", "set_item_source"):
+                # Voce di combo con la sua sorgente (`I18n.add_item(combo, "…", dato)`,
+                # `set_item_source(combo, indice, "…")`): la sorgente del testo
+                # e il tooltip (parola chiave) sono catalogo, il dato no.
+                position = 1 if name == "add_item" else 2
+                if len(node.args) > position and (value := constant(node.args[position])):
+                    remember(value, path, node.lineno)
+                for keyword in node.keywords:
+                    if keyword.arg == "tooltip" and (value := constant(keyword.value)):
+                        remember(value, path, node.lineno)
             elif name == "addRow" and len(node.args) >= 2 and (value := constant(node.args[0])):
                 # Etichetta di una riga di QFormLayout: diventa una QLabel che
                 # `retranslate_widgets` ritraduce. Mancava al raccoglitore, e
@@ -188,7 +199,7 @@ def test_translation_catalog_seeds_all_supported_languages(tmp_path):
     i18n = I18n(store, "fr")
     # Titoli senza emoji dal 2026-09-24: l'icona della scheda e' un SVG.
     assert i18n.tr("tab.project.name") == "Projet"
-    assert i18n.tr("tab.model3d.name") == "Modèle 3D"
+    assert i18n.tr("tab.model3d.name") == "Modèle STEP"
     assert i18n.tr("tab.kicad.name") == "KiCad"
 
 
@@ -212,7 +223,7 @@ def test_emoji_free_tab_titles_reach_a_database_created_before_them(tmp_path):
     ProfileStore(fresh)
     with sqlite3.connect(fresh) as db:
         db.execute("DELETE FROM translations WHERE key LIKE 'tab.%.name'")
-    assert I18n(ProfileStore(fresh), "it").tr("tab.model3d.name") == "Modello 3D"
+    assert I18n(ProfileStore(fresh), "it").tr("tab.model3d.name") == "Modello STEP"
 
 
 def test_translation_falls_back_to_english_and_persists_edits(tmp_path):
@@ -365,7 +376,7 @@ def test_the_removed_entries_are_not_referenced_by_any_source():
     removed = (
         "ui:Rivedi proposte e rilancia l'inventario…",
         "ui:Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, "
-        "permette di correggerli. Non avvia la generazione del footprint o del modello 3D.",
+        "permette di correggerli. Non avvia la generazione del footprint o del modello STEP.",
     )
     for key in removed:
         assert key not in DEFAULT_TRANSLATIONS

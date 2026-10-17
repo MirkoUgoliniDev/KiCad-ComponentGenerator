@@ -36,7 +36,7 @@ from kicadgen.cad3d.process_log import heartbeat_interval
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Testo che apre la riga di rinuncia: e' il contratto della riga.
-GIVEUP_HEAD = "Verso del modello 3D"
+GIVEUP_HEAD = "Verso del modello STEP"
 
 
 # --------------------------------------------------------------------------
@@ -443,7 +443,7 @@ def test_the_heartbeat_keeps_beating_during_the_measurement(parts, capsys):
         parts._half_turn_residue(_Assembly(6, 0.03), FRAME, None, heartbeat)
     finally:
         heartbeat.stop()
-    assert "Importazione del modello 3D" in capsys.readouterr().out
+    assert "Importazione del modello STEP" in capsys.readouterr().out
 
 
 def test_the_give_up_line_reaches_the_progress_modal(parts):

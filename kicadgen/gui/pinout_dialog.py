@@ -34,8 +34,8 @@ def pin_sort_key(entry: dict) -> tuple:
 class PinoutDialog(QDialog):
     """@brief Modal table mapping each pin number to its function.
 
-    Sta in una modale e non sotto l'anteprima per lasciare al disegno tutta
-    l'altezza del tab: il footprint con le quote e' gia' fitto di suo.
+    It lives in a modal and not under the preview, to leave the drawing the
+    whole height of the tab: the dimensioned footprint is already dense.
     """
 
     def __init__(self, pinout: list[dict], component_name: str = "", parent=None):
@@ -88,7 +88,11 @@ class PinoutDialog(QDialog):
         layout.addWidget(buttons)
 
     def edited_pinout(self) -> list[dict]:
-        """@brief Copy edited functions, preserving original pin IDs, order and metadata."""
+        """@brief Copy edited functions, preserving original pin IDs, order and metadata.
+
+        @return A deep copy of the input rows with each `name` replaced by the
+            stripped text typed in the table.
+        """
         result = deepcopy(self._entries)
         for row, index in enumerate(self._row_indices):
             result[index]['name'] = self.table.item(row, 1).text().strip()

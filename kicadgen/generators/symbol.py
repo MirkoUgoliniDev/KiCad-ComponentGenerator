@@ -13,6 +13,16 @@ import tempfile
 import unicodedata
 from typing import Iterable
 
+from kicadgen.core import kicad_text as _kicad_text
+from kicadgen.core.kicad_text import (  # noqa: F401 (re-exported, see kicad_text_width)
+    KICAD_ADVANCE_FALLBACK_UNITS as _KICAD_ADVANCE_FALLBACK_UNITS,
+    KICAD_ADVANCE_GROUPS as _KICAD_ADVANCE_GROUPS,
+    KICAD_ADVANCE_UNITS as _KICAD_ADVANCE_UNITS,
+    KICAD_CENTRE_TO_BOTTOM as _KICAD_CENTRE_TO_BOTTOM,
+    SCHEMATIC_DEFAULT_PEN_MM,
+    kicad_corner_from_centre,
+    kicad_text_margin,
+)
 from kicadgen.fsutil import replace_file
 
 ELECTRICAL_TYPES = (
@@ -102,7 +112,12 @@ class SymbolError(ValueError):
         super().__init__(str(text))
 
     def localized(self, translate=None) -> str:
-        """@brief The message in the interface language, see `LocalizedText.localized`."""
+        """@brief The message in the interface language, see `LocalizedText.localized`.
+
+        @param translate Optional translation callable; None uses the
+            catalogue of the current interface language.
+        @return The localized message text.
+        """
         return self.text.localized(translate)
 
 
@@ -148,12 +163,21 @@ PIN_TEXT_SIZE_RANGE_MM = (0.5, 5.08)
 
 
 def pin_length_of(pin: SymbolPin, default: float = PIN_GRID_MM) -> float:
-    """@brief The length of a pin in mm: its own or the layout default."""
+    """@brief The length of a pin in mm: its own or the layout default.
+
+    @param pin The symbol pin.
+    @param default Length used when the pin declares none, mm.
+    @return The pin length as a float, mm.
+    """
     return float(pin.length) if pin.length is not None else float(default)
 
 
 def pin_text_size_of(pin: SymbolPin) -> float:
-    """@brief The font size of a pin's texts in mm: its own or TEXT_SIZE."""
+    """@brief The font size of a pin's texts in mm: its own or TEXT_SIZE.
+
+    @param pin The symbol pin.
+    @return The text size as a float, mm.
+    """
     return float(pin.text_size) if pin.text_size is not None else TEXT_SIZE
 
 
@@ -234,7 +258,16 @@ def _datasheet(value: str) -> str:
 
 
 def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
-    """@brief Validate identities; preserve names/order and default unknown types passive."""
+    """@brief Validate identities; preserve names/order and default unknown types passive.
+
+    @param pins The pins to check, in their intended order.
+    @return A tuple of copies with number, name, electrical type, length,
+        hidden flag and text size normalized; order preserved.
+    @throws SymbolError When an item is not a SymbolPin, a number is empty
+        or duplicated, a side is unknown, a length is not a multiple of
+        1.27 mm up to 12.7 mm, a text size is outside 0.5-5.08 mm, or no pin
+        is given.
+    """
     result = []
     seen = set()
     for pin in pins:
@@ -273,7 +306,14 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
 
 
 def symbol_inputs(rows):
-    """@brief Decode project metadata without discarding pin identities or electrical roles."""
+    """@brief Decode project metadata without discarding pin identities or electrical roles.
+
+    @param rows Project pin rows (dicts with `pin`, `name`, `electrical_type`,
+        the `symbol_*` layout fields and, optionally, `symbol_body`).
+    @return (pins, body): the SymbolPin list in row order and the shared
+        body size, None when no row declares one.
+    @throws SymbolError When the rows declare different body sizes.
+    """
     pins = [SymbolPin(str(row.get('pin', '')), str(row.get('name') or ''),
                       row.get('electrical_type', 'passive'),
                       row.get('symbol_side', 'left'), row.get('symbol_offset'),
@@ -297,11 +337,11 @@ PROPERTIES_KEY = 'symbol_properties'
 
 #: Grid the default property positions snap to, mm: KiCad's 50 mil text grid.
 PROPERTY_GRID_MM = 1.27
-#: Upper bound of the gap between a horizontal pin's line and the baseline of
-#: its number, mm. KiCad uses a 4 mil text margin plus half the pin pen
-#: (~0.18 mm, see `symbol_tab.PIN_NUMBER_GAP_MM`); 0.508 mm (20 mil) is a
-#: deliberately generous bound so the clearance estimate errs upwards.
-_PIN_NUMBER_GAP_BOUND_MM = 0.508
+# The height a horizontal pin's number reaches above its line is KiCad's
+# own rule, `kicadgen.core.kicad_text.kicad_pin_number_extent` (measured
+# with kicad-cli 10, 2026-10-16). It replaced the fixed estimate
+# «0.508 mm + size», which KiCad's numbers exceed from size 1.27 upwards
+# (1.921 mm against 1.778 mm at 1.27).
 #: Upper bound of the advance of one stroke-font character, as a fraction of
 #: the font size. KiCad's stroke font advances digits and capitals by less
 #: than the font size, so 1.0 overestimates a pin number's length: the
@@ -329,8 +369,8 @@ def _pin_drawing_top(placed: 'PositionedPin', default_length: float,
     - the number, on a vertical pin, is rotated and centred on the middle of
       the line, so it overshoots the outer end only when the text is longer
       than the pin (half the excess on each side); on a horizontal pin it
-      sits above the line, one text height plus a small gap
-      (`_PIN_NUMBER_GAP_BOUND_MM`) higher;
+      sits above the line and reaches `kicad_pin_number_extent` (size) higher
+      (KiCad's anchor, baseline, glyph top and half pen);
     - the name starts PIN_NAME_OFFSET beyond the inner end and runs on along
       the pin direction (rotated on a vertical pin, centred on the line on a
       horizontal one). It is decided by geometry, never by the `side` field:
@@ -364,8 +404,8 @@ def _pin_drawing_top(placed: 'PositionedPin', default_length: float,
         half_text = len(placed.pin.number) * size * _CHAR_ADVANCE_BOUND / 2
         top = max(top, (placed.y + inner_y) / 2 + half_text)
     else:
-        # Horizontal pin: the number stands on the line, one text height tall.
-        top = max(top, placed.y + _PIN_NUMBER_GAP_BOUND_MM + size)
+        # Horizontal pin: the number stands above the line where KiCad draws it.
+        top = max(top, placed.y + _kicad_text.kicad_pin_number_extent(size))
     characters = _drawn_name_length(placed.pin.name)
     if characters:
         start_x, start_y = inner_x + dx * PIN_NAME_OFFSET, inner_y + dy * PIN_NAME_OFFSET
@@ -405,10 +445,12 @@ def default_property_positions(layout: 'SymbolLayout') -> dict:
     @note Backward compatibility: pins placed by `layout_symbol` on the
         left, right or bottom side never reach above the body with the
         default 1.27 mm text (a side pin is at least 2.54 mm below the top
-        edge, its number at most 0.508 + 1.27 mm above its line), so those
-        symbols keep exactly `h + 2.54` / `h + 5.08` and write the same file.
-        A side pin in the top row with a number of 2.04 mm or more does reach
-        above the body and lifts the properties too: same class of overlap.
+        edge, its 1.27 mm number at most 1.921 mm above its line, see
+        `kicad_pin_number_extent`), so those symbols keep exactly `h + 2.54`
+        / `h + 5.08` and write the same file. A side pin in the top row with
+        a number larger than 1.798 mm does reach above the body and lifts the
+        properties too: same class of overlap (2026-10-16: the threshold was
+        2.04 mm with the earlier fixed 0.508 mm gap estimate).
     @note The rule ignores the horizontal extent of the texts: any pin drawn
         above the body lifts the properties, even one far from x = 0. That
         errs on the side of clearance and needs no text-width estimate of
@@ -433,6 +475,122 @@ def default_property_positions(layout: 'SymbolLayout') -> dict:
     return {'Reference': (0.0, round(base + 5.08, 4)), 'Value': (0.0, round(base + 2.54, 4))}
 
 
+#: Value of the `PROPERTY_ANCHOR_FIELD` entry of `symbol_properties` once the
+#: stored positions are the bottom-left corners of the texts (user decision,
+#: 2026-10-16: Reference and Value anchored like the drawn texts of
+#: 2026-10-14). A mapping without it holds the text CENTRES written before.
+PROPERTY_ANCHOR_BOTTOM_LEFT = 'bottom_left'
+#: Anchor convention of the positions stored before 2026-10-16: text centres.
+PROPERTY_ANCHOR_CENTRE = 'centre'
+#: Entry of the `symbol_properties` mapping that marks its anchor convention.
+PROPERTY_ANCHOR_FIELD = 'anchor'
+
+# KiCad's stroke-font geometry lives in `kicadgen.core.kicad_text`, shared
+# with the footprint writer (2026-10-16); the names here keep this module's
+# earlier API (`kicad_text_width`, `property_anchor_from_centre` and the
+# measured `_KICAD_*` constants imported at the top) for its callers and tests.
+
+#: Constant part of the width KiCad centres a symbol property on, mm, at the
+#: schematic default pen `serialize_symbol` always writes (25/19 x 0.1524 =
+#: 0.2005, see `kicadgen.core.kicad_text`).
+_KICAD_TEXT_WIDTH_MARGIN_MM = kicad_text_margin(TEXT_SIZE, SCHEMATIC_DEFAULT_PEN_MM)
+
+
+def kicad_text_width(text: str, size: float) -> float:
+    """@brief Width KiCad centres a one-line symbol text on, mm (stroke font, default pen).
+
+    @param text The text as KiCad shows it (for the Reference of a library
+        symbol «U?», see `property_texts`).
+    @param size Font size, mm.
+    @return `kicadgen.core.kicad_text.kicad_text_width` at the schematic
+        default pen: size x the sum of the advances / 21 + 0.2005 mm.
+    """
+    return _kicad_text.kicad_text_width(text, size, SCHEMATIC_DEFAULT_PEN_MM)
+
+
+def property_anchor_from_centre(text: str, size: float, x: float, y: float, angle: int = 0) -> tuple:
+    """@brief The bottom-left anchor at which KiCad draws a text where it drew it centred at (x, y).
+
+    @param text The text as KiCad shows it.
+    @param size Font size, mm.
+    @param x Centre x, mm, symbol coordinates (y up).
+    @param y Centre y, mm.
+    @param angle Text angle, degrees: 0 (reads +x) or 90 (reads +y, glyph up
+        towards -x, as KiCad turns a text); other values are read modulo 180.
+    @return (x, y) of the anchor with `(justify left bottom)`, mm, rounded to 0.1 um.
+    @note KiCad's own geometry, not the editor's
+        (`kicadgen.core.kicad_text.kicad_corner_from_centre` at the
+        schematic default pen, y up). In KiCad the converted text does not
+        move; the editor draws every text at KiCad's width
+        (`kicadgen.gui.kicad_text_item`, 2026-10-16), so on screen it stays
+        put too, apart from the side bearings of the first and last glyph.
+    """
+    return kicad_corner_from_centre(text, size, x, y, thickness=SCHEMATIC_DEFAULT_PEN_MM,
+                                    angle=angle, y_down=False)
+
+
+def property_texts(reference: str, name: str) -> dict:
+    """@brief The texts KiCad shows for the visible properties of an unannotated symbol.
+
+    @param reference Designator prefix (e.g. «U»).
+    @param name Symbol name (the Value).
+    @return {'Reference': reference + '?', 'Value': name}: kicad-cli and the
+        schematic show an unannotated Reference with «?», so that is the
+        width the anchor conversion uses.
+    """
+    return {'Reference': f'{reference}?', 'Value': name}
+
+
+class PropertyPositions(dict):
+    """@brief Chosen property positions {key: (x, y)} mm, with the anchor convention they use.
+
+    @note `anchor` is PROPERTY_ANCHOR_BOTTOM_LEFT for positions stored since
+        2026-10-16 (bottom-left corners) and PROPERTY_ANCHOR_CENTRE for those
+        stored before (text centres, converted by `property_anchors`). A
+        plain dict passed as `properties` is read as centres, the meaning it
+        always had. Equality ignores the convention (plain dict comparison).
+    """
+
+    def __init__(self, mapping=(), anchor: str = PROPERTY_ANCHOR_BOTTOM_LEFT):
+        """@brief Build the mapping.
+
+        @param mapping Initial {key: (x, y)}.
+        @param anchor PROPERTY_ANCHOR_BOTTOM_LEFT or PROPERTY_ANCHOR_CENTRE.
+        """
+        super().__init__(mapping)
+        self.anchor = anchor
+
+
+def property_anchors(layout: 'SymbolLayout', texts: dict, chosen=None, size: float = TEXT_SIZE) -> dict:
+    """@brief Bottom-left anchors of Reference and Value: the chosen ones, else the converted defaults.
+
+    @param layout The symbol geometry (for `default_property_positions`).
+    @param texts {key: shown text}, see `property_texts`.
+    @param chosen Positions carried by the rows (`symbol_property_positions`);
+        a `PropertyPositions` states its convention, any other mapping holds
+        centres; None or {} for none.
+    @param size Font size of the properties, mm.
+    @return {key: (x, y)} mm for every key of PROPERTY_KEYS, bottom-left anchors.
+    @note The defaults stay CENTRES (`default_property_positions`, which
+        clears top pins) and are converted here at every call, so an
+        unmoved property keeps following the rule and its centred place in
+        KiCad. Legacy chosen centres are converted the same way; nothing is
+        converted twice because converted positions are only ever stored
+        with the PROPERTY_ANCHOR_BOTTOM_LEFT mark.
+    """
+    centres = default_property_positions(layout)
+    chosen = chosen or {}
+    anchored = isinstance(chosen, PropertyPositions) and chosen.anchor == PROPERTY_ANCHOR_BOTTOM_LEFT
+    result = {}
+    for key in PROPERTY_KEYS:
+        if key in chosen and anchored:
+            result[key] = tuple(chosen[key])
+            continue
+        x, y = chosen[key] if key in chosen else centres[key]
+        result[key] = property_anchor_from_centre(texts[key], size, x, y)
+    return result
+
+
 def _property_position(value, key: str) -> tuple:
     """Validate one [x, y] of `symbol_properties`: two finite numbers, mm."""
     if isinstance(value, (list, tuple)) and len(value) == 2 and all(
@@ -447,26 +605,36 @@ def symbol_property_positions(rows) -> dict:
 
     @param rows Symbol rows of the project (every row holds the same mapping,
         like `symbol_body`).
-    @return {key: (x, y)} for the keys present, mm, symbol coordinates; {}
-        when no row carries `symbol_properties` or it is empty.
+    @return A `PropertyPositions` {key: (x, y)} for the keys present, mm,
+        symbol coordinates, whose `anchor` is PROPERTY_ANCHOR_BOTTOM_LEFT
+        when the mapping carries that mark (`PROPERTY_ANCHOR_FIELD`) and
+        PROPERTY_ANCHOR_CENTRE otherwise (projects saved before 2026-10-16);
+        empty when no row carries `symbol_properties` or it holds no position.
     @throws ValueError When rows disagree, the value is not a mapping, a key
-        is not one of `PROPERTY_KEYS` or a position is not [x, y] of finite
-        numbers.
+        is not one of `PROPERTY_KEYS`, the mark has another value or a
+        position is not [x, y] of finite numbers.
     """
     carried = [row[PROPERTIES_KEY] for row in rows if isinstance(row, dict) and PROPERTIES_KEY in row]
     if not carried:
-        return {}
+        return PropertyPositions()
     if any(entry != carried[0] for entry in carried):
         raise SymbolError(_message('Posizioni delle proprietà del simbolo incoerenti fra i pin.',
                           'Inconsistent symbol property positions'))
     mapping = carried[0]
     if mapping is None:
-        return {}
+        return PropertyPositions()
     if not isinstance(mapping, dict):
         raise SymbolError(_message('Posizioni delle proprietà del simbolo non valide.',
                           '{properties}: expected a mapping', properties=PROPERTIES_KEY))
-    result = {}
+    anchor = mapping.get(PROPERTY_ANCHOR_FIELD, PROPERTY_ANCHOR_CENTRE)
+    if anchor != PROPERTY_ANCHOR_BOTTOM_LEFT and PROPERTY_ANCHOR_FIELD in mapping:
+        raise SymbolError(_message('Posizioni delle proprietà del simbolo non valide.',
+                          '{properties}: unknown anchor {anchor}', properties=PROPERTIES_KEY,
+                          anchor=repr(anchor)))
+    result = PropertyPositions(anchor=anchor)
     for key, value in mapping.items():
+        if key == PROPERTY_ANCHOR_FIELD:
+            continue
         if key not in PROPERTY_KEYS:
             raise SymbolError(_message('Proprietà sconosciuta: {key}.', '{properties}: unknown property {key}',
                               properties=PROPERTIES_KEY, key=repr(key)))
@@ -479,6 +647,15 @@ def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
 
     Custom offsets are y coordinates for left/right and x for top/bottom.
     The body stays centred; dimensions are multiples of two grid steps.
+
+    @param pins The pins to place (normalized here).
+    @param body Optional explicit (width, height) of the body, mm; None
+        sizes the body from the pin counts and name lengths.
+    @return The SymbolLayout with every positioned pin and the body size.
+    @throws SymbolError When the pins do not validate, the body is not a
+        pair of finite grid-aligned sizes within 10.16-1000 mm, a custom
+        position or offset is invalid or off the grid, or two terminals
+        would coincide.
     """
     pins = normalize_pins(pins)
     spacing = PIN_GRID_MM
@@ -595,8 +772,17 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         and filter properties are left out, as KiCad itself does.
     @param properties Chosen positions of the visible properties, {key: (x, y)}
         mm in symbol coordinates (`symbol_property_positions`); a key left
-        out takes its `default_property_positions` place. None for none.
+        out takes its `default_property_positions` place. A
+        `PropertyPositions` states whether its points are bottom-left
+        anchors or text centres; a plain mapping holds centres. None for none.
     @return The `.kicad_sym` text, newline-terminated.
+    @note A Reference or Value the user placed is written with
+        `(justify left bottom)` at its bottom-left anchor (`property_anchors`;
+        chosen centres stored before 2026-10-16 are converted with KiCad's
+        own text geometry). CONTRACT CHANGED 2026-10-17 (user, «Predefinito
+        centrato»): an unmoved one is written centred, without justify, at
+        its `default_property_positions` centre, so it stays centred whatever
+        Value the schematic shows.
     @throws SymbolError (a ValueError) On an invalid name, reference,
         metadata or geometry; `localized()` gives the translated message.
         A name holding a character of SYMBOL_NAME_ILLEGAL_CHARACTERS or a
@@ -631,22 +817,33 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
              '    (exclude_from_sim no) (in_bom yes) (on_board yes) (in_pos_files yes)',
              '    (duplicate_pin_numbers_are_jumpers no)',
              '    (pin_names (offset 0.508))']
-    positions = default_property_positions(layout)
+    chosen = PropertyPositions(anchor=getattr(properties, 'anchor', PROPERTY_ANCHOR_CENTRE))
     for key, value in (properties or {}).items():
         if key not in PROPERTY_KEYS:
             raise SymbolError(_message('Proprietà sconosciuta: {key}.', 'properties: unknown property {key}', key=repr(key)))
-        positions[key] = _property_position(value, key)
+        chosen[key] = _property_position(value, key)
+    positions = property_anchors(layout, property_texts(reference, name), chosen)
     visible = [('Reference', reference), ('Value', name)]
     hidden = [('Footprint', footprint), ('Datasheet', datasheet), ('Description', description)]
     if keywords:
         hidden.append(('ki_keywords', keywords))
     if fp_filters:
         hidden.append(('ki_fp_filters', fp_filters))
-    entries = [(key, value, positions[key], False) for key, value in visible]
-    entries += [(key, value, (0.0, 0.0), True) for key, value in hidden]
-    for key, value, (x, y), hide in entries:
+    centres = default_property_positions(layout)
+    # A property the user placed is anchored at its bottom-left corner, like
+    # the drawn texts (user, 2026-10-16): KiCad starts the text exactly at
+    # the point the editor shows. An unmoved one stays a centred KiCad text
+    # at its default centre (user, 2026-10-17, «Predefinito centrato»): the
+    # schematic shows the Value the user types, of any width, and a centred
+    # text stays centred over the body. Hidden ones keep the plain effects.
+    entries = [(key, value, positions[key] if key in chosen else centres[key], key in chosen, False)
+               for key, value in visible]
+    entries += [(key, value, (0.0, 0.0), False, True) for key, value in hidden]
+    anchored_effects = '(effects (font (size 1.27 1.27)) (justify left bottom))'
+    for key, value, (x, y), anchored, hide in entries:
         flags = '(show_name no) (do_not_autoplace no)' + (' (hide yes)' if hide else '')
-        lines.append(f'    (property {_quote(key)} {_quote(value)} (at {_num(x)} {_num(y)} 0) {flags} {effects})')
+        lines.append(f'    (property {_quote(key)} {_quote(value)} (at {_num(x)} {_num(y)} 0) {flags} '
+                     f'{anchored_effects if anchored else effects})')
     lines.extend((f'    (symbol {_quote(name + "_0_1")}',
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
                   '        (stroke (width 0.254) (type default)) (fill (type background)))'))
@@ -672,6 +869,12 @@ def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
                   metadata: SymbolMetadata | None = None, properties=None) -> Path:
     """@brief Validate before touching disk and atomically replace an explicitly chosen file.
 
+    @param path Destination .kicad_sym path; parent folders are created.
+    @param name Symbol name.
+    @param pins The symbol pins, see `serialize_symbol`.
+    @param footprint Footprint property value ("" when none).
+    @param reference Reference designator prefix.
+    @param body Optional explicit body size, see `layout_symbol`.
     @param graphics Placed glyph records, see `serialize_symbol`.
     @param metadata Library metadata, see `serialize_symbol`.
     @param properties Chosen positions of the visible properties, see `serialize_symbol`.

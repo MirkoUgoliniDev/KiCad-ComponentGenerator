@@ -1,37 +1,90 @@
 # Classificatore SMD locale
 
-L'unico file trasferito da TorchObjectDetection e' `models\smd\smd_classifier.pt`
-(v3). La funzione `classify_photo_boxes` ricostruisce la rete ResNet18 dalle
-informazioni e dai pesi contenuti in questo checkpoint. Classi e orientamenti
-sono gia' nel file; non serve il progetto di addestramento o il suo catalogo.
+Rete neurale locale che classifica i corpi SMD tenuti nella revisione dei
+rilevamenti, senza chiamate remote. È il rilevatore predefinito avviando il
+programma dai sorgenti (**Rilevamento foto → YOLO + rete SMD locale (v3)**);
+nel programma Windows installato la voce è disabilitata, con il motivo nel
+suggerimento, perché il runtime PyTorch e il checkpoint non sono inclusi.
 
-Footprint e STEP vengono cercati dal sistema gia' presente in KiCadGen,
-`kicadgen.cad3d.kicad_models`. Le associazioni fra footprint e STEP vengono
-lette dalle librerie KiCad installate. Alternative e scelte da rivedere
-rimangono esplicite nel risultato.
+L'unico file necessario è `models/smd/smd_classifier.pt` (v3, prodotto dal progetto di
+addestramento, non distribuito con i sorgenti). La funzione
+`kicadgen.services.smd_component_classifier.classify_photo_boxes`
+ricostruisce la rete ResNet18 dalle informazioni e dai pesi contenuti nel
+checkpoint: classi e orientamenti sono già nel file, non serve il progetto di
+addestramento né il suo catalogo. Footprint e STEP vengono cercati dal
+sistema già presente in KiCadGen (`kicadgen.cad3d.kicad_models`), leggendo le
+librerie KiCad installate; alternative e scelte da rivedere restano esplicite
+nel risultato.
 
 ## Runtime
 
-Nella cartella KiCad-ComponentGenerator:
+Nella cartella del repository:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-smd.txt
 ```
 
-Il runtime PyTorch e il checkpoint SMD non sono inclusi nell'attuale pacchetto
-Windows della GUI: in quel pacchetto la modalita' SMD e' disabilitata e ne
-viene indicato il motivo. Per usarla, avvia il programma dai sorgenti con il
-checkpoint in `models/smd/smd_classifier.pt` e il runtime indicato sopra.
+Se il runtime manca, il programma lo dice con il comando da eseguire. Il
+rilevatore YOLO di questa modalità usa, se il campo **Modello YOLO** è vuoto,
+`models/yolo/pcb_component_detector_yolov8m_best.pt` (lo stesso verificato
+nel progetto di origine) e richiede quindi anche `requirements-yolo-pt.txt`;
+un modello scelto esplicitamente ha precedenza.
 
-## Uso con la foto RS485 di questo progetto
+I pesi (`models/smd/smd_classifier.pt` e
+`models/yolo/pcb_component_detector_yolov8m_best.pt`) **non sono distribuiti
+con i sorgenti** e un checkout nuovo non ha le cartelle `models/yolo/` e
+`models/smd/`: vanno create quando si aggiungono i file. Poiché questa è la
+modalità predefinita dai sorgenti, senza pesi o senza i pacchetti di
+`requirements-smd.txt` e `requirements-yolo-pt.txt` l'analisi di una scheda
+si ferma con un avviso prima di qualunque chiamata a pagamento (controlli
+`validate_yolo_setup` e `validate_smd_setup`). Per lavorare senza questi pesi
+basta scegliere un'altra voce in **Rilevamento foto**, nel riquadro
+**Strumenti AI** (per esempio *AI (attuale)*).
 
-Questo comando usa il YOLO locale, le quote RS485 di 42,8 x 15,2 mm e la
-funzione unica foto + riquadri. Il callback di `prepare_photo` conserva la
-foto completa nel medesimo sistema di coordinate del PCB rilevato. Questo
-evita di tagliare il margine dei componenti vicini al bordo della scheda.
+## Uso nella GUI
+
+1. Tipologia **Scheda con componenti**, foto con il ruolo **Alta
+   risoluzione**, rilevatore **YOLO + rete SMD locale (v3)**. La riga
+   **Modello rete SMD** mostra il checkpoint in uso; il pulsante accanto apre
+   **Scegli la rete SMD**: a sinistra i file `.pt` di `models/smd` (più quello
+   in uso e i file aggiunti con «Altro file…»), a destra dimensione, data,
+   SHA-256 e ciò che il checkpoint dichiara di sé (architettura, data ed
+   epoche di addestramento, classi, tipi di rotazione, soglia di
+   accettazione, metriche di validazione). Il checkpoint è letto con
+   `weights_only=True`: nessun codice del file viene eseguito.
+2. **Estrai parametri con AI**. Dopo la revisione dei riquadri del
+   rilevatore (prima fase della finestra di revisione), la rete classifica i
+   corpi tenuti — fase **Rete SMD locale** nella finestra di avanzamento — e il
+   programma cerca footprint e STEP nella libreria KiCad.
+3. Solo i corpi che la rete **non** risolve (classe `_other` o probabilità
+   sotto la soglia del checkpoint) passano alla **Lettura ritagli** AI usata
+   dagli altri percorsi (`photo_crop_reading`: due letture per corpo, si
+   adotta solo ciò su cui concordano); la finestra di avanzamento mostra il
+   numero dei corpi rimandati. I corpi risolti non generano chiamate. Un
+   errore della rete ad alta confidenza NON viene rimandato all'AI: va corretto
+   nella revisione.
+4. Nella finestra di revisione, **Parametri…** mostra per ogni corpo classe,
+   confidenza, rotazione KiCad proposta e stato del footprint; la riga
+   **Esito rete SMD** dice chi ha deciso il tipo. Le risposte `_other` o sotto
+   soglia restano corpi generici da rivedere. Le altezze restano stime: la
+   rete non le misura.
+
+L'analisi iniziale dei documenti continua a usare il modello AI
+configurato. La rotazione KiCad della rete viene conservata separatamente
+dall'angolo dell'ingombro e non forza l'orientamento del STEP nativo, che può
+avere una trasformazione diversa nel footprint e va confermato nel selettore
+dei modelli (`interactive-kicad-models.md`).
+
+## Uso da riga di comando
+
+Questo esempio usa il YOLO locale, le quote della scheda RS485 di esempio
+(42,8 × 15,2 mm) e la funzione unica foto + riquadri. Il callback di
+`prepare_photo` conserva la foto completa nel sistema di coordinate del PCB
+rilevato, così il margine dei componenti vicini al bordo non viene tagliato.
+
+Dalla radice del repository:
 
 ```powershell
-Set-Location 'C:\Lavori\Python\KiCad-ComponentGenerator'
 @'
 import json
 from pathlib import Path
@@ -45,7 +98,7 @@ def remember_frame(photo, box):
 
 length_mm, width_mm = 42.8, 15.2
 board = prepare_photo(
-    Path('generated/RS485/docs/AltaRisoluzione.jpg'),
+    Path('docs/RS485/AltaRisoluzione.jpg'),
     length_mm, width_mm, frame_callback=remember_frame,
 )
 if board is None:
@@ -65,87 +118,60 @@ print(json.dumps(results, ensure_ascii=False, indent=2))
 '@ | .\.venv\Scripts\python.exe -
 ```
 
-Le quote dell'esempio sono della RS485. Per un'altra scheda si applicano le
-sue quote e la sua foto, usando la calibrazione gia' disponibile nel progetto.
+Per un'altra scheda si usano le sue quote e la sua foto.
 
 ## Ritagli e risultati
 
-La rete riceve il riquadro con margine del 10% per lato, mantenendo i pixel e
-le proporzioni della foto. Il ritaglio viene ridimensionato con interpolazione
-bicubica in un quadrato 224 x 224, con riempimento RGB (114, 114, 114), poi
-normalizzato con media e deviazione ImageNet. La TTA usa quattro rotazioni:
-0, 90, 180 e 270 gradi. Le probabilita' della rotazione vengono riportate
-all'orientamento iniziale prima della media.
+La rete riceve il riquadro con margine del 10 % per lato, mantenendo i pixel
+e le proporzioni della foto. Il ritaglio viene ridimensionato con
+interpolazione bicubica in un quadrato 224 × 224, con riempimento RGB
+(114, 114, 114), poi normalizzato con media e deviazione ImageNet. La TTA usa
+quattro rotazioni (0, 90, 180, 270 gradi); le probabilità della rotazione
+vengono riportate all'orientamento iniziale prima della media.
 
 I ritagli context/detail preparati per l'AI hanno margini, correzioni della
-scala e annotazioni diversi: alla rete SMD si passa la foto completa e i
+scala e annotazioni diversi: alla rete SMD si passano la foto completa e i
 riquadri, lasciando la preparazione a `classify_photo_boxes`.
 
-`box_frame_px` e' il riquadro del PCB nella foto completa. Quando viene passato,
-i box in ingresso si riferiscono a quel PCB; i box restituiti in `box_px` si
-riferiscono alla foto completa. Il margine viene limitato dai bordi della
-foto completa, come in TorchObjectDetection. L'eventuale raddrizzamento del
-PCB effettuato da KiCadGen e' condiviso tra rilevatore e classificatore;
-la funzione non aggiunge correzioni delle proporzioni.
+`box_frame_px` è il riquadro del PCB nella foto completa. Quando viene
+passato, i box in ingresso si riferiscono a quel PCB e i box restituiti in
+`box_px` alla foto completa; il margine viene limitato dai bordi della foto.
+L'eventuale raddrizzamento del PCB fatto da KiCadGen è condiviso tra
+rilevatore e classificatore; la funzione non aggiunge correzioni delle
+proporzioni.
 
 Ogni risultato contiene `class`, `kind`, `class_confidence`, `rotation_deg`,
-`size_mm`, `footprint`, `footprint_candidates`, `step_model`, `step_candidates`
-e `model_match`. La rotazione e' antioraria nella convenzione KiCad. `_other`
-e le risposte sotto la soglia (almeno 0,5) non ricevono footprint o rotazione.
-Senza `mm_per_pixel` si restituiscono soltanto classificazione e rotazione.
-L'abbinamento dimensionale conserva gli stati di revisione del programma;
-un modello STEP condiviso da piu' footprint lascia i footprint come alternative.
+`size_mm`, `footprint`, `footprint_candidates`, `step_model`,
+`step_candidates` e `model_match`. La rotazione è antioraria nella
+convenzione KiCad. `_other` e le risposte sotto la soglia (almeno 0,5) non
+ricevono footprint o rotazione. Senza `mm_per_pixel` si restituiscono solo
+classificazione e rotazione. L'abbinamento dimensionale conserva gli stati di
+revisione del programma; un modello STEP condiviso da più footprint lascia i
+footprint come alternative.
 
-## Uso nella GUI
-
-Dai sorgenti, **YOLO + rete SMD locale (v3)** e' la modalita' predefinita di
-**Rilevamento foto** (nel binario frozen resta YOLO, perche' manca PyTorch). Se il campo
-del modello YOLO e' vuoto, questa modalita' usa
-`models/yolo/pcb_component_detector_yolov8m_best.pt`, lo stesso verificato nel
-progetto TorchObjectDetection. Un modello scelto esplicitamente ha precedenza.
-Le altre modalita' restano disponibili.
-
-Dopo la revisione dei riquadri, la rete classifica i corpi tenuti e il programma
-cerca footprint e STEP nella libreria KiCad. In **Parametri componente** trovi
-classe, confidenza, rotazione KiCad proposta e stato del footprint. Le risposte
-`_other` o sotto soglia restano corpi generici da rivedere. Le altezze restano
-stime: la rete non le misura.
-
-La classificazione dei ritagli non chiama un modello remoto. Solo i corpi che
-la rete NON risolve (classe `_other` o probabilita' sotto la soglia del
-checkpoint) passano alla lettura AI dei ritagli gia' usata dagli altri percorsi
-(`photo_crop_reading.read_bodies`, due letture per corpo, si adotta solo cio'
-su cui concordano); quelli risolti non generano chiamate. La modale mostra la
-fase «Rete SMD locale» e, se serve, «Lettura ritagli» col numero dei corpi
-rimandati; in **Parametri componente** la riga «Esito rete SMD» dice chi ha
-deciso il tipo. Un errore della rete ad alta confidenza NON viene rimandato
-all'AI. L'analisi iniziale dei documenti e delle immagini selezionate continua
-a usare il modello AI configurato. La rotazione KiCad della rete viene conservata separatamente
-dall'angolo dell'ingombro; non forza l'orientamento del STEP nativo, che puo'
-avere una trasformazione diversa nel footprint e va confermato nel selettore.
-
-## Identita' dei pesi
+## Identità dei pesi
 
 SHA-256 del file SMD v3 copiato:
 `3CEEEADC9B03C2CC04E0F59FF04FAE6ADAD9EF11BA021CBFA0DBAE89D0FE1A4B`.
 
-I due pesi YOLO `pcb_component_detector_yolov8m_best.pt` sono identici:
+Il peso YOLO `pcb_component_detector_yolov8m_best.pt` usato qui è identico a
+quello prodotto dall'addestramento da cui è stato copiato:
 `27AF3B3D1E17251B124C9DE860B024833A46F77DB04AB8767FC2554A3B3A4607`.
 
-Per ripetere il controllo:
+Per ripetere il controllo, dalla radice del repository (per confrontarli con
+gli originali, aggiungere alla lista i percorsi dei file prodotti
+dall'addestramento):
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\Lavori\Python\KiCad-ComponentGenerator\models\smd\smd_classifier.pt', 'C:\Lavori\Python\TorchObjectDetection\models\smd_classifier.pt', 'C:\Lavori\Python\KiCad-ComponentGenerator\models\yolo\pcb_component_detector_yolov8m_best.pt', 'C:\Lavori\Python\TorchObjectDetection\models\pcb_component_detector_yolov8m_best.pt' | Format-List Path, Hash
+Get-FileHash -Algorithm SHA256 -LiteralPath 'models\smd\smd_classifier.pt', 'models\yolo\pcb_component_detector_yolov8m_best.pt' | Format-List Path, Hash
 ```
 
-Confronto effettuato su 65 riquadri delle schede di prova originali: pixel dei
-ritagli, letterbox, tensori normalizzati, classi, rotazioni e probabilita' sono
-identici fra il classificatore originale e questa funzione. Il controllo
+Confronto effettuato su 65 riquadri delle schede di prova originali: pixel
+dei ritagli, letterbox, tensori normalizzati, classi, rotazioni e probabilità
+sono identici fra il classificatore originale e questa funzione. Il controllo
 non implica che due configurazioni diverse di YOLO producano gli stessi box.
-La foto RS485 di KiCadGen conserva i pixel originali nella calibrazione;
-il margine oltre il bordo del PCB e' mantenuto usando la foto completa.
 
-Le regressioni locali si eseguono con:
+Le regressioni locali:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_smd_component_classifier.py -q

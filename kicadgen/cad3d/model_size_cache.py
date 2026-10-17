@@ -94,17 +94,17 @@ def file_identity(path: str | os.PathLike[str]) -> str | None:
     @param path File whose measurements are about to be stored or replayed.
     @return "<absolute path>:<size>:<mtime_ns>", or None when the file cannot
         be inspected.
-    @note Questa e' la chiave che rende una misura ripetibile: un file
-        riscritto cambia dimensione o data e quindi cambia chiave, cosi' una
-        voce vecchia non puo' essere scambiata per una misura del file nuovo.
-    @note None non e' una chiave degradata ma l'assenza di chiave: senza
-        dimensione e data non si puo' invalidare nulla, quindi il chiamante
-        deve rimisurare invece di fidarsi. Per questo non si ripiega sul solo
-        percorso.
-    @note `kicad_models.index_key` calcola oggi la stessa stringa per l'indice
-        degli ingombri; le due formule devono restare identiche (un test lo
-        verifica) e quel modulo dovrebbe passare di qui alla prossima modifica,
-        invece di conservare una seconda copia della ricetta.
+    @note This is the key that makes a measurement repeatable: a rewritten
+        file changes size or date and therefore changes key, so an old entry
+        cannot be mistaken for a measurement of the new file.
+    @note None is not a degraded key but the absence of a key: without size
+        and date nothing can be invalidated, so the caller must measure again
+        instead of trusting. This is why there is no fallback to the path
+        alone.
+    @note `kicad_models.index_key` currently computes the same string for the
+        envelope index; the two formulas must stay identical (a test checks
+        it) and that module should go through here at the next change,
+        instead of keeping a second copy of the recipe.
     """
     try:
         resolved = Path(path).absolute()

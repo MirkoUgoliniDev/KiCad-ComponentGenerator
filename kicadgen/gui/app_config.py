@@ -1,14 +1,14 @@
 """@brief Persistent application preferences stored in config.json.
 
-Configurazione applicativa persistente (config.json accanto a main.py).
+Persistent application configuration (config.json next to main.py).
 
-Qui restano le preferenze dell'interfaccia. Prompt e modelli precedenti vengono
-letti solo per la migrazione iniziale al database SQLite dei profili AI;
-save_config non li riscrive nel JSON. I parametri del singolo footprint
-vivono nei campi della finestra.
+The interface preferences live here. Prompts and models of earlier versions
+are read only for the one-time migration into the SQLite database of the AI
+profiles; save_config does not write them back into the JSON. The parameters
+of the single footprint live in the window's fields.
 
-Il file e' un JSON in chiaro, cosi' e' ispezionabile e modificabile a mano;
-non contiene segreti (la API key resta nel .env).
+The file is plain JSON, so it can be inspected and edited by hand; it holds
+no secrets (the API key stays in the .env).
 """
 
 from __future__ import annotations
@@ -28,24 +28,29 @@ from ..services.photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, V
 from ..services.messages import tx
 from ..app_paths import user_data_dir
 
-#: config.json nella cartella dati: il repository da sorgente (come prima),
-#: %LOCALAPPDATA%\KiCadGen nel programma installato (vedi `app_paths`).
+#: config.json in the data folder: the repository when run from source (as
+#: before), %LOCALAPPDATA%\KiCadGen in the installed program (see `app_paths`).
 CONFIG_PATH = user_data_dir() / "config.json"
 
 
 def config_path() -> Path:
-    """@brief Return the config.json path, overridable through KICADGEN_CONFIG_PATH."""
+    """@brief Return the config.json path, overridable through KICADGEN_CONFIG_PATH.
+
+    @return The path named by the KICADGEN_CONFIG_PATH environment variable
+        when set, otherwise CONFIG_PATH in the user data directory.
+    """
     return Path(os.environ.get("KICADGEN_CONFIG_PATH", CONFIG_PATH))
 
-#: SHA-256 dei prompt di sistema che sono stati il default in passato.
-#: Un config.json che contiene ancora uno di questi non e' stato
-#: personalizzato dall'utente: viene aggiornato al default corrente, cosi'
-#: i miglioramenti al prompt arrivano anche a chi ha gia' il file salvato.
-#: Chi invece l'ha modificato se lo tiene: la sua versione non e' in lista.
+#: SHA-256 of the system prompts that were the default in the past.
+#: A config.json that still contains one of these has not been customised
+#: by the user: it is updated to the current default, so that prompt
+#: improvements also reach whoever already has the file saved.
+#: Whoever modified it keeps it: their version is not in the list.
 LEGACY_DEFAULT_PROMPT_HASHES = {
-    # Default fino alla versione senza il campo "layout" (solo matrice).
+    # Default up to the version without the "layout" field (matrix only).
     "c744e556d5e1eba95f41d69b5eb635c2ab8bcc0cf77f5c1d163b18ca3a41feea",
-    # Default che chiedeva solo i componenti principali ("non serve mapparli tutti").
+    # Default that asked only for the main components
+    # ("non serve mapparli tutti" (no need to map them all)).
     "eefd487b98f9217c71c14976fe71ac0095a14dd8ed9b8bd1b5d58e8231c0aafa",
 }
 
@@ -55,31 +60,31 @@ def _prompt_hash(prompt: str) -> str:
 
 DEFAULTS = {
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
-    # Modello di default dell'estrazione AI: id OpenRouter, scelto dalla
-    # finestra "Modello e prompt di sistema LLM". Per una singola estrazione
-    # se ne puo' usare un altro senza toccare questo valore.
+    # Default model of the AI extraction: an OpenRouter id, chosen from the
+    # "Modello e prompt di sistema LLM" (LLM model and system prompt) window.
+    # A single extraction can use another one without touching this value.
     "model": DEFAULT_MODEL,
     "vision_model": DEFAULT_VISION_MODEL,
     "grounding_prompt": GROUNDING_PROMPT,
     "verification_prompt": VERIFICATION_PROMPT,
-    # Ultima tipologia di componente selezionata: si ripropone all'avvio,
-    # perche' di solito si generano in serie componenti dello stesso tipo.
+    # Last selected component type: offered again at start-up, because
+    # components of the same type are usually generated in series.
     "component_type": "",
-    # I pin NC (Not Connected) sono elettricamente scollegati ma fisicamente
-    # presenti: di default vanno generati, altrimenti manca il foro e il
-    # componente non entra nella scheda.
+    # NC (Not Connected) pins are electrically disconnected but physically
+    # present: by default they are generated, otherwise the hole is missing
+    # and the component does not fit into the board.
     "include_nc_pins": True,
-    # Ultima cartella da cui si sono presi documenti da caricare. I file
-    # arrivano quasi sempre in serie dalla stessa cartella (le viste di uno
-    # stesso componente), mentre la cartella del progetto -- dove le copie
-    # finiscono -- non e' mai quella da cui si pesca.
+    # Last folder from which documents to load were taken. Files almost
+    # always arrive in series from the same folder (the views of the same
+    # component), while the project folder -- where the copies end up -- is
+    # never the one they are picked from.
     "last_document_dir": "",
-    # Sigle dei pin incise sulla serigrafia del modello 3D. Spente: su un
-    # modulo a passo fitto i nomi lunghi si sovrappongono fra loro e finiscono
-    # sopra i componenti, rendendo il solido meno leggibile invece che piu'.
+    # Pin labels engraved on the silkscreen of the 3D model. Off: on a
+    # fine-pitch module the long names overlap each other and end up on top
+    # of the components, making the solid less readable instead of more.
     "silk_pin_labels": False,
     "show_grid": True,
-    "grid_unit": "mm",  # "mm" oppure "inch" (passo 2.54mm, standard THT)
+    "grid_unit": "mm",  # "mm" or "inch" (2.54mm pitch, THT standard)
     "show_pin_numbers_3d": True,
     # Active UI language; translations are stored in the profile SQLite catalog.
     "language": "it",
@@ -219,11 +224,17 @@ def _read_config(problems: list) -> dict:
 def browse_start_dir(config, fallback="") -> str:
     """@brief Return the last document folder if it still exists, otherwise `fallback`.
 
-    Cartella da cui far partire un dialogo di caricamento documenti.
+    Folder a document-loading dialog should start from.
 
-    Vale l'ultima cartella usata, ma solo se esiste ancora: una cartella
-    rimossa o su un disco scollegato aprirebbe il dialogo in un punto morto,
-    ed e' meglio ripiegare sul `fallback` del chiamante.
+    The last folder used counts, but only while it still exists: a removed
+    folder, or one on a disconnected drive, would open the dialog in a dead
+    spot, and falling back to the caller's `fallback` is better.
+
+    @param config Preferences dict (may be None); its `last_document_dir`
+        entry is the remembered folder.
+    @param fallback Folder returned when nothing usable is remembered.
+    @return The remembered folder when it is still a directory, otherwise
+        `fallback` as a string ("" when None).
     """
     remembered = (config or {}).get("last_document_dir") or ""
     try:
@@ -237,11 +248,15 @@ def browse_start_dir(config, fallback="") -> str:
 def remember_browse_dir(config, selected) -> None:
     """@brief Remember the folder of the selected file in `config` and save config.json.
 
-    Memorizza la cartella del file scelto, aggiornando anche config.json.
+    Stores the folder of the chosen file, updating config.json as well.
 
-    `config` e' il dizionario vivo della finestra: aggiornarlo qui evita che
-    un salvataggio successivo, fatto con la copia in memoria, riscriva sopra
-    la preferenza appena registrata.
+    `config` is the window's live dictionary: updating it here prevents a
+    later save, made from the in-memory copy, from overwriting the
+    preference just recorded.
+
+    @param config Live preferences dict of the window; None does nothing.
+    @param selected Chosen file or folder; its parent folder is remembered
+        when it is a file. Empty values do nothing.
     """
     if config is None or not selected:
         return
@@ -253,9 +268,9 @@ def remember_browse_dir(config, selected) -> None:
     if config.get("last_document_dir") == directory:
         return
     config["last_document_dir"] = directory
-    # Preferenza di comodita': se il file non e' scrivibile, save_config
-    # restituisce False, la sessione corrente la usa comunque e il
-    # caricamento non si interrompe.
+    # Convenience preference: if the file is not writable, save_config
+    # returns False, the current session uses it anyway and loading is not
+    # interrupted.
     save_config(config)
 
 

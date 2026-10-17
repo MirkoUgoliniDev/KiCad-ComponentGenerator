@@ -68,6 +68,9 @@ def checked_box(value, label="box", bounds=None):
 def positive_number(value, label):
     """@brief Return `value` when it is a positive finite non-boolean number.
 
+    @param value Candidate number.
+    @param label Name used in the error message.
+    @return `value` unchanged.
     @throws ValueError Otherwise, naming `label`.
     """
     if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -132,7 +135,12 @@ def normalized_to_original(box, crop):
 
 
 def box_iou(a, b):
-    """@brief Return the intersection-over-union of two (x0, y0, x1, y1) boxes."""
+    """@brief Return the intersection-over-union of two (x0, y0, x1, y1) boxes.
+
+    @param a First box (x0, y0, x1, y1), in any consistent unit.
+    @param b Second box in the same unit.
+    @return Intersection area divided by union area, 0..1.
+    """
     x0, y0 = max(a[0], b[0]), max(a[1], b[1])
     x1, y1 = min(a[2], b[2]), min(a[3], b[3])
     intersection = max(0, x1-x0) * max(0, y1-y0)
@@ -144,6 +152,11 @@ def maximum_matching(scores, threshold):
     """@brief Match predictions to references one-to-one with maximum cardinality above an IoU threshold.
 
     Iterative augmenting paths: maximum cardinality, no recursion/dependencies.
+
+    @param scores IoU matrix, one row for each prediction and one column for
+        each reference.
+    @param threshold Minimum IoU for an edge to be eligible.
+    @return Dictionary prediction index -> matched reference index.
     """
     edges = [sorted((r for r, score in enumerate(row) if score >= threshold),
                     key=lambda r: (-row[r], r)) for row in scores]
@@ -175,7 +188,11 @@ def maximum_matching(scores, threshold):
 
 
 def error_summary(values):
-    """@brief Summarize errors as mean, median, RMSE and maximum; all None for an empty list."""
+    """@brief Summarize errors as mean, median, RMSE and maximum; all None for an empty list.
+
+    @param values Error magnitudes.
+    @return Dictionary with keys mean, median, rmse and max.
+    """
     if not values:
         return {key: None for key in ("mean", "median", "rmse", "max")}
     return {"mean": statistics.mean(values), "median": statistics.median(values),
@@ -186,6 +203,17 @@ def evaluate_inventory(reference, predictions, crop, iou_threshold=0.5):
     """@brief Compare predicted inventory boxes with the manual reference and report precision, recall and errors.
 
     Return auditable localization metrics; reject malformed input, never drop it.
+
+    @param reference Parsed reference annotation (schema 1).
+    @param predictions List of predicted components carrying a normalized
+        `_box` (0..1 within the crop).
+    @param crop Crop rectangle (left, top, right, bottom) in original-photo
+        pixels that the normalized boxes refer to.
+    @param iou_threshold Minimum IoU for a prediction to count as a match.
+    @return Report dictionary with counts, precision, recall, matched-pair
+        errors (px) and the unmatched items of both sides.
+    @throws ValueError When the reference, the threshold, the crop or a
+        prediction is malformed.
     """
     validate_reference(reference)
     positive_number(iou_threshold, "IoU threshold")
@@ -270,6 +298,13 @@ def verify_photo(path, reference):
     """@brief Check that a file is the reference PNG (size and optional SHA-256) and describe it.
 
     Verify this fixture's original PNG, without image or network dependencies.
+
+    @param path Path of the PNG file to check.
+    @param reference Parsed reference annotation holding the expected
+        `image` size in px and optional sha256.
+    @return Dictionary describing the file (path, size in px, digest).
+    @throws ValueError When the file is not an original PNG or its size or
+        digest differ from the reference.
     """
     data = Path(path).read_bytes()
     if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR" or len(data) < 24:
@@ -288,6 +323,8 @@ def verify_photo(path, reference):
 def calibrate_crop(path, reference):
     """@brief Recompute the calibrated board crop of the reference photo with find_board.
 
+    @param path Path of the original reference PNG.
+    @param reference Parsed reference annotation with the board size in mm.
     @return Crop rectangle in original-photo pixels.
     @throws ValueError When the photo does not match the reference, cannot be decoded or calibrated.
     """
@@ -313,6 +350,14 @@ def draw_overlay(photo, reference, report, output):
     """@brief Draw references, excluded regions and predictions on a double-size photo and save it.
 
     Generated review output only; labels are annotation IDs, not PCB identities.
+
+    @param photo Path of the original reference PNG.
+    @param reference Parsed reference annotation.
+    @param report Evaluation report (output of evaluate_inventory), or None
+        to draw the reference alone.
+    @param output Path of the PNG to write.
+    @throws ValueError When the photo cannot be decoded or the overlay
+        cannot be encoded.
     """
     import cv2
     import numpy as np
@@ -349,6 +394,12 @@ def main(argv=None):
 
     @param argv Optional argument list; None uses sys.argv.
     @return Process exit code 0; argument and input errors exit through argparse.
+    @throws SystemExit With status 2, through ``parser.error``, on invalid
+        arguments and when the reference, the photo or the inventory cannot
+        be used: an inventory that does not match the reference or the
+        calibrated crop, or no crop source (the reference crop is
+        deliberately not a fallback). The ValueError, OSError and ImportError
+        raised inside are caught here and reported that way.
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1), formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("inventory", type=Path, nargs="?")

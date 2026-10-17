@@ -84,8 +84,8 @@ class Toast(QWidget):
                                 " background: transparent; border: none;")
         for label in (self.title, self.body, self.hint):
             label.setTextFormat(Qt.TextFormat.PlainText)
-            # Un'etichetta che va a capo si stringe al minimo possibile: senza
-            # una larghezza minima la scheda andava a capo a ogni parola.
+            # A label that wraps shrinks to the minimum possible: without a
+            # minimum width the card wrapped at every word.
             label.setMinimumWidth(TOAST_TEXT_MIN_PX)
             texts.addWidget(label)
         row.addLayout(texts)

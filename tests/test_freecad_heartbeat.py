@@ -30,7 +30,7 @@ from kicadgen.cad3d.process_log import (HEARTBEAT_BEATS_PER_TIMEOUT,
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Testo che apre ogni battito: e' il contratto della riga, non un dettaglio.
-BEAT_HEAD = "Importazione del modello 3D"
+BEAT_HEAD = "Importazione del modello STEP"
 
 
 # --------------------------------------------------------------------------

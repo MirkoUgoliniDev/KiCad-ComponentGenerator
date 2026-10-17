@@ -815,7 +815,7 @@ def test_the_abort_action_exists_only_while_something_can_be_stopped(qapp):
         app.processEvents()
         assert not overlay.is_abortable(), (
             "chi non dichiara di saper fermare il lavoro non offre di fermarlo")
-        overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…', abortable=True)
+        overlay.start('Generazione modello STEP', 'Avvio di FreeCAD…', abortable=True)
         app.processEvents()
         assert overlay.is_abortable()
         assert overlay.abort_button.isEnabled()
@@ -868,8 +868,8 @@ def test_overlay_animation_resize_literal_status_and_cleanup(qapp):
         overlay.start()
         assert overlay.status.text() == "Preparazione dei documenti…"
         assert overlay.elapsed.text().endswith("00:00")
-        overlay.start('Generazione footprint e modello 3D', 'Generazione…')
-        assert overlay.title.text() == 'Generazione footprint e modello 3D'
+        overlay.start('Generazione footprint e modello STEP', 'Generazione…')
+        assert overlay.title.text() == 'Generazione footprint e modello STEP'
         assert overlay.status.text() == 'Generazione…'
     finally:
         overlay.stop()

@@ -82,7 +82,8 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         positions; the footprint origin is the (possibly estimated) body
         centre, see PackageGeometry.body_frame_offset. A ``${REFERENCE}``
         text on F.Fab marks the body centre (core.footprint.fab_reference_text);
-        Reference/Value at core.footprint.default_text_positions.
+        Reference/Value anchored bottom-left at the KiCad corner of
+        core.footprint.default_text_positions (place_default_texts).
     @throws ValueError When the geometry does not validate or the pin-1
         marker cannot be placed off the copper.
     """
@@ -138,15 +139,15 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     for x0, y0, x1, y1 in boxes:
         extent = [min(extent[0], x0), min(extent[1], y0), max(extent[2], x1), max(extent[3], y1)]
 
-    # Un foro meccanico non e' un pin: non riceve il marcatore del pin 1.
+    # A mechanical hole is not a pin: it does not get the pin 1 marker.
     first = pin_one(pin.number for pin in pins if pin.pad_type != "np_thru_hole")
     if first is not None:
         # With several pads numbered like pin 1 the first one listed is used.
         index = next(i for i, p in enumerate(pins)
                      if p.number == first and p.pad_type != "np_thru_hole")
         pin = pins[index]
-        # Fuori dal pad, dalla parte opposta al centro del package: e' il lato
-        # libero del pin 1 (verso l'esterno per un pin di bordo).
+        # Outside the pad, on the side opposite to the package centre: it is the
+        # free side of pin 1 (outwards for an edge pin).
         dx, dy = pin.x_mm, pin.y_mm
         if math.hypot(dx, dy) < 1e-9:
             dx, dy = -1.0, -1.0

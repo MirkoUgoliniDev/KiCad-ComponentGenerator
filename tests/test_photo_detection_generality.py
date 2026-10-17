@@ -350,18 +350,63 @@ def test_the_global_inventory_estimates_a_missing_height_from_the_plan():
 # ── minor: hand-drawn boxes have a floor in millimetres, not a photo fraction ─
 
 
+def _png():
+    """@brief A flat 400x200 PNG standing in for the calibrated board crop.
+
+    @return Raw PNG bytes accepted by `PhotoReviewDialog`.
+    """
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QColor, QImage
+    image = QImage(400, 200, QImage.Format.Format_RGB32)
+    image.fill(QColor('#243b28'))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buffer, 'PNG')
+    return bytes(data)
+
+
+def _draw_mm(dialog, x0, y0, x1, y1):
+    """@brief Hand the review a rectangle traced on the photo, given in board mm.
+
+    @param dialog `PhotoReviewDialog` under test.
+    @return The component created from it (the last row).
+    @note Goes through the same slot the view's `rectangle_drawn` signal
+          reaches, so the floor and the clamping are the production ones; the
+          pointer gesture itself (click vs stroke) is covered in
+          `test_photo_review_dialog.py`.
+    """
+    from PyQt6.QtCore import QRectF
+    transform = dialog.photo_transform
+    rect = QRectF(transform.mm_to_pixel(x0, y0), transform.mm_to_pixel(x1, y1)).normalized()
+    dialog._component_from_rectangle(rect)
+    return dialog.get_components()[-1]
+
+
 def test_a_0402_short_side_can_be_drawn_on_a_large_board(qapp):
-    """@brief Positivo e negativo: il minimo e' in mm sulla scheda, qualunque sia la scheda."""
+    """@brief Positivo e negativo: il minimo e' in mm sulla scheda, qualunque sia la scheda.
+
+    Positivo: 0.5 x 1.0 mm su una scheda da 300 x 200 mm (0.0017 della foto)
+    resta 0.5 x 1.0 mm, ne' rifiutato ne' gonfiato. Negativo: un tratto sotto
+    MIN_HANDLE_SIZE_MM viene tenuto al minimo in mm, non a una frazione fissa
+    della foto, che su questa scheda varrebbe tutt'altra misura.
+    """
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     pytest.importorskip('PyQt6')
-    from kicadgen.gui.yolo_review_dialog import MIN_NEW_BOX_MM, YoloReviewDialog
-    dialog = YoloReviewDialog(b'', [], 300.0, 200.0, photo_yolo.detector_classes())
+    from kicadgen.gui.photo_review_dialog import (MIN_HANDLE_SIZE_MM, STAGE_DETECTOR,
+                                                  PhotoReviewDialog)
+    dialog = PhotoReviewDialog(_png(), [], 300.0, 200.0, stage=STAGE_DETECTOR)
     try:
-        view = dialog.view
-        # 0.5 mm on a 300 mm board is 0.0017 of the photo: the old fixed
-        # fraction (0.004) refused it.
-        assert view.large_enough((.5, .5, .5 + .5 / 300, .5 + 1.0 / 200))
-        assert not view.large_enough((.5, .5, .5 + (MIN_NEW_BOX_MM / 2) / 300, .6))
+        # Detector convention (photo_yolo.box_geometry_mm): length is the long
+        # side, rotation 90 when it lies along Y; the 0.5 mm side is the width.
+        chip = _draw_mm(dialog, 0.0, 0.0, 0.5, 1.0)
+        assert chip['width_mm'] == pytest.approx(0.5)
+        assert chip['length_mm'] == pytest.approx(1.0)
+        assert chip['rotation_deg'] == 90
+        assert chip['_yolo_origin'] == 'user_added'
+        sliver = _draw_mm(dialog, 10.0, 10.0, 10.0 + MIN_HANDLE_SIZE_MM / 2, 11.0)
+        assert sliver['width_mm'] == pytest.approx(MIN_HANDLE_SIZE_MM)
+        assert sliver['length_mm'] == pytest.approx(1.0)
     finally:
         dialog.close()
 
@@ -387,53 +432,77 @@ def test_a_battery_height_follows_the_plan_shape_not_its_size():
 
 @pytest.fixture
 def low_dialog(qapp):
-    """A review window with one strong proposal and one low-confidence proposal."""
+    """A detector-stage review with one strong proposal and one low-confidence proposal."""
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     pytest.importorskip('PyQt6')
-    from kicadgen.gui.yolo_review_dialog import YoloReviewDialog
-    app = qapp
+    from kicadgen.gui.photo_review_dialog import STAGE_DETECTOR, PhotoReviewDialog
     strong = _low(1, (.1, .1, .2, .2), _yolo_confidence=.8, _yolo_review_only=False,
                   _yolo_origin='operating_threshold', _yolo_low_confidence=False)
     weak = _low(2, (.6, .6, .7, .7))
-    dialog = YoloReviewDialog(b'', [strong, weak], LENGTH_MM, WIDTH_MM,
-                              photo_yolo.detector_classes())
-    yield app, dialog
+    dialog = PhotoReviewDialog(_png(), [strong, weak], LENGTH_MM, WIDTH_MM, stage=STAGE_DETECTOR)
+    yield dialog
     dialog.close()
+    qapp.processEvents()
 
 
 def test_a_low_confidence_proposal_is_shown_as_such_and_not_kept(low_dialog):
-    """@brief Positivo: la debole si vede, puntinata ed etichettata, ma non e' tenuta."""
+    """@brief Positivo: la debole si vede, tratteggiata ed etichettata, ma non e' tenuta."""
     from PyQt6.QtCore import Qt
-    from kicadgen.gui.yolo_review_dialog import LOW_CONFIDENCE_COLOR, box_pen
-    _app, dialog = low_dialog
-    assert dialog.list.count() == 2
-    assert 'bassa confidenza' in dialog.list.item(1).text()
-    assert 'non tenuta' in dialog.list.item(1).text()
-    pen = box_pen(dialog.proposals[1])
-    assert pen.style() == Qt.PenStyle.DotLine
-    assert pen.color().name() == LOW_CONFIDENCE_COLOR
-    assert [p['_id'] for p in dialog.kept()] == [1]
+    from kicadgen.gui.photo_review_dialog import AI_ONLY_EXCLUDED_COLOR
+    dialog = low_dialog
+    assert dialog.component_list.count() == 2
+    assert 'bassa confidenza' in dialog.component_list.item(1).text()
+    assert 'non tenuta' in dialog.component_list.item(1).text()
+    pen = dialog._items[1].pen()
+    assert pen.style() == Qt.PenStyle.DashLine
+    assert pen.color().name() == AI_ONLY_EXCLUDED_COLOR
+    assert dialog._items[0].pen().style() == Qt.PenStyle.SolidLine
+    assert [p['_id'] for p in dialog.kept_components()] == [1]
+    assert [p['_id'] for p in dialog.left_out_components()] == [2]
 
 
 def test_a_low_confidence_proposal_the_user_keeps_is_returned(low_dialog):
     """@brief Negativo: tenuta (T) torna nella revisione, non piu' da rivedere; lasciata sparisce."""
-    _app, dialog = low_dialog
+    dialog = low_dialog
     dialog._select_row(1)
-    assert dialog.btn_keep.isEnabled()
+    assert dialog.keep_button.isEnabled()
     assert dialog.toggle_keep() is True
-    kept = dialog.kept()
+    kept = dialog.kept_components()
     assert [p['_id'] for p in kept] == [1, 2]
     assert kept[1]['_yolo_user_kept'] is True and kept[1]['_yolo_review_only'] is False
-    assert 'tenuta' in dialog.list.item(1).text() and 'non tenuta' not in dialog.list.item(1).text()
+    text = dialog.component_list.item(1).text()
+    assert 'tenuta' in text and 'non tenuta' not in text
     assert dialog.toggle_keep() is False
-    assert [p['_id'] for p in dialog.kept()] == [1]
+    assert [p['_id'] for p in dialog.kept_components()] == [1]
     dialog._select_row(0)
-    assert not dialog.btn_keep.isEnabled() and dialog.toggle_keep() is None
+    assert not dialog.keep_button.isEnabled() and dialog.toggle_keep() is None
 
 
-def test_moving_a_low_confidence_proposal_keeps_it(low_dialog):
-    """@brief Ritoccarla e' guardarla: la mano di chi rivede e' la decisione di presenza."""
-    from kicadgen.gui.yolo_review_dialog import YoloReviewDialog
-    _app, dialog = low_dialog
-    YoloReviewDialog.mark_manual(dialog.proposals[1])
-    assert [p['_id'] for p in dialog.kept()] == [1, 2]
+def test_moving_a_low_confidence_proposal_keeps_it(low_dialog, qapp):
+    """@brief Ritoccarla e' guardarla: la mano di chi rivede e' la decisione di presenza.
+
+    @note A real pointer drag: in the detector stage the side form is hidden,
+          so the outline is the only way a reviewer moves a proposal. The
+          fuller gesture contract lives in test_detector_stage_gestures.py.
+    """
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication
+    dialog = low_dialog
+    dialog.show()
+    dialog.show_unkept.setChecked(True)
+    qapp.processEvents()
+    viewport, button = dialog.view.viewport(), Qt.MouseButton.LeftButton
+    start = dialog.view.mapFromScene(dialog._items[1].scenePos())
+    end = start + QPoint(10, 4)
+    QTest.mousePress(viewport, button, Qt.KeyboardModifier.NoModifier, start)
+    QApplication.sendEvent(viewport, QMouseEvent(
+        QMouseEvent.Type.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+        Qt.MouseButton.NoButton, button, Qt.KeyboardModifier.NoModifier))
+    QTest.mouseRelease(viewport, button, Qt.KeyboardModifier.NoModifier, end)
+    qapp.processEvents()
+    assert [p['_id'] for p in dialog.kept_components()] == [1, 2]
+    moved = dialog.get_components()[1]
+    assert moved['_yolo_user_kept'] is True and moved['_yolo_review_only'] is False
+    assert moved['_yolo_manual_box'] is True

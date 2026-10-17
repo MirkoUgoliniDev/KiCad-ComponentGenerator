@@ -18,7 +18,7 @@ every name defined here, so existing imports keep working.
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
+from functools import lru_cache, partial
 import re
 import json
 import threading
@@ -51,21 +51,42 @@ def _patch_point(name: str):
 
 
 def accepts_keyword(function, name: str) -> bool:
-    """@brief Dice se si puo' passare `name=` a questa funzione senza TypeError.
+    """@brief Tell whether `name=` can be passed to this function without a TypeError.
 
-    @param function Funzione che si sta per chiamare.
-    @param name Nome del parametro facoltativo da passare.
-    @return True quando la firma lo dichiara, oppure quando ha un `**kwargs`
-        insieme ad almeno un parametro con un nome.
-    @note Regole e motivazioni sono quelle di `phase_kwargs`, di cui questa e'
-        la parte generale: un `**kwargs` DA SOLO e' l'impronta di un wrapper
-        scritto senza `functools.wraps`, quindi non dimostra nulla.
+    @param function Function about to be called.
+    @param name Name of the optional parameter to pass.
+    @return True when the signature declares it, or when it has a `**kwargs`
+        next to at least one named parameter.
+    @note Rules and reasons are those of `phase_kwargs`, of which this is the
+        general part: a `**kwargs` ALONE is the footprint of a wrapper written
+        without `functools.wraps`, so it proves nothing.
+    @note The answer depends only on the code object, so it is memoised on the
+        underlying function and on whether it is bound (`_keyword_answer`):
+        the window asked it a dozen times per keystroke (2026-10-17). A bound
+        method is keyed by its function, never by the instance, so the cache
+        keeps no window alive; a different (e.g. monkeypatched) function is
+        a different key.
     """
+    target = getattr(function, "__func__", None)
+    try:
+        if target is not None and hasattr(function, "__self__"):
+            return _keyword_answer(target, True, name)
+        return _keyword_answer(function, False, name)
+    except TypeError:  # unhashable callable: answer without the memo
+        return _keyword_answer.__wrapped__(function, False, name)
+
+
+@lru_cache(maxsize=1024)
+def _keyword_answer(function, bound: bool, name: str) -> bool:
+    """Answer of `accepts_keyword` for `function`; `bound` drops its first parameter (self)."""
     try:
         import inspect
         parameters = list(inspect.signature(function).parameters.values())
-    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
+    except (TypeError, ValueError):  # builtin or object that cannot be introspected
         return False
+    if bound and parameters and parameters[0].kind in (
+            inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        parameters = parameters[1:]
     named = [p for p in parameters if p.kind not in (
         inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
     for parameter in parameters:
@@ -78,47 +99,47 @@ def accepts_keyword(function, name: str) -> bool:
 
 
 def cancel_kwargs(function, cancel) -> dict:
-    """@brief `{'cancel': evento}` solo se il generatore 3D accetta il canale.
+    """@brief `{'cancel': event}` only when the 3D generator accepts the channel.
 
-    @param function Generatore 3D che si sta per chiamare.
-    @param cancel Evento con cui la modale chiede di fermare il figlio FreeCAD.
-    @return Dizionario da espandere nella chiamata, vuoto se il canale non e'
-        accettato.
-    @note Stessa ragione di `phase_kwargs`: la funzione chiamata puo' essere
-        sostituita (prove, strumenti) da una che non conosce questo parametro,
-        e un TypeError li' farebbe fallire una generazione buona per colpa di
-        una funzionalita' accessoria.
-    @note A differenza dell'annuncio della fase, qui la rinuncia NON si perde
-        in silenzio: chi chiama deve dirlo nel log (vedi
-        `GenerateWorker._generation_kwargs`), perche' una modale che offre
-        «Interrompi» su un lavoro non interrompibile prometterebbe il falso.
+    @param function 3D generator about to be called.
+    @param cancel Event with which the modal asks to stop the FreeCAD child.
+    @return Dictionary to expand into the call, empty when the channel is not
+        accepted.
+    @note Same reason as `phase_kwargs`: the called function can be replaced
+        (tests, tools) by one that does not know this parameter, and a
+        TypeError there would fail a good generation because of an accessory
+        feature.
+    @note Unlike the phase announcement, giving up here is NOT lost in
+        silence: the caller must say so in the log (see
+        `GenerateWorker._generation_kwargs`), because a modal offering
+        «Interrompi» on a job that cannot be interrupted would promise a lie.
     """
     return {"cancel": cancel} if accepts_keyword(function, "cancel") else {}
 
 
 def phase_kwargs(function, callback) -> dict:
-    """@brief `{'phase': callback}` solo se la funzione di servizio lo accetta.
+    """@brief `{'phase': callback}` only when the service function accepts it.
 
-    @param function Funzione di servizio che si sta per chiamare.
-    @param callback Callable(tool, detail) da inoltrare alla modale.
-    @return Dizionario da espandere nella chiamata: vuoto se il parametro non
-        esiste ancora o se la firma non dice nulla di utile.
-    @note I servizi e l'interfaccia evolvono separatamente: passare `phase=` a
-        una firma che non lo prevede fa fallire l'analisi con un TypeError, e
-        non passarlo quando c'e' fa perdere l'annuncio della fase. Si guarda
-        la firma installata invece di scommettere sull'ordine di arrivo delle
-        modifiche.
-    @note `**kwargs` conta come consenso solo se la firma dichiara anche
-        almeno un parametro con un nome. Una firma fatta di soli `*args,
-        **kwargs` e' l'impronta di un decoratore scritto SENZA
-        `functools.wraps`: `inspect.signature` vede il wrapper, non la
-        funzione vera, quindi `**kwargs` non dimostra nulla e passare `phase=`
-        ricrea esattamente il TypeError che questo aiutante esiste per
-        evitare. In quel caso si rinuncia all'annuncio: perdere una riga in
-        modale e' meno grave che far cadere l'analisi. Un decoratore con
-        `functools.wraps` espone `__wrapped__`, `inspect.signature` lo segue e
-        la firma vera torna visibile: e' quella la soluzione, non una regola
-        piu' furba qui.
+    @param function Service function about to be called.
+    @param callback Callable(tool, detail) to forward to the modal.
+    @return Dictionary to expand into the call: empty when the parameter does
+        not exist yet or when the signature says nothing useful.
+    @note The services and the interface evolve separately: passing `phase=`
+        to a signature that does not expect it fails the analysis with a
+        TypeError, and not passing it when it is there loses the phase
+        announcement. The installed signature is inspected instead of betting
+        on the order in which the changes land.
+    @note `**kwargs` counts as consent only when the signature also declares
+        at least one named parameter. A signature made only of `*args,
+        **kwargs` is the footprint of a decorator written WITHOUT
+        `functools.wraps`: `inspect.signature` sees the wrapper, not the real
+        function, so `**kwargs` proves nothing and passing `phase=` recreates
+        exactly the TypeError this helper exists to avoid. In that case the
+        announcement is given up: losing one line in the modal is less serious
+        than bringing the analysis down. A decorator with `functools.wraps`
+        exposes `__wrapped__`, `inspect.signature` follows it and the real
+        signature becomes visible again: that is the fix, not a cleverer rule
+        here.
     """
     return accepted_kwargs(function, phase=callback)
 
@@ -138,7 +159,7 @@ def accepted_kwargs(function, **values) -> dict:
     try:
         import inspect
         parameters = list(inspect.signature(function).parameters.values())
-    except (TypeError, ValueError):  # builtin o oggetto non introspezionabile
+    except (TypeError, ValueError):  # builtin or object that cannot be introspected
         return {}
     named = [p for p in parameters if p.kind not in (
         inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
@@ -150,52 +171,54 @@ def accepted_kwargs(function, **values) -> dict:
 
 
 def matching_cancel_kwargs(function, cancel) -> dict:
-    """@brief `{'model_cancel': evento}` solo se il generatore dichiara quel canale.
+    """@brief `{'model_cancel': event}` only when the generator declares that channel.
 
-    @param function Generatore 3D che si sta per chiamare.
-    @param cancel Evento con cui la modale chiede di fermare il lavoro.
-    @return Dizionario da espandere nella chiamata, vuoto quasi sempre.
-    @note L'abbinamento dei modelli KiCad (`kicad_models.attach_models`, che
-        per misurare un candidato non ancora in cache avvia `freecadcmd`) puo'
-        durare minuti da solo, e la sua interruzione sta nascendo in
-        `cad3d/`: il canale ordinario e' lo stesso `cancel` che gia' arriva al
-        figlio FreeCAD (vedi `cancel_kwargs`), ma se l'abbinamento ricevesse un
-        canale PROPRIO questa e' la porta per passarglielo. Finche' la firma
-        non lo dichiara non si passa nulla: mai un TypeError per una
-        funzionalita' accessoria, e le due modifiche possono atterrare in
-        qualunque ordine.
+    @param function 3D generator about to be called.
+    @param cancel Event with which the modal asks to stop the job.
+    @return Dictionary to expand into the call, empty almost always.
+    @note Matching the KiCad models (`kicad_models.attach_models`, which
+        launches `freecadcmd` to measure a candidate not yet in the cache) can
+        take minutes on its own, and its interruption is being born in
+        `cad3d/`: the ordinary channel is the same `cancel` that already
+        reaches the FreeCAD child (see `cancel_kwargs`), but should the
+        matching receive a channel of its OWN this is the door to pass it
+        through. Until the signature declares it nothing is passed: never a
+        TypeError for an accessory feature, and the two changes can land in
+        any order.
     """
     return {"model_cancel": cancel} if accepts_keyword(function, "model_cancel") else {}
 
 
 def _photo_scale_kwargs(generator, scale) -> dict:
-    """@brief `{'photo_scale_px_per_mm': scala}` solo se il generatore chiamato la accetta.
+    """@brief `{'photo_scale_px_per_mm': scale}` only when the called generator accepts it.
 
-    @param generator Funzione 3D che il worker sta per chiamare (l'involucro o
-        un sostituto di prova con la firma di prima).
-    @param scale Scala della foto calibrata in px/mm, o None.
+    @param generator 3D function the worker is about to call (the wrapper or
+        a test substitute with the former signature).
+    @param scale Scale of the calibrated photo in px/mm, or None.
+    @return Dictionary to expand into the call, empty when the parameter is
+        not accepted.
     """
     return ({"photo_scale_px_per_mm": scale}
             if accepts_keyword(generator, "photo_scale_px_per_mm") else {})
 
 
-#: Riga con cui lo script FreeCAD annuncia il componente su cui lavora.
+#: Line with which the FreeCAD script announces the component it is working on.
 _FREECAD_COMPONENT = re.compile(r"KICADGEN_COMPONENT_START:(\d+)/(\d+)")
 
 
 def freecad_progress(message: str):
-    """@brief Avanzamento del 3D letto dalle righe di FreeCAD.
+    """@brief 3D progress read from the FreeCAD log lines.
 
-    @param message Riga di log, gia' prefissata con «FreeCAD: ».
-    @return (completati, totale) quando la riga annuncia un componente,
-        altrimenti None.
-    @note Il conteggio in modale si fermava a «100% · 50/50» mentre FreeCAD
-        era ancora al primo componente: quel numero era l'abbinamento dei
-        modelli, finito prima che FreeCAD partisse, e nessuno lo aggiornava
-        dopo. FreeCAD pero' annuncia ogni componente che comincia: i
-        completati sono quelli prima di lui. Su un lavoro da cinque minuti la
-        differenza fra «finito» e «al primo di cinquanta» e' tutto cio' che
-        chi aspetta ha bisogno di sapere.
+    @param message Log line, already prefixed with «FreeCAD: ».
+    @return (completed, total) when the line announces a component, otherwise
+        None.
+    @note The count in the modal used to stop at «100% · 50/50» while FreeCAD
+        was still on the first component: that number was the model matching,
+        finished before FreeCAD started, and nobody updated it afterwards.
+        FreeCAD however announces every component it begins: the completed
+        ones are those before it. On a five-minute job the difference between
+        «finished» and «at the first of fifty» is everything the person
+        waiting needs to know.
     """
     match = _FREECAD_COMPONENT.search(message or "")
     if not match:
@@ -212,26 +235,27 @@ class _Cad3DRunWorker(QThread):
     same progress parsing; only the signals that carry the outcome differ.
     This base holds everything they share, so the two cannot drift apart.
 
-    Segnali comuni:
-        warning(str)  -- annotazione non applicata (es. fillet impossibile)
-        progress(str) -- riga informativa per il log e la modale
-        cancellable(bool) -- vedi sotto
-        phase(str, str, int, int) -- vedi sotto
+    Shared signals:
+        warning(str)  -- annotation not applied (e.g. impossible fillet)
+        progress(str) -- informative line for the log and the modal
+        cancellable(bool) -- see below
+        phase(str, str, int, int) -- see below
     """
 
     warning = pyqtSignal(str)
-    #: Annotazioni informative (es. quanti modelli reali di KiCad sono stati
-    #: usati): vanno nel log senza il prefisso di avviso, perche' non c'e'
-    #: nulla che richieda attenzione.
+    #: Informative annotations (e.g. how many real KiCad models were used):
+    #: they go to the log without the warning prefix, because there is
+    #: nothing that requires attention.
     progress = pyqtSignal(str)
-    #: True/False all'inizio del 3D: dice alla finestra se «Interrompi» ha
-    #: davvero un lavoro da fermare. Falso = il generatore in uso non conosce
-    #: il canale, e la modale deve togliere il comando invece di prometterlo.
+    #: True/False at the start of the 3D: tells the window whether «Interrompi»
+    #: (stop) really has a job to stop. False = the generator in use does not
+    #: know the channel, and the modal must remove the command instead of
+    #: promising it.
     cancellable = pyqtSignal(bool)
-    #: (strumento, dettaglio, fatti, totale). Dice alla modale CHI sta
-    #: lavorando, che dai messaggi di avanzamento non si capiva. Un totale non
-    #: positivo significa "nessun conteggio": la modale resta animata invece di
-    #: mostrare una percentuale inventata.
+    #: (tool, detail, done, total). Tells the modal WHO is working, which
+    #: could not be understood from the progress messages. A non-positive
+    #: total means "no count": the modal stays animated instead of showing
+    #: an invented percentage.
     phase = pyqtSignal(str, str, int, int)
 
     def __init__(self, params, project_dir: Path, body: Body3DParams | None,
@@ -243,6 +267,8 @@ class _Cad3DRunWorker(QThread):
         @param body 3D body parameters, or None when no 3D model is requested.
         @param fillets Edge fillet annotations, as given by the caller.
         @param face_texts Face text annotations, as given by the caller.
+        @param single_component True for a single leaded part (no FreeCAD
+            component lines, the phase is announced by the worker itself).
         """
         super().__init__()
         self.params = params
@@ -251,28 +277,28 @@ class _Cad3DRunWorker(QThread):
         self.fillets = fillets
         self.face_texts = face_texts
         self.single_component = bool(single_component)
-        #: Canale di rinuncia condiviso col processo FreeCAD figlio. Vive sul
-        #: worker e non sulla finestra: e' la corsa a poter essere fermata, e
-        #: una corsa successiva deve nascere con un canale pulito.
+        #: Abort channel shared with the child FreeCAD process. It lives on
+        #: the worker and not on the window: it is the run that can be stopped,
+        #: and a subsequent run must be born with a clean channel.
         self.cancel = threading.Event()
-        #: Scala della foto calibrata (px/mm) o None: la imposta la finestra
-        #: dopo la costruzione, vedi `MainWindow._photo_scale_px_per_mm`.
+        #: Scale of the calibrated photo (px/mm) or None: the window sets it
+        #: after construction, see `MainWindow._photo_scale_px_per_mm`.
         self.photo_scale_px_per_mm = None
 
     def _cancel_kwargs(self, generator) -> dict:
-        """@brief Il canale di rinuncia da passare al generatore, se lo accetta.
+        """@brief The abort channel to pass to the generator, when it accepts it.
 
-        @param generator La funzione di generazione 3D che si sta per chiamare.
-        @return `{'cancel': evento}` oppure `{}`.
-        @note Quando il canale non viene accettato la corsa NON e' fermabile, e
-            la cosa si dice invece di scoprirla premendo un pulsante che non fa
-            niente. La riga finisce nel log e sulla modale come ogni altro
-            avviso di questo worker, e `cancellable(False)` fa TOGLIERE il
-            comando dalla modale: un pulsante che non ferma niente e' peggio
-            di nessun pulsante.
-        @note La domanda si fa a `generation_accepts_cancel`, non alla sola
-            firma dell'involucro `_generate_3d`: e' il generatore reale a
-            dover conoscere il canale.
+        @param generator The 3D generation function about to be called.
+        @return `{'cancel': event}` or `{}`.
+        @note When the channel is not accepted the run is NOT stoppable, and
+            this is said instead of being discovered by pressing a button that
+            does nothing. The line goes to the log and to the modal like every
+            other warning of this worker, and `cancellable(False)` REMOVES the
+            command from the modal: a button that stops nothing is worse than
+            no button.
+        @note The question is asked to `generation_accepts_cancel`, not to the
+            signature of the `_generate_3d` wrapper alone: it is the real
+            generator that must know the channel.
         """
         accepts = _patch_point("generation_accepts_cancel")
         kwargs = (cancel_kwargs(generator, self.cancel)
@@ -287,35 +313,41 @@ class _Cad3DRunWorker(QThread):
     def request_abort(self) -> None:
         """@brief Ask the FreeCAD child of this run to die.
 
-        @note Non uccide il QThread: l'ordine viaggia sul canale e il figlio
-            viene ucciso da `process_log.run_logged`, cioe' dalla stessa
-            macchina del watchdog. Il worker esce poi dalla sua via d'errore
-            normale (segnale d'errore e `finished`), che e' cio' che riporta la
-            finestra in quiete: terminare il thread di forza lascerebbe invece
-            un processo figlio orfano e la GUI senza segnale di fine.
+        @note It does not kill the QThread: the order travels on the channel
+            and the child is killed by `process_log.run_logged`, that is by
+            the same machinery as the watchdog. The worker then leaves through
+            its normal error path (error signal and `finished`), which is what
+            brings the window back to rest: terminating the thread by force
+            would instead leave an orphan child process and the GUI without
+            an end signal.
         """
         self.cancel.set()
 
     def _model_progress(self, done: int, total: int) -> None:
-        """@brief Porta in modale l'unico conteggio vero della generazione.
+        """@brief Bring the only real count of the generation to the modal.
 
-        @param done Componenti gia' esaminati.
-        @param total Componenti da esaminare.
-        @note Ogni componente puo' costare una misura CAD, quindi il conto
-            avanza al ritmo del lavoro vero e non di un timer.
-        @note Lo strumento dichiarato e' `kicad` perche' la fase e' la scelta
-            del file da usare nella libreria dei modelli di KiCad: e' quello
-            che avanza componente per componente ed e' quello che spiega
-            l'attesa. Non si dice che FreeCAD sia fermo -- `attach_models`
-            avvia `freecadcmd` per misurare i candidati che non sono ancora in
-            cache -- ma quelle misure servono all'abbinamento, non alla
-            costruzione del solido: mostrare il solido di FreeCAD qui faceva
-            credere che il modello finale fosse gia' in lavorazione.
+        @param done Components already examined.
+        @param total Components to examine.
+        @note Every component may cost a CAD measurement, so the count
+            advances at the pace of the real work and not of a timer.
+        @note The declared tool is `kicad` because the phase is the choice of
+            the file to use from the KiCad model library: that is what
+            advances component by component and what explains the wait. It is
+            not claimed that FreeCAD is idle -- `attach_models` launches
+            `freecadcmd` to measure the candidates not yet in the cache -- but
+            those measurements serve the matching, not the construction of
+            the solid: showing the FreeCAD solid here made people believe the
+            final model was already being built.
         """
         self.phase.emit('kicad', tx("scelta del modello per ogni componente"), done, total)
 
     def _archive_progress(self, done, total, records):
-        """@brief Show archive outcomes and persist the per-component report."""
+        """@brief Show archive outcomes and persist the per-component report.
+
+        @param done Components already compared with the shared archive.
+        @param total Components to compare.
+        @param records Per-component outcome rows, each with a `status` key.
+        """
         counts = {key: sum(row['status'] == key for row in records)
                   for key in ('matched', 'not_found', 'review_required', 'skipped', 'unavailable')}
         detail = tx("{matched} trovati · {not_found} non trovati · {review} da verificare",
@@ -340,7 +372,10 @@ class _Cad3DRunWorker(QThread):
                 self.progress.emit(tx("Resoconto consolidati non salvato: {error}", error=str(exc)))
 
     def _cad_progress(self, message: str) -> None:
-        """@brief Inoltra la riga al log e, se annuncia un componente, al conteggio."""
+        """@brief Forward the line to the log and, when it announces a component, to the count.
+
+        @param message Progress line from the 3D generator.
+        """
         from ..cad3d.header_reuse import REUSE_PROGRESS
         if message == REUSE_PROGRESS:
             self.phase.emit('headers', tx("Modelli già scelti riutilizzati: aggiornamento degli header."), 0, 0)
@@ -357,13 +392,13 @@ class _Cad3DRunWorker(QThread):
         @return The generator's result mapping (`step_path`, `warnings`, `notes`).
         @throws Cad3DError and any other exception of the generator; the
             caller reports them through its own error signal.
-        @note Il generatore si risolve UNA volta sola, da `main_window` (vedi
-            `_patch_point`): introspezione e chiamata devono riguardare lo
-            stesso oggetto, anche quando e' stato sostituito.
-        @note La prima cosa che fa `_generate_3d` e' l'abbinamento dei modelli
-            di KiCad, non la costruzione del solido: chi chiama annuncia
-            `kicad`, e `_cad_progress` passa a `freecad` quando il solido
-            comincia davvero.
+        @note The generator is resolved ONCE, from `main_window` (see
+            `_patch_point`): introspection and call must concern the same
+            object, even when it has been replaced.
+        @note The first thing `_generate_3d` does is the matching of the KiCad
+            models, not the construction of the solid: the caller announces
+            `kicad`, and `_cad_progress` switches to `freecad` when the solid
+            really begins.
         """
         if self.single_component and not isinstance(self.params, PackageGeometry):
             # No component lines come from FreeCAD for a single part, so the
@@ -392,17 +427,17 @@ class _Cad3DRunWorker(QThread):
 class GenerateWorker(_Cad3DRunWorker):
     """@brief Worker thread that builds and saves the footprint and, when requested, the 3D model.
 
-    QThread che costruisce/salva un Footprint e, se richiesto, il modello 3D.
+    QThread that builds/saves a Footprint and, when requested, the 3D model.
 
-    Il footprint 2D e il modello 3D sono riportati separatamente: un
-    fallimento della generazione 3D (es. freecadcmd non trovato) non deve
-    invalidare un footprint 2D generato correttamente.
+    The 2D footprint and the 3D model are reported separately: a failure of
+    the 3D generation (e.g. freecadcmd not found) must not invalidate a 2D
+    footprint generated correctly.
 
-    Segnali (oltre a quelli di `_Cad3DRunWorker`):
-        done(str)       -- percorso assoluto del file .kicad_mod scritto
-        error(str)      -- errore nella generazione del footprint 2D
-        cad3d_done(str) -- percorso assoluto del file .step scritto
-        cad3d_error(str) -- errore nella generazione del modello 3D
+    Signals (besides those of `_Cad3DRunWorker`):
+        done(str)       -- absolute path of the written .kicad_mod file
+        error(str)      -- error in the 2D footprint generation
+        cad3d_done(str) -- absolute path of the written .step file
+        cad3d_error(str) -- error in the 3D model generation
     """
 
     done = pyqtSignal(str)
@@ -423,6 +458,7 @@ class GenerateWorker(_Cad3DRunWorker):
         @param body 3D body parameters; None generates the footprint only.
         @param fillets Edge fillet annotations; None means none.
         @param face_texts Face text annotations; None means none.
+        @param single_component True for a single leaded part (see `_Cad3DRunWorker`).
         """
         super().__init__(params, project_dir, body, fillets or [], face_texts or [], single_component)
         # Only the host footprint may differ: self.params remains the physical
@@ -450,7 +486,7 @@ class GenerateWorker(_Cad3DRunWorker):
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
         try:
-            # Il file lo scrive questo programma: KiCad non e' in esecuzione.
+            # This program writes the file: KiCad is not running.
             self.phase.emit('footprint', tx("scrittura del file .kicad_mod"), 0, 0)
             self.progress.emit(tx("Generazione del footprint KiCad…"))
             host = self.footprint_params if self.footprint_params is not None else self.params
@@ -464,9 +500,9 @@ class GenerateWorker(_Cad3DRunWorker):
                 else _patch_point("build_pin_header")(host)
             )
             footprint.place_texts(self.text_positions)
-            # Disegni dell'utente (palette dell'anteprima): record gia'
-            # validati, aggiunti dopo il generato cosi' non toccano la
-            # geometria calcolata (pad, courtyard, contorni).
+            # User drawings (preview palette): records already validated,
+            # added after the generated ones so they do not touch the
+            # computed geometry (pads, courtyard, outlines).
             from ..core.footprint import drawing_graphics
             for item in drawing_graphics(self.drawings):
                 footprint.add_graphic(item)
@@ -474,38 +510,39 @@ class GenerateWorker(_Cad3DRunWorker):
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))
             if self.body is None and isinstance(self.params, CastellatedModuleParams):
-                # Solo footprint: le note delle stime ridotte (fori, piazzole)
-                # altrimenti le porta al log solo il passo 3D (punto 140,
-                # «riduci e segnala»: una riduzione non resta mai muta).
+                # Footprint only: the notes of the reduced estimates (holes,
+                # pads) would otherwise reach the log only through the 3D step
+                # (point 140, «riduci e segnala» (reduce and report): a
+                # reduction never stays silent).
                 for note in self.params.geometry_notes():
                     self.progress.emit(note)
             self.done.emit(str(out_path))
-        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+        except Exception as exc:  # noqa: BLE001 - reported in the UI, not fatal
             self.error.emit(str(exc))
             return
 
         if self.body is not None:
             try:
-                # La prima cosa che fa `_generate_3d` e' l'abbinamento dei
-                # modelli di KiCad, non la costruzione del solido: annunciare
-                # qui `freecad` accendeva il cubo di FreeCAD per tutta la fase
-                # che la correzione vuole attribuita a KiCad, per poi tornare
-                # indietro. Da `freecad` ci passa `_cad_progress`, quando il
-                # solido comincia davvero.
+                # The first thing `_generate_3d` does is matching the KiCad
+                # models, not building the solid: announcing `freecad` here
+                # lit the FreeCAD cube for the whole phase that the correction
+                # wants attributed to KiCad, only to go back afterwards.
+                # `_cad_progress` switches to `freecad` when the solid really
+                # starts.
                 if not self.single_component and not isinstance(self.params, PackageGeometry):
                     self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
-                self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
+                self.progress.emit(tx("Generazione del modello STEP tramite FreeCAD…"))
                 result = self._generate_model()
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)
-                # Le note della risoluzione modelli vanno nel log anche nella
-                # generazione completa, non solo nella rigenerazione 3D.
+                # The notes of the model resolution go to the log also in the
+                # full generation, not only in the 3D regeneration.
                 for note in result.get('notes', []):
                     self.progress.emit(note)
                 self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
                 self.cad3d_error.emit(str(exc))
-            except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+            except Exception as exc:  # noqa: BLE001 - reported in the UI, not fatal
                 self.cad3d_error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
@@ -529,14 +566,15 @@ def _announce_freecad_measuring(worker, started: bool, count: int) -> None:
 class Cad3DWorker(_Cad3DRunWorker):
     """@brief Worker thread that regenerates only the 3D model (STEP/VRML), not the footprint.
 
-    QThread che rigenera solo il modello 3D (STEP/VRML), senza rifare il footprint.
+    QThread that regenerates only the 3D model (STEP/VRML), without redoing the footprint.
 
-    Serve al pulsante "Rigenera modello 3D" del tab Modello 3D: dopo aver
-    aggiunto/tolto annotazioni non ha senso riscrivere anche il .kicad_mod.
+    It serves the "Rigenera modello 3D" button of the Modello 3D tab: after
+    adding/removing annotations there is no point in rewriting the .kicad_mod
+    too.
 
-    Segnali (oltre a quelli di `_Cad3DRunWorker`):
-        done(str)    -- percorso assoluto del file .step scritto
-        error(str)   -- messaggio di errore leggibile
+    Signals (besides those of `_Cad3DRunWorker`):
+        done(str)    -- absolute path of the written .step file
+        error(str)   -- readable error message
     """
 
     done = pyqtSignal(str)
@@ -554,15 +592,16 @@ class Cad3DWorker(_Cad3DRunWorker):
         @param project_dir Project folder the model is written to.
         @param fillets Edge fillet annotations, kept as given.
         @param face_texts Face text annotations, kept as given.
+        @param single_component True for a single leaded part (see `_Cad3DRunWorker`).
         """
         super().__init__(params, project_dir, body, fillets, face_texts, single_component)
 
     def run(self) -> None:
         """@brief QThread override: regenerate the 3D model and emit done, warning or error."""
         try:
-            # Stessa ragione di GenerateWorker.run: `_generate_3d` comincia
-            # dall'abbinamento dei modelli di KiCad. `_cad_progress` passa a
-            # `freecad` quando il solido comincia davvero.
+            # Same reason as GenerateWorker.run: `_generate_3d` starts from
+            # matching the KiCad models. `_cad_progress` switches to
+            # `freecad` when the solid really starts.
             if not self.single_component and not isinstance(self.params, PackageGeometry):
                 self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
             result = self._generate_model()
@@ -573,7 +612,7 @@ class Cad3DWorker(_Cad3DRunWorker):
             self.done.emit(str(result["step_path"]))
         except Cad3DError as exc:
             self.error.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - riportato in UI, non e' fatale
+        except Exception as exc:  # noqa: BLE001 - reported in the UI, not fatal
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
 
@@ -645,8 +684,8 @@ class TerminalDetailWorker(QThread):
         self.photo, self.components, self.model = photo, deepcopy(components), model
         self.only_leads = only_leads
         self.system_prompt = system_prompt
-        # Cache del PROGETTO (vedi photo_inventory.PHOTO_CACHE_SUBDIR); None =
-        # nessuna cache, mai una cartella comune.
+        # PROJECT cache (see photo_inventory.PHOTO_CACHE_SUBDIR); None = no
+        # cache, never a shared folder.
         self.cache_dir = cache_dir
 
     def run(self):
@@ -668,30 +707,30 @@ class TerminalDetailWorker(QThread):
 class ExtractWorker(QThread):
     """@brief Extract datasheet parameters with session-selected photo detection.
 
-    `model` e' l'id OpenRouter da usare per questa estrazione: puo' essere
-    il default del profilo SQLite oppure un modello diverso scelto solo per
-    la sessione corrente.
+    `model` is the OpenRouter id to use for this extraction: it can be the
+    default of the SQLite profile or a different model chosen only for the
+    current session.
 
-    Segnali:
-        done(ExtractedParams) -- parametri estratti con successo
-        error(str)            -- messaggio di errore leggibile
-        progress(str)        -- avanzamento dell'analisi AI, incluso ogni crop
+    Signals:
+        done(ExtractedParams) -- parameters extracted successfully
+        error(str)            -- readable error message
+        progress(str)        -- progress of the AI analysis, every crop included
     """
 
     done = pyqtSignal(object)
     error = pyqtSignal(str)
-    #: Righe di avanzamento. `object`, non `str`: una riga puo' essere una
-    #: messages.Message con il suo tipo (avviso), e un segnale `str` la
-    #: ridurrebbe a testo semplice perdendolo (punto 136).
+    #: Progress rows. `object`, not `str`: a row may be a messages.Message
+    #: with its type (warning), and a `str` signal would reduce it to plain
+    #: text, losing it (point 136).
     progress = pyqtSignal(object)
-    #: Vedi GenerateWorker.phase.
+    #: See GenerateWorker.phase.
     phase = pyqtSignal(str, str, int, int)
-    #: (foto PNG, proposte del rilevatore, lunghezza mm, larghezza mm). Emesso
-    #: fra il rilevamento locale e la riconciliazione a pagamento: il worker si
-    #: ferma qui finche' l'interfaccia non risponde con deliver_review, perche'
-    #: una proposta tolta adesso non viene ne' inviata ne' pagata. Le quote
-    #: sono quelle con cui la foto e' stata calibrata, non quelle dei campi:
-    #: durante l'estrazione i campi non sono ancora stati compilati.
+    #: (PNG photo, detector proposals, length mm, width mm). Emitted between
+    #: the local detection and the paid reconciliation: the worker stops here
+    #: until the interface answers with deliver_review, because a proposal
+    #: removed now is neither sent nor paid for. The dimensions are those the
+    #: photo was calibrated with, not those of the fields: during extraction
+    #: the fields have not been filled in yet.
     review_requested = pyqtSignal(object, object, float, float)
 
     def __init__(
@@ -734,6 +773,10 @@ class ExtractWorker(QThread):
             field 'crop_model', HANDOFF 150); None or blank reads the crops
             with the model of the paid call on the photograph
             (`verification_model`). Forwarded like `crop_prompt`.
+        @param smd_model_path Weights file of the local SMD network chosen in
+            the «Modello rete SMD» row; None uses the default in models/smd.
+        @param numbering_prompt Prompt of the dedicated pin-numbering call;
+            None uses the factory default.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -749,38 +792,39 @@ class ExtractWorker(QThread):
         self.verification_prompt = verification_prompt
         self.verification_model = verification_model
         self.terminal_prompt = terminal_prompt
-        # Copia anche delle liste: dal 26/09 ogni file porta una lista di ruoli.
+        # Copy of the lists too: since 26/09 every file carries a list of roles.
         self.document_roles = ({name: (list(roles) if isinstance(roles, (list, tuple)) else roles)
                                 for name, roles in document_roles.items()}
                                if document_roles is not None else None)
         self.component_family = component_family
         self.photo_detector = photo_detector
         self.yolo_model_path = yolo_model_path
-        # File della rete SMD scelto nella riga «Modello rete SMD» (None: il
-        # predefinito in models/smd).
+        # SMD network file chosen in the «Modello rete SMD» (SMD network model)
+        # row (None: the default in models/smd).
         self.smd_model_path = smd_model_path
         self.yolo_confidence = yolo_confidence
         self.yolo_settings = dict(yolo_settings) if yolo_settings is not None else None
         self.crop_prompt = crop_prompt
         self.crop_model = crop_model
-        # «Interrompi» lo alza: il servizio lo controlla prima di ogni chiamata
-        # a pagamento, cosi' dopo l'interruzione non ne parte nessun'altra
-        # (verifica del 25/09, D8). Quella gia' in volo non si puo' richiamare.
+        # «Interrompi» (stop) raises it: the service checks it before every
+        # paid call, so that after the stop no other one starts (check of
+        # 25/09, D8). The one already in flight cannot be recalled.
         self.cancel_event = threading.Event()
         self._review_answered = threading.Event()
         self._review_result = None
 
     def _review_proposals(self, photo_png, proposals, length_mm, width_mm):
-        """@brief Chiede all'interfaccia quali corpi tenere, e aspetta.
+        """@brief Ask the interface which bodies to keep, and wait.
 
-        @param photo_png Fotografia calibrata, gia' codificata in PNG.
-        @param proposals Proposte del rilevatore locale.
-        @param length_mm Estensione della scheda lungo X, in mm.
-        @param width_mm Estensione lungo Y, in mm.
-        @return Le proposte da tenere, oppure None se la revisione e' annullata.
-        @note Gira nel thread del worker: il segnale attraversa i thread e la
-            risposta torna da deliver_review. L'attesa e' voluta -- la chiamata
-            a pagamento non deve partire prima che qualcuno abbia guardato.
+        @param photo_png Calibrated photograph, already encoded as PNG.
+        @param proposals Proposals of the local detector.
+        @param length_mm Board extent along X, in mm.
+        @param width_mm Board extent along Y, in mm.
+        @return The proposals to keep, or None when the review is cancelled.
+        @note Runs on the worker thread: the signal crosses the threads and
+            the answer comes back through deliver_review. The wait is
+            deliberate -- the paid call must not start before someone has
+            looked.
         """
         self._review_result = None
         self._review_answered.clear()
@@ -790,35 +834,36 @@ class ExtractWorker(QThread):
         return self._review_result
 
     def deliver_review(self, kept) -> None:
-        """@brief Consegna al worker l'esito della revisione e lo sblocca.
+        """@brief Deliver the outcome of the review to the worker and unblock it.
 
-        @param kept Proposte da tenere, o None per annullare l'estrazione.
-        @note Va chiamata SEMPRE, anche quando qualcosa va storto: un worker
-            lasciato in attesa non finisce piu'.
+        @param kept Proposals to keep, or None to cancel the extraction.
+        @note It must ALWAYS be called, even when something goes wrong: a
+            worker left waiting never finishes.
         """
         self._review_result = kept
         self._review_answered.set()
 
     def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
-        """@brief Porta in modale lo strumento che il servizio dichiara al lavoro.
+        """@brief Bring to the modal the tool the service declares at work.
 
-        @param tool Chiave in analysis_overlay.TOOLS, es. yolo o llm.
-        @param detail Testo libero: l'etichetta del rilevatore o il modello.
-        @param done Elementi fatti della fase (HANDOFF 156: corpi letti).
-        @param total Elementi previsti; 0 = nessun conteggio.
-        @note Contratto del servizio: `phase(tool, detail, done=0, total=0)`.
-            Senza conteggio (0, 0) la modale resta animata invece di mostrare
-            una percentuale inventata. Serve soprattutto al rilevatore locale ONNX, che prima
-            girava senza che nulla lo annunciasse: chi guardava vedeva la nuvola
-            del modello a pagamento anche mentre non si spendeva niente.
+        @param tool Key in analysis_overlay.TOOLS, e.g. yolo or llm.
+        @param detail Free text: the detector's label or the model.
+        @param done Items done in the phase (HANDOFF 156: bodies read).
+        @param total Items expected; 0 = no count.
+        @note Service contract: `phase(tool, detail, done=0, total=0)`.
+            Without a count (0, 0) the modal stays animated instead of showing
+            an invented percentage. It serves above all the local ONNX
+            detector, which used to run without anything announcing it: the
+            viewer saw the cloud of the paid model even while nothing was
+            being spent.
         """
         self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
 
     def run(self) -> None:
         """@brief Forward the captured settings and emit extracted data or an error."""
         try:
-            # Risolto una volta sola da `main_window` (vedi `_patch_point`):
-            # firma interrogata e funzione chiamata sono lo stesso oggetto.
+            # Resolved only once by `main_window` (see `_patch_point`): the
+            # queried signature and the called function are the same object.
             extract = _patch_point("extract_pin_header_params")
             params = extract(
                 self.doc_paths,
@@ -836,7 +881,7 @@ class ExtractWorker(QThread):
                 include_nc_pins=self.include_nc_pins,
                 progress=self.progress.emit,
                 review_proposals=self._review_proposals,
-                # Cartella del PROGETTO assegnata da chi avvia; None = nessuna cache.
+                # PROJECT folder assigned by the caller; None = no cache.
                 **accepted_kwargs(extract,
                                   photo_cache_dir=getattr(self, "photo_cache_dir", None),
                                   yolo_confidence=self.yolo_confidence,
@@ -890,8 +935,8 @@ class YoloPretestWorker(ExtractWorker):
         """
         if self.document_roles is None:
             return None
-        # Stessa scelta dell'estrattore quando c'e' il suo helper: il pretest
-        # deve provare esattamente le foto che l'analisi proverebbe.
+        # Same choice as the extractor when its helper exists: the pretest
+        # must try exactly the photos the analysis would try.
         from ..services import datasheet_extractor
         indices = getattr(datasheet_extractor, "photo_document_indices", None)
         if callable(indices):
@@ -901,13 +946,19 @@ class YoloPretestWorker(ExtractWorker):
                 if PHOTO_ROLE in role_list(self.document_roles.get(path.name))] or [-1]
 
     def run(self) -> None:
-        """@brief Detect, let the user review, emit the report (None if cancelled)."""
+        """@brief Detect, let the user review, emit the report (None if cancelled).
+
+        @note Nothing escapes: the inner `no_ai` stub raises RuntimeError if
+            the yolo_only branch ever tried to call an AI model (that would be
+            a defect, and it must stop instead of spending), and that error is
+            caught like any other worker error and reported through `error`.
+        """
         from ..services.datasheet_extractor import COMPONENT_KINDS
         from ..services.photo_inventory import ReviewCancelled, extract_inventory
 
         def no_ai(**_kwargs):
-            # Il ramo yolo_only non chiama mai il modello: se succedesse sarebbe
-            # un difetto, e deve fermarsi invece di spendere.
+            # The yolo_only branch never calls the model: if it happened it
+            # would be a defect, and it must stop instead of spending.
             raise RuntimeError("the YOLO pretest must not call any AI model")
 
         try:
@@ -923,25 +974,25 @@ class YoloPretestWorker(ExtractWorker):
             self.done.emit(report)
         except ReviewCancelled:
             self.done.emit(None)
-        except Exception as exc:  # noqa: BLE001 - riportato in UI come ogni errore del worker
+        except Exception as exc:  # noqa: BLE001 - reported in the UI like every worker error
             self.error.emit(str(exc))
 
 
 class ReconcileWorker(QThread):
-    """@brief Rilancia la sola riconciliazione a pagamento su proposte gia' riviste.
+    """@brief Re-run only the paid reconciliation on proposals already reviewed.
 
-    E' la coda di ExtractWorker senza la testa: niente documenti, niente
-    rilevatore locale, niente filtro dei contatti ne' misura dei bordi. Riceve
-    le proposte tenute nella finestra «Corpi rilevati», riaperta sull'ultimo
-    salvataggio, e fa UNA richiesta al modello che guarda la fotografia, poi
-    rilegge ogni corpo dal suo ritaglio, campiona i colori, rilegge le sigle e
-    salva l'evidenza come farebbe l'estrazione normale.
+    It is the tail of ExtractWorker without the head: no documents, no local
+    detector, no contact filter nor edge measurement. It receives the
+    proposals kept in the «Corpi rilevati» window, reopened on the last save,
+    and makes ONE request to the model that looks at the photograph, then
+    re-reads every body from its crop, samples the colours, re-reads the
+    markings and saves the evidence as the normal extraction would.
 
-    Segnali:
-        done(InventoryResult) -- inventario riconciliato
-        error(str)            -- messaggio di errore leggibile
-        progress(str)         -- avanzamento, compresa la riga della chiamata
-        phase(str, str, int, int) -- vedi GenerateWorker.phase
+    Signals:
+        done(InventoryResult) -- reconciled inventory
+        error(str)            -- readable error message
+        progress(str)         -- progress, the line of the call included
+        phase(str, str, int, int) -- see GenerateWorker.phase
     """
 
     done = pyqtSignal(object)
@@ -953,25 +1004,30 @@ class ReconcileWorker(QThread):
                  *, declared=None, verification_prompt=None, extra_instructions=None,
                  detector='yolo', crop_prompt=None, crop_model=None, reviewed=True,
                  smd_model_path=None):
-        """@brief Fotografa le proposte approvate prima di lasciare il thread GUI.
+        """@brief Snapshot the approved proposals before leaving the GUI thread.
 
-        @param photo_png Fotografia calibrata su cui le proposte furono misurate.
-        @param proposals Proposte tenute dalla revisione, inoltrate cosi' come sono.
-        @param length_mm Estensione della scheda lungo X, in mm (calibrazione).
-        @param width_mm Estensione lungo Y, in mm.
-        @param model Modello a pagamento della riconciliazione.
-        @param cache_dir Cartella della cache delle risposte e dell'evidenza.
-        @param declared Quote dichiarate della scheda, solo per la nota di coerenza.
-        @param verification_prompt Note del profilo, come nel percorso normale.
-        @param extra_instructions Note dell'utente, come nel percorso normale.
-        @param detector Nome del rilevatore da registrare nella calibrazione.
-        @param crop_prompt Prompt della lettura per ritaglio (campo del profilo
-            'crop_prompt'), come per ExtractWorker: il rilancio esegue la stessa
-            lettura dei singoli corpi (HANDOFF 146 V2). None o vuoto: testo di
-            fabbrica.
-        @param crop_model Modello della lettura per ritaglio (campo del profilo
-            'crop_model', HANDOFF 150); None o vuoto: lo stesso `model` della
-            richiesta sulla fotografia.
+        @param photo_png Calibrated photograph on which the proposals were measured.
+        @param proposals Proposals kept by the review, forwarded as they are.
+        @param length_mm Board extent along X, in mm (calibration).
+        @param width_mm Board extent along Y, in mm.
+        @param model Paid model of the reconciliation.
+        @param cache_dir Folder of the answer cache and of the evidence.
+        @param declared Declared board dimensions, only for the consistency note.
+        @param verification_prompt Profile notes, as in the normal path.
+        @param extra_instructions User notes, as in the normal path.
+        @param detector Name of the detector to record in the calibration.
+        @param crop_prompt Prompt of the per-crop reading (profile field
+            'crop_prompt'), as for ExtractWorker: the re-run performs the same
+            reading of the single bodies (HANDOFF 146 V2). None or empty:
+            factory text.
+        @param crop_model Model of the per-crop reading (profile field
+            'crop_model', HANDOFF 150); None or empty: the same `model` as the
+            request on the photograph.
+        @param reviewed Whether the proposals come from a review made by a
+            person (ReviewBundle.reviewed: False for the fallback bundle from
+            the cache).
+        @param smd_model_path Weights file of the local SMD network, or None
+            for the default.
         """
         super().__init__()
         self.photo_png = photo_png
@@ -983,50 +1039,56 @@ class ReconcileWorker(QThread):
         self.verification_prompt = verification_prompt
         self.extra_instructions = extra_instructions
         self.detector = detector
-        # Le proposte vengono da una revisione fatta da una persona?
-        # (ReviewBundle.reviewed: False per il pacchetto di ripiego dalla cache).
+        # Do the proposals come from a review made by a person?
+        # (ReviewBundle.reviewed: False for the fallback bundle from the cache).
         self.reviewed = bool(reviewed)
         self.smd_model_path = smd_model_path
         self.crop_prompt = crop_prompt
         self.crop_model = crop_model
-        # Come ExtractWorker.cancel_event: alzato da «Interrompi».
+        # Like ExtractWorker.cancel_event: raised by «Interrompi» (stop).
         self.cancel_event = threading.Event()
 
     def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
-        """@brief Inoltra alla modale la fase dichiarata dal servizio.
+        """@brief Forward to the modal the phase declared by the service.
 
-        @param tool Chiave in analysis_overlay.TOOLS.
-        @param detail Testo libero accanto al nome dello strumento.
-        @note Vedi ExtractWorker._forward_phase: stesso contratto
-            `phase(tool, detail)`, cosi' il rilancio annuncia le sue fasi
-            esattamente come l'estrazione completa.
+        @param tool Key in analysis_overlay.TOOLS.
+        @param detail Free text next to the tool name.
+        @param done Items done in the phase.
+        @param total Items expected; 0 = no count.
+        @note See ExtractWorker._forward_phase: same contract
+            `phase(tool, detail)`, so the re-run announces its phases exactly
+            like the full extraction.
         """
         self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
 
     def _raise_if_cancelled(self) -> None:
-        """Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed."""
+        """@brief Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed.
+
+        @throws CallCancelled when the cancel event is set, so that no further
+            paid request starts after the interruption.
+        """
         if self.cancel_event.is_set():
             from ..services.ai_diagnostics import CallCancelled
             raise CallCancelled(tx("Rilancio dell'inventario interrotto dall'utente: nessuna "
                                    "nuova richiesta."))
 
     def run(self) -> None:
-        """@brief Esegue la riconciliazione con la stessa chiamata registrata dell'estrazione."""
+        """@brief Run the reconciliation with the same logged call as the extraction."""
         from ..services.photo_inventory import reconcile_saved_proposals
         from ..services.openrouter import call_tool
         from ..services.ai_diagnostics import make_logged_call
         from ..services import providers
         try:
-            # Chiave e credito di ogni fornitore DIRETTO che il rilancio usa:
-            # il modello dell'inventario e quello, se diverso, delle letture
-            # dei ritagli (OpenRouter e' gia' verificato da _ensure_api_key).
+            # Key and credit of every DIRECT provider the rerun uses: the
+            # inventory model and, if different, the one of the crop readings
+            # (OpenRouter is already verified by _ensure_api_key).
             direct = [m for m in (self.model, (self.crop_model or '').strip() or self.model)
                       if providers.provider_of(m) == providers.PROVIDER_DEEPSEEK]
             if direct:
                 providers.ensure_providers_ready(direct, self.progress.emit)
             if self.detector != 'yolo_smd':
-                # Con la rete SMD non c'e' inventario a pagamento: la fase la
-                # annuncia il servizio quando parte davvero.
+                # With the SMD network there is no paid inventory: the service
+                # announces the phase when it really starts.
                 self.phase.emit('llm_inventory', self.model, 0, 0)
             report = reconcile_saved_proposals(
                 self.photo_png, self.proposals, self.length_mm, self.width_mm, self.model,

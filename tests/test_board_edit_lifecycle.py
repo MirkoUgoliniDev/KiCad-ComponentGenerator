@@ -138,6 +138,9 @@ def test_gui_family_keeps_pcb_mode_after_last_component_removed(window, photo_co
     window.group_3d.setChecked(True)
     # The board's 3D uses the thickness shown on the Component page (point 132).
     window.field_cast_pcb.setValue(1.2)
+    # CONTRACT CHANGED 2026-10-15 (review pass 2, M3): a board builds its body only
+    # with a known board size; this board stands for one whose size is known.
+    window._board_size_known = True
     window._set_photo_components(photo_components[:1])
     populated = window._current_body_params()
     window._set_photo_components([])  # l'ultimo corpo tolto dalla revisione

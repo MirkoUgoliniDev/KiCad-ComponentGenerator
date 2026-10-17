@@ -120,6 +120,15 @@ def no_unattended_modal_dialog(monkeypatch):
                         lambda self, editors, can_apply: main_window.MainWindow.PENDING_EDITS_STAY)
     monkeypatch.setattr(main_window.MainWindow, "_ask_footprint_draft_before_start",
                         lambda self: main_window.MainWindow.PENDING_EDITS_APPLY)
+    # Pin names typed by the user vs a new analysis (audit 2026-10-15,
+    # item 2): unattended, the safe answer «keep my names» (nothing lost).
+    monkeypatch.setattr(main_window.MainWindow, "_ask_user_pin_names",
+                        lambda self, conflicts, proposed, vanished=(): main_window.MainWindow.USER_PIN_NAMES_KEEP)
+    # Structural doubts of a package geometry (audit 2026-10-15, item 3):
+    # unattended, «leave as it is / confirm», i.e. the geometry is never
+    # changed, which is what every older test expects.
+    monkeypatch.setattr(main_window.MainWindow, "_ask_geometry_doubt",
+                        lambda self, doubt: main_window.MainWindow.GEOMETRY_DOUBT_KEEP)
 
 
 @pytest.fixture(autouse=True)
@@ -193,6 +202,29 @@ def drain_qt_thread_pool(monkeypatch, hang_watchdog):
             return
     pytest.fail(f"QThreadPool still has {pool.activeThreadCount()} running job(s) after "
                 "the drain: a background job outlives its test", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def no_application_font_in_the_shared_session(monkeypatch):
+    """@brief Refuse `QFontDatabase.addApplicationFont` outside the desktop-font child process.
+
+    A registered font is never really removed: it changed the default font of
+    every later test and made a layout test fail depending on the order
+    (HANDOFF, 2026-10-16). Font-dependent checks use `tests/desktop_fonts.py`,
+    which reruns them in a child process.
+    """
+    from desktop_fonts import in_desktop_font_process
+    if in_desktop_font_process():
+        yield
+        return
+    from PyQt6.QtGui import QFontDatabase
+
+    def refused(*args, **kwargs):
+        raise AssertionError("addApplicationFont in the shared test session: use "
+                             "tests/desktop_fonts.run_with_desktop_fonts (child process)")
+    monkeypatch.setattr(QFontDatabase, "addApplicationFont", staticmethod(refused))
+    monkeypatch.setattr(QFontDatabase, "addApplicationFontFromData", staticmethod(refused))
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -499,12 +531,74 @@ def pytest_unconfigure(config):
     # A leaked QThread still running when the interpreter frees it would
     # abort the process at exit and hide the session's real exit status.
     join_qthreads([item for item in _GRAVEYARD if hasattr(item, "isRunning")], 60_000)
+    _release_graveyard()
     if sys.excepthook is _record_escaped_exception:
         sys.excepthook = _HOOK_STATE["previous_excepthook"] or sys.__excepthook__
     if _HOOK_STATE["qt_handler_installed"]:
         from PyQt6.QtCore import qInstallMessageHandler
         qInstallMessageHandler(_HOOK_STATE["previous_qt_handler"])
         _HOOK_STATE["qt_handler_installed"] = False
+
+
+def _release_graveyard() -> None:
+    """Destroy the objects kept alive for a leaked QThread, once every such thread has ended.
+
+    `_GRAVEYARD` keeps a window whose worker did not stop in time, and the
+    worker, for the whole session: freeing either while the thread runs is a
+    qFatal. `pytest_sessionfinish` skips them on purpose. Left there, they
+    were destroyed by the interpreter's own shutdown, after the QApplication
+    could already be gone, and the process died with an access violation
+    (0xC0000005) AFTER all its tests had passed: reproduced 3 times in 6 with
+    the child run of test_window_whose_worker_does_not_stop_is_kept_alive_with_its_graph
+    (2026-10-15), the same class as the exit-139 crash of HANDOFF 131.
+    Here, after `pytest_unconfigure` joined the threads, the widgets are
+    deleted while Qt still exists and the list is emptied. If a thread is
+    STILL running nothing is touched: the old contract wins.
+    @note `close()` is NOT called (final review, L2). The monkeypatches are
+        undone at unconfigure, and the real `MainWindow.closeEvent` opens a
+        modal QMessageBox when `_background_work_running()` is true or an
+        edit is pending: nobody would click it, and a green run would end
+        with the watchdog's exit code. `deleteLater` skips closeEvent, and
+        destroying is what this function is for. Modal dialogs are refused
+        meanwhile all the same, as in `_collect_after_test`: a dialog opened
+        by a dying child would hang the same way.
+    """
+    if not _GRAVEYARD:
+        return
+    if any(_thread_is_running(item) for item in _GRAVEYARD if hasattr(item, "isRunning")):
+        return
+    try:
+        from PyQt6 import sip
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QApplication, QWidget
+    except ImportError:
+        _GRAVEYARD.clear()
+        return
+    application = QApplication.instance()
+    if application is None:
+        return            # nothing safe to do without Qt: keep the old behaviour
+    # Session teardown has no per-test watchdog: a blocking close must not
+    # hang an unattended run without a stack dump.
+    faulthandler.dump_traceback_later(TEST_WATCHDOG_S, exit=True)
+    patcher = pytest.MonkeyPatch()
+    try:
+        _refuse_modal_dialogs_after_test(patcher)
+        for item in list(_GRAVEYARD):
+            if isinstance(item, QWidget) and not sip.isdeleted(item):
+                try:
+                    item.hide()         # no paint of a half-destroyed window
+                    item.deleteLater()  # its threads have ended: nothing to refuse
+                except RuntimeError:
+                    pass
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        application.processEvents()
+        _GRAVEYARD.clear()
+        gc.collect()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        application.processEvents()
+    finally:
+        patcher.undo()
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.hookimpl(wrapper=True)

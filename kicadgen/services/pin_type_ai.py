@@ -10,7 +10,18 @@ from .providers import ensure_providers_ready
 
 
 def validate_suggestions(data, rows, sources):
-    """@brief Validate proposal identities and evidence, leaving unresolved pins unknown."""
+    """@brief Validate proposal identities and evidence, leaving unresolved pins unknown.
+
+    @param data Decoded tool answer; must hold a `pins` list.
+    @param rows Project pin rows (dicts with `pin`), the only admissible ids.
+    @param sources File names of the documents sent: a proposal citing
+        another source, or none, is demoted to 'unknown'.
+    @return One dict per project pin (pin, electrical_type, source, reason),
+        in the rows' order, 'unknown' for pins without a usable proposal.
+    @throws ValueError When the answer has no pin list, an entry is not an
+        object, a pin is unknown, duplicated or of an invalid type, or the
+        source/reason are not text.
+    """
     ordered = [str(row['pin']) for row in rows]
     allowed = set(ordered)
     proposals = data.get('pins') if isinstance(data, dict) else None
@@ -42,7 +53,20 @@ def validate_suggestions(data, rows, sources):
 
 
 def suggest_pin_types(name, rows, documents, model, *, progress=None, cancelled=None):
-    """@brief Request document-backed electrical role proposals without changing project rows."""
+    """@brief Request document-backed electrical role proposals without changing project rows.
+
+    @param name Component name sent as context.
+    @param rows Project pin rows (pin, name, electrical_type).
+    @param documents Paths of the pinout/datasheet documents sent; their
+        file names must be distinct, as they are the cited sources.
+    @param model Model identifier of the paid call.
+    @param progress Optional progress callback forwarded to the logged call.
+    @param cancelled Optional zero-argument callable that raises when the
+        user cancelled; checked before the paid call.
+    @return The validated proposals of validate_suggestions.
+    @throws ValueError When no document or no pin is given, or document
+        names collide.
+    """
     def check_cancel():
         if cancelled is not None:
             cancelled()

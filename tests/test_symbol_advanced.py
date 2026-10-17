@@ -176,6 +176,9 @@ def test_export_review_cancel_never_opens_file_dialog(window, monkeypatch):
 def test_recovery_file_tracks_failed_save_then_retry(window, monkeypatch):
     from tests.test_symbol_integration import setup_board
     setup_board(window, monkeypatch)
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    window._project_dir().mkdir(parents=True, exist_ok=True)
     tab = window.symbol_tab
     tab.place_pin('1',50.8,25.4)
     path = window._project_dir()/'.symbol-draft.json'

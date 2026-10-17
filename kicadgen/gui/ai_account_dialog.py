@@ -307,9 +307,11 @@ class AiAccountDialog(QDialog):
         for button in (self.btn_verify, self.btn_save, self.btn_remove):
             actions.addWidget(button)
         actions.addStretch(1)
-        # Indicatore di attivita' (utente, 27/09: «fai partire un loader per far
-        # capire che fai la chiamata»): barra indeterminata, visibile solo
-        # mentre una verifica o una lettura del saldo e' in corso.
+        # Activity indicator (user, 27/09:
+        # «fai partire un loader per far capire che fai la chiamata»
+        # (start a loader to show that you are making the call)):
+        # indeterminate bar, visible only while a check or a balance
+        # reading is in progress.
         self.busy = QProgressBar()
         self.busy.setObjectName("ai_account_busy")
         self.busy.setRange(0, 0)

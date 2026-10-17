@@ -1,8 +1,8 @@
 """@brief Example: generate a 2x4 THT pin header footprint with 2.54 mm pitch.
 
-Esempio: genera un header THT 2x4 passo 2.54mm (tipo pin header maschio).
+The footprint is that of a male pin header.
 
-Uso:
+Usage:
     python examples/generate_pin_header.py
 """
 

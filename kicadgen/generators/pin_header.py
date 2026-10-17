@@ -1,25 +1,24 @@
 """@brief Generate a parametric through-hole header or module on a pin grid.
 
-Usato sia da examples/generate_pin_header.py sia dalla GUI
-(kicadgen.gui.main_window) per costruire footprint THT a matrice di pin
-a partire da parametri (righe, colonne, passo, distanza tra righe,
-diametro pad, drill).
+Used both by examples/generate_pin_header.py and by the GUI
+(kicadgen.gui.main_window) to build THT pin-matrix footprints from
+parameters (rows, columns, pitch, row spacing, pad diameter, drill).
 
-`pitch` e `row_spacing` sono volutamente separati: nei connettori/moduli
-in stile DIP (es. convertitori DC/DC come TRACO TEL8WI) il passo tra pin
-adiacenti sulla stessa riga (tipicamente 2.54mm) e' molto piu' piccolo
-della distanza tra le due file di pin (es. 10.16mm) -- usare lo stesso
-valore per entrambi produce una griglia quadrata errata.
+`pitch` and `row_spacing` are deliberately separate: in DIP-style
+connectors/modules (e.g. DC/DC converters such as the TRACO TEL8WI) the
+pitch between adjacent pins on the same row (typically 2.54 mm) is much
+smaller than the spacing between the two rows of pins (e.g. 10.16 mm) --
+using the same value for both produces a wrong square grid.
 
-`populated_pins` gestisce i moduli con pinout parziale (non tutte le
-posizioni della matrice RxC hanno un pin fisico): se None, tutte le
-posizioni vengono generate (comportamento di un normale pin header).
+`populated_pins` handles modules with a partial pinout (not every position
+of the RxC matrix has a physical pin): when None, every position is
+generated (the behaviour of an ordinary pin header).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import hypot, isfinite
+from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text
@@ -27,15 +26,15 @@ from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
 
-#: Rame libero minimo fra due piazzole adiacenti, in mm.
+#: Minimum free copper between two adjacent lands, in mm.
 #:
-#: E' lo stesso minimo del generatore castellated (`MIN_HOLE_WALL_MM`, 0.2
-#: mm), riusato di proposito: vale come limite inferiore anche fra due
-#: piazzole di rame, perche' 0.2 mm e' la distanza di isolamento predefinita
-#: di un progetto KiCad (classe Default) e sta sopra il minimo di spaziatura
-#: dei produttori di PCB standard (tipicamente 0.1-0.15 mm). Un footprint che
-#: non la rispetta ha piazzole che si toccano o che il DRC segnala subito. E'
-#: un LIMITE INFERIORE di fabbricabilita', non una distanza consigliata.
+#: It is the same minimum as the castellated generator (`MIN_HOLE_WALL_MM`, 0.2
+#: mm), reused on purpose: it holds as a lower bound between two copper lands
+#: too, because 0.2 mm is the default clearance of a KiCad project (Default
+#: class) and sits above the minimum spacing of standard PCB manufacturers
+#: (typically 0.1-0.15 mm). A footprint that does not respect it has lands
+#: that touch or that the DRC flags at once. It is a LOWER BOUND of
+#: manufacturability, not a recommended distance.
 MIN_PAD_GAP_MM = MIN_HOLE_WALL_MM
 
 
@@ -67,9 +66,9 @@ class PinHeaderParams:
     pad_overrides: Optional[dict] = field(default=None)
     margin: float = 1.0
     populated_pins: Optional[set] = field(default=None)
-    # Posizione esplicita dei pin: {numero_pin: (riga, colonna)}. Serve quando la
-    # numerazione non e' quella colonna-per-colonna dei pin header, per esempio
-    # nei package DIP-style che numerano a U. Se None si usa l'ordine automatico.
+    # Explicit pin positions: {pin_number: (row, column)}. Needed when the
+    # numbering is not the column-by-column one of pin headers, for example
+    # in DIP-style packages numbered in a U. If None the automatic order is used.
     pin_map: Optional[dict] = field(default=None)
     body_length: Optional[float] = None
     body_width: Optional[float] = None
@@ -77,7 +76,11 @@ class PinHeaderParams:
     body_offset_y: float = 0.0
 
     def effective_row_spacing(self) -> float:
-        """@brief Return row spacing in mm, defaulting to the pin pitch."""
+        """@brief Return row spacing in mm, defaulting to the pin pitch.
+
+        @return `row_spacing` when declared, otherwise `pitch` (a single-row
+            header or a square grid).
+        """
         return self.row_spacing if self.row_spacing is not None else self.pitch
 
     def validate(self) -> None:
@@ -149,11 +152,11 @@ class PinHeaderParams:
                     raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
                                         number=number))
         if self.populated_pins is not None:
-            # Senza mappa i numeri sono quelli automatici colonna per colonna,
-            # quindi stanno in 1..righe*colonne. Con una mappa esplicita la
-            # numerazione e' una convenzione del disegno (DIP numerato a U con
-            # posizioni vuote: pin 16 su una griglia 2x3) e il solo criterio
-            # e' che la mappa dia una posizione al pin.
+            # Without a map the numbers are the automatic column-by-column ones,
+            # so they lie in 1..rows*columns. With an explicit map the numbering is a
+            # convention of the drawing (DIP numbered in a U with empty positions:
+            # pin 16 on a 2x3 grid) and the only criterion is that the map gives the
+            # pin a position.
             if not self.pin_map:
                 max_pin = self.rows * self.cols
                 for p in self.populated_pins:
@@ -162,9 +165,9 @@ class PinHeaderParams:
                             tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
                                pin=p, max_pin=max_pin)
                         )
-            # Con una mappa esplicita un pin popolato senza posizione verrebbe
-            # scartato in silenzio (pin_positions itera solo la mappa): il
-            # footprint perderebbe un pin del pinout sorgente.
+            # With an explicit map a populated pin without a position would be
+            # dropped silently (pin_positions iterates only the map): the footprint
+            # would lose a pin of the source pinout.
             if self.pin_map:
                 missing = sorted(set(self.populated_pins) - set(self.pin_map))
                 if missing:
@@ -178,26 +181,62 @@ class PinHeaderParams:
     def _validate_pad_clearance(self) -> None:
         """Refuse populated pads closer than MIN_PAD_GAP_MM of free copper.
 
+        Grid-bucketed neighbour check, equivalent to a scan of every pair
+        (same pairs judged, same first pair reported), see the comment below.
+
         The pads actually emitted are checked (pin_positions), so a sparse
         pin map with a small grid pitch is accepted when the populated pads
         are far apart, and a full grid is checked along the pitch, the row
         spacing and the diagonal alike. Square header pads use their corners
         when checking copper clearance.
         """
-        radius = self.pad_diameter / 2
+        # Only pads whose centres are close in BOTH axes can leave less than
+        # the minimum gap: for a circle the copper gap is at least the centre
+        # distance minus the two radii, for an axis-aligned square it is
+        # max(|dx|, |dy|) minus the two half-sides, so a violating pair has
+        # |dx| < ra + rb + gap and |dy| < ra + rb + gap, both at most
+        # `window` (the two largest pads). Pads are bucketed on a grid of
+        # that window and only pairs of adjacent cells are judged: O(n) on a
+        # regular matrix instead of the O(n²) scan of every later pad (review
+        # pass 4, 2026-10-15: a 30 x 30 matrix cost ~300 ms per validation).
+        # The judged pairs are visited in the order of the former scan
+        # (sorted by x, then original order), so the first pair reported is
+        # the same; tests/test_pad_clearance_equivalence.py checks the
+        # equivalence against that scan on random matrices.
+        overrides = self.pad_overrides or {}
         pads = sorted(pin_positions(self), key=lambda item: item[1])
-        for index, (pin_a, xa, ya) in enumerate(pads):
-            for pin_b, xb, yb in pads[index + 1:]:
-                size_a = float((self.pad_overrides or {}).get(str(pin_a), {}).get(
-                    "size", self.pad_diameter))
-                size_b = float((self.pad_overrides or {}).get(str(pin_b), {}).get(
-                    "size", self.pad_diameter))
-                radius_a, radius_b = size_a / 2, size_b / 2
+        if not pads:
+            return
+        sizes = [float(overrides.get(str(pin), {}).get("size", self.pad_diameter))
+                 for pin, _x, _y in pads]
+        window = max(sizes) + MIN_PAD_GAP_MM
+        if not window > 0:
+            return
+        cells: dict = {}
+        for index, (_pin, x, y) in enumerate(pads):
+            cells.setdefault((floor(x / window), floor(y / window)), []).append(index)
+        # Pad by pad in sorted order, its LATER neighbours of the adjacent
+        # cells in sorted order, stopping at the first violation: no pair is
+        # collected that a violation found earlier makes useless (review
+        # pass 4: one pad far larger than the pitch puts every pad in one
+        # cell, and collecting all n²/2 pairs first cost 333 ms where the
+        # former scan stopped after 2 ms).
+        for index_a, (pin_a, xa, ya) in enumerate(pads):
+            cell_x, cell_y = floor(xa / window), floor(ya / window)
+            later = set()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for index_b in cells.get((cell_x + dx, cell_y + dy), ()):
+                        if index_b > index_a:
+                            later.add(index_b)
+            for index_b in sorted(later):
+                pin_b, xb, yb = pads[index_b]
+                radius_a, radius_b = sizes[index_a] / 2, sizes[index_b] / 2
                 if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
                     continue
-                shape_a = (self.pad_overrides or {}).get(str(pin_a), {}).get(
+                shape_a = overrides.get(str(pin_a), {}).get(
                     "shape", "rect" if self.pad_shape == "rect" or pin_a == 1 else "circle")
-                shape_b = (self.pad_overrides or {}).get(str(pin_b), {}).get(
+                shape_b = overrides.get(str(pin_b), {}).get(
                     "shape", "rect" if self.pad_shape == "rect" or pin_b == 1 else "circle")
                 gap = pad_copper_gap(xa, ya, shape_a, radius_a,
                                      xb, yb, shape_b, radius_b)
@@ -248,12 +287,16 @@ def pad_copper_gap(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> floa
 def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]:
     """@brief Yield (pin number, x_mm, y_mm) for each populated pin.
 
-    Stessa geometria usata da build_pin_header() per il footprint 2D e dal
-    generatore 3D (kicadgen.cad3d) per posizionare i pin cilindrici -- unica
-    fonte di verita' per righe/colonne/pitch/row_spacing/populated_pins.
+    The same geometry used by build_pin_header() for the 2D footprint and by
+    the 3D generator (kicadgen.cad3d) to place the cylindrical pins -- the
+    single source of truth for rows/columns/pitch/row_spacing/populated_pins.
 
-    Con `pin_map` valorizzata le posizioni sono quelle indicate; altrimenti i
-    numeri seguono l'ordine colonna per colonna (1,2 poi 3,4...) dei pin header.
+    With `pin_map` set the positions are the given ones; otherwise the
+    numbers follow the column-by-column order (1,2 then 3,4...) of pin headers.
+
+    @param params Header parameters (not validated here).
+    @return An iterator of (pin number, x_mm, y_mm): X along the pitch, Y
+        along the row spacing.
     """
     row_spacing = params.effective_row_spacing()
 
@@ -302,7 +345,8 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     @param params Grid, pad and optional body dimensions in mm.
     @return Footprint with unchanged pin coordinates and numbering and a
         ``${REFERENCE}`` text on F.Fab (see core.footprint.fab_reference_text);
-        Reference/Value at core.footprint.default_text_positions.
+        Reference/Value anchored bottom-left at the KiCad corner of
+        core.footprint.default_text_positions (place_default_texts).
     @throws ValueError If params contain invalid geometry.
     """
     params.validate()

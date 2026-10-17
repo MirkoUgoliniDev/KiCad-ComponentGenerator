@@ -51,8 +51,8 @@ class ZoomImageView(QGraphicsView):
 
     def _fitted_scale(self) -> float:
         rect = self._item.boundingRect()
-        # Area senza barre di scorrimento: quando lo zoom le fa comparire, il
-        # riferimento del 100% non deve cambiare (percentuale falsata).
+        # Area without scroll bars: when the zoom makes them appear, the 100%
+        # reference must not change (distorted percentage).
         view = self.maximumViewportSize()
         if rect.isEmpty() or view.isEmpty():
             return 1.0
@@ -87,30 +87,42 @@ class ZoomImageView(QGraphicsView):
         self.zoom_changed.emit()
 
     def zoom_percent(self) -> int:
-        """@brief Current scale relative to the fitted image, in percent."""
+        """@brief Current scale relative to the fitted image, in percent.
+
+        @return Integer percentage (100 = the image fitted to the viewport).
+        """
         return round(100 * self.transform().m11() / self._fit_scale) if self._fit_scale else 100
 
     def wheelEvent(self, event):  # noqa: N802 - Qt override
-        """@brief Zoom around the pointer, one step per wheel notch."""
+        """@brief Zoom around the pointer, one step per wheel notch.
+
+        @param event Qt wheel event; its vertical angle delta gives the steps.
+        """
         delta = event.angleDelta().y()
         if delta:
             self.zoom(ZOOM_STEP ** max(-4, min(4, delta / 120)), around_pointer=True)
         event.accept()
 
     def resizeEvent(self, event):  # noqa: N802 - Qt override
-        """@brief Keep the image fitted while the user has not zoomed."""
+        """@brief Keep the image fitted while the user has not zoomed.
+
+        @param event Qt resize event, forwarded to the base class.
+        """
         super().resizeEvent(event)
         if self.auto_fit:
             self.fit()
         else:
             self._fit_scale = self._fitted_scale()
-            # Riportata nei limiti: dopo un ingrandimento della finestra lo
-            # zoom minimo scendeva sotto il limite, e «zoom indietro» finiva
-            # per ingrandire (audit 25/09).
+            # Brought back within the limits: after enlarging the window the
+            # minimum zoom dropped below the limit, and «zoom indietro» (zoom
+            # out) ended up enlarging (audit 25/09).
             self.zoom(1.0)
 
     def showEvent(self, event):  # noqa: N802 - Qt override
-        """@brief Fit on first show, when the viewport has its real size."""
+        """@brief Fit on first show, when the viewport has its real size.
+
+        @param event Qt show event, forwarded to the base class.
+        """
         super().showEvent(event)
         if self.auto_fit:
             self.fit()
@@ -161,7 +173,7 @@ class ZoomImagePanel(QWidget):
                            (("-",), lambda: self.view.zoom(1 / ZOOM_STEP)),
                            (("F",), self.view.fit)):
             for key in keys:
-                # Contesto finestra: valgono anche col fuoco sui pulsanti.
+                # Window context: they apply also with focus on the buttons.
                 QShortcut(QKeySequence(key), self).activated.connect(slot)
         self._update_label()
 

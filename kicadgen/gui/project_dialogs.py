@@ -76,13 +76,27 @@ def list_projects(root) -> list:
     return sorted(entries, key=lambda entry: entry.modified, reverse=True)
 
 
-def name_problem(root, name: str, current: str = "") -> str:
+def taken_project_names(root) -> frozenset:
+    """@brief Names of the folders directly under the library root, casefolded.
+
+    @param root Library root.
+    @return The casefolded folder names; empty when `root` is not a folder.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return frozenset()
+    return frozenset(path.name.casefold() for path in root.iterdir() if path.is_dir())
+
+
+def name_problem(root, name: str, current: str = "", taken=None) -> str:
     """@brief Why `name` cannot be used for a new or renamed project, or "".
 
     @param root Library root.
     @param name Proposed project name.
     @param current Name of the project being renamed ("" for a new one): a
         rename that only changes letter case is allowed.
+    @param taken The casefolded folder names of `root` already read
+        (`taken_project_names`), or None to read the folder now.
     @return Italian message (source text for i18n), or "" when the name is usable.
     @note Existing folders are compared ignoring letter case: on Windows
         «Test» and «TEST» are the same folder, so they are the same project.
@@ -96,11 +110,10 @@ def name_problem(root, name: str, current: str = "") -> str:
         return "Il nome non puo' finire con un punto o uno spazio."
     if name.split(".")[0].upper() in _RESERVED:
         return "Questo nome e' riservato da Windows."
-    root = Path(root)
-    if root.is_dir():
-        taken = {path.name.casefold() for path in root.iterdir() if path.is_dir()}
-        if name.casefold() in taken and name.casefold() != current.strip().casefold():
-            return "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…»."
+    if taken is None:
+        taken = taken_project_names(root)
+    if name.casefold() in taken and name.casefold() != current.strip().casefold():
+        return "Esiste gia' un progetto con questo nome: aprilo da «Apri progetto…»."
     return ""
 
 
@@ -117,6 +130,8 @@ class ProjectNameDialog(QDialog):
         self._tr = tr or (lambda text: text)
         self._root = Path(root)
         self._current = current
+        #: (modification stamp of the root, its folder names); see `_taken`.
+        self._taken_snapshot = None
         self.setWindowTitle(self._tr(title))
         self.setModal(True)
         self.field = QLineEdit(current)
@@ -126,7 +141,7 @@ class ProjectNameDialog(QDialog):
         self.problem.setStyleSheet("color: #f38ba8;")
         self.problem.setProperty("i18n_skip", True)
         hint = QLabel(self._tr("Il nome del progetto e' il nome della sua cartella, "
-                               "del footprint e del modello 3D."))
+                               "del footprint e del modello STEP."))
         hint.setWordWrap(True)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                         | QDialogButtonBox.StandardButton.Cancel)
@@ -141,10 +156,27 @@ class ProjectNameDialog(QDialog):
         self.resize(460, self.sizeHint().height())
         self._validate()
 
-    def _problem(self) -> str:
-        """Why the typed name cannot be used, or ""."""
+    def _taken(self, fresh: bool = False) -> frozenset:
+        """The root's folder names, read again only when the root folder changed.
+
+        Every keystroke validates the name: listing the library and testing
+        each entry for a folder at each key was the cost of the typing. The
+        root's modification stamp changes whenever a folder is created,
+        renamed or removed in it, so it keys the snapshot; `fresh` reads the
+        folder regardless (the final check of `accept`).
+        """
+        try:
+            stamp = self._root.stat().st_mtime_ns
+        except OSError:
+            stamp = None
+        if fresh or stamp is None or self._taken_snapshot is None or self._taken_snapshot[0] != stamp:
+            self._taken_snapshot = (stamp, taken_project_names(self._root))
+        return self._taken_snapshot[1]
+
+    def _problem(self, fresh: bool = False) -> str:
+        """Why the typed name cannot be used, or ""; `fresh` re-reads the root folder."""
         name = self.field.text()
-        problem = name_problem(self._root, name, self._current)
+        problem = name_problem(self._root, name, self._current, taken=self._taken(fresh))
         if not problem and self._current and name.strip() == self._current.strip():
             problem = "E' gia' il nome del progetto."
         return problem
@@ -161,13 +193,16 @@ class ProjectNameDialog(QDialog):
             the field, a caller): the name is checked again here, so an
             existing project's name can never get through.
         """
-        if self._problem():
+        if self._problem(fresh=True):
             self._validate()
             return
         super().accept()
 
     def project_name(self) -> str:
-        """@brief The accepted name, without surrounding spaces."""
+        """@brief The accepted name, without surrounding spaces.
+
+        @return The stripped text of the name field.
+        """
         return self.field.text().strip()
 
 
@@ -213,7 +248,10 @@ class OpenProjectDialog(QDialog):
             self.list.currentItem() is not None)
 
     def selected_name(self) -> str:
-        """@brief Name of the chosen project, or "" when nothing is chosen."""
+        """@brief Name of the chosen project, or "" when nothing is chosen.
+
+        @return The project name stored in the current list item, or "".
+        """
         item = self.list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
 

@@ -76,8 +76,8 @@ def install(application=None) -> WheelGuard | None:
     application = application or QApplication.instance()
     if application is None:
         return None
-    # Installato una volta per applicazione: se quella di prima e' stata
-    # distrutta (succede fra un test e l'altro), il filtro va rimesso.
+    # Installed once per application: if the previous one was destroyed
+    # (it happens between one test and the next), the filter must be put back.
     if _INSTALLED is None or sip.isdeleted(_INSTALLED) or _INSTALLED.parent() is not application:
         _INSTALLED = WheelGuard(application)
         application.installEventFilter(_INSTALLED)

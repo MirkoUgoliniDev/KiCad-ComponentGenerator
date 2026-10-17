@@ -1,14 +1,12 @@
 """@brief Write-only S-expression tree and serializer that follows KiCad file formatting.
 
-Serializzatore generico di S-expression nel formato usato da KiCad.
+KiCad saves footprints (.kicad_mod), symbols and PCBs as S-expressions
+(Lisp-style nested lists). This module provides a small node tree (SExpr)
+and a serializer that replicates KiCad's formatting style: tab
+indentation, one entry on each line for "structural" nodes, inline
+rendering for lists made only of simple values (e.g. coordinates).
 
-KiCad salva footprint (.kicad_mod), simboli e PCB come S-expression
-(liste annidate stile Lisp). Questo modulo fornisce un piccolo albero
-di nodi (SExpr) e un serializzatore che replica lo stile di formattazione
-di KiCad: indentazione a tab, una entry per riga per i nodi "strutturali",
-inline per le liste di soli valori semplici (es. coordinate).
-
-Non e' un parser: serve solo per la scrittura (generazione) dei file.
+It is not a parser: it only serves the writing (generation) of files.
 """
 
 from __future__ import annotations
@@ -20,12 +18,10 @@ from typing import Union
 class Symbol(str):
     """@brief Bare (unquoted) KiCad keyword token such as yes, no or thru_hole.
 
-    Token bare (non quotato), es. yes/no/solid/thru_hole.
-
-    KiCad distingue le stringhe vere (sempre tra virgolette, es. nomi layer
-    o testi) dai simboli/keyword (mai quotati, es. `yes`, `no`, `solid`,
-    `thru_hole`). Un normale `str` viene sempre quotato da questo
-    serializzatore; usare `Symbol("yes")` quando serve un token bare.
+    KiCad distinguishes real strings (always between double quotes, e.g.
+    layer names or texts) from symbols/keywords (never quoted, e.g. `yes`,
+    `no`, `solid`, `thru_hole`). A plain `str` is always quoted by this
+    serializer; use `Symbol("yes")` whenever a bare token is needed.
     """
 
     __slots__ = ()
@@ -38,13 +34,14 @@ NO = Symbol("no")
 def bare(value: bool) -> Symbol:
     """@brief Convert a Python bool into the bare yes/no symbol expected by KiCad.
 
-    Converte un bool Python nel simbolo bare yes/no atteso da KiCad.
+    @param value The flag to write.
+    @return YES for True, NO for False.
     """
     return YES if value else NO
 
 
-# Un token puo' essere: un altro SExpr, oppure un valore atomico
-# (str/int/float/bool/Symbol) che viene renderizzato come token o stringa quotata.
+# A token can be: another SExpr, or an atomic value
+# (str/int/float/bool/Symbol) rendered as a token or as a quoted string.
 Atom = Union[str, int, float, bool, Symbol]
 Token = Union["SExpr", Atom]
 
@@ -63,7 +60,7 @@ def _format_number(value: float) -> str:
         return str(value)
     if not math.isfinite(value):
         raise ValueError(f"cannot write a non-finite number to a KiCad file: {value!r}")
-    # arrotonda per evitare rumore tipo 1.2699999999999
+    # round to avoid noise such as 1.2699999999999
     text = f"{value:.6f}".rstrip("0").rstrip(".")
     if text in ("", "-0", "-"):
         return "0"
@@ -90,12 +87,12 @@ def _format_atom(value: Atom) -> str:
         return _format_number(value)
     if isinstance(value, int):
         return str(value)
-    # stringa: quotata sempre tra virgolette doppie, come fa KiCad
+    # string: always quoted in double quotes, as KiCad does
     return _quote(str(value))
 
 
 def _is_simple(token: Token) -> bool:
-    """True se il token puo' stare inline (non e' un SExpr con figli complessi)."""
+    """True when the token can stay inline (it is not an SExpr with its own children)."""
     return not isinstance(token, SExpr)
 
 
@@ -103,7 +100,8 @@ def _is_simple(token: Token) -> bool:
 class SExpr:
     """@brief S-expression node holding a name and its atom or child arguments.
 
-    Nodo S-expression: (name arg1 arg2 (child1 ...) (child2 ...) ...).
+    Written as (name arg1 arg2 (child1 ...) (child2 ...) ...): atoms and
+    child nodes keep the order in which they were added.
     """
 
     name: str
@@ -112,7 +110,9 @@ class SExpr:
     def add(self, *args: Token) -> "SExpr":
         """@brief Append arguments or children to the node and return self for chaining.
 
-        Aggiunge argomenti/figli al nodo, ritorna self per chaining.
+        @param args Atoms (str, int, float, bool, Symbol) or SExpr children,
+            appended in the given order.
+        @return This node.
         """
         self.args.extend(args)
         return self
@@ -120,14 +120,16 @@ class SExpr:
     def child(self, name: str, *args: Token) -> "SExpr":
         """@brief Create a child node, append it and return it.
 
-        Crea un figlio SExpr(name, args), lo appende e lo ritorna.
+        @param name Name of the new child node.
+        @param args Initial atoms or children of the new node.
+        @return The new child SExpr(name, args), already appended to this node.
         """
         node = SExpr(name, list(args))
         self.args.append(node)
         return node
 
     def _inline(self) -> str:
-        """Rende il nodo su una sola riga (usato per coordinate/atomi semplici)."""
+        """Render the node on a single line (used for coordinates and simple atoms)."""
         parts = [self.name] + [
             arg._inline() if isinstance(arg, SExpr) else _format_atom(arg)
             for arg in self.args
@@ -137,16 +139,20 @@ class SExpr:
     def render(self, indent: int = 0) -> str:
         """@brief Render the node on multiple tab-indented lines in KiCad style.
 
-        Rende il nodo multi-riga con indentazione a tab, stile KiCad.
+        @param indent Nesting depth: number of leading tabs of the first line.
+        @return The node text without a trailing newline: a single line when
+            every argument is atomic, otherwise the head atoms on the first
+            line, each child or later atom on its own indented line and the
+            closing parenthesis on the last.
         """
         pad = "\t" * indent
-        # se tutti gli argomenti sono atomici, resta su una riga
+        # if every argument is atomic, it stays on one line
         if all(_is_simple(a) for a in self.args):
             return pad + self._inline()
 
-        # Gli atomi che precedono il primo figlio restano sulla riga di testa;
-        # tutto il resto segue nell'ordine originale (un atomo dopo un figlio
-        # va su una riga propria, non spostato in testa: l'ordine conta).
+        # The atoms that precede the first child stay on the head line;
+        # everything else follows in the original order (an atom after a child
+        # goes on its own line, not moved to the head: the order matters).
         first_child = next(i for i, a in enumerate(self.args) if isinstance(a, SExpr))
         head = " ".join([self.name] + [_format_atom(a) for a in self.args[:first_child]])
         lines = [f"{pad}({head}"]
@@ -165,6 +171,8 @@ class SExpr:
 def sx(name: str, *args: Token) -> SExpr:
     """@brief Shortcut that creates an SExpr from a name and arguments.
 
-    Scorciatoia per creare un SExpr.
+    @param name Node name.
+    @param args Atoms or child nodes, in order.
+    @return The new SExpr(name, list(args)).
     """
     return SExpr(name, list(args))

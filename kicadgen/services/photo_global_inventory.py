@@ -24,12 +24,12 @@ from .photo_yolo import split_ai_candidates
 from .messages import CACHE_HIT, marked, tx
 
 PROMPT_VERSION = 'global-yolo-inventory-10'
-#: Versione del prompt usato quando NESSUN rilevatore locale ha girato e
-#: l'enumerazione dei corpi la fa il modello di visione.
+#: Version of the prompt used when NO local detector has run and the
+#: enumeration of the bodies is done by the vision model.
 ENUMERATION_PROMPT_VERSION = 'global-vlm-inventory-5'
-#: Prima riga della parte di prompt che non parla di candidati: da qui in poi
-#: valgono le stesse regole fisiche e di misura nei due percorsi, e vanno
-#: tenute identiche invece di essere riscritte due volte.
+#: First line of the part of the prompt that does not talk about candidates:
+#: from here on the same physical and measurement rules apply in both paths,
+#: and they must be kept identical instead of being rewritten twice.
 _COMMON_FROM = 'Do not count markings/QR codes,'
 SCHEMA_VERSION = 'global-inventory-7'
 PHYSICAL_REJECTIONS = ('bare_pad_or_contact', 'silkscreen_or_marking',
@@ -76,14 +76,14 @@ def class_kind(name):
     @return The kind used for the 3D shape (a COMPONENT_KINDS key).
     """
     return CLASS_KINDS.get(name, name)
-#: Feature che distinguono un corpo da un capo all'altro. Sono morfologie, non
-#: funzioni: quello che serve e' che si vedano e che stiano da una parte sola.
+#: Features that tell one end of a body from the other. They are morphologies,
+#: not functions: what matters is that they are visible and on one side only.
 LANDMARK_FEATURES = ('coaxial_jack', 'connector_opening', 'cable_exit',
                      'polarity_marker', 'pin1_marker', 'chamfer', 'notch',
                      'tab', 'other')
-#: Lato della scatola del componente, nel frame della prima foto (X a destra,
-#: Y in basso). Un angolo non serve: per confrontarlo con un modello 3D basta
-#: la direzione dominante.
+#: Side of the component's package, in the frame of the first photo (X to the
+#: right, Y down). An angle is not needed: to compare it with a 3D model the
+#: dominant direction is enough.
 LANDMARK_SIDES = ('left', 'right', 'top', 'bottom')
 PROMPT = """Review the entire TOP-side PCB inventory jointly using the full photo,
 numbered overlay, contextual detail tiles and JSON of ALL detector candidates.
@@ -205,10 +205,10 @@ Audit overlapping final boxes for duplicates/fragments; retain genuinely overlap
 assemblies with explicit evidence. Return concise complete JSON and uncertainties.
 """
 
-#: Testa del prompt quando non ci sono candidati: nessuna contabilita' di ID da
-#: rispettare, perche' non c'e' nulla da riconciliare. Tutto il resto -- corpi
-#: separati, misure, famiglie di package, orientamento, riferimento asimmetrico
-#: -- resta parola per parola quello dell'altro percorso.
+#: Head of the prompt when there are no candidates: no ID bookkeeping to
+#: respect, because there is nothing to reconcile. Everything else -- separate
+#: bodies, measurements, package families, orientation, asymmetric reference
+#: -- stays word for word that of the other path.
 _ENUMERATION_HEAD = """Enumerate the entire TOP-side PCB inventory from the full calibrated photograph
 and its contextual detail tiles. NO local detector ran: there are no candidates, so
 candidate_decisions MUST be an empty list and source_candidate_ids MUST be empty
@@ -239,23 +239,23 @@ and whose top edge is one tenth down is [0.25,0.10,...], never [250,100,...].
 image_size_px in the JSON is context, not the unit of your answer.
 """
 
-#: Il prompt di enumerazione completo: testa nuova, coda identica all'altro.
+#: The complete enumeration prompt: new head, tail identical to the other one.
 PROMPT_ENUMERATE = _ENUMERATION_HEAD + PROMPT[PROMPT.index(_COMMON_FROM):]
 
-#: Frase del prompt di enumerazione che dice PERCHE' non ci sono candidati.
+#: Sentence of the enumeration prompt that says WHY there are no candidates.
 _NO_DETECTOR_SENTENCE = "NO local detector ran: there are no candidates, so"
 
-#: Stesso prompt quando il rilevatore locale HA girato e non ha proposto nulla.
-#: Dire al modello che nessun rilevatore ha girato sarebbe falso, e il suo
-#: silenzio non e' prova di una scheda vuota: la frase lo dice, il resto e'
-#: identico parola per parola.
+#: Same prompt when the local detector HAS run and proposed nothing.
+#: Telling the model that no detector has run would be false, and its silence
+#: is no proof of an empty board: the sentence says so, the rest is identical
+#: word for word.
 PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR = PROMPT_ENUMERATE.replace(
     _NO_DETECTOR_SENTENCE,
     "A local detector ran on this photograph and left NO candidate body; its\n"
     "silence is not evidence of an empty board. There are no candidates, so", 1)
 assert PROMPT_ENUMERATE_AFTER_EMPTY_DETECTOR != PROMPT_ENUMERATE
 
-#: Versione del prompt precedente, distinta nell'audit e nella cache.
+#: Version of the previous prompt, kept distinct in the audit and the cache.
 ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION = ENUMERATION_PROMPT_VERSION + '+empty-local-detector'
 
 
@@ -325,15 +325,16 @@ def inventory_tool():
 
 
 def _landmark(row):
-    """@brief Campi del riferimento asimmetrico, se il modello ne ha dichiarato uno.
+    """@brief Fields of the asymmetry landmark, when the model declared one.
 
-    @param row Riga grezza della risposta del modello.
-    @return Dizionario con landmark_feature/landmark_side/landmark_confidence,
-        oppure vuoto quando manca, e' nullo o e' incompleto.
-    @note L'assenza e' una risposta legittima e frequente: un corpo simmetrico
-        non ha un capo distinguibile dall'altro, e inventarglielo e' peggio che
-        lasciare l'orientamento non verificato. Una confidenza bassa vale come
-        assenza: qui un errore ruota il pezzo di 180 gradi, non di poco.
+    @param row Raw row of the model's answer.
+    @return Dict with landmark_feature/landmark_side/landmark_confidence, or
+        empty when it is missing, null or incomplete.
+    @note Absence is a legitimate and frequent answer: a symmetric body has
+        no end distinguishable from the other, and inventing one is worse
+        than leaving the orientation unverified. A low confidence counts as
+        absence: here an error rotates the part by 180 degrees, not by a
+        little.
     """
     landmark = row.get('asymmetry_landmark')
     if not isinstance(landmark, dict):
@@ -477,16 +478,16 @@ def lead_count_confidence(row):
     return value if value in _CONFIDENCE_LEVELS else LEAD_COUNT_CONFIDENCE_UNDECLARED
 
 
-#: Convenzioni di coordinate che un modello di grounding puo' consegnare al
-#: posto delle frazioni chieste: (nome, divisore X, divisore Y), None = lato
-#: della foto in pixel. Ognuna si prova anche nell'ordine [y0,x0,y1,x1]
-#: (suffisso «_yx»). La prima riga e' il contratto del prompt.
+#: Coordinate conventions a grounding model may deliver instead of the
+#: requested fractions: (name, X divisor, Y divisor), None = side of the photo
+#: in pixels. Each one is also tried in the order [y0,x0,y1,x1] (suffix
+#: «_yx»). The first row is the prompt's contract.
 _BOX_SCALES = (('fraction', 1.0, 1.0), ('normalized_1000', 1000.0, 1000.0),
                ('pixels', None, None))
-#: Lato minimo, in pixel della foto, di un rettangolo convertito. Criterio
-#: fisico, non tarato: un corpo piu' piccolo di un pixel non si vede ne' si
-#: delimita, quindi una convenzione che lo produrrebbe non e' quella usata
-#: (e' cio' che distingue frazioni vere da pixel o griglia 0-1000).
+#: Minimum side, in pixels of the photo, of a converted rectangle. Physical
+#: criterion, not tuned: a body smaller than one pixel can neither be seen nor
+#: bounded, so a convention that would produce it is not the one used (this is
+#: what tells true fractions from pixels or a 0-1000 grid).
 _MIN_BOX_SIDE_PX = 1.0
 
 
@@ -523,44 +524,45 @@ def _same_body_majority(rows, converted, candidate_boxes):
 
 
 def _rescale_boxes(rows, width, height, log, candidate_boxes=None, issues=None):
-    """@brief Riporta a frazioni 0..1 i rettangoli consegnati in un'altra unita'.
+    """@brief Bring back to 0..1 fractions the boxes delivered in another unit.
 
-    @param rows Componenti della risposta, modificati sul posto: chi deve
-        conservare la risposta originale passa una copia (_in_contract_units).
-    @param width Larghezza della fotografia in pixel.
-    @param height Altezza della fotografia in pixel.
-    @param log Callback di avanzamento: dice quale convenzione e' stata usata.
-    @param candidate_boxes {id proposta: rettangolo in frazioni} del
-        rilevatore locale, prova per decidere fra convenzioni ambigue.
-    @param issues Lista che riceve un errore della risposta quando la
-        convenzione e' ambigua e le prove non decidono.
-    @return Il nome della convenzione applicata, o None se non serviva o non
-        si e' potuta decidere.
-    @note Un modello di grounding spesso risponde in pixel o su griglia 0-1000
-        anche quando il contratto chiede frazioni. Scartare tutto sarebbe
-        buttare una risposta corretta per un'unita' di misura: qui la si
-        converte, ma solo quando la conversione rende validi TUTTI i
-        rettangoli, perche' una conversione che ne salva una parte e' un
-        indizio che il problema e' un altro.
-    @note Ambiguita' (HANDOFF 130 F1): su una foto di al piu' 1000 px per
-        lato un rettangolo in pixel e' valido anche letto su griglia 0-1000,
-        e l'ordine [y,x] rende validi quasi tutti i rettangoli. Quando piu'
-        convenzioni (con risultati diversi) rendono validi tutti i
-        rettangoli, decide la prova del rilevatore: vince l'unica convenzione
-        sotto cui la maggioranza delle righe con UNA sola proposta coincide
-        con il suo riquadro (IoU >= SAME_BODY_IOU, lo stesso criterio «stesso
-        corpo» della NMS). Se nessuna o piu' d'una lo fanno: con il contratto
-        (frazioni, [x,y]) fra le valide si tiene il contratto, che e' cio' che
-        il prompt chiede e non un'ipotesi; altrimenti non si indovina, si
-        registra un errore della risposta e non si converte nulla.
-    @note Separazione fragile dichiarata: la maggioranza e' su righe a
-        sorgente singola; con una o due righe decide un solo riquadro. Senza
-        proposte del rilevatore (enumerazione) una risposta non in frazioni e
-        ambigua resta sempre un errore.
+    @param rows Components of the answer, modified in place: whoever must
+        keep the original answer passes a copy (_in_contract_units).
+    @param width Width of the photograph in pixels.
+    @param height Height of the photograph in pixels.
+    @param log Progress callback: it says which convention was applied.
+    @param candidate_boxes {proposal id: box in fractions} of the local
+        detector, the evidence used to decide between ambiguous conventions.
+    @param issues List that receives an answer error when the convention is
+        ambiguous and the evidence does not decide.
+    @return The name of the applied convention, or None when none was needed
+        or none could be decided.
+    @note A grounding model often answers in pixels or on a 0-1000 grid even
+        when the contract asks for fractions. Discarding everything would
+        throw away a correct answer over a unit of measure: here it is
+        converted, but only when the conversion makes ALL the boxes valid,
+        because a conversion that rescues only some of them is a hint that
+        the problem is a different one.
+    @note Ambiguity (HANDOFF 130 F1): on a photo of at most 1000 px on each
+        side a box in pixels is also valid when read on the 0-1000 grid, and
+        the [y,x] order makes almost every box valid. When several
+        conventions (with different results) make all the boxes valid, the
+        detector's evidence decides: the winner is the only convention under
+        which the majority of the rows resting on ONE single proposal
+        coincide with its box (IoU >= SAME_BODY_IOU, the same «same body»
+        criterion as the NMS). If none or more than one do so: when the
+        contract (fractions, [x,y]) is among the valid ones the contract is
+        kept, because it is what the prompt asks and not a hypothesis;
+        otherwise nothing is guessed, an answer error is recorded and nothing
+        is converted.
+    @note Declared fragile separation: the majority is taken over
+        single-source rows; with one or two rows a single box decides.
+        Without detector proposals (enumeration) an ambiguous answer that is
+        not in fractions always remains an error.
     """
     def numbers(box):
-        # Un intero enorme o un non-numero non descrive un'unita' di misura
-        # diversa: descrive una risposta rotta, che deve restare tale. A
+        # A huge integer or a not-a-number does not describe a different unit
+        # of measurement: it describes a broken response, which must stay so. A
         # numeric string is not a coordinate either (review D4): the shared
         # finite_number accepts only real int/float values, never bool/str.
         values = [finite_number(v) for v in box]
@@ -577,15 +579,15 @@ def _rescale_boxes(rows, width, height, log, candidate_boxes=None, issues=None):
     _name, sx, sy = _BOX_SCALES[0]
     contract = _convention_boxes(boxes, sx, sy, False, width, height)
     if contract is None and max(max(box) for box in boxes) <= 1.0:
-        # Numeri gia' nell'intervallo delle frazioni ma non tutti validi: e'
-        # una risposta da giudicare cosi' com'e', non un'altra unita'.
+        # Numbers already in the fraction range but not all valid: it is a
+        # response to be judged as it is, not another unit.
         return None
     valid = []
     for name, sx, sy in _BOX_SCALES:
         for swapped in (False, True):
             converted = _convention_boxes(boxes, sx, sy, swapped, width, height)
-            # Due convenzioni che danno gli stessi rettangoli (es. riquadri
-            # quadrati letti [x,y] o [y,x]) sono una sola lettura.
+            # Two conventions giving the same rectangles (e.g. square boxes
+            # read [x,y] or [y,x]) are a single reading.
             if converted is not None and all(converted != other for _, other in valid):
                 valid.append((name + ('_yx' if swapped else ''), converted))
     chosen = None
@@ -615,11 +617,11 @@ def _rescale_boxes(rows, width, height, log, candidate_boxes=None, issues=None):
     name, converted = chosen
     if name == 'fraction':
         return None
-    # Solo le righe-dizionario hanno un rettangolo, e `boxes` e' stato
-    # costruito da loro nello stesso ordine. Accoppiarlo a TUTTE le righe
-    # spostava i rettangoli e, con una riga non-dizionario, sollevava
-    # TypeError dopo la chiamata pagata. Le righe malformate restano come
-    # sono: le segnala _validate come righe non valide.
+    # Only the dictionary rows have a rectangle, and `boxes` was built from
+    # them in the same order. Pairing it with ALL the rows shifted the
+    # rectangles and, with a non-dictionary row, raised TypeError after the
+    # paid call. Malformed rows stay as they are: _validate reports them as
+    # invalid rows.
     for row, box in zip(dict_rows, converted):
         row['bbox'] = box
     log(tx("Inventario globale: coordinate ricevute in {name}; convertite in "
@@ -657,18 +659,18 @@ def _in_contract_units(data, width, height, log, candidate_boxes=None):
 
 
 def omitted_required_fields(data):
-    """@brief Campi obbligatori per riga che il modello ha omesso su TUTTE le righe.
+    """@brief Required row fields that the model omitted on EVERY row.
 
-    @param data Risposta decodificata del modello.
-    @return Nomi dei campi, nell'ordine dello schema; vuoto se non manca nulla
-        o se non ci sono righe da giudicare.
-    @note Un campo assente su una riga e' un'omissione di quella riga; assente
-        su tutte e' il modello che non ha onorato `required` dello schema, e
-        allora la risposta non e' incompleta per caso: e' scritta in un altro
-        contratto. Su una corsa reale mancavano presence_confidence,
-        class_confidence e lead_count_confidence su 43 righe su 43, e la
-        presenza collassava a 'low' ovunque, spegnendo a valle ogni
-        abbinamento ai modelli KiCad.
+    @param data Decoded answer of the model.
+    @return Field names, in schema order; empty when nothing is missing or
+        there are no rows to judge.
+    @note A field absent on one row is an omission of that row; absent on all
+        of them, it is the model that did not honour the schema's `required`,
+        and then the answer is not incomplete by chance: it is written to
+        another contract. On a real run presence_confidence, class_confidence
+        and lead_count_confidence were missing on 43 rows out of 43, and the
+        presence collapsed to 'low' everywhere, switching off every KiCad
+        model match downstream.
     @note Only BLOCKING fields are returned. A field in NON_BLOCKING_QUALIFIERS
         only qualifies other data: its omission is recorded as «not declared»
         and never justifies a second paid request (user decision 2026-09-26,
@@ -744,9 +746,9 @@ def undeclared_lead_count_confidence(data):
     return missing, len(rows)
 
 
-#: Coda aggiunta al prompt per il secondo tentativo, quando il primo ha omesso
-#: campi obbligatori su ogni riga. Nomina i CAMPI, non la scheda: e' una
-#: correzione di contratto, non un aiuto sul caso.
+#: Tail appended to the prompt for the second attempt, when the first omitted
+#: required fields on every row. It names the FIELDS, not the board: it is a
+#: contract correction, not a hint about the case.
 _OMISSION_REMINDER = (
     '\n\nYour previous answer omitted these REQUIRED fields on every component: {fields}. '
     'Every component object must carry every required field of the schema, with one of '
@@ -754,17 +756,17 @@ _OMISSION_REMINDER = (
 
 
 class _Issue(str):
-    """@brief Messaggio di validazione che sa a quale riga appartiene.
+    """@brief Validation message that knows which row it belongs to.
 
-    @note E' una stringa a tutti gli effetti (log, cache, audit e test la
-        trattano come tale) con in piu' la sua attribuzione: il component_id
-        della riga del modello che l'ha causata e gli ID delle proposte del
-        rilevatore coinvolte. Senza attribuzione un errore su una riga
-        finiva addosso all'intero inventario: su una corsa reale una fusione
-        incoerente di UN modulo ha marcato 55 componenti su 55 come parziali.
-    @note Un'istanza senza componente ne' proposte e' un errore della
-        risposta nel suo insieme (oggetto malformato, chiamata fallita), e
-        vale davvero per tutti.
+    @note It is a string in every respect (log, cache, audit and tests treat
+        it as such) plus its attribution: the component_id of the model row
+        that caused it and the IDs of the detector proposals involved.
+        Without attribution an error on one row landed on the whole
+        inventory: on a real run an incoherent merge of ONE module marked
+        55 components out of 55 as partial.
+    @note An instance with neither component nor proposals is an error of the
+        answer as a whole (malformed object, failed call), and it really
+        applies to every row.
     """
     def __new__(cls, message, component=None, candidates=()):
         issue = super().__new__(cls, message)
@@ -773,32 +775,32 @@ class _Issue(str):
         return issue
 
     def concerns(self, component=None, candidates=()):
-        """@brief Vero se l'errore riguarda questa riga.
-        @param component component_id della riga del modello, se ne ha uno.
-        @param candidates ID delle proposte che la riga rappresenta o lega.
-        @return True quando la riga e' quella incriminata o ne lega una proposta.
+        """@brief True when the error concerns this row.
+        @param component component_id of the model row, when it has one.
+        @param candidates IDs of the proposals the row represents or links.
+        @return True when the row is the one at fault or links one of its proposals.
         """
         return ((self.component is not None and self.component == component)
                 or bool(self.candidates.intersection(candidates)))
 
 
 def _presence(row):
-    """@brief Confidenza di presenza dichiarata, o il suo limite inferiore.
+    """@brief Declared presence confidence, or its lower bound.
 
-    @param row Riga del modello (grezza o riparata).
-    @return 'high', 'medium' o 'low'.
-    @note Lo schema chiede presence_confidence come campo obbligatorio, ma un
-        provider puo' ometterlo pur rispettando tutto il resto, e le risposte
-        in cache anteriori al campo non lo hanno. In quel caso vale la
-        confidenza complessiva: per contratto del prompt e' l'incertezza
-        globale, che comprende anche il dubbio sulla classe, quindi non puo'
-        superare la presenza. E' un limite inferiore, non una stima.
-    @note E' un ripiego, e va dichiarato tale: e' tarato su nulla di
-        specifico e diventa superfluo quando il provider onora il campo
-        obbligatorio. Prima esisteva in due versioni -- 'low' fisso nella
-        normalizzazione, la confidenza complessiva nei controlli geometrici
-        -- e la prima cancellava la presenza di un'intera risposta valida
-        per l'assenza di un campo.
+    @param row Model row (raw or repaired).
+    @return 'high', 'medium' or 'low'.
+    @note The schema asks for presence_confidence as a required field, but a
+        provider may omit it while honouring everything else, and cached
+        answers older than the field do not have it. In that case the overall
+        confidence applies: by the prompt's contract it is the global
+        uncertainty, which also includes the doubt on the class, so it cannot
+        exceed the presence. It is a lower bound, not an estimate.
+    @note It is a fallback, and must be declared as such: it is calibrated on
+        nothing specific and becomes superfluous once the provider honours
+        the required field. It used to exist in two versions -- a fixed 'low'
+        in the normalization, the overall confidence in the geometric checks
+        -- and the first one erased the presence of an entire valid answer
+        over the absence of a field.
     """
     return row.get('presence_confidence', row['confidence'])
 
@@ -899,8 +901,8 @@ def _validate(data, known, boxes=None):
     votes = {}
     for d in decisions:
         if not isinstance(d, dict) or type(d.get('candidate_id')) is not int or d['candidate_id'] not in known:
-            # Una decisione su un ID inesistente non ha una proposta da
-            # incolpare: resta il genitore che nomina, se ne nomina uno.
+            # A decision on a non-existent ID has no proposal to blame: the
+            # parent it names remains, if it names one.
             errors.append(_Issue('unknown/invalid candidate ID',
                                  component=d.get('component_id') if isinstance(d, dict) else None))
             continue
@@ -914,9 +916,9 @@ def _validate(data, known, boxes=None):
             continue
         d = entries[0]; parent = d.get('component_id'); status = d.get('status')
         owners = [r['component_id'] for r in valid if identity in r['source_candidate_ids']]
-        # L'errore appartiene alla proposta e, quando la decisione nomina un
-        # genitore, anche a quello: la contabilita' di quella riga e' rimasta
-        # in contraddizione con la decisione, chiunque dei due abbia torto.
+        # The error belongs to the proposal and, when the decision names a
+        # parent, to that one too: the bookkeeping of that row has remained in
+        # contradiction with the decision, whichever of the two is wrong.
         blame = dict(component=parent, candidates=(identity,))
         if not isinstance(d.get('reason'), str) or not d['reason'].strip():
             errors.append(_Issue(f'candidate {identity}: missing evidence', **blame)); continue
@@ -972,11 +974,11 @@ def _validate_geometry(rows, safe, boxes):
         #                 may be retained on that basis
         outside = [i for i in sources if not overlaps(row['bbox'], boxes[i])]
         backed = [i for i in sources if i not in outside]
-        # Una fusione che lascia fuori la maggior parte di una sorgente e' una
-        # contraddizione dichiarata: il modello dice di aver fuso quel pezzo e
-        # poi ne esclude piu' di meta'. Non si corregge la bbox -- allargarla
-        # all'unione importerebbe gli errori dei frammenti -- ma non deve
-        # passare in silenzio.
+        # A merge that leaves out most of a source is a declared
+        # contradiction: the model says it merged that piece and then excludes
+        # more than half of it. The bbox is not corrected -- widening it to the
+        # union would import the errors of the fragments -- but it must not
+        # pass silently.
         dropped = [i for i in backed if covered_fraction(boxes[i], row['bbox']) < .5]
         if dropped:
             errors.append(_Issue(f"component {row['component_id']}: merged box excludes most of "
@@ -1034,8 +1036,8 @@ def _validate_geometry(rows, safe, boxes):
             if uncertain_group or (pending and not (assembly or single_body)):
                 reason = 'unsupported group of separate or unresolved proposals'
         if reason:
-            # La riga cade e le sue proposte tornano originali: l'errore deve
-            # seguirle, perche' sono loro a restare nell'inventario.
+            # The row drops and its proposals return to the originals: the
+            # error must follow them, because they are what stays in the inventory.
             errors.append(_Issue(f"component {row['component_id']}: {reason}; individual proposals retained",
                                  component=row['component_id'], candidates=original_sources))
             # Drop all decisions pointing at this parent, including inconsistent
@@ -1144,9 +1146,9 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
             host = next((name for name, box in hosts
                          if covered_fraction(row['bbox'], box) >= _INSIDE_FRACTION), None)
             if host is not None:
-                # Scartato, non piu' dubbio (utente, 28/09, HANDOFF 141): un
-                # corpo dentro un corpo rilevato non aggiunge ingombro, e nella
-                # corsa reale erano quasi tutti fantasmi (tre dentro un SOIC).
+                # Discarded, no longer doubtful (user, 28/09, HANDOFF 141): a
+                # body inside a detected body adds no footprint, and in the real
+                # run they were almost all ghosts (three inside a SOIC).
                 note = (f"component {row['component_id']}: no detector proposal and at least "
                         f'half inside {host}; discarded as the same body counted twice')
                 notes.append(note)
@@ -1161,27 +1163,27 @@ def contradicted_by_detections(rows, safe, boxes, margin=(0.0, 0.0), enumerating
     return retained, safe, notes, reasons, excluded
 
 
-#: Separatore fra piu' motivi dentro UNA sola riga di avanzamento. Il filtro
-#: della modale (`per_item_detail` in gui/main_window.py) riconosce il
-#: rendiconto per-elemento dalla forma «intestazione: campo; campo; campo»:
-#: una riga di fase che elenchi i suoi motivi con il punto e virgola viene
-#: quindi nascosta proprio quando i motivi sono tanti. Le righe che parlano di
-#: soldi e di esiti mancati non possono sparire al crescere del numero di
-#: problemi, percio' elencano con questo separatore e non con «;».
+#: Separator between several reasons inside ONE single progress line. The
+#: modal's filter (`per_item_detail` in gui/main_window.py) recognises the
+#: per-item report by the shape «intestazione: campo; campo; campo» (header:
+#: field; field; field): a phase line listing its reasons with semicolons is
+#: therefore hidden exactly when the reasons are many. Lines about money and
+#: missed outcomes cannot disappear as the number of problems grows, so they
+#: list with this separator and not with «;».
 _DETAIL_SEPARATOR = ' · '
 
 
 def _inline_detail(text):
-    """@brief Ridurre un testo altrui a una sola clausola di avanzamento.
+    """@brief Reduce a foreign text to a single progress clause.
 
-    @param text Testo non nostro (errore dell'API, messaggio di eccezione).
-    @return Lo stesso testo su una riga, senza punto e virgola.
-    @note Serve perche' il testo interpolato non e' sotto il nostro controllo:
-        un errore upstream come «HTTP 502; upstream timeout; retry later»
-        porta con se' i separatori che il filtro della modale conta, e la riga
-        che dichiara una chiamata a pagamento senza esito sparirebbe proprio
-        nei casi peggiori. I punti e virgola diventano virgole: cambia la
-        punteggiatura, non il contenuto, e il log completo resta leggibile.
+    @param text Text that is not ours (API error, exception message).
+    @return The same text on one line, without semicolons.
+    @note Needed because the interpolated text is not under our control: an
+        upstream error such as «HTTP 502; upstream timeout; retry later»
+        carries the separators the modal's filter counts, and the line that
+        declares a paid call without an outcome would vanish precisely in
+        the worst cases. Semicolons become commas: the punctuation changes,
+        not the content, and the full log stays readable.
     """
     return ' '.join(str(text).replace(';', ',').split())
 
@@ -1206,10 +1208,11 @@ def paid_request_message(images, proposals, enumerating, detector_ran=False):
         resolution target: «1 immagine» is then reachable in the enumeration
         path, and the test exercises the agreement here as well.
     """
-    # Frasi INTERE, una per caso (utente, 2026-09-24): montata a quattro pezzi
-    # la riga usciva in inglese con «5 immagini» in italiano in mezzo, e un
-    # pezzo non si traduce bene fuori dalla sua frase. Due frasi complete
-    # accostate restano traducibili una per una.
+    # WHOLE sentences, one per case (user, 2026-09-24): assembled from four
+    # pieces the line came out in English with «5 immagini» (5 images) in
+    # Italian in the middle, and a piece does not translate well outside its
+    # sentence. Two complete sentences side by side stay translatable one by
+    # one.
     request = (tx("Inventario globale: una sola richiesta a pagamento con 1 immagine.")
                if images == 1 else
                tx("Inventario globale: una sola richiesta a pagamento con {images} immagini.",
@@ -1246,15 +1249,15 @@ def _inventory_context(text):
     return text.strip()
 
 
-#: IoU minima fra il rettangolo restituito dal modello e l'ingombro allineato
-#: agli assi del corpo misurato perche' descrivano lo STESSO corpo. E' il
-#: criterio «stesso corpo» gia' usato dalla NMS del rilevatore
-#: (photo_yolo._NMS_IOU), non una soglia nuova: sotto, il
-#: modello ha ridisegnato l'ingombro e la sua lettura prevale.
+#: Minimum IoU between the rectangle returned by the model and the
+#: axis-aligned footprint of the measured body for them to describe the SAME
+#: body. It is the «stesso corpo» (same body) criterion already used by the
+#: detector's NMS (photo_yolo._NMS_IOU), not a new threshold: below it, the
+#: model has redrawn the footprint and its reading prevails.
 SAME_BODY_IOU = 0.5
 
-#: Altezza segnaposto, in mm, di un corpo senza altezza dichiarata dal modello
-#: e senza stima per la sua famiglia. Valore di sempre, marcato come tale.
+#: Placeholder height, in mm, of a body with no height declared by the model
+#: and no estimate for its family. Long-standing value, marked as such.
 PLACEHOLDER_HEIGHT_MM = 1.0
 
 
@@ -1354,7 +1357,15 @@ def _detector_evidence(row, proposals):
 
 
 def retain_detector_category(component):
-    """@brief Preserve the detector proposal until independent crop evidence confirms a change."""
+    """@brief Preserve the detector proposal until independent crop evidence confirms a change.
+
+    @param component Reconciled component row, modified in place: when the
+        local detector saw an informative class and the AI class is missing
+        or of another kind, the detector class becomes the row's class (the
+        AI proposal is kept in `_ai_class_proposal`, `_category_source`
+        'yolo_proposal'); ambiguous or low-confidence detector evidence,
+        user-reviewed presence or a crop-pair category leave the row as is.
+    """
     evidence = component.get('_detector_evidence') or {}
     if (evidence.get('class_ambiguous') or evidence.get('low_confidence')
             or component.get('_yolo_class_ambiguous') or component.get('_yolo_low_confidence')
@@ -1391,26 +1402,34 @@ def retain_detector_category(component):
 def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), measured=None,
                proposals=None):
     """@brief Convert AI observations without modifying the raw audit response.
-    @param issues Errori di validazione che riguardano QUESTA riga, non l'inventario.
-    @param proposals Proposte del rilevatore per `_id`: una riga che poggia su
-        UNA sola proposta ne riceve classe, confidenza e provenienza di
-        soglia in `_detector_evidence` (HANDOFF 149): senza, l'evidenza del
-        rilevatore locale («transistor 0.90») non arrivava mai alla lettura
-        per ritaglio ne' alla revisione. None: nessuna evidenza copiata.
-    @param manual_ids ID dei candidati che una persona ha tracciato o ritoccato
-        (`_yolo_manual_box`). Se questa riga ne assorbe almeno uno, la
-        marcatura passa al componente finale: senza, la mano dell'utente si
-        perdeva qui, fra i candidati inviati e l'inventario restituito, e a
-        valle nessuno sapeva piu' che quel riquadro era una decisione umana.
-    @param measured Corpi misurati sui bordi della foto, per ID di proposta
-        (measured_body). Quando la riga e' quel corpo e basta
-        (_measured_geometry), lati, centro e angolo QUALSIASI vengono dalla
-        misura: dal solo rettangolo allineato agli assi un QFN 5x5 a 45 gradi
-        diventava 7.1x7.1. Altrimenti resta l'ingombro allineato del modello,
-        con rotazione 0/90 e l'angolo riferito conservato come prova.
-    @note Altezza: quella del modello se l'ha data, altrimenti la stima di
-        famiglia e pianta (photo_heights.estimate_body_height), altrimenti il
-        segnaposto PLACEHOLDER_HEIGHT_MM. Sempre `_height_estimated` True.
+    @param row Validated model row (bbox in 0..1 fractions, class, marking,
+        rotation_deg, height fields, confidences).
+    @param identity Integer `_id` assigned to the resulting component.
+    @param length Board extent along X, in mm.
+    @param width Board extent along Y, in mm.
+    @param issues Validation errors that concern THIS row, not the inventory.
+    @param proposals Detector proposals keyed by `_id`: a row that rests on
+        ONE single proposal receives its class, confidence and threshold
+        provenance in `_detector_evidence` (HANDOFF 149): without it, the
+        local detector's evidence («transistor 0.90») never reached the crop
+        reading nor the review. None: no evidence copied.
+    @param manual_ids IDs of the candidates a person drew or retouched
+        (`_yolo_manual_box`). If this row absorbs at least one of them, the
+        mark passes to the final component: without it, the user's hand was
+        lost here, between the candidates sent and the inventory returned,
+        and downstream nobody knew any more that that box was a human
+        decision.
+    @param measured Bodies measured on the photo edges, keyed by proposal ID
+        (measured_body). When the row is that body and nothing else
+        (_measured_geometry), sides, centre and ANY angle come from the
+        measurement: from the axis-aligned box alone a 5x5 QFN at 45 degrees
+        became 7.1x7.1. Otherwise the model's axis-aligned envelope stays,
+        with rotation 0/90 and the reported angle kept as evidence.
+    @return Normalized component dict (geometry in mm, class, kind, height
+        with its provenance, confidences, source links and review markers).
+    @note Height: the model's when it gave one, otherwise the estimate from
+        family and footprint (photo_heights.estimate_body_height), otherwise
+        the placeholder PLACEHOLDER_HEIGHT_MM. Always `_height_estimated` True.
     """
     marking = row['marking']
     # These whole-field AI sentinels mean no literal marking, not CAD glyphs.
@@ -1448,26 +1467,26 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         _reported_rotation_deg=angle, _orientation_verified=False,
         height_mm=height, _height_source=height_source, _height_basis=height_basis,
         _height_estimated=True,
-        # Il riferimento asimmetrico e' cio' che rende verificabile un
-    # orientamento: un ingombro da solo non dice quale capo sia quale. Va
-    # letto solo se il modello lo ha dichiarato per intero, perche' un lato
-    # senza la feature (o viceversa) non permette alcun confronto.
+        # The asymmetric reference is what makes an orientation verifiable:
+    # a footprint alone does not say which end is which. It must be read
+    # only if the model declared it in full, because a side without the
+    # feature (or vice versa) allows no comparison.
     **_landmark(row),
-    # Un package e' una dichiarazione MECCANICA, e va sostenuta da cio' che
-        # sostiene la meccanica: la fiducia complessiva e un contorno risolto.
-        # class_confidence dice un'altra cosa -- "non so se e' un regolatore o
-        # un transistor di potenza" -- e lasciarla cancellare il campo buttava
-        # via anche l'involucro, che il modello aveva descritto benissimo. Con
-        # il package vuoto la ricerca perde la sua chiave e scandisce l'intera
-        # famiglia: su un run reale un regolatore passava da 9 percorsi a 79
-        # rigetti, ricerca troncata e nessun modello agganciato. La prosa
-        # (package_evidence, riga sotto) veniva invece conservata: si teneva la
-        # descrizione e si buttava il dato strutturato.
+    # A package is a MECHANICAL declaration, and must be backed by what backs
+        # the mechanics: the overall confidence and a resolved contour.
+        # class_confidence says something else -- "I do not know whether it is
+        # a regulator or a power transistor" -- and letting it clear the field
+        # also threw away the package outline, which the model had described
+        # perfectly. With the package empty the search loses its key and scans
+        # the whole family: on a real run a regulator went from 9 paths to 79
+        # rejections, a truncated search and no model attached. The prose
+        # (package_evidence, line below) was kept instead: the description was
+        # kept and the structured datum thrown away.
         package=row['package'] if _package_kept(row) else '',
         package_confidence=(row['package_confidence']
                             if row.get('package_confidence') in _CONFIDENCE_LEVELS else None),
-        # Affidabilita' della sola lettura della sigla (schema 6): None se il
-        # modello non l'ha data o se non c'e' nessuna sigla.
+        # Reliability of the marking reading alone (schema 6): None if the
+        # model did not give it or if there is no marking.
         marking_confidence=(row['marking_confidence'] if marking
                             and row.get('marking_confidence') in _CONFIDENCE_LEVELS else None),
         _package_verified=False, package_evidence=row['evidence'], marking=marking,
@@ -1478,8 +1497,8 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
         # Omitted/null is recorded as explicitly undeclared, never as a guessed level.
         lead_count_confidence=lead_count_confidence(row),
         confidence=row['confidence'], color_hex='#303030', _uncertain=True,
-        # Stessa lettura della presenza usata dai controlli geometrici: un
-        # campo assente non e' una dichiarazione di assenza (vedi _presence).
+        # Same presence reading used by the geometric checks: an absent field
+        # is not a declaration of absence (see _presence).
         presence_confidence=_presence(row),
         class_confidence=row.get('class_confidence', row['confidence']),
         component_id=row['component_id'], source_candidate_ids=list(row['source_candidate_ids']),
@@ -1508,8 +1527,8 @@ def _normalize(row, identity, length, width, issues, manual_ids=frozenset(), mea
             and row.get('lead_count_confidence') in ('medium', 'high')):
         result.update(pin_count=row['lead_count'], pin_count_confidence=row['lead_count_confidence'],
                       pin_count_source='complete_lead_observation')
-    # La disposizione per lato e' un'osservazione morfologica: la forma del
-    # corpo non deve dipendere dalla funzione (class), che puo' restare ignota.
+    # The per-side arrangement is a morphological observation: the shape of
+    # the body must not depend on the function (class), which may stay unknown.
     sides = leads_by_side(row)
     if sides is not None:
         result['pins_by_side'] = sides
@@ -1565,7 +1584,7 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @param width Board Y dimension in mm.
     @param model Caller-selected model, unchanged.
     @param call Application API callable, invoked without local retries: once,
-        plus at most ONE more paid call per run in total -- either for an
+        plus at most ONE more paid call in the whole run -- either for an
         unreadable answer (tool arguments not JSON) or for an answer omitting a
         blocking field on every row, never both (HANDOFF 137-138, A6). A
         truncated answer is not retried (openrouter.tool_arguments).
@@ -1596,8 +1615,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     @note Unsupported groups restore individual proposals. Spatially impossible
         links are detached from high-presence bodies without discarding their geometry.
         Body/assembly declarations are hypotheses, not independent visual proof.
-    @note ``_global_inventory_errors`` and ``_global_inventory_status`` are per
-        row: a row carries the errors that name it or one of its proposals, and
+    @note ``_global_inventory_errors`` and ``_global_inventory_status`` are
+        row-level: a row carries the errors that name it or one of its proposals, and
         is ``partial`` only then. Errors no retained row can claim (malformed
         response, failed call) belong to the inventory and reach every row.
         The cache still requires a response with no error at all.
@@ -1613,11 +1632,11 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         raise ValueError('Global inventory requires a nonempty photograph')
     if not all(_number(v, 0, 1e6) and v > 0 for v in (length, width)):
         raise ValueError('Global inventory requires positive finite board dimensions')
-    # Le proposte sotto la soglia operativa che nessuno ha tenuto non vanno
-    # al modello a pagamento: si vedono nella revisione, ma entrano solo se
-    # l'utente le tiene (photo_yolo.awaiting_user_keep). Tolte QUI, prima di
-    # contare e di validare, cosi' nessun percorso che salti la revisione le
-    # fa pagare per errore.
+    # Proposals below the operating threshold that nobody kept do not go to
+    # the paid model: they are visible in the review, but they enter only if
+    # the user keeps them (photo_yolo.awaiting_user_keep). Removed HERE, before
+    # counting and validating, so that no path skipping the review makes them
+    # paid by mistake.
     components, withheld = split_ai_candidates(components)
     if withheld:
         log(tx("Inventario globale: {n_withheld} proposte a bassa confidenza non tenute "
@@ -1644,22 +1663,23 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             detector_metadata={k: deepcopy(v) for k, v in c.items()
                                if isinstance(k, str) and k.startswith('_yolo_')},
             detector_envelope_mm=[(box[2]-box[0])*length, (box[3]-box[1])*width],
-            # Misura dei bordi sulla foto (angolo compreso), quando c'e': un
-            # rettangolo allineato agli assi non puo' dire lati e angolo di un
-            # corpo obliquo, e senza questa prova il modello non la vede.
+            # Edge measurement on the photo (angle included), when present: an
+            # axis-aligned rectangle cannot tell the sides and angle of an
+            # oblique body, and without this evidence the model does not see it.
             **({'measured_body_mm': {
                 'length': round(body['length_mm'], 3), 'width': round(body['width_mm'], 3),
                 'rotation_deg': round(body['rotation_deg'], 2),
                 'basis': 'photo edge measurement; rotation clockwise, X right, Y down'}}
                if body is not None else {})))
     h, w = photo.shape[:2]
-    # Griglia e ingrandimento dei dettagli secondo il modello che li riceve
-    # (HANDOFF 144): con un modello a token grossi i dettagli servono anche
-    # quando la foto intera ha gia' tutti i pixel che l'avrebbero bastata a Claude.
+    # Grid and enlargement of the details according to the model receiving
+    # them (HANDOFF 144): with a coarse-token model the details are needed even
+    # when the whole photo already has all the pixels that would have been
+    # enough for Claude.
     limits = model_image_limits(model)
     tiles = detail_grid(length, width, (w, h), limits)
-    # Senza candidati non c'e' nulla da riconciliare: cambia il prompt e cade
-    # la sovrapposizione numerata, che sarebbe una copia vuota della foto.
+    # Without candidates there is nothing to reconcile: the prompt changes and
+    # the numbered overlay drops, since it would be an empty copy of the photo.
     enumerating = not candidates
     empty_detector = enumerating and detector_ran is True
     version = (ENUMERATION_AFTER_EMPTY_DETECTOR_PROMPT_VERSION if empty_detector
@@ -1672,9 +1692,9 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         content += [{'type': 'text', 'text': 'Same photograph with ALL numbered YOLO proposals.'},
                     image_block(draw_inventory(photo, components, use_ids=True))]
     content.append({'type': 'text', 'text': json.dumps(inputs, allow_nan=False)})
-    # Dettagli ingranditi su entrambi gli assi, dimensionati dalle quote in mm
-    # (photo_grounding.detail_grid): stessa griglia della localizzazione. Sono
-    # immagini in PIU' nella stessa, unica richiesta, non chiamate in piu'.
+    # Details enlarged on both axes, sized from the dimensions in mm
+    # (photo_grounding.detail_grid): same grid as the localisation. They are
+    # EXTRA images in the same, single request, not extra calls.
     for i, (region, _cell) in enumerate(tiles, 1):
         left, right = max(0, round(region[0]*w)), min(w, round(region[2]*w))
         top, bottom = max(0, round(region[1]*h)), min(h, round(region[3]*h))
@@ -1705,8 +1725,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     if path and path.exists():
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
-            # La cache conserva la risposta del fornitore com'era: si valida
-            # nella stessa unita' in cui la valida la corsa dal vivo.
+            # The cache keeps the provider's response as it was: it is
+            # validated in the same unit in which the live run validates it.
             replay, _, scale_issue = _in_contract_units(record.get('response'), w, h,
                                                         lambda _m: None, boxes)
             if (record.get('key') == key and scale_issue is None
@@ -1720,14 +1740,15 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         images = sum(1 for block in content if block.get('type') == 'image_url')
         log(paid_request_message(images, len(candidates), enumerating, empty_detector))
         data = _call_once(call, kwargs)
-        # Al massimo UNA chiamata a pagamento in piu' per corsa (utente, 28/09:
-        # «un solo nuovo tentativo»; audit 138, A6): chi la spende la segna.
+        # At most ONE extra paid call per run (user, 28/09:
+        # «un solo nuovo tentativo» (a single new attempt); audit 138, A6):
+        # whoever spends it marks it.
         extra_call_spent = False
         if data.get('_unreadable') if isinstance(data, dict) else False:
-            # Il modello ha risposto con lo strumento giusto ma con argomenti
-            # illeggibili: la STESSA richiesta puo' tornare leggibile, quindi
-            # un solo nuovo tentativo a pagamento (utente, 28/09, punto 137).
-            # Rifiuti, errori di rete e di credito non passano di qui.
+            # The model answered with the right tool but with unreadable
+            # arguments: the SAME request may come back readable, so a single
+            # new paid attempt (user, 28/09, point 137).
+            # Refusals, network and credit errors do not pass through here.
             log(tx("Inventario globale: la risposta del modello non era un JSON leggibile; un "
                    "solo nuovo tentativo a pagamento con la stessa richiesta."))
             extra_call_spent = True
@@ -1736,25 +1757,26 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                 data = second
                 log(tx("Inventario globale: il nuovo tentativo e' leggibile; si usa quello."))
             else:
-                # Si tiene il primo fallimento, con il testo ricevuto per l'audit,
-                # e si dice che anche la seconda chiamata pagata non e' servita.
+                # The first failure is kept, with the text received for the
+                # audit, and it is said that the second paid call was no use
+                # either.
                 data['retry_error'] = second.get('error') if isinstance(second, dict) else None
                 data['retry_raw_arguments'] = (second.get('raw_arguments')
                                                if isinstance(second, dict) else None)
                 log(tx("Inventario globale: anche il nuovo tentativo e' fallito ({detail}); "
                        "restano le proposte del rilevatore come ipotesi generiche.",
                        detail=_inline_detail(data['retry_error'] or '?')))
-        # Una risposta che omette un campo obbligatorio su ogni riga non e'
-        # incompleta per caso: il modello ha ignorato lo schema. Si ritenta
-        # UNA volta, a pagamento, dicendo quali campi mancavano -- e' l'unica
-        # cosa che distingue il secondo tentativo dal primo. Se anche il
-        # secondo li omette, si tiene e si dichiara: a valle la presenza
-        # ripiega sulla confidenza complessiva (vedi _presence).
+        # A response omitting a required field on every row is not incomplete
+        # by chance: the model ignored the schema. It is retried ONCE, paid,
+        # saying which fields were missing -- it is the only thing telling the
+        # second attempt from the first. If the second omits them too, it is
+        # kept and declared: downstream the presence falls back on the overall
+        # confidence (see _presence).
         omitted = omitted_required_fields(data)
         if omitted and extra_call_spent:
-            # La chiamata in piu' e' gia' stata pagata per la risposta
-            # illeggibile: una terza non si fa. L'omissione resta dichiarata
-            # e la presenza ripiega sulla confidenza complessiva.
+            # The extra call has already been paid for the unreadable
+            # response: a third one is not made. The omission stays declared
+            # and the presence falls back on the overall confidence.
             log(tx("Inventario globale: il modello ha omesso campi obbligatori su OGNI "
                    "componente ({join}); nessun altro tentativo: l'unico nuovo tentativo a "
                    "pagamento di questa corsa è già stato usato per la risposta illeggibile.",
@@ -1773,12 +1795,12 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
             except (OpenRouterError, ValueError, OSError) as exc:
                 second = {'error': str(exc)}
             still = omitted_required_fields(second)
-            # Il secondo tentativo vale solo se ha righe da giudicare: una
-            # risposta vuota o malformata non «omette nulla», ma non e' una
-            # risposta. La cache resta sotto la chiave della richiesta
-            # originale: e' la risposta accettata PER QUELLA richiesta, e una
-            # corsa successiva con gli stessi input deve rigiocarla, non
-            # ripagare due chiamate.
+            # The second attempt counts only if it has rows to judge: an empty
+            # or malformed response does not «omette nulla» (omit anything),
+            # but it is not a response. The cache stays under the key of the
+            # original request: it is the response accepted FOR THAT request,
+            # and a later run with the same inputs must replay it, not pay for
+            # two calls again.
             usable = (isinstance(second, dict) and not second.get('error')
                       and isinstance(second.get('components'), list)
                       and any(isinstance(row, dict) for row in second['components']))
@@ -1788,13 +1810,13 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                        "usa quello."))
             else:
                 failure = second.get('error') if isinstance(second, dict) else None
-                # Questa riga dice che una SECONDA chiamata a pagamento e' stata
-                # spesa senza risultato: e' l'unica cosa che contraddice la riga
-                # precedente, che il pagamento lo annuncia. Il motivo arriva
-                # dall'API e puo' contenere punti e virgola, quindi si appiattisce
-                # (`_inline_detail`) e i pezzi della riga si separano con
-                # `_DETAIL_SEPARATOR`: cosi' la visibilita' in modale non dipende
-                # da come e' punteggiato un errore altrui.
+                # This line says that a SECOND paid call was spent without
+                # result: it is the only thing contradicting the previous line,
+                # which announces the payment. The reason comes from the API
+                # and may contain semicolons, so it is flattened
+                # (`_inline_detail`) and the pieces of the line are separated
+                # with `_DETAIL_SEPARATOR`: so the visibility in the modal does
+                # not depend on how someone else's error is punctuated.
                 log(tx("Inventario globale: nuovo tentativo ")
                     + (tx("fallito ({detail})", detail=_inline_detail(failure)) if failure else
                        (tx("che omette ancora ") + ', '.join(still)) if still else
@@ -1804,8 +1826,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                          "complessiva."))
                 omission_issue = _Issue('model omitted required fields on every component: '
                                         + ', '.join(omitted))
-    # Prima di giudicare la risposta, portarla nell'unita' del contratto: un
-    # rettangolo giusto consegnato in pixel non e' una risposta sbagliata.
+    # Before judging the response, bring it into the contract's unit: a right
+    # rectangle delivered in pixels is not a wrong response.
     checked, box_scale, scale_issue = _in_contract_units(data, w, h, log, boxes)
     rows, safe, errors = _validate(checked, known, boxes)
     repaired_reasons = Counter(r[LEAD_OBSERVATION_DISCARDED] for r in rows
@@ -1823,10 +1845,10 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
         # Boxes left in an undecided unit: the response is not cached as good
         # and the rows it invalidated are reported, never silently guessed.
         errors.append(scale_issue)
-    # Controlli contro cio' che il rilevatore ha visto (HANDOFF 126): un
-    # gruppo che inghiotte corpi rilevati che non dichiara non si applica, un
-    # corpo solo-AI dentro un corpo rilevato non si aggiunge. Esiti come note,
-    # non come errori: la cache della risposta non ne dipende.
+    # Checks against what the detector saw (HANDOFF 126): a group swallowing
+    # detected bodies it does not declare is not applied, an AI-only body
+    # inside a detected body is not added. Outcomes as notes, not as errors:
+    # the response cache does not depend on them.
     from ..cad3d.measurement_uncertainty import edge_uncertainty_mm
     tolerance_mm, _source = edge_uncertainty_mm(scale_px_per_mm=min(w / length, h / width))
     rows, safe, evidence_notes, evidence_reasons, ai_only_excluded = contradicted_by_detections(
@@ -1834,8 +1856,8 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     for note in evidence_notes:
         log(tx("Inventario globale, contraddetto dal rilevatore locale: ") + note)
     if ai_only_excluded:
-        # Proposti ma non scelti (HANDOFF 141): nota, non _Issue, cosi' la
-        # risposta resta in cache e un rilancio non ripaga.
+        # Proposed but not chosen (HANDOFF 141): a note, not an _Issue, so the
+        # response stays in the cache and a rerun does not pay again.
         log(tx("Inventario globale: {count} corpi aggiunti dal solo modello, senza proposte "
                "del rilevatore: proposti ma esclusi dalla tabella e dal 3D finché non li "
                "tieni nella revisione fotografica.", count=len(ai_only_excluded)))
@@ -1852,18 +1874,19 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     if isinstance(data, dict) and data.get('error'):
         errors.append(_Issue(str(data['error'])))
     if omission_issue is not None:
-        # E' un errore della risposta nel suo insieme: vale per tutte le
-        # righe e impedisce di mettere in cache come buona una risposta che
-        # non rispetta lo schema.
+        # It is an error of the response as a whole: it applies to all the
+        # rows and prevents caching as good a response that does not respect
+        # the schema.
         errors.append(omission_issue)
     if errors:
-        # Il numero di problemi non deve cambiare la VISIBILITA' dell'avviso:
-        # con il punto e virgola due errori bastavano a far contare tre
-        # clausole al filtro della modale, che nascondeva l'avviso mentre la
-        # riga «una sola richiesta a pagamento…» restava, facendo passare per
-        # riuscita una chiamata pagata e parziale. Gli errori si elencano con
-        # `_DETAIL_SEPARATOR` e restano subito dopo «FAILED/PARTIAL: », dove i
-        # test della pipeline li cercano; il conteggio va in coda.
+        # The number of problems must not change the VISIBILITY of the
+        # warning: with semicolons two errors were enough to make the modal's
+        # filter count three clauses, hiding the warning while the line
+        # «una sola richiesta a pagamento…» (one single paid request) stayed,
+        # passing off a paid and partial call as successful. The errors are
+        # listed with `_DETAIL_SEPARATOR` and stay right after
+        # «FAILED/PARTIAL: », where the pipeline tests look for them; the
+        # count goes at the end.
         total = (tx("{count} problemi", count=len(errors)) if len(errors) != 1
                  else tx("1 problema"))
         # «FAILED/PARTIAL» is a machine-readable marker searched by tests and
@@ -1887,17 +1910,17 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     uncertainties = [u for u in uncertainties if isinstance(u, str)]
     for uncertainty in uncertainties:
         log(tx("Inventario globale, dubbio dichiarato dal modello: ") + uncertainty)
-    # Un'incoerenza su una riga degrada QUELLA riga. Ogni errore porta con se'
-    # il component_id e le proposte che lo riguardano, e una riga eredita solo
-    # gli errori che la nominano o che nominano una proposta che essa
-    # rappresenta. Prima l'elenco intero finiva su ogni componente e lo status
-    # era unico per tutto l'inventario: la fusione incoerente di un modulo
-    # marcava come parziali anche i passivi dall'altra parte della scheda.
+    # An inconsistency on a row degrades THAT row. Every error carries the
+    # component_id and the proposals concerning it, and a row inherits only
+    # the errors naming it or naming a proposal it represents. Before, the
+    # whole list ended up on every component and the status was one for the
+    # whole inventory: the inconsistent merge of a module marked as partial
+    # even the passives on the other side of the board.
     def own(component=None, candidates=()):
         return [str(e) for e in errors if e.concerns(component, candidates)]
     # New IDs cannot collide with unresolved originals, including malformed merges.
-    # Nemmeno con gli ID delle proposte trattenute (awaiting_user_keep): chi
-    # rilegge l'audit non deve trovare due corpi diversi sotto lo stesso ID.
+    # Nor with the IDs of the withheld proposals (awaiting_user_keep): whoever
+    # rereads the audit must not find two different bodies under the same ID.
     next_id = max(known | {c.get('_id') for c in withheld if type(c.get('_id')) is int},
                   default=0)+1
     manual_ids = frozenset(c['_id'] for c in components if c.get('_yolo_manual_box') is True)
@@ -1908,18 +1931,19 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
               for i, r in enumerate(rows)]
     for body in result:
         if body['component_id'] in ai_only_excluded:
-            # Proposto ma non scelto: resta fuori da tabella e 3D finche'
-            # l'utente non lo tiene (gui/photo_review_dialog). La chiave c'e'
-            # SOLO sui corpi solo-AI: False vuol dire «tenuto dall'utente».
+            # Proposed but not chosen: it stays out of the table and the 3D
+            # until the user keeps it (gui/photo_review_dialog). The key is
+            # there ONLY on the AI-only bodies: False means
+            # «tenuto dall'utente» (kept by the user).
             body.update(_ai_only_excluded=True,
                         _review_reason=ai_only_excluded[body['component_id']])
     for original in components:
         decision = safe.get(original['_id'])
         if decision is None or (decision['status'] == 'uncertain' and decision['component_id'] is None):
-            # Una riga trattenuta che RECLAMA questa proposta e la contiene per
-            # piu' di meta' la rappresenta gia': ripristinarla anche da sola
-            # contava lo stesso corpo due volte (HANDOFF 126, G2). L'incoerenza
-            # della decisione resta come errore su quella riga.
+            # A withheld row that CLAIMS this proposal and contains more than
+            # half of it already represents it: restoring it on its own too
+            # counted the same body twice (HANDOFF 126, G2). The inconsistency
+            # of the decision stays as an error on that row.
             if any(original['_id'] in r['source_candidate_ids']
                    and covered_fraction(boxes[original['_id']], r['bbox']) >= _INSIDE_FRACTION
                    for r in rows):
@@ -1934,14 +1958,14 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
                                 'Global inventory accounting unresolved; original retained')))
             retain_detector_category(retained)
             result.append(retained)
-    # Un errore che nessuna riga trattenuta puo' reclamare -- risposta
-    # malformata, chiamata fallita, riga caduta senza proposte superstiti --
-    # e' un errore dell'inventario, e allora vale davvero per tutti.
-    # Un errore che nomina SOLO un componente che la risposta non contiene
-    # (una decisione su un ID inventato che rimanda a un genitore inventato)
-    # non riguarda nessun corpo: copiarlo su tutti li marcava tutti
-    # «parziali» e annegava gli errori che contano (HANDOFF 126, G6). Resta
-    # nel log, nell'audit e su ogni corpo come segnale della risposta.
+    # An error that no withheld row can claim -- malformed response, failed
+    # call, row dropped with no surviving proposals -- is an error of the
+    # inventory, and then it really applies to all.
+    # An error naming ONLY a component the response does not contain (a
+    # decision on an invented ID pointing to an invented parent) concerns no
+    # body: copying it onto all marked them all «parziali» (partial) and
+    # drowned the errors that matter (HANDOFF 126, G6). It stays in the log,
+    # in the audit and on every body as a signal of the response.
     answered = ({r['component_id'] for r in checked['components']
                  if isinstance(r, dict) and isinstance(r.get('component_id'), str)}
                 if isinstance(checked, dict) and isinstance(checked.get('components'), list)
@@ -1968,12 +1992,13 @@ def review_global_inventory(photo, components, length, width, model, call, log, 
     if errors and not result:
         raise ValueError('Global inventory failed with no recoverable bodies: ' + '; '.join(errors))
     if enumerating and not result:
-        # Senza candidati un elenco vuoto non e' un esito: e' un rifiuto di
-        # lavorare che lo schema consente, perche' `components` puo'
-        # legittimamente essere vuoto e non c'e' nessuna contabilita' di ID
-        # che obblighi il modello a pronunciarsi. Registrarlo come «0 ipotesi,
-        # completezza non certificata» lo farebbe passare per un risultato, e
-        # la lavorazione proseguirebbe in silenzio con cio' che restava prima.
+        # Without candidates an empty list is not an outcome: it is a refusal
+        # to work that the schema allows, because `components` may
+        # legitimately be empty and there is no ID bookkeeping forcing the
+        # model to pronounce itself. Recording it as
+        # «0 ipotesi, completezza non certificata» (0 hypotheses, completeness
+        # not certified) would pass it off as a result, and the processing
+        # would silently go on with what was there before.
         raise ValueError(
             'Global inventory returned no bodies at all: a populated board always has some. '
             'The model answered with an empty enumeration; nothing was detected.')

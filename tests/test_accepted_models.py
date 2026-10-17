@@ -246,7 +246,7 @@ def test_accepting_the_same_model_again_confirms_and_averages(library):
 
 
 @pytest.mark.parametrize("change, reason", [
-    ({"render_3d": False}, "escluso dal modello 3D"),
+    ({"render_3d": False}, "escluso dal modello STEP"),
     ({"model_selection": {"status": "rejected"}}, "segnaposto"),
     ({"model_match": {"status": "import_failed"}}, "nessun modello KiCad importato"),
     ({"model_path": None}, "nessun modello KiCad agganciato"),

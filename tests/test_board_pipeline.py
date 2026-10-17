@@ -241,7 +241,7 @@ def test_a_deliberate_2d_only_run_still_produces_the_footprint(window, monkeypat
     _wait_for_worker(window)
     name = window._component_name()
     footprint = window._project_dir() / f"{name}.pretty" / f"{name}.kicad_mod"
-    assert footprint.is_file(), "il footprint 2D deve esistere anche senza modello 3D"
+    assert footprint.is_file(), "il footprint 2D deve esistere anche senza modello STEP"
     assert window._automatic_footprint_done is True
     assert window._automatic_3d_expected is False
 
@@ -255,10 +255,10 @@ def test_a_missing_body_with_the_3d_group_on_still_blocks(window, monkeypatch):
     blocked = []
     monkeypatch.setattr(gui.QMessageBox, "warning", lambda *a, **k: None)
     monkeypatch.setattr(window, "_automatic_generation_blocked", blocked.append)
-    monkeypatch.setattr(window, "_current_body_params", lambda: None)
+    monkeypatch.setattr(window, "_current_body_params", lambda **_kwargs: None)
     window.group_3d.setChecked(True)
     window._start_automatic_generation(_castellated_raw())
-    assert blocked and "modello 3D" in blocked[0]
+    assert blocked and "modello STEP" in blocked[0]
     assert window._worker is None or not window._worker.isRunning()
 
 

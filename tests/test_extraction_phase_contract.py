@@ -24,6 +24,23 @@ from kicadgen.services import datasheet_extractor as extractor
 from kicadgen.services import photo_inventory, photo_yolo
 
 
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    Document images must be decodable: since 2026-10-15 an upload whose
+    metadata cannot be removed is refused (fail closed), so fake bytes named
+    .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
+
 #: Risposta minima dell'analisi principale che porta al passaggio fotografico:
 #: un modulo castellated con le quote del corpo dichiarate.
 _PAYLOAD = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
@@ -39,7 +56,7 @@ def extraction(monkeypatch, tmp_path):
         cosi' ogni test legge la sequenza esatta che la modale riceverebbe.
     """
     photo = tmp_path / 'top.png'
-    photo.write_bytes(b'offline fixture')
+    photo.write_bytes(_TINY_PNG)
     monkeypatch.setattr(extractor, 'api_key', lambda: 'offline')
     monkeypatch.setattr(extractor, 'check_credit', lambda **kwargs: None)
     monkeypatch.setattr(extractor, 'call_tool', Mock(return_value=dict(_PAYLOAD)))

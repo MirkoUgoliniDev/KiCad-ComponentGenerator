@@ -3,6 +3,6 @@
 @details Contains the reusable core, generators, CAD services and Qt GUI.
 """
 
-#: Versione del programma: una sola fonte, letta dalla finestra About, dal
-#: build dell'eseguibile e dall'installer MSI (tre numeri, come vuole l'MSI).
+#: Program version: a single source, read by the About window, by the
+#: executable build and by the MSI installer (three numbers, as the MSI wants).
 __version__ = "1.0.0"

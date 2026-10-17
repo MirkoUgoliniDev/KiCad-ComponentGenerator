@@ -1,24 +1,22 @@
 """@brief Post-processing annotations for the 3D body: text on a face and fillet on an edge.
 
-Annotazioni di post-elaborazione per il corpo 3D (testo su faccia, fillet su spigolo).
+The body is always an axis-aligned box, so faces and edges have fixed,
+predictable names that can be chosen from a list (no click-to-pick 3D
+selector on the preview is needed):
 
-Il corpo e' sempre un parallelepipedo assi-allineato, quindi facce e
-spigoli hanno nomi fissi e prevedibili, selezionabili da una lista (non
-serve un picker 3D a click sull'anteprima):
+Faces (6): top, bottom, left, right, front, back
+    - top/bottom: normal along Z (top = maximum height, bottom = soldering plane Z=0)
+    - left/right: normal along X (left = minimum X, right = maximum X)
+    - front/back: normal along the Y axis OF THE 3D MODEL (Y pointing up, as
+      in KiCad): front = the -Y side, i.e. the BOTTOM side of the top view;
+      back = the +Y side, at the top. It is the face the 3D view cube calls
+      «Fronte» (convention 2, since 2026-09-25; before that, front was the
+      upper side of the 2D view and the cube called it «Retro»).
 
-Facce (6): top, bottom, left, right, front, back
-    - top/bottom: normale lungo Z (top = altezza massima, bottom = piano di saldatura Z=0)
-    - left/right: normale lungo X (left = X minimo, right = X massimo)
-    - front/back: normale lungo Y DEL MODELLO 3D (Y verso l'alto, come in
-      KiCad): front = lato -Y, cioe' il lato in BASSO della vista dall'alto;
-      back = lato +Y, in alto. E' la faccia che il cubo della vista 3D chiama
-      «Fronte» (convenzione 2, dal 2026-09-25; prima front era il lato in alto
-      della vista 2D e il cubo lo chiamava «Retro»).
-
-Spigoli (12): combinazione di due facce adiacenti, es. "top-front",
-"front-left" -- lo script FreeCAD (freecad_build_body.py) classifica gli
-spigoli del solido a runtime in base a direzione e posizione, con la
-stessa logica di FACE_NAMES/EDGE_NAMES qui sotto.
+Edges (12): combination of two adjacent faces, e.g. "top-front",
+"front-left" -- the FreeCAD script (freecad_build_body.py) classifies the
+edges of the solid at run time by direction and position, with the same
+logic as FACE_NAMES/EDGE_NAMES below.
 """
 
 from __future__ import annotations
@@ -31,9 +29,9 @@ from ..services.messages import tx
 
 FACE_NAMES = ("top", "bottom", "left", "right", "front", "back")
 
-#: Convenzione dei nomi front/back scritta nei progetti. 1 (o assente): front
-#: era il lato in alto della vista dall'alto; 2: front e' il lato in basso,
-#: come il cubo 3D e KiCad.
+#: Front/back naming convention written into projects. 1 (or absent): front
+#: was the upper side of the top view; 2: front is the lower side,
+#: like the 3D cube and KiCad.
 ANNOTATION_CONVENTION = 2
 
 
@@ -63,7 +61,10 @@ def _positive(value) -> bool:
 def validate_hex_color(value: str, what: str) -> None:
     """@brief Raise ValueError unless `value` is a '#rrggbb' colour; `what` names it in the message.
 
-    Valida un colore nel formato '#rrggbb'.
+    @param value Candidate colour string in '#rrggbb' format.
+    @param what Human-readable name of the colour being validated, used in
+        the error message.
+    @throws ValueError When `value` is not a string or does not match '#rrggbb'.
     """
     if not isinstance(value, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", value.strip()):
         raise ValueError(tx("{what} non valido: {value!r} (atteso formato '#rrggbb')",
@@ -75,18 +76,16 @@ def validate_hex_color(value: str, what: str) -> None:
 class FaceTextAnnotation:
     """@brief Printed text layer laid on one face of the body, exported as its own coloured solid.
 
-    Scritta serigrafata su una faccia del corpo.
-
-    Non e' un'incisione: e' uno strato sottile di "vernice" appoggiato sopra la
-    superficie (un solido a se', con un colore proprio), come la serigrafia
-    stampata sui case reali. Resta un solido separato dal corpo proprio perche'
-    cosi' puo' avere un colore diverso nell'export.
+    It is not an engraving: it is a thin layer of "paint" laid on top of the
+    surface (a solid of its own, with its own colour), like the silkscreen
+    printed on real cases. It stays a solid separate from the body precisely
+    so that it can have a different colour in the export.
     """
 
     face: str
     text: str
     size_mm: float = 2.0
-    thickness_mm: float = 0.06  # spessore dello strato di vernice
+    thickness_mm: float = 0.06  # thickness of the paint layer
     color_hex: str = "#ffffff"
     #: Centre of the text on the face, in footprint mm (both or neither).
     #: None: the text sits at the centre of the face. Used for the pin
@@ -130,14 +129,19 @@ class FaceTextAnnotation:
 class EdgeFilletAnnotation:
     """@brief Fillet of a given radius (mm) on one named edge of the body.
 
-    Raccordo (fillet) su uno spigolo del corpo.
+    @note The edge name must be one of EDGE_NAMES; the FreeCAD script
+        resolves it to the actual edge of the solid at run time.
     """
 
     edge: str
     radius_mm: float = 0.5
 
     def validate(self) -> None:
-        """@brief Validate the object against its supported contract."""
+        """@brief Validate the object against its supported contract.
+
+        @throws ValueError When the edge name is not in EDGE_NAMES or the
+            radius is not a positive finite number.
+        """
         if self.edge not in EDGE_NAMES:
             raise ValueError(tx("Spigolo non valido: {edge!r} (ammessi: {EDGE_NAMES})",
                                 edge=self.edge,

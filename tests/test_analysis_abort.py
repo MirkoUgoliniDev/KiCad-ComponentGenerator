@@ -95,6 +95,9 @@ def _prepare_3d(window):  # noqa: F811
     window.field_body_length.setValue(10.0)
     window.field_body_width.setValue(8.0)
     window.field_body_height.setValue(2.0)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes
+    # build a solid; these values stand for an analysis that declared them.
+    window._body_size_declared = True
 
 
 def _say_yes(monkeypatch, answers):
@@ -294,7 +297,7 @@ def test_the_abort_button_is_absent_while_nothing_is_running(window):  # noqa: F
     assert not overlay.abort_button.isEnabled()
     assert not overlay.abort_button.isVisibleTo(overlay.button_row)
     # Anche dopo un'operazione: la fine toglie il pulsante insieme alla modale.
-    overlay.start("Generazione modello 3D", "Avvio di FreeCAD…", abortable=True)
+    overlay.start("Generazione modello STEP", "Avvio di FreeCAD…", abortable=True)
     assert overlay.abort_button.isEnabled()
     assert overlay.abort_button.isVisibleTo(overlay.button_row)
     overlay.stop()
@@ -356,7 +359,7 @@ def test_aborting_a_generation_kills_the_child_and_gives_the_window_back(
     assert not window.btn_regen_3d.property("workflow_busy")
     log = window._log_plain_text()
     assert "INTERRUZIONE chiesta dall'utente durante" in log
-    assert "Rigenerazione del modello 3D" in log, "il log deve dire a che punto si era"
+    assert "Rigenerazione del modello STEP" in log, "il log deve dire a che punto si era"
     assert "INTERROTTO 3D" in log
     assert "ERRORE 3D" not in log, "una scelta dell'utente non e' un guasto"
     freecad_log = (window._project_dir() / "freecad.log").read_text(encoding="utf-8")
@@ -642,6 +645,6 @@ def test_aborting_the_automatic_generation_restores_the_window_without_alarms(
     assert not window._abort_pending
     log = window._log_plain_text()
     assert "INTERRUZIONE chiesta dall'utente durante" in log
-    assert "Generazione di footprint e modello 3D" in log
+    assert "Generazione di footprint e modello STEP" in log
     assert "Generazione interrotta dall’utente" in log
     assert "ERRORE 3D" not in log

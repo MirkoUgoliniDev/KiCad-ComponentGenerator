@@ -112,7 +112,8 @@ def test_applica_writes_the_project_once_and_rewrites_the_footprint_once(project
     assert generations == [{"footprint_only": True}], "one .kicad_mod rewrite"
     state = _config(window)["state"]
     assert state["footprint_drawings"] == validate_footprint_drawings([record()])
-    assert state["footprint_texts"] == {"Reference": [1.0, 2.0]}
+    # Marked as bottom-left anchors since 2026-10-16 (test_footprint_property_anchor).
+    assert state["footprint_texts"] == {"Reference": [1.0, 2.0], "anchor": "left_bottom"}
     assert state["package_geometry"]["pins"][_tht_index(window)]["drill_mm"] == 0.5
     assert not window.has_pending_footprint_edits()
     assert not window.btn_fp_apply.isEnabledTo(window.btn_fp_apply.parentWidget())
@@ -495,7 +496,12 @@ def test_an_existing_project_opens_as_applied_without_a_draft(project):
     (folder / PROJECT_CONFIG_NAME).write_text(json.dumps(config), encoding="utf-8")
     window._open_project_at(folder, save_current=False)
     assert window.footprint_drawings == validate_footprint_drawings([record()])
-    assert window.footprint_text_positions == {"Reference": (1.0, -3.0)}
+    # CONTRACT CHANGED 2026-10-16: an unmarked (pre-anchor) position is the
+    # text centre, converted once to its bottom-left corner (KiCad's text
+    # geometry: KiCad keeps drawing it there); still no draft.
+    from kicadgen.gui.main_window import _property_text_corner_offset
+    dx, dy = _property_text_corner_offset("REF**")
+    assert window.footprint_text_positions["Reference"] == pytest.approx((1.0 + dx, -3.0 + dy), abs=1e-4)
     assert not window.has_pending_footprint_edits()
     assert not window.btn_fp_apply.isEnabledTo(window.btn_fp_apply.parentWidget())
     assert not window.btn_fp_recover.isEnabledTo(window.btn_fp_recover.parentWidget())

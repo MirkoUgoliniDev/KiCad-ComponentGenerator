@@ -1,16 +1,15 @@
 """@brief LLM model picker over the OpenRouter catalogue, with a cost filter.
 
-Scelta del modello LLM dall'elenco OpenRouter, con filtro sul costo.
+Choice of the LLM model from the OpenRouter list, with a cost filter.
 
-OpenRouter pubblica centinaia di modelli a prezzi che vanno da zero a
-qualche decina di dollari per milione di token: la tabella qui sotto li
-mostra con il loro costo e permette di filtrare per prezzo massimo, cosi'
-si sceglie consapevolmente fra un modello economico per i datasheet
-semplici e uno piu' capace per quelli difficili.
+OpenRouter publishes hundreds of models at prices ranging from zero to a
+few tens of dollars per million tokens: the table below shows them with
+their cost and allows filtering by maximum price, so that one chooses
+knowingly between a cheap model for simple datasheets and a more capable
+one for the difficult ones.
 
-Di default sono elencati solo i modelli utilizzabili per questo lavoro
-(tool calling + lettura di immagini e PDF): gli altri fallirebbero la
-chiamata.
+By default only the models usable for this job are listed (tool calling +
+reading of images and PDFs): the others would fail the call.
 """
 
 from __future__ import annotations
@@ -32,15 +31,19 @@ from ..services.providers import (PROVIDER_DEEPSEEK, PROVIDER_LABELS, PROVIDER_S
                                   deepseek_models, provider_of)
 from ..services.messages import tx
 
-#: Come si chiama, per chi guarda, ogni capacita' richiesta.
+#: What each required capability is called, for the viewer.
 _CAPABILITY_LABELS = {"tools": "tool calling", "images": "immagini", "files": "PDF"}
 
-#: Colonne della tabella.
+#: Columns of the table.
 _COL_ID, _COL_NAME, _COL_IN, _COL_OUT, _COL_CTX = range(5)
 
 
 def _find_i18n(widget):
-    """@brief Return the translation service owned by the nearest parent."""
+    """@brief Return the translation service owned by the nearest parent.
+
+    @param widget Widget from which the parent chain is walked upwards.
+    @return The first `i18n` attribute found on the chain, or None.
+    """
     current = widget
     while current is not None:
         i18n = getattr(current, "i18n", None)
@@ -51,20 +54,20 @@ def _find_i18n(widget):
 
 
 class _ModelsWorker(QThread):
-    """Scarica l'elenco modelli fuori dal thread grafico.
+    """@brief Download the model list off the GUI thread.
 
-    L'elenco e' circa un megabyte e il timeout arriva a 30 secondi: farlo
-    sul thread della GUI significherebbe una finestra congelata, senza
-    nemmeno il modo di annullare.
+    The list is about one megabyte and the timeout reaches 30 seconds: doing
+    it on the GUI thread would mean a frozen window, without even a way to
+    cancel.
 
-    @note Il thread non appartiene alla finestra che lo avvia ma a
-    QApplication. Un QThread ancora in corsa distrutto insieme alla finestra
-    fa terminare l'intero processo — lo stesso rischio annotato in
-    `main_window.choose_model` per i worker della revisione fotografica — e i
-    30 secondi di timeout rendono la finestra chiusa in anticipo il caso
-    normale, non l'eccezione. Con la proprieta' in mano a Qt il worker
-    sopravvive alla finestra, si elimina da se' quando ha finito e l'uscita
-    dall'applicazione lo attende invece di distruggerlo.
+    @note The thread does not belong to the window that starts it but to
+    QApplication. A QThread still running and destroyed together with the
+    window terminates the whole process — the same risk noted in
+    `main_window.choose_model` for the photo review workers — and the 30 s
+    timeout makes the window closed early the normal case, not the
+    exception. With the ownership in Qt's hands the worker outlives the
+    window, deletes itself when finished and the application exit waits for
+    it instead of destroying it.
     """
 
     done = pyqtSignal(object)
@@ -83,15 +86,15 @@ class _ModelsWorker(QThread):
         self.provider = provider
         application = QApplication.instance()
         if application is not None:
-            # Uscire dall'applicazione mentre il download e' in volo
-            # distruggerebbe il thread in corsa: si attende invece che esca da
-            # list_models. L'attesa non e' indefinita, il limite e' il timeout
-            # HTTP della richiesta.
+            # Quitting the application while the download is in flight would
+            # destroy the running thread: instead we wait for it to leave
+            # list_models. The wait is not unbounded, the limit is the HTTP
+            # timeout of the request.
             application.aboutToQuit.connect(self.wait)
         self.finished.connect(self._release)
 
     def run(self) -> None:
-        """@brief Provide the run operation for this workflow."""
+        """@brief QThread override: download the provider's model list and emit `done` or `error`."""
         try:
             if self.provider == PROVIDER_DEEPSEEK:
                 self.done.emit(deepseek_models())
@@ -99,46 +102,46 @@ class _ModelsWorker(QThread):
                 self.done.emit(list_models(force_refresh=self.force_refresh))
         except OpenRouterError as exc:
             self.error.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - riportato nel dialogo
+        except Exception as exc:  # noqa: BLE001 - reported in the dialog
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
 
     def _release(self) -> None:
-        """Scioglie l'attesa all'uscita e si elimina, una volta finito.
+        """Drop the exit-time wait and delete the thread, once finished.
 
-        La promessa di `wait` vale solo finche' il thread esiste: lasciandola
-        attiva, all'uscita Qt chiamerebbe `wait` su un oggetto gia' eliminato
-        da `deleteLater` e l'applicazione terminerebbe con RuntimeError. E' la
-        stessa sequenza dei worker della revisione fotografica.
+        The `wait` promise is valid only while the thread exists: left
+        connected, at exit Qt would call `wait` on an object already removed
+        by `deleteLater` and the application would terminate with a
+        RuntimeError. It is the same sequence as the photo review workers.
         """
         application = QApplication.instance()
         if application is not None:
             try:
                 application.aboutToQuit.disconnect(self.wait)
             except TypeError:
-                # Mai connessa (nessuna QApplication alla costruzione) o gia'
-                # sciolta: in entrambi i casi non c'e' nulla da sciogliere.
+                # Never connected (no QApplication at construction) or already
+                # disconnected: in both cases there is nothing to disconnect.
                 pass
         self.deleteLater()
 
 
 class _NumericItem(QTableWidgetItem):
-    """Cella che si ordina per valore numerico ma si legge formattata.
+    """@brief Cell that sorts by numeric value but reads formatted.
 
-    Senza questo, l'ordinamento della tabella sarebbe alfabetico e "10.00"
-    finirebbe prima di "2.00": inutile proprio nella colonna che serve a
-    confrontare i costi.
+    Without it the table ordering would be alphabetical and "10.00" would
+    end up before "2.00": useless precisely in the column meant to compare
+    costs.
     """
 
     def __init__(self, text: str, value: float):
         super().__init__(text)
-        # Un prezzo non dichiarato (NaN, API di DeepSeek) va in fondo: NaN non
-        # e' ordinabile e un confronto incoerente fa crollare l'ordinamento Qt.
+        # An undeclared price (NaN, DeepSeek API) goes to the bottom: NaN is
+        # not orderable and an inconsistent comparison breaks Qt's sorting.
         self._value = value if value == value else float("inf")
         self.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
 
-    def __lt__(self, other) -> bool:  # noqa: D105 - contratto di QTableWidgetItem
+    def __lt__(self, other) -> bool:  # noqa: D105 - QTableWidgetItem contract
         if isinstance(other, _NumericItem):
             return self._value < other._value
         return super().__lt__(other)
@@ -147,11 +150,11 @@ class _NumericItem(QTableWidgetItem):
 class ModelPickerDialog(QDialog):
     """@brief Dialog listing OpenRouter models with search, cost filter and selection; it saves nothing.
 
-    Elenco modelli OpenRouter con ricerca, filtro costo e selezione.
+    List of OpenRouter models with search, cost filter and selection.
 
-    Il dialogo non salva nulla: ritorna solo l'id del modello scelto
-    (`selected_model()`), e sta al chiamante decidere se diventa il default
-    globale o vale solo per l'estrazione in corso.
+    The dialog saves nothing: it only returns the id of the chosen model
+    (`selected_model()`), and it is up to the caller to decide whether it
+    becomes the global default or applies only to the extraction in progress.
     """
 
     def __init__(self, current_model: Optional[str] = None, parent=None,
@@ -160,6 +163,7 @@ class ModelPickerDialog(QDialog):
         """@brief Build the picker.
 
         @param current_model Model selected when the dialog opens.
+        @param parent Parent widget; its `i18n` service, if any, translates the dialog.
         @param title Window title.
         @param capabilities Capabilities the model must have (ModelInfo.usable_for).
         @param provider Source fixed by the caller (the «Modello» tab of the
@@ -174,6 +178,8 @@ class ModelPickerDialog(QDialog):
         self.resize(900, 620)
 
         self._models: list[ModelInfo] = []
+        #: What the table rows show (models, language); see `_apply_filters`.
+        self._shown_key = None
         self._selected = current_model or ""
         self._worker: Optional[_ModelsWorker] = None
         self._closed = False
@@ -189,20 +195,20 @@ class ModelPickerDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # Fornitore dell'API (utente, 2026-09-27): OpenRouter oppure l'API
-        # diretta di DeepSeek (chiave DEEPSEEK_API_KEY). Parte da quello del
-        # modello gia' scelto.
+        # API provider (user, 2026-09-27): OpenRouter or the direct DeepSeek
+        # API (key DEEPSEEK_API_KEY). It starts from the one of the model
+        # already chosen.
         provider_row = QHBoxLayout()
         provider_row.addWidget(QLabel("Fornitore:"))
         fixed_provider = provider
         self.combo_provider = QComboBox()
         for source in PROVIDERS:
-            # Tradotta qui: retranslate_widgets non tocca le voci dei combo (B7).
+            # Translated here: retranslate_widgets does not touch combo items (B7).
             self.combo_provider.addItem(tx(PROVIDER_LABELS[source]), source)
         self.combo_provider.setCurrentIndex(
             max(0, self.combo_provider.findData(fixed_provider or provider_of(current_model))))
-        # La sorgente scelta nel tab «Modello» non si cambia qui: l'elenco e'
-        # solo il suo.
+        # The source chosen in the «Modello» (model) tab is not changed here:
+        # the list is only its own.
         self.combo_provider.setEnabled(fixed_provider is None)
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
         provider_row.addWidget(self.combo_provider)
@@ -234,17 +240,17 @@ class ModelPickerDialog(QDialog):
         layout.addLayout(filter_row)
 
         options_row = QHBoxLayout()
-        # Tradotto con l'i18n della finestra genitore, come il resto del
-        # dialogo: il testo e' composto (le capacita' cambiano con lo stadio),
-        # quindi la ritraduzione generica non lo troverebbe nel catalogo.
+        # Translated with the parent window's i18n, like the rest of the
+        # dialog: the text is composed (the capabilities change with the
+        # stage), so the generic retranslation would not find it in the catalogue.
         source = "Solo modelli compatibili ({capabilities})"
         labels = " + ".join(self.i18n.text(_CAPABILITY_LABELS[name]) if self.i18n is not None
                             else _CAPABILITY_LABELS[name] for name in self.capabilities)
         self.check_compatible = QCheckBox(
             self.i18n.tr("ui:" + source, default=source, capabilities=labels)
             if self.i18n is not None else source.format(capabilities=labels))
-        # Testo composto e gia' tradotto: la ritraduzione generica non deve
-        # cercarlo nel catalogo come sorgente.
+        # Text composed and already translated: the generic retranslation must
+        # not look it up in the catalogue as a source.
         self.check_compatible.setProperty("i18n_skip", True)
         self.check_compatible.setChecked(True)
         tooltip = ("L'estrazione manda disegni meccanici e pretende una risposta "
@@ -295,16 +301,16 @@ class ModelPickerDialog(QDialog):
         self._update_selected_label()
         self._load_models()
 
-    # ── Dati ────────────────────────────────────────────────────────
+    # ── Data ────────────────────────────────────────────────────────
 
     def _alive(self) -> bool:
-        """Vero finche' questa finestra puo' ancora essere aggiornata.
+        """True while this window can still be updated.
 
-        Il download dura fino a 30 secondi e non viene interrotto: il risultato
-        puo' quindi arrivare quando la finestra e' stata chiusa, oppure quando
-        i suoi widget sono stati distrutti perche' e' morto il genitore. Un
-        aggiornamento in uno dei due casi solleverebbe RuntimeError dentro uno
-        slot Qt, e PyQt fa terminare il processo: si controlla prima.
+        The download lasts up to 30 seconds and is not interrupted: the result
+        may therefore arrive when the window has been closed, or when its
+        widgets have been destroyed because the parent died. An update in
+        either case would raise RuntimeError inside a Qt slot, and PyQt
+        terminates the process: it is checked first.
         """
         return not self._closed and not sip.isdeleted(self)
 
@@ -323,7 +329,7 @@ class ModelPickerDialog(QDialog):
         )
         self.btn_refresh.setEnabled(False)
 
-        # Proprieta' a QApplication, non a questa finestra: vedi _ModelsWorker.
+        # Property of QApplication, not of this window: see _ModelsWorker.
         self._update_provider_note()
         self._worker = _ModelsWorker(force_refresh, parent=QApplication.instance(),
                                      provider=self.provider())
@@ -333,7 +339,11 @@ class ModelPickerDialog(QDialog):
         self._worker.start()
 
     def provider(self) -> str:
-        """@brief Provider chosen in the dialog (providers.PROVIDERS)."""
+        """@brief Provider chosen in the dialog (providers.PROVIDERS).
+
+        @return The provider key of the current combo entry, or the first
+            provider when the combo carries no data.
+        """
         return self.combo_provider.currentData() or PROVIDERS[0]
 
     def _on_provider_changed(self, _index) -> None:
@@ -354,10 +364,11 @@ class ModelPickerDialog(QDialog):
                                          else note)
 
     def _worker_finished(self) -> None:
-        """Riabilita l'aggiornamento, se c'e' ancora una finestra da riabilitare.
+        """Re-enable the refresh, if there is still a window to re-enable it on.
 
-        Un metodo e non una lambda: la lambda resterebbe viva insieme al worker
-        (che ora sopravvive alla finestra) e toccherebbe widget gia' eliminati.
+        A method and not a lambda: the lambda would stay alive together with
+        the worker (which now outlives the window) and would touch widgets
+        already deleted.
         """
         self._worker = None
         if not self._alive():
@@ -365,12 +376,13 @@ class ModelPickerDialog(QDialog):
         self.btn_refresh.setEnabled(True)
 
     def _detach_worker(self) -> None:
-        """Slega il download in corso da questa finestra, senza fermarlo.
+        """Detach the running download from this window, without stopping it.
 
-        Chi chiude non deve attendere il megabyte dell'elenco, e il thread non
-        si puo' distruggere mentre gira: resta vivo sotto QApplication e si
-        elimina da se' alla fine. Qui si tagliano solo i tre collegamenti verso
-        questa finestra, cosi' un risultato tardivo non tocca piu' nulla.
+        Whoever closes must not wait for the megabyte of the list, and the
+        thread cannot be destroyed while it runs: it stays alive under
+        QApplication and deletes itself at the end. Only the three connections
+        towards this window are cut here, so that a late result touches
+        nothing any more.
         """
         worker = self._worker
         self._worker = None
@@ -382,8 +394,8 @@ class ModelPickerDialog(QDialog):
             try:
                 signal.disconnect(slot)
             except TypeError:
-                # Gia' sciolto: il worker puo' essere finito prima della
-                # chiusura, e disconnettere due volte non e' un errore qui.
+                # Already disconnected: the worker may have finished before
+                # closing, and disconnecting twice is not an error here.
                 pass
 
     def closeEvent(self, event) -> None:
@@ -428,8 +440,8 @@ class ModelPickerDialog(QDialog):
 
         result = []
         for model in self._models:
-            # Capacita' non dichiarate (API di DeepSeek): ne' compatibile ne'
-            # incompatibile noto, quindi il filtro non lo nasconde.
+            # Undeclared capabilities (DeepSeek API): neither known compatible
+            # nor known incompatible, so the filter does not hide it.
             if (only_compatible and getattr(model, "capabilities_declared", True)
                     and not model.usable_for(self.capabilities)):
                 continue
@@ -441,7 +453,21 @@ class ModelPickerDialog(QDialog):
         return result
 
     def _apply_filters(self) -> None:
+        """Show the models that pass the filters, sorted by input price, the chosen one selected.
+
+        The rows are rebuilt only when what they show changes (the visible
+        models, field by field, or the language of the price texts): a
+        keystroke that keeps the same models visible, as most do while a
+        prefix is typed, re-sorts and re-selects without recreating several
+        thousand cells.
+        """
         models = self._visible_models()
+        key = (tuple(models), getattr(self.i18n, "language", None))
+        if key == self._shown_key and self.table.rowCount() == len(models):
+            self.table.sortItems(_COL_IN, Qt.SortOrder.AscendingOrder)
+            self._restore_selection()
+            return
+        self._shown_key = key
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(models))
@@ -475,7 +501,7 @@ class ModelPickerDialog(QDialog):
         self._restore_selection()
 
     def _restore_selection(self) -> None:
-        """Riseleziona il modello corrente, se ancora visibile coi filtri."""
+        """Re-select the current model, if still visible with the filters."""
         for row in range(self.table.rowCount()):
             item = self.table.item(row, _COL_ID)
             if item is not None and item.text() == self._selected:
@@ -483,7 +509,7 @@ class ModelPickerDialog(QDialog):
                 self.table.scrollToItem(item)
                 return
 
-    # ── Selezione ───────────────────────────────────────────────────
+    # ── Selection ───────────────────────────────────────────────────
 
     def _on_selection_changed(self) -> None:
         rows = self.table.selectionModel().selectedRows()
@@ -509,13 +535,16 @@ class ModelPickerDialog(QDialog):
             ok_button.setEnabled(bool(self._selected))
 
     def selected_model(self) -> str:
-        """@brief Return the id of the model chosen in the dialog."""
+        """@brief Return the id of the model chosen in the dialog.
+
+        @return The selected model id, or "" when nothing is selected.
+        """
         return self._selected
 
 
 def _price_text(value: float, i18n=None) -> str:
-    """Prezzo leggibile: 'gratis' a costo zero, 'n.d.' se il fornitore non lo dichiara."""
-    if value != value:  # NaN: prezzo non dichiarato (API di DeepSeek)
+    """Readable price: 'gratis' at zero cost, 'n.d.' when the provider does not declare it."""
+    if value != value:  # NaN: undeclared price (DeepSeek API)
         return i18n.text("n.d.") if i18n is not None else "n.d."
     if value <= 0:
         return i18n.text("gratis") if i18n is not None else "gratis"
@@ -528,12 +557,17 @@ def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli i
                capabilities=DATASHEET_CAPABILITIES, provider: Optional[str] = None) -> Optional[str]:
     """@brief Open the model picker and return the chosen model id, or None when cancelled.
 
-    Apre il dialogo e ritorna l'id scelto, o None se si annulla.
+    Opens the dialog and returns the chosen id, or None on cancel.
 
-    @param capabilities Capacita' che il modello dovra' avere per il lavoro a
-        cui e' destinato: vedi ModelInfo.usable_for. Chiederne piu' del
-        necessario nasconde modelli validi.
+    @param current_model Model pre-selected when the dialog opens.
+    @param parent Parent widget of the dialog.
+    @param title Window title.
+    @param capabilities Capabilities the model must have for the job it is
+        meant for: see ModelInfo.usable_for. Asking for more than needed
+        hides valid models.
     @param provider Source fixed by the caller, or None (see ModelPickerDialog).
+    @return The chosen model id, or None when the dialog is cancelled or
+        nothing is selected.
     """
     dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities,
                                provider=provider)

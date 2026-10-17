@@ -17,7 +17,12 @@ SCALE = 64.0  # pixels per mm; resampling adds no source detail
 
 
 def render(solids):
-    """@brief Rasterize top-facing geometry in physical units with depth ordering."""
+    """@brief Rasterize top-facing geometry in physical units with depth ordering.
+
+    @param solids Solids as dicts with `vertices` (x, y, z in mm),
+        `triangles` and a `label` (1 body, 2 exposed lead).
+    @return SIZE x SIZE label image (uint8) at SCALE px per mm.
+    """
     all_vertices = np.array([v for s in solids for v in s['vertices']])
     center = (all_vertices[:, :2].min(axis=0) + all_vertices[:, :2].max(axis=0)) / 2
     low, high = all_vertices[:, 2].min(), all_vertices[:, 2].max()
@@ -36,14 +41,26 @@ def render(solids):
 
 
 def transform(labels, angle, scale=1, dx=0, dy=0):
-    """@brief Rotate and shift a projection without changing its physical scale metadata."""
+    """@brief Rotate and shift a projection without changing its physical scale metadata.
+
+    @param labels Label image produced by render.
+    @param angle Rotation in degrees, counter-clockwise.
+    @param scale Uniform scale factor applied about the image centre.
+    @param dx Horizontal shift in px.
+    @param dy Vertical shift in px.
+    @return Transformed label image, nearest-neighbour resampled.
+    """
     matrix = cv2.getRotationMatrix2D((SIZE/2, SIZE/2), angle, scale)
     matrix[:,2] += [dx,dy]
     return cv2.warpAffine(labels, matrix, (SIZE,SIZE), flags=cv2.INTER_NEAREST)
 
 
 def colour(labels):
-    """@brief Display body in dark grey and exposed leads in light grey."""
+    """@brief Display body in dark grey and exposed leads in light grey.
+
+    @param labels Label image produced by render.
+    @return BGR image of the same size.
+    """
     image=np.full((SIZE,SIZE,3), (55,65,55), np.uint8)
     image[labels==1]=(42,42,42)
     image[labels==2]=(220,220,220)
@@ -51,7 +68,13 @@ def colour(labels):
 
 
 def compare(crop, labels):
-    """@brief Compare metal occupancy, body darkness and silhouette-edge proximity."""
+    """@brief Compare metal occupancy, body darkness and silhouette-edge proximity.
+
+    @param crop BGR photo crop at the same scale as the label image.
+    @param labels Label image produced by render (possibly transformed).
+    @return (score, parts) where parts holds the metal, body and edge terms;
+        (0, zeros) when the projection has no body or no lead.
+    """
     hsv=cv2.cvtColor(crop,cv2.COLOR_BGR2HSV)
     grey=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
     metal=((hsv[:,:,1]<105)&(hsv[:,:,2]>110)).astype(np.uint8)

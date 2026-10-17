@@ -315,7 +315,11 @@ class ProviderBalance:
     currency: str
 
     def describe(self) -> str:
-        """@brief One log line."""
+        """@brief Render the balance as one log line in the active language.
+
+        @return The line: the amount with its currency when known, otherwise
+            whether credit is available or exhausted.
+        """
         label = tx(PROVIDER_LABELS.get(self.provider, self.provider))
         if self.amount is None:
             return tx("Credito {label}: {state}.", label=label,

@@ -62,6 +62,6 @@ def test_the_dialog_opens_showing_the_current_value(window, monkeypatch):
 
 @pytest.mark.parametrize("language", ["en", "it", "fr", "de"])
 def test_the_new_labels_are_translated(language):
-    for source in ('Serigrafia del modello 3D', 'Incidi le sigle dei pin'):
+    for source in ('Serigrafia del modello STEP', 'Incidi le sigle dei pin'):
         entry = DEFAULT_TRANSLATIONS.get(f'ui:{source}')
         assert entry and entry.get(language), f'manca {language} per «{source}»'

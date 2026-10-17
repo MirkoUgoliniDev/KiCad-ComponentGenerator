@@ -98,6 +98,15 @@ docstring whenever behavior, inputs, outputs or side effects change. New public
 APIs without Doxygen-compatible documentation are not complete and must not be
 merged. Run the documentation test together with the relevant functional tests.
 
+**Comments in English — user rule, binding (2026-10-16).** Every `#` and `#:`
+comment in production code, tools, examples and `main.py` is written in
+English, exactly like the docstrings. Verbatim user quotes, UI labels and
+literal program output stay in Italian inside «…» on ONE line, with an English
+gloss next to them. `tests/test_documentation.py`
+(`test_comments_are_written_in_english`) enforces it: an Italian comment fails
+the suite. Write new comments in English from the start; never translate a
+quote or reword English only to satisfy the checker.
+
 Use the project skills in `.claude/skills/` for generation and verification workflows. Use the reviewer agent for read-only audits before publishing a component.
 
 # Strategia del progetto e consegna agli agenti
@@ -244,7 +253,27 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8244 passed,
+is 8909 passed,
+12 skipped and 19 subtests (2026-10-17, branch `ADVANCED` merged into `main`: status bar
+right at start-up, Qt tab scroll buttons retranslated, desktop fonts only in a child test
+process, every visible «modello 3D» renamed «modello STEP» in four languages, unmoved
+Reference/Value written centred in footprint and symbol, opaque grey hints, and the
+performance audit — metadata typing 450-870 ms -> 4-9 ms per key on a real board, photo
+crops, profile store, costs, symbol drag, dialogs and document cards no longer redo
+unchanged work). Before that, 8826 passed,
+12 skipped and 19 subtests (2026-10-16 evening, branch `ADVANCED`, not merged: designator
+in grey counts as filled, medium findings 12-16 closed, two full adversarial reviews and
+their fixes, lead attachment declared by the vision model, default model chosen only from
+the interface, every comment and docstring in English enforced by the documentation test,
+detector's own strong/weak count, bottom-left anchors for the symbol and footprint property
+texts with KiCad fixed, texts drawn at KiCad's width, pin numbers at KiCad's position, anchor
+square on hover in both tabs). Before that, 8557 passed,
+12 skipped, 2 expected failures and 19 subtests (the night between 2026-10-15 and 2026-10-16, after the full-codebase
+audit and the fixes of its 11 medium findings: generated files aligned with the parameters,
+every KiCad block naming an enabled remedy, user pin names kept across analyses, no invented
+3D body, rename carrying the symbol, KiCad library robustness, photos uploaded without
+metadata, package orientation doubts asked; four adversarial review rounds). Before that,
+8244 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15 late evening, after the
 keywords field starting empty and following every extraction). Before that, 8237 passed,
 11 skipped, 2 expected failures and 19 subtests (2026-10-15 evening, after required

@@ -96,3 +96,43 @@ def test_every_step_label_is_translated_in_the_four_languages():
         assert entry is not None, source
         assert set(entry) == {"en", "it", "fr", "de"} and entry["it"] == source
         assert all(entry[language].strip() for language in entry), source
+
+
+def _fresh_window(monkeypatch, tmp_path):
+    """Construct a MainWindow as at start-up: no name typed, no refresh forced."""
+    from qt_fixtures import PreviewStub
+    monkeypatch.setattr(gui, "Preview3DVtk", PreviewStub)
+    monkeypatch.setattr(gui, "load_config", lambda: {"component_type": "", "system_prompt": ""})
+    monkeypatch.setattr(gui, "save_config", lambda config: None)
+    monkeypatch.setattr(gui, "DEFAULT_LIBRARY_ROOT", tmp_path)
+    return gui.MainWindow()
+
+
+def test_a_new_window_says_no_project_without_any_event(qapp, monkeypatch, tmp_path):
+    """@brief Positive (2026-10-17, S1): the status label is right as soon as the window exists.
+
+    The label was built after every refresh of the construction and stayed
+    empty until the first language switch recomputed it.
+    """
+    from qt_fixtures import shutdown_main_window
+    window = _fresh_window(monkeypatch, tmp_path)
+    try:
+        assert window.status_project.text() == "Nessun progetto aperto"
+        assert window.workflow_bar.state() == (set(), None, set())
+    finally:
+        shutdown_main_window(window, qapp)
+
+
+def test_opening_a_project_still_drives_the_status_after_start_up(qapp, monkeypatch, tmp_path):
+    """@brief Negative: the start-up pass must not freeze the label; opening a project rewrites it."""
+    from qt_fixtures import shutdown_main_window
+    window = _fresh_window(monkeypatch, tmp_path)
+    try:
+        folder = window._library_root() / "APERTO"
+        (folder / "APERTO.pretty").mkdir(parents=True)
+        (folder / "APERTO.pretty" / "APERTO.kicad_mod").write_text("(footprint)")
+        window._open_project_at(folder, save_current=False)
+        assert window.status_project.text() == "Progetto: APERTO"
+        assert "analysis" in window.workflow_bar.state()[0]
+    finally:
+        shutdown_main_window(window, qapp)

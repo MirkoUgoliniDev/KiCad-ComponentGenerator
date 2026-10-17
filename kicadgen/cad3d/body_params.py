@@ -1,15 +1,13 @@
 """@brief Parameters of the parametric 3D model: rectangular body plus cylindrical THT pins.
 
-Parametri del modello 3D parametrico (corpo rettangolare + pin cilindrici).
+The geometric model is deliberately simple: a box for the component body
+(mechanical envelope, e.g. for interference/keepout checks) plus one
+cylinder for each THT pin, placed with the same geometry as the 2D
+footprint (kicadgen.generators.pin_header) so that the 3D model is always
+aligned with the generated pads.
 
-Il modello geometrico e' volutamente semplice: un parallelepipedo per il
-corpo del componente (ingombro meccanico, es. per il controllo di
-interferenza/keepout) piu' un cilindro per ogni pin THT, posizionati con
-la stessa geometria del footprint 2D (kicadgen.generators.pin_header) cosi'
-il modello 3D risulta sempre allineato ai pad generati.
-
-Il piano di riferimento (Z=0) e' il piano di saldatura/PCB: i pin si
-estendono da Z=-pin_length_mm a Z=0, il corpo da Z=0 a Z=height_mm.
+The reference plane (Z=0) is the soldering/PCB plane: the pins extend from
+Z=-pin_length_mm to Z=0, the body from Z=0 to Z=height_mm.
 """
 
 from __future__ import annotations
@@ -36,27 +34,29 @@ class Body3DParams:
     offset_y_mm: float = 0.0
     pin_diameter_mm: float = 0.5
     pin_length_mm: float = 3.0
-    color_hex: str = "#1a1a1a"       # colore del case
-    pin_color_hex: str = "#b0b0b0"   # colore dei pin (metallo)
+    color_hex: str = "#1a1a1a"       # case colour
+    pin_color_hex: str = "#b0b0b0"   # pin colour (metal)
     pcb_thickness_mm: float | None = None
     components: list | None = None
     populated_board: bool = False
-    # Scritte lette sui componenti (campo `marking` di ComponentBox) stampate
-    # sul solido. Spento per contratto: il percorso standard ricostruisce
-    # ingombri meccanici generici, senza marcature -- una sigla letta dalla
-    # foto ("330?", "123", il nome di un modulo radio) e' un'evidenza per
-    # l'abbinamento ai modelli di libreria, non un dato geometrico da
-    # incidere. Chi vuole davvero le scritte lo dichiara qui.
+    # Markings read on the components (`marking` field of ComponentBox) printed
+    # on the solid. Off by contract: the standard path rebuilds generic
+    # mechanical envelopes, without markings -- a code read from the
+    # photo ("330?", "123", the name of a radio module) is evidence for
+    # matching against library models, not geometric data to
+    # engrave. Whoever really wants the markings declares it here.
     show_markings_3d: bool = False
-    # Cilindri dei pin sotto il piano di saldatura (utente, 2026-09-26: «se
-    # scegli fori passanti non devi mettere i pin, oppure un'opzione»). Spento,
-    # il solido non ha i pin ma i fori restano: e' il modulo come si compra,
-    # senza strip saldati. Il footprint non cambia.
+    # Pin cylinders below the soldering plane (user, 2026-09-26: «se
+    # scegli fori passanti non devi mettere i pin, oppure un'opzione» (if you
+    # choose through holes you must not add the pins, or an option)). Off:
+    # the solid has no pins but the holes stay: it is the module as sold,
+    # without soldered strips. The footprint does not change.
     show_pins_3d: bool = True
-    # Numeri dei pin stampati sulla faccia inferiore accanto a ogni reoforo
-    # di un componente singolo THT (utente, 2026-10-10: «come nel
-    # castellated», dove le sigle stanno accanto ai contatti). Serigrafia,
-    # non geometria: spenta per contratto, la accende chi la vuole.
+    # Pin numbers printed on the bottom face next to each lead
+    # of a single THT component (user, 2026-10-10: «come nel
+    # castellated» (like in the castellated one), where the labels sit next to
+    # the contacts). Silkscreen, not geometry: off by contract, whoever wants it
+    # turns it on.
     pin_numbers_3d: bool = False
 
     def validate(self) -> None:

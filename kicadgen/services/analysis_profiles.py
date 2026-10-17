@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import uuid
 
 from .component_types import COMPONENT_TYPES
@@ -36,6 +37,8 @@ BLANK_ALLOWED_FIELDS = ('image_instructions', 'crop_model')
 #: own profile tab instead.
 PHOTO_PROMPT_FIELDS = ('grounding_prompt','verification_prompt','terminal_prompt','lead_prompt')
 FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
+#: Marks a read-cache miss (None is a valid cached value: an absent type).
+_MISSING = object()
 #: Database schema version. 2: verification_model; 3: translations table;
 #: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
 #: (model of that reading, blank = photo model, HANDOFF 150).
@@ -69,7 +72,8 @@ def _replace_superseded_texts(db):
     @note A stored text is replaced only when its SHA-256 digest is one of the
         known former defaults (component_types.SUPERSEDED_INSTRUCTION_DIGESTS,
         datasheet_extractor.SUPERSEDED_SYSTEM_PROMPT_DIGESTS,
-        photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS): a text the user
+        photo_crop_reading.SUPERSEDED_CROP_PROMPT_DIGESTS,
+        photo_terminals.SUPERSEDED_PROMPT_DIGESTS): a text the user
         edited, even by one character, never matches and is kept. Only the
         global system prompt, the global crop prompt and the built-in types
         are touched; a per-type
@@ -91,11 +95,14 @@ def _replace_superseded_texts(db):
                        'WHERE key=? AND builtin=1 AND instructions=?',
                        (current.prompt, key, instructions))
     from .photo_crop_reading import SUPERSEDED_CROP_PROMPT_DIGESTS, SYSTEM_PROMPT as CROP_PROMPT
+    from .photo_terminals import SUPERSEDED_PROMPT_DIGESTS as SUPERSEDED_TERMINAL_PROMPT_DIGESTS
+    from .photo_terminals import PROMPT as TERMINAL_PROMPT
     for name, current, superseded in (
             ('system_prompt', DEFAULT_SYSTEM_PROMPT, SUPERSEDED_SYSTEM_PROMPT_DIGESTS),
             ('system_prompt_single', DEFAULT_SINGLE_SYSTEM_PROMPT, SUPERSEDED_SINGLE_PROMPT_DIGESTS),
             ('numbering_prompt', DEFAULT_PIN_NUMBERING_PROMPT, SUPERSEDED_NUMBERING_PROMPT_DIGESTS),
-            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS)):
+            ('crop_prompt', CROP_PROMPT, SUPERSEDED_CROP_PROMPT_DIGESTS),
+            ('terminal_prompt', TERMINAL_PROMPT, SUPERSEDED_TERMINAL_PROMPT_DIGESTS)):
         row = db.execute('SELECT value FROM ai_defaults WHERE name=?', (name,)).fetchone()
         if row is not None and row[0] != current and text_digest(row[0]) in superseded:
             db.execute('UPDATE ai_defaults SET value=? WHERE name=? AND value=?',
@@ -103,7 +110,10 @@ def _replace_superseded_texts(db):
 
 
 def factory_defaults():
-    """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database."""
+    """@brief Return the built-in AI defaults (models and prompts) used to seed the profile database.
+
+    @return Mapping of default name to its factory value (a fresh dict).
+    """
     from .datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
                                       DEFAULT_PIN_NUMBERING_PROMPT)
     from .openrouter import DEFAULT_MODEL
@@ -148,19 +158,25 @@ class ProfileError(ValueError):
 class ProfileStore:
     """@brief Persist and retrieve component analysis profiles in SQLite."""
     def __init__(self,path=None,*,legacy_config=None,legacy_path=None):
-        # Da sorgente il database del repository (come prima); installato,
-        # la copia dell'utente, creata al primo avvio da quella distribuita.
+        # From source, the repository database (as before); when installed,
+        # the user's copy, created on first start from the distributed one.
         if not path and not os.environ.get('KICADGEN_PROFILE_DB'):
             from ..app_paths import data_file
             path = data_file('analysis_profiles.sqlite3', seed=True)
         self.path = Path(path or os.environ['KICADGEN_PROFILE_DB'])
         self.path.parent.mkdir(parents=True,exist_ok=True)
-        # In-memory translation catalog, one dict per language loaded with a
-        # single query (see translation). Tagged with the database file
-        # signature it was read from, so a write by another store or process
-        # drops it on the next lookup.
-        self._translations = {}
-        self._translations_signature = None
+        # In-memory read cache: the translation catalogue (one dict per
+        # language, loaded with a single query) and the catalogue getters
+        # (get_type, list_types, overrides, defaults, resolve). It is tagged
+        # with the database file signature it was read from, so a write by
+        # another store or process drops it on the next read, and every
+        # write of this store drops it explicitly (_writing). The lock and
+        # the generation make it safe for worker threads: a read that
+        # straddles an invalidation is never stored (see _cached).
+        self._cache_lock = threading.Lock()
+        self._cache = {}
+        self._cache_signature = None
+        self._cache_generation = 0
         self._initialize(legacy_config,Path(legacy_path) if legacy_path else None)
 
     @contextmanager
@@ -174,8 +190,51 @@ class ProfileStore:
         finally:
             connection.close()
 
+    @contextmanager
+    def _writing(self):
+        """A connection for a write; the read cache is dropped after it, committed or not."""
+        try:
+            with self._connect() as db:
+                yield db
+        finally:
+            self._invalidate_cache()
+
+    def _invalidate_cache(self):
+        """Drop every cached read and fence off the reads already in flight."""
+        with self._cache_lock:
+            self._cache = {}
+            self._cache_signature = None
+            self._cache_generation += 1
+
+    def _cached(self, kind, argument, loader):
+        """Value of `loader()` for (kind, argument), served from the read cache while the file is unchanged.
+
+        The file signature is taken BEFORE the read: a write landing during
+        the read changes the file, so the next read reloads instead of
+        keeping a value older than its tag. A value is stored only if no
+        invalidation happened since the read started (generation check), so
+        an own write racing with a worker's read never leaves the old value
+        cached. Exceptions are not cached. The cached object is shared:
+        callers that hand it out copy it.
+        """
+        signature = self._database_signature()
+        with self._cache_lock:
+            if signature is None or signature != self._cache_signature:
+                self._cache = {}
+                self._cache_signature = signature
+                self._cache_generation += 1
+            generation = self._cache_generation
+            value = self._cache.get((kind, argument), _MISSING)
+        if value is not _MISSING:
+            return value
+        value = loader()
+        with self._cache_lock:
+            if signature is not None and generation == self._cache_generation:
+                self._cache[(kind, argument)] = value
+        return value
+
     def _initialize(self,legacy,legacy_path):
-        with self._connect() as db:
+        with self._writing() as db:
             db.execute('BEGIN IMMEDIATE')
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version > SCHEMA_VERSION:
@@ -335,31 +394,27 @@ class ProfileStore:
         return (stat.st_mtime_ns, stat.st_size)
 
     def _language_catalog(self, language):
-        """All translations of `language` as a dict, read with one query and cached."""
-        signature = self._database_signature()
-        if signature is None or signature != self._translations_signature:
-            self._translations = {}
-            self._translations_signature = signature
-        catalog = self._translations.get(language)
-        if catalog is None:
+        """All translations of `language` as a dict, read with one query and cached.
+
+        The same dict object is returned while the catalogue is unchanged:
+        I18n keys its reverse index on that identity. Callers must not
+        mutate it.
+        """
+        def load():
             with self._connect() as db:
-                catalog = dict(db.execute('SELECT key,text FROM translations WHERE language=?',
-                                          (language,)).fetchall())
-            # Tagged with the signature seen BEFORE the read: a write that
-            # lands during the read changes the file, and the next lookup
-            # reloads instead of keeping a catalog older than its tag.
-            self._translations[language] = catalog
-        return catalog
+                return dict(db.execute('SELECT key,text FROM translations WHERE language=?',
+                                       (language,)).fetchall())
+        return self._cached('translations', language, load)
 
     def invalidate_translations(self):
-        """@brief Drop the in-memory translation cache; the next lookup reads the database.
+        """@brief Drop the in-memory read cache (translations and catalogue getters); the next read uses the database.
 
-        @note Lookups already drop it when the database file changes (another
-            store or process wrote it); call this after writing the file by
-            other means within the same timestamp resolution.
+        @note Reads already drop it when the database file changes (another
+            store or process wrote it) and every write of this store drops
+            it; call this after writing the file by other means within the
+            same timestamp resolution.
         """
-        self._translations = {}
-        self._translations_signature = None
+        self._invalidate_cache()
 
     def translation(self, key, language, fallback=None):
         """@brief Resolve one translation with an English fallback.
@@ -397,14 +452,17 @@ class ProfileStore:
         from .i18n import LANGUAGES
         if not key or language not in LANGUAGES or not isinstance(text, str) or not text.strip():
             raise ProfileError('Translation key, language and text are required.')
-        with self._connect() as db:
+        with self._writing() as db:
             db.execute('INSERT INTO translations(key,language,text) VALUES (?,?,?) '
                        'ON CONFLICT(key,language) DO UPDATE SET text=excluded.text',
                        (key, language, text))
-        self.invalidate_translations()
 
     def list_translations(self, language=None):
-        """@brief List translation rows, optionally filtered by language."""
+        """@brief List translation rows, optionally filtered by language.
+
+        @param language Language code to keep, or None/empty for every language.
+        @return List of dicts with key, language and text, ordered by key.
+        """
         with self._connect() as db:
             if language:
                 rows = db.execute('SELECT key,language,text FROM translations WHERE language=? '
@@ -414,9 +472,16 @@ class ProfileStore:
             return [dict(row) for row in rows]
 
     def defaults(self):
-        """@brief Return the global AI default values as a name-to-value dictionary."""
-        with self._connect() as db:
-            return dict(db.execute('SELECT name,value FROM ai_defaults'))
+        """@brief Return the global AI default values as a name-to-value dictionary.
+
+        @return Mapping of default name to its stored value (a new dict).
+        @note Served from the read cache (see _cached) while the database
+            file is unchanged.
+        """
+        def load():
+            with self._connect() as db:
+                return dict(db.execute('SELECT name,value FROM ai_defaults'))
+        return dict(self._cached('defaults', None, load))
 
     @staticmethod
     def _validate_values(values,allow_inherit=False):
@@ -442,55 +507,86 @@ class ProfileStore:
         """
         self._validate_values(values)
         values = {k: v.strip() if k.endswith('model') else v for k, v in values.items()}
-        with self._connect() as db:
+        with self._writing() as db:
             db.executemany('UPDATE ai_defaults SET value=? WHERE name=?',[(v,k) for k,v in values.items()])
 
     def list_types(self,include_inactive=False):
-        """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`."""
-        with self._connect() as db:
-            query = 'SELECT * FROM component_types'
-            if not include_inactive:
-                query += ' WHERE active=1'
-            return [dict(r) for r in db.execute(query+' ORDER BY position,label,key')]
+        """@brief Return the component types ordered by position and label, only active ones unless `include_inactive`.
+
+        @param include_inactive True to include the types marked inactive.
+        @return List of type rows as new dicts (every column of component_types).
+        @note Served from the read cache (see _cached) while the database
+            file is unchanged.
+        """
+        def load():
+            with self._connect() as db:
+                query = 'SELECT * FROM component_types'
+                if not include_inactive:
+                    query += ' WHERE active=1'
+                return [dict(r) for r in db.execute(query+' ORDER BY position,label,key')]
+        return [dict(row) for row in self._cached('list_types', bool(include_inactive), load)]
 
     def get_type(self,key):
-        """@brief Return the component type row for `key` as a dictionary, or None when absent."""
-        with self._connect() as db:
-            row = db.execute('SELECT * FROM component_types WHERE key=?',(key,)).fetchone()
-            return dict(row) if row else None
+        """@brief Return the component type row for `key` as a dictionary, or None when absent.
+
+        @param key Component type key.
+        @return The row as a new dict, or None.
+        @note Served from the read cache (see _cached) while the database
+            file is unchanged: the GUI asks for the selected type's family
+            on every refresh.
+        """
+        def load():
+            with self._connect() as db:
+                row = db.execute('SELECT * FROM component_types WHERE key=?',(key,)).fetchone()
+                return dict(row) if row else None
+        row = self._cached('get_type', key, load)
+        return dict(row) if row is not None else None
 
     def overrides(self,key):
-        """@brief Return the AI values overridden by the component type `key`."""
-        with self._connect() as db:
-            return dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,)))
+        """@brief Return the AI values overridden by the component type `key`.
+
+        @param key Component type key.
+        @return Mapping of field name to override text (empty when none), a new dict.
+        @note Served from the read cache (see _cached) while the database
+            file is unchanged.
+        """
+        def load():
+            with self._connect() as db:
+                return dict(db.execute('SELECT name,value FROM ai_overrides WHERE type_key=?',(key,)))
+        return dict(self._cached('overrides', key, load))
 
     def resolve(self,key=''):
         """@brief Return the effective AI values: global defaults updated with the prompt overrides of `key`.
 
         No instructions are composed and no persisted text is changed.
         @param key Component type key; empty for the global defaults only.
+        @return Mapping of every profile field to its effective value.
         @throws ProfileError When `key` is not in the catalogue.
         @note One model for every analysis (user, 2026-10-02): a type's
             override of a MODEL_FIELDS entry is ignored (see
             ignored_model_overrides), every model field resolves to the global
             'model', and 'crop_model' to blank (= that same model).
+            Served from the read cache (see _cached) while the database file
+            is unchanged; a missing type is not cached and raises every time.
         """
-        with self._connect() as db:
-            db.execute('BEGIN')
-            values = dict(db.execute('SELECT name,value FROM ai_defaults'))
-            if key:
-                if not db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone():
-                    raise ProfileError(tx("Tipologia non trovata nel database."))
-                values.update({name: value for name, value in db.execute(
-                    'SELECT name,value FROM ai_overrides WHERE type_key=?',(key,))
-                    if name not in MODEL_FIELDS})
-            model = values.get('model')
-            for name in ('vision_model', 'verification_model'):
-                if name in values:
-                    values[name] = model
-            if 'crop_model' in values:
-                values['crop_model'] = ''
-            return values
+        def load():
+            with self._connect() as db:
+                db.execute('BEGIN')
+                values = dict(db.execute('SELECT name,value FROM ai_defaults'))
+                if key:
+                    if not db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone():
+                        raise ProfileError(tx("Tipologia non trovata nel database."))
+                    values.update({name: value for name, value in db.execute(
+                        'SELECT name,value FROM ai_overrides WHERE type_key=?',(key,))
+                        if name not in MODEL_FIELDS})
+                model = values.get('model')
+                for name in ('vision_model', 'verification_model'):
+                    if name in values:
+                        values[name] = model
+                if 'crop_model' in values:
+                    values['crop_model'] = ''
+                return values
+        return dict(self._cached('resolve', key or '', load))
 
     def ignored_model_overrides(self,key):
         """@brief Model overrides stored for the type `key` that resolve() now ignores.
@@ -529,6 +625,10 @@ class ProfileStore:
         """@brief Create (empty `key`) or update a component type and optionally replace its overrides.
 
         @param key Existing type key, or a false value to create a new custom type.
+        @param label Display name of the type; must not be blank.
+        @param family Geometric family, one of FAMILIES.
+        @param instructions Instruction block inserted in the component notes.
+        @param active False to hide the type from the selectable list.
         @param overrides New override mapping (None values inherit); None keeps the stored ones.
         @return The key of the saved type.
         @throws ProfileError On missing label, invalid family or data, or a type removed meanwhile.
@@ -542,7 +642,7 @@ class ProfileStore:
         values = {k: v.strip() if k.endswith('model') and v is not None else v for k, v in values.items()}
         creating = not key
         key = key or 'custom_'+uuid.uuid4().hex
-        with self._connect() as db:
+        with self._writing() as db:
             exists = db.execute('SELECT 1 FROM component_types WHERE key=?',(key,)).fetchone()
             if not exists and not creating:
                 raise ProfileError(tx("Tipologia non più disponibile: riaprire il catalogo."))
@@ -562,6 +662,8 @@ class ProfileStore:
     def duplicate(self,key):
         """@brief Create an active copy of type `key`, including its overrides, and return the new key.
 
+        @param key Key of the type to copy.
+        @return The key of the new custom type.
         @throws ProfileError When `key` does not exist.
         """
         original = self.get_type(key)
@@ -573,9 +675,10 @@ class ProfileStore:
     def delete_type(self,key):
         """@brief Delete the component type `key` from the catalogue.
 
+        @param key Key of the type to delete.
         @throws ProfileError When `key` does not exist.
         """
-        with self._connect() as db:
+        with self._writing() as db:
             if db.execute('DELETE FROM component_types WHERE key=?',(key,)).rowcount != 1:
                 raise ProfileError(tx("Tipologia da eliminare non trovata."))
 

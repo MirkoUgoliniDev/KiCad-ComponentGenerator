@@ -521,3 +521,42 @@ def test_the_crop_model_always_resolves_to_the_single_model(tmp_path):
     assert store.resolve('')['crop_model'] == ''
     assert store.resolve(own)['crop_model'] == ''
     assert store.ignored_model_overrides(own) == {'crop_model': 'vendor/type-crop'}
+
+
+# ── terminal_prompt: former factory texts reach existing databases (HANDOFF 16/10, T2) ──
+
+def _store_with_global_terminal_prompt(path, text):
+    """Create a current database and write `text` verbatim as the global terminal prompt."""
+    store = ProfileStore(path)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE ai_defaults SET value=? WHERE name='terminal_prompt'", (text,))
+    db.close()
+    return store
+
+
+def test_a_former_factory_terminal_prompt_is_replaced_on_open(tmp_path, monkeypatch):
+    """@brief Positive case: the former built-in terminal prompt follows the new one.
+
+    The new prompt asks the model whether each lead touches the body; an
+    unedited database must not keep sending the instructions without it.
+    """
+    from kicadgen.services import photo_terminals
+    from kicadgen.services.component_types import text_digest
+    old = 'terminal observation instructions of a former release'
+    monkeypatch.setattr(photo_terminals, 'SUPERSEDED_PROMPT_DIGESTS',
+                        frozenset({text_digest(old)}))
+    path = tmp_path / 'ai.sqlite3'
+    _store_with_global_terminal_prompt(path, old)
+    assert ProfileStore(path).defaults()['terminal_prompt'] == photo_terminals.PROMPT
+
+
+def test_an_edited_former_terminal_prompt_is_kept(tmp_path, monkeypatch):
+    """@brief Negative case: one character more than the former default is a user edit."""
+    from kicadgen.services import photo_terminals
+    from kicadgen.services.component_types import text_digest
+    old = 'terminal observation instructions of a former release'
+    monkeypatch.setattr(photo_terminals, 'SUPERSEDED_PROMPT_DIGESTS',
+                        frozenset({text_digest(old)}))
+    path = tmp_path / 'ai.sqlite3'
+    _store_with_global_terminal_prompt(path, old + '.')
+    assert ProfileStore(path).defaults()['terminal_prompt'] == old + '.'

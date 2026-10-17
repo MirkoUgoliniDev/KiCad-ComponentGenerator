@@ -31,13 +31,13 @@ class GenerationOptionsDialog(QDialog):
             text_key='help.generation.include_nc'
         )))
         page_layout.addWidget(contacts)
-        silk = QGroupBox("Serigrafia del modello 3D")
+        silk = QGroupBox("Serigrafia del modello STEP")
         silk_layout = QHBoxLayout(silk)
         self.silk_labels_checkbox = QCheckBox("Incidi le sigle dei pin")
         self.silk_labels_checkbox.setChecked(silk_pin_labels)
         silk_layout.addWidget(self.silk_labels_checkbox, 1)
         silk_layout.addWidget(icon_button('Info', 'info.svg', lambda: show_info(self,
-            'Serigrafia del modello 3D',
+            'Serigrafia del modello STEP',
             "Incide accanto a ogni contatto la sigla presa dalla tabella pinout.\n\n"
             "Disattivata di default: su un modulo a passo fitto le sigle lunghe si "
             "sovrappongono fra loro e finiscono sopra i componenti, rendendo il solido "
@@ -46,8 +46,8 @@ class GenerationOptionsDialog(QDialog):
             "L'opzione vale dalla prossima generazione: non modifica i file gia' prodotti.",
             text_key='help.generation.silk_labels')))
         page_layout.addWidget(silk)
-        # La pausa dopo l'inventario AI: un'impostazione, quindi qui e non nel
-        # tab Progetto (utente, 2026-09-24). Stessa chiave di config.json.
+        # The pause after the AI inventory: a setting, hence here and not in
+        # the Project tab (user, 2026-09-24). Same key as config.json.
         analysis = QGroupBox("Analisi AI")
         analysis_layout = QHBoxLayout(analysis)
         self.pause_checkbox = QCheckBox(
@@ -78,13 +78,22 @@ class GenerationOptionsDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def include_nc_pins(self):
-        """@brief Return whether not-connected pins are included in the generated component."""
+        """@brief Return whether not-connected pins are included in the generated component.
+
+        @return True when the «include NC pins» box is checked.
+        """
         return self.include_nc_checkbox.isChecked()
 
     def silk_pin_labels(self):
-        """@brief Tell whether pin names must be engraved on the 3D silkscreen."""
+        """@brief Tell whether pin names must be engraved on the 3D silkscreen.
+
+        @return True when the silkscreen labels box is checked.
+        """
         return self.silk_labels_checkbox.isChecked()
 
     def pause_after_inventory(self):
-        """@brief Tell whether the pipeline stops after the AI inventory for a review."""
+        """@brief Tell whether the pipeline stops after the AI inventory for a review.
+
+        @return True when the pause box is checked.
+        """
         return self.pause_checkbox.isChecked()

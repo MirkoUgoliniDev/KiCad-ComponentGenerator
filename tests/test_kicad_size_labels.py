@@ -14,7 +14,10 @@ import pytest
 from PyQt6.QtGui import QPainterPath
 from PyQt6.QtWidgets import QGraphicsSimpleTextItem
 
-from kicadgen.core.footprint import PROPERTY_TEXT_SIZE, USER_TEXT_ANCHOR, validate_footprint_drawings
+from kicadgen.core.footprint import (PROPERTY_TEXT_SIZE, PROPERTY_TEXT_THICKNESS, USER_TEXT_ANCHOR,
+                                     validate_footprint_drawings)
+from kicadgen.core.kicad_text import (KICAD_BOTTOM_TO_BASELINE, KICAD_CENTRE_TO_BOTTOM, kicad_text_cells,
+                                      kicad_text_margin)
 from kicadgen.generators.symbol import PIN_NAME_OFFSET, TEXT_SIZE
 from kicadgen.gui.symbol_tab import PIN_NUMBER_GAP_MM, SCENE_UNITS_PER_MM, SymbolTab
 
@@ -72,15 +75,26 @@ def test_symbol_pin_number_sits_above_the_line_and_the_name_is_centred_on_it(qap
             line_y = -placed.y * S
             (number,) = _items(tab, placed.pin.number)
             (name,) = _items(tab, placed.pin.name)
-            assert _baseline_y(number) == pytest.approx(line_y - PIN_NUMBER_GAP_MM * S, abs=0.05)
+            # CONTRACT CHANGED 2026-10-16 (user: KiCad's width and box,
+            # gui/kicad_text_item.py): the number is a bottom-justified text
+            # anchored PIN_NUMBER_GAP_MM above the line, so its baseline lies
+            # KiCad's 0.125 x size higher; the name is vertically centred on
+            # the line as KiCad centres it (baseline 0.46 x size below).
+            from kicadgen.generators.symbol import pin_text_size_of
+            size = pin_text_size_of(placed.pin)
+            assert _baseline_y(number) == pytest.approx(
+                line_y - (PIN_NUMBER_GAP_MM + KICAD_BOTTOM_TO_BASELINE * size) * S, abs=0.05)
             assert number.sceneBoundingRect().center().y() < line_y, "the number is above the pin"
-            assert _baseline_y(name) - _cap(name) / 2 == pytest.approx(line_y, abs=0.05)
-            # The name starts PIN_NAME_OFFSET past the inner end of the pin.
+            assert _baseline_y(name) == pytest.approx(
+                line_y + (KICAD_CENTRE_TO_BOTTOM - KICAD_BOTTOM_TO_BASELINE) * size * S, abs=0.05)
+            # The name's cells start PIN_NAME_OFFSET past the inner end of the
+            # pin plus KiCad's half pen margin.
             from kicadgen.generators.symbol import pin_length_of
             inner = (placed.x + (1 if placed.angle == 0 else -1)
                      * pin_length_of(placed.pin, tab._symbol.pin_length)) * S
             edge = name.sceneBoundingRect().left() if placed.angle == 0 else name.sceneBoundingRect().right()
-            assert abs(edge - inner) == pytest.approx(PIN_NAME_OFFSET * S, abs=0.05)
+            half_margin = kicad_text_margin(size) / 2
+            assert abs(edge - inner) == pytest.approx((PIN_NAME_OFFSET + half_margin) * S, abs=0.05)
     finally:
         tab.deleteLater()
 
@@ -116,11 +130,14 @@ def test_footprint_reference_and_value_have_capitals_as_tall_as_the_file_size(pr
     for key in ("Reference", "Value"):
         item = _property_text(window, key)
         assert _cap(item) == pytest.approx(_cap(reference), rel=0.03), key
-        # Centred on the anchor (the group's origin) as KiCad centres it.
+        # CONTRACT CHANGED 2026-10-16 (twice): drawn from the anchor (the
+        # group's origin) as KiCad draws (justify left bottom): cells from
+        # half the pen margin to the right, baseline 0.125 x size above.
         origin = item.parentItem().mapToScene(0, 0)
         baseline = item.mapToScene(0, _drawing_text_baseline(item)).y()
-        assert baseline - _cap(item) / 2 == pytest.approx(origin.y(), abs=0.05), key
-        assert item.sceneBoundingRect().center().x() == pytest.approx(origin.x(), abs=0.05), key
+        left, up = kicad_text_cells(item.text(), PROPERTY_TEXT_SIZE, PROPERTY_TEXT_THICKNESS)
+        assert baseline == pytest.approx(origin.y() - up * 20, abs=0.05), key
+        assert item.sceneBoundingRect().left() == pytest.approx(origin.x() + left * 20, abs=0.05), key
     # Negative: a user text of another size is not drawn like the properties.
     window.footprint_drawings = validate_footprint_drawings([
         {"kind": "text", "points": [[1, 5]], "layer": "F.SilkS", "text": "H",

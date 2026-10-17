@@ -100,3 +100,62 @@ def test_the_guard_pattern_sees_a_kept_wrapper():
     assert kept.search("        self.photo_item = self.scene.addPixmap(pixmap)")
     assert kept.search("        self._handles.append(scene.addRect(0, 0, 1, 1))")
     assert not kept.search("        items.append(scene.addRect(0, 0, 1, 1))")
+
+
+def _graphics_items_held(value, depth=0):
+    """Every QGraphicsItem reachable from `value` through lists, tuples, sets and dicts (bounded depth)."""
+    from PyQt6.QtWidgets import QGraphicsItem
+    if isinstance(value, QGraphicsItem):
+        return [value]
+    if depth >= 4:
+        return []
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [item for element in value for item in _graphics_items_held(element, depth + 1)]
+    return []
+
+
+def _deleted_items_held(tab):
+    """Attributes of the tab that still refer to a graphics item Qt has deleted."""
+    return [name for name, value in vars(tab).items()
+            if any(sip.isdeleted(item) for item in _graphics_items_held(value))]
+
+
+@pytest.mark.parametrize('tool', ['wire', 'line'])
+def test_no_attribute_refers_to_a_deleted_item_after_an_invalid_draft(qapp, tool):
+    """Guard for the class of defect (audit M1, 2026-10-15): `_draw` clears
+    the scene and returned early for an invalid draft before resetting the
+    rubber band it kept, so the next mouse move called setPath on a deleted
+    item. The check walks every attribute, so a future kept item that is not
+    reset by `_forget_scene_items` fails here too.
+    """
+    tab = SymbolTab()
+    try:
+        tab.set_data('Board', _rows())
+        if tool == 'wire':
+            tab.start_wire()
+            assert tab.add_wire_point(0, 2.54)
+        else:
+            tab.start_shape(tool)
+            assert tab.add_shape_point(0, 0)
+        assert tab._wire_cursor_item is not None
+        tab.table.item(0, 1).setText('VCC\tGND')  # a control character: invalid draft
+        assert tab._symbol is None
+        assert _deleted_items_held(tab) == []
+    finally:
+        tab.deleteLater()
+
+
+def test_the_attribute_walk_sees_a_deleted_kept_item(qapp):
+    """Negative twin: a wrapper kept across scene.clear() is reported."""
+    tab = SymbolTab()
+    try:
+        tab.set_data('Board', _rows())
+        stale = tab._handle_groups
+        assert stale, 'the symbol draws resize handles'
+        tab.view.scene().clear()
+        tab._stale_for_test = stale
+        assert '_stale_for_test' in _deleted_items_held(tab)
+    finally:
+        tab.deleteLater()

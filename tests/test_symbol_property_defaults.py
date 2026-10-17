@@ -42,6 +42,49 @@ def _property_line(text, key):
     return next(line for line in text.splitlines() if line.strip().startswith(f'(property "{key}"'))
 
 
+def _num(value):
+    return f'{value:.4f}'.rstrip('0').rstrip('.') or '0'
+
+
+def _at_anchor_of(key, centre, name='Board', reference='U'):
+    """The `(at x y 0)` the file writes for a property the USER placed centred at `centre`.
+
+    CONTRACT CHANGED 2026-10-16 (user): a placed property is written at its
+    bottom-left anchor, `(justify left bottom)`, converted from the centre
+    with KiCad's text geometry (`property_anchors`), so KiCad still draws it
+    centred there.
+    """
+    from kicadgen.generators.symbol import property_anchor_from_centre, property_texts
+    x, y = property_anchor_from_centre(property_texts(reference, name)[key], TEXT_SIZE, *centre)
+    return f'(at {_num(x)} {_num(y)} 0)'
+
+
+def _default_line(key, value, centre):
+    """The line of an UNMOVED property: centred at `centre`, no justify.
+
+    CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): back to the
+    centred KiCad text of before 2026-10-16, so the Value stays centred
+    whatever the schematic shows in it.
+    """
+    return (f'    (property "{key}" "{value}" (at {_num(centre[0])} {_num(centre[1])} 0) '
+            '(show_name no) (do_not_autoplace no) (effects (font (size 1.27 1.27))))')
+
+
+def _defaults_file(name, pins, positions, **kwargs):
+    """The file a symbol writes when its properties sit, unmoved, at `positions`.
+
+    The rest of the file is the one written with the positions as a choice;
+    only the two visible property lines differ (anchored there, centred here).
+    """
+    chosen = serialize_symbol(name, pins, properties=positions, **kwargs).splitlines(keepends=True)
+    values = {'Reference': 'U', 'Value': name}
+    out = []
+    for line in chosen:
+        key = next((k for k in values if line.strip().startswith(f'(property "{k}"')), None)
+        out.append(_default_line(key, values[key], positions[key]) + "\n" if key else line)
+    return ''.join(out)
+
+
 SIDE_PINS = [SymbolPin('1', 'VCC', 'power_in', 'left'), SymbolPin('2', 'GND', 'power_in', 'left'),
              SymbolPin('3', 'TX', 'output', 'right'), SymbolPin('4', 'RX', 'input', 'right')]
 
@@ -100,8 +143,8 @@ def test_the_written_file_uses_the_lifted_positions():
     layout = layout_symbol(pins)
     positions = default_property_positions(layout)
     text = serialize_symbol('ESP_Module', pins)
-    assert f'(at 0 {positions["Value"][1]:g} 0)' in _property_line(text, 'Value')
-    assert f'(at 0 {positions["Reference"][1]:g} 0)' in _property_line(text, 'Reference')
+    assert _property_line(text, 'Value') == _default_line('Value', 'ESP_Module', positions['Value'])
+    assert _property_line(text, 'Reference') == _default_line('Reference', 'U', positions['Reference'])
     assert positions != _old_defaults(layout)
 
 
@@ -123,25 +166,32 @@ def test_without_pins_above_the_body_the_positions_are_those_of_before(pins):
 @pytest.mark.parametrize('body', [None, (20.32, 20.32), (30.48, 50.8)])
 def test_without_pins_above_the_body_the_file_is_byte_identical(body):
     # The old file wrote the fixed defaults; writing them as an explicit
-    # choice reproduces it exactly, so equality proves byte identity.
+    # choice and centring its two property lines again (`_defaults_file`)
+    # reproduces it exactly, so equality proves byte identity.
     pins = SIDE_PINS + [SymbolPin('5', 'GND', 'power_in', 'bottom')]
     layout = layout_symbol(pins, body)
-    assert serialize_symbol('Board', pins, body=body) == serialize_symbol(
-        'Board', pins, body=body, properties=_old_defaults(layout))
+    assert serialize_symbol('Board', pins, body=body) == _defaults_file(
+        'Board', pins, _old_defaults(layout), body=body)
 
 
 def test_the_known_default_lines_are_unchanged():
     # Golden lines of a two-pin symbol (body 10.16 x 10.16 mm, h = 5.08).
     text = serialize_symbol('Board', [SymbolPin('1', 'A', 'passive', 'left'), SymbolPin('2', 'B', 'passive', 'right')])
-    assert '(property "Reference" "U" (at 0 10.16 0)' in _property_line(text, 'Reference')
-    assert '(property "Value" "Board" (at 0 7.62 0)' in _property_line(text, 'Value')
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): the
+    # centres (0, 10.16) and (0, 7.62) written centred again, as before
+    # 2026-10-16 (in between they were converted to bottom-left anchors).
+    assert _property_line(text, 'Reference') == (
+        '    (property "Reference" "U" (at 0 10.16 0) (show_name no) (do_not_autoplace no) '
+        '(effects (font (size 1.27 1.27))))')
+    assert _property_line(text, 'Value') == _default_line('Value', 'Board', (0, 7.62))
 
 
 def test_explicit_positions_are_never_touched_by_the_rule():
     pins = SIDE_PINS + [SymbolPin('5', 'EN', 'input', 'top', length=12.7)]
     text = serialize_symbol('Board', pins, properties={'Value': (0.0, 2.54), 'Reference': (-7.62, -12.7)})
-    assert '(at 0 2.54 0)' in _property_line(text, 'Value')
-    assert '(at -7.62 -12.7 0)' in _property_line(text, 'Reference')
+    assert _at_anchor_of('Value', (0.0, 2.54)) in _property_line(text, 'Value')
+    assert _at_anchor_of('Reference', (-7.62, -12.7)) in _property_line(text, 'Reference')
+    assert '(justify left bottom)' in _property_line(text, 'Value')
 
 
 # -- Review M2 (2026-10-15): a pin name drawn above the body counts ---------
@@ -240,7 +290,7 @@ def test_layout_symbol_names_inside_the_body_change_nothing(pins):
     assert default_property_positions(layout) == expected
     if not any(p.side == 'top' for p in pins):
         assert expected == _old_defaults(layout)
-    assert serialize_symbol('Board', pins) == serialize_symbol('Board', pins, properties=expected)
+    assert serialize_symbol('Board', pins) == _defaults_file('Board', pins, expected)
 
 
 # -- Review L4 (2026-10-15): hidden pins are not drawn by KiCad -------------
@@ -253,7 +303,7 @@ def test_a_hidden_top_pin_does_not_lift_the_properties():
     assert default_property_positions(layout) == _old_defaults(layout)
     text = serialize_symbol('Board', hidden)
     assert '(hide yes)' in text
-    assert f'(at 0 {_old_defaults(layout)["Value"][1]:g} 0)' in _property_line(text, 'Value')
+    assert _property_line(text, 'Value') == _default_line('Value', 'Board', _old_defaults(layout)['Value'])
 
 
 def test_the_same_top_pin_visible_lifts_the_properties():

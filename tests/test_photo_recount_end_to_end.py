@@ -26,6 +26,23 @@ from kicadgen.services import photo_global_inventory, photo_grounding, photo_inv
 from kicadgen.services.messages import WARNING, kind_of
 from test_edge_notches import LENGTH, ROW_4, WIDTH, board_photo
 
+
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    CONTRACT CHANGED 2026-10-15: document images must be decodable, because
+    an upload whose metadata cannot be removed is refused (fail closed); fake
+    bytes named .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
 NAMES = ["GND", "A", "B", "VCC"]
 
 
@@ -164,7 +181,7 @@ def test_the_extractor_does_not_claim_the_vision_call_before_the_inventory(
     OpenCV covered it at once: an empty «✓» phase in the modal.
     """
     photo = tmp_path / "top.png"
-    photo.write_bytes(b"offline")
+    photo.write_bytes(_TINY_PNG)
     monkeypatch.setattr(extractor, "api_key", lambda: "offline")
     monkeypatch.setattr(extractor, "check_credit", lambda **kwargs: None)
     monkeypatch.setattr(extractor, "call_tool", Mock(return_value=_payload(4)))

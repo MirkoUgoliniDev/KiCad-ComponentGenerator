@@ -1,8 +1,12 @@
 """Independent projection/topology checks; no FreeCAD or network required.
 
 The box-union mock proves coordinate and contact contracts, not OCC validity,
-fillet quality, or correspondence to photograph pixels. Known topology gaps
-are strict xfails so a future resolution requires updating these contracts.
+fillet quality, or correspondence to photograph pixels.
+
+Attachment contract (MEDIO 16, 2026-10-16): every terminal the decoder accepts
+as attached is drawn with a riser sharing a face with the body; the lead is
+only enlarged toward the body, never moved at its outer end; a terminal beyond
+the shared tolerance stays an island without an invented bridge.
 """
 import ast
 from copy import deepcopy
@@ -198,19 +202,224 @@ def test_attached_feet_have_connected_risers_touching_body(renderer, layout):
         assert face_or_volume_contact(body_box, riser)
 
 
-@pytest.mark.parametrize("first_terminal", [
-    [0, .3, .19, .4],  # Gap of .01: decoder tolerates it, renderer leaves an island.
-    [0, 0, .2, .2],    # Corner-only contact: vertical line, not a connected lead face.
-])
-@pytest.mark.xfail(strict=True, reason="Decoder accepts gap/corner attachment without a face-connected CAD lead")
-def test_decoded_attached_terminals_should_have_face_contact(renderer, first_terminal):
-    module, _ = renderer
+# Body [.2, .2, .8, .8]; the first terminal is the one under test, the others
+# are ordinary face contacts. Expected: the drawn foot after anchoring, with
+# source() length 8 / width 3 (riser lateral footprint .12 mm = .04 of width).
+ANCHORED = [
+    # Gap of .01 to the left face: the inner edge is pulled onto the face.
+    ([0, .3, .19, .4], [0, .3, .2, .4]),
+    # Corner-only contact: anchored to the left face (X before Y on the tie),
+    # the root lengthened along the face by the riser footprint.
+    ([0, 0, .2, .2], [0, 0, .2, .24]),
+    # Gap on both axes near a corner: both closures, outer edges untouched.
+    ([0, .05, .17, .15], [0, .05, .2, .24]),
+    # Overlap into the body is kept as observed (hidden under the body).
+    ([0, .3, .3, .4], [0, .3, .3, .4]),
+]
+
+
+def decoded(terminals, rotation=0, **updates):
     body = [.2, .2, .8, .8]
-    terminals = [first_terminal, [.8, .3, 1, .4], [.4, .8, .5, 1]]
     entry = dict(resolved=True, confidence="high", body_bbox=body,
                  terminals=[{"bbox": b} for b in terminals])
     geometry = decode_terminal_geometry(entry, 0)
     assert geometry is not None
-    parts = module.build_component(source(body, terminals, terminal_geometry=geometry), 0)
+    return source(body, terminals, terminal_geometry=geometry, rotation_deg=rotation, **updates)
+
+
+@pytest.mark.parametrize("first_terminal,anchored", ANCHORED)
+def test_decoded_attached_terminals_have_face_contact(renderer, first_terminal, anchored):
+    module, _ = renderer
+    terminals = [first_terminal, [.8, .3, 1, .4], [.4, .8, .5, 1]]
+    parts = module.build_component(decoded(terminals), 0)
     body_box = parts[0][0].boxes[0]
-    assert any(face_or_volume_contact(body_box, box) for box in parts[1][0].boxes)
+    for lead, _ in parts[1:]:
+        assert len(lead.boxes) == 2
+        foot, riser = lead.boxes
+        assert face_or_volume_contact(foot, riser)
+        assert face_or_volume_contact(body_box, riser)
+    foot = parts[1][0].boxes[0]
+    expected = (3.7 + (anchored[0] - .5) * 8, -2.1 + (.5 - anchored[3]) * 3,
+                3.7 + (anchored[2] - .5) * 8, -2.1 + (.5 - anchored[1]) * 3)
+    assert (foot[0], foot[1], foot[0] + foot[3], foot[1] + foot[4]) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("first_terminal,anchored", ANCHORED)
+@pytest.mark.parametrize("rotation", [45, 33, -120])
+def test_anchoring_survives_non_cardinal_rotation(renderer, first_terminal, anchored, rotation):
+    """The caller's rotation is applied once to the anchored lead; the oracle is
+    the projection used by test_actual_projected_bounds_equal_observed_boxes."""
+    _, render = renderer
+    terminals = [first_terminal, [.8, .3, 1, .4], [.4, .8, .5, 1]]
+    output = render(decoded(terminals, rotation))
+    assert len(output) == 4
+    c, s = math.cos(math.radians(rotation)), math.sin(math.radians(rotation))
+    for (shape, _), bbox in zip(output, [[.2, .2, .8, .8], anchored] + terminals[1:]):
+        expected = []
+        for u, v in product((bbox[0], bbox[2]), (bbox[1], bbox[3])):
+            x, y = (u - .5) * 8, (v - .5) * 3
+            expected.append((3.7 + c * x - s * y, -(-2.1 + s * x + c * y)))
+        assert bounds(shape.projected_corners()) == pytest.approx(bounds(expected), abs=1e-10)
+        assert len(shape.rotation_calls) == 1
+    # Local (pre-rotation) contact is what the STEP solid carries.
+    body_box = output[0][0].boxes[0]
+    assert all(face_or_volume_contact(body_box, lead.boxes[1]) for lead, _ in output[1:])
+
+
+def test_far_terminal_is_an_island_not_a_bridge(renderer):
+    """Negative: a terminal clearly beyond the shared tolerance (here across the
+    envelope from the body) is refused by the decoder and, if drawn anyway,
+    gets no riser and touches nothing."""
+    module, _ = renderer
+    body = [.2, .2, .5, .8]
+    far = [.9, .3, 1, .4]           # gap .4 along X: not a lead of this body
+    terminals = [far, [.5, .3, .6, .4], [.3, .8, .4, 1]]
+    entry = dict(resolved=True, confidence="high", body_bbox=body,
+                 terminals=[{"bbox": b} for b in terminals])
+    with pytest.raises(ValueError):
+        decode_terminal_geometry(entry, 0)
+    parts = module.build_component(source(body, terminals), 0)
+    body_box = parts[0][0].boxes[0]
+    assert len(parts[1][0].boxes) == 1
+    assert not face_or_volume_contact(body_box, parts[1][0].boxes[0])
+    assert all(face_or_volume_contact(body_box, lead.boxes[1]) for lead, _ in parts[2:])
+
+
+@pytest.mark.parametrize("terminal", [[0, .3, .19, .4], [0, 0, .2, .2]])
+@pytest.mark.parametrize("length,width", [(8, 3), (.3, .8), (2, 9)])
+def test_anchoring_only_enlarges_toward_the_body(renderer, terminal, length, width):
+    """The outer end measured on the photo is never moved; the foot grows only
+    toward the body face, whatever the envelope proportions."""
+    module, _ = renderer
+    terminals = [terminal, [.8, .3, 1, .4], [.4, .8, .5, 1]]
+    parts = module.build_component(decoded(terminals, length_mm=length, width_mm=width), 0)
+    x, y, _, dx, dy, _ = parts[1][0].boxes[0]
+    observed = (3.7 + (terminal[0] - .5) * length, -2.1 + (.5 - terminal[3]) * width,
+                3.7 + (terminal[2] - .5) * length, -2.1 + (.5 - terminal[1]) * width)
+    assert x == pytest.approx(observed[0])            # outer (left) edge kept
+    assert y + dy == pytest.approx(observed[3])       # top edge (away from body) kept
+    assert x + dx >= observed[2] - 1e-12 and y <= observed[1] + 1e-12
+    # Growth toward the body is bounded by the gap plus the riser footprint
+    # (.12 mm), whichever face the millimetre protrusion selects.
+    body = parts[0][0].boxes[0]
+    assert x + dx <= max(observed[2], body[0]) + .12 + 1e-12
+    assert y >= min(observed[1], body[1] + body[4]) - .12 - 1e-12
+
+
+# A gap of .25 - .19 on Y, written with two decimals like a model answer: in
+# floating point it lands exactly on the tolerance, accepted by the decoder.
+BOUNDARY_BODY = [.2, .25, .8, .75]
+BOUNDARY_TERMINALS = [[.3, .09, .4, .19], [.8, .3, 1, .4], [.4, .75, .5, 1]]
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_boundary_gap_accepted_by_the_decoder_is_drawn_attached(renderer, rotation):
+    """The renderer uses the decoder's `attached` flag: a gap exactly at the
+    tolerance is drawn attached at every cardinal rotation, never as an island."""
+    module, _ = renderer
+    entry = dict(resolved=True, confidence="high", body_bbox=BOUNDARY_BODY,
+                 terminals=[{"bbox": b} for b in BOUNDARY_TERMINALS])
+    geometry = decode_terminal_geometry(entry, rotation)
+    parts = module.build_component(
+        source(geometry["body_bbox"], [t["bbox"] for t in geometry["terminals"]],
+               terminal_geometry=geometry), 0)
+    body_box = parts[0][0].boxes[0]
+    for lead, _ in parts[1:]:
+        assert len(lead.boxes) == 2
+        assert face_or_volume_contact(body_box, lead.boxes[1])
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_payload_without_flag_is_decided_once_with_rounding_slack(renderer, rotation):
+    """Backward compatibility: a cached payload without `attached` flags gets
+    the same decision at every rotation (the slack absorbs 1 - x rounding)."""
+    module, _ = renderer
+    entry = dict(resolved=True, confidence="high", body_bbox=BOUNDARY_BODY,
+                 terminals=[{"bbox": b} for b in BOUNDARY_TERMINALS])
+    geometry = decode_terminal_geometry(entry, rotation)
+    for terminal in geometry["terminals"]:
+        del terminal["attached"]
+    parts = module.build_component(
+        source(geometry["body_bbox"], [t["bbox"] for t in geometry["terminals"]],
+               terminal_geometry=geometry), 0)
+    assert [len(lead.boxes) for lead, _ in parts[1:]] == [2, 2, 2]
+
+
+def test_explicit_detached_flag_is_never_bridged(renderer):
+    """Negative: the flag is authoritative also when it says detached, even for
+    a box that would pass the geometric tolerance."""
+    module, _ = renderer
+    terminals = [[0, .3, .2, .4], [.8, .3, 1, .4], [.4, .8, .5, 1]]
+    geometry = dict(body_bbox=[.2, .2, .8, .8], confidence="high",
+                    terminals=[{"bbox": b, "attached": i != 0} for i, b in enumerate(terminals)])
+    parts = module.build_component(source([.2, .2, .8, .8], terminals,
+                                          terminal_geometry=geometry), 0)
+    assert len(parts[1][0].boxes) == 1
+    assert [len(lead.boxes) for lead, _ in parts[2:]] == [2, 2]
+
+
+def feet(parts):
+    """Drawn foot rectangles (x0, y0, x1, y1) in mm, one per lead."""
+    result = []
+    for shape, _ in parts[1:]:
+        x, y, _, dx, dy, _ = shape.boxes[0]
+        result.append((x, y, x + dx, y + dy))
+    return result
+
+
+def overlap_area(a, b):
+    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+@pytest.mark.parametrize("first,neighbour", [
+    # Corner lead, fine-pitch neighbour just inside the face span.
+    ([0, .1, .2, .2], [0, .22, .2, .3]),
+    # Corner lead slightly detached (blurred edge), neighbour below it.
+    ([0, .12, .19, .19], [0, .215, .19, .3]),
+    # Neighbour exactly at the span edge: no lateral room at all.
+    ([0, .1, .2, .2], [0, .2, .2, .3]),
+])
+@pytest.mark.parametrize("length,width", [(8, 3), (2, 9)])
+def test_anchoring_never_makes_two_leads_overlap(renderer, capsys, first, neighbour, length, width):
+    """Positive: lateral growth is clamped against neighbours, the outer end is
+    kept and the riser stays a valid box inside the foot.
+
+    CONTRACT CHANGED 2026-10-16 (R2T2): the riser of every lead drawn attached
+    must also share a FACE with the body; the former version accepted the
+    edge-only contact of the no-room case without checking the body at all.
+    The only other admitted outcome is the documented fallback: the foot as
+    observed, alone, with a warning naming the terminal."""
+    module, _ = renderer
+    terminals = [first, neighbour, [.8, .3, 1, .4]]
+    parts = module.build_component(decoded(terminals, length_mm=length, width_mm=width), 0)
+    body_box = parts[0][0].boxes[0]
+    warned = capsys.readouterr().out
+    for position, (lead, _) in enumerate(parts[1:], 1):
+        if len(lead.boxes) == 2:
+            assert face_or_volume_contact(body_box, lead.boxes[1])
+        else:
+            assert len(lead.boxes) == 1 and f'"terminal": {position}' in warned
+    drawn = feet(parts)
+    for i, a in enumerate(drawn):
+        for b in drawn[i + 1:]:
+            assert overlap_area(a, b) <= 1e-12
+    x0 = 3.7 + (first[0] - .5) * length
+    top = -2.1 + (.5 - first[1]) * width
+    assert drawn[0][0] == pytest.approx(x0) and drawn[0][3] == pytest.approx(top)
+    # In these layouts a face is always reachable (the top face when the left
+    # one is blocked), so the fallback must not be taken.
+    assert len(parts[1][0].boxes) == 2
+    foot, riser = parts[1][0].boxes
+    assert riser[0] >= foot[0] - 1e-12 and riser[0] + riser[3] <= foot[0] + foot[3] + 1e-12
+    assert riser[1] >= foot[1] - 1e-12 and riser[1] + riser[4] <= foot[1] + foot[4] + 1e-12
+
+
+def test_isolated_corner_lead_growth_is_unchanged_by_far_leads(renderer):
+    """Negative: with no neighbour in its growth path the corner lead keeps the
+    full riser-footprint lengthening (the ANCHORED oracle)."""
+    module, _ = renderer
+    terminals = [[0, 0, .2, .2], [.8, .3, 1, .4], [.4, .8, .5, 1]]
+    parts = module.build_component(decoded(terminals), 0)
+    expected = (3.7 + (0 - .5) * 8, -2.1 + (.5 - .24) * 3,
+                3.7 + (.2 - .5) * 8, -2.1 + (.5 - 0) * 3)
+    assert feet(parts)[0] == pytest.approx(expected)

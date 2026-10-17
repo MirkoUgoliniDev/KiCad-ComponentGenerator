@@ -29,7 +29,10 @@ class CollapsibleTools(QGroupBox):
         self.content.hide()
 
     def setExpanded(self, expanded):
-        """@brief Open settings without changing any saved model selection."""
+        """@brief Open settings without changing any saved model selection.
+
+        @param expanded True shows the content and the down arrow, False hides it.
+        """
         self.toggle.setChecked(expanded)
         self.toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.content.setVisible(expanded)
@@ -120,7 +123,10 @@ class ProjectWizard(QWidget):
             self.set_page(self.stack.currentIndex() - 1)
 
     def set_page(self, index):
-        """@brief Navigate locally; moving forward never starts a paid analysis."""
+        """@brief Navigate locally; moving forward never starts a paid analysis.
+
+        @param index Target page index, clamped to the stack's range.
+        """
         self.stack.setCurrentIndex(max(0, min(self.stack.count() - 1, index)))
         self._update_navigation()
         self.page_changed.emit(self.stack.currentIndex())

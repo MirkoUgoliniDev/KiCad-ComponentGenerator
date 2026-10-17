@@ -83,15 +83,15 @@ def paste_format(row: dict, fmt: dict) -> dict:
         result["model_selection"] = deepcopy(fmt["model_selection"])
     else:
         result.pop("model_selection", None)
-    # La rete SMD aveva letto il corpo di DESTINAZIONE come un'altra cosa: il
-    # formato incollato la smentisce, quindi identita' e posa della rete non
-    # valgono piu' (audit 2026-10-02: un SOIC prendeva il verso da una
-    # lettura «chip_R»).
+    # The SMD network had read the TARGET body as something else: the pasted
+    # format contradicts it, so the network's identity and pose no longer
+    # apply (audit 2026-10-02: a SOIC took its orientation from a «chip_R»
+    # reading).
     from .smd_component_classifier import drop_classifier_identity
     drop_classifier_identity(result)
     local = fmt.get("lead_sides_local")
-    # Il verso inverso di local_lead_sides: dal riferimento del corpo alla
-    # foto, con la rotazione del BERSAGLIO.
+    # The inverse direction of local_lead_sides: from the body frame to the
+    # photo, with the rotation of the TARGET.
     sides = (local_lead_sides(local, -float(result.get("rotation_deg") or 0.0))
              if local else None)
     if sides:

@@ -127,6 +127,7 @@ def ray_box_entry(near, far, half: float = HALF) -> Optional[tuple]:
 
     @param near Point where the pick ray enters the view volume.
     @param far Point where it leaves.
+    @param half Half side of the box, in cube world units (0.5 for the unit cube).
     @return The entry point, or None when the ray misses the box.
     @note Slab method; parallel components are handled explicitly.
     """
@@ -149,7 +150,14 @@ def ray_box_entry(near, far, half: float = HALF) -> Optional[tuple]:
 
 
 def view_for_direction(direction) -> Optional[str]:
-    """@brief Name of the standard view of a face direction, None for edges/corners."""
+    """@brief Name of the standard view of a face direction, None for edges/corners.
+
+    @param direction Tuple of -1/0/1 components as `classify_cube_point`
+        returns it, or None/empty for no direction.
+    @return The view name in FACE_VIEWS (top, bottom, front, back, right,
+        left) for a single-axis direction; None for an edge, a corner or no
+        direction.
+    """
     return FACE_VIEWS.get(tuple(direction)) if direction else None
 
 
@@ -254,7 +262,11 @@ class CameraPose(NamedTuple):
 
 
 def ease_in_out(t: float) -> float:
-    """@brief Cubic ease-in-out (smoothstep) of a progress in [0, 1]."""
+    """@brief Cubic ease-in-out (smoothstep) of a progress in [0, 1].
+
+    @param t Animation progress; values outside [0, 1] are clamped.
+    @return The eased progress in [0, 1], 0 at t = 0 and 1 at t = 1.
+    """
     t = min(max(float(t), 0.0), 1.0)
     return t * t * (3.0 - 2.0 * t)
 
@@ -500,16 +512,16 @@ class ViewCube:
 
         self.cube = vtkAnnotatedCubeActor()
         self.cube.GetCubeProperty().SetColor(*_FACE_COLOR)
-        # Le facce devono leggersi anche di taglio: luce ambiente alta.
+        # The faces must be readable even edge-on: high ambient light.
         self.cube.GetCubeProperty().SetAmbient(0.45)
         self.cube.GetCubeProperty().SetDiffuse(0.7)
         self.cube.GetCubeProperty().SetEdgeVisibility(True)
         self.cube.GetCubeProperty().SetEdgeColor(*_EDGE_COLOR)
         self.cube.GetCubeProperty().SetLineWidth(1.5)
-        # I contorni del testo producevano un tratteggio lungo i bordi delle facce.
+        # The text outlines produced a dashing along the edges of the faces.
         self.cube.SetTextEdgesVisibility(False)
-        # Scritta della faccia SOPRA leggibile con il fronte in basso, come la
-        # vista dall'alto della finestra (Y in su sullo schermo).
+        # Caption of the TOP face readable with the front at the bottom, like
+        # the top view of the window (Y up on the screen).
         self.cube.SetZFaceTextRotation(_Z_TEXT_ROTATION)
         for name in ("XPlus", "XMinus", "YPlus", "YMinus", "ZPlus", "ZMinus"):
             face = getattr(self.cube, f"Get{name}FaceProperty")()
@@ -541,9 +553,9 @@ class ViewCube:
             render_window.AddRenderer(renderer)
             return actor, renderer
 
-        # Vista isometrica iniziale: un cubetto isometrico, non una casetta.
+        # Initial isometric view: an isometric little cube, not a little house.
         self.home_actor, self.home_renderer = overlay(_iso_cube_polydata(), colored=True)
-        # Comandi accanto al cubo: inquadra sotto, frecce di rotazione a sinistra.
+        # Controls beside the cube: the framing button below, rotation arrows on the left.
         self.roll_renderers = {}
         _, self.roll_renderers[FIT] = overlay(_fit_polydata())
         for key, clockwise in ((ROLL_CCW, False), (ROLL_CW, True)):
@@ -553,7 +565,7 @@ class ViewCube:
         self.set_labels(labels or DEFAULT_LABELS)
         main_renderer.AddObserver("StartEvent", self._sync)
 
-    # ── Aspetto ─────────────────────────────────────────────────────
+    # ── Appearance ──────────────────────────────────────────────────
 
     def set_labels(self, labels: dict) -> None:
         """@brief Write the face labels and scale them so that all of them fit.
@@ -577,7 +589,7 @@ class ViewCube:
         # count: "FRONT" and "RIGHT" overflowed with the old estimate.
         self.cube.SetFaceTextScale(scale)
 
-    # ── Geometria sullo schermo ─────────────────────────────────────
+    # ── On-screen geometry ──────────────────────────────────────────
 
     def layout(self, width: float, height: float) -> None:
         """@brief Place cube and house in the top-right corner of a widget.
@@ -596,13 +608,18 @@ class ViewCube:
                                  min(1.0, (x + w) / width), min(1.0, 1 - y / height))
 
     def cube_rect(self) -> tuple:
-        """@brief (x, y, w, h) of the cube square in logical widget pixels."""
+        """@brief (x, y, w, h) of the cube square in logical widget pixels.
+
+        @return Rectangle anchored MARGIN_PX from the top-right corner of the
+            widget, CUBE_PX on each side (Qt convention, Y from the top).
+        """
         width, _ = self._size
         return (width - MARGIN_PX - CUBE_PX, MARGIN_PX, CUBE_PX, CUBE_PX)
 
     def home_rect(self) -> tuple:
         """@brief (x, y, w, h) of the isometric-view button in logical widget pixels.
 
+        @return Square of side HOME_PX placed HOME_GAP_PX under the cube.
         @note It shares the row under the cube with the fit button: the pair is
             centred on the cube.
         """
@@ -615,6 +632,7 @@ class ViewCube:
 
         @param key FIT (under the cube, right of the isometric button), ROLL_CCW
             (left of the cube, upper) or ROLL_CW (left of the cube, lower).
+        @return Square of side ROLL_PX, ROLL_GAP_PX away from its neighbour.
         """
         cx, cy, cw, ch = self.cube_rect()
         if key == FIT:
@@ -655,16 +673,23 @@ class ViewCube:
         return left <= x <= left + w and top <= y <= top + h
 
     def contains(self, x: float, y: float) -> bool:
-        """@brief Whether a logical widget point lies on the cube, the house or an arrow."""
+        """@brief Whether a logical widget point lies on the cube, the house or an arrow.
+
+        @param x Logical widget X, px.
+        @param y Logical widget Y, px (from the top).
+        @return True inside the cube square or any command button rectangle.
+        """
         return (self._inside(self.cube_rect(), x, y) or self._inside(self.home_rect(), x, y)
                 or any(self._inside(self.roll_rect(key), x, y)
                        for key in (FIT, ROLL_CW, ROLL_CCW)))
 
-    # ── Clic ────────────────────────────────────────────────────────
+    # ── Click ───────────────────────────────────────────────────────
 
     def hit(self, x: float, y: float):
         """@brief What a click at a logical widget point selects.
 
+        @param x Logical widget X, px.
+        @param y Logical widget Y, px (from the top).
         @return "home", FIT, ROLL_CW, ROLL_CCW, a direction tuple (see
             classify_cube_point), or None when the click is outside the cube
             and its buttons.
@@ -704,7 +729,7 @@ class ViewCube:
         entry = ray_box_entry(centre, far)
         return classify_cube_point(entry) if entry is not None else None
 
-    # ── Sincronizzazione ────────────────────────────────────────────
+    # ── Synchronisation ─────────────────────────────────────────────
 
     def _sync(self, *_args) -> None:
         """Turn the cube camera with the main camera, at a fixed distance."""

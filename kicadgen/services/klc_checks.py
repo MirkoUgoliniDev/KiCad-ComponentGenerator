@@ -18,6 +18,7 @@ characters KiCad forbids.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
 import unicodedata
 
@@ -462,7 +463,62 @@ def _parse(text: str, code: str, label: str) -> tuple[list | None, list[Finding]
         return None, [_error(code, tx('{label}: file non leggibile: {error}', label=label, error=exc))]
 
 
+def _language_token() -> str:
+    """@brief The code of the active message language, the cache key of the file checks.
+
+    @return `I18n.language` of the registered translator (`messages.set_translator`
+        receives its bound `raw` method), or "it", the language of the
+        sources, when none is registered or it carries no language.
+    @note The cached file checks below return translated messages, so their
+        cache key includes the language. The CODE, not a translated sentence
+        (review pass 3): two languages lacking an entry, or a catalogue edited
+        so that two texts coincide, would otherwise share a key and serve
+        findings cached in another language.
+    """
+    from . import messages
+    translator = messages._translator  # noqa: SLF001 - the registered translator is module state
+    owner = getattr(translator, "__self__", None)
+    language = getattr(owner, "language", None)
+    return language if isinstance(language, str) and language else "it"
+
+
+@lru_cache(maxsize=8)
+def _cached_symbol_findings(text: str, _language: str) -> tuple:
+    """@brief `_check_symbol_text` memoised per text and message language."""
+    return tuple(_check_symbol_text(text))
+
+
+@lru_cache(maxsize=8)
+def _cached_footprint_findings(text: str, _language: str) -> tuple:
+    """@brief `_check_footprint_text` memoised per text and message language."""
+    return tuple(_check_footprint_text(text))
+
+
 def check_symbol_text(text: str) -> list[Finding]:
+    """@brief Check a `.kicad_sym` text against the symbol rules of the KLC (cached).
+
+    @param text Whole library text (one or more symbols).
+    @return See `_check_symbol_text`; a new list on every call.
+    @note The window re-checks the files on every metadata keystroke; the
+        parse of a large library cost tens of milliseconds each time
+        (review pass 2 of 2026-10-15, L2). Findings are immutable, so the
+        cached tuple is safe to share; the cache follows the text and the
+        message language.
+    """
+    return list(_cached_symbol_findings(text, _language_token()))
+
+
+def check_footprint_text(text: str) -> list[Finding]:
+    """@brief Check a `.kicad_mod` text against the footprint rules of the KLC (cached).
+
+    @param text Whole footprint file text.
+    @return See `_check_footprint_text`; a new list on every call.
+    @note Cached like `check_symbol_text`, for the same reason.
+    """
+    return list(_cached_footprint_findings(text, _language_token()))
+
+
+def _check_symbol_text(text: str) -> list[Finding]:
     """@brief Check a `.kicad_sym` text against the symbol rules of the KLC.
 
     @param text Whole library text (one or more symbols).
@@ -580,7 +636,7 @@ def check_symbol_text(text: str) -> list[Finding]:
     return findings
 
 
-def check_footprint_text(text: str) -> list[Finding]:
+def _check_footprint_text(text: str) -> list[Finding]:
     """@brief Check a `.kicad_mod` text against the footprint rules of the KLC.
 
     @param text Whole footprint file text.

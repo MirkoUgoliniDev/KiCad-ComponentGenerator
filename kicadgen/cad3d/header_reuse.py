@@ -63,7 +63,12 @@ class HeaderModelReuse:
             pass
 
     def load(self):
-        """@brief Return copied resolved components, or None when reuse is not proven."""
+        """@brief Return copied resolved components, or None when reuse is not proven.
+
+        @return The list of component dictionaries saved for the same inputs,
+            or None when the file is missing, malformed, built for another
+            key or `show` flag, or any referenced file changed since.
+        """
         if self.key is None:
             return None
         try:

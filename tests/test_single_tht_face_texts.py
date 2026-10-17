@@ -155,6 +155,9 @@ def test_top_writing_is_prefilled_with_the_name_and_an_emptied_field_stays_empty
 
 def test_top_writing_goes_to_freecad_sized_for_the_body_only_on_a_single_part(window):
     _select_single_tht(window)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     window.group_3d.setChecked(True)
     window.field_body_length.setValue(23.8)
     window.field_top_text_3d.setText("TEL 8-2411WI")
@@ -170,6 +173,9 @@ def test_top_writing_goes_to_freecad_sized_for_the_body_only_on_a_single_part(wi
 
 def test_pin_numbers_checkbox_is_a_project_option_shown_for_single_tht_only(window):
     _select_single_tht(window)
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     checkbox = window.chk_pin_numbers_3d
     assert not checkbox.isHidden() and checkbox.isChecked(), "on by default: the user asked for them"
     assert window._current_body_params().pin_numbers_3d is True

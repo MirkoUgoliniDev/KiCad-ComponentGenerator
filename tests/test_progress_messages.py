@@ -18,6 +18,23 @@ from kicadgen.services import photo_global_inventory, photo_inventory, photo_yol
 from kicadgen.services.datasheet_extractor import _files_sent_message, _LOG_NAME_CHARS
 
 
+def _tiny_png() -> bytes:
+    """@brief A real 4x4 PNG for image fixtures.
+
+    CONTRACT CHANGED 2026-10-15: document images must be decodable, because
+    an upload whose metadata cannot be removed is refused (fail closed); fake
+    bytes named .png/.jpg no longer reach the fake provider.
+    """
+    from io import BytesIO
+    from PIL import Image
+    out = BytesIO()
+    Image.new("RGB", (4, 4), "white").save(out, "PNG")
+    return out.getvalue()
+
+
+_TINY_PNG = _tiny_png()
+
+
 # ── 1. Quali file sono stati inviati alla chiamata a pagamento ───────
 #
 # CONTRATTO CAMBIATO, di proposito: fra il nome del file e il suo ruolo c'era
@@ -131,7 +148,7 @@ def test_the_extraction_log_names_the_documents_and_their_roles(monkeypatch, tmp
     long_name = 'foto-dall-alto-ad-altissima-risoluzione-rev-C.png'
     paths = [tmp_path / 'pinout.pdf', tmp_path / long_name]
     paths[0].write_bytes(b'%PDF-1.4 offline')
-    paths[1].write_bytes(b'offline fixture')
+    paths[1].write_bytes(_TINY_PNG)
     roles = {'pinout.pdf': 'pinout', long_name: 'hires'}
     call = Mock(return_value=dict(
         layout='castellated', castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)]))
@@ -378,7 +395,7 @@ def test_the_extractor_forwards_the_phase_callback_to_the_photo_inventory(monkey
     -- che e' il difetto segnalato dall'utente.
     """
     photo = tmp_path / 'top.png'
-    photo.write_bytes(b'offline fixture')
+    photo.write_bytes(_TINY_PNG)
     payload = dict(layout='castellated', body_length_mm=40, body_width_mm=20,
                    top_photo_index=0,
                    castellated_sides=[dict(edge='left', count=2, pitch_mm=2.54)])

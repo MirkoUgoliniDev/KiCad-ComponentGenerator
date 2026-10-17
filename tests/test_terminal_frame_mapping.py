@@ -11,7 +11,9 @@ from kicadgen.services import photo_terminals as service
 
 def observation():
     return dict(id=1, resolved=True, confidence='high', body_bbox=[.2,.2,.8,.8],
-        terminals=[{'bbox':[0,.3,.2,.4]}, {'bbox':[.8,.6,1,.7]}, {'bbox':[.4,0,.5,.2]}])
+        terminals=[{'bbox':[0,.3,.2,.4], 'attachment':'attached'},
+                   {'bbox':[.8,.6,1,.7], 'attachment':'attached'},
+                   {'bbox':[.4,0,.5,.2], 'attachment':'attached'}])
 
 
 @pytest.mark.parametrize('rotation', [0,90,180,270])

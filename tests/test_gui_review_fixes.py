@@ -111,6 +111,8 @@ def test_a_text_move_and_a_pad_edit_while_busy_are_retried(busy_window, qapp, mo
     window._on_terminal_detail_finished()
     _turns(qapp)
     assert len(started) == 1
+    # Since 2026-10-17 the worker gets only the chosen anchor: the unmoved
+    # Value stays the generator's centred default.
     assert started[0].text_positions == {"Reference": (1.0, 2.0)}
 
 

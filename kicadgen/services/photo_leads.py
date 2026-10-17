@@ -23,7 +23,12 @@ PROMPT = (
 
 
 def separation_tool():
-    """@brief Return the separate_visible_leads tool schema for lead boxes inside fixed terminal envelopes."""
+    """@brief Return the separate_visible_leads tool schema for lead boxes inside fixed terminal envelopes.
+
+    @return The tool definition dict (name, description, input schema) that
+        asks the model for one lead_bbox, resolved flag and confidence for
+        each supplied terminal ID.
+    """
     props = dict(id={'type':'integer'}, resolved={'type':'boolean'},
         confidence={'type':'string','enum':['high','low']},
         lead_bbox={'type':'array','items':{'type':'number'},
@@ -59,7 +64,24 @@ def _frame_box(box, source, destination):
 
 
 def refine_leads(photo_png, components, model, call, log, cache_dir=None, system_prompt=None):
-    """@brief Only attach optional lead_detail; preserve every existing field on failure."""
+    """@brief Only attach optional lead_detail; preserve every existing field on failure.
+
+    @param photo_png Encoded PNG bytes of the calibrated board photo.
+    @param components Component dicts; only those carrying a ``terminal_geometry``
+        dict and a ``_box`` (normalized photo rectangle) are sent to the model.
+    @param model Identifier of the vision model to call.
+    @param call Provider callable, used through photo_grounding.cached_call.
+    @param log Callable receiving one progress line at a time.
+    @param cache_dir Directory of the response cache, or None for no cache.
+    @param system_prompt Optional system prompt replacing the module PROMPT.
+    @return A deep copy of ``components`` in which each resolved terminal gained
+        a ``lead_detail`` dict (bbox, confidence, source); bodies, envelopes
+        and every other field are unchanged.
+    @throws ValueError When the photo bytes cannot be decoded. The ValueErrors
+        raised while handling one component (invalid terminal list, rotation
+        that is not a multiple of 90 degrees, invalid model answer) are caught
+        and logged, leaving that component untouched.
+    """
     import cv2
     import numpy as np
     from .photo_grounding import cached_call

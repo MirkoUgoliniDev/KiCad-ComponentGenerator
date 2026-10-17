@@ -318,14 +318,12 @@ def _write_complete_kicad_output(window):
     step = window._project_dir() / f"{name}.3dshapes" / f"{name}.step"
     footprint.parent.mkdir(parents=True, exist_ok=True)
     step.parent.mkdir(parents=True, exist_ok=True)
-    # One pad and an attribute: a footprint without pads is a KLC ERROR and
+    # Pads and an attribute: a footprint without pads is a KLC ERROR and
     # the installation would ask for a confirmation (2026-10-10).
-    footprint.write_text(
-        f'(footprint "{name}"\n\t(version 20260206)\n'
-        '\t(generator "test")\n\t(layer "F.Cu")\n\t(attr smd)\n'
-        '\t(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Paste" "F.Mask"))\n)\n',
-        encoding="utf-8",
-    )
+    # CONTRACT CHANGED 2026-10-15 (audit H1): the preview and installations
+    # are refused while the .kicad_mod pads differ from those the fields
+    # generate, so the hand-written footprint carries exactly those pads.
+    footprint.write_text(minimal_aligned_footprint(window, name), encoding="utf-8")
     # A complete STEP: the KiCad tab refuses one without the ISO trailer.
     step.write_bytes(b"ISO-10303-21;\nEND-ISO-10303-21;\n")
     # CONTRACT CHANGED 2026-10-15: the installation is refused while a
@@ -334,6 +332,28 @@ def _write_complete_kicad_output(window):
     fill_required_metadata(window)
     window._refresh_output_actions()
     return footprint, step
+
+
+def minimal_aligned_footprint(window, name):
+    """@brief A minimal .kicad_mod whose pads are those the window's fields generate now.
+
+    @param window The main window (its fields decide the pads).
+    @param name Footprint name written in the file.
+    @return File text: header, attribute matching the pad types, the pads.
+    @note Stands for «a footprint generated from the current parameters»
+        without the rest of a generated file, so tests about other gates
+        (metadata, KLC, files present) are not blocked by the file/parameter
+        alignment check (audit 2026-10-15, H1).
+    """
+    from dataclasses import replace
+    _params, host = window._footprint_inputs_now()
+    # The pads never depend on the name; the file may be written before the
+    # name field is set, and the generators refuse an empty name.
+    pads = window._build_footprint(replace(host, name=name)).pads
+    attr = "through_hole" if any(p.pad_type == "thru_hole" for p in pads) else "smd"
+    body = "".join("\t" + pad.to_sexpr().render(1).strip() + "\n" for pad in pads)
+    return (f'(footprint "{name}"\n\t(version 20260206)\n'
+            f'\t(generator "test")\n\t(layer "F.Cu")\n\t(attr {attr})\n{body})\n')
 
 
 def fill_required_metadata(window):
@@ -1199,7 +1219,7 @@ def test_apply_without_a_previous_solid_leaves_the_choice_to_the_user(shown_soli
     window._apply_photo_review(window._photo_components_from_table())
     _settle()
     assert calls == [] and not window._regen_3d_pending
-    assert "Rigenera modello 3D" in window.label_3d_status.text()
+    assert "Rigenera modello STEP" in window.label_3d_status.text()
 
 
 def test_apply_during_other_work_waits_for_it_and_runs_once(shown_solid, monkeypatch):

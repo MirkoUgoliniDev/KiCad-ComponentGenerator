@@ -31,7 +31,7 @@ try:
     from .messages import end_sentence, tx
     from .photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from .photo_heights import estimate_body_height
-except ImportError:  # caricato come file a se' (test di isolamento degli import)
+except ImportError:  # loaded as a standalone file (import isolation test)
     from kicadgen.core.validation import covered_fraction
     from kicadgen.services.messages import end_sentence, tx
     from kicadgen.services.photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
@@ -43,12 +43,12 @@ _CLASSES = (
     "display", "fuse", "heatsink", "ic", "inductor", "led", "pads", "pins",
     "potentiometer", "relay", "resistor", "switch", "transformer", "transistor",
 )
-#: Soglia operativa PREDEFINITA. E' una proprieta' del modello (quanto e'
-#: calibrata la sua confidenza), non della scheda: 0.25 va bene per l'ONNX
-#: yolov8s di base; un YOLO26 addestrato su Roboflow rende meglio piu' in
-#: alto (utente, 2026-09-25). Per questo chi usa il rilevatore la puo'
-#: scegliere (detect_yolo_components(confidence=...)), come il cursore di
-#: Roboflow; qui resta solo il valore di partenza.
+#: DEFAULT operating threshold. It is a property of the model (how well its
+#: confidence is calibrated), not of the board: 0.25 suits the base yolov8s
+#: ONNX; a YOLO26 trained on Roboflow performs better higher up (user,
+#: 2026-09-25). That is why the caller of the detector can choose it
+#: (detect_yolo_components(confidence=...)), like the Roboflow slider; here
+#: only the starting value remains.
 _CONFIDENCE = 0.25
 _AUDIT_CONFIDENCE = 0.05
 
@@ -58,9 +58,9 @@ def operating_confidence(value=None) -> float:
 
     @param value Threshold in (0.05, 1), or None for the default _CONFIDENCE.
     @return The threshold as a float.
-    @throws ValueError For a non-number, a boolean, a non-finite value or a
-        value outside (audit floor, 1): below the audit floor the weak
-        proposals would not even be recorded.
+    @throws ValueError For a value that is not a number, a boolean, an
+        infinite or NaN value, or a value outside (audit floor, 1): below the
+        audit floor the weak proposals would not even be recorded.
     """
     if value is None:
         return _CONFIDENCE
@@ -71,19 +71,19 @@ def operating_confidence(value=None) -> float:
     return float(value)
 _NMS_IOU = 0.5
 _EXCLUDED = {"pads", "pins"}
-#: Lati delle tessere ingrandite, in pixel della foto calibrata.
+#: Sides of the enlarged tiles, in pixels of the calibrated photo.
 _TILE_SIZES = (640, 1280)
-#: Frazione di tessera che si ripete nella successiva. Il passo e' il
-#: complemento: e' la stessa costante usata da _views, tenuta qui perche' da
-#: essa dipende quale corpo una tessera puo' misurare e quale no.
+#: Fraction of a tile repeated in the next one. The step is its complement:
+#: it is the same constant used by _views, kept here because it decides which
+#: body a tile can measure and which it cannot.
 _TILE_OVERLAP_FRACTION = 0.25
 
-#: Parametri del rilevatore che l'utente puo' scegliere (utente, 2026-09-25:
-#: modale «Parametri YOLO»). I valori sono quelli usati finora: scegliere
-#: nulla lascia il comportamento identico. Restano fuori di proposito l'unione
-#: dei frammenti (_FRAGMENT_COVERED, interna e dichiarata fragile), la soglia
-#: d'audit (non cambia il risultato) e l'ingresso a 640 px (lo fissa
-#: l'addestramento del modello).
+#: Detector parameters the user can choose (user, 2026-09-25:
+#: «Parametri YOLO» (YOLO parameters) modal). The values are the ones used so
+#: far: choosing nothing leaves the behaviour identical. Deliberately left
+#: out: the fragment union (_FRAGMENT_COVERED, internal and declared fragile),
+#: the audit threshold (it does not change the result) and the 640 px input
+#: (fixed by the model's training).
 YOLO_SETTING_DEFAULTS = {"confidence": _CONFIDENCE, "nms_iou": _NMS_IOU,
                          "tile_sizes": list(_TILE_SIZES),
                          "tile_overlap": _TILE_OVERLAP_FRACTION}
@@ -131,21 +131,24 @@ def yolo_settings(values=None) -> dict:
 
 try:
     from ..app_paths import DEFAULT_YOLO_ONNX, resource_path, yolo_model_path
-except ImportError:  # modulo caricato da solo (test): stessa regola del sorgente
+except ImportError:  # module loaded on its own (test): same rule as the source
     def resource_path(*parts):
         """@brief Resolve a resource path inside the source repository when app_paths is unavailable.
 
         Fallback: the repository layout.
+
+        @param parts Path components relative to the repository root.
+        @return The absolute Path of the resource.
         """
         return Path(__file__).resolve().parents[2].joinpath(*parts)
 
 def detector_classes() -> tuple:
-    """@brief Categorie che il rilevatore locale sa assegnare.
+    """@brief Categories the local detector can assign.
 
-    @return Le classi note, escluse quelle che non sono corpi montati.
-    @note Le piazzole nude e le file di pin non sono componenti: restano fuori
-        anche dall'elenco che si propone a chi rivede, perche' sceglierle
-        sarebbe un errore che nessuno a valle saprebbe correggere.
+    @return The known classes, excluding those that are not mounted bodies.
+    @note Bare pads and pin rows are not components: they are also left out
+        of the list offered to the reviewer, because choosing one of them
+        would be a mistake nobody downstream could correct.
     """
     return tuple(name for name in _CLASSES if name not in _EXCLUDED)
 
@@ -292,7 +295,13 @@ class _RemappedSession:
         self._session, self._mapping, self._np = session, list(mapping), np
 
     def run(self, output_names, feeds):
-        """@brief Run the model, then reorder its scores; see _remap_scores."""
+        """@brief Run the model, then reorder its scores; see _remap_scores.
+
+        @param output_names Output names forwarded to the wrapped onnxruntime session.
+        @param feeds Input feeds forwarded to the wrapped session.
+        @return The session outputs, with every [1, 4 + classes, rows] array
+            remapped to _CLASSES order and the others passed through.
+        """
         return [_remap_scores(raw, self._mapping, self._np) if isinstance(raw, self._np.ndarray)
                 and raw.ndim == 3 and raw.shape[1] == 4 + len(self._mapping) else raw
                 for raw in self._session.run(output_names, feeds)]
@@ -312,11 +321,15 @@ class _TorchSession:
         self._network, self._torch, self._np = network, torch, np
         self._input = input_name
         self._end_to_end = end_to_end
-        # Indice di classe del modello -> indice in _CLASSES (class_mapping).
+        # Model class index -> index in _CLASSES (class_mapping).
         self._mapping = list(mapping) if mapping is not None else list(range(len(_CLASSES)))
 
     def raw_output(self, feeds):
-        """@brief Run the network and return its first output as float32, unconverted."""
+        """@brief Run the network and return its first output as float32, unconverted.
+
+        @param feeds Mapping input name -> [1, 3, 640, 640] float32 letterboxed tensor.
+        @return The first network output as a contiguous float32 numpy array.
+        """
         np = self._np
         tensor = self._torch.from_numpy(feeds[self._input])
         with self._torch.no_grad():
@@ -325,7 +338,13 @@ class _TorchSession:
         return np.ascontiguousarray(raw.detach().cpu().numpy(), dtype=np.float32)
 
     def run(self, output_names, feeds):
-        """@brief Run the network on one letterboxed tensor; return [raw output]."""
+        """@brief Run the network on one letterboxed tensor; return [raw output].
+
+        @param output_names Ignored; kept for the onnxruntime `run` signature.
+        @param feeds Mapping input name -> [1, 3, 640, 640] float32 letterboxed tensor.
+        @return A one-element list holding the raw [1, 4 + classes, rows]
+            float32 array, scores remapped to _CLASSES order when needed.
+        """
         np = self._np
         raw = self.raw_output(feeds)
         if not self._end_to_end:
@@ -417,11 +436,11 @@ def _force_one_to_one(head, probe) -> bool:
 def _setup_torch(path):
     """Load a .pt checkpoint with Ultralytics, checked like the ONNX model."""
     np, cv2 = _image_dependencies()
-    # Il rilevatore e' locale: Ultralytics all'import verifica la connessione
-    # (ricerche DNS verso Cloudflare e Google) e puo' sincronizzare
-    # impostazioni. YOLO_OFFLINE lo spegne; un valore gia' scelto
-    # dall'utente resta com'e' (HANDOFF 131, blocco B: trovato dalla guardia
-    # di rete dei test).
+    # The detector is local: on import Ultralytics checks the connection
+    # (DNS lookups towards Cloudflare and Google) and may sync settings.
+    # YOLO_OFFLINE turns this off; a value already chosen by the user is left
+    # as it is (HANDOFF 131, block B: found by the network guard of the
+    # tests).
     import os
     os.environ.setdefault("YOLO_OFFLINE", "1")
     try:
@@ -443,15 +462,16 @@ def _setup_torch(path):
         mapping = class_mapping(names)
         network = model.model.float().eval()
         head = network.model[-1]
-        # Testa end-to-end (YOLO26, YOLOv10): si usa SEMPRE la sua inferenza
-        # ufficiale, uno-a-uno, forzata qui perche' il valore predefinito
-        # cambia fra versioni di Ultralytics (8.4.37 accesa, 8.4.163 spenta).
-        # Verificato il 2026-09-25 su una foto reale: il ramo uno-a-molti con
-        # il nostro NMS trovava 38 corpi e ne ritrovava 39 dei 46 dell'uno-a-
-        # uno; la scorciatoia cambiava il modello, non solo il codice.
-        # La testa uno-a-uno ordina ancore x classi insieme, quindi la stessa
-        # ancora puo' tornare con piu' classi: _one_to_one_rows le riunisce e
-        # il recupero «pads/pins con un corpo concorrente» vale come per l'ONNX.
+        # End-to-end head (YOLO26, YOLOv10): its official one-to-one inference
+        # is ALWAYS used, forced here because the default changes between
+        # Ultralytics versions (8.4.37 on, 8.4.163 off).
+        # Verified on 2026-09-25 on a real photo: the one-to-many branch with
+        # our NMS found 38 bodies and recovered 39 of the 46 of the
+        # one-to-one; the shortcut changed the model, not just the code.
+        # The one-to-one head ranks anchors x classes together, so the same
+        # anchor can come back with several classes: _one_to_one_rows merges
+        # them and the recovery «pads/pins con un corpo concorrente»
+        # (pads/pins with a competing body) applies as for the ONNX.
         session = _TorchSession(network, torch, np, "images", mapping=mapping)
         blank = {"images": np.zeros((1, 3, 640, 640), np.float32)}
         end_to_end = _force_one_to_one(head, lambda: session.raw_output(blank))
@@ -519,9 +539,9 @@ def _setup(model_path):
             "[1, 4 + classes, 8400] output and classes among: " + ", ".join(_CLASSES)
             + "; check the CPU onnxruntime installation."
         ) from exc
-    # Il rilevatore legge i punteggi nell'ordine di _CLASSES: un modello con
-    # una tabella diversa passa da una sessione che li riordina. Con la
-    # tabella del rilevatore la sessione resta quella di onnxruntime.
+    # The detector reads the scores in the order of _CLASSES: a model with a
+    # different table goes through a session that reorders them. With the
+    # detector's table the session stays the onnxruntime one.
     if mapping != list(range(len(_CLASSES))):
         session = _RemappedSession(session, mapping, np)
     info = {
@@ -552,15 +572,15 @@ def validate_yolo_setup(model_path=None) -> dict:
 
 
 def view_overlap_px(view, overlap=_TILE_OVERLAP_FRACTION):
-    """@brief Quanto una tessera si sovrappone alla successiva, in pixel.
+    """@brief How much one tile overlaps the next, in pixels.
 
-    @param view Nome della vista, come lo genera _views.
-    @param overlap Frazione di tessera ripetuta, la stessa data a _views.
-    @return Pixel di sovrapposizione, o infinito per la vista d'insieme.
-    @note E' la quota che decide che cosa quella vista puo' misurare: un corpo
-        piu' grande della sovrapposizione tocca un bordo in OGNI tessera che lo
-        contiene, quindi da li' il suo ingombro non e' osservabile, per quanto
-        il rilevamento sia sicuro.
+    @param view Name of the view, as _views generates it.
+    @param overlap Fraction of the tile that is repeated, the same given to _views.
+    @return Overlap in pixels, or infinity for the whole-board view.
+    @note This is the quantity that decides what that view can measure: a
+        body larger than the overlap touches an edge in EVERY tile that
+        contains it, so its extent cannot be observed from there, however
+        confident the detection is.
     """
     name = str(view or "")
     if not name.startswith("tile"):
@@ -573,29 +593,29 @@ def view_overlap_px(view, overlap=_TILE_OVERLAP_FRACTION):
 
 
 def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION, iou=_NMS_IOU):
-    """@brief Toglie i frammenti che nessuna tessera poteva misurare.
+    """@brief Drop the fragments that no tile could measure.
 
-    @param rows Righe da filtrare.
-    @param complete Rilevamenti non tagliati, da QUALUNQUE vista e a qualunque
-        confidenza: che una vista abbia visto il corpo per intero e' un fatto
-        geometrico e non dipende dalla soglia operativa. Restringerlo ai soli
-        candidati sopra soglia lasciava passare proprio il caso che conta --
-        sulla scheda di prova la vista d'insieme vedeva il modulo intero a
-        0,18, sotto soglia, e il confronto non la trovava.
-    @param overlap Frazione di sovrapposizione fra tessere.
-    @param iou Criterio d'identita' della NMS: una vista intera conta solo se
-        e' lo STESSO corpo del frammento (`_same_body_as_fragment`), non se
-        lo contiene e basta. Con il solo contenimento un riquadro debole
-        grande come la scheda (ESP32-S3-DEV-KIT, 08/10: 61x15 mm a 0,055)
-        «copriva» un frammento sicuro e veniva promosso a corpo vero.
-    @return Le righe da tenere.
-    @note Regola fisica, non una soglia: un corpo piu' grande della
-        sovrapposizione fra tessere tocca un bordo in ogni tessera che lo
-        contiene, quindi quella vista non ne conosce l'ingombro. Se un'altra
-        vista lo contiene per intero, e' quella a misurarlo, e il frammento non
-        aggiunge nulla -- anzi, e' cio' che creava il falso accordo su un bordo
-        di tessera. Sotto la sovrapposizione la regola non si applica: un corpo
-        piccolo che sfiora una cucitura resta un corpo osservato.
+    @param rows Rows to filter.
+    @param complete Unclipped detections, from ANY view and at any
+        confidence: that a view saw the body whole is a geometric fact and
+        does not depend on the operating threshold. Restricting it to the
+        candidates above threshold let through exactly the case that
+        matters -- on the test board the whole-board view saw the entire
+        module at 0.18, below threshold, and the comparison did not find it.
+    @param overlap Overlap fraction between tiles.
+    @param iou Identity criterion of the NMS: a whole view counts only when
+        it is the SAME body as the fragment (`_same_body_as_fragment`), not
+        when it merely contains it. With containment alone a weak box as
+        large as the board (ESP32-S3-DEV-KIT, 08/10: 61x15 mm at 0.055)
+        "covered" a confident fragment and was promoted to a real body.
+    @return The rows to keep.
+    @note A physical rule, not a threshold: a body larger than the overlap
+        between tiles touches an edge in every tile that contains it, so that
+        view does not know its extent. If another view contains it whole,
+        that view measures it and the fragment adds nothing -- indeed it is
+        what created the false agreement on a tile edge. Below the overlap
+        the rule does not apply: a small body grazing a seam remains an
+        observed body.
     @note Side effect: when the dropped fragment was at the operating
         threshold and no covering view is, the most confident covering view
         gets `attests_presence` True, `presence_attested_by` (fragment ids)
@@ -619,15 +639,16 @@ def _prefer_complete_views(rows, complete, overlap=_TILE_OVERLAP_FRACTION, iou=_
     for index, row in enumerate(rows):
         covering = covering_of.get(index)
         if covering:
-            # Presenza ed ingombro sono due fatti distinti. Se il frammento che
-            # cede il posto era sopra la soglia operativa, la PRESENZA del corpo
-            # e' attestata da un rilevamento sicuro: a cedere e' solo la misura
-            # dell'ingombro, che passa alla vista che lo contiene. Quella vista
-            # va quindi tenuta anche se debole, altrimenti si perderebbe due
-            # volte un corpo che era stato visto benissimo.
-            # Se una vista che lo contiene e' gia' sopra soglia, la presenza e'
-            # gia' portata da lei: nulla da promuovere. Altrimenti la promossa
-            # e' UNA sola, la piu' sicura, per non moltiplicare lo stesso corpo.
+            # Presence and footprint are two distinct facts. If the fragment
+            # giving way was above the operating threshold, the PRESENCE of
+            # the body is attested by a confident detection: only the
+            # footprint measurement gives way, passing to the view that
+            # contains it. That view must therefore be kept even if weak,
+            # otherwise a body that had been seen perfectly would be lost twice.
+            # If a view that contains it is already above threshold, presence
+            # is already carried by it: nothing to promote. Otherwise ONE view
+            # only is promoted, the most confident, so as not to multiply the
+            # same body.
             if (row.get("rejection") is None
                     and not any(other.get("rejection") is None for other in covering)):
                 best = max(covering, key=lambda other: other["confidence"])
@@ -787,9 +808,9 @@ def _nms(rows, np, trace=None, stage=None, iou=_NMS_IOU):
     return retained
 
 
-#: Quanto un frammento deve stare dentro un rilevamento intero perche' sia lo
-#: stesso corpo, gia' visto meglio: sotto questa frazione della propria area
-#: il frammento e' l'unica prova che quel corpo esista.
+#: How much of a fragment must lie inside a whole detection for it to be the
+#: same body, already seen better: below this fraction of its own area the
+#: fragment is the only evidence that the body exists.
 _FRAGMENT_COVERED = 0.5
 
 
@@ -799,44 +820,44 @@ _cover = covered_fraction
 
 
 def _recover_clipped(retained, fragments, confidence=_CONFIDENCE, iou=_NMS_IOU):
-    """@brief Ricompone i corpi che nessuna vista ha visto per intero.
+    """@brief Reassemble the bodies that no view saw whole.
 
-    @param retained Rilevamenti interni sopravvissuti alla NMS globale.
-    @param fragments Righe scartate perche' toccavano il bordo di una tessera.
-    @param confidence Soglia operativa.
-    @param iou Criterio d'identita' della NMS (`_same_body_as_fragment`).
-    @return Righe ricomposte, con la confidenza migliore del gruppo.
-    @note Il taglio di una tessera non e' prova di assenza. La regola che
-        scarta i frammenti serve a togliere i doppioni di cio' che un'altra
-        vista vede per intero: quando NESSUNA vista lo vede intero, scartare
-        significa perdere il corpo. Succede a chi e' piu' grande della
-        sovrapposizione fra tessere -- 160 px su tessere da 640 -- e allora il
-        corpo tocca un bordo in ogni tessera che lo contiene. Le sovrapposizioni
-        si potrebbero allargare, ma nessuna larghezza fissa e' garantita:
-        l'ingombro dei corpi non si conosce prima di averli visti.
-    @note L'unione dei frammenti resta un ingombro TRONCATO quando il taglio e'
-        su un bordo che nessuna tessera supera: e' un'ipotesi da rivedere, non
-        una misura, e chi la riceve la marca come tale.
-    @note Il raggruppamento usa l'identita' sulle strisce viste da entrambe le
-        tessere (dal 2026-10-08); le misure precedenti (31 frammenti, unione
-        fino a quattro volte il capostipite) valevano per il vecchio criterio
-        di sola copertura e non descrivono piu' questo. L'ingombro ricomposto
-        resta comunque un'ipotesi da rivedere, non una misura.
+    @param retained Interior detections that survived the global NMS.
+    @param fragments Rows discarded because they touched a tile edge.
+    @param confidence Operating threshold.
+    @param iou Identity criterion of the NMS (`_same_body_as_fragment`).
+    @return Reassembled rows, with the best confidence of the group.
+    @note A tile cut is not proof of absence. The rule that discards the
+        fragments exists to remove the duplicates of what another view sees
+        whole: when NO view sees it whole, discarding means losing the body.
+        It happens to whatever is larger than the overlap between tiles --
+        160 px on 640 px tiles -- and then the body touches an edge in every
+        tile that contains it. The overlaps could be widened, but no fixed
+        width is guaranteed: the extent of the bodies is not known before
+        seeing them.
+    @note The union of the fragments remains a TRUNCATED extent when the cut
+        lies on an edge that no tile goes beyond: it is a hypothesis to
+        review, not a measurement, and the receiver marks it as such.
+    @note The grouping uses the identity on the strips seen by both tiles
+        (since 2026-10-08); the earlier measurements (31 fragments, union up
+        to four times the seed) held for the old containment-only criterion
+        and no longer describe this one. The reassembled extent remains in
+        any case a hypothesis to review, not a measurement.
     """
     orphans = [row for row in fragments
                if not any(_cover(row["box"], kept["box"]) >= _FRAGMENT_COVERED
                           and _same_body_as_fragment(row, kept, iou)
                           for kept in retained)]
-    # Raggruppamento per IDENTITA', non per contenimento: due pezzi sono lo
-    # stesso corpo solo se coincidono dove entrambe le tessere vedono
-    # (_same_body_as_fragment). I gruppi sono le componenti connesse di questa
-    # relazione, cosi' un corpo tagliato da due cuciture (tre tessere, o una
-    # cucitura verticale e una orizzontale) torna un pezzo solo anche se il
-    # primo e l'ultimo pezzo non si vedono mai insieme. Il legame a catena era
-    # stato tolto perche', col solo contenimento, l'unione camminava per la
-    # scheda; con l'identita' sulle strisce comuni ogni anello deve misurare lo
-    # stesso corpo, e due corpi diversi affiancati in una striscia non si legano.
-    # Un pezzo senza legami resta un gruppo da solo.
+    # Grouping by IDENTITY, not by containment: two pieces are the same body
+    # only if they coincide where both tiles see (_same_body_as_fragment). The
+    # groups are the connected components of this relation, so a body cut by
+    # two seams (three tiles, or one vertical and one horizontal seam) comes
+    # back as a single piece even if the first and last pieces are never seen
+    # together. Chaining had been removed because, with containment alone, the
+    # union walked across the board; with identity on the shared strips every
+    # link must measure the same body, and two different bodies side by side
+    # in a strip do not get linked.
+    # A piece with no links stays a group on its own.
     ordered = sorted(orphans, key=lambda row: -row["confidence"])
     parent = list(range(len(ordered)))
 
@@ -848,11 +869,11 @@ def _recover_clipped(retained, fragments, confidence=_CONFIDENCE, iou=_NMS_IOU):
 
     for first in range(len(ordered)):
         for second in range(first + 1, len(ordered)):
-            # Solo fra viste DIVERSE: nella stessa tessera i riquadri sono
-            # ipotesi alternative dello stesso passaggio del rilevatore, e a
-            # catena l'unione crescerebbe di ipotesi in ipotesi (misurato su
-            # ESP32-S3, 08/10: 13 riquadri della stessa tessera, alti da 3.3 a
-            # 10 mm, legati in una striscia sola). I doppioni restano alla NMS.
+            # Only between DIFFERENT views: within the same tile the boxes are
+            # alternative hypotheses of the same detector pass, and chained the
+            # union would grow from hypothesis to hypothesis (measured on
+            # ESP32-S3, 08/10: 13 boxes of the same tile, from 3.3 to 10 mm
+            # tall, linked into a single strip). Duplicates are left to the NMS.
             if (ordered[first].get("view") != ordered[second].get("view")
                     and _same_body_as_fragment(ordered[first], ordered[second], iou)):
                 parent[root(second)] = root(first)
@@ -865,9 +886,9 @@ def _recover_clipped(retained, fragments, confidence=_CONFIDENCE, iou=_NMS_IOU):
         best = max(group, key=lambda row: row["confidence"])
         box = [min(row["box"][0] for row in group), min(row["box"][1] for row in group),
                max(row["box"][2] for row in group), max(row["box"][3] for row in group)]
-        # Dopo l'unione un lato resta artificiale solo se TUTTI i frammenti che
-        # lo toccano erano tagliati li': se un altro pezzo vede oltre, quel
-        # bordo e' stato misurato davvero.
+        # After the union a side stays artificial only if ALL the fragments
+        # touching it were cut there: if another piece sees beyond it, that
+        # edge was really measured.
         outer = {'left': box[0], 'top': box[1], 'right': box[2], 'bottom': box[3]}
         index_of = {'left': 0, 'top': 1, 'right': 2, 'bottom': 3}
         still_clipped = [side for side in outer
@@ -1033,14 +1054,14 @@ def _proposals(raw, bounds, image_size, transform, view, np, confidence_threshol
         cx, cy, bw, bh = map(float, prediction[:4])
         local = [(cx - bw / 2 - left) / ratio, (cy - bh / 2 - top) / ratio,
                  (cx + bw / 2 - left) / ratio, (cy + bh / 2 - top) / ratio]
-        # Quali lati poggiano sul CONFINE DELLA TESSERA e non sul corpo: sono
-        # artefatti del ritaglio, non bordi misurati, e chi li riceve deve
-        # saperlo. Un bordo interno della tessera resta escluso dal conteggio
-        # quando coincide con il bordo dell'immagine, che invece e' reale.
-        # Il margine non e' 1 px: e' l'incertezza del rilevatore sul bordo del
-        # riquadro (_tile_edge_margin_px), perche' un corpo tagliato dalla
-        # tessera torna con il lato qualche pixel DENTRO il taglio (ESP32-S3,
-        # 08/10: 636-638 su 640) e con 1 px passava per intero.
+        # Which sides rest on the TILE BOUNDARY and not on the body: they are
+        # cropping artefacts, not measured edges, and the receiver must know
+        # it. An inner tile edge is left out of the count when it coincides
+        # with the image edge, which is real instead.
+        # The margin is not 1 px: it is the detector's uncertainty on the box
+        # edge (_tile_edge_margin_px), because a body cut by the tile comes
+        # back with its side a few pixels INSIDE the cut (ESP32-S3, 08/10:
+        # 636-638 out of 640) and with 1 px it passed as whole.
         clipped_sides = [name for name, touching in (
             ('left', x > 0 and local[0] <= margin),
             ('top', y > 0 and local[1] <= margin),
@@ -1108,12 +1129,56 @@ def split_ai_candidates(proposals):
     return sent, withheld
 
 
-#: Provenienza dichiarata di un riquadro che l'utente ha spostato,
-#: ridimensionato o tracciato: la stessa stringa per tutti e tre i casi,
-#: perche' per chi sta a valle sono la stessa cosa -- l'occhio di chi guarda.
+#: Field keeping the detector's own `_yolo_review_only` verdict once a
+#: reviewer's action has overwritten the live one (user decision 2026-10-16).
+#: Deliberately without the `_yolo_` prefix: every `_yolo_*` key is forwarded
+#: as `detector_metadata` to the paid inventory request
+#: (photo_global_inventory), and a bookkeeping field of the review window must
+#: not change that request nor its cache key.
+DETECTOR_REVIEW_ONLY_FIELD = "_detector_review_only"
+
+
+def set_review_only(proposal, value):
+    """@brief Write `_yolo_review_only` on a proposal, keeping the detector's original verdict.
+
+    @param proposal Detector proposal (dict), modified in place.
+    @param value New boolean value of `_yolo_review_only`.
+    @note The one writer of `_yolo_review_only` after the detector: the first
+        time a reviewer's action (keep, leave out, edit, move, resize) changes
+        it, the value the detector wrote is stored once in
+        DETECTOR_REVIEW_ONLY_FIELD and never overwritten afterwards, so the
+        detector's own strong/weak count survives every later gesture
+        and every save/reopen of the review bundle.
+    """
+    if DETECTOR_REVIEW_ONLY_FIELD not in proposal:
+        proposal[DETECTOR_REVIEW_ONLY_FIELD] = bool(proposal.get("_yolo_review_only"))
+    proposal["_yolo_review_only"] = bool(value)
+
+
+def detector_review_only(proposal) -> bool:
+    """@brief Tell whether the DETECTOR left this proposal for review (a «debole» one).
+
+    @param proposal Detector proposal (dict).
+    @return The stored detector verdict when a reviewer's action overwrote
+        `_yolo_review_only`; otherwise `_yolo_review_only` itself.
+    @note The fallback is exact, not an estimate: a proposal without
+        DETECTOR_REVIEW_ONLY_FIELD was never touched through set_review_only,
+        so its live value is still the detector's. The only case it cannot
+        recover is a proposal changed and saved by a version older than the
+        field: there the reviewer's choice already replaced the detector's
+        verdict on disk and nothing else records it.
+    """
+    if DETECTOR_REVIEW_ONLY_FIELD in proposal:
+        return bool(proposal[DETECTOR_REVIEW_ONLY_FIELD])
+    return bool(proposal.get("_yolo_review_only"))
+
+
+#: Declared provenance of a box the user has moved, resized or drawn: the
+#: same string for all three cases, because downstream they are the same
+#: thing -- the eye of the person looking.
 MANUAL_SOURCE = "revisione manuale"
 
-#: Maniglia «interno» di mark_manual_box: uno spostamento, nessun lato guardato.
+#: «interno» (inner) handle of mark_manual_box: a move, no side looked at.
 MOVE_HANDLE = (0, 0)
 
 
@@ -1159,8 +1224,9 @@ def mark_manual_box(proposal, handle=MOVE_HANDLE):
     @note Reviewer's decision: the hand of whoever looks IS the decision of
         presence. A weak proposal (`_yolo_review_only`) that was moved or
         resized is no longer a low-confidence hypothesis -- the eye verified
-        it -- so `_yolo_review_only` becomes False, the previous origin kept
-        in `_yolo_origin_before_manual`. Same rule for the sub-threshold ones:
+        it -- so `_yolo_review_only` becomes False (through set_review_only,
+        which keeps the detector's verdict for its own count), the previous
+        origin kept in `_yolo_origin_before_manual`. Same rule for the sub-threshold ones:
         touching one is keeping it (`_yolo_user_kept`, awaiting_user_keep).
     """
     if not proposal.get("_yolo_manual_box"):
@@ -1186,7 +1252,7 @@ def mark_manual_box(proposal, handle=MOVE_HANDLE):
     if proposal.get("_yolo_review_only"):
         if "_yolo_origin" in proposal and "_yolo_origin_before_manual" not in proposal:
             proposal["_yolo_origin_before_manual"] = proposal["_yolo_origin"]
-        proposal["_yolo_review_only"] = False
+        set_review_only(proposal, False)
     if proposal.get("_yolo_low_confidence"):
         proposal["_yolo_user_kept"] = True
 
@@ -1319,7 +1385,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
     if log is not None and not callable(log):
         raise ValueError("log must be callable or None.")
     emit = log if log is not None else lambda message: None
-    # Solo numpy/OpenCV qui: onnxruntime serve ai soli .onnx (vedi _setup).
+    # Only numpy/OpenCV here: onnxruntime is needed only for .onnx (see _setup).
     np, cv2 = _image_dependencies()
     if (not isinstance(photo, np.ndarray) or photo.ndim != 3
             or photo.shape[2] != 3 or min(photo.shape[:2]) <= 0
@@ -1356,8 +1422,8 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             result = session.run(None, {input_name: tensor})
             if (len(result) != 1 or not isinstance(result[0], np.ndarray)
                     or result[0].shape != expected_shape or result[0].dtype != np.float32):
-                # La forma misurata al caricamento, per ogni modello: 8400 righe
-                # per l'ONNX (contratto invariato), quella della testa per un .pt.
+                # The shape measured at load time, for each model: 8400 rows
+                # for the ONNX (contract unchanged), the head's one for a .pt.
                 raise ValueError(f"expected float32 output {list(expected_shape)}")
         except Exception as exc:
             raise ValueError(f"Local YOLO inference failed in {view}: {exc}") from exc
@@ -1366,11 +1432,11 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         eligible = [row for row in rows if row["rejection"] is None]
         selected = _nms(eligible, np, nms_trace, "eligible_per_view", nms_iou)
         candidates.extend(selected)
-        # Raccolti sempre, non solo per l'audit: senza di loro un corpo piu'
-        # grande della sovrapposizione fra tessere non arriva da nessuna parte.
+        # Always collected, not only for the audit: without them a body larger
+        # than the overlap between tiles gets nowhere.
         fragments.extend(row for row in rows if row["rejection"] == "clipped_by_tile")
-        # Chi ha visto un corpo per intero conta come misura anche sotto la
-        # soglia operativa: e' un fatto geometrico, non un giudizio.
+        # A view that saw a body whole counts as a measurement even below the
+        # operating threshold: it is a geometric fact, not a judgement.
         whole.extend(row for row in rows if not row["clipped_sides"]
                      and row["rejection"] in (None, "below_confidence"))
         if audit_dir is not None or include_review_candidates:
@@ -1386,28 +1452,28 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "raw_proposals": len(rows), "retained_before_global_nms": len(selected)})
         emit(f"YOLO local {view}: {len(selected)} candidates; {invalid} invalid rows rejected.")
     retained = _nms(candidates, np, nms_trace, "global", nms_iou)
-    # Cio' che nessuna vista ha visto intero torna in gioco: sopra soglia come
-    # candidato, sotto soglia come ipotesi da rivedere, come qualunque altro.
+    # What no view saw whole comes back into play: above threshold as a
+    # candidate, below threshold as a hypothesis to review, like any other.
     recovered = _recover_clipped(retained, fragments, threshold, nms_iou)
     confident = [row for row in recovered if row["rejection"] is None]
     if confident:
         retained = _nms(retained + confident, np, nms_trace, "global_with_recovered", nms_iou)
     retained.sort(key=lambda row: (row["box"][1], row["box"][0]))
-    # Chi ha visto un corpo per intero vale come misura anche se non era
-    # abbastanza sicuro da diventare un candidato.
+    # A view that saw a body whole counts as a measurement even if it was not
+    # confident enough to become a candidate.
     before_preference = len(retained)
     retained = _prefer_complete_views(retained, whole, overlap, nms_iou)
     if len(retained) < before_preference:
         emit(f"YOLO local: {before_preference - len(retained)} clipped detections dropped; "
              "they are larger than the tile overlap, so that view could not measure them, "
              "and a view containing them whole is available.")
-    # Presenza e ingombro restano due fatti distinti. Il frammento sicuro che
-    # ha ceduto il posto ATTESTA che il corpo c'e': la vista che lo contiene
-    # ne da' solo la misura. Se quella vista e' sotto soglia, il corpo esce
-    # comunque come corpo a soglia operativa -- sempre, anche senza revisione
-    # -- con la marca che la sua geometria viene dalla vista piu' debole.
-    # Prima restava «below_confidence»: diventava un'ipotesi da rivedere e
-    # spariva del tutto senza include_review_candidates.
+    # Presence and footprint stay two distinct facts. The confident fragment
+    # that gave way ATTESTS that the body is there: the view that contains it
+    # only provides its measurement. If that view is below threshold, the body
+    # still comes out as an operating-threshold body -- always, even without
+    # review -- marked as having its geometry from the weaker view.
+    # Before, it stayed «below_confidence»: it became a hypothesis to review
+    # and disappeared entirely without include_review_candidates.
     attested = [dict(row, rejection=None, geometry_from_weaker_view=True)
                 for row in whole if row.get("attests_presence")
                 and row.get("rejection") == "below_confidence"]
@@ -1432,24 +1498,24 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             [row for row in _nms(review_pool, np, review_trace, "review_pool", nms_iou)
              if row["rejection"] == "below_confidence"],
             whole, overlap, nms_iou)
-    # Le proposte deboli tornano VISIBILI nella revisione (utente, 26/09):
-    # prima sparivano, perche' sulla scheda di prova erano 35 su 82, quasi
-    # tutte su zone vuote, e rendevano piu' rumorosa (e piu' cara) l'unica
-    # chiamata a pagamento. Ma una confidenza bassa non e' prova di assenza, e
-    # la soglia che le separava viene da quella scheda. Ora escono marcate
-    # `_yolo_low_confidence`: la revisione le mostra tratteggiate e NON tenute,
-    # e nessun percorso a pagamento le manda al modello se l'utente non le
-    # tiene (awaiting_user_keep / split_ai_candidates).
-    # Anche i corpi RICOMPOSTI dalle cuciture sotto soglia sono marcati (utente,
-    # 08/10): la loro confidenza e' quella del pezzo MIGLIORE, quindi nessun
-    # pezzo ha raggiunto la soglia -- il taglio non spiega un punteggio basso
-    # su ogni pezzo. Prima restavano tenuti per default e una striscia di
-    # serigrafia a 0,10 entrava fra i corpi. Le viste che attestano una
-    # presenza non passano da qui: sono gia' fra i corpi a soglia operativa
-    # (vedi `attested` sopra).
-    # Cio' che sta sulla superficie di un corpo gia' trovato (lamierino,
-    # etichetta, piedini, connettore montato sul modulo) non e' un altro
-    # corpo: retrocesso a proposta da tenere a mano, mai cancellato.
+    # Weak proposals come back VISIBLE in the review (user, 26/09): before,
+    # they disappeared, because on the test board they were 35 out of 82,
+    # almost all on empty areas, and made the only paid call noisier (and
+    # more expensive). But a low confidence is no proof of absence, and the
+    # threshold that separated them came from that board. Now they come out
+    # marked `_yolo_low_confidence`: the review shows them dashed and NOT
+    # kept, and no paid path sends them to the model unless the user keeps
+    # them (awaiting_user_keep / split_ai_candidates).
+    # Bodies REASSEMBLED from below-threshold seams are marked too (user,
+    # 08/10): their confidence is that of the BEST piece, so no piece reached
+    # the threshold -- the cut does not explain a low score on every piece.
+    # Before, they stayed kept by default and a silkscreen strip at 0.10
+    # entered the bodies. Views that attest a presence do not pass through
+    # here: they are already among the operating-threshold bodies (see
+    # `attested` above).
+    # What lies on the surface of an already found body (shield can, label,
+    # leads, connector mounted on the module) is not another body: demoted to
+    # a proposal to be kept by hand, never deleted.
     on_body = _on_body_surface(retained, review_proposals, max(threshold, _CONFIDENCE))
     if on_body:
         emit(f"YOLO local: {len(on_body)} boxes lie on a body already found (centre inside "
@@ -1464,9 +1530,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         x0, y0, x1, y1 = [v / dim for v, dim in zip(row["box"], (width, height, width, height))]
         sx, sy = (x1 - x0) * length_mm, (y1 - y0) * width_mm
         low_confidence = row["rejection"] == "below_confidence" or bool(row.get("on_body_of"))
-        # Altezza: stima dalla classe del rilevatore e dalla pianta, mai una
-        # misura (photo_heights). Una classe ambigua o senza regola resta il
-        # segnaposto dichiarato di sempre.
+        # Height: estimate from the detector class and the footprint, never a
+        # measurement (photo_heights). An ambiguous class or one without a
+        # rule keeps the usual declared placeholder.
         estimate = (None if row["class_ambiguous"]
                     else estimate_body_height(row["class"], sx, sy))
         body_height, height_basis = estimate if estimate is not None else (
@@ -1488,22 +1554,22 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             "_yolo_class": row["class"], "_yolo_confidence": row["confidence"],
             "_yolo_proposal_id": row["proposal_id"],
             "_yolo_class_ambiguous": row["class_ambiguous"],
-            # L'ingombro di un corpo ricomposto e' troncato dal bordo che lo ha
-            # tagliato: e' un'ipotesi da rivedere, non una misura.
+            # The footprint of a reassembled body is truncated by the edge
+            # that cut it: it is a hypothesis to review, not a measurement.
             "_yolo_clipped_recovery": bool(row.get("recovered_from")),
-            # Lati che poggiano sul confine di una tessera: non sono misure.
+            # Sides resting on a tile boundary: they are not measurements.
             "_yolo_clipped_sides": list(row.get("clipped_sides") or ()),
             "_yolo_origin": ("low_confidence_review" if row["rejection"] == "below_confidence"
                              else "operating_threshold"),
             "_yolo_review_only": low_confidence,
-            # Sotto soglia, ricomposta o no: visibile in revisione, ma da
-            # tenere a mano prima di qualunque uso (awaiting_user_keep).
+            # Below threshold, reassembled or not: visible in the review, but
+            # to be kept by hand before any use (awaiting_user_keep).
             "_yolo_low_confidence": low_confidence,
-            # Sulla superficie di questo corpo (proposal_id): vedi _on_body_surface.
+            # On the surface of this body (proposal_id): see _on_body_surface.
             **({"_yolo_on_body_of": row["on_body_of"],
                 "_yolo_abuts_body": bool(row.get("abuts_body"))} if row.get("on_body_of") else {}),
-            # Presenza attestata da un frammento sicuro, ingombro misurato da
-            # una vista che lo contiene per intero ma con meno confidenza.
+            # Presence attested by a confident fragment, footprint measured by
+            # a view that contains it whole but with less confidence.
             "_yolo_geometry_from_weaker_view": bool(row.get("geometry_from_weaker_view")),
             **({"_yolo_presence_attested_by": list(row.get("presence_attested_by") or ()),
                 "_yolo_presence_confidence": row.get("presence_confidence")}
@@ -1522,9 +1588,9 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "raw_proposal_min_confidence": _AUDIT_CONFIDENCE,
                              "include_review_candidates": include_review_candidates,
                              "nms_iou": nms_iou, "class_agnostic": True,
-                             # Tutte le passate di NMS che girano, nell'ordine;
-                             # review_pool traccia a parte (review_nms_suppressions)
-                             # perche' li' le deboli competono con i corpi tenuti.
+                             # All the NMS passes that run, in order;
+                             # review_pool is tracked separately (review_nms_suppressions)
+                             # because there the weak ones compete with the kept bodies.
                              "nms_stages": ["eligible_per_view", "global",
                                             "global_with_recovered", "presence_attested",
                                             "review_pool"],

@@ -55,7 +55,7 @@ def test_without_the_review_an_excluded_body_is_neither_in_the_table_nor_in_the_
     assert [r["name"] for r in window._photo_excluded_rows] == ["L1"]
     log = _log(window)
     assert "1 corpi aggiunti dal solo modello" in log
-    assert "Modifica la revisione dei componenti" in log
+    assert "«Revisione componenti…»" in log, "the log names the real button"
 
 
 def test_a_kept_ai_only_body_enters_the_table_and_the_3d(window, monkeypatch):

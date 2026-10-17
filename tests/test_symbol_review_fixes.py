@@ -133,6 +133,10 @@ def test_b3_without_pending_edits_nothing_is_offered_or_copied(qapp, tmp_path):
 
 def test_b3_another_project_draft_is_not_offered_but_kept_on_disk(qapp, tmp_path):
     path = tmp_path / "a" / ".symbol-draft.json"
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    path.parent.mkdir()
+    (tmp_path / "b").mkdir()
     tab = SymbolTab()
     try:
         tab.set_data("Alpha", _rows(), "L:Alpha", _ids())
@@ -440,6 +444,10 @@ def _restart(path, rows, count, name="Board"):
 def test_f1_same_name_in_another_library_root_never_receives_the_draft(qapp, tmp_path):
     pa = tmp_path / "rootA" / "Board" / ".symbol-draft.json"
     pb = tmp_path / "rootB" / "Board" / ".symbol-draft.json"
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    pa.parent.mkdir(parents=True)
+    pb.parent.mkdir(parents=True)
     other = SymbolTab()
     _flow(other, pb, _rows(), 4)
     b_baseline = other.rows()
@@ -480,6 +488,9 @@ def test_f1_same_name_in_another_library_root_never_receives_the_draft(qapp, tmp
 def test_f1_same_project_path_still_rebases(qapp, tmp_path):
     """Negative: the same recovery path is the same project, the draft is carried."""
     path = tmp_path / "rootA" / "Board" / ".symbol-draft.json"
+    # CONTRACT CHANGED (audit L3, 2026-10-15): drafts never create the project
+    # folder; a real project has one from «Nuovo progetto» on.
+    path.parent.mkdir(parents=True)
     tab = SymbolTab()
     try:
         _flow(tab, path, _rows(), 4)

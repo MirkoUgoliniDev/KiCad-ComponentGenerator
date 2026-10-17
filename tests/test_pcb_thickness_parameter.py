@@ -129,6 +129,9 @@ def test_a_single_component_keeps_the_value_of_its_documents(window):
     _select_type(window, "single_tht")
     window.group_3d.setChecked(True)
     window._extracted_pcb_thickness = None
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     window.field_cast_pcb.setValue(1.0)
     assert window._current_body_params().pcb_thickness_mm is None
 

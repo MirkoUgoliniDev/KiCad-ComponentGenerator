@@ -65,10 +65,13 @@ def test_header_and_symbol_flags_follow_the_kicad_10_library_format():
 
 def test_properties_carry_show_name_autoplace_and_hide_forms():
     text = serialize_symbol('M', [SymbolPin('1', 'A')], footprint='L:F')
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): unmoved
+    # visible properties are centred KiCad texts on the centre line x = 0,
+    # with no justify (from 2026-10-16 they were bottom-left anchors).
     visible = re.findall(r'\(property "(Reference|Value)" "([^"]*)" \(at 0 ([\d.]+) 0\) \(show_name no\) '
                          r'\(do_not_autoplace no\) \(effects \(font \(size 1.27 1.27\)\)\)\)', text)
     assert [(key, value) for key, value, _ in visible] == [('Reference', 'U'), ('Value', 'M')]
-    assert float(visible[0][2]) > float(visible[1][2]) > 5.08, 'Reference above Value, both above the body'
+    assert float(visible[0][2]) > float(visible[1][2]) > 5.08 - 0.75, 'Reference above Value, both above the body'
     hidden = re.findall(r'\(property "(\w+)" "([^"]*)" \(at 0 0 0\) \(show_name no\) \(do_not_autoplace no\) '
                         r'\(hide yes\) \(effects \(font \(size 1.27 1.27\)\)\)\)', text)
     assert hidden == [('Footprint', 'L:F'), ('Datasheet', ''), ('Description', '')]

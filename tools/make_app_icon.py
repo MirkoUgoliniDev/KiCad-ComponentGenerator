@@ -17,7 +17,12 @@ SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
 def main(argv):
-    """@brief Write the .ico; return the process exit status."""
+    """@brief Write the .ico; return the process exit status.
+
+    @param argv Command-line arguments; `argv[1]` is the optional target
+        path of the .ico.
+    @return 0 on success, 1 when the source SVG cannot be rendered.
+    """
     from PIL import Image
     from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt
     from PyQt6.QtGui import QImage, QPainter

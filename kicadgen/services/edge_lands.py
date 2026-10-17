@@ -104,7 +104,12 @@ class LandMeasure:
     reason: str = ""
 
     def as_dict(self) -> dict:
-        """@brief JSON-friendly copy for the extraction answer (`_measured_lands`)."""
+        """@brief JSON-friendly copy for the extraction answer (`_measured_lands`).
+
+        @return A plain dict with the edge, the land width and inward extent in
+            mm, the tolerance in mm, the contact pairs as lists, the rejected
+            entries and the reason text.
+        """
         return dict(edge=self.edge, width_mm=self.width_mm, inward_mm=self.inward_mm,
                     tolerance_mm=self.tolerance_mm,
                     contacts=[list(pair) for pair in self.contacts], rejected=list(self.rejected),
@@ -604,7 +609,12 @@ class HoleStyle:
     reason: str = ""
 
     def as_dict(self) -> dict:
-        """@brief JSON-friendly copy for the extraction answer (`_measured_holes`)."""
+        """@brief JSON-friendly copy for the extraction answer (`_measured_holes`).
+
+        @return A plain dict with the edge, the hole style, the contact and
+            agreeing counts, the drill and chord diameters in mm (None when not
+            measured) and the reason text.
+        """
         return dict(edge=self.edge, style=self.style, contacts=self.contacts,
                     agreeing=self.agreeing, drill_mm=self.drill_mm, chord_mm=self.chord_mm,
                     reason=self.reason)

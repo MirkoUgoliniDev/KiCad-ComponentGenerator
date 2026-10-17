@@ -102,12 +102,12 @@ class _Job(QRunnable):
                 result = {"ok": True, "classes": list(info.get("model_classes") or []),
                           "missing": list(info.get("missing_classes") or []),
                           "order": info.get("class_order", "")}
-        except Exception as exc:  # noqa: BLE001 - mostrato nella finestra
+        except Exception as exc:  # noqa: BLE001 - shown in the window
             result = ({"ok": False, "error": str(exc)} if self.kind == "check" else None)
         except BaseException as exc:  # noqa: BLE001 - see below
-            # Un'eccezione che esce da un QRunnable fa terminare il processo
-            # (Qt, senza traceback): nemmeno una BaseException deve uscire da
-            # qui. Il risultato e' un errore visibile, come per Exception.
+            # An exception escaping a QRunnable terminates the process (Qt,
+            # without a traceback): not even a BaseException must escape from
+            # here. The result is a visible error, as for Exception.
             result = ({"ok": False, "error": type(exc).__name__} if self.kind == "check"
                       else None)
         self.signals.ready.emit(self.kind, self.path, result)
@@ -196,7 +196,7 @@ class YoloModelDialog(QDialog):
         layout.addLayout(bottom)
         self._fill()
 
-    # ── elenco ────────────────────────────────────────────────────────
+    # ── list ──────────────────────────────────────────────────────────
 
     def _fill(self, select: str = "") -> None:
         """Rebuild the list and select `select`, else the model in use."""
@@ -235,7 +235,10 @@ class YoloModelDialog(QDialog):
             == os.path.normcase(os.path.abspath(str(second))))
 
     def selected_path(self) -> str:
-        """@brief Path of the selected file, or "" when the list is empty."""
+        """@brief Path of the selected file, or "" when the list is empty.
+
+        @return The weights path stored in the current list item, or "".
+        """
         item = self.model_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item is not None else ""
 
@@ -248,7 +251,7 @@ class YoloModelDialog(QDialog):
             self._extra.append(selected)
             self._fill(select=selected)
 
-    # ── dettagli ──────────────────────────────────────────────────────
+    # ── details ───────────────────────────────────────────────────────
 
     def _start(self, kind: str, path: str) -> None:
         if self._closed:
@@ -296,8 +299,8 @@ class YoloModelDialog(QDialog):
             self._start("check", path)
         self.check_button.setVisible(check is None and facts.runs_code_when_loaded
                                      and not self._running(path, "check"))
-        # Un modello che il rilevatore ha rifiutato non si sceglie: fallirebbe
-        # all'analisi, dopo aver preparato tutto il resto.
+        # A model the detector rejected cannot be chosen: it would fail at
+        # analysis time, after everything else has been prepared.
         ok_button.setEnabled(not (check and not check.get("ok")))
         self.details.setText(self._details_html(facts, digest, check, path))
 

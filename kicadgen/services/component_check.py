@@ -109,6 +109,9 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         unapplied draft: the footprint checked is the applied one on disk,
         and a warning says the draft is not included.
     @return The list of Check results.
+    @note No exception escapes for a footprint without electrical pads or an
+        incomplete STEP file: the ValueError raised internally is caught and
+        reported as an ERROR check.
     """
     results = []
     def add(status, title, detail):
@@ -282,7 +285,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             else:
                 add('SKIP', tx('Importazione 3D in KiCad'), tx('Footprint mancante.'))
         except (OSError, ValueError, RuntimeError) as exc:
-            add('ERROR', tx('Modello 3D'), exc)
+            add('ERROR', tx('Modello STEP'), exc)
     add('WARN', tx('Verifiche manuali'),
         tx('Confrontare pinout e misure con la documentazione; verificare visivamente posizione, scala e orientamento 3D. Il test 3D usa il collegamento normalizzato della libreria generata. Registrazione nelle librerie installate, ERC dello schema e DRC della scheda finale non verificati.'))
     return results

@@ -231,7 +231,7 @@ class ComponentCheckDialog(QDialog):
             elif result.status == 'WARN' and result.title == self.tx('Collegamento 3D originale') \
                     and result.detail == missing_3d:
                 actions.append(self.tx(
-                    'Installa la libreria dal tab KiCad e verifica il modello 3D nella libreria installata.'))
+                    'Installa la libreria dal tab KiCad e verifica il modello STEP nella libreria installata.'))
             elif result.status == 'ERROR':
                 actions.append(self.tx('Apri i dettagli tecnici e correggi: {item}.').format(
                     item=result.title))
@@ -272,7 +272,10 @@ class ComponentCheckDialog(QDialog):
             super().reject()
 
     def closeEvent(self, event):
-        """@brief Keep the dialog alive while its verification thread runs."""
+        """@brief Keep the dialog alive while its verification thread runs.
+
+        @param event Qt close event; ignored while the worker is running.
+        """
         if self._running:
             event.ignore()
         else:

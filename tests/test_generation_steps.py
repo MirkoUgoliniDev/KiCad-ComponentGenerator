@@ -64,7 +64,7 @@ def test_the_worker_shows_freecad_while_it_measures_then_the_kicad_library():
 
 def test_each_phase_moves_the_step_row(window):  # noqa: F811
     overlay = window.analysis_overlay
-    overlay.start("Generazione footprint e modello 3D")
+    overlay.start("Generazione footprint e modello STEP")
     window._show_generation_steps(object(), body=object())
     assert "1 · Footprint 2D (KiCadGen)" in overlay.steps_plain_text()
     window._on_phase("footprint", "scrittura del file .kicad_mod", 0, 0)
@@ -84,7 +84,7 @@ def test_each_phase_moves_the_step_row(window):  # noqa: F811
 def test_without_freecad_steps_two_and_three_say_why(window):  # noqa: F811
     """@brief Negativo: senza FreeCAD i passi 2 e 3 non spariscono in silenzio."""
     overlay = window.analysis_overlay
-    overlay.start("Generazione footprint e modello 3D")
+    overlay.start("Generazione footprint e modello STEP")
     window._freecad_available = False
     window._show_generation_steps(object(), body=None)
     text = overlay.steps_plain_text()
@@ -95,7 +95,7 @@ def test_without_freecad_steps_two_and_three_say_why(window):  # noqa: F811
 
 def test_a_single_phase_operation_has_no_step_row(window):  # noqa: F811
     overlay = window.analysis_overlay
-    overlay.start("Generazione footprint e modello 3D")
+    overlay.start("Generazione footprint e modello STEP")
     window._show_generation_steps(object(), body=object())
     overlay.start("Analisi AI in corso")
     assert not overlay.steps.isVisibleTo(overlay)
@@ -108,11 +108,11 @@ def test_a_finished_job_keeps_the_card_until_chiudi(window):  # noqa: F811
     """@brief Positivo: a lavoro riuscito tutti i passi spuntati, niente «Interrompi», chiusura solo al clic."""
     from PyQt6.QtTest import QSignalSpy
     overlay = window.analysis_overlay
-    overlay.start("Generazione modello 3D", abortable=True)
-    overlay.set_steps(["Modelli 3D dalla libreria KiCad", "Solido 3D con FreeCAD"])
+    overlay.start("Generazione modello STEP", abortable=True)
+    overlay.set_steps(["Modelli STEP dalla libreria KiCad", "Solido 3D con FreeCAD"])
     overlay.set_current_step(1)
     closed = QSignalSpy(overlay.closed)
-    window._hold_completed_overlay("Completato: modello 3D rigenerato.")
+    window._hold_completed_overlay("Completato: modello STEP rigenerato.")
     assert overlay.is_holding_completed()
     text = overlay.steps_plain_text()
     assert "✓ 1" in text and "✓ 2" in text, "anche il passo FreeCAD e' spuntato"
@@ -137,8 +137,8 @@ def test_a_single_phase_operation_is_not_held(window):  # noqa: F811
 def test_the_steps_are_listed_one_under_the_other(window):  # noqa: F811
     """@brief Utente 26/09: un passo per riga, nell'ordine, senza frecce fra l'uno e l'altro."""
     overlay = window.analysis_overlay
-    overlay.start("Generazione footprint e modello 3D")
-    overlay.set_steps(["Footprint 2D (KiCadGen)", "Modelli 3D dalla libreria KiCad",
+    overlay.start("Generazione footprint e modello STEP")
+    overlay.set_steps(["Footprint 2D (KiCadGen)", "Modelli STEP dalla libreria KiCad",
                        "Solido 3D con FreeCAD"])
     overlay.set_current_step(1)
     lines = [line for line in overlay.steps_plain_text().splitlines() if line.strip()]

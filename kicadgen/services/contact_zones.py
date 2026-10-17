@@ -1,41 +1,41 @@
-"""@brief Dove stanno i contatti del modulo, secondo cio' che e' stato dichiarato.
+"""@brief Where the module's contacts are, according to what was declared.
 
-Il rilevatore locale scambia regolarmente le file di piazzole per componenti:
-sulla scheda di prova le ha chiamate «switch», «battery», «clock». Filtrarle
-per classe non serve -- la classe che il modello assegna e' proprio quella
-sbagliata -- e nemmeno per dimensione, perche' una piazzola e un condensatore
-0603 misurano uguale.
+The local detector regularly mistakes rows of pads for components: on the
+test board it called them «switch», «battery», «clock». Filtering them by
+class is useless -- the class the model assigns is exactly the wrong one --
+and so is filtering by size, because a pad and a 0603 capacitor measure the
+same.
 
-Ma la posizione dei contatti non e' un'incognita: l'estrazione la dichiara
-(lati, numero, passo, offset) ed e' la stessa geometria con cui il footprint
-disegna le piazzole. Un riquadro che copre il RAME di un contatto dichiarato, e
-che e' piccolo quanto il passo, e' quel contatto (contact_proposals).
+But the position of the contacts is not an unknown: the extraction declares
+it (sides, count, pitch, offset) and it is the same geometry the footprint
+draws the pads with. A box that covers the COPPER of a declared contact, and
+that is as small as the pitch, is that contact (contact_proposals).
 
-Dal 2026-09-27 (utente: «regola generale, non una pezza») il criterio del
-filtro e' strutturale e non dipende piu' dalla profondita' della striscia: il
-rame di un contatto di bordo arriva al bordo della scheda, quindi un riquadro
-su quella piazzola TOCCA il bordo; un corpo montato accanto al contatto non lo
-tocca. Prima bastava che il centro cadesse nella striscia, e quando la piazzola
-non era quotata la striscia prendeva il PASSO come lunghezza: su un lato a
-passo 5,08 mm era profonda 6,7 mm e cancellava i corpi montati vicino ai
-contatti prima di qualunque revisione. Il passo non e' piu' una lunghezza di
-ripiego (_pad_length).
+Since 2026-09-27 (user: «regola generale, non una pezza», a general rule,
+not a patch) the filter criterion is structural and no longer depends on the
+depth of the strip: the copper of an edge contact reaches the board edge, so
+a box on that pad TOUCHES the edge; a body mounted next to the contact does
+not. Before, it was enough that the centre fell inside the strip, and when
+the pad was not dimensioned the strip took the PITCH as its length: on a
+side with a 5.08 mm pitch it was 6.7 mm deep and deleted the bodies mounted
+near the contacts before any review. The pitch is no longer a fallback
+length (_pad_length).
 
-EURISTICA DICHIARATA (non una regola fisica). Posizione, passo e lunghezza
-della piazzola sono quote dichiarate; non lo sono i margini con cui la
-striscia del contatto viene allargata: la profondita' aggiunge mezzo foro e
-_LABEL_GAP_MM per la sigla serigrafata, e la tolleranza lungo il bordo e'
-_BAND_TOLERANCE (mezzo passo). Sono convenzioni: la prima e' come QUESTO
-programma dispone la serigrafia, non come l'ha stampata il produttore del
-pezzo; la seconda e' la meta' del passo, cioe' il confine con il contatto
-vicino. Sono state osservate, non misurate, sulla scheda di prova (moduli
-castellated a passo 2,54 mm), dove il rilevatore annotava piazzola e sigla
-insieme. Le renderebbe superflue una misura della serigrafia reale (per
-esempio la maschera delle piazzole ricavata dalla foto, o le quote della
-serigrafia nel disegno meccanico). Dal 27/09 la striscia (depth_mm) serve solo
-alla maschera della misura dei bordi (contact_rects_mm): il filtro delle
-proposte usa il contatto fisico con il rame, e una sigla serigrafata accanto al
-contatto non viene piu' tolta per posizione -- la scarta l'AI come serigrafia.
+DECLARED HEURISTIC (not a physical rule). Position, pitch and pad length are
+declared quantities; the margins by which the contact strip is widened are
+not: the depth adds half a hole and _LABEL_GAP_MM for the silkscreen label,
+and the tolerance along the edge is _BAND_TOLERANCE (half a pitch). They are
+conventions: the first is how THIS program lays out the silkscreen, not how
+the manufacturer of the part printed it; the second is half the pitch, that
+is the boundary with the neighbouring contact. They were observed, not
+measured, on the test board (castellated modules with a 2.54 mm pitch), where
+the detector annotated pad and label together. A measurement of the real
+silkscreen would make them superfluous (for instance the pad mask derived
+from the photo, or the silkscreen dimensions in the mechanical drawing).
+Since 27/09 the strip (depth_mm) serves only the mask of the edge
+measurement (contact_rects_mm): the proposal filter uses the physical contact
+with the copper, and a silkscreen label next to the contact is no longer
+removed by position -- the AI discards it as silkscreen.
 """
 from __future__ import annotations
 
@@ -49,19 +49,19 @@ from ..generators.castellated_module import (
     AssumedSize, CastellatedModuleParams, CastellatedSide,
 )
 
-#: Quanto puo' sporgere un corpo oltre la banda dei contatti restando un
-#: contatto: mezza piazzola. Oltre, e' un corpo che ci sta sopra o accanto.
-#: EURISTICA (vedi docstring del modulo): mezzo passo e' il confine con il
-#: contatto vicino, non una misura della piazzola annotata dal rilevatore.
+#: How far a body may protrude beyond the contact band and still be a
+#: contact: half a pad. Beyond that, it is a body sitting on top or beside.
+#: HEURISTIC (see the module docstring): half a pitch is the boundary with
+#: the neighbouring contact, not a measurement of the pad annotated by the detector.
 _BAND_TOLERANCE = 0.5
 
-#: Distanza fra la fine della piazzola e la sua sigla serigrafata, come la
-#: dispone il generatore del footprint (`label_gap` in step_generator): mezzo
-#: foro piu' questo margine. Non e' stato scelto per far tornare un caso, ma
-#: resta un'EURISTICA: e' la convenzione con cui questo programma disegna la
-#: serigrafia, e che le sigle stampate sul pezzo reale stiano grosso modo li'
-#: e' un'osservazione sulla scheda di prova, non una misura (vedi docstring
-#: del modulo per cosa la renderebbe superflua).
+#: Distance between the end of the pad and its silkscreen label, as the
+#: footprint generator lays it out (`label_gap` in step_generator): half a
+#: hole plus this margin. It was not chosen to make a case fit, but it stays
+#: a HEURISTIC: it is the convention with which this program draws the
+#: silkscreen, and that the labels printed on the real part sit roughly there
+#: is an observation on the test board, not a measurement (see the module
+#: docstring for what would make it unnecessary).
 _LABEL_GAP_MM = 0.55
 
 
@@ -83,9 +83,9 @@ def _side_value(side, *names):
     return None
 
 
-#: Campi che il CastellatedSide installato accetta: i diametri per lato sono
-#: arrivati dopo, e un lato costruito con un campo che la classe non conosce
-#: fermerebbe il filtro dei contatti per un dato accessorio.
+#: Fields the installed CastellatedSide accepts: the per-side diameters came
+#: later, and a side built with a field the class does not know would stop
+#: the contact filter over an accessory datum.
 _SIDE_FIELDS = frozenset(field.name for field in dataclasses.fields(CastellatedSide))
 
 
@@ -134,12 +134,12 @@ def declared_module(data, length_mm, width_mm):
     """@brief The castellated module the footprint would draw from the declared quantities.
 
     @param data Extracted parameters (raw): castellated_sides with edge, count,
-        pitch_mm, offset_mm, contact_style and the optional per-side hole sizes
+        pitch_mm, offset_mm, contact_style and the optional side-level hole sizes
         half_hole_diameter_mm (legacy hole_diameter_mm) and
         through_hole_drill_mm; module-wide drill_mm / pad_diameter_mm for the
         through-hole and row_spacing_mm.
-    @param length_mm Board extent along X.
-    @param width_mm Board extent along Y.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
     @return (CastellatedModuleParams, list of (declared side, CastellatedSide))
         for the sides that carry a valid edge, count and pitch.
     @note Hole sizes and through-hole positions are then read per side with
@@ -152,7 +152,7 @@ def declared_module(data, length_mm, width_mm):
         the row spacing, so it could disagree with the footprint it filters for.
     @note Tolerant of side descriptions that are objects rather than dicts
         (attributes pitch/offset/hole_diameter/... as CastellatedSide names
-        them), and of an installed CastellatedSide without the per-side size
+        them), and of an installed CastellatedSide without the side-level size
         fields: those sizes are then simply not passed.
     """
     pairs = []
@@ -179,8 +179,8 @@ def declared_module(data, length_mm, width_mm):
     declared = data if isinstance(data, dict) else {}
     module = CastellatedModuleParams(
         body_length=length_mm, body_width=width_mm, sides=[built for _, built in pairs],
-        # None = non dichiarato: il generatore usa la sua quota di riferimento.
-        # Stima o valore senza provenienza = AssumedSize (vedi _module_size).
+        # None = not declared: the generator uses its reference dimension.
+        # Estimate or value without provenance = AssumedSize (see _module_size).
         thru_hole_drill=_module_size(declared, 'drill_mm'),
         thru_pad_diameter=_module_size(declared, 'pad_diameter_mm'),
         row_spacing=positive_number(declared.get('row_spacing_mm')))
@@ -231,8 +231,8 @@ def _continuous_pad_depth(side, data, pitch, geometry):
     edge_band = pad_length + geometry.half_hole / 2 + _LABEL_GAP_MM
     if not geometry.has_thru_holes or geometry.thru_inset is None:
         return edge_band
-    # Stesso margine della sigla della piazzola di bordo, contato dalla fine
-    # del rame continuo quando questa sta piu' dentro.
+    # Same margin as the edge pad's label, counted from the end of the
+    # continuous copper when that lies further in.
     return edge_band + max(0.0, geometry.thru_inset + geometry.ring / 2 - pad_length)
 
 
@@ -251,24 +251,24 @@ def _half_hole_depth(side, data, pitch, geometry):
 
 
 def _band_depth(side, data, pitch):
-    """@brief Profondita' della striscia occupata dal contatto e dalla sua sigla.
+    """@brief Depth of the strip occupied by the contact and its silkscreen label.
 
-    @param side Lato dichiarato, che puo' portare la lunghezza della piazzola.
-    @param data Parametri estratti, per le quote comuni a tutti i lati.
-    @param pitch Passo dichiarato del lato, usato come ripiego.
-    @return Millimetri dal bordo verso l'interno.
-    @note Il rilevatore non annota il centro del semi-foro: annota la piazzola
-        dorata, che entra sotto il modulo, e la sigla stampata accanto. Una
-        zona ridotta al solo centro del contatto non li prende, ed e'
-        esattamente cio' che lasciava passare le file di piazzole. La
-        profondita' si ricava dalle quote dichiarate piu' la convenzione di
-        serigrafia del generatore, non da una misura sulla foto: e' quindi
-        un'euristica, dichiarata come tale nella docstring del modulo.
-    @note Usata quando il tipo di contatto NON e' osservato (e per le matrici):
-        qui si prendono solo quote dichiarate, mai le misure assunte del
-        generatore, perche' allargare la maschera su un'ipotesi toglierebbe
-        dalla misura i corpi montati vicino al bordo. Il semi-foro dichiarato
-        del lato viene prima di ogni altra quota trasversale.
+    @param side Declared side, which may carry the pad length.
+    @param data Extracted parameters, holding the quantities shared by all sides.
+    @param pitch Declared pitch of the side, in mm, used as the fallback.
+    @return Millimetres from the board edge inward.
+    @note The detector does not annotate the centre of the half-hole: it
+        annotates the gold pad, which runs under the module, and the label
+        printed next to it. A zone reduced to the contact centre alone does
+        not catch them, and that is exactly what let the rows of pads through.
+        The depth comes from the declared quantities plus the generator's
+        silkscreen convention, not from a measurement on the photo: it is
+        therefore a heuristic, declared as such in the module docstring.
+    @note Used when the contact style is NOT observed (and for matrices):
+        only declared quantities are taken here, never the generator's assumed
+        sizes, because widening the mask on a hypothesis would remove from the
+        measurement the bodies mounted near the edge. The side's declared
+        half-hole comes before any other transverse quantity.
     """
     return _pad_length(side, data, pitch) + _declared_hole(side, data) / 2 + _LABEL_GAP_MM
 
@@ -276,8 +276,8 @@ def _band_depth(side, data, pitch):
 def _declared_hole(side, data):
     """Declared transverse size of a contact of unobserved style (0 when none is declared).
 
-    Nei castellated il foro non e' quotato e drill_mm vale 0 per convenzione:
-    in quel caso la larghezza della piazzola e' la misura trasversale nota.
+    In castellated modules the hole is not dimensioned and drill_mm is 0 by
+    convention: in that case the pad width is the known transverse size.
     """
     return (_side_value(side, 'half_hole_diameter_mm', 'hole_diameter_mm')
             or positive_number(data.get('drill_mm'))
@@ -302,18 +302,18 @@ def _through_hole_depth(geometry):
 
 
 def contact_positions(data, length_mm, width_mm):
-    """@brief Centri dei contatti dichiarati, in millimetri dal centro scheda.
+    """@brief Centres of the declared contacts, in millimetres from the board centre.
 
-    @param data Parametri estratti: layout e lati castellated, oppure matrice.
-    @param length_mm Estensione della scheda lungo X.
-    @param width_mm Estensione lungo Y.
-    @return Lista di dizionari con x_mm, y_mm, pitch_mm, edge, depth_mm.
-    @note Per una matrice servono anche body_offset_x_mm e body_offset_y_mm:
-        la griglia sta dove la mettono gli offset dichiarati, non al centro
-        della scheda (vedi _matrix_positions).
-    @note Ritorna una lista vuota quando le quote dichiarate non bastano: senza
-        di esse non si filtra nulla, perche' un filtro che indovina dove sono i
-        contatti cancellerebbe componenti veri.
+    @param data Extracted parameters: layout and castellated sides, or a matrix.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return List of dicts with x_mm, y_mm, pitch_mm, edge, depth_mm.
+    @note A matrix also needs body_offset_x_mm and body_offset_y_mm: the grid
+        sits where the declared offsets put it, not at the board centre (see
+        _matrix_positions).
+    @note Returns an empty list when the declared quantities are insufficient:
+        without them nothing is filtered, because a filter that guesses where
+        the contacts are would delete real components.
     """
     if not isinstance(data, dict):
         return []
@@ -323,19 +323,19 @@ def contact_positions(data, length_mm, width_mm):
     for side, built in pairs:
         edge, count, pitch = built.edge, built.count, float(built.pitch)
         offset = finite_number(_read(side, 'offset_mm', 'offset')) or 0.0
-        # La striscia descrive il contatto che il lato offre davvero: la
-        # piazzola di bordo (default, e tipi con semi-foro) oppure la corona
-        # arretrata di un foro passante.
-        # Solo un tipo OSSERVATO allarga la striscia. Un tipo assente viene
-        # disegnato a valle come half_and_through, ma e' un'ipotesi: mascherare
-        # la foto su un'ipotesi toglierebbe dalla misura i corpi montati vicino
-        # al bordo (vedi il @note di contact_positions). Senza tipo resta la
-        # striscia della piazzola di bordo dichiarata, come prima.
+        # The strip describes the contact the side really offers: the edge
+        # pad (default, and types with a half-hole) or the set-back ring of a
+        # through hole.
+        # Only an OBSERVED type widens the strip. A missing type is drawn
+        # downstream as half_and_through, but that is an assumption: masking
+        # the photo on an assumption would remove the bodies mounted near the
+        # edge from the measurement (see the @note of contact_positions).
+        # Without a type the declared edge-pad strip stays, as before.
         style = _read(side, 'contact_style')
         geometry = _geometry(module, built) if style in CONTACT_STYLES else None
-        # Fatti del rame usati dal filtro (contact_proposals): se il contatto
-        # arriva al bordo, il raggio noto del suo semiforo e, per un foro
-        # arretrato, dove sta l'anello.
+        # Copper facts used by the filter (contact_proposals): whether the
+        # contact reaches the edge, the known radius of its half-hole and, for
+        # a set-back hole, where the ring lies.
         at_edge, edge_radius, ring_inset, ring_radius = True, 0.0, None, None
         if (geometry is not None and style == CONTACT_THROUGH_HOLE
                 and geometry.thru_inset is not None):
@@ -416,16 +416,16 @@ def _matrix_positions(data, length_mm, width_mm):
         grid.validate()
         pins = [(x, y) for _, x, y in pin_positions(grid)]
     except (TypeError, ValueError, KeyError):
-        # Pinout non leggibile: dove stanno i pin non si sa, quindi non si filtra.
+        # Unreadable pinout: where the pins are is unknown, so nothing is filtered.
         return []
-    # Il bordo sinistro della scheda (-length/2) sta a offset_x dal pin 1,
-    # quello superiore (-width/2) a offset_y dalla prima fila.
+    # The left edge of the board (-length/2) lies offset_x from pin 1, the
+    # top one (-width/2) offset_y from the first row.
     origin_x, origin_y = -length_mm / 2 - offset_x, -width_mm / 2 - offset_y
-    # Un pin_map letto su una BOTTOM VIEW porta con se' colonne e offset X di
-    # quella vista; l'estrazione li ribalta insieme (_pin_map_seen_from_top e
-    # _offset_x_seen_from_top in datasheet_extractor), che equivale a
-    # specchiare l'intero campo dei pin attorno al centro della scheda. Qui
-    # arrivano i valori grezzi, quindi si applica la stessa riflessione.
+    # A pin_map read on a BOTTOM VIEW carries the columns and X offset of
+    # that view; the extraction flips them together (_pin_map_seen_from_top
+    # and _offset_x_seen_from_top in datasheet_extractor), which amounts to
+    # mirroring the whole pin field around the board centre. Here the raw
+    # values arrive, so the same reflection is applied.
     mirror = -1.0 if (data.get('pin_map') and data.get('pin_map_view') == 'bottom') else 1.0
     depth = _band_depth({}, data, pitch)
     return [dict(x_mm=mirror * (origin_x + x), y_mm=origin_y + y, pitch_mm=pitch,
@@ -433,21 +433,21 @@ def _matrix_positions(data, length_mm, width_mm):
 
 
 def contact_rects_mm(positions, length_mm, width_mm):
-    """@brief Rettangoli (x0,y0,x1,y1) in mm occupati dai contatti di bordo.
+    """@brief Rectangles (x0,y0,x1,y1) in mm occupied by the edge contacts.
 
-    @param positions Uscita di contact_positions.
-    @param length_mm Estensione della scheda lungo X.
-    @param width_mm Estensione lungo Y.
-    @return Lista di rettangoli in millimetri dal centro scheda.
-    @note Serve a dire alla misura dei bordi dove NON guardare: la piazzola
-        dorata ha un contorno netto quanto quello di un componente, e senza
-        questa esclusione una misura buona viene sostituita dal bordo della
-        piazzola vicina. La zona parte dalle quote dichiarate -- mezzo passo
-        lungo il bordo, la profondita' della piazzola -- piu' il margine
-        convenzionale della sigla (euristica dichiarata nella docstring del
-        modulo), non una fascia scelta guardando la foto.
-    @note Le matrici passanti restano fuori: li' un connettore sta proprio
-        sopra i suoi pin, e mascherare la zona impedirebbe di misurarlo.
+    @param positions Output of contact_positions.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @return List of rectangles in millimetres from the board centre.
+    @note It tells the edge measurement where NOT to look: the gold pad has
+        an outline as sharp as a component's, and without this exclusion a
+        good measurement gets replaced by the edge of the neighbouring pad.
+        The zone starts from the declared quantities -- half a pitch along
+        the edge, the pad depth -- plus the conventional label margin
+        (heuristic declared in the module docstring), not a band chosen by
+        looking at the photo.
+    @note Through-hole matrices stay out: there a connector sits right on
+        top of its pins, and masking the zone would prevent measuring it.
     """
     rects = []
     for contact in positions or ():
@@ -470,33 +470,33 @@ def contact_rects_mm(positions, length_mm, width_mm):
 
 
 def contact_proposals(proposals, positions, length_mm, width_mm, edge_tolerance_mm=None):
-    """@brief Indici delle proposte che coprono il rame di un contatto dichiarato.
+    """@brief Indices of the proposals that cover the copper of a declared contact.
 
-    @param proposals Proposte del rilevatore, con `_box` normalizzato.
-    @param positions Uscita di contact_positions.
-    @param length_mm Estensione della scheda lungo X.
-    @param width_mm Estensione lungo Y.
-    @param edge_tolerance_mm Incertezza di misura di un bordo della foto, in mm
-        (measurement_uncertainty.edge_uncertainty_mm); None vale 0.
-    @return Insieme degli indici da scartare.
-    @note Regola strutturale (utente, 2026-09-27: «regola generale»), la stessa
-        per ogni scheda, senza profondita' di striscia:
-        1. contatto di BORDO (semiforo, contatto doppio, tipo non osservato):
-           il rame arriva al bordo della scheda, quindi il riquadro falso
-           TOCCA il bordo -- entro l'incertezza di misura piu' il raggio noto
-           del semiforo -- sta entro mezzo passo lungo il bordo ed e' piccolo
-           quanto il passo. Un corpo montato accanto al contatto non tocca il
-           bordo li', e resta per la revisione;
-        2. contatto PASSANTE arretrato: il riquadro contiene (entro
-           l'incertezza) il centro dell'anello ed e' piccolo quanto il passo;
-        3. PEZZO DI FILA: tocca il bordo (o contiene gli anelli), copre due o
-           piu' contatti e non entra nella scheda oltre il rame noto
-           (`copper_mm`, dalle quote dichiarate): un connettore montato sul
-           bordo entra molto di piu' e resta;
-        4. MATRICE passante: invariata, il riquadro piccolo sul pin.
-    @note Le sigle serigrafate accanto ai contatti non si tolgono piu' qui:
-        per posizione non si distinguono da un corpo piccolo montato li'
-        accanto, mentre l'inventario AI le scarta come serigrafia.
+    @param proposals Detector proposals, with a normalized `_box`.
+    @param positions Output of contact_positions.
+    @param length_mm Board extent along X, in mm.
+    @param width_mm Board extent along Y, in mm.
+    @param edge_tolerance_mm Measurement uncertainty of an edge on the photo,
+        in mm (measurement_uncertainty.edge_uncertainty_mm); None counts as 0.
+    @return Set of the indices to discard.
+    @note Structural rule (user, 2026-09-27: «regola generale» -- a general
+        rule), the same on every board, with no strip depth:
+        1. EDGE contact (half-hole, double contact, unobserved style): the
+           copper reaches the board edge, so the false box TOUCHES the edge
+           -- within the measurement uncertainty plus the known half-hole
+           radius -- stays within half a pitch along the edge and is as small
+           as the pitch. A body mounted next to the contact does not touch
+           the edge there, and stays for the review;
+        2. set-back THROUGH-HOLE contact: the box contains (within the
+           uncertainty) the centre of the ring and is as small as the pitch;
+        3. PIECE OF A ROW: it touches the edge (or contains the rings), covers
+           two or more contacts and does not enter the board beyond the known
+           copper (`copper_mm`, from the declared quantities): a connector
+           mounted on the edge enters much further and stays;
+        4. through-hole MATRIX: unchanged, the small box on the pin.
+    @note Silkscreen labels next to the contacts are no longer removed here:
+        by position they cannot be told apart from a small body mounted right
+        there, while the AI inventory discards them as silkscreen.
     """
     if not positions:
         return set()
@@ -528,8 +528,8 @@ def contact_proposals(proposals, positions, length_mm, width_mm, edge_tolerance_
             along_key = 'y_mm' if vertical else 'x_mm'
             along = (centre_y if vertical else centre_x) - contact[along_key]
             span = (top, bottom) if vertical else (left, right)
-            # Distanza del lato del riquadro verso il bordo dal bordo stesso, e
-            # quanto il riquadro entra nella scheda.
+            # Distance of the box side facing the edge from the edge itself,
+            # and how far the box enters the board.
             outer = {'left': left - contact['x_mm'], 'right': contact['x_mm'] - right,
                      'top': top - contact['y_mm'], 'bottom': contact['y_mm'] - bottom}[edge]
             reach_in = {'left': right - contact['x_mm'], 'right': contact['x_mm'] - left,

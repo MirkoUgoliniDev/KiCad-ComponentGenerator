@@ -1,7 +1,7 @@
 """@brief Footprint navigation: camera changes never modify geometry; only the texts can be dragged."""
 import math
 
-from PyQt6.QtCore import Qt, QLineF, QPointF, QRect, pyqtSignal
+from PyQt6.QtCore import Qt, QLineF, QPointF, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QGraphicsView
 
@@ -15,9 +15,15 @@ DRAWING_KEY_ROLE = 0x445257
 #: point index -1 means the WHOLE drawing (a press on its body).
 HANDLE_KEY_ROLE = 0x48444C
 
+#: Item data role marking the anchor square of a Reference/Value text (a
+#: child of the text group). Hidden at rest; shown while the pointer is near
+#: the text or the text is dragged, as the symbol editor's property anchors.
+TEXT_ANCHOR_ROLE = 0x544158
+
 #: Divisor of the main grid giving the fine drawing grid (user, 2026-10-13:
-#: «una griglia puntinata a un decimo di quella attuale per ancorare gli
-#: elementi grafici»). Pads and pins stay on the main grid.
+#: «una griglia puntinata a un decimo di quella attuale per ancorare gli elementi grafici»
+#: (a dotted grid at one tenth of the current one to anchor the graphic
+#: elements)). Pads and pins stay on the main grid.
 DEFAULT_FINE_GRID_DIVISOR = 10
 
 #: Fine-grid dots are drawn only when their spacing on screen reaches this
@@ -37,6 +43,8 @@ HIT_MARGIN_PX = 4
 #: Handles stay visible while the pointer is within this many screen px of
 #: the hovered drawing's bounds, as the symbol editor's HANDLE_HOVER_MARGIN:
 #: without it the handles vanish on the way from the stroke to a handle.
+#: The anchor square of a Reference/Value text uses the same margin around
+#: the text and its anchor, as the symbol editor's property anchors.
 HOVER_KEEP_MARGIN_PX = 12
 
 
@@ -48,7 +56,8 @@ class FootprintView(QGraphicsView):
         and redraws (user, 2026-10-13).
     """
     pad_context_requested = pyqtSignal(str)
-    #: A text was dropped: key and its anchor (the item's position), scene units.
+    #: A text was dropped: key and its anchor (the item's position: the
+    #: bottom-left corner of the text since 2026-10-16), scene units.
     text_moved = pyqtSignal(str, float, float)
     #: Right click on a text: key.
     text_context_requested = pyqtSignal(str)
@@ -66,6 +75,8 @@ class FootprintView(QGraphicsView):
     draw_hover_left = pyqtSignal()
     #: Outside draw mode: the pointer is over this drawing (-1: none).
     drawing_hovered = pyqtSignal(int)
+    #: The text whose anchor square must show changed: its key ("" for none).
+    text_hovered = pyqtSignal(str)
     #: A handle was pressed: drawing index, point index (-1: whole drawing), scene point.
     handle_pressed = pyqtSignal(int, int, float, float)
     #: A handle is being dragged: drawing index, point index, scene point.
@@ -99,12 +110,15 @@ class FootprintView(QGraphicsView):
         #: Scene bounds of the hovered drawing (handles kept while the
         #: pointer stays within them plus HOVER_KEEP_MARGIN_PX), or None.
         self._hover_bounds = None
+        #: Key of the text whose anchor square is shown ("" for none).
+        self._hovered_text = ""
         #: Main grid step divided by this gives the drawing snap step.
         self._fine_divisor = DEFAULT_FINE_GRID_DIVISOR
         #: True while the camera follows the footprint (every redraw fits
         #: it); False once the user zooms or pans, as the symbol editor's
         #: `auto_fit`: a redraw after an edit must not move the camera
-        #: (user, 2026-10-13: «non mantiene lo zoom e lo cambia»).
+        #: (user, 2026-10-13: «non mantiene lo zoom e lo cambia», it does not
+        #: keep the zoom and changes it).
         self.auto_fit = True
 
     def set_draw_mode(self, active):
@@ -117,6 +131,7 @@ class FootprintView(QGraphicsView):
         if self._draw_mode:
             self._pan = None
             self._text_drag = None
+            self._report_text_hover("")
             self.viewport().setCursor(Qt.CursorShape.CrossCursor)
             self.setFocus()
         else:
@@ -133,7 +148,10 @@ class FootprintView(QGraphicsView):
         self.viewport().update()
 
     def grid_step(self):
-        """@brief The pitch of the visible main grid in scene units, or None when hidden/unset."""
+        """@brief The pitch of the visible main grid in scene units, or None when hidden/unset.
+
+        @return Main grid pitch in scene units (mm), or None.
+        """
         if self._grid and self._grid[2] and self._grid[0] > 0:
             return self._grid[0]
         return None
@@ -148,11 +166,17 @@ class FootprintView(QGraphicsView):
         self.viewport().update()
 
     def fine_divisor(self):
-        """@brief The divisor of the main grid that gives the drawing grid."""
+        """@brief The divisor of the main grid that gives the drawing grid.
+
+        @return Positive integer divisor (1 = drawings snap to the main grid).
+        """
         return self._fine_divisor
 
     def fine_step(self):
-        """@brief The drawing-grid pitch in scene units, or None when the grid is hidden/unset."""
+        """@brief The drawing-grid pitch in scene units, or None when the grid is hidden/unset.
+
+        @return Fine grid pitch in scene units (mm), or None.
+        """
         step = self.grid_step()
         return None if step is None else step / self._fine_divisor
 
@@ -223,13 +247,22 @@ class FootprintView(QGraphicsView):
         painter.drawPoints([QPointF(x, y) for x in xs for y in ys])
 
     def fine_dots_visible(self):
-        """@brief True when the fine-grid dots are drawn at the current zoom."""
+        """@brief True when the fine-grid dots are drawn at the current zoom.
+
+        @return True when the fine step on screen reaches FINE_GRID_MIN_SCREEN_PX.
+        """
         fine = self.fine_step()
         return (fine is not None and self._fine_divisor > 1
                 and fine * self.transform().m11() >= FINE_GRID_MIN_SCREEN_PX)
 
     def zoom(self, factor, anchor=None):
-        """@brief Scale the camera within limits while preserving the scene point under the anchor."""
+        """@brief Scale the camera within limits while preserving the scene point under the anchor.
+
+        @param factor Multiplier applied to the current scale (>1 zooms in);
+            the resulting scale is clamped to [0.02, 40] px per scene unit.
+        @param anchor Viewport point (QPoint, px) kept fixed on screen;
+            None uses the viewport centre.
+        """
         anchor = anchor if anchor is not None else self.viewport().rect().center()
         self.auto_fit = False
         before = self.mapToScene(anchor)
@@ -240,7 +273,10 @@ class FootprintView(QGraphicsView):
         self.centerOn(self.mapToScene(self.viewport().rect().center()) + delta)
 
     def wheelEvent(self, event):
-        """@brief Zoom toward the mouse position using the wheel delta."""
+        """@brief Zoom toward the mouse position using the wheel delta.
+
+        @param event Qt wheel event; angle delta and pointer position are used.
+        """
         self.zoom(1.2 ** (event.angleDelta().y() / 120), event.position().toPoint())
         event.accept()
 
@@ -257,7 +293,7 @@ class FootprintView(QGraphicsView):
     def _text_item_at(self, pos):
         """The draggable text group under a viewport point, with its key, or (None, None).
 
-        The hit may be a child (the text or its anchor cross): the drag moves
+        The hit may be a child (the text or its anchor square): the drag moves
         the top-level item, whose position is the anchor.
         """
         for item in self._items_near(pos):
@@ -297,13 +333,68 @@ class FootprintView(QGraphicsView):
                 bounds = rect if bounds is None else bounds.united(rect)
         return bounds
 
+    def _near_scene_rect(self, rect, pos):
+        """True when a viewport point lies within HOVER_KEEP_MARGIN_PX screen px of a scene rect.
+
+        The margin is in screen pixels at any zoom, as the symbol editor's
+        HANDLE_HOVER_MARGIN (divided there by the view scale).
+        """
+        area = self.mapFromScene(rect).boundingRect()
+        m = HOVER_KEEP_MARGIN_PX
+        return area.adjusted(-m, -m, m, m).contains(pos)
+
     def _within_hover_area(self, pos):
         """True while a viewport point stays near the hovered drawing's bounds."""
         if self._hover_bounds is None:
             return False
-        area = self.mapFromScene(self._hover_bounds).boundingRect()
-        m = HOVER_KEEP_MARGIN_PX
-        return area.adjusted(-m, -m, m, m).contains(pos)
+        return self._near_scene_rect(self._hover_bounds, pos)
+
+    @staticmethod
+    def _text_reveal_area(group):
+        """Scene rect of a text group's glyphs united with its anchor point.
+
+        The same base rect as the symbol editor's property anchors (text
+        bounds plus anchor). The square itself is left out: it ignores the
+        view transform, so its scene bounds are not a scene measure.
+        """
+        anchor = group.scenePos()
+        area = QRectF(anchor, anchor)
+        for child in group.childItems():
+            if child.data(TEXT_ANCHOR_ROLE) is None:
+                area = area.united(child.sceneBoundingRect())
+        return area
+
+    def _text_near(self, pos):
+        """Key of the text whose reveal area holds a viewport point, or ""."""
+        # Candidates: items within the margin (+1 px for the anchor point at
+        # the glyphs' edge); the exact test is the reveal area itself.
+        m = HOVER_KEEP_MARGIN_PX + 1
+        seen = set()
+        for item in self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1)):
+            key = item.data(TEXT_KEY_ROLE)
+            if key is None:
+                continue
+            while item.parentItem() is not None:
+                item = item.parentItem()
+            if id(item) in seen:
+                continue
+            seen.add(id(item))
+            if self._near_scene_rect(self._text_reveal_area(item), pos):
+                return str(key)
+        return ""
+
+    def _report_text_hover(self, key):
+        """Emit `text_hovered` only when the text whose anchor shows changes."""
+        if key != self._hovered_text:
+            self._hovered_text = key
+            self.text_hovered.emit(key)
+
+    def hovered_text(self):
+        """@brief The key of the text whose anchor square is shown ("" for none).
+
+        @return "Reference", "Value" or "".
+        """
+        return self._hovered_text
 
     def _report_hover(self, index):
         """Emit `drawing_hovered` only when the hovered drawing changes."""
@@ -313,7 +404,10 @@ class FootprintView(QGraphicsView):
             self.drawing_hovered.emit(index)
 
     def hovered_drawing(self):
-        """@brief The index of the drawing whose handles are shown (-1: none)."""
+        """@brief The index of the drawing whose handles are shown (-1: none).
+
+        @return Index into the window's drawings list, or -1.
+        """
         return self._hovered_drawing
 
     def reset_hover(self):
@@ -346,6 +440,7 @@ class FootprintView(QGraphicsView):
     def mousePressEvent(self, event):
         """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
 
+        @param event Qt mouse press event.
         @note In draw mode a left press is a drawing point and a right press
             asks to close the shape; panning stays on the middle button.
         """
@@ -389,6 +484,9 @@ class FootprintView(QGraphicsView):
             item, key = (None, None) if handle is not None else self._text_item_at(event.pos())
             if item is not None:
                 self._text_drag = (item, key, self.mapToScene(event.pos()), item.pos())
+                # The dragged text keeps its anchor square wherever the
+                # pointer goes, as a dragged property in the symbol editor.
+                self._report_text_hover(key)
                 self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
                 event.accept()
                 return
@@ -415,7 +513,10 @@ class FootprintView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """@brief Move the dragged text, or pan the camera, without changing footprint geometry."""
+        """@brief Move the dragged text, or pan the camera, without changing footprint geometry.
+
+        @param event Qt mouse move event.
+        """
         if self._text_drag is not None:
             item, _key, start, origin = self._text_drag
             try:
@@ -443,27 +544,36 @@ class FootprintView(QGraphicsView):
             self.handle_dragged.emit(*self._handle_drag, point.x(), point.y())
             event.accept()
         else:
-            # Hovering a drawing reveals its handles (user, 2026-10-13: «come
-            # nell'altro tab»); they stay while the pointer remains near the
+            # Hovering a drawing reveals its handles (user, 2026-10-13:
+            # «come nell'altro tab», as in the other tab); they stay while the pointer remains near the
             # drawing (hysteresis, as the symbol editor's reveal area), so a
             # handle can be reached from the stroke.
             index = self._drawing_at(event.pos())
             if index < 0 and self._within_hover_area(event.pos()):
                 index = self._hovered_drawing
             self._report_hover(index)
+            # A text's anchor square shows while the pointer is near the
+            # text, same margin as the symbol editor's property anchors.
+            self._report_text_hover(self._text_near(event.pos()))
             super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
-        """@brief Qt override: the snap marker and the hover handles go away with the pointer."""
+        """@brief Qt override: the snap marker and the hover handles go away with the pointer.
+
+        @param event Qt leave event, forwarded to the base class.
+        """
         if self._draw_mode:
             self.draw_hover_left.emit()
         if self._handle_drag is None:
             self._report_hover(-1)
+        if self._text_drag is None:
+            self._report_text_hover("")
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
         """@brief Report the dropped text, or apply the final pan displacement; release the cursor.
 
+        @param event Qt mouse release event.
         @note In draw mode a release away from its press is a DRAG: the
             release point counts as the next drawing point, so a rectangle
             or a circle can be drawn press-move-release as in a CAD, not
@@ -494,6 +604,8 @@ class FootprintView(QGraphicsView):
                 self.text_moved.emit(key, item.pos().x(), item.pos().y())
             except RuntimeError:
                 pass  # redrawn under the drag: nothing to report
+            # After the drop the square follows the pointer rule again.
+            self._report_text_hover(self._text_near(event.pos()))
             event.accept()
             return
         if self._pan is not None and event.button() == self._pan_button:
@@ -508,6 +620,7 @@ class FootprintView(QGraphicsView):
     def mouseDoubleClickEvent(self, event):
         """@brief Qt override: in draw mode a left double click closes the shape.
 
+        @param event Qt mouse double-click event.
         @note A fast second click reaches Qt as press, release, DOUBLE CLICK:
             the second press never arrives. The double click therefore first
             counts as that missing point (fixed-count shapes close on it),
@@ -525,7 +638,10 @@ class FootprintView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
-        """@brief Qt override: in draw mode Esc cancels and Enter closes the shape."""
+        """@brief Qt override: in draw mode Esc cancels and Enter closes the shape.
+
+        @param event Qt key press event.
+        """
         if self._draw_mode:
             if event.key() == Qt.Key.Key_Escape:
                 self.draw_cancelled.emit()
@@ -538,10 +654,14 @@ class FootprintView(QGraphicsView):
         super().keyPressEvent(event)
 
     def hideEvent(self, event):
-        """@brief Discard an unfinished camera or text drag when the view is hidden."""
+        """@brief Discard an unfinished camera or text drag when the view is hidden.
+
+        @param event Qt hide event, forwarded to the base class.
+        """
         self._pan = None
         self._text_drag = None
         self._handle_drag = None
+        self._report_text_hover("")
         if self._draw_mode:
             # The window disarms the tool and cleans its click markers.
             self.draw_cancelled.emit()

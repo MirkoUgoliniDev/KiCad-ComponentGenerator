@@ -8,16 +8,19 @@ from test_photo_inventory_gui import gui
 def test_the_overlay_opens_when_the_regeneration_starts(window, monkeypatch):
     started = []
     monkeypatch.setattr(gui.Cad3DWorker, 'start', lambda self: started.append(self))
-    window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
+    window.analysis_overlay.start('Generazione modello STEP', 'Avvio di FreeCAD…')
     assert not window.analysis_overlay.isHidden()
     assert window.analysis_overlay.title.text()
 
 
 def test_the_overlay_closes_when_the_worker_ends(window):
     """Anche in errore: finished di QThread scatta comunque."""
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     window._analysis_tabs_enabled = window.tabs.isEnabled()
     window.tabs.setEnabled(False)
-    window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
+    window.analysis_overlay.start('Generazione modello STEP', 'Avvio di FreeCAD…')
     window._on_regen_3d_finished()
     assert window.analysis_overlay.isHidden()
     assert window.tabs.isEnabled(), 'le schede restano bloccate'
@@ -40,6 +43,9 @@ def test_the_icon_only_command_shows_it_is_busy_and_then_recovers(window, monkey
     visibile in altro modo -- comando spento, icona della clessidra, nome e
     tooltip che dicono «in corso».
     """
+    # CONTRACT CHANGED 2026-10-15 (audit item 4): only DOCUMENTED body sizes build a body;
+    # this component stands for one whose analysis declared them.
+    window._body_size_declared = True
     idle_icon = window.btn_regen_3d.icon().cacheKey()
     window._set_regen_busy(True)
     button = window.btn_regen_3d
@@ -55,7 +61,7 @@ def test_the_icon_only_command_shows_it_is_busy_and_then_recovers(window, monkey
 
 
 def test_worker_messages_reach_the_overlay(window):
-    window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
+    window.analysis_overlay.start('Generazione modello STEP', 'Avvio di FreeCAD…')
     window._on_regen_3d_progress('Fillet non applicabile su uno spigolo')
     assert 'Fillet' in window.analysis_overlay.status.text()
 
@@ -64,5 +70,5 @@ def test_worker_messages_reach_the_overlay(window):
 def test_every_language_has_the_new_overlay_strings(language):
     from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
 
-    for key in ("ui:Generazione modello 3D", "ui:Avvio di FreeCAD…"):
+    for key in ("ui:Generazione modello STEP", "ui:Avvio di FreeCAD…"):
         assert DEFAULT_TRANSLATIONS[key].get(language), f"{key} manca in {language}"

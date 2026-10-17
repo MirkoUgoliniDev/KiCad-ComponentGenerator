@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -33,6 +34,57 @@ class KiCadLibraryError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.context = context
+
+
+#: UTF-8 byte order mark some Windows editors put at the start of a file.
+UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _decode_utf8(data: bytes, path: Path, *, keep_newlines: bool = False) -> str:
+    """@brief Decode a KiCad text file read as bytes.
+
+    @param data Raw content of the file.
+    @param path File the bytes come from, named in the error.
+    @param keep_newlines Return the line endings exactly as stored (CRLF
+        kept), for a caller that rewrites the file and must change only what
+        it adds; by default they are universal newlines like ``read_text``.
+    @return The text without a leading UTF-8 byte order mark (`UTF8_BOM`).
+        A BOM made a valid table look like ``invalid_table``: the text no
+        longer started with ``(fp_lib_table``. A caller that rewrites the file
+        restores the BOM itself (see update_fp_lib_table).
+    @throws KiCadLibraryError ``file_not_utf8`` (context ``path``, ``error``)
+        when the bytes are not valid UTF-8.
+    @note KiCad reads and writes its tables and footprints in UTF-8. A table
+        re-saved by another editor in the ANSI code page (cp1252 with an
+        accented folder name) raised a bare UnicodeDecodeError, a ValueError
+        that the GUI handlers (KiCadLibraryError, OSError) did not catch, and
+        the application closed. Guessing the encoding is refused: rewriting the
+        table in a guessed encoding could corrupt the user's other rows.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise KiCadLibraryError(
+            f"{path} is not UTF-8 text (invalid byte at offset {exc.start}); "
+            "KiCad files must be saved as UTF-8. No file was changed.",
+            code="file_not_utf8", path=path, error=exc,
+        ) from exc
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    if keep_newlines:
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _read_utf8(path: Path) -> str:
+    """@brief Read a KiCad text file as UTF-8, mapping a decode error.
+
+    @param path File to read.
+    @return Its text with universal newlines (see `_decode_utf8`).
+    @throws KiCadLibraryError ``file_not_utf8`` for a non-UTF-8 file.
+    @throws OSError When the file cannot be read.
+    """
+    return _decode_utf8(path.read_bytes(), path)
 
 
 @dataclass(frozen=True)
@@ -265,7 +317,14 @@ def name_footprint(footprint_text: str, name: str) -> str:
 
 
 def attach_3d_model(footprint_text: str, model_reference: str) -> str:
-    """@brief Replace root model nodes with one normalized STEP reference."""
+    """@brief Replace root model nodes with one normalized STEP reference.
+
+    @param footprint_text Text of a .kicad_mod footprint.
+    @param model_reference Model path written in the `(model ...)` node, e.g.
+        a `${KIPRJMOD}` or absolute STEP reference.
+    @return The footprint text with exactly one model node, with zero offset
+        and rotation and unit scale.
+    """
     without_models = _remove_direct_children(footprint_text, "model")
     model = (
         f"\t(model {_quote(model_reference)}\n"
@@ -290,6 +349,11 @@ def _mm(value: float) -> str:
     text = f"{round(float(value), 4):.4f}".rstrip("0").rstrip(".")
     return "0" if text in ("-0", "") else text
 
+
+#: Name of the preview folder the program creates inside a component folder.
+#: Everything in it is generated (board, project, model copies), never user
+#: content, which is what allows create_preview_project to unlock its files.
+PREVIEW_DIR_NAME = ".kicad-preview"
 
 #: Position of the footprint on the preview board, mm.
 _PREVIEW_ORIGIN = (100.0, 100.0)
@@ -425,19 +489,32 @@ def create_preview_project(
     @param output_dir Preview directory; defaults to ``<component>/.kicad-preview``.
     @return Paths of the preview directory, board and project files.
     @throws KiCadLibraryError ``invalid_footprint``/``malformed_file`` when the
-        footprint cannot be converted (nothing is written), ``preview_locked``
-        when KiCad's lock file ``~<board>.lck`` exists next to the board.
+        footprint cannot be converted (nothing is written), ``file_not_utf8``
+        when it is not UTF-8 text (nothing is written), ``preview_locked``
+        when KiCad's lock file ``~<board>.lck`` exists next to the board,
+        ``preview_write_refused`` (context ``path``, ``error``) when the
+        operating system refuses to replace a preview file (read-only
+        attribute, file held open by another program).
+    @throws OSError Any other file-system failure, unchanged.
+    @note The copies never carry the read-only attribute of their source
+        (see `_copy_writable`). In the default ``.kicad-preview`` folder
+        (`PREVIEW_DIR_NAME`) the read-only attribute of the files about to be
+        replaced is cleared: that folder is generated by the program and never
+        holds user content, and older versions copied the attribute onto it
+        from read-only sources. Files of any other folder chosen by the caller
+        are not unlocked; a refusal there, or a file held open, is reported as
+        ``preview_write_refused``.
     @note A lock file left behind by a crashed KiCad also blocks the preview:
         the error names the lock file so the user can delete it once KiCad is
         closed. Stale locks are not removed automatically because a running
         KiCad and a crashed one cannot be told apart from the file alone.
     """
-    preview_dir = Path(output_dir or artifacts.component_dir / ".kicad-preview")
+    preview_dir = Path(output_dir or artifacts.component_dir / PREVIEW_DIR_NAME)
     board_path = preview_dir / f"{artifacts.name}-preview.kicad_pcb"
     project_path = preview_dir / f"{artifacts.name}-preview.kicad_pro"
     # Parse and convert the footprint first: a malformed file must not leave a
     # half-refreshed preview directory behind.
-    footprint_text = artifacts.footprint_path.read_text(encoding="utf-8")
+    footprint_text = _read_utf8(artifacts.footprint_path)
     footprint = _board_footprint(
         footprint_text, f"${{KIPRJMOD}}/{artifacts.name}.step",
     )
@@ -449,11 +526,6 @@ def create_preview_project(
             "Close it in KiCad before refreshing the preview.",
             code="preview_locked", path=lock_path, board=board_path,
         )
-    preview_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_copy(artifacts.step_path, preview_dir / f"{artifacts.name}.step")
-    if artifacts.wrl_path is not None:
-        _atomic_copy(artifacts.wrl_path, preview_dir / f"{artifacts.name}.wrl")
-
     outline_uuid = uuid.uuid4()
     layer_rows = "".join(
         f"\t\t({ordinal} {_quote(name)} {kind}"
@@ -474,10 +546,53 @@ def create_preview_project(
         f"\t\t(layer \"Edge.Cuts\") (uuid \"{outline_uuid}\"))\n"
         ")\n"
     )
-    _atomic_write_text(board_path, board)
-    if not project_path.exists():
-        _atomic_write_text(project_path, "{}\n")
+    # The board text is complete before the first write, so a refusal below
+    # can only come from the file system, never from the footprint.
+    try:
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        if preview_dir.name == PREVIEW_DIR_NAME:
+            # Files of the program's own preview folder, about to be replaced:
+            # a read-only attribute on them was copied from a read-only source
+            # by older versions (shutil.copy2), never set to protect content.
+            for own in (preview_dir / f"{artifacts.name}.step",
+                        preview_dir / f"{artifacts.name}.wrl",
+                        board_path, project_path):
+                if own.is_file():
+                    _clear_readonly(own)
+        _atomic_copy(artifacts.step_path, preview_dir / f"{artifacts.name}.step")
+        if artifacts.wrl_path is not None:
+            _atomic_copy(artifacts.wrl_path, preview_dir / f"{artifacts.name}.wrl")
+        _atomic_write_text(board_path, board)
+        if not project_path.exists():
+            _atomic_write_text(project_path, "{}\n")
+    except PermissionError as exc:
+        # A bare PermissionError reached the user as "unexpected OS error"
+        # naming a scratch file; name the preview file that was refused.
+        refused = _refused_path(exc, preview_dir)
+        raise KiCadLibraryError(
+            f"Unable to write the preview file {refused}: it is read-only or "
+            f"held open by another program ({exc}).",
+            code="preview_write_refused", path=refused, error=exc,
+        ) from exc
     return PreviewProject(preview_dir, board_path, project_path)
+
+
+def _refused_path(error: OSError, fallback: Path) -> Path:
+    """@brief File a refused operation was writing to, for the user message.
+
+    @param error The PermissionError raised by the file system.
+    @param fallback Path reported when the error names no file.
+    @return For a refused ``os.replace`` the destination (``filename2``, the
+        real file), otherwise the file named by the error, otherwise
+        `fallback`; a scratch name of ours is mapped back to its target.
+    """
+    named = getattr(error, "filename2", None) or getattr(error, "filename", None)
+    if not named:
+        return fallback
+    path = Path(os.fsdecode(named))
+    match = re.fullmatch(r"(.+)\.[0-9a-f]{%d}%s" % (
+        TEMPORARY_TOKEN_HEX, re.escape(TEMPORARY_SUFFIX)), path.name)
+    return path.with_name(match.group(1)) if match else path
 
 
 def kicad_lock_file(document_path: str | os.PathLike[str]) -> Path:
@@ -540,7 +655,9 @@ def _remove_stale_scratch(target: Path, suffix: str = TEMPORARY_SUFFIX,
         try:
             if not entry.is_file(follow_symlinks=False) or entry.stat().st_mtime > limit:
                 continue
-            os.remove(entry.path)
+            # A scratch copy made by an older version could carry the source's
+            # read-only attribute: it is ours, so unlock it rather than keep it.
+            _remove_clearing_readonly(Path(entry.path))
             removed.append(Path(entry.path))
         except OSError:
             continue
@@ -576,37 +693,158 @@ def _temporary_sibling(target: Path, suffix: str = TEMPORARY_SUFFIX) -> Path:
     raise FileExistsError(f"No free scratch name next to {target}")
 
 
-def _unlink_quietly(path: Path) -> None:
-    """Remove a scratch file; a cleanup failure must not hide the real error."""
+#: Windows FILE_ATTRIBUTE_REPARSE_POINT (symbolic links, junctions, mount
+#: points), from ``stat.FILE_ATTRIBUTE_REPARSE_POINT`` where available.
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _clear_readonly(path: Path) -> None:
+    """@brief Give the owner write permission back (Windows: clear read-only).
+
+    @param path File of OURS: a scratch file, a copy we made, a backup we
+        wrote. Never called on a user file or on a source artifact.
+    @note Links and reparse points are never unlocked, even under our names:
+        unlocking through them would change the attribute of their target.
+    @note Best effort: a failure is ignored, the operation that needed the
+        file writable then reports its own error.
+    """
     try:
-        if path.exists():
-            path.unlink()
+        info = os.stat(path, follow_symlinks=False)
+        # Only a plain file is unlocked: a symbolic link, a junction or any
+        # other reparse point may lead to a user file, and os.chmod follows
+        # links (asking it not to is unsupported on Linux).
+        if (not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT):
+            return
+        if not info.st_mode & stat.S_IWRITE:
+            os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IWRITE)
     except OSError:
         pass
 
 
-def _atomic_write_text(target: Path, text: str) -> None:
-    """Write UTF-8 text through a sibling temporary file and an atomic replace."""
+def _remove_clearing_readonly(path: Path) -> None:
+    """@brief Delete one of OUR files even when it carries the read-only attribute.
+
+    @param path Scratch, rollback or backup file written by this module.
+    @throws OSError When the file still cannot be removed (held open).
+    @note On Windows ``os.remove`` refuses a read-only file; older versions
+        copied that attribute from read-only sources (``shutil.copy2``), so
+        their leftovers could never be cleaned up.
+    """
+    try:
+        os.remove(path)
+    except PermissionError:
+        _clear_readonly(path)
+        os.remove(path)
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Remove a scratch file; a cleanup failure must not hide the real error."""
+    try:
+        if path.exists():
+            _remove_clearing_readonly(path)
+    except OSError:
+        pass
+
+
+def _remove_tree_quietly(directory: Path) -> bool:
+    """@brief Remove a folder of ours (rollback copies), read-only files included.
+
+    @param directory Folder created by this module.
+    @return True when the folder is gone.
+    @note ``shutil.rmtree(ignore_errors=True)`` silently left the folder
+        behind when one copy was read-only; files are unlocked first here.
+    """
+    if not directory.exists():
+        return True
+    for current, folders, files in os.walk(directory, topdown=False):
+        for name in files:
+            try:
+                _remove_clearing_readonly(Path(current) / name)
+            except OSError:
+                pass
+        for name in folders:
+            try:
+                os.rmdir(Path(current) / name)
+            except OSError:
+                pass
+    try:
+        os.rmdir(directory)
+    except OSError:
+        return False
+    return True
+
+
+def _copy_writable(source: Path, target: Path) -> None:
+    """@brief Copy content and timestamps of `source`, never its read-only attribute.
+
+    @param source File to copy (left untouched, attribute included).
+    @param target Destination: one of our scratch or rollback files.
+    @throws OSError When the copy fails.
+    @note ``shutil.copy2`` copies the permission bits, i.e. the Windows
+        read-only attribute: a read-only source (VCS checkout with locking,
+        files restored from read-only media) produced read-only copies that
+        broke the next preview refresh or overwrite, and scratch files that
+        could not be deleted. The timestamps are kept as before; only the
+        write permission is given back to the copy.
+    """
+    shutil.copy2(source, target)
+    _clear_readonly(target)
+
+
+def _write_durably(path: Path, payload: bytes) -> None:
+    """@brief Write `payload` into an existing scratch file and fsync it.
+
+    @param path Scratch file created by `_temporary_sibling`.
+    @param payload Complete content.
+    @throws OSError When the write or the flush to disk fails.
+    @note Same guarantee as `kicadgen.fsutil.atomic_write_bytes`: the data is
+        on disk before the rename publishes it, so a power loss right after
+        the replace cannot leave an empty or truncated fp-lib-table. That
+        helper is not used directly because its scratch name would escape the
+        stale-scratch cleanup of this module (`_scratch_pattern`).
+    """
+    with open(path, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+    """Write bytes durably through a sibling scratch file and an atomic replace."""
     temporary = _temporary_sibling(target)
     try:
-        temporary.write_text(text, encoding="utf-8", newline="\n")
+        _write_durably(temporary, payload)
         replace_file(temporary, target)
     finally:
         _unlink_quietly(temporary)
 
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    """Write UTF-8 text (LF newlines) durably through a scratch file and a replace."""
+    _atomic_write_bytes(target, text.encode("utf-8"))
+
+
 def _atomic_copy(source: Path, target: Path) -> None:
-    """Copy a file through a sibling temporary file and an atomic replace."""
+    """Copy a file (writable, see `_copy_writable`) durably through a scratch file and a replace."""
     temporary = _temporary_sibling(target)
     try:
-        shutil.copy2(source, temporary)
+        _copy_writable(source, temporary)
+        _fsync_file(temporary)
         replace_file(temporary, target)
     finally:
         _unlink_quietly(temporary)
 
 
 def launch_preview(pcbnew_path: str | os.PathLike[str], board_path: Path) -> None:
-    """@brief Open an isolated preview board in the KiCad PCB Editor."""
+    """@brief Open an isolated preview board in the KiCad PCB Editor.
+
+    @param pcbnew_path Path of the pcbnew executable.
+    @param board_path Path of the preview .kicad_pcb to open.
+    @throws KiCadLibraryError When the executable or the board file is
+        missing (codes pcbnew_missing, preview_missing) or the process
+        cannot be started (launch_failed).
+    """
     executable = Path(pcbnew_path)
     if not executable.is_file():
         raise KiCadLibraryError(
@@ -776,12 +1014,13 @@ def find_library_entry(
     @param library_name Library nickname (exact, case-sensitive like KiCad).
     @return The matching row, or None when the table or the row is missing.
     @throws KiCadLibraryError ``invalid_table``/``malformed_file`` for an
-        unreadable table, ``duplicate_library_entry`` for an ambiguous one.
+        unreadable table, ``file_not_utf8`` for a table not saved as UTF-8,
+        ``duplicate_library_entry`` for an ambiguous one.
     """
     table = Path(table_path)
     if not table.is_file():
         return None
-    text = table.read_text(encoding="utf-8")
+    text = _read_utf8(table)
     if not text.lstrip().startswith("(fp_lib_table"):
         raise KiCadLibraryError(
             f"Invalid footprint library table: {table}",
@@ -797,28 +1036,130 @@ def find_library_entry(
     return matches[0] if matches else None
 
 
-def _rotate_table_backups(table: Path) -> None:
-    """Keep the pre-change copy of ``table`` plus a bounded history.
+def _table_backup_history(table: Path) -> list[Path]:
+    """@brief Backup files of `table`, newest first (``.kicadgen-backup``, ``.1``...).
 
-    ``<table>.kicadgen-backup`` is always the state immediately before the
-    latest KiCadGen write; older copies shift to ``.kicadgen-backup.1`` and
-    so on, up to `TABLE_BACKUP_RETENTION` files, the oldest being discarded.
-    The new copy is written before any shift, so a failed copy changes nothing.
+    @param table Footprint library table.
+    @return `TABLE_BACKUP_RETENTION` paths; they may not exist.
     """
     backup = table.with_name(table.name + ".kicadgen-backup")
-    history = [backup] + [
+    return [backup] + [
         backup.with_name(f"{backup.name}.{index}")
         for index in range(1, TABLE_BACKUP_RETENTION)
     ]
-    fresh = _temporary_sibling(backup)
+
+
+def _stage_table_backup(table: Path, original: bytes) -> Path:
+    """@brief Write the pre-change table bytes into a scratch file, durably.
+
+    @param table Table about to be rewritten.
+    @param original Its exact bytes before the change.
+    @return The scratch file, next to ``<table>.kicadgen-backup``.
+    @throws OSError When the scratch file cannot be written (then removed).
+    @note Staged BEFORE the table write and published only after it (see
+        `_publish_table_backup`): written from bytes, not copied, so it never
+        inherits the table's read-only attribute.
+    """
+    fresh = _temporary_sibling(_table_backup_history(table)[0])
     try:
-        shutil.copy2(table, fresh)
+        _write_durably(fresh, original)
+    except BaseException:
+        _unlink_quietly(fresh)
+        raise
+    return fresh
+
+
+def _publish_table_backup(table: Path, fresh: Path) -> None:
+    """@brief Shift the backup history of `table` and move `fresh` into first place.
+
+    @param table Table that has just been rewritten successfully.
+    @param fresh Scratch file holding its previous bytes (`_stage_table_backup`).
+    @throws OSError When a backup file cannot be moved; every move already
+        made is undone, so the history is exactly as before (oldest included).
+    @throws KiCadLibraryError ``table_backup_rotation_incomplete`` (context
+        ``path``, ``failures``) when that undo itself fails: the failures say
+        which copy is where, nothing is silently lost.
+    @note ``<table>.kicadgen-backup`` is always the state immediately before
+        the latest KiCadGen write; older copies shift to ``.1`` and so on, up
+        to `TABLE_BACKUP_RETENTION` files, the oldest being discarded. The
+        files are ours: a read-only attribute that older versions copied onto
+        them is cleared first, otherwise Windows refused every later rotation
+        and with it every global installation.
+    @note Called only after the table write succeeded: rotating before it
+        shifted, and discarded, the history even when the write then failed.
+    """
+    history = _table_backup_history(table)
+    for path in history:
+        if path.exists():
+            _clear_readonly(path)
+    moved: list[tuple[Path, Path]] = []
+    oldest = history[-1]
+    # The first shift overwrites the oldest copy. It is first moved aside, so
+    # a rotation failing halfway can put it back: an undo that restores only
+    # the shifted copies lost it (review 2026-10-15, L1).
+    aside: Path | None = None
+    try:
+        if oldest.exists() and history[-2].exists():
+            scratch = _temporary_sibling(oldest)
+            try:
+                replace_file(oldest, scratch)
+            except BaseException:
+                # Still empty: it must never be "restored" over the oldest copy.
+                _unlink_quietly(scratch)
+                raise
+            aside = scratch
         for index in range(len(history) - 1, 0, -1):
             if history[index - 1].exists():
                 replace_file(history[index - 1], history[index])
-        replace_file(fresh, backup)
-    finally:
-        _unlink_quietly(fresh)
+                moved.append((history[index - 1], history[index]))
+        replace_file(fresh, history[0])
+    except BaseException as exc:
+        failures = _undo_backup_moves(moved, aside, oldest)
+        if failures:
+            raise KiCadLibraryError(
+                f"The backups of {table} could not be put back in order after "
+                f"a failed rotation ({exc}):\n" + "\n".join(failures),
+                code="table_backup_rotation_incomplete", path=table,
+                failures="\n".join(failures), error=exc,
+            ) from exc
+        raise
+    if aside is not None:
+        _unlink_quietly(aside)
+
+
+def _undo_backup_moves(moved: list[tuple[Path, Path]], aside: Path | None,
+                       oldest: Path) -> list[str]:
+    """@brief Reverse the moves of a failed backup rotation, newest move first.
+
+    @param moved (source, destination) of every move that succeeded, in order.
+    @param aside Scratch file holding the oldest copy, or None when it was not
+        moved aside (or the move aside itself failed).
+    @param oldest Path the oldest copy must return to.
+    @return One message per copy that could not be put back; empty when the
+        history is exactly as before.
+    @note At the first failed undo the remaining ones stop: each of them would
+        replace a file that still holds a copy not yet moved back. The
+        messages name every copy left out of place so none is lost silently.
+    """
+    failures: list[str] = []
+    for position, (source, destination) in enumerate(reversed(moved)):
+        try:
+            replace_file(destination, source)
+        except OSError as error:
+            failures.append(f"{destination} -> {source}: {error}")
+            for earlier_source, earlier_destination in list(reversed(moved))[position + 1:]:
+                failures.append(
+                    f"{earlier_destination} -> {earlier_source}: not attempted")
+            break
+    if aside is not None and aside.exists():
+        if failures:
+            failures.append(f"oldest backup kept in {aside} (for {oldest})")
+        else:
+            try:
+                replace_file(aside, oldest)
+            except OSError as error:
+                failures.append(f"{aside} -> {oldest}: {error}")
+    return failures
 
 
 def _global_table_missing(table: Path) -> KiCadLibraryError:
@@ -844,15 +1185,26 @@ def update_fp_lib_table(
         pass False for KiCad's global table, which KiCad must create itself.
     @return True when the table contents changed.
     @throws KiCadLibraryError ``global_table_missing`` when the table is
-        absent and ``create_missing`` is False; see
+        absent and ``create_missing`` is False, ``file_not_utf8`` when the
+        table is not UTF-8 text (nothing is written); see
         `_updated_fp_lib_table_text` for the conflict codes.
+    @throws OSError When the table or its backup cannot be written; the table
+        is then left (or put back) as it was, and the backup history unchanged.
     @note Every changing write refreshes ``<table>.kicadgen-backup`` (bounded
         history, see `TABLE_BACKUP_RETENTION`) and replaces the table
-        atomically; the temporary file never survives a failed replace.
+        atomically and durably (fsync before the rename); the temporary file
+        never survives a failed replace.
+    @note Order: the pre-change copy is staged, the table is written, and only
+        then the history rotates. A failed write leaves the history as it was;
+        a failed rotation puts the previous table back, so no change is ever
+        left without its backup.
     """
     table = Path(table_path)
+    original_bytes: bytes | None = None
     if table.is_file():
-        original = table.read_text(encoding="utf-8")
+        original_bytes = table.read_bytes()
+        # Line endings kept as stored: only the added row may differ.
+        original = _decode_utf8(original_bytes, table, keep_newlines=True)
     elif create_missing:
         original = _EMPTY_TABLE
     else:
@@ -862,9 +1214,29 @@ def update_fp_lib_table(
     if updated == original:
         return False
     table.parent.mkdir(parents=True, exist_ok=True)
-    if table.is_file():
-        _rotate_table_backups(table)
-    _atomic_write_text(table, updated)
+    fresh = (_stage_table_backup(table, original_bytes)
+             if original_bytes is not None else None)
+    # A BOM the file started with is written back: the rewrite keeps every
+    # byte except the added or repointed row.
+    bom = (UTF8_BOM if original_bytes is not None
+           and original_bytes.startswith(UTF8_BOM) else b"")
+    try:
+        _atomic_write_bytes(table, bom + updated.encode("utf-8"))
+        if fresh is not None:
+            try:
+                _publish_table_backup(table, fresh)
+            except BaseException:
+                # The new table has no backup of its predecessor: undo it. A
+                # failed undo must not mask the rotation error; the install
+                # rollback compares the table with its own copy and retries.
+                try:
+                    _atomic_write_bytes(table, original_bytes)
+                except OSError:
+                    pass
+                raise
+    finally:
+        if fresh is not None:
+            _unlink_quietly(fresh)
     return True
 
 
@@ -922,18 +1294,83 @@ def _updated_fp_lib_table_text(
             code="invalid_table", path=location,
         )
     replacement = _library_entry(library_name, uri)
-    return original[:closing].rstrip() + "\n  " + replacement + "\n)\n"
+    # Same line ending as the file (CRLF written on Windows by an editor or
+    # an older tool) and the same text after the closing parenthesis (final
+    # newline or none), so the rewrite changes only the added row.
+    newline = "\r\n" if "\r\n" in original else "\n"
+    return (original[:closing].rstrip() + newline + "  " + replacement
+            + newline + original[closing:])
+
+
+def _fsync_file(path: Path) -> None:
+    """@brief Flush an existing file of ours to disk.
+
+    @param path Scratch or rollback copy written by this module (writable).
+    @throws OSError When the file cannot be opened for writing or flushed.
+    @note Opened for update because Windows only commits handles opened with
+        write access; the content is not modified.
+    """
+    with open(path, "r+b") as stream:
+        os.fsync(stream.fileno())
+
+
+def _target_is_folder(target: Path) -> KiCadLibraryError:
+    """@brief Error for a folder sitting where an installed file must go.
+
+    @param target The user's path (footprint, model or table) that is a folder.
+    @return KiCadLibraryError ``install_target_is_folder`` (context ``path``).
+    """
+    return KiCadLibraryError(
+        f"A folder is in the place of the file {target}; the installation "
+        "cannot replace a folder. Rename or move it, then retry.",
+        code="install_target_is_folder", path=target,
+    )
+
+
+def _install_write_refused(error: OSError, root: Path,
+                           aliases: dict[Path, Path] | None = None) -> KiCadLibraryError:
+    """@brief Error for an install the operating system refused, after a full rollback.
+
+    @param error The PermissionError (or IsADirectoryError) raised by the write.
+    @param root Destination folder, named when the error names no file.
+    @param aliases Internal paths (scratch files, rollback copies, the
+        rollback folder) mapped to the user's file they stand for.
+    @return KiCadLibraryError ``install_target_is_folder`` when the real path
+        is a folder, otherwise ``install_write_refused``; both name the user's
+        file, never a scratch file or the rollback folder.
+    """
+    refused = _refused_path(error, root)
+    aliases = aliases or {}
+    if refused in aliases:
+        refused = aliases[refused]
+    else:
+        for internal, real in aliases.items():
+            if internal in refused.parents:
+                # Something inside the rollback folder: name the destination.
+                refused = real
+                break
+    if refused.is_dir() and refused != root:
+        return _target_is_folder(refused)
+    return KiCadLibraryError(
+        f"Unable to write {refused}: it is read-only or held open by another "
+        f"program ({error}). The installation was undone.",
+        code="install_write_refused", path=refused, error=error,
+    )
 
 
 def _restore_file(backup: Path, target: Path) -> None:
-    """Put a rollback copy back in place atomically.
+    """Put a rollback copy back in place atomically and durably.
 
     A rename is tried first (same volume, cannot run out of space); when it is
     impossible the copy goes through a sibling temporary file. Either way the
     target is replaced in one step and the backup is never deleted first.
+    The backup is flushed to disk before the rename (`_fsync_file`): it was
+    written by a plain copy, and a power loss right after the rename could
+    otherwise leave the restored file empty.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
+        _fsync_file(backup)
         os.replace(backup, target)
     except OSError:
         _atomic_copy(backup, target)
@@ -951,33 +1388,59 @@ def _remove_created_directories(directories: list[Path]) -> None:
 def _rollback_install(
         installed: list[Path], backups: dict[Path, Path], table: Path,
         table_backup: Path | None, table_existed: bool) -> list[str]:
-    """Undo a failed install; return one message per step that failed.
+    """@brief Undo a failed install; return one message per step that failed.
 
-    Every step is attempted independently, so a locked file does not prevent
-    the other files and the table from being restored.
+    @param installed Targets this install really changed, in order: replaced
+        by a staged file, or (WRL) deleted. Targets never reached are absent.
+    @param backups Rollback copy of every target that existed before.
+    @param table Library table of the install.
+    @param table_backup Rollback copy of the table, None when it did not exist.
+    @param table_existed Whether the table existed before the install.
+    @return Messages of the steps that failed; empty for a complete rollback.
+    @note Only what was really changed is put back. Restoring every backup
+        and the table regardless reported a false ``rollback_incomplete``
+        whenever an untouched file could not be replaced (the very read-only
+        file that had made the install fail) and left the rollback folder,
+        scratch files and empty folders behind. The table is restored only
+        when its content differs from the copy taken before the install.
+    @note Every step is attempted independently, so a locked file does not
+        prevent the other files and the table from being restored.
     """
     failures: list[str] = []
     for target in installed:
         if target in backups:
+            try:
+                _restore_file(backups[target], target)
+            except OSError as error:
+                failures.append(f"{target} <- {backups[target]}: {error}")
             continue
         try:
             if target.exists():
                 target.unlink()
         except OSError as error:
             failures.append(f"{target}: {error}")
-    for target, backup in backups.items():
-        try:
-            _restore_file(backup, target)
-        except OSError as error:
-            failures.append(f"{target} <- {backup}: {error}")
     try:
         if table_backup is not None:
-            _restore_file(table_backup, table)
+            if not _same_content(table, table_backup):
+                _restore_file(table_backup, table)
         elif not table_existed and table.exists():
             table.unlink()
     except OSError as error:
         failures.append(f"{table}: {error}")
     return failures
+
+
+def _same_content(first: Path, second: Path) -> bool:
+    """@brief Tell whether two files exist and hold the same bytes.
+
+    @param first File compared (missing or unreadable -> False).
+    @param second Reference copy.
+    @return True only when both files can be read and are byte-identical.
+    """
+    try:
+        return first.read_bytes() == second.read_bytes()
+    except OSError:
+        return False
 
 
 def install_component_library(
@@ -1004,12 +1467,25 @@ def install_component_library(
         parsing errors are raised before anything is written.
         ``rollback_incomplete`` (context ``rollback_dir``, ``error``,
         ``failures``) means the install failed AND some files could not be
-        restored: the backups are kept in ``rollback_dir``. Any other failure
+        restored: the backups are kept in ``rollback_dir``.
+        ``install_write_refused`` (context ``path``, ``error``) means the
+        operating system refused a write (read-only table or installed file,
+        file held open, protected folder) and the rollback was complete:
+        ``path`` is the real file, never a scratch name. Any other failure
         is re-raised unchanged after a complete rollback.
-    @note Rollback restores replaced component files and the table from copies
-        kept in a rollback folder, removes files and empty folders the install
+    @note CONTRACT CHANGED 2026-10-15: a refused write used to be re-raised as
+        a bare PermissionError, which the GUI showed as «unexpected OS error»
+        naming a ``.kicadgen.tmp`` scratch path the user never sees.
+        ``file_not_utf8`` (table or footprint not saved as UTF-8) is raised
+        before anything is written.
+    @note Rollback restores, from copies kept in a rollback folder, only the
+        component files this install really replaced and the table only when
+        its content changed; it removes files and empty folders the install
         created, and deletes the rollback folder only when every step
         succeeded. Each rollback step runs even if an earlier one failed.
+    @note Copies never inherit the read-only attribute of their source (see
+        `_copy_writable`), so a read-only artifact does not make the
+        installed files, or the rollback copies, impossible to replace later.
     @note The installed copy is named ``<artifacts.name>`` inside, like its
         file (see name_footprint); the source footprint is not modified.
     """
@@ -1026,6 +1502,11 @@ def install_component_library(
     target_wrl_path = shapes_dir / f"{artifacts.name}.wrl"
     target_wrl = target_wrl_path if artifacts.wrl_path else None
     targets = [target_footprint, target_step, target_wrl_path]
+    for target in targets:
+        if target.is_dir() and not target.is_symlink():
+            # Overwriting cannot help: a file never replaces a folder. Saying
+            # "read-only or held open" sent the user looking for the wrong cause.
+            raise _target_is_folder(target)
     existing = [path for path in targets if path.exists()]
     if existing and not overwrite:
         raise KiCadLibraryError(
@@ -1039,7 +1520,9 @@ def install_component_library(
         # A global table holding only KiCadGen would make KiCad skip its
         # first-run setup of the standard libraries.
         raise _global_table_missing(destination_table)
-    table_original = (destination_table.read_text(encoding="utf-8")
+    # A non-UTF-8 table is refused here, before the first write.
+    table_original = (_decode_utf8(destination_table.read_bytes(),
+                                   destination_table, keep_newlines=True)
                       if table_existed else _EMPTY_TABLE)
     library_uri = (f"${{KIPRJMOD}}/{library_name}.pretty"
                    if project_library else pretty_dir.as_posix())
@@ -1052,8 +1535,7 @@ def install_component_library(
         if project_library else target_step.as_posix()
     )
     rendered = attach_3d_model(
-        name_footprint(artifacts.footprint_path.read_text(encoding="utf-8"),
-                       artifacts.name),
+        name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name),
         model_reference)
 
     # Folders created here are removed again by a failed install when empty.
@@ -1067,6 +1549,9 @@ def install_component_library(
     # removes exactly the scratch files created so far.
     staged: list[tuple[Path, Path]] = []
     rollback_dir = root / f".kicadgen-rollback-{uuid.uuid4().hex}"
+    # Internal path -> the user's file it stands for, so an error never names
+    # a scratch file or the rollback folder (review 2026-10-15, L5).
+    aliases: dict[Path, Path] = {rollback_dir: root}
     try:
         pretty_dir.mkdir(parents=True, exist_ok=True)
         shapes_dir.mkdir(parents=True, exist_ok=True)
@@ -1077,15 +1562,24 @@ def install_component_library(
         if target_wrl is not None:
             staged_wrl = _temporary_sibling(target_wrl)
             staged.append((staged_wrl, target_wrl))
-        staged_footprint.write_text(rendered, encoding="utf-8", newline="\n")
-        shutil.copy2(artifacts.step_path, staged_step)
+        aliases.update({temporary: target for temporary, target in staged})
+        # Every staged file is on disk before its rename publishes it: the
+        # rollback folder is deleted after a successful install, so a power
+        # loss could otherwise leave an empty .kicad_mod/.step that the table
+        # already references (review 2026-10-15, M5).
+        _write_durably(staged_footprint, rendered.encode("utf-8"))
+        _copy_writable(artifacts.step_path, staged_step)
+        _fsync_file(staged_step)
         if target_wrl is not None and artifacts.wrl_path is not None:
-            shutil.copy2(artifacts.wrl_path, staged_wrl)
+            _copy_writable(artifacts.wrl_path, staged_wrl)
+            _fsync_file(staged_wrl)
         rollback_dir.mkdir()
-    except BaseException:
+    except BaseException as exc:
         for temporary, _target in staged:
             _unlink_quietly(temporary)
         _remove_created_directories(created_dirs)
+        if isinstance(exc, (PermissionError, IsADirectoryError)):
+            raise _install_write_refused(exc, root, aliases) from exc
         raise
 
     backups: dict[Path, Path] = {}
@@ -1095,13 +1589,18 @@ def install_component_library(
         for target in targets:
             if target.is_file():
                 backup = rollback_dir / f"{len(backups)}-{target.name}"
-                shutil.copy2(target, backup)
+                aliases[backup] = target
+                _copy_writable(target, backup)
                 backups[target] = backup
         if table_existed:
             table_backup = rollback_dir / "table-backup"
-            shutil.copy2(destination_table, table_backup)
+            aliases[table_backup] = destination_table
+            _copy_writable(destination_table, table_backup)
         for temporary, target in staged:
-            os.replace(temporary, target)
+            # Retried like every other atomic write: an antivirus or KiCad's
+            # file watcher holding the target for an instant must not undo
+            # the whole installation (review 2026-10-15, M5).
+            replace_file(temporary, target)
             installed.append(target)
         if artifacts.wrl_path is None and target_wrl_path.is_file():
             target_wrl_path.unlink()
@@ -1123,12 +1622,14 @@ def install_component_library(
                 code="rollback_incomplete", rollback_dir=rollback_dir,
                 error=exc, failures="\n".join(failures),
             ) from exc
-        shutil.rmtree(rollback_dir, ignore_errors=True)
+        _remove_tree_quietly(rollback_dir)
         _remove_created_directories(created_dirs)
+        if isinstance(exc, (PermissionError, IsADirectoryError)):
+            raise _install_write_refused(exc, root, aliases) from exc
         raise
     for temporary, _target in staged:
         _unlink_quietly(temporary)
-    shutil.rmtree(rollback_dir, ignore_errors=True)
+    _remove_tree_quietly(rollback_dir)
     return LibraryInstallResult(
         f"{library_name}:{artifacts.name}", target_footprint, target_step,
         target_wrl, destination_table,

@@ -164,10 +164,15 @@ def test_qthread_left_running_fails_the_test_and_is_listed(tmp_path, monkeypatch
     result = run_child(tmp_path, _QT_APP + """
     import kicadgen_test_harness
     kicadgen_test_harness.THREAD_JOIN_TIMEOUT_MS = 200
+    import threading
+
+    # The thread ends only when the second test releases it: "still running
+    # at the 200 ms join" must not depend on how loaded the machine is.
+    RELEASE = threading.Event()
 
     class Sleeper(QThread):
         def run(self):
-            self.msleep(1500)
+            RELEASE.wait(30)
 
     KEEP = []
 
@@ -175,6 +180,10 @@ def test_qthread_left_running_fails_the_test_and_is_listed(tmp_path, monkeypatch
         worker = Sleeper()
         KEEP.append(worker)
         worker.start()
+
+    def test_release_the_worker():
+        RELEASE.set()
+        assert KEEP[0].wait(10000)
     """)
     assert result.returncode == 1, outcome(result)
     assert "still running" in result.stdout, outcome(result)
@@ -347,10 +356,14 @@ def test_shutdown_main_window_keeps_a_window_whose_worker_does_not_stop(monkeypa
     from qt_fixtures import shutdown_main_window
     app = _application()
     monkeypatch.setattr(harness, "THREAD_JOIN_TIMEOUT_MS", 50)
+    import threading
+    # Released in the finally: the worker cannot end by itself before the
+    # 50 ms join, however loaded the machine (a fixed sleep made it a race).
+    release = threading.Event()
 
     class Worker(QThread):
         def run(self):
-            self.msleep(600)
+            release.wait(30)
 
     window = QMainWindow()
     window._worker = Worker()
@@ -362,7 +375,8 @@ def test_shutdown_main_window_keeps_a_window_whose_worker_does_not_stop(monkeypa
         assert window in harness._GRAVEYARD
         assert len(harness._THREAD_LEAKS) == leaks_before + 1
     finally:
-        window._worker.wait(5000)
+        release.set()
+        window._worker.wait(10000)
         harness._GRAVEYARD.remove(window)
         harness._GRAVEYARD.remove(window._worker)
         del harness._THREAD_LEAKS[leaks_before:]
@@ -449,9 +463,16 @@ _STUCK_WORKER_CHILD = """
     kicadgen_test_harness.THREAD_JOIN_TIMEOUT_MS = 100
     kicadgen_test_harness.ENFORCE_THREAD_JOIN = False
 
+    import threading
+
+    #: Released only by the second test: the worker cannot end on its own
+    #: between the start and the 100 ms join, however loaded the machine is
+    #: (a fixed sleep made "does not stop" a timing assumption).
+    RELEASE = threading.Event()
+
     class Sleeper(QThread):
         def run(self):
-            self.msleep(1500)
+            RELEASE.wait(30)
 
     class Probe:
         \"\"\"Python object hung on the window: must survive with it.\"\"\"
@@ -470,7 +491,9 @@ _STUCK_WORKER_CHILD = """
         assert window is not None
         assert window in kicadgen_test_harness._GRAVEYARD
         assert REFS["probe"]() is window._probe   # attributes not dropped
-        window._stuck_worker.wait(5000)
+        assert window._stuck_worker.isRunning()   # still the reason it is kept
+        RELEASE.set()
+        assert window._stuck_worker.wait(10000)
 """
 
 
@@ -656,3 +679,101 @@ def test_interrupt_from_the_test_is_not_replaced_by_the_collection(tmp_path, bod
     assert result.returncode == exit_code, outcome(result)
     assert marker in result.stdout, outcome(result)
     assert "not writable for the post-test collection" not in result.stdout, outcome(result)
+
+
+def test_graveyard_is_released_when_its_threads_have_ended(monkeypatch):
+    """Kept windows are destroyed at unconfigure while Qt exists, not at interpreter exit."""
+    from PyQt6 import sip
+    from PyQt6.QtCore import QThread
+    from PyQt6.QtWidgets import QMainWindow
+    _application()
+
+    class Quick(QThread):
+        def run(self):
+            pass
+
+    window, worker = QMainWindow(), Quick()
+    worker.start()
+    assert worker.wait(10000)
+    graveyard = [window, worker]
+    monkeypatch.setattr(harness, "_GRAVEYARD", graveyard)
+    harness._release_graveyard()
+    assert graveyard == []
+    assert sip.isdeleted(window)
+
+
+def test_graveyard_is_untouched_while_a_thread_still_runs(monkeypatch):
+    """Negative case: a running leaked thread keeps the whole graveyard alive."""
+    import threading
+    from PyQt6 import sip
+    from PyQt6.QtCore import QThread
+    from PyQt6.QtWidgets import QMainWindow
+    _application()
+    release = threading.Event()
+
+    class Held(QThread):
+        def run(self):
+            release.wait(30)
+
+    window, worker = QMainWindow(), Held()
+    worker.start()
+    graveyard = [window, worker]
+    monkeypatch.setattr(harness, "_GRAVEYARD", graveyard)
+    try:
+        harness._release_graveyard()
+        assert graveyard == [window, worker]
+        assert not sip.isdeleted(window)
+    finally:
+        release.set()
+        assert worker.wait(10000)
+
+
+#: Child whose MainWindow ends in the graveyard (worker released only by the
+#: second test) while its real closeEvent would block: the pending-edits
+#: step opens a QDialog with exec(). A static QMessageBox would not prove
+#: anything here, because pytest_sessionfinish neutralises those for good;
+#: a QDialog.exec is what a dialog of the program does. `_release_graveyard`
+#: must not call close() on it; the short watchdog armed before the session
+#: end turns a hang there into a nonzero exit.
+_BUSY_GRAVEYARD_CHILD = """
+    import threading
+    import pytest
+    from PyQt6.QtCore import QThread
+    import kicadgen_test_harness
+
+    pytest.importorskip("pyvistaqt")
+    kicadgen_test_harness.THREAD_JOIN_TIMEOUT_MS = 100
+    kicadgen_test_harness.ENFORCE_THREAD_JOIN = False
+    RELEASE = threading.Event()
+
+    class Sleeper(QThread):
+        def run(self):
+            RELEASE.wait(30)
+
+    REFS = {}
+
+    def test_busy_window_ends_in_the_graveyard(window):
+        from PyQt6.QtWidgets import QDialog
+        # Instance attributes: they survive the undo of the monkeypatches,
+        # so the real closeEvent would reach them at unconfigure.
+        window._background_work_running = lambda: False
+        window._can_leave_project = lambda: QDialog(window).exec() == 1
+        window._stuck_worker = Sleeper()
+        window._stuck_worker.start()
+        REFS["window"] = window
+
+    def test_release_the_worker_then_shorten_the_watchdog():
+        RELEASE.set()
+        assert REFS["window"]._stuck_worker.wait(10000)
+        # Only the session end remains: a modal there must not wait 300 s.
+        kicadgen_test_harness.TEST_WATCHDOG_S = 20
+"""
+
+
+def test_busy_graveyard_window_does_not_hang_the_session_end(tmp_path):
+    """A kept window whose closeEvent would block is deleted without close()."""
+    result = run_child(tmp_path, _BUSY_GRAVEYARD_CHILD)
+    if "skipped" in result.stdout and "passed" not in result.stdout:
+        pytest.skip("pyvistaqt not installed in the child")
+    assert result.returncode == 0, outcome(result)
+    assert "2 passed" in result.stdout, outcome(result)

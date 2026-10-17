@@ -1,17 +1,15 @@
 """@brief KiCad footprint (.kicad_mod) data model and writer.
 
-Modello dati e generatore di footprint KiCad (.kicad_mod).
+Provides high-level classes (Pad, FpLine, FpRect, FpCircle, FpText) that
+convert themselves into S-expressions through core.sexpr, and the
+Footprint class that assembles them into the complete file format
+accepted by KiCad (pcbnew) version 10.x.
 
-Fornisce classi ad alto livello (Pad, FpLine, FpRect, FpCircle, FpText)
-che si convertono in S-expression tramite core.sexpr, e la classe
-Footprint che le assembla nel formato file completo accettato da KiCad
-(pcbnew) versione 10.x.
-
-Esempio minimo:
+Minimal example:
 
     from kicadgen.core.footprint import Footprint, Pad
 
-    fp = Footprint(name="MY_CONN", description="Connettore di test")
+    fp = Footprint(name="MY_CONN", description="Test connector")
     fp.add_pad(Pad(number="1", pad_type="thru_hole", shape="circle",
                     at=(0, 0), size=(1.7, 1.7), drill=1.0,
                     layers=["*.Cu", "*.Mask"]))
@@ -25,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
 
+from .kicad_text import kicad_centre_from_corner, kicad_centre_to_corner
 from .sexpr import YES, SExpr, Symbol, bare, sx
 from ..services.messages import tx
 
@@ -65,6 +64,31 @@ def _stroke_node(width: float) -> SExpr:
 #: Text size (mm) of the Reference/Value properties the generator writes;
 #: the footprint preview draws them at this size (capitals this tall).
 PROPERTY_TEXT_SIZE = 1.0
+#: Stroke thickness (mm) of the Reference/Value properties the generator
+#: writes; with the size it fixes where KiCad centres them
+#: (`property_corner_offset`).
+PROPERTY_TEXT_THICKNESS = 0.15
+#: Text of the Reference property of a library footprint, as KiCad shows it.
+REFERENCE_TEXT = "REF**"
+
+
+def property_corner_offset(text: str) -> Point:
+    """@brief Offset, mm, from a centred Reference/Value property's anchor to the bottom-left anchor KiCad draws it at.
+
+    @param text The text KiCad shows for the property («REF**», the
+        footprint name for the Value).
+    @return (dx, dy) mm (footprint axes, y down): minus half the width KiCad
+        centres the text on, and 0.585 x size downwards, for the size and
+        thickness `Footprint` writes (`PROPERTY_TEXT_SIZE`,
+        `PROPERTY_TEXT_THICKNESS`).
+    @note KiCad's stroke-font geometry measured with kicad-cli
+        (`kicadgen.core.kicad_text`), not any desktop font: a text moved by
+        this offset and written with ``(justify left bottom)`` stays where
+        KiCad drew it centred, within 0.02 mm. The preview draws texts at
+        KiCad's width (`kicadgen.gui.kicad_text_item`, 2026-10-16), so on
+        screen it stays put too, apart from first/last glyph side bearings.
+    """
+    return kicad_centre_to_corner(text, PROPERTY_TEXT_SIZE, PROPERTY_TEXT_THICKNESS, y_down=True)
 
 
 def _text_effects(size: float = 1.0, thickness: float = 0.15,
@@ -80,16 +104,14 @@ def _text_effects(size: float = 1.0, thickness: float = 0.15,
 class Pad:
     """@brief Footprint pad: number, type, shape, position, size, layers and optional drill.
 
-    Piazzola (pad) di un footprint.
-
-    - number: nome/numero pin (es. "1", "A2", "" per pad meccaniche senza rete)
+    - number: pin name/number (e.g. "1", "A2", "" for mechanical pads without a net)
     - pad_type: "thru_hole" | "smd" | "np_thru_hole"
     - shape: "circle" | "rect" | "oval" | "roundrect"
-    - at: posizione (x, y) in mm relativa all'origine del footprint
-    - size: (larghezza, altezza) in mm
-    - layers: lista layer KiCad, es. ["*.Cu", "*.Mask"] per THT o ["F.Cu", "F.Paste", "F.Mask"] per SMD
-    - drill: diametro foro in mm (obbligatorio per thru_hole/np_thru_hole)
-    - roundrect_rratio: rapporto di arrotondamento per shape="roundrect" (0..0.5)
+    - at: (x, y) position in mm relative to the footprint origin
+    - size: (width, height) in mm
+    - layers: list of KiCad layers, e.g. ["*.Cu", "*.Mask"] for THT or ["F.Cu", "F.Paste", "F.Mask"] for SMD
+    - drill: hole diameter in mm (required for thru_hole/np_thru_hole)
+    - roundrect_rratio: rounding ratio for shape="roundrect" (0..0.5)
     """
 
     number: str
@@ -138,7 +160,7 @@ class Pad:
 class FpLine:
     """@brief Graphic line segment on a footprint layer.
 
-    Segmento grafico (bordo silkscreen/fab/courtyard ecc.).
+    Used for the silkscreen, fab and courtyard outlines, among others.
     """
 
     start: Point
@@ -147,7 +169,10 @@ class FpLine:
     width: float = 0.12
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize this line graphic to a KiCad S-expression."""
+        """@brief Serialize this line graphic to a KiCad S-expression.
+
+        @return The `fp_line` node with start, end, stroke, layer and a fresh uuid.
+        """
         node = sx("fp_line", sx("start", *self.start), sx("end", *self.end))
         node.add(_stroke_node(self.width))
         node.add(sx("layer", self.layer))
@@ -159,7 +184,7 @@ class FpLine:
 class FpRect:
     """@brief Graphic rectangle on a footprint layer, optionally filled.
 
-    Rettangolo grafico (es. contorno serigrafia).
+    Graphic rectangle (e.g. a silkscreen outline).
     """
 
     start: Point
@@ -169,7 +194,10 @@ class FpRect:
     fill: bool = False
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize this rectangle graphic to a KiCad S-expression."""
+        """@brief Serialize this rectangle graphic to a KiCad S-expression.
+
+        @return The `fp_rect` node with corners, stroke, fill, layer and a fresh uuid.
+        """
         node = sx("fp_rect", sx("start", *self.start), sx("end", *self.end))
         node.add(_stroke_node(self.width))
         node.add(sx("fill", bare(self.fill)))
@@ -182,7 +210,7 @@ class FpRect:
 class FpCircle:
     """@brief Graphic circle on a footprint layer, optionally filled.
 
-    Cerchio grafico (es. marcatore pin 1).
+    Graphic circle (e.g. the pin 1 marker).
     """
 
     center: Point
@@ -192,7 +220,11 @@ class FpCircle:
     fill: bool = False
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize this circle graphic to a KiCad S-expression."""
+        """@brief Serialize this circle graphic to a KiCad S-expression.
+
+        @return The `fp_circle` node (centre plus a point on the circumference,
+            as KiCad writes it) with stroke, fill, layer and a fresh uuid.
+        """
         end = (self.center[0] + self.radius, self.center[1])
         node = sx("fp_circle", sx("center", *self.center), sx("end", *end))
         node.add(_stroke_node(self.width))
@@ -206,7 +238,7 @@ class FpCircle:
 class FpArc:
     """@brief Graphic circular arc on a footprint layer, through three points.
 
-    Arco grafico (fp_arc): inizio, punto intermedio e fine, come lo scrive KiCad.
+    Graphic arc (fp_arc): start, mid point and end, the way KiCad writes it.
     """
 
     start: Point
@@ -216,7 +248,10 @@ class FpArc:
     width: float = 0.12
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize this arc graphic to a KiCad S-expression."""
+        """@brief Serialize this arc graphic to a KiCad S-expression.
+
+        @return The `fp_arc` node with start, mid, end, stroke, layer and a fresh uuid.
+        """
         node = sx("fp_arc", sx("start", *self.start), sx("mid", *self.mid),
                   sx("end", *self.end))
         node.add(_stroke_node(self.width))
@@ -229,7 +264,7 @@ class FpArc:
 class FpText:
     """@brief Graphic text item on a footprint layer.
 
-    Testo grafico (usato per riferimenti extra, non Reference/Value).
+    Graphic text (used for extra references, not the Reference/Value properties).
 
     @param justify KiCad justification words written as
         ``(justify <words>)`` inside ``effects`` (for example
@@ -248,7 +283,11 @@ class FpText:
     justify: Optional[Tuple[str, ...]] = None
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize this text graphic to a KiCad S-expression."""
+        """@brief Serialize this text graphic to a KiCad S-expression.
+
+        @return The `fp_text` node with kind, text, position, layer, a fresh
+            uuid and the font effects (size, thickness, optional justify).
+        """
         node = sx("fp_text", Symbol(self.kind), self.text)
         node.add(_at_node(self.at))
         node.add(sx("layer", self.layer))
@@ -358,6 +397,14 @@ USER_DRAW_TEXT_MM = 1.0
 USER_TEXT_ANCHOR = "left_bottom"
 #: KiCad justification written for a text record anchored at `USER_TEXT_ANCHOR`.
 USER_TEXT_JUSTIFY = ("left", "bottom")
+#: Field of the saved Reference/Value position mapping (``footprint_texts``
+#: of the project, ``texts`` of the footprint recovery file) that marks its
+#: points as BOTTOM-LEFT anchors (value `USER_TEXT_ANCHOR`, user,
+#: 2026-10-16). A mapping without it was saved before that date and holds
+#: the CENTRE of each text; it is converted once on load
+#: (`migrate_centred_positions`). `validate_text_positions` ignores the
+#: field, so a program older than the mark still reads the mapping.
+TEXT_POSITIONS_ANCHOR_FIELD = "anchor"
 
 
 #: Largest coordinate KiCad can hold, mm: its internal unit is the
@@ -573,6 +620,62 @@ def migrate_centred_text(record: dict, corner_offset: Point) -> dict:
     return clean
 
 
+def text_positions_anchored(raw) -> bool:
+    """@brief Tell whether a saved Reference/Value position mapping holds bottom-left anchors.
+
+    @param raw Whatever the project or recovery file holds for the positions.
+    @return True when it is a mapping marked with `TEXT_POSITIONS_ANCHOR_FIELD`
+        = `USER_TEXT_ANCHOR`; False for an unmarked (legacy, centred) or
+        malformed value.
+    """
+    return isinstance(raw, dict) and raw.get(TEXT_POSITIONS_ANCHOR_FIELD) == USER_TEXT_ANCHOR
+
+
+def text_positions_json(positions) -> dict:
+    """@brief JSON form of validated Reference/Value anchors, marked as bottom-left anchors.
+
+    @param positions {key: (x, y)} mm, keys of `TEXT_KEYS` (bottom-left anchors).
+    @return {key: [x, y]} plus `TEXT_POSITIONS_ANCHOR_FIELD` when at least
+        one position is chosen; {} when none is (nothing to convert, and the
+        file stays as it was before the mark existed).
+    """
+    data = {key: [float(value[0]), float(value[1])] for key, value in positions.items()}
+    if data:
+        data[TEXT_POSITIONS_ANCHOR_FIELD] = USER_TEXT_ANCHOR
+    return data
+
+
+def migrate_centred_positions(positions, corner_offsets) -> dict:
+    """@brief Move legacy centred Reference/Value positions to the bottom-left corner of their text.
+
+    @param positions {key: (x, y)} mm as `validate_text_positions` returns
+        them from an UNMARKED mapping (each point the centre of its text).
+    @param corner_offsets {key: (dx, dy)} mm from the centre to the
+        bottom-left anchor of that key's text, `property_corner_offset` of
+        the text KiCad shows; a key without an offset is left out of the
+        result (it falls back to its default instead of being misread).
+    @return {key: (x, y)} anchors rounded to 0.1 um; a coordinate pushed past
+        `TEXT_POSITION_LIMIT_MM` is clamped to it (the text then moves by at
+        most half its width instead of being lost).
+    @note CONTRACT CHANGED 2026-10-16 (user: KiCad stays still in both
+        tabs): with `property_corner_offset` the conversion keeps the text
+        where KICAD drew it; the preview may show it shifted once by a few
+        tenths of a mm (its font is not KiCad's). Before, the offsets came
+        from the preview's metrics and KiCad moved the text instead.
+    """
+    limit = TEXT_POSITION_LIMIT_MM
+    result = {}
+    for key, (x, y) in positions.items():
+        offset = corner_offsets.get(key)
+        if offset is None:
+            continue
+        moved = [round(float(v) + float(d), 4) for v, d in zip((x, y), offset)]
+        if not all(math.isfinite(v) for v in moved):
+            continue
+        result[key] = tuple(max(-limit, min(limit, v)) + 0.0 for v in moved)
+    return result
+
+
 #: Extension of a KiCad footprint file inside a ``.pretty`` library folder.
 FOOTPRINT_FILE_SUFFIX = ".kicad_mod"
 
@@ -591,8 +694,6 @@ def footprint_file_name(name: str) -> str:
 class Footprint:
     """@brief Complete KiCad footprint that renders and saves as a .kicad_mod file.
 
-    Footprint KiCad completo, esportabile come file .kicad_mod.
-
     @param datasheet Datasheet URL or path; "" when unknown. It fills the
         hidden "Datasheet" property, as `description` fills "Description".
     """
@@ -605,6 +706,11 @@ class Footprint:
     attr: Optional[str] = None  # "through_hole" | "smd" | None
     reference_at: Point = (0.0, -2.0)
     value_at: Point = (0.0, 2.0)
+    #: {key: justify words} of the Reference/Value texts placed by
+    #: `place_texts` or `place_default_texts` (bottom-left anchors,
+    #: ``("left", "bottom")``); a key without an entry keeps KiCad's centred
+    #: text (a Footprint built directly, as before 2026-10-16).
+    text_justify: dict = field(default_factory=dict)
 
     pads: list = field(default_factory=list)
     graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
@@ -619,19 +725,86 @@ class Footprint:
         @note Generators call this once their pads and outlines are complete
             and before any user choice (place_texts) or user drawing is
             added, so neither moves the default (decision D1, 2026-10-14).
+        @note CONTRACT CHANGED 2026-10-17 (user: «Predefinito centrato»):
+            the D1 centres (`default_text_positions`) are written as KiCad
+            centred texts, with no ``justify``. A centred default stays
+            centred under the pads whatever text KiCad shows in it: the
+            board shows the schematic Value, not the footprint name, and a
+            rename changes the name's width. From 2026-10-16 to this change
+            the defaults were converted to ``(justify left bottom)``
+            anchors, which kept the left edge and so lost the centring.
+            Only a text the user places (`place_texts`) is anchored at its
+            bottom-left corner.
         """
-        positions = default_text_positions(self, grid_origin)
-        self.reference_at = positions["Reference"]
-        self.value_at = positions["Value"]
+        centres = default_text_positions(self, grid_origin)
+        self.reference_at = centres["Reference"]
+        self.value_at = centres["Value"]
+        self.text_justify = {}
         return self
+
+    def property_texts(self) -> dict:
+        """@brief The texts KiCad shows for the Reference and Value properties of this footprint.
+
+        @return {"Reference": `REFERENCE_TEXT`, "Value": the footprint name},
+            the texts `to_sexpr` writes.
+        """
+        return {"Reference": REFERENCE_TEXT, "Value": self.name}
+
+    def _text_points(self) -> dict:
+        """{key: (point, bottom-left?)} of the Reference/Value properties as written."""
+        return {"Reference": (self.reference_at, "Reference" in self.text_justify),
+                "Value": (self.value_at, "Value" in self.text_justify)}
+
+    def text_anchors(self) -> dict:
+        """@brief Bottom-left anchors, mm, at which KiCad draws the Reference and Value texts.
+
+        @return {key: (x, y)} for every key of `TEXT_KEYS`: the written point
+            of a bottom-left text, the KiCad conversion of a centred one
+            (`property_corner_offset`, rounded to 0.1 um and clamped like
+            `migrate_centred_positions`).
+        """
+        texts = self.property_texts()
+        result = {}
+        for key, (point, corner) in self._text_points().items():
+            if corner:
+                result[key] = (float(point[0]) + 0.0, float(point[1]) + 0.0)
+            else:
+                result[key] = migrate_centred_positions(
+                    {key: point}, {key: property_corner_offset(texts[key])})[key]
+        return result
+
+    def text_centres(self) -> dict:
+        """@brief Points, mm, on which KiCad centres the Reference and Value texts as written.
+
+        @return {key: (x, y)} for every key of `TEXT_KEYS`: the written point
+            of a centred text, the inverse KiCad conversion of a bottom-left
+            one (unrounded; within 0.1 um of the centre it was converted
+            from, the rounding of the anchor).
+        """
+        texts = self.property_texts()
+        result = {}
+        for key, (point, corner) in self._text_points().items():
+            if corner:
+                result[key] = kicad_centre_from_corner(
+                    texts[key], PROPERTY_TEXT_SIZE, point[0], point[1],
+                    thickness=PROPERTY_TEXT_THICKNESS, y_down=True)
+            else:
+                result[key] = (float(point[0]), float(point[1]))
+        return result
 
     def place_texts(self, positions) -> "Footprint":
         """@brief Put the Reference and Value texts where the user chose; the others keep their default.
 
         @param positions {key: (x, y)} mm in footprint coordinates (y down),
-            keys of `TEXT_KEYS`; None or {} changes nothing.
+            keys of `TEXT_KEYS`; each point is the BOTTOM-LEFT corner of the
+            text (left edge, baseline); None or {} changes nothing.
         @return self, for chaining.
         @throws ValueError On an unknown key or a position that does not validate.
+        @note CONTRACT CHANGED 2026-10-16 (user: REF**/Value anchored like
+            the drawn texts): a placed text is written with
+            ``(justify left bottom)`` at its point, so it grows right and up
+            from it; before, the point was the text centre. A text not placed
+            here keeps its centred default (`place_default_texts`).
         """
         for key, value in (positions or {}).items():
             if key not in TEXT_KEYS:
@@ -643,19 +816,30 @@ class Footprint:
                 self.reference_at = checked[key]
             else:
                 self.value_at = checked[key]
+            self.text_justify[key] = USER_TEXT_JUSTIFY
         return self
 
     def add_pad(self, pad: Pad) -> "Footprint":
-        """@brief Append a pad and return self for chaining."""
+        """@brief Append a pad and return self for chaining.
+
+        @param pad The Pad to add; not validated here.
+        @return This footprint.
+        """
         self.pads.append(pad)
         return self
 
     def add_graphic(self, item) -> "Footprint":
-        """@brief Append a graphic item (line, rectangle, circle or text) and return self for chaining."""
+        """@brief Append a graphic item (line, rectangle, circle or text) and return self for chaining.
+
+        @param item Any object with a `to_sexpr()` method (FpLine, FpRect,
+            FpCircle, FpArc, FpText).
+        @return This footprint.
+        """
         self.graphics.append(item)
         return self
 
     def _property_node(self, key: str, value: str, at: Point, layer: str, hide: bool = False) -> SExpr:
+        """Property node; a key in `text_justify` gets its ``(justify ...)`` (bottom-left anchor)."""
         node = sx("property", key, value)
         node.add(_at_node(at))
         node.add(sx("unlocked", YES))
@@ -663,11 +847,17 @@ class Footprint:
         if hide:
             node.add(sx("hide", YES))
         node.add(sx("uuid", _uuid()))
-        node.add(_text_effects(PROPERTY_TEXT_SIZE))
+        node.add(_text_effects(PROPERTY_TEXT_SIZE, PROPERTY_TEXT_THICKNESS,
+                               justify=self.text_justify.get(key)))
         return node
 
     def to_sexpr(self) -> SExpr:
-        """@brief Serialize the complete footprint to a KiCad S-expression."""
+        """@brief Serialize the complete footprint to a KiCad S-expression.
+
+        @return The root `footprint` node: header, properties (Reference,
+            Value, hidden Datasheet and Description), attribute, graphics
+            and pads, in the order KiCad writes them.
+        """
         root = sx("footprint", self.name)
         root.add(sx("version", KICAD_VERSION))
         root.add(sx("generator", "kicadgen_tool"))
@@ -678,7 +868,7 @@ class Footprint:
         if self.tags:
             root.add(sx("tags", self.tags))
 
-        root.add(self._property_node("Reference", "REF**", self.reference_at, "F.SilkS"))
+        root.add(self._property_node("Reference", REFERENCE_TEXT, self.reference_at, "F.SilkS"))
         root.add(self._property_node("Value", self.name, self.value_at, "F.Fab"))
         # The hidden properties repeat descr/datasheet: KiCad's footprint
         # editor edits the properties, so an empty one looks like missing data.
@@ -696,7 +886,10 @@ class Footprint:
         return root
 
     def render(self) -> str:
-        """@brief Return the complete .kicad_mod file text, newline-terminated."""
+        """@brief Return the complete .kicad_mod file text, newline-terminated.
+
+        @return The rendered S-expression followed by a single newline.
+        """
         return self.to_sexpr().render(0) + "\n"
 
     def save(self, path: str) -> None:
@@ -834,7 +1027,8 @@ def default_text_positions(footprint: "Footprint", grid_origin: Optional[Point] 
     @param footprint Generated footprint (pads and outlines complete).
     @param grid_origin Origin of the preview grid of this footprint, mm;
         None uses text_grid_origin.
-    @return {"Reference": (x, y), "Value": (x, y)} mm: Reference centred
+    @return {"Reference": (x, y), "Value": (x, y)} mm, the CENTRE of each
+        text (KiCad's default justification): Reference centred
         above the envelope (footprint_envelope), Value centred below it,
         each clear of it by half the text box (size + stroke, 1.0 + 0.15 mm,
         the property text written by Footprint) plus SILK_PAD_CLEARANCE_MM,
@@ -848,6 +1042,11 @@ def default_text_positions(footprint: "Footprint", grid_origin: Optional[Point] 
         on the pads of SOIC packages and on the pin-1 marker of pin headers
         (KiCad DRC silk_over_copper). The envelope is the larger of pads and
         body/courtyard, so a rotated or off-centre package uses its real extent.
+    @note The default is a centre (the D1 contract); its bottom-left
+        anchor depends on the text width, which `Footprint.place_default_texts`
+        takes from KiCad's stroke-font geometry (`property_corner_offset`,
+        2026-10-16), so every footprint, with or without the window, is
+        written in the same ``(justify left bottom)`` form.
     """
     from .silk import SILK_PAD_CLEARANCE_MM
 

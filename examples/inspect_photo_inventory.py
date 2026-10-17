@@ -1,15 +1,15 @@
 """@brief Explicit top-photo inventory run: localization plus grouped verification, saved for inspection.
 
-Prova esplicita su una foto superiore: 4 localizzazioni + verifica a gruppi.
+Explicit run on one top photo: 4 localizations plus grouped verification.
 
-Salva JSON e confronto PNG sotto generated/photo-review per misurare e
-ispezionare la localizzazione senza rigenerare il modello FreeCAD.
+Saves the JSON and the PNG comparison under generated/photo-review so the
+localization can be measured and inspected without regenerating the FreeCAD
+model.
 
-La cartella di output fa da progetto: la cache delle risposte AI sta in
-`<output>/photo-cache`, come `<progetto>/photo-cache` nell'applicazione
-(decisione dell'utente del 2026-09-24: ogni interrogazione AI e' del suo
-progetto). Rilanciare con la stessa `--output` riusa la cache, senza nuove
-chiamate a pagamento.
+The output folder acts as the project: the cache of the AI answers lives in
+`<output>/photo-cache`, like `<project>/photo-cache` in the application
+(user decision of 2026-09-24: every AI query belongs to its project).
+Re-running with the same `--output` reuses the cache, without new paid calls.
 """
 import argparse
 import json
@@ -27,7 +27,11 @@ from kicadgen.services.photo_inventory import extract_inventory, photo_cache_dir
 
 
 def main():
-    """@brief Parse the CLI, run the photo inventory with the project cache and save JSON, PNG and log."""
+    """@brief Parse the CLI, run the photo inventory with the project cache and save JSON, PNG and log.
+
+    @throws SystemExit When no component was detected; the diagnostic
+        messages printed before the stop say why.
+    """
     parser = argparse.ArgumentParser(description=(__doc__ or "").replace("@brief ", "", 1))
     parser.add_argument("photo", type=Path)
     parser.add_argument("--length",type=float,required=True)

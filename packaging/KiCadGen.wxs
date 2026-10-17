@@ -67,7 +67,7 @@
       </DirectorySearch>
     </Property>
     <SetProperty Id="WIXUI_EXITDIALOGOPTIONALTEXT" After="AppSearch" Sequence="first"
-                 Value="KiCadGen uses FreeCAD for the 3D models and KiCad to check and install the libraries. The installer may not have found: [MISSINGAPPS] (it only looks in Program Files). If they are not installed, get them from freecad.org and kicad.org; KiCadGen will find them, also through PATH or the FREECAD_CMD_PATH and KICAD_CLI_PATH variables.">
+                 Value="KiCadGen uses FreeCAD for the 3D models and KiCad to check and install the libraries. The installer may not have found: [MISSINGAPPS] (it only looks in Program Files). If they are not installed, get them from freecad.org and kicad.org; KiCadGen finds them in Program Files; elsewhere, FreeCAD through the FREECAD_CMD_PATH variable (it is not looked up on PATH) and KiCad through PATH or the KICAD_CLI_PATH variable.">
       NOT FREECADCMD OR NOT KICADEXE
     </SetProperty>
     <SetProperty Id="MISSINGAPPS" Before="SetWIXUI_EXITDIALOGOPTIONALTEXT" Sequence="first"

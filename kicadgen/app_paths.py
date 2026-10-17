@@ -37,7 +37,11 @@ APP_FOLDER = "KiCadGen"
 
 
 def is_frozen() -> bool:
-    """@brief Tell whether the program runs as the packaged executable."""
+    """@brief Tell whether the program runs as the packaged executable.
+
+    @return True under the PyInstaller bundle (`sys.frozen` set), False from
+        the sources.
+    """
     return bool(getattr(sys, "frozen", False))
 
 
