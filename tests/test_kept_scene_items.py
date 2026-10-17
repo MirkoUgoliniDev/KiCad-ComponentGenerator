@@ -30,6 +30,10 @@ def _kept_wrappers(tab):
     kept = [item for items, _base, _ring, _owner in tab._handle_groups for item in items]
     if tab._wire_cursor_item is not None:
         kept.append(tab._wire_cursor_item)
+    # The property texts and squares moved live by a drag (2026-10-17).
+    for item, square in tab._property_items.values():
+        kept.extend((item, square))
+    kept.extend(item for item, _origin in tab._gesture_live)
     return kept
 
 

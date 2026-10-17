@@ -253,8 +253,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8970 passed,
-12 skipped and 19 subtests (2026-10-17 evening, branch `ADVANCED` merged into `main`: the
+is 8977 passed,
+12 skipped and 19 subtests (2026-10-17 night, branch `ADVANCED` merged into `main`: the
+Reference/Value texts of the symbol editor follow the pointer live and commit once on
+release, as the footprint preview's texts; the plan for one shared gesture component is in
+docs/canvas-gestures-plan.md; before that, 8970 passed, same evening: the
 symbol editor lays out its grid only where Qt paints and keys the pin cache on the pin's
 picture, same pixels; before that, 8961 passed, same day:
 «il 3D» meaning the model renamed «modello STEP» in 24 messages, KiCad text markup and
