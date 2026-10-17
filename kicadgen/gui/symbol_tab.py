@@ -1097,6 +1097,17 @@ class SymbolTab(QWidget):
         #: (kind, rows, draft, status) of the last step the running drag committed;
         #: see `_gesture_step_repeats`.
         self._gesture_last_step = None
+        #: Target of the running drag (`_begin_gesture`), None outside a drag.
+        self._gesture_target = None
+        #: Scene point of the last step of the running drag, None before the
+        #: first step: a property drag commits from it on release.
+        self._gesture_last_point = None
+        #: Items a property drag moves live, with their positions at the
+        #: press: [(item, QPointF), ...]; see `_move_gesture`.
+        self._gesture_live = []
+        #: Drawn Reference and Value texts with their anchor squares, kept
+        #: between redraws for the live drag: key -> (text item, square).
+        self._property_items = {}
         self._selected_pin = None
         self._selected_pins = set()
         self._syncing_selection = False
@@ -3943,6 +3954,9 @@ class SymbolTab(QWidget):
             return
         self._gesture_before = self.draft_rows()
         self._gesture_last_step = None
+        self._gesture_target = tuple(target)
+        self._gesture_last_point = None
+        self._gesture_live = []
         self._gesture_layout = self._symbol
         self._gesture_start = point
         self._gesture_scene_rect = self.view.scene().sceneRect()
@@ -3970,6 +3984,10 @@ class SymbolTab(QWidget):
         elif target[0] == 'property':
             self._gesture_property_origin = self._property_positions(
                 self._gesture_before, self._gesture_layout).get(target[1])
+            # The text and its anchor square follow the pointer live
+            # (`_move_gesture`) from where the last redraw put them.
+            self._gesture_live = [(item, QPointF(item.pos()))
+                                  for item in self._property_items.get(target[1], ())]
 
     def _editable_rows(self, rows, symbol):
         rows = copy_rows(rows)
@@ -4505,12 +4523,24 @@ class SymbolTab(QWidget):
             self.move_shape_point(target[1], target[2], point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
             return
         if target[0] == 'property':
-            origin = getattr(self, '_gesture_property_origin', None)
-            if origin is None:
+            # GUARANTEE (user, 2026-10-17: «il trascinamento di REF** in
+            # Anteprima Footprint è molto smooth», the footprint text drag is
+            # very smooth, the symbol's was not): a property drag moves the
+            # drawn text and its anchor square live, like the footprint
+            # preview's `_text_drag`, and touches neither the draft nor the
+            # scene. Before, every step that reached another 2.54 mm node
+            # laid the symbol out again, redrew the elements, the handles and
+            # both properties and repainted a quarter of the viewport, while
+            # the steps in between showed nothing: the text stood still and
+            # then jumped a node. The snapped position is committed once, on
+            # release (`_end_gesture`), exactly as `move_property` would
+            # commit a single step there.
+            if getattr(self, '_gesture_property_origin', None) is None:
                 return
+            self._gesture_last_point = QPointF(point)
             delta = point - self._gesture_start
-            self.move_property(target[1], origin[0] + delta.x() / SCENE_UNITS_PER_MM,
-                               origin[1] - delta.y() / SCENE_UNITS_PER_MM)
+            for item, origin in self._gesture_live:
+                item.setPos(origin + delta)
             return
         if target[0] == 'pin':
             placed = next(p for p in symbol.pins if p.pin.number == target[1])
@@ -4527,13 +4557,35 @@ class SymbolTab(QWidget):
                              2 * abs(y) if vertical else symbol.height)
 
     def _end_gesture(self, commit):
+        """@brief Finish the running drag: commit its result once, or restore the rows it started from.
+
+        @param commit True on a drop, False on a cancel (Escape, the view
+            hidden, the body locked).
+        @note A property drag moved only the scene items (`_move_gesture`),
+            so the draft is still the drag's initial rows: the drop point is
+            committed here through `move_property`, outside the drag, which
+            writes the draft, the history entry and the recovery checkpoint
+            once, as a single step to that point would have. A cancelled
+            drag redraws the initial rows, which puts the items back.
+        """
         before = self._gesture_before
+        target = self._gesture_target
+        last = self._gesture_last_point
+        origin = getattr(self, '_gesture_property_origin', None)
         self._gesture_before = None
         self._gesture_last_step = None
+        self._gesture_target = None
+        self._gesture_last_point = None
+        self._gesture_live = []
         if before is None:
             return
         if not commit:
             self._populate(before)
+        elif target is not None and target[0] == 'property' and last is not None and origin is not None:
+            delta = last - self._gesture_start
+            if not self.move_property(target[1], origin[0] + delta.x() / SCENE_UNITS_PER_MM,
+                                      origin[1] - delta.y() / SCENE_UNITS_PER_MM):
+                self._changed()
         else:
             self._changed()
 
@@ -4846,14 +4898,18 @@ class SymbolTab(QWidget):
         Called right after `scene.clear()`, which deletes the items. The kept
         references are the resize handles with their hover areas
         (`_handle_groups`), the rubber band of the wire or shape being drawn
-        (`_wire_cursor_item`) and the text areas of the pins (`_text_bounds`,
-        plain rectangles, reset with the drawing they describe). A new kept
-        attribute must be reset here too; tests/test_kept_scene_items.py
-        checks that no attribute of the tab still refers to a deleted item.
+        (`_wire_cursor_item`), the Reference and Value texts with their
+        anchor squares (`_property_items`, moved live by a property drag) and
+        the text areas of the pins (`_text_bounds`, plain rectangles, reset
+        with the drawing they describe). A new kept attribute must be reset
+        here too; tests/test_kept_scene_items.py checks that no attribute of
+        the tab still refers to a deleted item.
         """
         self._handle_groups = []
         self._text_bounds = []
         self._wire_cursor_item = None
+        self._property_items = {}
+        self._gesture_live = []
 
     def _clear_scene(self, scene, keep=()):
         """Remove every top-level item of `scene` except the kept ones in `keep` (pin roots, body).
@@ -5124,6 +5180,20 @@ class SymbolTab(QWidget):
             square.setToolTip(hints[key])
             area = item.sceneBoundingRect().united(QRectF(square.pos(), square.pos()))
             self._handle_groups.append((anchor_handles, area, False, ('property', key)))
+            # Both built in Python (`kicad_text_item`, `_add_handle`): the
+            # tab keeps them for the live drag (see `_add_kept_item`).
+            self._property_items[key] = (item, square)
+            if self._gesture_before is not None and self._gesture_target == ('property', key):
+                # A redraw during the drag (a rename or a selection from the
+                # keyboard: the viewport holds the mouse) rebuilt the items
+                # where the drag began; the live move goes on with the new
+                # ones, resumed at the last pointer position, so the text
+                # neither freezes nor jumps at the drop (review, 2026-10-17).
+                self._gesture_live = [(item, QPointF(item.pos())), (square, QPointF(square.pos()))]
+                if self._gesture_last_point is not None:
+                    delta = self._gesture_last_point - self._gesture_start
+                    for live, origin in self._gesture_live:
+                        live.setPos(origin + delta)
         self._update_handle_visibility(self._cursor_position)
         self._draw_pins(scene, symbol, keys)
         handles = [] if self._body_locked else [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)]

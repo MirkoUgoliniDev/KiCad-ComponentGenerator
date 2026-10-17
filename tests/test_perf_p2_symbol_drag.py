@@ -5,8 +5,9 @@ and each of them used to rebuild the layout and redraw the whole scene
 (about 40 ms with 80 pins) to show the same picture. The contracts here are
 call counts and identical drafts, never wall-clock times:
 
-- steps that land on the node already shown redraw nothing (pin and
-  property drags, and a drag that returns to its start);
+- steps that land on the node already shown redraw nothing (pin drags, and
+  a drag that returns to its start); a property drag redraws at no step at
+  all, only at the drop (2026-10-17, live move as the footprint preview);
 - a step to another node, an edit of the draft between two steps or a
   status line written by a refused step redraws (negative twins: a cache
   must never hide a change);
@@ -143,23 +144,27 @@ def test_a_status_written_between_two_equal_steps_is_replaced(qapp, monkeypatch)
         tab.deleteLater()
 
 
-def test_property_drag_steps_on_the_same_node_redraw_once(qapp, monkeypatch):
-    """@brief Positive: the property drag follows the same rule as the pins."""
+def test_property_drag_steps_redraw_nothing_until_the_drop(qapp, monkeypatch):
+    """@brief Positive: a property drag moves its items live and redraws once, on release.
+
+    CONTRACT CHANGED 2026-10-17 (user: the footprint text drag is smooth,
+    the symbol's was not): the steps of a property drag no longer commit a
+    snapped draft and redraw at every node; the text follows the pointer
+    (tests/test_symbol_property_drag_smooth.py) and the drop commits once.
+    """
     tab = _tab()
     try:
         start = QPointF(0, 0)
         tab._begin_gesture(('property', 'Reference'), start)
         target = start + QPointF(3 * STEP, -STEP)
-        tab._move_gesture(('property', 'Reference'), target)
         redraws = _count_redraws(tab, monkeypatch)
-        # The same pointer position again: the property's default anchor is
-        # off the grid, so a jitter could legitimately cross a node here.
+        tab._move_gesture(('property', 'Reference'), target)
         for _ in range(10):
             tab._move_gesture(('property', 'Reference'), target)
-        assert redraws == []
         tab._move_gesture(('property', 'Reference'), target + QPointF(2 * STEP, 0))
-        assert len(redraws) == 1, 'another node is redrawn'
+        assert redraws == [], 'no step of a property drag redraws, another node included'
         tab._end_gesture(True)
+        assert len(redraws) == 1, 'the drop redraws once'
     finally:
         tab.deleteLater()
 

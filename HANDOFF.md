@@ -1,5 +1,82 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 17/10 sera — PROSSIMO LAVORO (utente: «uniformare il funzionamento della gestione grafica nelle due tab ... scatena agenti esperti ... ma prima fai un piano»)
+
+Obiettivo: UN solo componente comune per i gesti del mouse (pressione,
+movimento in diretta o a passi di griglia, aggancio, Escape, rilascio con
+commit unico, quadratini al passaggio) usato da _SymbolView/SymbolTab
+(symbol_tab.py) e da FootprintView + main_window (anteprima footprint).
+Comportamento visibile e file prodotti IDENTICI a oggi (test per conteggi
+e uscite uguali), pixel identici dove gia' garantiti. Sequenza: (1) suite
+verde -> commit del trascinamento fluido di oggi; (2) piano scritto da un
+agente architetto in sola lettura, presentato all'utente; (3) solo dopo
+l'OK: agenti su file disgiunti, revisione avversariale, suite completa.
+PIANO SCRITTO: docs/canvas-gestures-plan.md (inventario S1-S18 / F1-F11 con
+righe, differenze D1-D12, modulo kicadgen/gui/canvas_gestures.py con API e
+12 regole di contratto, sequenza di migrazione in 11 passi con i test
+sentinella, 3 agenti su file disgiunti + coordinatore, rischi, misure).
+Consiglio del coordinatore all'utente: allineare D1-D5, D8, D9 (Escape,
+rotella e tasto destro durante un trascinamento, ridisegno e annullamento
+di un trascinamento in diretta, scrittura a ogni ripetizione di Ctrl+Z,
+trascinamento dimenticato a meta' dal footprint): sono difetti o quasi;
+tenere le differenze giustificate (pin a passi di griglia, griglie di
+aggancio diverse per decisione del 13-16/10, maniglie del footprint
+create al passaggio). Fasi B (strumenti a clic) e C (camera) opzionali.
+IN ATTESA dell'OK dell'utente sul piano.
+
+## 17/10 sera — FATTO: trascinamento di «U?»/Value in diretta (suite 8977: A 5451/10/19, B 3526/2, 0 falliti); hash sotto in «STATO»
+
+## 17/10 sera — IN CORSO: trascinamento di «U?»/Value nell'editor del simbolo «un disastro» (utente), mentre REF** nell'anteprima footprint e' fluido
+
+Progetto RS485 (7 pin): quindi NON e' il numero di pin. Sospetti: ogni
+passo del trascinamento di una proprieta' passa da _with_properties ->
+_changed -> ridisegno completo + _checkpoint_draft (scrittura su disco
+della bozza di recupero a ogni passo?) invece di spostare l'item in
+diretta e salvare al rilascio come fa footprint_view (regola «stessa UX»).
+Agente A2 su symbol_tab.py: riprodurre con sonda (passi su nodi nuovi e
+uguali, ms e scritture su disco per passo), correggere, test per conteggi
+(0 scritture durante il trascinamento, 1 al rilascio; stessa bozza finale),
+poi revisione avversariale. Commit solo con OK.
+CORREZIONE DELLA DIAGNOSI (A2, misurato con eventi mouse veri): le
+scritture su disco NON c'entrano (0 durante il trascinamento gia' prima,
+_checkpoint_draft esce con _gesture_before attivo). CAUSA VERA: il testo
+della proprieta' veniva mosso a SCATTI di un nodo di griglia (64 px a zoom
+2,5x; primo scatto staccato dal puntatore perche' l'ancora predefinita e'
+fuori griglia), con layout_symbol + ridisegno parziale (proprieta',
+quadratini, 8 maniglie, elementi) + repaint su ~25% dello schermo a OGNI
+nodo, e testo FERMO fra un nodo e l'altro; footprint_view._text_drag
+invece fa setPos a ogni movimento e aggancia/scrive solo al rilascio.
+FATTO A2 (symbol_tab.py): _begin_gesture ricorda item del testo e
+quadratino con le posizioni alla pressione; _move_gesture ramo 'property'
+= setPos in diretta, nessuna modifica di bozza/scena; _end_gesture
+committa UNA volta l'ultimo punto via move_property (stesso snap, stessa
+regola «tornato al predefinito non scrive», 1 voce di cronologia, 1
+checkpoint); Escape = _populate(before) come prima; _property_items
+azzerato in _forget_scene_items. Pin/elementi/vertici/resize invariati
+(anche nel footprint solo i testi REF/Value si muovono in diretta). Dopo:
+60 movimenti -> 0 _changed/_draw/layout/save_draft; rilascio -> 1 di
+ciascuno; righe committate identiche. Test
+tests/test_symbol_property_drag_smooth.py (6); test_perf_p2_symbol_drag
+contratto proprieta' aggiornato (nessun ridisegno fino al rilascio). 473
+verdi correlati. Note A2: LayoutRequest dell'intera scheda a ogni
+movimento da readout.setText (preesistente, lasciato); tasto destro non
+annulla (ne' nel footprint). REVISIONE AVVERSARIALE (sola lettura):
+nessun crash (ogni cancellazione di item passa da _forget_scene_items,
+che azzera _property_items/_gesture_live prima di ogni uscita anticipata);
+commit, annullamento (Escape, scheda nascosta), undo, pressione sul
+quadratino, rilascio fuori dalla vista, secondo trascinamento: tutti
+corretti; salto al rilascio <= mezzo passo di griglia. Due BASSI, chiusi
+dal coordinatore: (1) un ridisegno a meta' trascinamento (rinomina o
+selezione da tastiera: il viewport tiene il mouse) ricostruiva gli item
+all'origine e il testo restava fermo fino al rilascio -> in _draw, se il
+trascinamento in corso e' su quella proprieta', i nuovi item vengono
+riagganciati e portati all'ultimo punto del puntatore; test
+test_a_redraw_during_the_drag_keeps_the_text_on_the_pointer; (2)
+test_kept_scene_items._kept_wrappers non guardava _property_items e
+_gesture_live -> aggiunti. INFO preesistente: un move_property rifiutato
+in _end_gesture perde il messaggio (solo con _symbol None). Suite completa
+in corso.
+
 ## 17/10 sera — FATTO e committato: griglia dell'editor del simbolo piu' veloce SENZA cambiarne l'aspetto (hash sotto, in «STATO»)
 
 Utente: «non si puo' migliorare com'e' ora e vedere di ottimizzare?» ->
