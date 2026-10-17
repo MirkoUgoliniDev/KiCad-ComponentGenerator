@@ -1,0 +1,28 @@
+{
+  "press_release": {
+    "calls": {
+      "_refresh_drawing_handles": 4
+    },
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  }
+}

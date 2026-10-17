@@ -1,0 +1,80 @@
+{
+  "inside": {
+    "calls": {
+      "_refresh_drawing_handles": 1
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "outside": {
+    "calls": {
+      "_refresh_drawing_handles": 1
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "rest": {
+    "calls": {
+      "_refresh_drawing_handles": 2
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  }
+}

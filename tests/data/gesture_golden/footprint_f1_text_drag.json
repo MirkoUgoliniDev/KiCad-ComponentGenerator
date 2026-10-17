@@ -1,0 +1,45 @@
+{
+  "drop": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_refresh_drawing_handles": 1,
+      "save_footprint_draft": 1
+    },
+    "drawings": [],
+    "recovery": {
+      "drawings": [],
+      "texts": {
+        "Reference": [
+          5.0,
+          0.0
+        ],
+        "anchor": "left_bottom"
+      }
+    },
+    "redo": 0,
+    "texts": {
+      "Reference": [
+        5.0,
+        0.0
+      ]
+    },
+    "undo": 1
+  },
+  "moves": {
+    "calls": {},
+    "drawings": [],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  },
+  "press": {
+    "calls": {},
+    "drawings": [],
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "undo": 0
+  }
+}

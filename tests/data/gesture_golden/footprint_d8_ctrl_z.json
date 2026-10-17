@@ -1,0 +1,190 @@
+{
+  "first_press": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_refresh_drawing_handles": 1,
+      "save_footprint_draft": 1
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            11.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "line",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              11.0,
+              8.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 1,
+    "texts": {},
+    "undo": 7
+  },
+  "release": {
+    "calls": {
+      "save_footprint_draft": 1
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "line",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              8.0,
+              8.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 4,
+    "texts": {},
+    "undo": 4
+  },
+  "three_clicks": {
+    "calls": {
+      "_checkpoint_footprint_draft": 3,
+      "_draw_preview": 3,
+      "_refresh_drawing_handles": 3,
+      "save_footprint_draft": 3
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            5.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "line",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              5.0,
+              8.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 7,
+    "texts": {},
+    "undo": 1
+  },
+  "three_repeats": {
+    "calls": {
+      "_checkpoint_footprint_draft": 3,
+      "_draw_preview": 3,
+      "_refresh_drawing_handles": 3
+    },
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            8.0,
+            8.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "line",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              8.0
+            ],
+            [
+              11.0,
+              8.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 4,
+    "texts": {},
+    "undo": 4
+  }
+}

@@ -107,14 +107,20 @@ def test_the_guard_pattern_sees_a_kept_wrapper():
 
 
 def _graphics_items_held(value, depth=0):
-    """Every QGraphicsItem reachable from `value` through lists, tuples, sets and dicts (bounded depth)."""
+    """Every QGraphicsItem reachable from `value` through lists, tuples, sets, dicts and the
+    shared gesture objects (`canvas_gestures`: controller, drag plan, hover groups), bounded depth."""
     from PyQt6.QtWidgets import QGraphicsItem
+    from kicadgen.gui import canvas_gestures
     if isinstance(value, QGraphicsItem):
         return [value]
-    if depth >= 4:
+    if depth >= 5:
         return []
     if isinstance(value, dict):
         value = list(value.values())
+    elif type(value).__module__ == canvas_gestures.__name__ and hasattr(value, '__dict__'):
+        # The shared objects hold items in their own attributes (2026-10-17):
+        # a stale reference inside them must fail like one on the tab.
+        value = list(vars(value).values())
     if isinstance(value, (list, tuple, set, frozenset)):
         return [item for element in value for item in _graphics_items_held(element, depth + 1)]
     return []
@@ -149,6 +155,68 @@ def test_no_attribute_refers_to_a_deleted_item_after_an_invalid_draft(qapp, tool
         assert _deleted_items_held(tab) == []
     finally:
         tab.deleteLater()
+
+
+def test_the_attribute_walk_enters_the_shared_gesture_objects(qapp):
+    """Negative twin (2026-10-17): a stale item kept inside a HoverGroups or a drag plan is reported."""
+    from PyQt6.QtCore import QPointF, QRectF
+    from PyQt6.QtWidgets import QGraphicsRectItem
+    from kicadgen.gui.canvas_gestures import DragPlan, HoverGroups
+    tab = SymbolTab()
+    try:
+        tab.set_data('Board', _rows())
+        square = QGraphicsRectItem(0, 0, 2, 2)
+        tab.view.scene().addItem(square)
+        hover = HoverGroups(tab.view)
+        hover.add([square], QRectF(0, 0, 2, 2), False, ('test', 0))
+        plan = DragPlan('live', live_items=[(square, QPointF(0, 0))])
+        tab._stale_hover_for_test = hover
+        tab._stale_plan_for_test = plan
+        assert _deleted_items_held(tab) == [], 'alive items are not reported'
+        tab.view.scene().clear()
+        assert {'_stale_hover_for_test', '_stale_plan_for_test'} <= set(_deleted_items_held(tab))
+    finally:
+        tab.deleteLater()
+
+
+def test_a_drag_cancelled_by_a_scene_clear_leaves_no_stale_item_in_the_controller(qapp):
+    """@brief Positive: after a redraw during a live property drag, the controller holds live items only."""
+    from PyQt6.QtCore import QPointF
+    tab = SymbolTab()
+    try:
+        tab.set_data('Board', _rows())
+        assert tab._gestures.press(('property', 'Value'), QPointF(0, 0))
+        tab._gestures.move(QPointF(5, 5))
+        tab._draw(tab._symbol)  # rebuilds the property items and re-binds them
+        assert tab._gestures.active and tab._gestures.live_items
+        assert _deleted_items_held(tab) == []
+        tab._gestures.cancel()
+        assert _deleted_items_held(tab) == []
+    finally:
+        tab.deleteLater()
+
+
+def test_footprint_preview_shared_objects_hold_no_deleted_item_across_a_redraw(window, qapp):
+    """@brief Positive (footprint side, 2026-10-17): the preview's hover groups and controller survive a redraw.
+
+    The window clears `preview_scene` on every redraw: the shared objects
+    must be emptied first (`_forget_preview_items`) and, during a live text
+    drag, re-bound to the new items, never left pointing at deleted ones.
+    """
+    from PyQt6.QtCore import QPointF
+    view = window.preview_view
+    window._draw_preview()
+    qapp.processEvents()
+    assert view.hover.groups, 'the preview registers its text squares as hover groups'
+    assert _deleted_items_held(view) == [] and _deleted_items_held(window) == []
+    assert view.gestures.press(('text', 'Reference'), QPointF(0, 0))
+    view.gestures.move(QPointF(3, 3))
+    window._draw_preview()  # a redraw under the live drag: items rebuilt and re-bound
+    qapp.processEvents()
+    assert view.gestures.active and view.gestures.live_items
+    assert _deleted_items_held(view) == [] and _deleted_items_held(window) == []
+    view.gestures.cancel()
+    assert _deleted_items_held(view) == [] and _deleted_items_held(window) == []
 
 
 def test_the_attribute_walk_sees_a_deleted_kept_item(qapp):

@@ -22,7 +22,178 @@ trascinamento dimenticato a meta' dal footprint): sono difetti o quasi;
 tenere le differenze giustificate (pin a passi di griglia, griglie di
 aggancio diverse per decisione del 13-16/10, maniglie del footprint
 create al passaggio). Fasi B (strumenti a clic) e C (camera) opzionali.
-IN ATTESA dell'OK dell'utente sul piano.
+AUTORIZZATO dall'utente 17/10 notte («ok scatena quanti agenti ti servono,
+voglio un lavoro professionale, mi serve una gestione unificata delle
+interfacce grafiche»): piano approvato COMPRESO l'allineamento di D1-D5,
+D8, D9. IN CORSO, fase 1 in parallelo: agente G1 = canvas_gestures.py +
+tests/test_canvas_gestures.py; G2 = test di parita' del simbolo
+(tests/test_symbol_gesture_parity.py + golden) e misure PRIMA; G3 = test di
+parita' del footprint (tests/test_footprint_gesture_parity.py + golden) e
+misure PRIMA. Fase 2 (dopo G1 verde, su segnale del coordinatore): G2
+adotta in symbol_tab.py (passi 3-6 del piano), G3 in footprint_view.py +
+main_window.py (passi 7-8), poi D1-D5/D8/D9 con test positivi/negativi.
+FATTO G1: kicadgen/gui/canvas_gestures.py (~560 righe) +
+tests/test_canvas_gestures.py (44 verdi + documentazione). API come nel
+piano §2a con aggiunte: GestureController.live_items/.active (proprieta'),
+HoverGroups.scene_margin() e margin_px, install_canvas_filters(view, keys,
+cancel) (ordine della regola 12), DeferredCheckpoint collega da se'
+keys.repeat_ended -> flush (non ricollegare), bind_shortcuts(runner=None)
+chiama direttamente, CancelOnEscapeAndHide(escape=...) consuma Escape solo
+se ha annullato un trascinamento, cursore tolto a ogni fine, DragPlan copia
+le origini e rifiuta una policy sconosciuta. Semantica: `moved` viene
+emesso anche se l'host ha annullato dentro gesture_step (controllare
+controller.active). Fase 2 avviata per G2 e G3.
+FATTO G2 fase 1: tests/test_symbol_gesture_parity.py 25 verdi sul codice
+attuale + golden tests/data/gesture_golden/symbol_session.json
+(KICADGEN_REGEN_GOLDEN=1 rigenera); misure PRIMA in scratchpad/plan/
+before_symbol_*.txt e before_*.png (probe_symbol: hover 0,19 ms, pin stesso
+nodo 0,60, proprieta' 0,21, rinomina 10,7, pin nodo nuovo 8,5;
+probe_keys4 scritture 10/0/10; probe_drag proprieta' {} per movimento e
+1/1/1/1 al rilascio; pin 1/1/1 per nodo nuovo, +save al rilascio). G2 in
+fase 2. DA FARE dal coordinatore quando `view.gesture` diventa di sola
+lettura: test_symbol_handles_hover.py righe 56, 62, 125-132 e
+test_symbol_property_anchor.py 304, 307 assegnano `tab.view.gesture`.
+FATTO G2 fase 2 (symbol_tab.py, +45 righe nette): KeyRepeatFilter +
+DeferredCheckpoint + bind_shortcuts (passo 3), memo (4), GestureController
+con view.gesture di sola lettura = controller.target, host
+gesture_begin/step/end, _begin/_move/_end_gesture tenuti come involucri
+(8 file di test li chiamano), filtri Escape/Hide (5), HoverGroups con
+_handle_groups e _gesture_live come proprieta' alias (6). 504 verdi;
+AFTER = BEFORE (probe identiche, 4 PNG byte-identiche; unico scarto «new
+items 4/55 -> 2/55» nel probe pin = riuso degli id dei wrapper, non
+comportamento). Note G2: finish_shape lascia armato lo strumento (una
+pressione successiva aggiunge un punto); _select_region con banda vuota
+tiene la selezione dei pin (contratto fotografato); repeat_ended da
+focus-out arriva PRIMA dell'annullamento da hide (innocuo: _checkpoint_draft
+esce durante un trascinamento). COORDINATORE: riscritte le 3 assegnazioni
+di view.gesture nei test (handles_hover 56/62/125-132, property_anchor
+304-307) pilotando _gestures.press/cancel.
+FATTO G3 fasi 1-2 (footprint_view.py + gestori footprint di main_window.py):
+tests/test_footprint_gesture_parity.py 19 + 19 golden
+(KICADGEN_REGEN_GESTURE_GOLDEN=1); FootprintView.attach_host(host) crea il
+controller (grab_mouse=False), filtri e HoverGroups; segnali
+text_moved/handle_* rimossi (la finestra e' l'host: gesture_begin/step/end);
+_text_drag/_handle_drag proprieta' di sola lettura (setter accetta solo
+None = cancel_interaction, per le poke dei test esistenti);
+_fp_handle_cancelled sparito; _forget_preview_items() prima di ogni
+preview_scene.clear() (4 punti); _screen_handle Python-built + addItem;
+D1-D5, D8, D9 applicati con test positivi/negativi. 323 verdi; PNG 4/4
+identiche; unico scarto nelle sonde: «drop senza spostamento» aggiorna le
+maniglie 2 volte invece di 1 (il rilascio passa da un movimento, regola 3
+del contratto), non visibile. Errata del piano: D9 era raggiungibile solo
+da chiamata diretta, non dal mouse. SEGNALATI da G3 e affidati a G3:
+(a) clic senza movimento su un testo predefinito del footprint lo aggancia
+e crea una voce di annulla (nel simbolo non cambia nulla) -> allineare;
+(b) rotella durante un PAN rifiutata nel simbolo, non nel footprint ->
+allineare. IN CORSO.
+FATTO coordinatore: tests/test_kept_scene_items.py — la scansione degli
+attributi entra negli oggetti di canvas_gestures (vars), gemello negativo
+con HoverGroups/DragPlan stantii, test positivo simbolo (ridisegno sotto
+un trascinamento in diretta) e footprint (window.preview_view.hover /
+.gestures dopo _draw_preview e sotto un trascinamento); 26 verdi. IN
+CORSO: revisione avversariale (sola lettura) su canvas_gestures +
+symbol_tab + footprint_view/main_window. FATTO G3 (a) e (b):
+main_window._drop_footprint_text(key, origin, delta) da gesture_end per
+'text': spostamento nullo = niente (ne' snap, ne' annulla, ne' checkpoint,
+ne' file); drop con ancora agganciata uguale all'ancora PREDEFINITA di un
+testo non ancora posizionato = niente (gruppo rimesso sull'ancora); drop
+sulla posizione MEMORIZZATA = ridisegno senza modifica (come prima);
+footprint_view.wheelEvent rifiuta la rotella anche durante un pan. Parity
+20, insieme footprint 327 verdi. SUITE COMPLETA sul lavoro unificato: A
+5517 verdi, 10 saltati, 19 sottotest, 1 fallito; B 3551 verdi, 2 saltati.
+L'unico fallito era test_message_localization: l'eccezione di DragPlan
+(«... must be 'live' or 'stepped' ...») conteneva `e' ` (virgolette dopo
+una vocale + spazio) che il rivelatore scambia per un'elisione italiana
+(FALSO POSITIVO dell'euristica dichiarata). Corretto SENZA allentare la
+regola: messaggio senza virgolette sui nomi («must be live or stepped, got
+{policy!r}»); 73 verdi (localizzazione + canvas_gestures + documentazione).
+REVISIONE AVVERSARIALE (riportata, nessun crash: ogni preview_scene.clear()
+preceduto da _forget_preview_items, 12 combinazioni nel simbolo senza
+eccezioni, ordine dei filtri corretto, formula dei quadratini identica,
+252 test dei 12 file verdi). RILIEVI, tutti AUTORIZZATI («continua», OK al
+lavoro di rifinitura) e in correzione:
+1. MEDIO — «torna sul predefinito» non e' la stessa regola nelle due schede:
+   il footprint (`_drop_footprint_text`) confronta con l'ancora predefinita
+   GREZZA, il simbolo (`move_property`) con quella AGGANCIATA; un movimento
+   di 2 px su un testo predefinito scriveva (2,0; -2,0) con un annulla nel
+   footprint e niente nel simbolo. Correzione di classe: confrontare
+   l'aggancio del punto di rilascio con l'aggancio dell'ancora predefinita
+   (`_snapped_draw_point(origin)`), test positivo (resta nella cella) e
+   negativo (altro nodo = commit). [G3]
+2. BASSO — tasto centrale durante un trascinamento imposta `_pan` nel
+   footprint (nel simbolo e' protetto da `gesture is None`). [G3]
+3. BASSO — Escape annulla anche il pan nel simbolo ma non nel footprint:
+   allineato (una sola regola). [G3]
+4. BASSO — codice morto: `DragPlan.hover_owner` scritto da entrambe le
+   schede e mai letto -> si toglie il campo (prima le due schede smettono di
+   passarlo: G2 simbolo, G3 main_window; poi il coordinatore lo toglie da
+   canvas_gestures.py e dal suo test); `_SymbolView.gesture_started/moved/
+   finished` non emessi dal codice di produzione -> G2 li toglie riscrivendo
+   i 2 test che li emettono; ramo irraggiungibile di keyPressEvent (Escape
+   con `gesture is not None`) -> G2 se dimostrabilmente morto; docstring
+   di CancelOnEscapeAndHide «finche' D1 non e' applicata» -> coordinatore.
+5. BASSO — il salvataggio differito del footprint non fa flush al cambio
+   progetto / chiusura (il simbolo si' in set_data/set_recovery_path). [G3]
+FATTO G2 (rilievo 4, parte simbolo): gesture_begin non passa piu'
+hover_owner (la scheda tiene _gesture_owner); tolti i segnali
+_SymbolView.gesture_started/moved/finished con le 3 connessioni (nessun
+consumatore di produzione; 2 test di test_symbol_palette_gui.py 945-948 e
+1017-1019 riscritti su _begin/_move/_end_gesture, stesse asserzioni);
+keyPressEvent: ramo Escape ora solo _pan_last e _rubber_start (la parte
+`gesture is not None` era irraggiungibile, il filtro la consuma prima);
+test nuovo test_escape_still_cancels_a_pan_a_band_a_wire_and_a_placing_glyph
+(+ gemello negativo: Escape a riposo non cambia nulla). 547 verdi. Resta:
+G3 (rilievi 1, 2, 3, 5 + hover_owner nel footprint), poi il coordinatore
+toglie DragPlan.hover_owner da canvas_gestures.py e dal suo test.
+DOMANDA UTENTE 17/10 sera: «voglio essere sicuro che ora ci sia una
+gestione ... riutilizzata invece di creare per ogni tab il codice da zero».
+VERIFICATO nel codice: condiviso = trascinamento, annullamento Escape/Hide,
+quadratini, memoria dei passi, ripetizione tasti + salvataggio differito,
+scorciatoie (canvas_gestures.py: 22 riferimenti in symbol_tab.py, 15 in
+footprint_view.py, 4 in main_window.py). ANCORA DOPPIO: (C) la camera (zoom,
+rotella, pan, fit: symbol_tab ~983-1003 e 588/693-787 contro footprint_view
+~333-360 e 590-677) e (B) gli strumenti a clic (symbol_tab start_wire/
+add_wire_point/start_shape/add_shape_point/finish_*; footprint set_draw_mode
++ main_window _on_footprint_draw_clicked/_finish/_cancel_footprint_drawing).
+DECISO (scopo ribadito dall'utente: fasi B e C del piano NON sono piu'
+opzionali): dopo la chiusura dei rilievi e il commit del passo corrente,
+fase C (componente camera con limiti e scala come parametri: zoom simbolo
+[0.15, 20] e footprint [0.02, 40] restano parametri) poi fase B (componente
+per gli strumenti a clic: raccolta punti, anteprima, fine con doppio clic o
+Invio, Escape annulla, punto doppio rifiutato, rilascio dopo trascinamento
+= punto nel footprint D10), stesso metodo: prove di parita' PRIMA, agenti
+su file disgiunti, revisione avversariale, suite in due meta'.
+FATTO G3 (rilievi 1, 2, 3, 4-footprint, 5): `_drop_footprint_text`
+confronta l'aggancio del rilascio con l'aggancio dell'ancora predefinita
+(`_snapped_draw_point(origin)`), come move_property del simbolo (test con
+asserzione che l'ancora e' fuori griglia e che il movimento di 2 px resta
+nella cella; gemelli: altro nodo = 1 commit, cella memorizzata = ridisegno,
+spostamento nullo = niente); tasto centrale durante un trascinamento non
+avvia il pan; Escape annulla anche il pan del footprint (consumato prima del
+ramo dello strumento armato, che sopravvive a quell'Escape);
+_flush_footprint_checkpoint() prima del cambio progetto (_on_name_changed
+prima di riassegnare _open_project_folder, inizio di _switch_project,
+closeEvent dopo _can_leave_project): una scrittura differita finisce nel
+progetto modificato, mai sotto il successivo. Parity footprint 25 test; 332
+verdi nell'insieme. Non coperto da test proprio: la chiusura della
+cartella di lavoro (passa da _on_name_changed). COORDINATORE: tolto
+DragPlan.hover_owner da canvas_gestures.py e dal suo test (ora si verifica
+`plan.cursor`); docstring di CancelOnEscapeAndHide(escape=) e di
+HoverGroups.add aggiornate. SUITE COMPLETA: A 5523 verdi, 10 saltati, 19
+sottotest; B 3552 verdi, 2 saltati; 0 falliti (totale 9075). Tolte anche
+due importazioni inutilizzate preesistenti di symbol_tab.py
+(QFontMetricsF, QPushButton); pyflakes pulito su symbol_tab,
+footprint_view, canvas_gestures; 102 verdi nei test del simbolo.
+COMMITTATO con OK utente («ok procedi»), hash in «STATO» in testa; era: commit + push +
+merge. Poi fase C (camera) e fase B (strumenti a clic).
+Dubbio del revisore: nessuna prova A/B viva col codice vecchio (conclusioni
+dalla lettura del diff e dai test di caratterizzazione). Dopo: suite
+completa, poi commit con OK.
+Fase 3: coordinatore (test_kept_scene_items, test_symbol_handles_hover
+125-131, test_footprint_text_positions 210-219), revisione avversariale,
+suite in due meta', commit con OK. Se si riprende a meta': `git status`
+dice cosa e' stato toccato; le misure PRIMA stanno nello scratchpad
+plan/ (volatile: in caso di perdita vanno rifatte dal commit c1cba37).
 
 ## 17/10 sera — FATTO e committato `c1cba37` su ADVANCED, mergiato in main `86c13d8`, pushati: trascinamento di «U?»/Value in diretta (suite 8977: A 5451/10/19, B 3526/2, 0 falliti)
 

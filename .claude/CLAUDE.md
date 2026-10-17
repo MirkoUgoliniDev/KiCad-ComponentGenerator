@@ -253,8 +253,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8977 passed,
-12 skipped and 19 subtests (2026-10-17 night, branch `ADVANCED` merged into `main`: the
+is 9075 passed,
+12 skipped and 19 subtests (2026-10-17 late night, branch `ADVANCED`: one shared gesture
+component, `kicadgen/gui/canvas_gestures.py`, drives drags, hover handles, key repeat, deferred
+recovery writes and Escape/Hide cancel in BOTH the symbol editor and the footprint preview
+(parity tests `tests/test_symbol_gesture_parity.py`, `tests/test_footprint_gesture_parity.py`);
+camera and click tools still to unify, see docs/canvas-gestures-plan.md; before that, 8977
+passed, same night, merged into `main`: the
 Reference/Value texts of the symbol editor follow the pointer live and commit once on
 release, as the footprint preview's texts; the plan for one shared gesture component is in
 docs/canvas-gestures-plan.md; before that, 8970 passed, same evening: the
