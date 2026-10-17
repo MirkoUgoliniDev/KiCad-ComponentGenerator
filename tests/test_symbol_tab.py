@@ -303,7 +303,7 @@ def test_cad_pan_zoom_anchor_and_fit_do_not_edit_symbol(qapp, button):
     QTest.mouseMove(view.viewport(), end)
     QTest.mouseRelease(view.viewport(), button, pos=end)
     assert (view.mapFromScene(world) - initial_pin - (end - start)).manhattanLength() <= 2
-    assert view.gesture is None and view._pan_last is None
+    assert view.gesture is None and not view.camera.pan_active
     assert not view.auto_fit
     anchor = view.viewport().rect().center() + QPoint(80, 50)
     fixed = view.mapToScene(anchor)
@@ -444,9 +444,9 @@ def test_escape_ends_background_pan_without_edit(qapp):
     assert not tab.view.items(start)
     QTest.mousePress(tab.view.viewport(), Qt.MouseButton.LeftButton, pos=start)
     QTest.mouseMove(tab.view.viewport(), QPoint(80, 80))
-    assert tab.view._pan_last is not None
+    assert tab.view.camera.pan_active
     QTest.keyClick(tab.view, Qt.Key.Key_Escape)
-    assert tab.view._pan_last is None
+    assert not tab.view.camera.pan_active
     assert tab.view.gesture is None
     assert not tab.has_pending_edits()
     assert len(tab._history) == 1

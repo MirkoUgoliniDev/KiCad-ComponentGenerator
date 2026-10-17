@@ -712,11 +712,11 @@ def test_s10_left_drag_on_the_background_pans_the_camera_and_edits_nothing(tab7,
     h0, v0 = view.horizontalScrollBar().value(), view.verticalScrollBar().value()
     counter = _Counter(tab7, monkeypatch)
     _press(tab7, qapp, start)
-    assert view.gesture is None and view._pan_last == start and not view.auto_fit
+    assert view.gesture is None and view.camera.pan_active and not view.auto_fit
     _move(tab7, qapp, start + QPoint(30, 20))
     _release(tab7, qapp, start + QPoint(30, 20))
     assert counter.take() == {}, 'a pan touches neither the draft nor the scene'
-    assert view._pan_last is None
+    assert not view.camera.pan_active
     assert (view.horizontalScrollBar().value() - h0, view.verticalScrollBar().value() - v0) == (-30, -20)
     assert tab7.draft_rows() == before and len(tab7._history) == 1
     # Escape mid-pan (D1 today: Escape cancels every interaction of the symbol view).
@@ -724,7 +724,7 @@ def test_s10_left_drag_on_the_background_pans_the_camera_and_edits_nothing(tab7,
     _move(tab7, qapp, start + QPoint(10, 0))
     QTest.keyClick(view, Qt.Key.Key_Escape)
     qapp.processEvents()
-    assert view._pan_last is None and counter.take() == {}
+    assert not view.camera.pan_active and counter.take() == {}
 
 
 # ── S11: wheel ──────────────────────────────────────────────────────────────
@@ -1072,8 +1072,36 @@ def test_golden_session(tab7, qapp, monkeypatch):
         GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
         GOLDEN_SESSION.write_text(text, encoding='utf-8', newline='\n')
     assert GOLDEN_SESSION.exists(), f'missing golden file: run once with {REGEN_ENV}=1'
-    assert GOLDEN_SESSION.read_bytes() == text.encode('utf-8'), \
+    assert _golden_equals(GOLDEN_SESSION, text), \
         f'the session differs from the golden record (regenerate with {REGEN_ENV}=1 only for a wanted contract change)'
+
+
+def _golden_equals(path, text):
+    """@brief Whether the golden file at `path` holds `text`, whatever line endings the checkout gave it.
+
+    @param path Golden file.
+    @param text Expected content, LF line endings.
+    @return True when the bytes are equal after CRLF is normalised to LF
+        (`core.autocrlf=true` checkouts rewrite the JSON as CRLF).
+    """
+    return path.read_bytes().replace(b'\r\n', b'\n') == text.encode('utf-8')
+
+
+def test_golden_comparison_ignores_line_endings_but_not_content(tmp_path):
+    """@brief Positive: a CRLF copy of a golden still matches; negative: a changed value does not."""
+    text = json.dumps([{'rows': [1, 2], 'name': 'a'}], indent=1, sort_keys=True) + '\n'
+    lf = tmp_path / 'lf.json'
+    lf.write_bytes(text.encode('utf-8'))
+    crlf_copy = tmp_path / 'crlf.json'
+    crlf_copy.write_bytes(text.replace('\n', '\r\n').encode('utf-8'))
+    assert _golden_equals(lf, text) and _golden_equals(crlf_copy, text)
+    real = GOLDEN_SESSION.read_bytes().replace(b'\r\n', b'\n').decode('utf-8')
+    crlf_real = tmp_path / 'real_crlf.json'
+    crlf_real.write_bytes(real.replace('\n', '\r\n').encode('utf-8'))
+    assert _golden_equals(crlf_real, real)
+    changed = tmp_path / 'changed.json'
+    changed.write_bytes(text.replace('"a"', '"b"').replace('\n', '\r\n').encode('utf-8'))
+    assert not _golden_equals(changed, text)
 
 
 # ── Escape on the interactions the view owns ────────────────────────────────
@@ -1089,9 +1117,9 @@ def test_escape_still_cancels_a_pan_a_band_a_wire_and_a_placing_glyph(tab5, qapp
     empty = _empty_point(tab5)
     _press(tab5, qapp, empty)
     _move(tab5, qapp, empty + QPoint(10, 5))
-    assert view._pan_last is not None
+    assert view.camera.pan_active
     QTest.keyClick(view, Qt.Key.Key_Escape)
-    assert view._pan_last is None
+    assert not view.camera.pan_active
     _press(tab5, qapp, empty, Qt.KeyboardModifier.ShiftModifier)
     _move(tab5, qapp, empty + QPoint(20, 20))
     assert view._rubber_start is not None and view._rubber.isVisible()

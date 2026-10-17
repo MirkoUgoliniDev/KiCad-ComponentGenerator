@@ -214,8 +214,8 @@ def test_a_left_press_on_the_background_still_pans(preview):
     event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(far), QPointF(view.viewport().mapToGlobal(far)),
                         Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     view.mousePressEvent(event)
-    assert view._pan is not None and view._text_drag is None
-    view._pan = None
+    assert view.camera.pan_active and view._text_drag is None
+    view.camera.pan_cancel()
 
 
 def test_the_default_position_comes_back_and_a_failed_save_keeps_the_previous_choice(preview, monkeypatch):

@@ -2,6 +2,184 @@
 
 ## 17/10 notte — FATTO e committato `29056de` su ADVANCED, mergiato in main `e2f0363`, pushati: gestione dei gesti UNIFICATA (canvas_gestures.py) nelle due schede, suite 9075 (A 5523/10/19, B 3552/2, 0 falliti)
 
+IN CORSO (18/10 notte): FASE C camera + griglia. Piano scritto:
+docs/canvas-camera-grid-plan.md (inventario delle due camere e delle due
+griglie, moduli kicadgen/gui/canvas_camera.py e canvas_grid.py con API,
+differenze eliminate D13 zoom oltre il limite = clamp in entrambe, D14
+rotella ±4 scatti in entrambe, D15 memo del fit e refit al resize anche nel
+footprint, D16 griglia calcolata solo dove Qt disegna anche nel footprint;
+tre agenti su file disgiunti: M moduli, S simbolo, F footprint). Poi fase B.
+(Scoperta durante la verifica richiesta dall'utente: il disegno della
+griglia e' ANCH'ESSO scritto due volte, e l'ottimizzazione «solo dove Qt
+disegna» c'era solo nel simbolo.)
+FATTO S fase 1: tests/test_symbol_camera_grid_parity.py 43 verdi (+ golden
+tests/data/camera_golden/symbol_camera.json e symbol_pixels.json,
+KICADGEN_REGEN_CAMERA_GOLDEN=1; SHA-1 dei grab: dipendono dalla build di Qt
+offscreen, se la CI differisce si rigenera; le uguaglianze nello stesso
+processo no). Dettagli che il piano non diceva e che il modulo M DEVE
+rispettare (girati a M): il pan del simbolo NON emette camera_changed;
+fit imposta auto_fit=True anche per un rect vuoto (poi salta); la chiave
+del memo contiene scene().sceneRect(); grab/cursore sul viewport; la
+chiave del tema chiaro e' 'kicad'. S autorizzato a ritoccare i test del
+simbolo che leggono _pan_last/_exposed_region/_grid_indices/
+GRID_PAINT_MARGIN_PX. Misure PRIMA di S prese con la macchina CARICATA da
+altri agenti (9-13 ms di sfondo per modifica contro 2,7-3,7 a macchina
+libera): il confronto dopo va fatto a ridosso, nelle stesse condizioni.
+FATTO M: kicadgen/gui/canvas_camera.py (Camera: zoom con clamp, wheel,
+pan_begin/move/end/cancel, fit con memo; `changed` MAI da un pan; parametro
+`strategy` 'scroll' (simbolo) / 'center' (footprint): misurato che con
+molti passi le due divergono per l'arrotondamento di centerOn, quindi una
+sola strategia non riproduce entrambe) e canvas_grid.py (ExposedRegion con
+filtro di eventi sul viewport che memorizza la regione del paint event e
+rinvia l'evento con guardia anti-rientro; GridStyle; paint_grid con
+`dots_first` (il simbolo disegna i puntini PRIMA delle linee, il footprint
+dopo) e `dots_antialiased` None = lascia l'hint del painter; dots_legible)
++ tests/test_canvas_camera.py (69) e test_canvas_grid.py (90): 177 verdi con
+la documentazione; i pixel sono provati contro copie congelate dei due
+drawBackground attuali (byte uguali su zoom, origini 0 e (7,3; -3,1), passi
+fini, divisori, skip on/off, antialiasing on/off, regione sparsa vs piena).
+Deviazioni dal piano: pan_begin(keep_auto_fit), Camera(strategy),
+paint_grid(dots_first), memo del fit = (rect passato, camera_key()).
+DA VERIFICARE in revisione avversariale: l'hook ExposedRegion (rinvio del
+paint event dal filtro) e il drift dei due pan. Fase 2 avviata per S e F.
+FATTO S fase 2 (symbol_tab.py su Camera + ExposedRegion/paint_grid): 768
+verdi; pixel dei golden identici (11 grab + paint sparsi, non rigenerati);
+sessione camera differente solo dal passo «zoom 1000» (D13: ora CLAMP,
+prima rifiuto: il limite era irraggiungibile con la rotella); costanti
+ZOOM_MIN/ZOOM_MAX; `auto_fit` proprieta' con setter sulla camera;
+fit() imposta camera.auto_fit=True poi camera.fit(sceneRect); pan con
+grab_mouse=True; cancel_interaction chiama camera.pan_cancel; rimossi
+_pan_last/_pan_button/_pan_to/_camera/_fitted_camera/paintEvent/
+_exposed_region/_grid_indices/GRID_PAINT_MARGIN_PX. Test ritoccati (righe
+nel rapporto di S): test_symbol_gesture_parity, test_symbol_tab,
+test_symbol_grid_paint_region (ora view.exposed.region/.indices,
+GRID_PAINT_MARGIN_PX da canvas_grid), test_symbol_camera_grid_parity
+(test D13 capovolto con la ragione). Tempi sfondo a 900 pin, prima/dopo
+a ridosso: 3,1/3,8 ms (nome), 5,3/5,6 (freccia), 6,8/7,0 (selezione):
++0,3-0,7 ms, entro il rumore ma non zero (probabile rinvio del paint
+event dal filtro). TROVATO: test_golden_session confrontava BYTE e falliva
+con file CRLF (core.autocrlf=true dopo i cambi di ramo; il test del
+footprint normalizza gia'): affidato a S (lettura indipendente dai fine
+riga + test che lo prova), con pulizia degli import inutilizzati.
+CHIUSO (verificato dal coordinatore nel codice): test_symbol_gesture_parity
+ha `_golden_equals` (confronto dopo CRLF->LF) + test che una copia CRLF
+passa e un valore cambiato no; i golden della camera si leggono con
+json.loads (indipendenti dai fine riga); pyflakes pulito su symbol_tab,
+canvas_camera, canvas_grid. Lato simbolo: 256 verdi (parita' gesti e
+camera, griglia, moduli camera/griglia, documentazione) tranne il
+controllo di documentazione, rosso SOLO per FootprintView.auto_fit
+(footprint_view.py:161) senza @brief: lavoro di F in corso (da richiudere
+nella sua fase 2). In attesa di F.
+FATTO F fasi 1-2 (footprint_view.py + _preview_framing_rect/_fit_preview/
+set_framing_provider in main_window.py): tests/test_footprint_camera_grid_
+parity.py 26 + golden footprint_camera.json/footprint_grid.json; 564 verdi
+nell'insieme footprint; pixel dei grab interi e dei drawBackground
+IDENTICI prima/dopo; D14 (rotella ±4), D15 (fitInView per redraw 1 -> 0, al
+resize 0 -> 1 con auto_fit; provider del rettangolo di inquadratura letto a
+richiesta), D16 (righe 65 -> 11, punti 3888 -> 126 per regione sparsa;
+drawBackground 49,5 -> 5,2 ms a div 5 / scala 2). Nessun test esistente
+modificato (`_pan`/`_pan_button` proprieta' di sola lettura sulla camera,
+assegnare None annulla il pan). ERRATA del piano §6: la scena del
+footprint ha setSceneRect ±1e6 sulla vista (footprint_view.py ~99), che
+sovrascrive quella di _fit_preview: la vista non scorre mai contro il
+rettangolo del contenuto.
+SCOPERTA (F, misurata): DIFETTO PREESISTENTE nel pan e nello zoom del
+footprint (e nello zoom del simbolo): il ricentraggio usa
+`viewport().rect().center()` = (479, 368) per una vista 960x738 mentre
+centerOn punta al centro vero (480, 369): ogni passo di pan deriva di
+(-1, -1) passi di scorrimento (anche con spostamento nullo e al rilascio),
+cioe' trascinando la scena «scappa» dal mouse. DECISO dal coordinatore
+(qualita' del componente unico): D17 pan a scorrimento (scrollbar) in
+ENTRAMBE le schede (senza deriva; il parametro `strategy` di Camera
+sparisce) e D18 ricentraggio dello zoom sul centro ESATTO. I golden di
+camera cambiano di 1 px (motivo: la deriva), con test che dimostrano che
+il punto di scena sotto il puntatore resta li' durante un pan e che
+l'ancora dello zoom resta ferma entro 0,5 px. Agente M ritocca
+canvas_camera.py e i suoi test; poi S e F aggiornano i golden. Nota F: uno
+zoom che non cambia la scala e una rotella a delta 0 NON toccano piu'
+auto_fit (prima il footprint lo spegneva): accettato.
+FATTO M (D17/D18): Camera senza `strategy` (TypeError se passato), pan
+unico a scrollbar, zoom con ricentraggio sul centro ESATTO
+(viewportTransform().inverted()[0].map: mapToScene non ha l'overload
+QPointF in PyQt6); test: punto sotto il puntatore fermo durante il pan
+(entro 1 passo), spostamento nullo e rilascio non muovono, 200 passi da 1 px
+= uno da 200 px (viste 400x300 e 401x301, scena ±1e6 e stretta), ancora
+dello zoom entro 0,5 px (4 dimensioni di vista), copia congelata del vecchio
+pan a centerOn come gemello negativo (60 passi: il vecchio ne sbaglia >= 30);
+220 verdi. S e F adattano viste e golden (1 px, motivo: la deriva).
+FATTO S (D17/D18): tolto `strategy='scroll'` (symbol_tab.py riga 577);
+801 verdi (test_symbol*, perf_p2_symbol_drag, kept_scene_items, canvas_*,
+documentazione); pyflakes pulito. symbol_pixels.json IDENTICO byte per
+byte; rigenerato SOLO symbol_camera.json dopo diff: cambiano solo h, v,
+cx, cy (scala, auto_fit e conteggio segnali uguali) nei passi dopo uno
+zoom: zoom 1,5 h -653 -> -652; zoom 0,7 h -728 -> -726; rotella +7 -> -823
+-> -818; rotella -3 -> -498 -> -494; zoom 1000 clamp -476 -> -424 (v -6631 ->
+-6580); «middle pan» -531 -> -479 solo per gli zoom precedenti (il delta
+del pan e' invariato: -55 h / +22 v); fit, fit again, fit after pan e
+resize invariati. La deriva era cumulativa (decine di passi di scorrimento
+a scala 20). Test nuovi (48 nel file): pan col mouse vero 40 x 1 px = un
+solo spostamento da 40 px, il punto sotto il puntatore resta li'; zoom
+avanti e indietro sulla stessa ancora torna entro 1 px; gemelli negativi.
+FATTO F (D17/D18): Camera(self, limits=ZOOM_LIMITS) senza strategy;
+parity footprint 28 test (drift test sostituito da «un passo non deriva,
+uno nullo e il rilascio non muovono» con il valore esatto (70, 45); tolto il
+test della divergenza dei due pan, coperto dalla copia congelata di M;
+aggiunti 40 x 1 px = un solo spostamento da 40 px con mouse sinistro e
+centrale veri, zoom avanti e indietro entro 1 px); rigenerato SOLO
+footprint_camera.json dopo diff: cambiano +1/+2 passi di scorrimento in
+limit/max, limit/min, pan/{Left,Middle}Button/{0.5,1.0,2.5} (+2),
+wheel/*, wheel_clamped/*, zoom/* (15); wheel/0 e fit/forced no;
+footprint_grid.json IDENTICO byte per byte. 329 (footprint + gui_review +
+kept_items) + 280 (canvas_*, documentazione, preview_grid) verdi.
+IN CORSO: revisione avversariale (sola lettura) di canvas_camera.py,
+canvas_grid.py (hook ExposedRegion: rinvio del paint event dal filtro del
+viewport), symbol_tab.py e footprint_view.py/main_window.py; in parallelo
+suite completa in due meta'. Poi commit con OK (hash in «STATO» in testa).
+REVISIONE AVVERSARIALE (riportata): nessun difetto che incida sull'uso
+reale; 290 + 78 test dei file coinvolti verdi. RILIEVI, tutti in correzione:
+1. BASSO (contrivato) — un paint ANNIDATO riusa la regione parziale ESTERNA
+   (ExposedRegion.eventFilter con _resending True): un drawBackground che
+   fa viewport().grab() durante un paint di 5x5 px produceva un grab con
+   linee mancanti; nessun percorso dell'app lo fa. Correzione di classe: la
+   regione diventa una pila (salva/ripristina nel finally, un paint annidato
+   imposta la propria); docstring corretta (viewport().grab() e
+   QWidget.render PASSANO dal filtro con regione = tutto il viewport,
+   QGraphicsView.render no). [M]
+2. BASSO — `FootprintView._pan` e `_pan_button` sono proprieta' di sola
+   lettura tenute solo per i test: tolte, test spostati su camera.pan_active/
+   pan_cancel. [F]
+3. BASSO — Camera.pan_begin con un pan gia' attivo e grab_mouse=False
+   lasciava la presa del mouse del pan precedente: ora chiude prima il pan
+   in corso. [M]
+4. INFO — i golden dei pixel (SHA di grab raster) dipendono dalla build di
+   Qt: documentato in docs/canvas-camera-grid-plan.md (rigenerare con
+   KICADGEN_REGEN_CAMERA_GOLDEN=1 dopo aver controllato il diff).
+5. INFO — differenza non numerata: una rotella a delta 0 e uno zoom che non
+   cambia la scala non spengono piu' auto_fit nel footprint: ora D19 nel
+   piano.
+FATTO M (rilievi 1 e 3): canvas_grid.py: `_resending` sostituito da
+`_inflight` (insieme degli indirizzi dei Paint event in rinvio,
+sip.unwrapinstance): passa solo la copia rinviata dell'evento in corso; un
+Paint DIVERSO (grab annidato) imposta la propria regione e ripristina la
+precedente nel finally (pila); docstring corretta. canvas_camera.py:
+pan_begin con un pan attivo esegue prima la pulizia di pan_cancel (rilascia
+solo cio' che quel pan aveva preso, toglie il cursore). 224 verdi. VERIFICA
+del coordinatore sulla riproduzione del revisore (scratchpad
+review_cam/p2.py): «nested grab equal to full: True» (prima: diverso, linee
+mancanti). M non aveva provato i nuovi test sul vecchio codice.
+FATTO F (rilievo 2): tolti `_pan` e `_pan_button` da FootprintView (nessun
+riferimento rimasto in footprint_view.py ne' nei test controllati);
+pyflakes pulito su symbol_tab, footprint_view, canvas_camera, canvas_grid,
+canvas_gestures. La suite lanciata PRIMA delle ultime correzioni (era al 39%
+/ 47%, nessun errore) e' stata fermata perche' obsoleta; lanciata la suite
+FINALE completa in due meta' su tutto il codice attuale.
+SUITE FINALE COMPLETA (fase camera + griglia, dopo tutti i rilievi): A 5760
+verdi, 10 saltati, 19 sottotest; B 3601 verdi, 2 saltati; 0 falliti
+(totale 9361). NULLA COMMITTATO: in attesa dell'OK dell'utente per commit +
+push + merge. Poi fase B (strumenti a clic).
+Dubbi del revisore: nessun confronto A/B vivo col codice di HEAD (letto il
+diff); i test sull'API nuova non possono fallire sul vecchio codice per
+costruzione (i numerici dei golden si').
 Prossimo (deciso, vedi «DOMANDA UTENTE 17/10 sera» piu' sotto): fase C
 camera (zoom/rotella/pan/fit con limiti e scala come parametri), poi fase B
 strumenti a clic (filo, forme, simboli grafici nel simbolo; modalita'

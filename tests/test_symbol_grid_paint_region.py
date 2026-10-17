@@ -19,7 +19,8 @@ import pytest
 from PyQt6.QtCore import QRect, QRectF
 from PyQt6.QtGui import QColor, QImage, QPainter, QRegion
 
-from kicadgen.gui.symbol_tab import (FINE_GRID_MIN_PX, GRID_MM, GRID_PAINT_MARGIN_PX, SCENE_UNITS_PER_MM,
+from kicadgen.gui.canvas_grid import GRID_PAINT_MARGIN_PX
+from kicadgen.gui.symbol_tab import (FINE_GRID_MIN_PX, GRID_MM, SCENE_UNITS_PER_MM,
                                      SymbolTab)
 
 
@@ -66,11 +67,11 @@ def _paint(view, region, exposed):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setClipRegion(region)
     painter.setWorldTransform(view.viewportTransform())
-    view._exposed_region = region if exposed else None
+    view.exposed.region = region if exposed else None
     try:
         view.drawBackground(painter, view.mapToScene(region.boundingRect()).boundingRect())
     finally:
-        view._exposed_region = None
+        view.exposed.region = None
         painter.end()
     return image, painter
 
@@ -140,14 +141,14 @@ def test_a_real_paint_event_hands_its_region_to_the_background(qapp):
         original = view.drawBackground
 
         def spy(painter, rect):
-            region = view._exposed_region
+            region = view.exposed.region
             seen.append(None if region is None else region.rectCount())
             original(painter, rect)
         view.drawBackground = spy
         region, _rects = _sparse_region(view)
         view.viewport().repaint(region)
         assert seen and seen[-1] == region.rectCount() == 2
-        assert view._exposed_region is None, "cleared after the paint"
+        assert view.exposed.region is None, "cleared after the paint"
         view.viewport().repaint()
         assert seen[-1] == 1, "a full repaint is one rectangle"
     finally:
@@ -161,12 +162,12 @@ def test_outside_a_paint_event_the_grid_is_laid_out_over_the_whole_rect(qapp):
         rect = QRectF(-100, -100, 200, 200)
         step = GRID_MM * SCENE_UNITS_PER_MM
         full = list(range(math.floor(rect.left() / step), math.ceil(rect.right() / step) + 1))
-        assert view._grid_indices(rect, step, 0) == full
-        view._exposed_region = QRegion()
-        assert view._grid_indices(rect, step, 0) == full, "an empty region means no restriction"
-        view._exposed_region = QRegion(view.viewport().rect())
-        assert view._grid_indices(rect, step, 0) == full, "the whole viewport means no restriction"
-        view._exposed_region = None
+        assert view.exposed.indices(rect, step, 0) == full
+        view.exposed.region = QRegion()
+        assert view.exposed.indices(rect, step, 0) == full, "an empty region means no restriction"
+        view.exposed.region = QRegion(view.viewport().rect())
+        assert view.exposed.indices(rect, step, 0) == full, "the whole viewport means no restriction"
+        view.exposed.region = None
     finally:
         tab.deleteLater()
 

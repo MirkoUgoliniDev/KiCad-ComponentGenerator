@@ -14414,6 +14414,7 @@ class MainWindow(QMainWindow):
         # The window is the gesture host: `gesture_begin` / `gesture_step` /
         # `gesture_end` snap and commit what the view's controller reports.
         self.preview_view.attach_host(self)
+        self.preview_view.set_framing_provider(self._preview_framing_rect)
         self.preview_view.set_fine_divisor(self.combo_fine_grid.currentData())
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
         self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
@@ -18177,20 +18178,15 @@ class MainWindow(QMainWindow):
                     self.preview_scene.removeItem(item)
             self._draw_grid(**spec)
 
-    def _fit_preview(self, force: bool = False) -> None:
-        """@brief Frame the footprint, ignoring the grid, if the camera follows it.
+    def _preview_framing_rect(self):
+        """@brief The scene rectangle the footprint camera frames: the non-grid items plus a 12 px margin.
 
-        The grid extends beyond the component: by including it in the framing,
-        switching it on and off changed the size of the drawing for the same
-        footprint -- confusing precisely when the grid serves to judge the
-        distances.
-
-        @param force True for «Adatta alla vista»: frame anyway and go back to
-            following the footprint.
-        @note After a zoom or a pan by the user (`FootprintView.auto_fit`
-            False) the redraws leave the camera where it is: editing a
-            drawing, a text or a pad must not change the zoom (user,
-            2026-10-13), as in the symbol editor.
+        @return A `QRectF`, or None when the scene holds nothing to frame.
+        @note The grid extends beyond the component: by including it in the
+            framing, switching it on and off changed the size of the drawing
+            for the same footprint -- confusing precisely when the grid
+            serves to judge the distances. Shared by `_fit_preview` and by
+            the view's resize refit (`FootprintView.set_framing_provider`).
         """
         rect = None
         for item in self.preview_scene.items():
@@ -18201,16 +18197,27 @@ class MainWindow(QMainWindow):
         if rect is None or rect.isEmpty():
             rect = self.preview_scene.itemsBoundingRect()
         if rect.isEmpty():
+            return None
+        return rect.adjusted(-12, -12, 12, 12)
+
+    def _fit_preview(self, force: bool = False) -> None:
+        """@brief Frame the footprint, ignoring the grid, if the camera follows it.
+
+        @param force True for «Adatta alla vista»: frame anyway and go back to
+            following the footprint.
+        @note After a zoom or a pan by the user (`FootprintView.auto_fit`
+            False) the redraws leave the camera where it is: editing a
+            drawing, a text or a pad must not change the zoom (user,
+            2026-10-13), as in the symbol editor. The shared camera also skips
+            the `fitInView` when neither the rectangle nor the camera changed.
+        """
+        rect = self._preview_framing_rect()
+        if rect is None:
             return
         # Keep the scrollable extent independent of grid visibility/spacing.
         # An implicit scene rect can grow with previously drawn grid items.
-        rect = rect.adjusted(-12, -12, 12, 12)
         self.preview_scene.setSceneRect(rect)
-        if not force and not self.preview_view.auto_fit:
-            return
-        self.preview_view.resetTransform()
-        self.preview_view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
-        self.preview_view.auto_fit = True
+        self.preview_view.camera.fit(rect, force=force, reset=True)
 
     def _draw_grid(
         self, mm_to_px: float, width: float, height: float, margin: float,
