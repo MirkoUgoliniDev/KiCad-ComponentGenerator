@@ -10,6 +10,7 @@ from kicadgen.core.footprint import FpLine, FpRect
 from kicadgen.gui.theme import BASE, TEXT
 from kicadgen.gui.main_window import KICAD_LAYER_COLORS  # silkscreen drawn in KiCad's colour
 from tests.test_contact_style import dev_kit
+from desktop_fonts import FONTS_DIR, desktop_font, in_desktop_font_process, run_with_desktop_fonts
 
 
 def _is_property_text(item):
@@ -120,25 +121,40 @@ def test_preview_builder_failure_does_not_escape_qt_slot(window, monkeypatch):
 
 
 def test_grid_dimensions_do_not_cover_pin_labels(window, monkeypatch, qapp):
-    from PyQt6.QtGui import QFont, QFontDatabase
-    from pathlib import Path
-    font_path = Path('C:/Windows/Fonts/segoeui.ttf')
-    if not font_path.exists():
-        pytest.skip('Windows visual regression requires Segoe UI')
+    """@brief Pin labels and dimensions of a grid header never overlap.
+
+    @note Checked with the session font here and with Segoe UI, the font
+        users see on Windows, in the desktop-font child process
+        (`test_grid_labels_with_segoe_ui_in_a_separate_process`): registering
+        it in the shared session changed the default font of every later test.
+    """
+    from PyQt6.QtGui import QFont
     original = qapp.font()
-    QFontDatabase.addApplicationFont(str(font_path))
     try:
-        qapp.setFont(QFont('Segoe UI', 10))
+        if in_desktop_font_process():
+            if desktop_font('segoeui.ttf', 'Segoe UI') is None:
+                pytest.skip('Windows visual regression requires Segoe UI')
+            qapp.setFont(QFont('Segoe UI', 10))
         monkeypatch.setattr(window, '_preview_params', lambda: PinHeaderParams(rows=2, cols=3, margin=.2))
         window._draw_preview()
         texts = [item for item in window.preview_scene.items()
                  if isinstance(item, QGraphicsSimpleTextItem) and not _is_property_text(item)]
         pins = [item for item in texts if item.toolTip()]
         dimensions = [item for item in texts if not item.toolTip()]
+        assert pins and dimensions
         assert not any(pin.sceneBoundingRect().intersects(dim.sceneBoundingRect())
                        for pin in pins for dim in dimensions)
     finally:
         qapp.setFont(original)
+
+
+def test_grid_labels_with_segoe_ui_in_a_separate_process(tmp_path):
+    """@brief Rerun the label/dimension check with Segoe UI registered, isolated from the session."""
+    if in_desktop_font_process():
+        pytest.skip('already the desktop-font child process')
+    if not (FONTS_DIR / 'segoeui.ttf').exists():
+        pytest.skip('Windows visual regression requires Segoe UI')
+    run_with_desktop_fonts(tmp_path, __file__ + '::test_grid_dimensions_do_not_cover_pin_labels')
 
 
 @pytest.mark.parametrize('language', ['de', 'en', 'fr', 'it'])

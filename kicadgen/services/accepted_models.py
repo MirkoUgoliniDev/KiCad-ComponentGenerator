@@ -302,7 +302,7 @@ def eligibility(component: dict) -> tuple[bool, str]:
     if not isinstance(component, dict):
         return False, "voce non valida"
     if component.get("render_3d") is False:
-        return False, "escluso dal modello 3D"
+        return False, "escluso dal modello STEP"
     selection = component.get("model_selection")
     if isinstance(selection, dict) and selection.get("status") == "rejected":
         return False, "hai scelto il segnaposto generico, nessun modello da ricordare"

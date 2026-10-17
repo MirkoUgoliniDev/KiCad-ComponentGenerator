@@ -4,7 +4,7 @@
 
 KiCadGen uses two free programs, installed separately:
 
-- **FreeCAD** (freecad.org) — builds the 3D models of the components.
+- **FreeCAD** (freecad.org) — builds the STEP models of the components.
   Without it the footprint and the symbol are still produced.
 - **KiCad 10 or newer** (kicad.org) — to test the result in an isolated
   project (its PCB Editor), run «Check component for KiCad» (`kicad-cli`

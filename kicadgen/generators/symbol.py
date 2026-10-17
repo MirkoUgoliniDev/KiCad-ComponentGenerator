@@ -776,10 +776,13 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         `PropertyPositions` states whether its points are bottom-left
         anchors or text centres; a plain mapping holds centres. None for none.
     @return The `.kicad_sym` text, newline-terminated.
-    @note Reference and Value are written with `(justify left bottom)` at
-        their bottom-left anchor (`property_anchors`): centres (defaults and
-        positions stored before 2026-10-16) are converted with KiCad's own
-        text geometry, so KiCad draws them where it drew them centred.
+    @note A Reference or Value the user placed is written with
+        `(justify left bottom)` at its bottom-left anchor (`property_anchors`;
+        chosen centres stored before 2026-10-16 are converted with KiCad's
+        own text geometry). CONTRACT CHANGED 2026-10-17 (user, «Predefinito
+        centrato»): an unmoved one is written centred, without justify, at
+        its `default_property_positions` centre, so it stays centred whatever
+        Value the schematic shows.
     @throws SymbolError (a ValueError) On an invalid name, reference,
         metadata or geometry; `localized()` gives the translated message.
         A name holding a character of SYMBOL_NAME_ILLEGAL_CHARACTERS or a
@@ -826,16 +829,21 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         hidden.append(('ki_keywords', keywords))
     if fp_filters:
         hidden.append(('ki_fp_filters', fp_filters))
-    entries = [(key, value, positions[key], False) for key, value in visible]
-    entries += [(key, value, (0.0, 0.0), True) for key, value in hidden]
-    # The visible properties are anchored at their bottom-left corner, like
+    centres = default_property_positions(layout)
+    # A property the user placed is anchored at its bottom-left corner, like
     # the drawn texts (user, 2026-10-16): KiCad starts the text exactly at
-    # the point the editor shows; the hidden ones keep the plain effects.
+    # the point the editor shows. An unmoved one stays a centred KiCad text
+    # at its default centre (user, 2026-10-17, «Predefinito centrato»): the
+    # schematic shows the Value the user types, of any width, and a centred
+    # text stays centred over the body. Hidden ones keep the plain effects.
+    entries = [(key, value, positions[key] if key in chosen else centres[key], key in chosen, False)
+               for key, value in visible]
+    entries += [(key, value, (0.0, 0.0), False, True) for key, value in hidden]
     anchored_effects = '(effects (font (size 1.27 1.27)) (justify left bottom))'
-    for key, value, (x, y), hide in entries:
+    for key, value, (x, y), anchored, hide in entries:
         flags = '(show_name no) (do_not_autoplace no)' + (' (hide yes)' if hide else '')
         lines.append(f'    (property {_quote(key)} {_quote(value)} (at {_num(x)} {_num(y)} 0) {flags} '
-                     f'{effects if hide else anchored_effects})')
+                     f'{anchored_effects if anchored else effects})')
     lines.extend((f'    (symbol {_quote(name + "_0_1")}',
                   f'      (rectangle (start {_num(-w)} {_num(h)}) (end {_num(w)} {_num(-h)})',
                   '        (stroke (width 0.254) (type default)) (fill (type background)))'))

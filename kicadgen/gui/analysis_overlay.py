@@ -45,7 +45,7 @@ TOOLS = {
     # presented itself as a second detection.
     "smd": ("Rete SMD locale", "#f5c2e7", "network"),
     "footprint": ("KiCadGen (footprint 2D, calcolo locale)", "#89b4fa", "pads"),
-    "kicad": ("Libreria modelli 3D di KiCad", "#94e2d5", "library"),
+    "kicad": ("Libreria modelli STEP di KiCad", "#94e2d5", "library"),
     "consolidated": ("Consolidati — OpenCV", "#94e2d5", "lens"),
     "freecad_measure": ("FreeCAD (misura dei modelli)", "#cba6f7", "caliper"),
     "freecad": ("FreeCAD (modellazione locale)", "#cba6f7", "cube"),

@@ -316,7 +316,8 @@ def test_property_texts_are_unchanged_by_a_drawn_text():
     drawn = serialize_symbol("T", pins, graphics=[g.shape_instance("text", [(0.0, 0.0)], text="NOTE")])
     properties = lambda body: [line for line in body.splitlines() if "(property " in line]
     assert properties(drawn) == properties(plain)
-    # CONTRACT CHANGED 2026-10-16 (user): Reference and Value now carry the
-    # same bottom-left anchor as the drawn texts (tests/test_symbol_property_anchor.py);
-    # the hidden properties still have no justification.
-    assert [("justify" in line) for line in properties(drawn)] == [True, True, False, False, False]
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): unmoved
+    # Reference and Value are centred again, like the hidden properties; only
+    # a placed one carries the drawn texts' bottom-left anchor
+    # (tests/test_symbol_property_anchor.py).
+    assert [("justify" in line) for line in properties(drawn)] == [False, False, False, False, False]

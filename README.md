@@ -1,7 +1,7 @@
 # KiCadGen
 
 KiCadGen is a Windows desktop application that builds a KiCad component —
-footprint (`.kicad_mod`), electrical symbol (`.kicad_sym`) and 3D model
+footprint (`.kicad_mod`), electrical symbol (`.kicad_sym`) and STEP model
 (`.step`) — from the manufacturer's documents and from photographs of the
 part. It reads the documents with an AI model, turns what the model read into
 geometry with deterministic rules, lets you review and correct every result,
@@ -20,7 +20,7 @@ Italian version: [README.it.md](README.it.md).
 - **Boards with mounted components** (modules, breakout boards, with
   through-hole or castellated contacts): besides the footprint and the symbol,
   KiCadGen reconstructs the **mechanical envelopes** of the bodies visible in a
-  top photograph — position, size and orientation — so the 3D model shows what
+  top photograph — position, size and orientation — so the STEP model shows what
   takes room on the board.
 - It is **not** reverse engineering: the bodies are generic volumes, or models
   taken from the KiCad 3D library because their measures match. Exact part
@@ -47,7 +47,7 @@ Requirements:
 - Python 3.11 or newer (the release build uses 3.13);
 - the packages of `requirements.txt` (PyQt6, Pillow, OpenCV, pyvista,
   pyvistaqt, python-dotenv, pytest);
-- optional: **FreeCAD** with `freecadcmd` (3D models). Without it the
+- optional: **FreeCAD** with `freecadcmd` (STEP models). Without it the
   footprint and the symbol are still produced; the progress window says which
   step cannot run and why;
 - optional: **KiCad 10 or newer**: its PCB Editor (`pcbnew`) opens «Test in
@@ -141,7 +141,7 @@ click reopens one; the right-click menu removes it from the list). A project
 is a folder in the **workspace** (`Documents\KiCadGen` in the installed
 program, `generated\` from the sources; the folder button beside the field
 chooses another). Its name is also the name of the footprint, the symbol and
-the 3D model; **File → Rename project...** (F2) renames the folder and the
+the STEP model; **File → Rename project...** (F2) renames the folder and the
 files together.
 
 ### Menus
@@ -164,14 +164,14 @@ files together.
 ### Workflow bar and tabs
 
 Above the tabs, a bar shows the phases of the work — **Documents › AI analysis
-› Body review › 3D model › KiCad** — with the completed ones ticked, the
+› Body review › STEP model › KiCad** — with the completed ones ticked, the
 current one highlighted and the ones that do not apply dimmed (the body review
 for a single component). Clicking a phase goes to its tab. On the right, the
 language selector: Italian, English, French, German (the texts come from the
 same SQLite catalogue; missing entries fall back to English).
 
 The tabs are **Project** (Ctrl+1), **Footprint preview** (Ctrl+2),
-**Electrical symbol** (Ctrl+3), **3D model** (Ctrl+4), **KiCad** (Ctrl+5)
+**Electrical symbol** (Ctrl+3), **STEP model** (Ctrl+4), **KiCad** (Ctrl+5)
 and **Exports** (Ctrl+6).
 
 ## Inputs
@@ -224,8 +224,8 @@ JPEG or PNG.
 The analysis is blocked without a component type. For boards, **Mounting
 on the host board** chooses how the module sits on the host board
 (direct soldering / module pads; strip header with round or square pads, with
-pad and hole diameters); **Show headers in the 3D model** adds the male
-headers under the board in the 3D model only (on castellated boards, only on
+pad and hole diameters); **Show headers in the STEP model** adds the male
+headers under the board in the STEP model only (on castellated boards, only on
 contacts that have a through hole). **PCB thickness** shows the board
 thickness with its provenance (from the documents, estimated by the AI, or set
 by you; «Reset» goes back).
@@ -264,7 +264,7 @@ The collapsible **AI tools** box shows the detector and the model in use:
 **Extract parameters with AI** starts the paid analysis. A progress window lists
 the phases and who works in each one — *AI model*, *Crop reading*,
 *Marking reading* (remote, paid), *YOLO*, *Local SMD network*, *OpenCV*,
-*KiCadGen (2D footprint)*, *KiCad 3D model library*, *Accepted matches*,
+*KiCadGen (2D footprint)*, *KiCad STEP model library*, *Accepted matches*,
 *FreeCAD* (local) — with the cost of the analysis; **Stop** stops it
 (a request already sent must finish; nothing more is attempted). The AI log
 (Ctrl+L) is written to `analisi-ai.log` in the project folder.
@@ -302,7 +302,7 @@ What happens, in order:
    reconciled bodies, the detector's reading kept beside the AI's (never
    overwritten), the detector's original box as a dotted ghost, markers for
    rows with warnings or an undetermined type.
-6. **Generation**: footprint, candidate 3D models from the KiCad library
+6. **Generation**: footprint, candidate STEP models from the KiCad library
    (FreeCAD measures the ones not cached yet), the STEP solid with FreeCAD.
 
 ### The review window
@@ -351,17 +351,17 @@ the proposals carry source and reason and are selected one by one).
 `KiCadGen:<name>`. The initial types are *passive*: verify them on the
 datasheet before relying on KiCad's ERC.
 
-### 3D model
+### STEP model
 
 Rotate with the mouse, the navigation cube for the standard views. Toolbar:
 pin numbers (visible from the pin side, a practical check of mirroring),
-pinout table, fit, open the `3dshapes` folder, **Regenerate 3D model (STEP) with
+pinout table, fit, open the `3dshapes` folder, **Regenerate STEP model with
 these annotations** (F5, free), **I like it — remember these models…** (saves the accepted
 body/model matches for future boards), **Copy format**. **Edit
 components…** (Ctrl+E, or right click on a body) edits name, type, position,
 sizes, rotation, colour and marking by hand, also without the photo; the
-right-click menu also offers *Remove from the 3D model (false positive)*,
-*Put back into the 3D model*, *Rotate the solid*, *Change KiCad model...*.
+right-click menu also offers *Remove from the STEP model (false positive)*,
+*Put back into the STEP model*, *Rotate the solid*, *Change KiCad model...*.
 
 **STEP model choice** shows up to five candidates of the KiCad library
 with their measures beside the photo crop; the preview is oriented as mounted,
@@ -386,7 +386,7 @@ by a top photograph: they stay to be verified.
 ├── yolo-pretest/                   (photo-review/ and photo-cache/ of «Local YOLO only»)
 ├── kicad-model-candidates.json, kicad-model-choices.json
 ├── consolidated-matches.json       (comparison with the accepted matches)
-├── .header-model-reuse.json        (reused pin-header 3D model, boards with headers)
+├── .header-model-reuse.json        (reused pin-header STEP model, boards with headers)
 ├── ai-costs.json, analisi-ai.log, freecad.log
 └── .kicad-preview/                 (the isolated test project)
 ```
@@ -400,9 +400,9 @@ Installation and the isolated test are **blocked until the files on disk
 match the parameters** and every block names its remedy, enabled while the
 block stands: *Apply to files* (metadata, footprint) and *Update the symbol
 file* in this tab; for a STEP that no longer matches (also after a change of
-colours or 3D annotations only) the regenerate button of the 3D model tab
-toolbar («Regenerate 3D model (STEP) with these annotations»), or *Remove the
-obsolete 3D model* here (a stale STEP that cannot be rebuilt).
+colours or 3D annotations only) the regenerate button of the STEP model tab
+toolbar («Regenerate STEP model with these annotations»), or *Remove the
+obsolete STEP model* here (a stale STEP that cannot be rebuilt).
 Projects saved by older versions may need one «Apply to files». The commands
 are also blocked while a background job runs. They use the **applied** files:
 an unapplied footprint or symbol draft is not installed, is not a block, and
@@ -545,7 +545,7 @@ which may differ from the code's**. They are listed one by one in
   the installed program's `_internal\licenses` folder, and
   `THIRD_PARTY_NOTICES.md` lists them with the upstream sources.
 
-Generated footprints, 3D models, and the datasheets and photos you provide may
+Generated footprints, STEP models, and the datasheets and photos you provide may
 have their own licenses or usage restrictions: check them yourself. This
 section does not state that any use, commercial or otherwise, is allowed
 beyond what the individual licenses say.

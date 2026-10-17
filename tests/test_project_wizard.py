@@ -39,7 +39,7 @@ def test_wizard_revisits_pages_and_keeps_extract_outside_scroll(window, app, tmp
 def test_mounting_preview_and_project_roundtrip_preserve_board_mesh(window, monkeypatch, tmp_path):
     select_board(window)
     physical = module()
-    monkeypatch.setattr(window, '_current_castellated_params', lambda: physical)
+    monkeypatch.setattr(window, '_current_castellated_params', lambda *_args, **_kwargs: physical)
     before = deepcopy(physical)
     mesh = tmp_path / 'unchanged.preview.json'
     window._last_mesh_path = mesh
@@ -133,7 +133,7 @@ def test_preview_mounting_edits_sync_and_preserve_physical_board(window, monkeyp
     select_board(window)
     physical = module()
     before = deepcopy(physical)
-    monkeypatch.setattr(window, '_current_castellated_params', lambda: physical)
+    monkeypatch.setattr(window, '_current_castellated_params', lambda *_args, **_kwargs: physical)
     revision = window._model_revision
     window.combo_preview_mounting.setCurrentIndex(1)
     window.spin_preview_header_pad.setValue(1.8)
@@ -162,7 +162,7 @@ def test_update_only_footprint_keeps_existing_step_and_mesh(window, monkeypatch,
     window._acquisition_completed = True
     physical = module()
     physical.name = window._component_name()
-    monkeypatch.setattr(window, '_current_castellated_params', lambda: physical)
+    monkeypatch.setattr(window, '_current_castellated_params', lambda *_args, **_kwargs: physical)
     monkeypatch.setattr(window, '_missing_contact_style_message', lambda: '')
     monkeypatch.setattr(gui.GenerateWorker, 'start', lambda worker: worker.run())
     monkeypatch.setattr(gui.GenerateWorker, '_generate_model',

@@ -111,9 +111,9 @@ def test_a_text_move_and_a_pad_edit_while_busy_are_retried(busy_window, qapp, mo
     window._on_terminal_detail_finished()
     _turns(qapp)
     assert len(started) == 1
-    # Since 2026-10-16 the worker gets both anchors (the default one converted).
-    assert started[0].text_positions["Reference"] == (1.0, 2.0)
-    assert set(started[0].text_positions) == {"Reference", "Value"}
+    # Since 2026-10-17 the worker gets only the chosen anchor: the unmoved
+    # Value stays the generator's centred default.
+    assert started[0].text_positions == {"Reference": (1.0, 2.0)}
 
 
 def test_any_generation_start_covers_the_pending_rewrite(busy_window, qapp):
@@ -304,8 +304,7 @@ def test_every_generation_worker_carries_drawings_and_texts(busy_window, qapp):
     window.footprint_text_positions = {"Reference": (1.0, 2.0)}
     assert window._generate() is True
     assert started[-1].drawings == drawings
-    assert started[-1].text_positions["Reference"] == (1.0, 2.0)
-    assert set(started[-1].text_positions) == {"Reference", "Value"}
+    assert started[-1].text_positions == {"Reference": (1.0, 2.0)}
 
 
 def test_an_abandoned_extraction_still_retries(busy_window, qapp, monkeypatch):

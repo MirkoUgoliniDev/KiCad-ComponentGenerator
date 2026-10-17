@@ -10,7 +10,7 @@ def test_3d_header_toggle_roundtrip_preserves_host_and_physical_contacts(window,
     select_board(window)
     physical = module()
     before = deepcopy(physical)
-    monkeypatch.setattr(window, '_current_castellated_params', lambda: physical)
+    monkeypatch.setattr(window, '_current_castellated_params', lambda *_args, **_kwargs: physical)
     window.combo_mounting.setCurrentIndex(1)
     host = window._mounting_state()
     footprint = window._host_footprint_params(physical)

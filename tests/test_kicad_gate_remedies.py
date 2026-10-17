@@ -235,7 +235,7 @@ def test_a_step_that_cannot_be_rebuilt_names_enabled_ways_out(window, monkeypatc
     _setup_step_unbuildable(window, monkeypatch, folder)
     window._refresh_output_actions()
     reason = window._kicad_command_block_reason()
-    assert "non ricostruibile" in reason and "Rimuovi il modello 3D obsoleto" in reason
+    assert "non ricostruibile" in reason and "Rimuovi il modello STEP obsoleto" in reason
     assert not window.btn_regen_3d.isEnabled()                 # the old, disabled remedy
     assert window.btn_remove_obsolete_model.isEnabled()
     assert window.btn_extract_ai.isEnabled()                   # the other way out

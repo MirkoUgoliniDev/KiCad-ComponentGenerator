@@ -253,7 +253,14 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8826 passed,
+is 8909 passed,
+12 skipped and 19 subtests (2026-10-17, branch `ADVANCED` merged into `main`: status bar
+right at start-up, Qt tab scroll buttons retranslated, desktop fonts only in a child test
+process, every visible «modello 3D» renamed «modello STEP» in four languages, unmoved
+Reference/Value written centred in footprint and symbol, opaque grey hints, and the
+performance audit — metadata typing 450-870 ms -> 4-9 ms per key on a real board, photo
+crops, profile store, costs, symbol drag, dialogs and document cards no longer redo
+unchanged work). Before that, 8826 passed,
 12 skipped and 19 subtests (2026-10-16 evening, branch `ADVANCED`, not merged: designator
 in grey counts as filled, medium findings 12-16 closed, two full adversarial reviews and
 their fixes, lead attachment declared by the vision model, default model chosen only from

@@ -199,7 +199,7 @@ def test_translation_catalog_seeds_all_supported_languages(tmp_path):
     i18n = I18n(store, "fr")
     # Titoli senza emoji dal 2026-09-24: l'icona della scheda e' un SVG.
     assert i18n.tr("tab.project.name") == "Projet"
-    assert i18n.tr("tab.model3d.name") == "Modèle 3D"
+    assert i18n.tr("tab.model3d.name") == "Modèle STEP"
     assert i18n.tr("tab.kicad.name") == "KiCad"
 
 
@@ -223,7 +223,7 @@ def test_emoji_free_tab_titles_reach_a_database_created_before_them(tmp_path):
     ProfileStore(fresh)
     with sqlite3.connect(fresh) as db:
         db.execute("DELETE FROM translations WHERE key LIKE 'tab.%.name'")
-    assert I18n(ProfileStore(fresh), "it").tr("tab.model3d.name") == "Modello 3D"
+    assert I18n(ProfileStore(fresh), "it").tr("tab.model3d.name") == "Modello STEP"
 
 
 def test_translation_falls_back_to_english_and_persists_edits(tmp_path):
@@ -376,7 +376,7 @@ def test_the_removed_entries_are_not_referenced_by_any_source():
     removed = (
         "ui:Rivedi proposte e rilancia l'inventario…",
         "ui:Mostra gli ingombri rilevati sulla foto superiore e, quando disponibile, "
-        "permette di correggerli. Non avvia la generazione del footprint o del modello 3D.",
+        "permette di correggerli. Non avvia la generazione del footprint o del modello STEP.",
     )
     for key in removed:
         assert key not in DEFAULT_TRANSLATIONS

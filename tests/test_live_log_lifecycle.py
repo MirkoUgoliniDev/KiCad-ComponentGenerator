@@ -153,7 +153,7 @@ def test_freecad_component_lines_drive_the_3d_progress():
     assert freecad_progress("FreeCAD: KICADGEN_COMPONENT_START:1/50:Cmp0_U1") == (0, 50)
     assert freecad_progress("FreeCAD: KICADGEN_COMPONENT_START:37/50:Cmp36_R9") == (36, 50)
     assert freecad_progress("FreeCAD: KICADGEN_IMPORT_START:C:\\x\\y.STEP") is None
-    assert freecad_progress("Generazione del modello 3D tramite FreeCAD…") is None
+    assert freecad_progress("Generazione del modello STEP tramite FreeCAD…") is None
     assert freecad_progress("") is None and freecad_progress(None) is None
 
 

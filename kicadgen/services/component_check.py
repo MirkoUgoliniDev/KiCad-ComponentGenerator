@@ -285,7 +285,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
             else:
                 add('SKIP', tx('Importazione 3D in KiCad'), tx('Footprint mancante.'))
         except (OSError, ValueError, RuntimeError) as exc:
-            add('ERROR', tx('Modello 3D'), exc)
+            add('ERROR', tx('Modello STEP'), exc)
     add('WARN', tx('Verifiche manuali'),
         tx('Confrontare pinout e misure con la documentazione; verificare visivamente posizione, scala e orientamento 3D. Il test 3D usa il collegamento normalizzato della libreria generata. Registrazione nelle librerie installate, ERC dello schema e DRC della scheda finale non verificati.'))
     return results

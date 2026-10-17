@@ -52,8 +52,11 @@ def test_without_a_choice_the_file_keeps_the_positions_of_before():
     layout = layout_symbol(PINS)
     h = layout.height / 2
     text = serialize_symbol('Board', PINS)
-    assert _at(_anchor('Value', (0, h + 2.54))) in _property_line(text, 'Value')
-    assert _at(_anchor('Reference', (0, h + 5.08))) in _property_line(text, 'Reference')
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): an unmoved
+    # property is a centred KiCad text at its default centre, no justify.
+    assert _at((0, h + 2.54)) in _property_line(text, 'Value')
+    assert _at((0, h + 5.08)) in _property_line(text, 'Reference')
+    assert 'justify' not in _property_line(text, 'Value') + _property_line(text, 'Reference')
     assert default_property_positions(layout) == {'Reference': (0.0, round(h + 5.08, 4)),
                                                   'Value': (0.0, round(h + 2.54, 4))}
 
@@ -62,8 +65,9 @@ def test_a_chosen_position_is_written_and_the_other_property_keeps_its_default()
     layout = layout_symbol(PINS)
     text = serialize_symbol('Board', PINS, properties={'Value': (7.62, -10.16)})
     assert _at(_anchor('Value', (7.62, -10.16))) in _property_line(text, 'Value'), 'a plain mapping holds centres'
-    assert _at(_anchor('Reference', default_property_positions(layout)['Reference'])) in _property_line(
-        text, 'Reference')
+    assert '(justify left bottom)' in _property_line(text, 'Value'), 'the chosen one is anchored'
+    assert _at(default_property_positions(layout)['Reference']) in _property_line(text, 'Reference')
+    assert 'justify' not in _property_line(text, 'Reference'), 'the unmoved one stays centred'
     assert '(at 0 0 0)' in _property_line(text, 'Footprint'), 'hidden properties stay at the origin'
 
 
@@ -248,7 +252,7 @@ def test_after_moving_the_reference_the_value_still_follows_the_default_rule(tab
     assert positions['Reference'] == moved, 'the moved Reference keeps the user choice'
     pins, body = symbol_inputs(tab.draft_rows())
     text = serialize_symbol('Board', pins, body=body, properties=symbol_property_positions(tab.draft_rows()))
-    assert _at(_anchor('Value', lifted['Value'])) in _property_line(text, 'Value')
+    assert _at(lifted['Value']) in _property_line(text, 'Value'), 'written centred at the lifted default'
 
 
 def test_a_property_moved_by_the_user_does_not_follow_the_default_rule(tab):

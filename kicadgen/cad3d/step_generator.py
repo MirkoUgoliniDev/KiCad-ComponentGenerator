@@ -347,7 +347,7 @@ def find_overlapping_components(components: list) -> list[str]:
                 warnings.append(
                     tx("componenti sovrapposti: '{name_a}' e '{name_b}' "
                        "({overlap_x:.2f}x{overlap_y:.2f}mm in comune) -- correggi posizione o "
-                       "rotazione con «Modifica componenti…» nel tab Modello 3D.",
+                       "rotazione con «Modifica componenti…» nel tab Modello STEP.",
                        name_a=name_a,
                        name_b=name_b,
                        overlap_x=overlap_x,
@@ -1293,7 +1293,7 @@ def generate_single_package_3d_model(
         texts.extend(pin_number_labels(
             [(n, *body_frame_point(x, y, turn)) for n, x, y in leads], centered))
     if progress:
-        progress(tx("Modello 3D generico del componente: nessuna ricerca nelle librerie KiCad."))
+        progress(tx("Modello STEP generico del componente: nessuna ricerca nelle librerie KiCad."))
     result = _run_freecad(
         package.name or "Package", leads, centered, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=texts,
@@ -1473,7 +1473,7 @@ def generate_single_tht_3d_model(
     if body.pin_numbers_3d:
         texts.extend(pin_number_face_texts(pin_params, body))
     if progress:
-        progress(tx("Modello 3D THT generico del componente: nessuna ricerca nelle librerie KiCad."))
+        progress(tx("Modello STEP THT generico del componente: nessuna ricerca nelle librerie KiCad."))
     result = _run_freecad(
         pin_params.name, pins, body, output_dir,
         freecadcmd_path=freecadcmd_path, fillets=fillets, face_texts=texts,

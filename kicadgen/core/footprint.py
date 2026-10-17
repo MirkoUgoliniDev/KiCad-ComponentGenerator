@@ -725,22 +725,21 @@ class Footprint:
         @note Generators call this once their pads and outlines are complete
             and before any user choice (place_texts) or user drawing is
             added, so neither moves the default (decision D1, 2026-10-14).
-        @note CONTRACT CHANGED 2026-10-16 (user: KiCad stays still; same file
-            form everywhere): the D1 centres (`default_text_positions`) are
-            converted with KiCad's own text geometry
-            (`property_corner_offset`) and written with
-            ``(justify left bottom)``, so KiCad draws the texts exactly where
-            the centred default put them, also for footprints built without
-            the window (CLI, examples). `text_centres` gives the D1 centres
-            back; the corner itself is not on the text grid (the centre is).
+        @note CONTRACT CHANGED 2026-10-17 (user: «Predefinito centrato»):
+            the D1 centres (`default_text_positions`) are written as KiCad
+            centred texts, with no ``justify``. A centred default stays
+            centred under the pads whatever text KiCad shows in it: the
+            board shows the schematic Value, not the footprint name, and a
+            rename changes the name's width. From 2026-10-16 to this change
+            the defaults were converted to ``(justify left bottom)``
+            anchors, which kept the left edge and so lost the centring.
+            Only a text the user places (`place_texts`) is anchored at its
+            bottom-left corner.
         """
-        texts = self.property_texts()
-        anchors = migrate_centred_positions(
-            default_text_positions(self, grid_origin),
-            {key: property_corner_offset(texts[key]) for key in TEXT_KEYS})
-        self.reference_at = anchors["Reference"]
-        self.value_at = anchors["Value"]
-        self.text_justify = {key: USER_TEXT_JUSTIFY for key in TEXT_KEYS}
+        centres = default_text_positions(self, grid_origin)
+        self.reference_at = centres["Reference"]
+        self.value_at = centres["Value"]
+        self.text_justify = {}
         return self
 
     def property_texts(self) -> dict:

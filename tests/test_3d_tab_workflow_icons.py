@@ -122,7 +122,7 @@ def test_own_workflow_texts_are_catalogued_in_four_languages(window):  # noqa: F
 def test_icon_tooltips_follow_the_language(window):  # noqa: F811
     """@brief Positivo: in inglese il tooltip e' inglese; negativo: l'italiano non resta."""
     window._on_language_changed(window.language_combo.findData("en"))
-    regen = DEFAULT_TRANSLATIONS["ui:Rigenera modello 3D (STEP) con queste annotazioni"]["en"]
+    regen = DEFAULT_TRANSLATIONS["ui:Rigenera modello STEP con queste annotazioni"]["en"]
     assert window.btn_regen_3d.accessibleName() == regen
     assert window.btn_regen_3d.toolTip().startswith(regen)
     assert "Rigenera" not in window.btn_regen_3d.toolTip()

@@ -475,7 +475,7 @@ def test_every_long_phase_offers_the_abort_button(window, monkeypatch, tmp_path)
     window._on_extracted(_extracted())
     window._generate(automatic=False)
     assert window._worker is not None and window._worker.body is not None
-    assert started[-1][1] is True, "generazione manuale con modello 3D"
+    assert started[-1][1] is True, "generazione manuale con modello STEP"
     assert window.analysis_overlay.is_abortable()
     window._worker.finished.emit()
     assert window.analysis_overlay.isHidden(), "chi apre la modale la chiude"
@@ -529,7 +529,7 @@ def test_a_generator_without_the_channel_withdraws_the_promise_to_stop(
     la finestra deve togliere il comando e dirlo.
     """
     _ready(window, monkeypatch)
-    window.analysis_overlay.start("Generazione modello 3D", "…", abortable=True)
+    window.analysis_overlay.start("Generazione modello STEP", "…", abortable=True)
     try:
         assert window.analysis_overlay.is_abortable()
         window._on_cad_cancellable(False)

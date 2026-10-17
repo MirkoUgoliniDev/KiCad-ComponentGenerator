@@ -19,8 +19,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -136,7 +137,49 @@ def _read(path: Path) -> Optional[dict]:
         return None
     # OSError (file busy for a moment) goes up as it is: it is not a damaged
     # file and must never be reported, or treated, as one.
-    text = path.read_text(encoding="utf-8")
+    return _parse(path, path.read_text(encoding="utf-8"))
+
+
+#: Totals of the cost files read by load_project_costs:
+#: path -> (raw bytes, {run: ProjectCosts}). Keyed on the bytes themselves, not on the
+#: modification time, so a rewrite within the file system's time resolution
+#: is never hidden. The status bar reads the file on every refresh, and
+#: pricing the DeepSeek entries grows with the history.
+_LOADED = {}
+_LOADED_LOCK = threading.Lock()
+#: Memory bound of _LOADED (projects opened in one session), not a tuning value.
+_LOADED_MAX = 32
+
+
+def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
+    """Totals of the file at `path` for `run`, reused while the file bytes are unchanged; None when absent.
+
+    The read-modify-write paths use `_read`, which always parses afresh.
+    The returned value is a copy: its provider dicts are not shared.
+    """
+    if not path.exists():
+        return None
+    raw = path.read_bytes()
+    key = str(path)
+    with _LOADED_LOCK:
+        cached = _LOADED.get(key)
+        totals = cached[1].get(run) if cached is not None and cached[0] == raw else None
+    if totals is None:
+        # Same decoding errors as read_text; JSON ignores the newline style.
+        totals = _totals(_parse(path, raw.decode("utf-8")), run)
+        with _LOADED_LOCK:
+            cached = _LOADED.get(key)
+            if cached is None or cached[0] != raw:
+                if cached is None and len(_LOADED) >= _LOADED_MAX:
+                    _LOADED.pop(next(iter(_LOADED)))
+                cached = _LOADED[key] = (raw, {})
+            cached[1][run] = totals
+    return replace(totals, by_provider=dict(totals.by_provider),
+                   run_by_provider=dict(totals.run_by_provider))
+
+
+def _parse(path: Path, text: str) -> dict:
+    """Validate and price the text of a cost file; ProjectCostsError when it is not usable."""
     try:
         data = json.loads(text)
     except ValueError as exc:
@@ -252,11 +295,12 @@ def load_project_costs(project_dir: Path, run: Optional[int] = None) -> ProjectC
     @return The totals (all zero and empty `since` when the file is absent).
     @throws ProjectCostsError When the file exists but is not usable.
     @throws OSError When the file exists but cannot be read right now.
+    @note The parsed content is reused while the file's bytes are unchanged
+        (the file is still read every time, never its modification time
+        alone), so a refresh does not re-parse and re-price the history.
     """
-    data = _read(Path(project_dir) / COSTS_FILE)
-    if data is None:
-        return ProjectCosts(by_provider={})
-    return _totals(data, run)
+    totals = _loaded_totals(Path(project_dir) / COSTS_FILE, run)
+    return ProjectCosts(by_provider={}) if totals is None else totals
 
 
 def _by_provider(data: dict, run: Optional[int] = None) -> dict:

@@ -69,20 +69,30 @@ def test_a_placed_text_is_written_left_bottom_at_its_anchor():
     assert "justify" not in Footprint(name="X").render()
 
 
-def test_the_defaults_are_written_left_bottom_at_the_kicad_corner_of_the_d1_centre():
-    """CONTRACT CHANGED 2026-10-16: same file form with or without the window (CLI, examples)."""
+def test_the_defaults_are_written_centred_at_the_d1_centre_and_a_placed_text_is_anchored():
+    """CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»).
+
+    Positive: an unmoved Reference/Value is a centred KiCad text at its D1
+    centre, so it stays centred whatever KiCad shows in it (the board shows
+    the schematic Value; a rename changes the name's width). The preview
+    still draws it from the corner KiCad draws it from (`text_anchors`).
+    Negative: a text the user places is written bottom-left anchored.
+    """
     from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
     fp = build_pin_header(PinHeaderParams(name="Hdr", rows=2, cols=5))
     centres = default_text_positions(fp)
     text = fp.render()
     for key, label in (("Reference", "REF**"), ("Value", "Hdr")):
+        assert f"(at {centres[key][0]:g} {centres[key][1]:g})" in _property(text, key)
+        assert "justify" not in _property(text, key)
+        assert fp.text_centres()[key] == pytest.approx(centres[key], abs=1e-12)
         dx, dy = property_corner_offset(label)
         expected = (round(centres[key][0] + dx, 4), round(centres[key][1] + dy, 4))
         assert fp.text_anchors()[key] == pytest.approx(expected, abs=1e-9)
-        assert f"(at {expected[0]:g} {expected[1]:g})" in _property(text, key)
-        assert "(justify left bottom)" in _property(text, key)
-        # The D1 centre is read back within the 0.1 um rounding of the anchor.
-        assert fp.text_centres()[key] == pytest.approx(centres[key], abs=1e-4)
+    fp.place_texts({"Value": (1.0, 9.0)})
+    placed = fp.render()
+    assert "(at 1 9)" in _property(placed, "Value") and "(justify left bottom)" in _property(placed, "Value")
+    assert "justify" not in _property(placed, "Reference"), "the unmoved one stays centred"
 
 
 def test_the_corner_offset_is_kicads_geometry_and_depends_on_the_text():
@@ -295,27 +305,32 @@ def test_a_drop_snaps_the_corner_to_the_grid(preview):
     assert "3.4 mm, -4.6 mm" in group.toolTip()
 
 
-def test_the_written_file_puts_both_texts_left_bottom_at_the_preview_anchors(preview, tmp_path):
+def test_the_written_file_anchors_the_placed_text_and_centres_the_unmoved_one(preview, tmp_path):
+    """CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»).
+
+    The placed Value is written bottom-left at the preview anchor; the
+    unmoved Reference is written centred at its D1 centre, and the preview
+    draws it from the corner KiCad draws that centred text from.
+    """
     from kicadgen.gui.workers import GenerateWorker
     window = preview
     window.footprint_text_positions = {"Value": (0.5, 6.0)}
     params = window._preview_params()
     anchors = window._footprint_text_anchors(lambda: window._build_footprint(params))
     worker = GenerateWorker(params, tmp_path)
-    worker.text_positions = anchors
+    worker.text_positions = dict(window.footprint_text_positions)
     written = []
     worker.done.connect(written.append)
     worker.run()
     assert written, "the footprint was written"
     text = open(written[0], encoding="utf-8").read()
-    for key in TEXT_KEYS:
-        node = _property(text, key)
-        x, y = anchors[key]
-        assert f"(at {x:g} {y:g})" in node, (key, node)
-        assert "(justify left bottom)" in node
-    assert anchors["Value"] == (0.5, 6.0)
-    # The default the window passes is the generator's own anchor.
-    assert anchors["Reference"] == window._build_footprint(params).text_anchors()["Reference"]
+    value = _property(text, "Value")
+    assert "(at 0.5 6)" in value and "(justify left bottom)" in value
+    built = window._build_footprint(params)
+    centre = built.text_centres()["Reference"]
+    reference = _property(text, "Reference")
+    assert f"(at {centre[0]:g} {centre[1]:g})" in reference and "justify" not in reference
+    assert anchors["Reference"] == built.text_anchors()["Reference"], "drawn where KiCad draws it"
 
 
 def test_reference_and_a_drawn_text_behave_the_same(preview):
@@ -415,17 +430,20 @@ def test_kicad_draws_the_converted_texts_where_the_centred_ones_were(tmp_path, n
 
 
 def test_kicad_draws_the_generated_defaults_where_the_d1_centres_put_them(tmp_path):
-    """The CLI path (no window): the default anchors draw like the centred D1 defaults."""
+    """The preview's corners of the centred defaults are where KiCad draws them.
+
+    CONTRACT CHANGED 2026-10-17: the generated defaults are centred; the
+    preview draws (and a drag starts from) `text_anchors`, so placing both
+    texts at those corners must not move them in KiCad.
+    """
     from dataclasses import replace
     from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
     cli = _cli()
-    fp = build_pin_header(PinHeaderParams(name="Hdr", rows=2, cols=5))
+    centred = build_pin_header(PinHeaderParams(name="Hdr", rows=2, cols=5))
     # The fabrication ${REFERENCE} also renders as «REF**»: left out of both
     # copies, it is not a property and is not converted.
-    fp.graphics = [g for g in fp.graphics if getattr(g, "text", None) != "${REFERENCE}"]
-    centres = fp.text_centres()
-    centred = replace(fp, reference_at=centres["Reference"], value_at=centres["Value"],
-                      text_justify={}, graphics=list(fp.graphics))
+    centred.graphics = [g for g in centred.graphics if getattr(g, "text", None) != "${REFERENCE}"]
+    fp = replace(centred, text_justify={}, graphics=list(centred.graphics)).place_texts(centred.text_anchors())
     assert "justify left bottom" in _property(fp.render(), "Reference")
     assert "justify" not in _property(centred.render(), "Reference")
     after = _export(cli, _with_cross(fp), tmp_path / "after")
@@ -557,3 +575,23 @@ def test_the_anchor_square_stays_shown_while_its_text_is_dragged(preview):
     assert _visible_squares(window) == {"Reference"}
     _send(view, QEvent.Type.MouseMove, far + QPoint(300, 300))
     assert _visible_squares(window) == set()
+
+
+def test_a_renamed_default_value_stays_centred_and_a_placed_one_keeps_its_corner():
+    """@brief S3 (2026-10-17): the installer's rename rewrites the Value text only.
+
+    Positive: the default Value is centred, so the longer name stays centred
+    on the same point (no justify, same `(at ...)`). Negative: a Value the
+    user placed keeps its bottom-left corner, as placed.
+    """
+    from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
+    from kicadgen.services.kicad_library import name_footprint
+    fp = build_pin_header(PinHeaderParams(name="Hdr", rows=2, cols=5))
+    before = _property(fp.render(), "Value")
+    renamed = _property(name_footprint(fp.render(), "Header_2x05_LongerName"), "Value")
+    assert '"Header_2x05_LongerName"' in renamed and "justify" not in renamed
+    at = re.compile(r"\(at [-\d.]+ [-\d.]+\)")
+    assert at.search(renamed).group(0) == at.search(before).group(0), "same centre"
+    placed = fp.place_texts({"Value": (1.0, 9.0)}).render()
+    moved = _property(name_footprint(placed, "Header_2x05_LongerName"), "Value")
+    assert "(at 1 9)" in moved and "(justify left bottom)" in moved

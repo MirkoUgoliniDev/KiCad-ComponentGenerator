@@ -128,6 +128,11 @@ APP_QSS = f"""
         padding: 4px 6px;
         selection-background-color: {BLUE};
         selection-color: {BASE};
+        /* Opaque grey hints (user, 2026-10-17): Qt's default is the text
+           colour at 50 % alpha, and on the thin strokes of a short hint
+           («U») that alpha adds to the edge antialiasing, so one hint read
+           darker than another in the same grey. */
+        placeholder-text-color: {SUBTEXT};
     }}
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus {{
         border: 1px solid {BLUE};

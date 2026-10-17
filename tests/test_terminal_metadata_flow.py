@@ -232,7 +232,7 @@ def test_valid_terminal_result_preserves_geometry_then_invalidates_mesh(
     assert window._last_mesh_path is None
     assert window._model_revision == revision + 1
     assert "1 componenti" in window.label_3d_status.text()
-    assert "Rigenera modello 3D" in window.label_3d_status.text()
+    assert "Rigenera modello STEP" in window.label_3d_status.text()
     assert result == before
 
 

@@ -59,6 +59,39 @@ def _decode_size(reader, size, upscale):
     return QSize(max(1, round(width * factor)), max(1, round(height * factor)))
 
 
+#: Card thumbnails already drawn: (path, mtime_ns, size in bytes, box) ->
+#: QPixmap (implicitly shared, so returning it copies nothing). Every
+#: refresh of the cards redrew each document from disk (PDF render or image
+#: decode), and a refresh runs on each keystroke of the working-folder field
+#: (2026-10-17). Keyed on the file's stamp, so a replaced file is redrawn.
+_CARD_PIXMAPS: dict = {}
+_CARD_PIXMAPS_MAX = 64
+
+
+def card_pixmap(path, size):
+    """@brief `document_pixmap` for a card, reused while the file is unchanged.
+
+    @param path Document file.
+    @param size Box the card preview fills.
+    @return The pixmap (null when the document cannot be drawn).
+    @throws OSError When the file cannot be read (as `document_pixmap`).
+    @note The key carries the file's modification time and size, so a file
+        rewritten in place is drawn again; a null pixmap is not kept, so a
+        document that becomes readable is tried again.
+    """
+    stat = Path(path).stat()
+    key = (str(Path(path).resolve()), stat.st_mtime_ns, stat.st_size, size.width(), size.height())
+    cached = _CARD_PIXMAPS.get(key)
+    if cached is not None:
+        return cached
+    pixmap = document_pixmap(path, size)
+    if not pixmap.isNull():
+        if len(_CARD_PIXMAPS) >= _CARD_PIXMAPS_MAX:
+            _CARD_PIXMAPS.pop(next(iter(_CARD_PIXMAPS)))
+        _CARD_PIXMAPS[key] = pixmap
+    return pixmap
+
+
 def document_pixmap(path, size, upscale=True):
     """@brief Pixmap of a document: an image with its EXIF orientation, or a PDF's first page.
 
@@ -514,7 +547,7 @@ class GuidedDocuments(QWidget):
         widgets['preview'].clear()
         if path is not None:
             try:
-                pixmap = document_pixmap(path, QSize(CARD_WIDTH - 24, PREVIEW_HEIGHT))
+                pixmap = card_pixmap(path, QSize(CARD_WIDTH - 24, PREVIEW_HEIGHT))
                 if pixmap.isNull():
                     widgets['preview'].setText('PDF' if is_pdf else 'Anteprima non disponibile')
                 else:

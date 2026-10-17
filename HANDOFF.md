@@ -1,5 +1,209 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 17/10 — STATO: tutto FATTO e verificato, NULLA COMMITTATO (in attesa dell'OK dell'utente), branch `ADVANCED` su `71c55e9`
+
+SUITE COMPLETA FINALE 17/10 (dopo S1-S4, «modello STEP», S3 centrato,
+grigio pieno, verifica prestazioni P1/P2/P3 + coordinatore): A 5416 verdi,
+10 saltati, 19 sottotest; B 3493 verdi, 2 saltati; 0 falliti (totale 8909).
+APERTO, chiesto all'utente e senza risposta: bordo rosso/giallo sui campi
+dei metadati con errore/avviso KLC + segnaposto del Datasheet (proposta
+sotto, «RICHIESTA UTENTE 17/10»). Da dire all'utente: «Rigenera 3D» (senza
+«modello») non rinominato. Prima del commit: numeri in CLAUDE.md, controllo
+segreti del database dei profili, database incluso nel commit.
+
+## 17/10 mattina — chiusura dei 4 SEGNALATI del 16/10 (utente: «devi risolvere se ci sono cose non risolte ok ?»)
+
+Partenza: branch `ADVANCED`, `71c55e9`, albero pulito, suite 8826/12/19.
+Autorizzati dall'utente, tutti e quattro:
+- S1: barra di stato «Nessun progetto aperto» vuota all'avvio e passo 2
+  della barra del flusso (○ in finestra nuova, ✓ dopo cambio lingua): lo
+  stato va calcolato alla costruzione e a ogni evento che lo cambia, non
+  solo al cambio lingua. Classe: stato derivato aggiornato da un solo evento.
+- S2: pulsanti di scorrimento delle schede di Qt (e altri testi interni di
+  Qt) nella lingua di avvio: installare/ricaricare il QTranslator di Qt al
+  cambio lingua.
+- S3: rinomina in kicad_library (~273) riscrive solo il testo del Value e
+  tiene il bordo sinistro: un Value predefinito non resta centrato. Da
+  capire se il Value predefinito va tenuto centrato (giustificazione del
+  testo) invece di spostato a mano.
+- S4: tests/test_preview_review.py registra Segoe UI nella sessione di test
+  condivisa senza toglierlo: stessa soluzione del 16/10 (processo separato
+  o nessuna registrazione nella sessione condivisa).
+Commit solo con OK esplicito; merge in main non chiesto.
+FATTO S1: causa — `status_project` nasce (main_window ~3150) DOPO tutti i
+refresh della costruzione, che lo saltavano (getattr None): ora un
+`_refresh_workflow_state()` in fondo alla costruzione. Il «passo 2 ○/✓» era
+della finestra di test: file scritti su disco senza evento ne' attivazione;
+nell'app il ritorno in primo piano (`changeEvent`) ricalcola gia'. 2 test in
+test_workflow_bar.py (positivo fallisce senza la correzione).
+FATTO S2: misurato — Qt scrive il nome accessibile di ScrollLeft/RightButton
+del QTabBar SOLO alla costruzione, LanguageChange non lo tocca. Ora
+qt_translations.retranslate_build_time_texts() (tabella _BUILD_TIME_TEXTS)
+dopo ogni install_qt_translations, su tutti i widget vivi. Altri testi
+interni di Qt longevi: nessuno (QWizard si crea al bisogno). 2 test.
+DOMANDA UTENTE 17/10: «U» e «RS485*» in grigi diversi? Risposta: stesso
+colore (placeholder, stessa palette, inchiostro misurato #7f7f7f in
+entrambi); la «U» sembra piu' chiara per l'antialias di una sola lettera.
+CORREZIONE (17/10, l'utente insiste «continuo ad avere colori diversi»): la
+misura sopra era senza APP_QSS. Con il foglio dell'app il segnaposto e' il
+TEXT al 50% di trasparenza (205,214,244,128 su SURFACE0 -> picco #7f849c,
+uguale nei due campi), ma la media dei pixel della lettera e' (86,88,109)
+per «U» contro (93,97,117) per «RS485*»: i tratti verticali sottili a
+mezzo pixel, gia' semitrasparenti, si sbiadiscono. Nessun codice diverso
+fra i due campi. Prova: `QLineEdit { placeholder-text-color: SUBTEXT }` in
+APP_QSS (colore pieno) -> a schermo i due grigi si leggono uguali
+(scratchpad fields_zoom.png / fields_zoom_opaque.png). PROPOSTA da fare
+all'utente: segnaposto a colore pieno SUBTEXT in tutta l'app.
+DECISO dall'utente 17/10: «Sì, grigio pieno ovunque». FATTO: APP_QSS,
+regola comune di QLineEdit/QPlainTextEdit/QTextEdit/spin/combo:
+`placeholder-text-color: SUBTEXT`. tests/test_theme_placeholder.py (4: «U»,
+«RS485*», multi-riga, negativo testo digitato = TEXT; 3 rossi senza).
+RICHIESTA UTENTE 17/10 (da confermare prima di costruire): «se risulta vuoto
+perche' non metterlo in evidenza invece di scrivere solo sotto?» (campo
+Datasheet). Proposta: ogni campo dei metadati con un errore KLC (non solo
+Datasheet) prende bordo rosso + tooltip col motivo, finche' l'errore resta;
+avviso giallo per gli avvertimenti; segnaposto del Datasheet «URL, percorso
+del file, oppure ~ se non c'e'». In attesa dell'OK.
+DIFETTO SEGNALATO DALL'UTENTE 17/10: «la scrittura ed editing dei campi meta
+e' lentissima». RIPRODOTTO su una copia di generated/RS485 (scratchpad
+lib/, probe_typing_real.py): 450-870 ms per tasto (finestra di test: 4 ms).
+CATENA: textChanged -> _refresh_klc_findings -> _refresh_install_gate ->
+_footprint_inputs_now (x2), _current_body_params, _symbol_pad_ids -> 4 x
+_current_castellated_params -> _components_from_table: per ciascuno
+imdecode della foto (12 ms), e per ognuno dei 42 corpi
+extract_component_crop (il primo copyMakeBorder copia la FOTO INTERA con
+il bordo) + describe_crop; piu' deepcopy delle righe (11 ms). PIANO: (1)
+extract_component_crop ritaglia prima e borda solo il ritaglio (uscita
+identica, test di equivalenza); (2) foto decodificata e descrittore per
+corpo riusati finche' foto, quote della scheda e geometria del corpo non
+cambiano (cache con chiave sui dati, non su eventi); (3) rimisurare, poi
+eventualmente un solo calcolo dei parametri per passata del gate.
+SUITE dopo il grigio: A 1 fallito (test_fsutil: os.replace patchato per
+tutto il processo contava anche la scrittura di un altro thread; CORRETTO:
+_flaky conta solo i bersagli sotto tmp_path), B non finita (interrotta per
+il lavoro sotto). Da rilanciare a fine verifica.
+ISTRUZIONE DELL'UTENTE 17/10: «devi fare una verifica approfondita nel
+codice per evitare che cose di questo genere siano presenti in altre parti
+... scatena agenti esperti e risolvi in modo definitivo ... hai carta
+bianca». PIANO: 3 agenti in parallelo su file DISGIUNTI, ognuno audit +
+correzione + test (contratti per numero di chiamate, non per tempi) +
+misura prima/dopo con la sonda sulla copia di RS485:
+- P1 kicadgen/gui/main_window.py (unico proprietario): catena dei metadati
+  (gate di installazione ricostruisce i parametri 4 volte a tasto) e ogni
+  altro gestore textChanged/valueChanged/itemChanged/currentIndexChanged/
+  timer/hover che fa lavoro pesante ripetuto.
+- P2 kicadgen/gui/* tranne main_window.py: symbol_tab, footprint_view,
+  photo_review_dialog, overlay, ecc.: mouse move/hover/paint/drag, timer.
+- P3 kicadgen/services, core, generators, cad3d: component_image_match
+  (bordo sulla foto intera), analysis_profiles (connessione sqlite a ogni
+  get_type), i18n, project_costs, klc_checks e simili chiamati dai refresh.
+Nessun commit degli agenti. Il coordinatore integra, rilancia la suite
+completa e verifica con la sonda.
+FATTO P3 (servizi): component_image_match: extract_component_crop borda
+solo la finestra (14,4 -> 1,2 ms per corpo, byte identici), describe_crop
+un solo bincount (bit identico), LRU dei 4 descrittori ruotati per PNG
+(AcceptedModelStore.find 1689 -> 185 ms); analysis_profiles: cache di
+lettura con chiave (mtime_ns, size) del db, svuotata da ogni scrittura
+propria, lock + contatore di generazione (0,45 -> 0,01 ms); project_costs:
+totali in cache con chiave sui byte del file. Test: test_perf_p3_*.py (4
+file, 364 verdi correlati). Limite dichiarato: scrittura di un ALTRO
+processo nello stesso tick con stessa dimensione non vista fino alla
+modifica successiva (limite gia' esistente della cache traduzioni).
+Lasciati: klc_checks 0,3 ms, i18n 1 stat, _find_visual ~4 ms/corpo.
+Segnalati alla GUI: _step_body_fingerprint json.loads ripetuti;
+preview_3d_vtk._prepare_mesh_scene json.load 63 ms.
+FATTO P2 (GUI tranne main_window): symbol_tab trascinamento con 80 pin 41 ->
+2,5 ms per movimento nello stesso nodo (passo ripetuto saltato solo se
+stesso percorso, righe uguali, stessa bozza e stessa riga di stato), una
+sola copia della bozza per ridisegno; model_dialog ricostruisce la tabella
+solo se l'insieme visibile o la lingua cambiano (28 -> 8,5 ms per tasto);
+project_dialogs nomi presi in istantanea con chiave st_mtime_ns della
+cartella, OK riverifica sempre. Test: test_perf_p2_symbol_drag.py (8),
+test_perf_p2_typing_dialogs.py (7). Lasciati: revisione foto 7-14 ms,
+overlay 2,5 ms per tick, footprint_view, view cube. Dubbi: passo su nodo
+NUOVO ancora ~40 ms con 80 pin (layout + scena completi); frecce con
+ripetizione scrivono la bozza di recupero a ogni ripetizione (lasciato).
+FATTO P1 (main_window): _current_castellated_params/_current_body_params
+(photo_components=True) — gate, anteprima 2D, _symbol_pad_ids,
+_step_body_fingerprint passano False (il footprint non legge i corpi);
+"components" in NON_GEOMETRIC_FIELDS; foto decodificata in cache per
+digest, descrittore per corpo con chiave (digest, quote scheda,
+CROP_GEOMETRY_KEYS); log AI: niente toPlainText() a ogni riga. Test
+test_perf_p1_metadata_typing.py (19) + fake a zero argomenti aggiornati
+(board_pipeline, header_pins_3d_control, project_wizard,
+symbol_integration). Lasciati e motivati: autosave 15 ms ogni 2 s,
+spin THT singolo salva a ogni passo (~67 ms con foto), _kicad_block x4.
+COORDINATORE: CROP_GEOMETRY_KEYS spostato nel servizio
+component_image_match (main_window lo importa); workers.accepts_keyword
+memoizzato sulla funzione sottostante (lru, mai sull'istanza);
+guided_documents.card_pixmap (miniature in cache con chiave percorso +
+mtime_ns + dimensione). Test test_perf_coord_crop_keys.py (chiavi lette
+dal ritaglio = elenco esatto; memo = risposta di inspect), 
+test_perf_coord_card_pixmap.py. MISURA FINALE sulla copia fresca di
+RS485: datasheet 5,1 / descrizione 5,2 / parole chiave 4,4 / filtri 4,2 /
+designatore 9,0 ms per tasto (prima 450-870).
+SEGNALATO da P2 e girato a P1 (RISOLTO da P1): test_symbol_integration/_navigation/
+_palette_gui falsificano _current_castellated_params con `lambda: params`,
+ma main_window ora lo chiama con photo_components=False (~11 test rossi).
+SUITE COMPLETA dopo S3 (prima del grigio): A 5343 verdi, 10 saltati, 19
+sottotest; B 3489 verdi, 2 saltati; 0 falliti (8832).
+FATTO S4 (classe intera): tests/desktop_fonts.py (flag, desktop_font,
+run_with_desktop_fonts in processo figlio); conftest
+`no_application_font_in_the_shared_session` fa fallire ogni
+addApplicationFont nella sessione condivisa; test_kicad_width_texts e
+test_preview_review (Segoe UI) passati al processo figlio. 61 verdi.
+S3 ANALIZZATO, DA CHIEDERE (una domanda alla volta, in coda): il Value
+predefinito e' scritto `justify left bottom`; rinomina (name_footprint) e
+valore dello schema sulla scheda cambiano la larghezza e il testo non e'
+piu' centrato. Opzioni: (a) Value PREDEFINITO scritto centrato (senza
+justify; solo i testi spostati dall'utente in basso a sinistra) -> resta
+centrato sempre, anche sulla scheda; ribalta in parte «stessa forma del
+file ovunque» del 16/10 (scelta del coordinatore, non dell'utente);
+(b) alla rinomina spostare l'ancora di (larghezza vecchia - nuova)/2 con la
+geometria di KiCad -> risolve solo la rinomina, non la scheda.
+Consiglio: (a).
+DECISO dall'utente 17/10: (a) «Predefinito centrato». IN CORSO: Reference e
+Value NON spostati dall'utente scritti centrati (nessun justify), solo i
+testi spostati dall'utente in basso a sinistra. Stessa classe nel simbolo
+(nello schema il Value mostra il valore dell'utente): da applicare anche li'
+se il simbolo scrive le proprieta' predefinite con justify (regola «stessa
+UX»), dicendolo all'utente.
+FATTO rinomina «modello STEP»: script su token stringa (scratchpad
+step_rename.py, non nel repo), 48 file; «(STEP)» ridondante tolto; 7 chiavi
+non «ui:» con valori vecchi in _STEP_MODEL_RENAME_SUPERSEDED (i18n.py, fusa
+in SUPERSEDED_DEFAULTS); 94 chiavi «ui:» nuove; data/analysis_profiles.sqlite3
+riaperto: 13268 -> 13644 righe (le vecchie chiavi restano, inutilizzate).
+SUITE COMPLETA dopo S1/S2/S4 + rinomina: A 5342 verdi, 10 saltati, 19
+sottotest; B 3489 verdi, 2 saltati; 0 falliti (totale 8831). S3 non ancora.
+S3 piano: footprint place_default_texts tiene i centri senza justify;
+main_window ~13861 passa al worker SOLO le posizioni scelte
+(footprint_text_positions), non tutte le ancore; simbolo build: proprieta'
+non scelte scritte al centro senza justify, scelte in basso a sinistra.
+FATTO S3: core/footprint.place_default_texts scrive i centri D1 senza
+justify; main_window._generate passa al worker solo
+footprint_text_positions; generators/symbol.serialize_symbol scrive le
+proprieta' non scelte centrate (default_property_positions), le scelte
+ancorate. L'anteprima disegna i predefiniti dall'angolo in cui KiCad li
+disegna (text_anchors), quindi a schermo nulla si sposta. Contratti
+aggiornati (CONTRACT CHANGED 2026-10-17) in 11 file di test; nuovo test
+della rinomina (Value predefinito resta centrato, quello spostato tiene
+l'angolo). I file generati il 16/10 con i predefiniti ancorati tornano
+centrati alla prossima generazione.
+DOMANDA UTENTE 17/10: uniformare «modello STEP» -> «modello 3D»? ~20 testi
+(main_window, model_candidates_dialog, i18n.py, 4 lingue). Proposta: «modello
+3D» per il concetto; «file STEP» solo dove conta il formato (file
+incompleto, scelta di un file). In attesa dell'OK.
+DECISO dall'utente 17/10 (CONTRARIO alla proposta): «Uniformiamo tutto a
+modello STEP OK ? in tutto anche titolo TAB ok ? procedi». IN CORSO:
+«modello 3D» -> «modello STEP» in ogni testo visibile, 4 lingue (it modello/
+modelli 3D, en 3D model(s), fr modèle(s) 3D, de 3D-Modell*), titolo della
+scheda e passo della barra del flusso compresi; guida interna, README e
+docs. Script su token stringa (non commenti/docstring). ESCLUSI i prompt AI
+(datasheet_extractor.py: cambiarli cambia le risposte e le chiavi della
+cache). Chiavi non «ui:» con valore cambiato -> vecchi testi in
+SUPERSEDED_DEFAULTS, cosi' i database esistenti si aggiornano. «Rigenera 3D»
+(pulsante corto, senza «modello») per ora invariato: da dire all'utente.
+
 ## 16/10 sera — STATO: branch `ADVANCED`, commit `2fbbbe7` (+ handoff), pushato, NON mergiato in `main`, PC spento
 
 Chiusi oggi: domanda designatore (grigio = compilato), MEDI 12-16, due

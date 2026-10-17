@@ -27,8 +27,8 @@ o castellated): per i componenti singoli l'inventario non viene eseguito.
    modificarne le quote, aggiungere o eliminare elementi. **Annulla** non
    modifica i dati; **Applica correzioni** aggiorna la tabella e invalida la
    vecchia anteprima, da rigenerare.
-4. Verificare le altezze con una misura diretta, poi **Rigenera modello 3D
-   (STEP) con queste annotazioni** (F5, gratuito) nella scheda Modello 3D.
+4. Verificare le altezze con una misura diretta, poi **Rigenera modello STEP
+   con queste annotazioni** (F5, gratuito) nella scheda Modello STEP.
 
 Un rettangolo indica un rilevamento, **non una misura certificata**. I
 marcatori della lista dicono se la riga ha almeno un avviso (`[!]`, di solito
@@ -165,7 +165,7 @@ progetto; la riga **Credito AI** il saldo del conto.
 Dalla scheda Progetto: **Revisione componenti…** riapre gratis la fase
 salvata in `photo-review/` (proposte del rilevatore prima dell'inventario,
 corpi riconciliati dopo); **Rilancia inventario AI (a pagamento)…** rifà solo
-l'inventario sulle proposte salvate. Dalla scheda Modello 3D: **Modifica
+l'inventario sulle proposte salvate. Dalla scheda Modello STEP: **Modifica
 componenti…** (Ctrl+E) modifica ogni corpo a mano, anche senza foto, e il
 tasto destro su un corpo offre eliminazione, ripristino, rotazione e cambio
 del modello KiCad. Nuove estrazioni e correzioni applicate invalidano

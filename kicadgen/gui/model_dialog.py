@@ -178,6 +178,8 @@ class ModelPickerDialog(QDialog):
         self.resize(900, 620)
 
         self._models: list[ModelInfo] = []
+        #: What the table rows show (models, language); see `_apply_filters`.
+        self._shown_key = None
         self._selected = current_model or ""
         self._worker: Optional[_ModelsWorker] = None
         self._closed = False
@@ -451,7 +453,21 @@ class ModelPickerDialog(QDialog):
         return result
 
     def _apply_filters(self) -> None:
+        """Show the models that pass the filters, sorted by input price, the chosen one selected.
+
+        The rows are rebuilt only when what they show changes (the visible
+        models, field by field, or the language of the price texts): a
+        keystroke that keeps the same models visible, as most do while a
+        prefix is typed, re-sorts and re-selects without recreating several
+        thousand cells.
+        """
         models = self._visible_models()
+        key = (tuple(models), getattr(self.i18n, "language", None))
+        if key == self._shown_key and self.table.rowCount() == len(models):
+            self.table.sortItems(_COL_IN, Qt.SortOrder.AscendingOrder)
+            self._restore_selection()
+            return
+        self._shown_key = key
 
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(models))

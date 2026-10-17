@@ -2,7 +2,7 @@
 
 KiCadGen è un'applicazione desktop per Windows che costruisce un componente
 per KiCad — footprint (`.kicad_mod`), simbolo elettrico (`.kicad_sym`) e
-modello 3D (`.step`) — a partire dai documenti del costruttore e dalle
+modello STEP (`.step`) — a partire dai documenti del costruttore e dalle
 fotografie del pezzo. Legge i documenti con un modello di intelligenza
 artificiale, trasforma quello che il modello ha letto in geometria con regole
 deterministiche, permette di rivedere e correggere ogni risultato e installa
@@ -21,7 +21,7 @@ English version: [README.md](README.md).
 - **Schede con componenti montati** (moduli, breakout, con contatti passanti o
   castellated): oltre al footprint e al simbolo, KiCadGen ricostruisce gli
   **ingombri meccanici** dei corpi visibili in una foto dall'alto — posizione,
-  dimensioni e orientamento — così il modello 3D mostra che cosa occupa spazio
+  dimensioni e orientamento — così il modello STEP mostra che cosa occupa spazio
   sulla scheda.
 - **Non** è reverse engineering: i corpi sono volumi generici, oppure modelli
   della libreria 3D di KiCad scelti perché le misure coincidono. Nomi esatti,
@@ -48,7 +48,7 @@ Requisiti:
 - Python 3.11 o successivo (la build di rilascio usa il 3.13);
 - i pacchetti di `requirements.txt` (PyQt6, Pillow, OpenCV, pyvista,
   pyvistaqt, python-dotenv, pytest);
-- facoltativo: **FreeCAD** con `freecadcmd` (modelli 3D). Senza, si ottengono
+- facoltativo: **FreeCAD** con `freecadcmd` (modelli STEP). Senza, si ottengono
   comunque footprint e simbolo; la finestra di avanzamento dice quale passo
   non può essere eseguito e perché;
 - facoltativo: **KiCad 10 o successivo**: il suo PCB Editor (`pcbnew`) apre
@@ -145,7 +145,7 @@ recenti (un clic ne riapre uno; il menu del tasto destro lo toglie
 dall'elenco). Un progetto è una cartella nell'**area di lavoro**
 (`Documents\KiCadGen`, «Documenti» in Esplora file, nel programma installato, `generated\` dai sorgenti; il
 pulsante con la cartella accanto al campo ne sceglie un'altra). Il suo nome è
-anche il nome del footprint, del simbolo e del modello 3D; **File → Rinomina
+anche il nome del footprint, del simbolo e del modello STEP; **File → Rinomina
 progetto…** (F2) rinomina insieme cartella e file.
 
 ### Menu
@@ -167,7 +167,7 @@ progetto…** (F2) rinomina insieme cartella e file.
 ### Barra del flusso e schede
 
 Sopra le schede una barra mostra le fasi del lavoro — **Documenti › Analisi
-AI › Revisione corpi › Modello 3D › KiCad** — con quelle concluse spuntate,
+AI › Revisione corpi › Modello STEP › KiCad** — con quelle concluse spuntate,
 quella corrente evidenziata e quelle che non si applicano attenuate (la
 revisione dei corpi per un componente singolo). Un clic su una fase porta
 alla sua scheda. A destra, il selettore della lingua: italiano, inglese,
@@ -175,7 +175,7 @@ francese, tedesco (i testi vengono dallo stesso catalogo SQLite; le voci
 mancanti ricadono sull'inglese).
 
 Le schede sono **Progetto** (Ctrl+1), **Anteprima footprint** (Ctrl+2),
-**Simbolo elettrico** (Ctrl+3), **Modello 3D** (Ctrl+4), **KiCad** (Ctrl+5) ed
+**Simbolo elettrico** (Ctrl+3), **Modello STEP** (Ctrl+4), **KiCad** (Ctrl+5) ed
 **Esportazioni** (Ctrl+6).
 
 ## Dati in ingresso
@@ -229,8 +229,8 @@ viene rifiutata, con l'invito a salvarla come JPEG o PNG.
 Senza una tipologia l'analisi è bloccata. Per le schede, **Montaggio sulla
 scheda principale** sceglie come il modulo sta sulla scheda ospitante
 (saldatura diretta / piazzole del modulo; strip header con pad circolari o
-quadrati, con diametri di pad e foro); **Mostra gli header nel modello 3D**
-aggiunge i maschi sotto la scheda nel solo modello 3D (sulle castellated solo
+quadrati, con diametri di pad e foro); **Mostra gli header nel modello STEP**
+aggiunge i maschi sotto la scheda nel solo modello STEP (sulle castellated solo
 sui contatti con foro passante). **Spessore PCB** mostra lo spessore con la
 sua provenienza (dai documenti, stimato dall'AI, impostato da te;
 «Ripristina» torna indietro).
@@ -270,7 +270,7 @@ Il riquadro richiudibile **Strumenti AI** mostra rilevatore e modello in uso:
 **Estrai parametri con AI** avvia l'analisi a pagamento. Una finestra di
 avanzamento elenca le fasi e chi lavora in ciascuna — *Modello AI*, *Lettura
 ritagli*, *Lettura sigle* (remote, a pagamento), *YOLO*, *Rete SMD locale*,
-*OpenCV*, *KiCadGen (footprint 2D)*, *Libreria modelli 3D di KiCad*,
+*OpenCV*, *KiCadGen (footprint 2D)*, *Libreria modelli STEP di KiCad*,
 *Consolidati*, *FreeCAD* (locali) — con il costo dell'analisi; **Interrompi**
 la ferma (una richiesta già inviata deve concludersi; non ne partono altre).
 Il log AI (Ctrl+L) viene scritto in `analisi-ai.log` nella cartella del
@@ -361,17 +361,17 @@ motivazione e si scelgono una per una). **Esporta simbolo KiCad** scrive il
 iniziali sono *passive*: verificali sul datasheet prima di affidarti all'ERC
 di KiCad.
 
-### Modello 3D
+### Modello STEP
 
 Rotazione con il mouse, cubo di navigazione per le viste standard. Barra:
 numeri dei pin (visibili dal lato dei piedini, un controllo pratico della
 specchiatura), tabella pinout, inquadra, apri la cartella `3dshapes`,
-**Rigenera modello 3D (STEP) con queste annotazioni** (F5, gratuito), **Accetto, mi piace — ricorda questi
+**Rigenera modello STEP con queste annotazioni** (F5, gratuito), **Accetto, mi piace — ricorda questi
 modelli…** (salva gli abbinamenti corpo/modello per le schede future),
 **Copia formato**. **Modifica componenti…** (Ctrl+E, o tasto destro su un
 corpo) modifica a mano nome, tipo, posizione, quote, rotazione, colore e
 marcatura, anche senza la foto; il menu del tasto destro offre anche *Elimina
-dal modello 3D (falso positivo)*, *Rimetti nel modello 3D*, *Ruota il solido*,
+dal modello STEP (falso positivo)*, *Rimetti nel modello STEP*, *Ruota il solido*,
 *Cambia modello KiCad…*.
 
 **Scelta del modello STEP** mostra fino a cinque candidati della libreria
@@ -398,7 +398,7 @@ foto dall'alto: restano da verificare.
 ├── yolo-pretest/                   (photo-review/ e photo-cache/ di «Solo YOLO locale»)
 ├── kicad-model-candidates.json, kicad-model-choices.json
 ├── consolidated-matches.json       (confronto con gli abbinamenti accettati)
-├── .header-model-reuse.json        (modello 3D degli header riusato, schede con header)
+├── .header-model-reuse.json        (modello STEP degli header riusato, schede con header)
 ├── ai-costs.json, analisi-ai.log, freecad.log
 └── .kicad-preview/                 (il progetto isolato di prova)
 ```
@@ -413,8 +413,8 @@ corrispondono ai parametri** e ogni blocco nomina il suo rimedio, abilitato
 finché il blocco resta: *Applica ai file* (metadati, footprint) e *Aggiorna il
 file del simbolo* in questa scheda; per uno STEP che non corrisponde più
 (anche dopo un cambio di soli colori o annotazioni 3D) il pulsante di
-rigenerazione nella barra della scheda Modello 3D («Rigenera modello 3D (STEP)
-con queste annotazioni»), oppure qui *Rimuovi il modello 3D obsoleto* (uno
+rigenerazione nella barra della scheda Modello STEP («Rigenera modello STEP
+con queste annotazioni»), oppure qui *Rimuovi il modello STEP obsoleto* (uno
 STEP vecchio che non si può ricostruire). I progetti salvati da versioni
 precedenti possono richiedere un «Applica ai file». I comandi sono bloccati
 anche mentre gira un lavoro in background. Usano i file **applicati**: una
@@ -568,7 +568,7 @@ che possono essere diverse da quella del codice**. Sono elencati uno per uno in
   copiati nella cartella `_internal\licenses` del programma installato e
   `THIRD_PARTY_NOTICES.md` li elenca con le sorgenti a monte.
 
-Footprint e modelli 3D generati, datasheet e foto forniti dall'utente possono
+Footprint e modelli STEP generati, datasheet e foto forniti dall'utente possono
 avere licenze o limiti d'uso propri, da verificare. Questa sezione non afferma
 che un uso, commerciale o no, sia consentito oltre quanto dicono le singole
 licenze.

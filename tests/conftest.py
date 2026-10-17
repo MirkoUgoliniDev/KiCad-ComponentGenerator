@@ -205,6 +205,29 @@ def drain_qt_thread_pool(monkeypatch, hang_watchdog):
 
 
 @pytest.fixture(autouse=True)
+def no_application_font_in_the_shared_session(monkeypatch):
+    """@brief Refuse `QFontDatabase.addApplicationFont` outside the desktop-font child process.
+
+    A registered font is never really removed: it changed the default font of
+    every later test and made a layout test fail depending on the order
+    (HANDOFF, 2026-10-16). Font-dependent checks use `tests/desktop_fonts.py`,
+    which reruns them in a child process.
+    """
+    from desktop_fonts import in_desktop_font_process
+    if in_desktop_font_process():
+        yield
+        return
+    from PyQt6.QtGui import QFontDatabase
+
+    def refused(*args, **kwargs):
+        raise AssertionError("addApplicationFont in the shared test session: use "
+                             "tests/desktop_fonts.run_with_desktop_fonts (child process)")
+    monkeypatch.setattr(QFontDatabase, "addApplicationFont", staticmethod(refused))
+    monkeypatch.setattr(QFontDatabase, "addApplicationFontFromData", staticmethod(refused))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def no_leftover_message_translator():
     """@brief Ogni test parte e finisce senza traduttore dei messaggi registrato.
 

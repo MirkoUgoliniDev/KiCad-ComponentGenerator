@@ -9,7 +9,7 @@ def test_missing_files_and_cli_are_explicit(tmp_path, monkeypatch):
     monkeypatch.setattr(check, 'find_kicad_cli', lambda: None)
     results = check.verify_component(tmp_path, 'Demo', [{'pin': '1', 'name': 'GPIO1'}], pending=True)
     assert any(r.status == 'ERROR' and r.title == 'Footprint su disco' for r in results)
-    assert any(r.status == 'ERROR' and r.title == 'Modello 3D' for r in results)
+    assert any(r.status == 'ERROR' and r.title == 'Modello STEP' for r in results)
     assert any(r.status == 'SKIP' and 'lettura' in r.title for r in results)
     assert any(r.title == 'Modifiche non applicate' for r in results)
 

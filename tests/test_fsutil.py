@@ -6,11 +6,20 @@ import pytest
 from kicadgen import fsutil
 
 
-def _flaky(monkeypatch, failures, error=PermissionError):
+def _flaky(monkeypatch, root, failures, error=PermissionError):
+    """Make os.replace refuse `failures` times, counting only the calls into `root` (the test's tmp_path).
+
+    `fsutil.os` is the process-wide os module: another thread of the session
+    (an atomic save of preferences or costs) may replace its own file while
+    the patch is active. Those calls pass through untouched and are not
+    counted (2026-10-17: one of them made 4 calls out of 3).
+    """
     calls = []
     real = os.replace
 
     def replace(source, target):
+        if not os.fspath(target).startswith(os.fspath(root)):
+            return real(source, target)
         calls.append(1)
         if len(calls) <= failures:
             raise error("simulated")
@@ -23,7 +32,7 @@ def test_a_transient_refusal_is_retried_until_it_succeeds(tmp_path, monkeypatch)
     source, target = tmp_path / "a.tmp", tmp_path / "a.json"
     source.write_text("new", encoding="utf-8")
     target.write_text("old", encoding="utf-8")
-    calls = _flaky(monkeypatch, 2)
+    calls = _flaky(monkeypatch, tmp_path, 2)
     pauses = []
     fsutil.replace_file(source, target, sleep=pauses.append)
     assert target.read_text(encoding="utf-8") == "new" and len(calls) == 3
@@ -33,14 +42,14 @@ def test_a_transient_refusal_is_retried_until_it_succeeds(tmp_path, monkeypatch)
 def test_a_refusal_that_does_not_heal_is_raised_after_the_attempts(tmp_path, monkeypatch):
     source = tmp_path / "a.tmp"
     source.write_text("new", encoding="utf-8")
-    calls = _flaky(monkeypatch, 99)
+    calls = _flaky(monkeypatch, tmp_path, 99)
     with pytest.raises(PermissionError):
         fsutil.replace_file(source, tmp_path / "a.json", attempts=3, sleep=lambda s: None)
     assert len(calls) == 3
 
 
 def test_other_errors_are_not_retried(tmp_path, monkeypatch):
-    calls = _flaky(monkeypatch, 99, error=FileNotFoundError)
+    calls = _flaky(monkeypatch, tmp_path, 99, error=FileNotFoundError)
     with pytest.raises(FileNotFoundError):
         fsutil.replace_file(tmp_path / "missing", tmp_path / "a.json", sleep=lambda s: None)
     assert len(calls) == 1
@@ -57,7 +66,7 @@ def test_document_roles_survive_a_transient_refusal(tmp_path, monkeypatch):
     source = tmp_path / "a.png"
     Image.new("RGB", (32, 20), "red").save(source)
     store.import_file("pinout", source)
-    calls = _flaky(monkeypatch, 1)
+    calls = _flaky(monkeypatch, tmp_path, 1)
     store.set_roles("a.png", ["pinout", "top"])
     assert len(calls) == 2
     assert DocumentSet(tmp_path / "docs").selected is not None

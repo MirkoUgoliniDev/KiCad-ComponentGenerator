@@ -101,14 +101,26 @@ def test_a_centre_becomes_the_bottom_left_corner_along_the_text_frame():
     assert property_anchor_from_centre('RS485', 1.27, 10.0, 20.0, 90) == pytest.approx((10 + 0.585 * 1.27, 20 - w / 2), abs=1e-4)
 
 
-def test_the_file_writes_both_visible_properties_bottom_left_and_leaves_the_hidden_ones():
+def test_unmoved_properties_are_written_centred_and_chosen_ones_bottom_left():
+    """CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»).
+
+    Positive: an unmoved property is a centred KiCad text at its default
+    centre, so it stays centred whatever Value the schematic shows. Negative:
+    the property the user placed keeps its bottom-left anchor.
+    """
+    layout = layout_symbol(PINS)
+    centres = default_property_positions(layout)
     text = serialize_symbol('Board', PINS)
-    anchors = property_anchors(layout_symbol(PINS), property_texts('U', 'Board'))
     for key in ('Reference', 'Value'):
-        x, y = anchors[key]
+        x, y = centres[key]
         line = _property_line(text, key)
         assert f'(at {_num(x)} {_num(y)} 0)' in line
-        assert line.endswith('(effects (font (size 1.27 1.27)) (justify left bottom)))')
+        assert line.endswith('(effects (font (size 1.27 1.27))))'), 'no justify: KiCad centres it'
+    chosen = PropertyPositions({'Value': (3.81, 8.89)}, anchor=PROPERTY_ANCHOR_BOTTOM_LEFT)
+    placed = serialize_symbol('Board', PINS, properties=chosen)
+    value = _property_line(placed, 'Value')
+    assert '(at 3.81 8.89 0)' in value and value.endswith('(justify left bottom)))')
+    assert _property_line(placed, 'Reference') == _property_line(text, 'Reference'), 'the other stays centred'
     for key in ('Footprint', 'Datasheet', 'Description'):
         line = _property_line(text, key)
         assert '(at 0 0 0)' in line and '(hide yes)' in line and 'justify' not in line
@@ -186,8 +198,12 @@ def test_kicad_draws_a_turned_property_where_it_drew_it_centred(tmp_path):
     line = _property_line(text, 'Value')
     turned = line.replace(' 0) (show_name', ' 90) (show_name')
     x, y = property_anchor_from_centre('RS485', TEXT_SIZE, 20.0, 0.0, 90)
-    anchored = re.sub(r'\(at [-\d.]+ [-\d.]+ 90\)', f'(at {_num(x)} {_num(y)} 90)', turned)
-    centred = re.sub(r'\(at [-\d.]+ [-\d.]+ 90\)', '(at 20 0 90)', turned).replace(' (justify left bottom)', '')
+    # The generated default is centred (2026-10-17): the anchored variant
+    # gets its justify here, the centred one has none.
+    plain = turned.replace(' (justify left bottom)', '')
+    anchored = re.sub(r'\(at [-\d.]+ [-\d.]+ 90\)', f'(at {_num(x)} {_num(y)} 90)', plain).replace(
+        '(effects (font (size 1.27 1.27)))', '(effects (font (size 1.27 1.27)) (justify left bottom))')
+    centred = re.sub(r'\(at [-\d.]+ [-\d.]+ 90\)', '(at 20 0 90)', plain)
     boxes = []
     for name, value_line in (('a', anchored), ('c', centred)):
         path = tmp_path / name / 'T.kicad_sym'

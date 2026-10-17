@@ -16,7 +16,7 @@ WORKFLOW_STEPS = (
     ("documents", "Documenti"),
     ("analysis", "Analisi AI"),
     ("review", "Revisione corpi"),
-    ("model3d", "Modello 3D"),
+    ("model3d", "Modello STEP"),
     ("kicad", "KiCad"),
 )
 

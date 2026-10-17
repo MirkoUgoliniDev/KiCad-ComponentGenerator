@@ -22,13 +22,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import re
 import subprocess
-import sys
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QPointF
-from PyQt6.QtGui import QFont, QFontDatabase, QPainterPath
+from PyQt6.QtGui import QFont, QPainterPath
 from PyQt6.QtWidgets import QGraphicsScene, QGraphicsSimpleTextItem
 
 from kicadgen.core.kicad_text import (KICAD_BOTTOM_TO_BASELINE, KICAD_CENTRE_TO_BOTTOM, SCHEMATIC_DEFAULT_PEN_MM,
@@ -36,6 +35,8 @@ from kicadgen.core.kicad_text import (KICAD_BOTTOM_TO_BASELINE, KICAD_CENTRE_TO_
                                       kicad_text_width)
 from kicadgen.gui import kicad_text_item as kti
 from kicadgen.services.system_dependencies import find_kicad_cli
+
+from desktop_fonts import FONTS_DIR, desktop_font, in_desktop_font_process, run_with_desktop_fonts
 
 #: The measured set (user request, 2026-10-16): properties, a long Value,
 #: a footprint name, extreme narrow/wide strings and a pin name.
@@ -74,36 +75,16 @@ def _qt_baseline_point(item):
     return item.mapToScene(QPointF(0.0, kti.text_baseline_px(item.text(), item.font())))
 
 
-#: Environment flag set only in the child process that checks the desktop
-#: fonts. Registering a font file with Qt is not undone by removing it: under
-#: the offscreen platform the application's default font then resolves to the
-#: registered family for the rest of the process (measured 2026-10-16: 12 px
-#: high before, 15-16 px after, still after removal), and a later layout test
-#: (test_overlay_phase_resize) measured its card 1 px taller. So the desktop
-#: fonts are registered only in a separate pytest process
-#: (`test_desktop_fonts_in_a_separate_process`), never in the shared session.
-DESKTOP_FONTS_ENV = "KICADGEN_TEST_DESKTOP_FONTS"
-
-
-def _desktop_font(file_name, family):
-    """A Windows desktop font registered with Qt, or None where it is not installed."""
-    path = Path("C:/Windows/Fonts") / file_name
-    if not path.exists():
-        return None
-    QFontDatabase.addApplicationFont(str(path))
-    return QFont(family)
-
-
 def _fonts(qapp):
     """The fonts the drawing is checked with: the session's own and, in the
     desktop-font child process only, Segoe UI (the Windows UI font users see)
     and Courier New (monospaced: «iiii» as wide as «MMMM», the farthest from
     KiCad's proportional advances)."""
     fonts = [("test font", QFont(qapp.font()))]
-    if os.environ.get(DESKTOP_FONTS_ENV) != "1":
+    if not in_desktop_font_process():
         return fonts
     for file_name, family in (("segoeui.ttf", "Segoe UI"), ("cour.ttf", "Courier New")):
-        font = _desktop_font(file_name, family)
+        font = desktop_font(file_name, family)
         if font is not None:
             fonts.append((family, font))
     return fonts
@@ -115,17 +96,11 @@ def test_desktop_fonts_in_a_separate_process(tmp_path):
     The child process registers Segoe UI and Courier New (when installed) and
     reruns this module; the shared test session never sees them.
     """
-    if os.environ.get(DESKTOP_FONTS_ENV) == "1":
+    if in_desktop_font_process():
         pytest.skip("already the desktop-font child process")
-    if not any((Path("C:/Windows/Fonts") / name).exists() for name in ("segoeui.ttf", "cour.ttf")):
+    if not any((FONTS_DIR / name).exists() for name in ("segoeui.ttf", "cour.ttf")):
         pytest.skip("no desktop font installed")
-    env = dict(os.environ, **{DESKTOP_FONTS_ENV: "1", "QT_QPA_PLATFORM": "offscreen"})
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp",
-         str(tmp_path / "child"), __file__],
-        cwd=str(Path(__file__).resolve().parents[1]), env=env, capture_output=True,
-        text=True, timeout=600)
-    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
+    run_with_desktop_fonts(tmp_path, __file__)
 
 
 def _old_item(text, size, x, y, font, mm_to_px, vertical=False):

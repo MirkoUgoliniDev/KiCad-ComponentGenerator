@@ -103,7 +103,12 @@ def _uuidless(fp):
 
 
 def test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides():
-    """@brief Folding the D1 anchors back changes the two (at ...) of Reference/Value and their justify only."""
+    """@brief Folding the D1 positions back changes the two (at ...) of Reference/Value only.
+
+    CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): the defaults
+    are centred again, so no ``justify`` differs any more (from 2026-10-16
+    the two defaults also carried ``(justify left bottom)``).
+    """
     import difflib
     fp = build_castellated_module(rs485())
     plain = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render())
@@ -113,8 +118,7 @@ def test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides():
             if line[:2] in ("- ", "+ ")]
     removed = [line[2:].strip() for line in diff if line.startswith("- ")]
     added = [line[2:].strip() for line in diff if line.startswith("+ ")]
-    assert len(removed) == 4 and len([r for r in removed if r.startswith("(at ")]) == 2
-    assert [r for r in removed if not r.startswith("(at ")] == ["(justify left bottom)"] * 2
+    assert len(removed) == 2 and all(r.startswith("(at ") for r in removed)
     assert added == ["(at 0 -2)", "(at 0 2)"]
 
 

@@ -31,13 +31,13 @@ class GenerationOptionsDialog(QDialog):
             text_key='help.generation.include_nc'
         )))
         page_layout.addWidget(contacts)
-        silk = QGroupBox("Serigrafia del modello 3D")
+        silk = QGroupBox("Serigrafia del modello STEP")
         silk_layout = QHBoxLayout(silk)
         self.silk_labels_checkbox = QCheckBox("Incidi le sigle dei pin")
         self.silk_labels_checkbox.setChecked(silk_pin_labels)
         silk_layout.addWidget(self.silk_labels_checkbox, 1)
         silk_layout.addWidget(icon_button('Info', 'info.svg', lambda: show_info(self,
-            'Serigrafia del modello 3D',
+            'Serigrafia del modello STEP',
             "Incide accanto a ogni contatto la sigla presa dalla tabella pinout.\n\n"
             "Disattivata di default: su un modulo a passo fitto le sigle lunghe si "
             "sovrappongono fra loro e finiscono sopra i componenti, rendendo il solido "

@@ -135,6 +135,7 @@ class _ModulePreloader(QObject):
 
 from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
+from ..services.component_image_match import CROP_GEOMETRY_KEYS as _CROP_GEOMETRY_KEYS
 from .theme import BASE, BLUE, GREEN, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
 from .kicad_text_item import REFERENCE_PX as _KICAD_TEXT_REFERENCE_PX, cap_height_px as _kicad_cap_height_px, kicad_text_item as _kicad_text_item, text_baseline_px as _kicad_text_baseline_px
 from .tooltips import install_tooltip_filter
@@ -649,10 +650,32 @@ def _symbol_text_without_metadata(text: str) -> str:
 #: parameters, so a metadata keystroke missed the cache and rebuilt the
 #: footprint; on a 30 x 30 matrix with a 1 mm pitch that cost 316-524 ms per
 #: character (measured on the reviewer's probe, before this change).
+#: `components` (the photo bodies of a castellated module) is read by the 3D
+#: model only, never by `build_castellated_module`: its repr of every body
+#: was rebuilt on each metadata keystroke (perf audit 2026-10-17; contract
+#: test `test_perf_p1_metadata_typing.py`).
 NON_GEOMETRIC_FIELDS = frozenset({
     "name", "description", "tags", "datasheet", "component_color_hex",
     "substrate_color_hex", "silk_color_hex", "show_silk_labels_3d", "silk_labels",
+    "components",
 })
+
+
+def _document_has_visible_text(document) -> bool:
+    """@brief True when a QTextDocument holds a non-whitespace character.
+
+    @param document The QTextDocument to inspect.
+    @return The same answer as `bool(document.toPlainText().strip())`.
+    @note Walks the blocks and stops at the first non-blank one, so a long
+        log costs one block instead of a copy of all its text: the check runs
+        on every appended log line (perf audit 2026-10-17).
+    """
+    block = document.begin()
+    while block.isValid():
+        if block.text().strip():
+            return True
+        block = block.next()
+    return False
 
 
 def _geometry_key(params) -> str:
@@ -2765,10 +2788,10 @@ class MainWindow(QMainWindow):
         ("Ctrl+1", "Scheda Progetto", "_shortcut_tab_project"),
         ("Ctrl+2", "Scheda Anteprima footprint", "_shortcut_tab_preview"),
         ("Ctrl+3", "Scheda Simbolo elettrico", "_shortcut_tab_symbol"),
-        ("Ctrl+4", "Scheda Modello 3D", "_shortcut_tab_model_3d"),
+        ("Ctrl+4", "Scheda Modello STEP", "_shortcut_tab_model_3d"),
         ("Ctrl+5", "Scheda KiCad", "_shortcut_tab_kicad"),
         ("Ctrl+6", "Scheda Esportazioni", "_shortcut_tab_exports"),
-        ("F5", "Rigenera il modello 3D (FreeCAD, gratuito)", "_shortcut_regenerate_3d"),
+        ("F5", "Rigenera il modello STEP (FreeCAD, gratuito)", "_shortcut_regenerate_3d"),
         ("Ctrl+E", "Modifica componenti", "_shortcut_edit_components"),
         ("Ctrl+L", "Apri il log AI", "_shortcut_ai_log"),
         ("Ctrl+Q", "Esci", "close"),
@@ -3168,6 +3191,9 @@ class MainWindow(QMainWindow):
         self._realign_form_labels()
         if hasattr(self, "project_wizard"):
             self.project_wizard.retranslate()
+        # The status label is built after every earlier refresh, which skipped
+        # it: without this pass it stayed empty until the first language switch.
+        self._refresh_workflow_state()
 
     def _align_form(self, form: QFormLayout, panel: str) -> None:
         """@brief Align a form's labels now and after every language change, with its panel's forms.
@@ -3405,7 +3431,7 @@ class MainWindow(QMainWindow):
         self.field_name.setReadOnly(True)
         self.field_name.setPlaceholderText(
             "Crea o apri un progetto dal menu File: il suo nome e' quello di cartella, "
-            "footprint e modello 3D")
+            "footprint e modello STEP")
         self.field_name.setToolTip(
             "Si cambia dal menu File: «Nuovo progetto…», «Apri progetto…», «Rinomina progetto…».")
         self.field_name.textChanged.connect(self._on_name_changed)
@@ -3542,7 +3568,7 @@ class MainWindow(QMainWindow):
         analysis_layout.addWidget(self.group_single_tht_pads)
         # 3D model only: the strips change neither the analysis nor the
         # footprint (user, 2026-09-26). Off by default.
-        self.chk_header_pins = QCheckBox("Mostra gli header nel modello 3D")
+        self.chk_header_pins = QCheckBox("Mostra gli header nel modello STEP")
         self.chk_header_pins.setToolTip(
             "Aggiunge sotto la scheda gli strip maschi a pin quadrati, come una scheda "
             "con gli strip gia' saldati. Sulle schede castellated solo sui contatti con "
@@ -3560,7 +3586,7 @@ class MainWindow(QMainWindow):
         mounting_layout.addWidget(self.combo_mounting)
         mounting_note = QLabel(
             "La scelta cambia solo il footprint della scheda ospitante. "
-            "Il modello 3D della board resta fedele alla foto.")
+            "Il modello STEP della board resta fedele alla foto.")
         mounting_note.setWordWrap(True)
         mounting_layout.addWidget(mounting_note)
         mounting_layout.addWidget(self.chk_header_pins)
@@ -3824,8 +3850,8 @@ class MainWindow(QMainWindow):
             "photo-review/ e, alla conferma, le risalva; dopo l'inventario mostra i corpi "
             "riconciliati con accanto la lettura del rilevatore (mai sovrascritta), le "
             "quote e la scelta dei modelli KiCad. Non avvia la generazione e non fa "
-            "richieste AI: gratuito. Dopo averla applicata, «Rigenera modello 3D» nella "
-            "scheda Modello 3D ricostruisce lo STEP."
+            "richieste AI: gratuito. Dopo averla applicata, «Rigenera modello STEP» nella "
+            "scheda Modello STEP ricostruisce lo STEP."
         )
         self.btn_component_review.setEnabled(False)
         self.btn_component_review.clicked.connect(self._open_component_review)
@@ -4654,7 +4680,7 @@ class MainWindow(QMainWindow):
             if complete_available and _step_older_than_footprint(footprint, step):
                 status += "\n" + self.i18n.text(
                     "ATTENZIONE: il modello STEP è più vecchio del footprint. Se dopo "
-                    "l'ultimo 3D hai cambiato il corpo, rigenera il modello 3D prima di "
+                    "l'ultimo 3D hai cambiato il corpo, rigenera il modello STEP prima di "
                     "installare.")
             if self.has_pending_footprint_edits():
                 # Test, export and installation copy the .kicad_mod on disk,
@@ -5124,7 +5150,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, self.i18n.text("Nome componente"),
                 self.i18n.text("Crea o apri prima un progetto dal menu File: il suo nome e' "
-                               "quello della cartella dei documenti, del footprint e del modello 3D."))
+                               "quello della cartella dei documenti, del footprint e del modello STEP."))
             return
 
         self._show_extract_preparing()
@@ -6208,7 +6234,7 @@ class MainWindow(QMainWindow):
             that really had something to show.
         """
         text = getattr(self, "ai_progress_text", None)
-        if text is not None and text.toPlainText().strip():
+        if text is not None and _document_has_visible_text(text.document()):
             return True
         elements = getattr(self, "ai_elements_list", None)
         if elements is not None and elements.count():
@@ -6576,8 +6602,8 @@ class MainWindow(QMainWindow):
     #:   result when it arrives. Pretending to "stop it" would be a lie
     #:   about the money spent.
     _ABORTABLE_OPERATIONS = (
-        ("cad", "_worker", "Generazione di footprint e modello 3D"),
-        ("cad", "_cad3d_worker", "Rigenerazione del modello 3D"),
+        ("cad", "_worker", "Generazione di footprint e modello STEP"),
+        ("cad", "_cad3d_worker", "Rigenerazione del modello STEP"),
         ("ai", "_extract_worker", "Analisi AI dei documenti"),
         ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
     )
@@ -6647,7 +6673,7 @@ class MainWindow(QMainWindow):
                 "verrà scartato.")
         elif kind == "cad":
             detail = self.i18n.text(
-                "Il processo FreeCAD in corso verrà terminato e il modello 3D non "
+                "Il processo FreeCAD in corso verrà terminato e il modello STEP non "
                 "sarà completato: il lavoro fatto finora va perso e la generazione "
                 "andrà rifatta da capo.\n\n"
                 "Se in questo momento si stanno misurando modelli della libreria "
@@ -6741,7 +6767,7 @@ class MainWindow(QMainWindow):
         """
         self._on_ai_progress(
             tx("INTERRUZIONE chiesta dall'utente durante: {phase}. Il processo "
-               "FreeCAD viene terminato; il modello 3D non sarà completato.",
+               "FreeCAD viene terminato; il modello STEP non sarà completato.",
                phase=phase))
         self.analysis_overlay.set_status(self.i18n.text(
             "Interruzione in corso: chiusura del processo FreeCAD…"))
@@ -7376,7 +7402,9 @@ class MainWindow(QMainWindow):
             list: it is the point where the log goes from absent to present,
             hence also the point where «Log AI» must appear.
         """
-        self.btn_copy_ai_log.setEnabled(bool(self.ai_progress_text.toPlainText()))
+        # `isEmpty`, not `toPlainText()`: this runs on every log line and a
+        # copy of the whole log made each append quadratic over a run.
+        self.btn_copy_ai_log.setEnabled(not self.ai_progress_text.document().isEmpty())
         self.btn_copy_ai_elements.setEnabled(self.ai_elements_list.count() > 0)
         self._refresh_ai_log_button()
 
@@ -7547,7 +7575,7 @@ class MainWindow(QMainWindow):
         self._invalidate_generated_mesh()
         if had_solid:
             self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; "
-                                "rigenerazione automatica del modello 3D.",
+                                "rigenerazione automatica del modello STEP.",
                                 n_components=len(components)))
             self._regen_3d_pending = True
             # After the review window closes, which emits the
@@ -7555,8 +7583,8 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._run_pending_regen_3d)
             return
         self._set_3d_status(self.i18n.text(
-            "Componenti corretti dalla foto. Modello 3D da rigenerare: "
-            "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
+            "Componenti corretti dalla foto. Modello STEP da rigenerare: "
+            "premi \"Rigenera modello STEP\" per aggiornare STEP e anteprima."
         ), STATUS_INFO)
         self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; 3D da "
                             "rigenerare.",
@@ -7587,13 +7615,13 @@ class MainWindow(QMainWindow):
             self._set_3d_status(missing, STATUS_WARNING)
             self._append_log(missing)
             return
-        if self._current_body_params() is None:
+        if self._current_body_params(photo_components=False) is None:
             self._set_3d_status(self.i18n.text(
-                "Componenti corretti dalla foto. Modello 3D da rigenerare: "
-                "premi \"Rigenera modello 3D\" per aggiornare STEP e anteprima."
+                "Componenti corretti dalla foto. Modello STEP da rigenerare: "
+                "premi \"Rigenera modello STEP\" per aggiornare STEP e anteprima."
             ), STATUS_INFO)
             self._append_log(tx("Rigenerazione automatica del 3D non avviata: il gruppo "
-                                "«Modello 3D» è spento."))
+                                "«Modello STEP» è spento."))
             return
         # Automatic retry: no question (`_regenerate_3d` still gives the
         # worker the applied pads, never the footprint draft's).
@@ -7612,7 +7640,7 @@ class MainWindow(QMainWindow):
         self._set_accept_models_ready(False)
         self.preview_3d.clear_preview()
         self._set_3d_status(
-            self.i18n.text("Dati modificati. Modello 3D da rigenerare."), STATUS_INFO)
+            self.i18n.text("Dati modificati. Modello STEP da rigenerare."), STATUS_INFO)
 
     def _cad_result_is_current(self) -> bool:
         worker = self.sender()
@@ -10132,7 +10160,7 @@ class MainWindow(QMainWindow):
         if not missing:
             return ""
         return tx("tipo di contatto non indicato per i lati {sides}: l'analisi non lo ha determinato e "
-                  "non viene indovinato. Sceglilo nel tab Modello 3D (Tipo contatto) e rigenera.",
+                  "non viene indovinato. Sceglilo nel tab Modello STEP (Tipo contatto) e rigenera.",
                   sides=", ".join(str(EDGE_LABELS.get(side["edge"], side["edge"]))
                                   for side in missing))
 
@@ -10216,12 +10244,12 @@ class MainWindow(QMainWindow):
                 tx("ATTENZIONE: il modello non ha restituito alcun componente dalla foto "
                    "(components_3d vuoto): nel 3D andra' un blocco unico. Rilancia "
                    "l'estrazione con la foto del lato superiore selezionata, oppure "
-                   "aggiungi i componenti a mano nel tab Modello 3D.")
+                   "aggiungi i componenti a mano nel tab Modello STEP.")
             )
         if self.castellated_components:
             self._append_log(
                 tx("{n_castellated_components} componenti letti dalla foto (stime "
-                   "visive): compariranno nel modello 3D, modificabili nel tab Modello 3D.",
+                   "visive): compariranno nel modello STEP, modificabili nel tab Modello STEP.",
                    n_castellated_components=len(self.castellated_components))
             )
 
@@ -10647,7 +10675,18 @@ class MainWindow(QMainWindow):
             side["contact_style"] = style
         self._on_contact_style_edited()
 
-    def _current_castellated_params(self) -> CastellatedModuleParams:
+    def _current_castellated_params(self, photo_components: bool = True) -> CastellatedModuleParams:
+        """@brief The castellated-module parameters of the current fields.
+
+        @param photo_components True to attach the photo bodies
+            (`_components_from_table`); False for a caller that only needs
+            pads, outline or body sizes, which never depend on them.
+        @return CastellatedModuleParams; `components` is empty when
+            `photo_components` is False.
+        @note The photo bodies are the costly part (one crop descriptor per
+            body); the KiCad gate runs on every metadata keystroke and needs
+            the footprint only (perf audit 2026-10-17).
+        """
         return CastellatedModuleParams(
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
@@ -10676,7 +10715,7 @@ class MainWindow(QMainWindow):
             # Deliberately NOT the body colour: the fallback block (without
             # components from the photo) must stand out from the PCB, not vanish on it.
             component_color_hex="#3a3a3a",
-            components=self._components_from_table(),
+            components=self._components_from_table() if photo_components else [],
             silk_labels=self._silk_labels(),
             sides=self._sides_from_table(),
             **self._declared_row_spacing_kwargs(),
@@ -10887,7 +10926,7 @@ class MainWindow(QMainWindow):
         step_row_layout.addWidget(self.label_kicad_step, 1)
         # Remedy of a stale STEP that cannot be rebuilt (review pass 3, H2).
         self.btn_remove_obsolete_model = self._workflow_tool_button(
-            "cancel.svg", "Rimuovi il modello 3D obsoleto", "Nessun modello 3D obsoleto.")
+            "cancel.svg", "Rimuovi il modello STEP obsoleto", "Nessun modello STEP obsoleto.")
         self.btn_remove_obsolete_model.clicked.connect(self._remove_obsolete_model)
         self.btn_remove_obsolete_model.setEnabled(False)
         step_row_layout.addWidget(self.btn_remove_obsolete_model)
@@ -10924,7 +10963,7 @@ class MainWindow(QMainWindow):
         review_group = QGroupBox("Verifica prima dell’installazione")
         review_layout = QVBoxLayout(review_group)
         review_note = QLabel(
-            "Crea un piccolo progetto temporaneo con il footprint e il modello 3D, "
+            "Crea un piccolo progetto temporaneo con il footprint e il modello STEP, "
             "quindi lo apre nel PCB Editor. In KiCad premi Alt+3 per la vista 3D.")
         review_note.setWordWrap(True)
         # Icons instead of text buttons, name and explanation in the tooltip
@@ -11793,11 +11832,14 @@ class MainWindow(QMainWindow):
         @note Read with the APPLIED footprint (`_applied_footprint_in_memory`):
             an unapplied footprint draft never makes the files look stale,
             exactly as it never reaches them.
+        @note A castellated `params` carries no photo bodies: every caller
+            compares pads and outline, which never depend on them, and this
+            runs on every metadata keystroke (perf audit 2026-10-17).
         """
         with self._applied_footprint_in_memory():
             params = (self.package_geometry if self.package_geometry is not None else
-                      self._current_castellated_params() if self._is_castellated()
-                      else self._current_params())
+                      self._current_castellated_params(photo_components=False)
+                      if self._is_castellated() else self._current_params())
             host = self._host_footprint_params(params)
         return params, host
 
@@ -12060,19 +12102,19 @@ class MainWindow(QMainWindow):
             return None
         if current_body is None:
             why = (self._missing_body_reason()
-                   or self.i18n.text("il gruppo «Modello 3D» è spento"))
+                   or self.i18n.text("il gruppo «Modello STEP» è spento"))
             return ("step_unbuildable", self.i18n.text(
                 "Modello STEP obsoleto e non ricostruibile: è stato costruito con pad o con un "
-                "corpo diversi da quelli attuali, e ora nessun modello 3D può essere costruito "
+                "corpo diversi da quelli attuali, e ora nessun modello STEP può essere costruito "
                 "({why}). Ripeti l'analisi con un disegno quotato del corpo, oppure premi "
-                "«Rimuovi il modello 3D obsoleto» nella scheda KiCad.").format(why=why))
+                "«Rimuovi il modello STEP obsoleto» nella scheda KiCad.").format(why=why))
         if stale_pads:
             return ("step_pads", self.i18n.text(
                 "Modello STEP non aggiornato: è stato costruito su pad diversi da quelli dei "
-                "parametri attuali. Rigenera il modello 3D prima di provarlo o installarlo."))
+                "parametri attuali. Rigenera il modello STEP prima di provarlo o installarlo."))
         return ("step_body", self.i18n.text(
             "Modello STEP non aggiornato: corpo, colori o annotazioni 3D sono cambiati dopo "
-            "la sua costruzione. Rigenera il modello 3D prima di provarlo o installarlo."))
+            "la sua costruzione. Rigenera il modello STEP prima di provarlo o installarlo."))
 
     def _step_body_fingerprint(self, body=_BODY_OVERRIDE_UNSET, fillets=None, face_texts=None):
         """@brief JSON-normal fingerprint of what a STEP is built from besides the pads.
@@ -12093,12 +12135,23 @@ class MainWindow(QMainWindow):
         """
         with self._applied_footprint_in_memory():
             if body is _BODY_OVERRIDE_UNSET:
-                body = self._current_body_params()
+                # The record leaves the photo bodies out, so they are not
+                # built (each one is a crop and a descriptor of the photo,
+                # and the gate runs on every keystroke: perf audit
+                # 2026-10-17). Only whether there would be any matters: the
+                # pin-matrix path attaches one box per photo row, the
+                # package and castellated paths none.
+                body = self._current_body_params(photo_components=False)
+                has_photo_bodies = bool(
+                    self.package_geometry is None and not self._is_castellated()
+                    and getattr(self, "_photo_rows", None))
+            else:
+                has_photo_bodies = bool(body is not None and body.components)
             if body is None:
                 return None
             fillets = list(self.fillet_annotations) if fillets is None else list(fillets)
             face_texts = self._face_texts_for_3d() if face_texts is None else list(face_texts)
-        board = bool(body.populated_board or body.components or self._is_castellated())
+        board = bool(body.populated_board or has_photo_bodies or self._is_castellated())
         data = self._normalised_body_record(
             {key: value for key, value in asdict(body).items() if key != "components"}, board=board)
         # `board` travels with the record so a comparison can normalise an
@@ -12293,7 +12346,7 @@ class MainWindow(QMainWindow):
         """
         if self._kicad_work_busy():
             return ("busy", self.i18n.text(
-                "Comando non disponibile mentre è in corso un lavoro (generazione, modello 3D, "
+                "Comando non disponibile mentre è in corso un lavoro (generazione, modello STEP, "
                 "analisi): i file del componente potrebbero essere a metà. Attendi che finisca."))
         return self._kicad_files_alignment_block()
 
@@ -12355,9 +12408,9 @@ class MainWindow(QMainWindow):
         if not existing:
             return
         answer = QMessageBox.question(
-            self, self.i18n.text("Modello 3D obsoleto"),
-            self.i18n.text("Rimuovere il modello 3D obsoleto? Verranno eliminati:\n{files}\n\n"
-                           "Il componente resterà senza modello 3D finché un'analisi non ne "
+            self, self.i18n.text("Modello STEP obsoleto"),
+            self.i18n.text("Rimuovere il modello STEP obsoleto? Verranno eliminati:\n{files}\n\n"
+                           "Il componente resterà senza modello STEP finché un'analisi non ne "
                            "documenta il corpo.").format(files="\n".join(str(p) for p in existing)),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
@@ -12369,12 +12422,12 @@ class MainWindow(QMainWindow):
                 path.unlink()
                 removed.append(path.name)
             except OSError as exc:
-                QMessageBox.warning(self, self.i18n.text("Modello 3D obsoleto"), self.i18n.text(
+                QMessageBox.warning(self, self.i18n.text("Modello STEP obsoleto"), self.i18n.text(
                     "Impossibile eliminare {path}: {error}").format(path=path, error=exc))
         self._step_source_pads = None
         self._step_source_body = None
         self._invalidate_generated_mesh()
-        self._append_log(tx("Modello 3D obsoleto rimosso: {files}.", files=", ".join(removed)))
+        self._append_log(tx("Modello STEP obsoleto rimosso: {files}.", files=", ".join(removed)))
         self._refresh_output_actions()
 
     def _refresh_kicad_remedies(self) -> None:
@@ -12410,9 +12463,9 @@ class MainWindow(QMainWindow):
         stale_step = code.startswith("step_")
         remove.setEnabled(stale_step)
         self._set_workflow_detail(remove, (
-            "Elimina STEP, WRL e anteprima del modello 3D, che non corrispondono più ai dati; "
+            "Elimina STEP, WRL e anteprima del modello STEP, che non corrispondono più ai dati; "
             "chiede conferma."
-            if stale_step else "Nessun modello 3D obsoleto."))
+            if stale_step else "Nessun modello STEP obsoleto."))
 
     def _apply_kicad_command_states(self, complete: bool, metadata_reason: str | None = None) -> None:
         """@brief Enable or disable the six KiCad commands with the reason in their tooltip.
@@ -12637,7 +12690,7 @@ class MainWindow(QMainWindow):
             "1. Installa la libreria del componente",
             "La libreria di progetto è consigliata se il componente serve solo in questo progetto. "
             "La libreria globale è disponibile in tutti i progetti di questo computer. "
-            "L’installazione registra footprint e modello 3D in KiCad.",
+            "L’installazione registra footprint e modello STEP in KiCad.",
             (("Installa nel progetto KiCad…", self._install_project_library),
              ("Installa come libreria globale…", self._install_global_library)),
         )
@@ -13205,9 +13258,13 @@ class MainWindow(QMainWindow):
             body_offset_y=self.field_body_offset_y.value(),
         )
 
-    def _current_body_params(self) -> Body3DParams | None:
+    def _current_body_params(self, photo_components: bool = True) -> Body3DParams | None:
         """@brief The parameters of the solid to build, or None if none must be built.
 
+        @param photo_components True to attach the photo bodies of a board
+            (`_components_from_table`); False for a caller that leaves them out
+            anyway (`_step_body_fingerprint`), so a keystroke does not crop
+            and describe every body of the photo (perf audit 2026-10-17).
         @return Body3DParams from the current fields; None when the «Modello
             3D» group is off.
         @note None does NOT mean "missing data": it means "no 3D model
@@ -13252,7 +13309,8 @@ class MainWindow(QMainWindow):
         if self._is_castellated():
             # The module PCB is centred on the origin like the footprint:
             # envelope and offset are derived from there, not from the hand-typed fields.
-            module = self._current_castellated_params()
+            # Only sizes, drill and thickness are read: never the photo bodies.
+            module = self._current_castellated_params(photo_components=False)
             return Body3DParams(
                 length_mm=module.body_length,
                 width_mm=module.body_width,
@@ -13286,7 +13344,7 @@ class MainWindow(QMainWindow):
             pcb_thickness_mm=(self.field_cast_pcb.value()
                               if self._photo_inventory_family() is True
                               else self._extracted_pcb_thickness),
-            components=self._components_from_table(),
+            components=self._components_from_table() if photo_components else [],
             populated_board=self._selected_family() == "aggregate_tht",
             pin_numbers_3d=(self._selected_family() == "single_tht"
                             and self._pin_numbers_3d()),
@@ -13520,7 +13578,7 @@ class MainWindow(QMainWindow):
                 # The 3D was asked for and the documents gave every quote, yet
                 # no body came out: a fault to report, not a deferral (the
                 # deferral is only for missing quotes, which `_generate` says).
-                raise ValueError(tx("I parametri del modello 3D non sono disponibili."))
+                raise ValueError(tx("I parametri del modello STEP non sono disponibili."))
             if body is not None:
                 # QSpinBox limits must not silently replace extracted dimensions.
                 dimensions = ((body.length_mm, extracted.body_length_mm),
@@ -13810,7 +13868,7 @@ class MainWindow(QMainWindow):
 
         if body is None and (self.fillet_annotations or self.face_text_annotations):
             self._append_log(
-                tx("ATTENZIONE: annotazioni 3D presenti ma il modello 3D non viene generato "
+                tx("ATTENZIONE: annotazioni 3D presenti ma il modello STEP non viene generato "
                    "(quote del corpo mancanti o 3D disattivato): verranno ignorate.")
             )
         if body is None and self.group_3d.isChecked() and not footprint_only:
@@ -13842,7 +13900,7 @@ class MainWindow(QMainWindow):
                 if automatic:
                     self._automatic_3d_deferred_reason = ", ".join(missing)
                 self._append_log(tx(
-                    "Modello 3D rinviato: mancano le quote documentate del corpo ({fields}). "
+                    "Modello STEP rinviato: mancano le quote documentate del corpo ({fields}). "
                     "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
                     "l'analisi per completare il 3D.", fields=", ".join(missing)))
 
@@ -13853,10 +13911,10 @@ class MainWindow(QMainWindow):
             single_component=self._is_single_component_project(),
         )
         self._worker.footprint_params = host_params
-        # Both texts as bottom-left anchors, the defaults converted as the
-        # preview shows them: the file writes what the preview draws.
-        self._worker.text_positions = self._footprint_text_anchors(
-            lambda: self._build_footprint(host_params if host_params is not None else params))
+        # Only the texts the user placed, as bottom-left anchors: an unmoved
+        # text keeps the generator's centred default, so it stays centred
+        # whatever KiCad shows in it (user, 2026-10-17).
+        self._worker.text_positions = dict(self.footprint_text_positions)
         self._worker.drawings = deepcopy(self.footprint_drawings)
         # PackageGeometry carries no datasheet: the worker passes it to
         # build_package itself (the other generators read it from params).
@@ -13902,7 +13960,7 @@ class MainWindow(QMainWindow):
             # rest of the window is not in the middle of the chain.
             self._manual_cad_overlay = True
             self._clear_cost_for_generation()
-            self.analysis_overlay.start('Generazione footprint e modello 3D',
+            self.analysis_overlay.start('Generazione footprint e modello STEP',
                                         'Preparazione della generazione…', abortable=True)
             self._show_generation_steps(params, body, self._is_single_component_project())
         if automatic:
@@ -13921,7 +13979,7 @@ class MainWindow(QMainWindow):
             self.menuBar().setEnabled(False)
             self.btn_extract_ai.setEnabled(False)
             self._clear_cost_for_generation()
-            self.analysis_overlay.start('Generazione footprint e modello 3D',
+            self.analysis_overlay.start('Generazione footprint e modello STEP',
                                         'Preparazione della generazione…', abortable=True)
             self._show_generation_steps(params, body, self._is_single_component_project())
         try:
@@ -13952,7 +14010,7 @@ class MainWindow(QMainWindow):
             steps = ("Footprint KiCadGen", "Corpo e terminali FreeCAD")
             step_of = {"footprint": 0, "freecad": 1}
             if body is None:
-                unavailable = {1: "modello 3D non richiesto"}
+                unavailable = {1: "modello STEP non richiesto"}
         else:
             steps = GENERATION_STEPS
             step_of = dict(GENERATION_STEP_OF)
@@ -13967,7 +14025,7 @@ class MainWindow(QMainWindow):
             reason = ("FreeCAD non installato" if self._freecad_available is False
                       else "quote 3D mancanti: completa il datasheet"
                       if self.group_3d.isChecked() and missing_body_dimensions
-                      else "modello 3D non richiesto")
+                      else "modello STEP non richiesto")
             if single_component or isinstance(params, PackageGeometry):
                 unavailable = {1: reason}
             if not single_component and not isinstance(params, PackageGeometry):
@@ -14024,27 +14082,27 @@ class MainWindow(QMainWindow):
                 tx("Generazione interrotta dall’utente. ")
                 + (tx("Il footprint scritto prima dell’interruzione resta sul disco; ")
                    if self._automatic_footprint_done else tx("Nessun footprint scritto; "))
-                + tx("il modello 3D non è stato completato."))
+                + tx("il modello STEP non è stato completato."))
         elif self._automatic_generation_errors or not complete:
             details = ('\n'.join(self._automatic_generation_errors)
                        or self.i18n.text('La generazione non ha prodotto entrambi i risultati.'))
-            prefix = (self.i18n.text('Footprint generato, modello 3D non completato.') + '\n'
+            prefix = (self.i18n.text('Footprint generato, modello STEP non completato.') + '\n'
                       if self._automatic_footprint_done and expected_3d else '')
             QMessageBox.warning(
                 self, self.i18n.text('Generazione incompleta'), prefix + details)
         elif expected_3d:
-            self._on_ai_progress(tx("Footprint e modello 3D generati. Verifica le anteprime prima "
+            self._on_ai_progress(tx("Footprint e modello STEP generati. Verifica le anteprime prima "
                                     "dell’utilizzo."))
-            self._hold_completed_overlay("Completato: footprint e modello 3D generati.")
+            self._hold_completed_overlay("Completato: footprint e modello STEP generati.")
         else:
             if getattr(self, "_automatic_3d_deferred_reason", ""):
-                message = tx("Footprint generato; modello 3D rinviato: mancano le quote del corpo ({fields}).",
+                message = tx("Footprint generato; modello STEP rinviato: mancano le quote del corpo ({fields}).",
                              fields=self._automatic_3d_deferred_reason)
                 self._on_ai_progress(message)
-                self._hold_completed_overlay("Footprint generato; modello 3D da completare.")
+                self._hold_completed_overlay("Footprint generato; modello STEP da completare.")
             else:
                 # Faithful final account: the 3D model was not requested.
-                self._on_ai_progress(tx("Footprint generato; modello 3D non richiesto. Verifica l’anteprima "
+                self._on_ai_progress(tx("Footprint generato; modello STEP non richiesto. Verifica l’anteprima "
                                         "prima dell’utilizzo."))
                 self._hold_completed_overlay("Completato: footprint generato.")
 
@@ -14162,9 +14220,9 @@ class MainWindow(QMainWindow):
         line the user would find files on disk that no longer match the data
         in the window and nothing explaining why the preview did not update.
         """
-        self._append_log(tx("Modello 3D scartato: i dati sono cambiati durante la generazione. "
+        self._append_log(tx("Modello STEP scartato: i dati sono cambiati durante la generazione. "
                             "I file su disco ({path}) non corrispondono ai dati attuali: "
-                            "rigenera il modello 3D.", path=path))
+                            "rigenera il modello STEP.", path=path))
 
     def _realign_after_3d_failure(self) -> None:
         """@brief After a failed or cancelled 3D run, show what is really on disk.
@@ -15756,10 +15814,13 @@ class MainWindow(QMainWindow):
             self._retry_footprint_rewrite()
 
     def _symbol_pad_ids(self):
-        """Electrical identities come from the actual footprint, never row indices."""
+        """Electrical identities come from the actual footprint, never row indices.
+
+        The photo bodies are left out: they never change a pad.
+        """
         params = (self.package_geometry if self.package_geometry is not None else
-                  self._current_castellated_params() if self._is_castellated()
-                  else self._current_params())
+                  self._current_castellated_params(photo_components=False)
+                  if self._is_castellated() else self._current_params())
         params = self._host_footprint_params(params)
         # Through the pad-record cache (review pass 3): the gate and the
         # editor refresh ask for the ids on every refresh of a big package.
@@ -16100,7 +16161,7 @@ class MainWindow(QMainWindow):
         # Main command of the tab: the last free step of the pipeline.
         self.btn_regen_3d = self._workflow_tool_button(
             "wf-regenerate.svg",
-            "Rigenera modello 3D (STEP) con queste annotazioni",
+            "Rigenera modello STEP con queste annotazioni",
             "Ultimo passo della pipeline — Ricostruisce lo STEP con FreeCAD dai corpi e "
             "dalle annotazioni attuali, comprese le correzioni appena applicate nella "
             "revisione dei componenti. Nessuna richiesta AI: gratuito.")
@@ -16168,7 +16229,7 @@ class MainWindow(QMainWindow):
             "Accendi, poi clic sul componente giusto per copiarne misure, altezza, "
             "tipologia, package e modello KiCad; clic sugli altri componenti per "
             "incollarli. Posizione, orientamento, nome, sigla e colore restano quelli "
-            "di ciascuno. Spegni per rigenerare il modello 3D: FreeCAD, nessuna "
+            "di ciascuno. Spegni per rigenerare il modello STEP: FreeCAD, nessuna "
             "richiesta AI.")
         self.btn_format_painter_3d.setCheckable(True)
         self.btn_format_painter_3d.toggled.connect(self._on_format_painter_toggled)
@@ -16216,7 +16277,7 @@ class MainWindow(QMainWindow):
         # Hidden until the module is castellated with at least one side:
         # `_sync_contact_style_bar` turns it on and keeps it aligned with the sides.
         self.contact_style_bar_3d.hide()
-        self.chk_header_pins_3d = QCheckBox("Mostra gli header nel modello 3D")
+        self.chk_header_pins_3d = QCheckBox("Mostra gli header nel modello STEP")
         self.chk_header_pins_3d.setToolTip(self.chk_header_pins.toolTip())
         self.chk_header_pins_3d.toggled.connect(self.chk_header_pins.setChecked)
         toolbar.addWidget(self.chk_header_pins_3d)
@@ -16279,7 +16340,7 @@ class MainWindow(QMainWindow):
         loading_icon.setPixmap(
             QIcon(str(Path(__file__).parent / "assets" / "wf-loading.svg")).pixmap(QSize(18, 18)))
         loading_layout.addWidget(loading_icon)
-        self.label_3d_loading = QLabel("Caricamento del modello 3D…")
+        self.label_3d_loading = QLabel("Caricamento del modello STEP…")
         self.label_3d_loading.setStyleSheet(f"color: {BLUE}; font-weight: bold;")
         loading_layout.addWidget(self.label_3d_loading)
         toolbar.addWidget(self.loading_3d_indicator)
@@ -16486,7 +16547,7 @@ class MainWindow(QMainWindow):
         if not missing:
             return ""
         return self.i18n.text(
-            "Modello 3D non disponibile: mancano le quote documentate del corpo ({fields}). "
+            "Modello STEP non disponibile: mancano le quote documentate del corpo ({fields}). "
             "Il programma non costruisce un corpo con misure inventate: aggiungi un disegno "
             "quotato del corpo e ripeti l'analisi.").format(fields=", ".join(missing))
 
@@ -16893,7 +16954,7 @@ class MainWindow(QMainWindow):
             self._set_3d_status(self.i18n.tr(
                 "status.leads_observed", count=count), STATUS_INFO)
 
-    def _no_3d_status(self, pending: str = "Il modello 3D compare qui dopo la generazione."):
+    def _no_3d_status(self, pending: str = "Il modello STEP compare qui dopo la generazione."):
         """@brief Why the 3D tab has no model, as (text, status level).
 
         @param pending Italian text for the case FreeCAD is available and the
@@ -16904,7 +16965,7 @@ class MainWindow(QMainWindow):
             the text says instead of pointing to a control that no longer exists.
         """
         if self._freecad_available is False:
-            return (self.i18n.text("FreeCAD non trovato: il modello 3D non può essere generato. "
+            return (self.i18n.text("FreeCAD non trovato: il modello STEP non può essere generato. "
                                    "Installa FreeCAD o imposta FREECAD_CMD_PATH."), STATUS_WARNING)
         return self.i18n.text(pending), STATUS_INFO
 
@@ -16949,10 +17010,10 @@ class MainWindow(QMainWindow):
         if not self._footprint_alignment_reason():
             return ""
         return self.i18n.text(
-            "Modello 3D non rigenerato: il footprint su disco non corrisponde ai parametri "
+            "Modello STEP non rigenerato: il footprint su disco non corrisponde ai parametri "
             "attuali e un modello costruito su questi parametri non combacerebbe con i suoi pad. "
             "Rigenera prima il footprint («Applica ai file» o una nuova generazione), poi il "
-            "modello 3D.")
+            "modello STEP.")
 
     def _regenerate_3d_applied(self) -> None:
         """@brief Body of `_regenerate_3d`, run with the applied footprint in the fields.
@@ -16979,7 +17040,7 @@ class MainWindow(QMainWindow):
                 self._append_log(missing)
             if not getattr(self, "_regen_3d_automatic", False):
                 QMessageBox.information(
-                    self, self.i18n.text("Modello 3D non disponibile"),
+                    self, self.i18n.text("Modello STEP non disponibile"),
                     missing or self._no_3d_status()[0])
             return
 
@@ -17005,7 +17066,7 @@ class MainWindow(QMainWindow):
             self._append_log(conflict)
             if not getattr(self, "_regen_3d_automatic", False):
                 QMessageBox.information(
-                    self, self.i18n.text("Modello 3D non disponibile"), conflict)
+                    self, self.i18n.text("Modello STEP non disponibile"), conflict)
             return
 
         self._set_regen_busy(True)
@@ -17044,7 +17105,7 @@ class MainWindow(QMainWindow):
         # while the solid is being built on the old ones.
         self._analysis_tabs_enabled = self.tabs.isEnabled()
         self.tabs.setEnabled(False)
-        self._start_log_session(tx("Rigenerazione modello 3D"))
+        self._start_log_session(tx("Rigenerazione modello STEP"))
         # This is an operation of its own, and does not call the AI model: leaving
         # the final account of the last analysis inside the modal would make it
         # read as the cost of what is happening now. It stays in the
@@ -17052,7 +17113,7 @@ class MainWindow(QMainWindow):
         # It holds for EVERY generation, the automatic one too: see
         # `_clear_cost_for_generation`.
         self._clear_cost_for_generation()
-        self.analysis_overlay.start('Generazione modello 3D',
+        self.analysis_overlay.start('Generazione modello STEP',
                                     'Avvio di FreeCAD…', abortable=True)
         # The footprint is not rewritten: the two 3D steps remain.
         if self._is_single_component_project():
@@ -17081,7 +17142,7 @@ class MainWindow(QMainWindow):
         aborted, self._abort_pending = self._abort_pending, False
         succeeded, self._regen_3d_succeeded = getattr(self, "_regen_3d_succeeded", False), False
         if succeeded and not aborted:
-            self._hold_completed_overlay("Completato: modello 3D rigenerato.")
+            self._hold_completed_overlay("Completato: modello STEP rigenerato.")
         else:
             self._hide_analysis_overlay()
         self._set_regen_busy(False)
@@ -17276,9 +17337,9 @@ class MainWindow(QMainWindow):
             # Interrupted after FreeCAD started, the run removed the previous
             # model: say so, instead of letting one believe it is still there.
             self._set_3d_status(self.i18n.text(
-                "Generazione interrotta dall'utente: il modello 3D non è stato "
+                "Generazione interrotta dall'utente: il modello STEP non è stato "
                 "aggiornato.") if self._step_still_on_disk() else self.i18n.text(
-                "Generazione interrotta dall'utente: il modello 3D precedente è "
+                "Generazione interrotta dall'utente: il modello STEP precedente è "
                 "stato rimosso, rigeneralo prima di usarlo in KiCad."), STATUS_INFO)
             return
         self._append_log(tx("ERRORE 3D: {message}", message=message))
@@ -17498,9 +17559,9 @@ class MainWindow(QMainWindow):
             self._format_toast_message(
                 tx("Formato applicato a {n} componenti", n=len(targets)),
                 ", ".join(targets),
-                self.i18n.text("Rigenerazione del modello 3D: FreeCAD, nessuna richiesta AI."))
+                self.i18n.text("Rigenerazione del modello STEP: FreeCAD, nessuna richiesta AI."))
             self._apply_photo_review(self._photo_components_from_table())
-            self.statusBar().showMessage(tx("Formato incollato su {n} componenti: modello 3D "
+            self.statusBar().showMessage(tx("Formato incollato su {n} componenti: modello STEP "
                                             "rigenerato.", n=len(targets)))
         else:
             self.statusBar().clearMessage()
@@ -17600,10 +17661,10 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         if hidden:
-            restore = menu.addAction(self.i18n.text("Rimetti nel modello 3D"))
+            restore = menu.addAction(self.i18n.text("Rimetti nel modello STEP"))
             restore.triggered.connect(lambda: self._set_component_visibility(row, True))
         else:
-            remove = menu.addAction(self.i18n.text("Elimina dal modello 3D (falso positivo)"))
+            remove = menu.addAction(self.i18n.text("Elimina dal modello STEP (falso positivo)"))
             remove.triggered.connect(lambda: self._set_component_visibility(row, False))
 
         rotate = menu.addMenu(self.i18n.text("Ruota il solido"))
@@ -17689,23 +17750,17 @@ class MainWindow(QMainWindow):
         components = [self._component_from_photo(row) for row in rows]
         image = self._decoded_component_photo()
         if image is not None:
-            import cv2
-            from ..services.component_image_match import (
-                describe_crop, descriptor_bytes, extract_component_crop,
-            )
             board_length, board_width = self._component_photo_board_size()
             if board_length and board_width:
                 for box, row in zip(components, rows):
-                    try:
-                        crop = extract_component_crop(
-                            image, row, board_length, board_width)
-                        evidence = dict(box.match_evidence or {})
-                        evidence["_accepted_image_descriptor"] = descriptor_bytes(
-                            describe_crop(crop))
-                        box.match_evidence = evidence
-                    except (KeyError, TypeError, ValueError, cv2.error):
+                    descriptor = self._component_crop_descriptor(
+                        image, row, board_length, board_width)
+                    if descriptor is None:
                         # An unusable photo/box does not block the 3D generation.
                         continue
+                    evidence = dict(box.match_evidence or {})
+                    evidence["_accepted_image_descriptor"] = descriptor
+                    box.match_evidence = evidence
         return components
 
     def _component_photo_board_size(self):
@@ -17714,17 +17769,98 @@ class MainWindow(QMainWindow):
         key = getattr(self, "_photo_body_fields", None) or current
         return self._body_sizes().get(key, (None, None))
 
-    def _decoded_component_photo(self):
-        """Decode the calibrated board photo once for component image work."""
+    #: Keys of a photo row that `extract_component_crop` reads: the cache key
+    #: of a body's crop descriptor (`_component_crop_descriptor`). Owned by
+    #: the service, which keeps it exact (tests/test_perf_coord_crop_keys.py).
+    CROP_GEOMETRY_KEYS = _CROP_GEOMETRY_KEYS
+
+    #: Bound of the per-photo descriptor cache: past it the cache restarts,
+    #: so edits of the same photo cannot grow it without limit.
+    CROP_DESCRIPTOR_CACHE_LIMIT = 4096
+
+    def _component_photo_digest(self):
+        """@brief Content digest of the calibrated board photo, or None without one.
+
+        @return BLAKE2b digest of `_photo_png`, recomputed only when another
+            object is bound (an immutable `bytes` object cannot change under
+            the same identity; a `bytearray` is hashed every time).
+        """
         png = getattr(self, "_photo_png", None)
         if not isinstance(png, (bytes, bytearray)) or not png:
             return None
+        cached = getattr(self, "_photo_digest_cache", None)
+        if isinstance(png, bytes) and cached is not None and cached[0] is png:
+            return cached[1]
+        import hashlib
+        digest = hashlib.blake2b(bytes(png), digest_size=20).digest()
+        self._photo_digest_cache = (png if isinstance(png, bytes) else None, digest)
+        return digest
+
+    def _decoded_component_photo(self):
+        """@brief The calibrated board photo decoded for component image work.
+
+        @return Read-only OpenCV array, or None without a decodable photo.
+        @note Cached by the content digest of `_photo_png`: the KiCad gate and
+            the generation ask for it repeatedly and a decode costs about
+            10 ms on a real photo (perf audit 2026-10-17). The array is made
+            read-only so no caller can alter the shared copy.
+        """
+        digest = self._component_photo_digest()
+        if digest is None:
+            return None
+        cached = getattr(self, "_decoded_photo_cache", None)
+        if cached is not None and cached[0] == digest:
+            return cached[1]
         try:
             import cv2
             import numpy as np
-            return cv2.imdecode(np.frombuffer(bytes(png), np.uint8), cv2.IMREAD_COLOR)
+            image = cv2.imdecode(np.frombuffer(bytes(self._photo_png), np.uint8),
+                                 cv2.IMREAD_COLOR)
         except (ImportError, ValueError):
             return None
+        if image is not None:
+            image.flags.writeable = False
+        self._decoded_photo_cache = (digest, image)
+        return image
+
+    def _component_crop_descriptor(self, image, row, board_length, board_width):
+        """@brief Image descriptor of one photo body, or None when its crop is unusable.
+
+        @param image The decoded photo (`_decoded_component_photo`).
+        @param row Photo component row (x_mm, y_mm, length_mm, width_mm, rotation_deg).
+        @param board_length Board extent along X, mm.
+        @param board_width Board extent along Y, mm.
+        @return `descriptor_bytes(describe_crop(crop))`, or None when the crop
+            or the description fails.
+        @note Memoised by data, never by event: the key is the photo digest,
+            the board size and the row values of `CROP_GEOMETRY_KEYS`, so a
+            changed photo, board size or body geometry computes it again,
+            and anything else (metadata, names, heights) reuses it.
+        """
+        import cv2
+        from ..services.component_image_match import (
+            describe_crop, descriptor_bytes, extract_component_crop,
+        )
+        digest = self._component_photo_digest()
+        try:
+            key = (float(board_length), float(board_width),
+                   *(repr(row.get(name)) for name in self.CROP_GEOMETRY_KEYS))
+        except (TypeError, ValueError, AttributeError):
+            key = None
+        cache = getattr(self, "_crop_descriptor_cache", None)
+        if (cache is None or cache[0] != digest
+                or len(cache[1]) > self.CROP_DESCRIPTOR_CACHE_LIMIT):
+            cache = self._crop_descriptor_cache = (digest, {})
+        if key is not None and key in cache[1]:
+            return cache[1][key]
+        try:
+            crop = extract_component_crop(image, row, board_length, board_width)
+            descriptor = descriptor_bytes(describe_crop(crop))
+        except (KeyError, TypeError, ValueError, cv2.error):
+            descriptor = None
+        if key is not None and digest is not None:
+            cache[1][key] = descriptor
+        return descriptor
 
     def _attach_accepted_component_images(self, components, *, include_png=False):
         """Attach transient crops/descriptors to chosen accepted components."""
@@ -17735,17 +17871,18 @@ class MainWindow(QMainWindow):
         if not board_length or not board_width:
             return [dict(component) for component in components], 0
         import cv2
-        from ..services.component_image_match import (
-            describe_crop, descriptor_bytes, extract_component_crop,
-        )
+        from ..services.component_image_match import extract_component_crop
         attached = []
         count = 0
         for component in components:
             item = dict(component)
             try:
-                crop = extract_component_crop(image, item, board_length, board_width)
-                descriptor = descriptor_bytes(describe_crop(crop))
+                descriptor = self._component_crop_descriptor(
+                    image, item, board_length, board_width)
+                if descriptor is None:
+                    raise ValueError("unusable component crop")
                 if include_png:
+                    crop = extract_component_crop(image, item, board_length, board_width)
                     ok, encoded = cv2.imencode(".png", crop)
                     if not ok:
                         raise ValueError("PNG encoding failed")
@@ -18111,8 +18248,9 @@ class MainWindow(QMainWindow):
             params = (
                 self._last_params if self._last_params is not None else
                 self.package_geometry if self.package_geometry is not None else
-                self._current_castellated_params() if self._is_castellated()
-                else self._current_params()
+                # The 2D preview draws pads and outline: never the photo bodies.
+                self._current_castellated_params(photo_components=False)
+                if self._is_castellated() else self._current_params()
             )
             if (isinstance(params, PinHeaderParams)
                     and (params.pad_overrides or {}) != self.header_pad_overrides):
@@ -18535,20 +18673,18 @@ class MainWindow(QMainWindow):
         """@brief Bottom-left anchors, mm, of the Reference and Value texts as the preview draws them.
 
         @param footprint The footprint the generator writes for this preview,
-            or a callable building it; its default anchors are the
-            bottom-left anchors `core.footprint.Footprint.place_default_texts`
-            converts from the D1 centres with KiCad's text geometry. None, or
-            a build that fails, converts `core.footprint.DEFAULT_TEXT_POSITIONS`
-            the same way.
+            or a callable building it; its defaults are the centred D1
+            texts `core.footprint.Footprint.place_default_texts` writes.
+            None, or a build that fails, uses
+            `core.footprint.DEFAULT_TEXT_POSITIONS`.
         @return {key: (x, y)} for every key of `TEXT_KEYS`: the chosen anchor
-            when there is one, else the footprint's own default anchor
-            (`Footprint.text_anchors`), so the preview shows the anchor the
-            file holds and KiCad draws the default where the centred default
-            was (2026-10-16, «KiCad fermo»).
-        @note The generation worker receives this mapping (`_generate`), so
-            the .kicad_mod writes both texts with ``(justify left bottom)`` at
-            the anchor the preview shows. A default anchor is NOT snapped to
-            the grid: snapping would move the text in KiCad; a drag snaps it.
+            when there is one, else the bottom-left corner at which KiCad
+            draws the centred default (`Footprint.text_anchors`), so the
+            preview draws every text where KiCad does.
+        @note Display only (2026-10-17, «Predefinito centrato»): the
+            generation worker receives just the chosen anchors (`_generate`),
+            so an unmoved text stays centred in the .kicad_mod. A default is
+            NOT snapped to the grid here: a drag snaps it.
         """
         from ..core.footprint import (
             DEFAULT_TEXT_POSITIONS, TEXT_KEYS, migrate_centred_positions)
@@ -18853,7 +18989,7 @@ class MainWindow(QMainWindow):
                     package.body_length_mm, package.body_width_mm, package.body_height_mm)):
                 self._set_3d_status(self.i18n.text(
                     "Completa le quote documentate di lunghezza, larghezza e altezza del corpo "
-                    "per generare il modello 3D."), STATUS_WARNING)
+                    "per generare il modello STEP."), STATUS_WARNING)
             else:
                 self._set_3d_status(*self._no_3d_status())
             return

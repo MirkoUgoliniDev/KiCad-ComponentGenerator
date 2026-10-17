@@ -1219,7 +1219,7 @@ def test_apply_without_a_previous_solid_leaves_the_choice_to_the_user(shown_soli
     window._apply_photo_review(window._photo_components_from_table())
     _settle()
     assert calls == [] and not window._regen_3d_pending
-    assert "Rigenera modello 3D" in window.label_3d_status.text()
+    assert "Rigenera modello STEP" in window.label_3d_status.text()
 
 
 def test_apply_during_other_work_waits_for_it_and_runs_once(shown_solid, monkeypatch):

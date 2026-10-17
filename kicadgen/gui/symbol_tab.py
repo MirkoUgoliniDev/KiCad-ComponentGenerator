@@ -931,6 +931,9 @@ class SymbolTab(QWidget):
         self._history_index = -1
         self._replaying = False
         self._gesture_before = None
+        #: (kind, rows, draft, status) of the last step the running drag committed;
+        #: see `_gesture_step_repeats`.
+        self._gesture_last_step = None
         self._selected_pin = None
         self._selected_pins = set()
         self._syncing_selection = False
@@ -2759,7 +2762,10 @@ class SymbolTab(QWidget):
 
         @return Sorted list of indices into the draft graphics list.
         """
-        count = len(self._graphics())
+        return self._selected_indices(len(self._graphics()))
+
+    def _selected_indices(self, count):
+        """The selected element indices below `count` (the number of elements), ascending."""
         chosen = {i for i in self._selected_graphics if 0 <= i < count}
         if self._selected_graphic is not None and 0 <= self._selected_graphic < count:
             chosen.add(self._selected_graphic)
@@ -3158,9 +3164,7 @@ class SymbolTab(QWidget):
             # wire's own frame (`refresh_wire_anchors` keeps it there).
             point['x'], point['y'] = self._wire_local(wire, point['x'], point['y'])
         if points[position] == point:
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         points[position] = point
         return self._accept_geometry(self._with_graphics(rows, graphics))
 
@@ -3520,7 +3524,9 @@ class SymbolTab(QWidget):
         self.undo_button.defaultAction().setEnabled(self._history_index > 0)
         self.redo_button.defaultAction().setEnabled(self._history_index + 1 < len(self._history))
         self.layout_reset_button.defaultAction().setEnabled(bool(rows))
-        self._draw(symbol)
+        # `rows` is this call's own copy of the draft (nothing above changes
+        # it): the redraw reuses it instead of copying the draft again.
+        self._draw(symbol, rows)
         self._checkpoint_draft()
 
     def _record(self, rows):
@@ -3700,15 +3706,14 @@ class SymbolTab(QWidget):
             self.set_status(self.tx('Operazione annullata: pin sovrapposti o selezione insufficiente.'))
             return False
         if rows == self._free_rows(source, symbol):
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         return self._accept_geometry(rows)
 
     def _begin_gesture(self, target, point):
         if self._symbol is None:
             return
         self._gesture_before = self.draft_rows()
+        self._gesture_last_step = None
         self._gesture_layout = self._symbol
         self._gesture_start = point
         self._gesture_scene_rect = self.view.scene().sceneRect()
@@ -3746,7 +3751,56 @@ class SymbolTab(QWidget):
             row['symbol_body'] = [symbol.width, symbol.height]
         return rows
 
+    def _gesture_step_repeats(self, kind, rows):
+        """@brief Tell whether a drag step would commit exactly what the previous step committed.
+
+        @param kind 'accept' for `_accept_geometry`, 'restore' for
+            `_restore_gesture_source`: the same rows give the same draft only
+            through the same path.
+        @param rows Rows the step is about to commit, before any change.
+        @return True only while a drag runs, when the previous step of THIS
+            drag took the same path with equal rows and the draft is still the
+            object that step produced, with the status line it left (a
+            refused step in between wrote another one, which only the full
+            path replaces).
+        @note A drag sends one step per mouse move, and most moves stay on the
+            same grid node: before, each of them rebuilt the layout and redrew
+            the whole scene (about 40 ms with 80 pins) to show the same
+            picture. The key is the data itself, so any real change (another
+            node, another target, an edit of the draft between two steps)
+            still goes through the full path.
+        """
+        last = self._gesture_last_step
+        return (self._gesture_before is not None and last is not None
+                and last[0] == kind and last[2] is self._draft
+                and last[3] == self.status.text() and last[1] == rows)
+
+    def _remember_gesture_step(self, kind, rows):
+        """Record what a drag step committed, for `_gesture_step_repeats`; nothing outside a drag."""
+        self._gesture_last_step = ((kind, rows, self._draft, self.status.text())
+                                   if self._gesture_before is not None else None)
+
+    def _restore_gesture_source(self, source):
+        """@brief Make the draft equal to `source` (a step that lands where the drag began).
+
+        @param source Rows the operation starts from (the drag's initial rows,
+            or the current draft outside a drag).
+        @return True, like the geometry operations that call it.
+        @note A repeated identical step of the same drag is skipped
+            (`_gesture_step_repeats`): the draft and the picture already show it.
+        """
+        if self._gesture_step_repeats('restore', source):
+            return True
+        key = deepcopy(source) if self._gesture_before is not None else None
+        self._draft = deepcopy(source)
+        self._changed()
+        self._remember_gesture_step('restore', key)
+        return True
+
     def _accept_geometry(self, rows):
+        if self._gesture_step_repeats('accept', rows):
+            return True
+        key = deepcopy(rows) if self._gesture_before is not None else None
         try:
             pins, body = symbol_inputs(rows)
             layout = layout_symbol(pins, body)
@@ -3764,6 +3818,7 @@ class SymbolTab(QWidget):
         # Geometry changes do not rebuild the table or interrupt its editor.
         self._draft = deepcopy(rows)
         self._changed()
+        self._remember_gesture_step('accept', key)
         return True
 
     def move_pin(self, number, side, offset, *, swap=False):
@@ -3788,9 +3843,7 @@ class SymbolTab(QWidget):
             return False
         snapped = round(round(offset / GRID_MM) * GRID_MM, 4)
         if side == row['symbol_side'] and math.isclose(snapped, row['symbol_offset'], abs_tol=1e-7):
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         occupied = next((r for r in rows if r is not row and
                          r['symbol_side'] == side and
                          math.isclose(r['symbol_offset'], snapped, abs_tol=1e-7)), None)
@@ -3842,9 +3895,7 @@ class SymbolTab(QWidget):
             position = [round(terminal.x, 4), round(terminal.y, 4)]
             angle = terminal.angle
         if position == row['symbol_position'] and angle == row.get('symbol_angle'):
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         occupied = next((r for r in rows if r is not row and r['symbol_position'] == position), None)
         if occupied is not None:
             occupied['symbol_position'] = row['symbol_position'][:]
@@ -3898,9 +3949,7 @@ class SymbolTab(QWidget):
         # that anchor is no move and must not pin the text.
         unchanged = chosen.get(key) == snapped or (key not in chosen and snap(anchors[key]) == snapped)
         if unchanged:
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         chosen[key] = snapped
         return self._accept_geometry(self._with_properties(source, chosen))
 
@@ -4144,9 +4193,7 @@ class SymbolTab(QWidget):
                 for v in (width, height)]
         if all(math.isclose(value, original, abs_tol=1e-7)
                for value, original in zip(body, (symbol.width, symbol.height))):
-            self._draft = deepcopy(source)
-            self._changed()
-            return True
+            return self._restore_gesture_source(source)
         rows = self._free_rows(source, symbol)
         for row in rows:
             row['symbol_body'] = body[:]
@@ -4250,6 +4297,7 @@ class SymbolTab(QWidget):
     def _end_gesture(self, commit):
         before = self._gesture_before
         self._gesture_before = None
+        self._gesture_last_step = None
         if before is None:
             return
         if not commit:
@@ -4257,16 +4305,19 @@ class SymbolTab(QWidget):
         else:
             self._changed()
 
-    def _draw_graphics(self, scene, scale):
-        """Draw every placed glyph (primitives and terminals), tagged for selection and dragging."""
+    def _draw_graphics(self, scene, scale, rows=None):
+        """Draw every placed glyph (primitives and terminals), tagged for selection and dragging.
+
+        `rows` is the draft the caller already copied (`draft_rows` when None).
+        """
         from PyQt6.QtGui import QPainterPath
         from ..generators.symbol_glyphs import placed_primitives, placed_terminals, primitive_outline
         from ..generators.symbol_glyphs import elements_by_id, is_wire, is_shape, shape_handles
-        graphics = self._graphics()
+        graphics = self._graphics(rows)
         # Resolved once per draw and shared by every wire.
         pin_ends = self._pin_ends()
         by_id = elements_by_id(graphics)
-        chosen = set(self.selected_graphics())
+        chosen = set(self._selected_indices(len(graphics)))
         for index, instance in enumerate(graphics):
             selected = index in chosen
             element_handles = []
@@ -4566,7 +4617,8 @@ class SymbolTab(QWidget):
         self._text_bounds = []
         self._wire_cursor_item = None
 
-    def _draw(self, symbol):
+    def _draw(self, symbol, rows=None):
+        """Redraw the scene for `symbol`; `rows` is a private copy of the draft (`draft_rows` when None)."""
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
             p.pin.number == self._selected_pin for p in symbol.pins))
         self.align_button.defaultAction().setEnabled(len(self._selection_ids()) >= 2)
@@ -4594,7 +4646,11 @@ class SymbolTab(QWidget):
         text_color = QColor(theme['pin_name'])
         width, height = symbol.width * scale, symbol.height * scale
         scene.addRect(-width / 2, -height / 2, width, height, pen, QColor(theme['body_fill']))
-        self._draw_graphics(scene, scale)
+        # One copy of the draft serves the whole redraw (properties, elements
+        # and their selection): each `draft_rows` deep-copies every row.
+        if rows is None:
+            rows = self.draft_rows()
+        self._draw_graphics(scene, scale, rows)
         if self._wire_points:
             from PyQt6.QtGui import QPainterPath
             wire_pen = QPen(QColor(theme['wire']), 1.6, Qt.PenStyle.DashLine)
@@ -4636,7 +4692,7 @@ class SymbolTab(QWidget):
         from ..generators.symbol import PIN_NAME_OFFSET, TEXT_SIZE, pin_length_of, pin_text_size_of
         # Reference and Value where the file puts them (user, 2026-10-13):
         # the editor shows what KiCad will show, and both can be dragged.
-        positions = self._property_positions(self.draft_rows(), symbol)
+        positions = self._property_positions(rows, symbol)
         texts = self._property_texts()
         hints = {'Reference': self.tx('Riferimento (U?): trascinalo dove deve stare nello schema.'),
                  'Value': self.tx('Nome del simbolo (Value): trascinalo dove deve stare nello schema.')}

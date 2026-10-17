@@ -69,9 +69,9 @@ passo per passo.</p>
     <li><a href="#tipologia">Scegliere la tipologia del componente</a></li>
     <li><a href="#analisi">Avviare l'analisi e controllare i costi</a></li>
     <li><a href="#revisione">Rivedere i corpi trovati sulla foto</a></li>
-    <li><a href="#generazione">Generazione: footprint e modello 3D</a></li>
+    <li><a href="#generazione">Generazione: footprint e modello STEP</a></li>
     <li><a href="#simbolo">La scheda «Simbolo elettrico»</a></li>
-    <li><a href="#modello3d">La scheda «Modello 3D»</a></li>
+    <li><a href="#modello3d">La scheda «Modello STEP»</a></li>
     <li><a href="#step">Scegliere il modello STEP di un componente</a></li>
     <li><a href="#pin">Pin maschi sotto la scheda</a></li>
     <li><a href="#kicad">La scheda «KiCad»: prova e installazione</a></li>
@@ -85,19 +85,19 @@ passo per passo.</p>
 <p>KiCadGen crea un componente per KiCad a partire da documenti tecnici e
 fotografie: il <strong>footprint</strong> (<code>.kicad_mod</code>), il
 <strong>simbolo elettrico</strong> (<code>.kicad_sym</code>) e il
-<strong>modello 3D</strong> (<code>.step</code>). I documenti vengono letti da
+<strong>modello STEP</strong> (<code>.step</code>). I documenti vengono letti da
 un modello di intelligenza artificiale (tramite OpenRouter o l'API diretta di
 DeepSeek); il programma trasforma poi quello che il modello ha letto in
 geometria, con regole deterministiche.</p>
 <p>Per una scheda con componenti montati sopra (un modulo, una scheda di
 sviluppo) KiCadGen ricostruisce gli <strong>ingombri meccanici</strong>: posizione,
 dimensioni e orientamento dei corpi visibili nella foto. Non fa reverse
-engineering: i corpi sono volumi generici, oppure modelli 3D della libreria di
+engineering: i corpi sono volumi generici, oppure modelli STEP della libreria di
 KiCad scelti per somiglianza di misure.</p>
 
 <h2 id="prima">2. Prima di iniziare</h2>
 <ul>
-  <li><strong>FreeCAD</strong> (freecad.org) costruisce i modelli 3D. Senza FreeCAD
+  <li><strong>FreeCAD</strong> (freecad.org) costruisce i modelli STEP. Senza FreeCAD
   si ottiene comunque il footprint; la finestra di avanzamento dice quali passi
   non possono essere eseguiti e perché.</li>
   <li><strong>KiCad</strong> (kicad.org) serve per provare il risultato e per
@@ -133,7 +133,7 @@ dall'elenco sopra le schede.</p>
 
 <h2 id="progetto">3. Creare il progetto</h2>
 <p>Un progetto è una cartella: il suo nome è anche il nome del footprint e del
-modello 3D.</p>
+modello STEP.</p>
 <ol>
   <li>Menu <span class="ui">File → Nuovo progetto...</span> (<kbd>Ctrl</kbd>+<kbd>N</kbd>).
   Scrivi il nome, per esempio <code>RS485_TTL</code>, e conferma.</li>
@@ -144,7 +144,7 @@ modello 3D.</p>
   <li>Per riprendere un lavoro: <span class="ui">File → Apri progetto...</span>
   (<kbd>Ctrl</kbd>+<kbd>O</kbd>) elenca i progetti dell'area di lavoro, dal più recente.
   <span class="ui">File → Rinomina progetto...</span> (<kbd>F2</kbd>) cambia il nome
-  della cartella e, insieme, quello di footprint, simbolo e modello 3D. Senza un
+  della cartella e, insieme, quello di footprint, simbolo e modello STEP. Senza un
   progetto aperto la finestra mostra la pagina iniziale, con i due comandi e i
   progetti recenti, riapribili con un clic.</li>
 </ol>
@@ -339,7 +339,7 @@ disattivata, si prosegue con i corpi come li ha proposti l'AI.</p>
   dal modello, come testo.</li>
   <li><span class="ui">Applica correzioni</span> salva; <span class="ui">Annulla</span>
   lascia tutto com'era. Dopo averle applicate, <span class="ui">Rigenera modello
-  3D</span> nella scheda <span class="ui">Modello 3D</span> ricostruisce lo STEP.</li>
+  3D</span> nella scheda <span class="ui">Modello STEP</span> ricostruisce lo STEP.</li>
 </ul>
 <p>Più tardi, dalla scheda <span class="ui">Progetto</span>:</p>
 <ul>
@@ -350,7 +350,7 @@ disattivata, si prosegue con i corpi come li ha proposti l'AI.</p>
   l'inventario AI sulle proposte salvate. È l'unico dei due che spende.</li>
 </ul>
 
-<h2 id="generazione">8. Generazione: footprint e modello 3D</h2>
+<h2 id="generazione">8. Generazione: footprint e modello STEP</h2>
 <p>Quando l'analisi è valida, la generazione parte da sola. Nella stessa finestra
 di avanzamento del <a href="#analisi">capitolo 6</a>, dopo le fasi dell'analisi, la
 generazione occupa quattro passi, e per ciascuno l'intestazione dice chi lo
@@ -399,14 +399,14 @@ all'inizio o ripetere l'analisi:</p>
 <p>L'anteprima cambia subito. Per scrivere il file, premi l'icona di aggiornamento
 con il tooltip <span class="ui">Aggiorna solo il footprint</span>: occorrono
 dati già acquisiti o un footprint esistente. Questa azione non richiama l'AI
-e non rigenera il modello 3D. Le scelte sono sincronizzate con quelle del passo
+e non rigenera il modello STEP. Le scelte sono sincronizzate con quelle del passo
 <span class="ui">Montaggio e analisi</span>.</p>
 <p>Il montaggio riguarda il footprint sulla scheda ospitante: la geometria fisica
 del modulo 3D, ricavata dalla foto, resta invariata. Un contatto castellated
 che possiede soltanto un mezzo foro non viene trasformato in un foro passante.</p>
 
 <h2 id="simbolo">9. La scheda «Simbolo elettrico»</h2>
-<p>Tra «Anteprima footprint» e «Modello 3D» trovi il simbolo da usare nello
+<p>Tra «Anteprima footprint» e «Modello STEP» trovi il simbolo da usare nello
 schema. I numeri sono quelli dei pad elettrici del footprint e non si modificano
 in questa tabella. Puoi correggere la funzione, scegliere il tipo elettrico e
 spostare liberamente i pin nell'editor.</p>
@@ -470,9 +470,9 @@ duplicati o assenti dal footprint impediscono l'esportazione.</p>
 Aggiungila in KiCad alle librerie di simboli. Il riferimento al footprint è
 <code>KiCadGen:nome_componente</code>: usa lo stesso nome di libreria quando
 installi il footprint, oppure modifica l'associazione in KiCad. L'installazione
-della scheda «KiCad» continua a gestire footprint e modello 3D; la libreria di
+della scheda «KiCad» continua a gestire footprint e modello STEP; la libreria di
 simboli si esporta separatamente.</p>
-<p>Scorciatoie: Ctrl+3 apre il simbolo, Ctrl+4 il modello 3D, Ctrl+5 KiCad.</p>
+<p>Scorciatoie: Ctrl+3 apre il simbolo, Ctrl+4 il modello STEP, Ctrl+5 KiCad.</p>
 <h3>Tipi elettrici suggeriti dall'AI</h3>
 <p>Nel tab <span class="ui">Simbolo elettrico</span>, <span class="ui">Suggerisci tipi pin con AI</span>
 usa i documenti dichiarati pinout o datasheet e il modello AI configurato. Prima della chiamata
@@ -485,7 +485,7 @@ ma non vengono effettuati ulteriori tentativi e la risposta viene scartata.
 Rinominare un pin revoca la conferma del suo tipo precedente. Per confermare
 un tipo già visualizzato, selezionarlo nuovamente nel menu della tabella.</p>
 
-<h2 id="modello3d">10. La scheda «Modello 3D»</h2>
+<h2 id="modello3d">10. La scheda «Modello STEP»</h2>
 <p>Il modello si ruota con il mouse; il cubo di navigazione porta sulle viste
 standard. Nella barra in alto:</p>
 <ul>
@@ -498,9 +498,9 @@ standard. Nella barra in alto:</p>
   tasto destro sul corpo nella vista 3D e <span class="ui">Modifica componente...</span>;
   non ha più un'icona nella barra): nome, tipo, posizione, quote,
   rotazione, colore e marcatura di ogni corpo, a mano. Funziona anche senza la foto.
-  Dopo <span class="ui">Applica</span> il modello 3D si rigenera con FreeCAD.
+  Dopo <span class="ui">Applica</span> il modello STEP si rigenera con FreeCAD.
   Nessuna richiesta AI.</li>
-  <li><span class="ui">Rigenera modello 3D (STEP) con queste annotazioni</span>: ricostruisce lo STEP dai corpi
+  <li><span class="ui">Rigenera modello STEP con queste annotazioni</span>: ricostruisce lo STEP dai corpi
   attuali, comprese le correzioni appena applicate. Gratuito.</li>
   <li><span class="ui">Accetto, mi piace — ricorda questi modelli…</span>: salva gli
   abbinamenti fra corpi e modelli KiCad, che in una scheda futura verranno proposti
@@ -514,7 +514,7 @@ standard. Nella barra in alto:</p>
 <p>Il visualizzatore 3D viene caricato alla prima apertura della scheda: finché
 non è pronto, la scheda mostra un segnaposto e nulla va perso.</p>
 <p>Con il tasto destro su un corpo del modello: <span class="ui">Elimina dal modello
-3D (falso positivo)</span> (e <span class="ui">Rimetti nel modello 3D</span>),
+3D (falso positivo)</span> (e <span class="ui">Rimetti nel modello STEP</span>),
 <span class="ui">Ruota il solido</span>, <span class="ui">Modifica
 componente...</span> e <span class="ui">Cambia modello KiCad...</span>.</p>
 
@@ -535,15 +535,15 @@ del componente.</p>
 
 <h2 id="pin">12. Pin maschi sotto la scheda</h2>
 <p>Per le due tipologie <span class="ui">Scheda con componenti</span>, la spunta
-<span class="ui">Mostra gli header nel modello 3D</span> nel passo
+<span class="ui">Mostra gli header nel modello STEP</span> nel passo
 <span class="ui">Montaggio e analisi</span> della scheda <span class="ui">Progetto</span>
-oppure nella barra della scheda <span class="ui">Modello 3D</span>
+oppure nella barra della scheda <span class="ui">Modello STEP</span>
 aggiunge sotto la scheda gli
 strip maschi a pin quadrati, come una scheda con gli strip già saldati. Sulle
 schede castellated vengono messi solo sui contatti con foro passante.</p>
 <p>È una scelta separata dal montaggio del footprint sulla scheda ospitante.
 Non cambia né l'analisi né il footprint: dopo averla cambiata basta rigenerare
-il modello 3D con l'icona accanto alla spunta. Le due spunte restano sincronizzate.
+il modello STEP con l'icona accanto alla spunta. Le due spunte restano sincronizzate.
 Il corpo del modulo, con rame e fori ricavati dalla foto,
 non cambia in base al tipo di montaggio scelto.</p>
 <p>Quando cambi soltanto questa spunta, la rigenerazione riutilizza i modelli
@@ -561,11 +561,11 @@ parametri</strong> del progetto, e ogni blocco nomina il suo rimedio, abilitato 
 accanto: <span class="ui">Applica ai file</span> (metadati o footprint non ancora
 scritti), <span class="ui">Aggiorna il file del simbolo</span> (il
 <code>.kicad_sym</code> esportato non corrisponde al simbolo applicato),
-<span class="ui">Rimuovi il modello 3D obsoleto</span> (uno STEP vecchio che non si
+<span class="ui">Rimuovi il modello STEP obsoleto</span> (uno STEP vecchio che non si
 può ricostruire). Quando lo STEP è stato costruito su piazzole diverse, oppure sono
 cambiati solo colori o annotazioni, il rimedio è il pulsante di rigenerazione
-nella barra della scheda <a href="#modello3d">«Modello 3D»</a> (suggerimento
-<span class="ui">Rigenera modello 3D (STEP) con queste annotazioni</span>). Un
+nella barra della scheda <a href="#modello3d">«Modello STEP»</a> (suggerimento
+<span class="ui">Rigenera modello STEP con queste annotazioni</span>). Un
 progetto salvato da una versione precedente può richiedere un
 <span class="ui">Applica ai file</span>. I comandi sono bloccati anche mentre gira
 un lavoro in background. Usano i file <strong>applicati</strong>: una bozza del
@@ -589,7 +589,7 @@ KiCad</span> (vedi sotto) e <span class="ui">Prova in KiCad...</span>. In
 <table>
   <tr><th>Comando</th><th>Che cosa fa</th></tr>
   <tr><td class="ui">Prova in KiCad...</td>
-      <td>Crea un piccolo progetto temporaneo con il footprint e il modello 3D, nella
+      <td>Crea un piccolo progetto temporaneo con il footprint e il modello STEP, nella
       sottocartella <code>.kicad-preview</code> del componente, e lo apre nel PCB
       Editor. In KiCad premi <kbd>Alt</kbd>+<kbd>3</kbd> per la vista 3D. Non installa
       e non modifica nessuna libreria di KiCad.</td></tr>
@@ -642,7 +642,7 @@ richiedono verifica nel progetto di destinazione.</p>
       passi, modelli usati, costi, avvisi. Si legge anche dal programma con
       l'icona <span class="ui">Log AI</span>.</td></tr>
   <tr><td><code>freecad.log</code></td><td>Nella cartella del progetto</td>
-      <td>L'uscita di FreeCAD durante la costruzione del modello 3D.</td></tr>
+      <td>L'uscita di FreeCAD durante la costruzione del modello STEP.</td></tr>
   <tr><td><code>crash-reports</code></td><td>Cartella <code>logs</code> dei dati del
       programma (installato: <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
       <td>Un file per ogni errore imprevisto del programma, con versione, sistema e
@@ -668,7 +668,7 @@ programma.</p>
 
 <h2 id="limiti">16. Limiti da conoscere</h2>
 <ul>
-  <li>L'analisi AI può sbagliare: controlla sempre footprint e modello 3D nelle
+  <li>L'analisi AI può sbagliare: controlla sempre footprint e modello STEP nelle
   anteprime prima di usarli.</li>
   <li>Le altezze dei corpi ricavate da una sola foto dall'alto sono
   <strong>stime</strong>, non misure. Verifica le altezze e le distanze critiche con

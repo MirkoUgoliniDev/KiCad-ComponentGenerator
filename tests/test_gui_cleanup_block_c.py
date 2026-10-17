@@ -129,7 +129,7 @@ def test_a_stale_3d_result_is_discarded_with_one_log_line(window, monkeypatch, i
     getattr(window, slot)("C:/out/U1.step")
     log = window._log_plain_text()
     assert shown == []
-    assert log.count("Modello 3D scartato") == 1 and "C:/out/U1.step" in log
+    assert log.count("Modello STEP scartato") == 1 and "C:/out/U1.step" in log
     assert "OK (3D)" not in log
 
 
@@ -143,7 +143,7 @@ def test_a_current_3d_result_is_shown_without_the_discard_line(window, monkeypat
     getattr(window, slot)("C:/out/U1.step")
     log = window._log_plain_text()
     assert shown == [Path("C:/out/U1.step")]
-    assert "Modello 3D scartato" not in log and "OK (3D) -> C:/out/U1.step" in log
+    assert "Modello STEP scartato" not in log and "OK (3D) -> C:/out/U1.step" in log
 
 
 # ── G6: the terminal pass charges the project it started from ──────────

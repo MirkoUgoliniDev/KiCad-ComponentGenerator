@@ -2061,7 +2061,7 @@ class PhotoReviewDialog(QDialog):
         body.addWidget(self.attributes_label)
         self.modal_model_button = QPushButton("Scegli modello KiCad…")
         self.modal_model_button.setToolTip(
-            "Confronta i modelli 3D di KiCad per il componente scelto "
+            "Confronta i modelli STEP di KiCad per il componente scelto "
             "(anche con doppio clic sulla lista).")
         self.modal_model_button.clicked.connect(self.choose_model)
         model_row = QHBoxLayout()
@@ -2095,7 +2095,7 @@ class PhotoReviewDialog(QDialog):
         self.parameters_button.clicked.connect(self.open_parameters)
         self.model_button = tool_button(
             "step-view-iso.svg", "Scegli modello KiCad…", "",
-            "Confronta i modelli 3D di KiCad per il componente scelto "
+            "Confronta i modelli STEP di KiCad per il componente scelto "
             "(anche con doppio clic sulla lista).", tr=tr)
         self.model_button.clicked.connect(self.choose_model)
         component_actions = QHBoxLayout()
@@ -2104,7 +2104,7 @@ class PhotoReviewDialog(QDialog):
         component_actions.addWidget(self.model_button)
         component_actions.addStretch()
         sidebar.addLayout(component_actions)
-        self.model_status = QLabel("Doppio clic su un componente per confrontare i modelli 3D.")
+        self.model_status = QLabel("Doppio clic su un componente per confrontare i modelli STEP.")
         self.model_status.setWordWrap(True)
         self.model_status.setTextFormat(Qt.TextFormat.PlainText)
         self.warning_label = QLabel()
@@ -2711,7 +2711,7 @@ class PhotoReviewDialog(QDialog):
              else tr("Tieni o lascia il corpo aggiunto dal solo modello")),
         ]
         if not detector:
-            rows.append((tr("Doppio clic"), tr("Confronta i modelli 3D KiCad del componente")))
+            rows.append((tr("Doppio clic"), tr("Confronta i modelli STEP KiCad del componente")))
         table = "".join(
             "<tr><td style='padding:2px 12px 2px 0'><b>" + escape(key) + "</b></td>"
             "<td style='padding:2px 0'>" + escape(text) + "</td></tr>" for key, text in rows)

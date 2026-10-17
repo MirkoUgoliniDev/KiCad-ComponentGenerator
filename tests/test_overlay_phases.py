@@ -122,7 +122,7 @@ def test_a_new_operation_starts_with_an_empty_list(overlay):
 
 def test_a_job_with_steps_lists_no_phases(overlay):
     """Negative: the generation ticks its own steps; a second list would repeat them."""
-    overlay.set_steps(["Footprint", "Modello 3D"])
+    overlay.set_steps(["Footprint", "Modello STEP"])
     overlay.set_tool("footprint")
     overlay.set_tool("freecad")
     assert overlay.phases_plain_text() == ""
@@ -171,7 +171,7 @@ def test_the_running_mark_pulses_without_changing_the_rows(overlay):
 def test_the_running_step_of_a_generation_pulses_too(overlay):
     """@brief The generation modal lists steps instead of phases: its «●» pulses the same way."""
     import re
-    overlay.set_steps(["Footprint 2D", "Modelli 3D", "Solido 3D"])
+    overlay.set_steps(["Footprint 2D", "Modelli STEP", "Solido 3D"])
     overlay.set_current_step(1)
     before_html, before_text = overlay.steps.text(), overlay.steps_plain_text()
     for _ in range(overlay._PULSE_TICKS // 4):

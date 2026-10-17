@@ -9,7 +9,7 @@ def setup_board(window, monkeypatch):
     monkeypatch.setattr(window.symbol_tab, "confirm_export_review", lambda: True)
     params = module()
     monkeypatch.setattr(window, '_is_castellated', lambda: True)
-    monkeypatch.setattr(window, '_current_castellated_params', lambda: params)
+    monkeypatch.setattr(window, '_current_castellated_params', lambda *_args, **_kwargs: params)
     window.pinout = [{'pin': n, 'name': 'GND' if n == 1 else f'GPIO{n}'} for n in range(1, 8)]
     window._open_project_folder = window._project_dir()
     window._restoring_project = False

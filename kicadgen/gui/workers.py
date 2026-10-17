@@ -18,7 +18,7 @@ every name defined here, so existing imports keep working.
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import partial
+from functools import lru_cache, partial
 import re
 import json
 import threading
@@ -60,12 +60,33 @@ def accepts_keyword(function, name: str) -> bool:
     @note Rules and reasons are those of `phase_kwargs`, of which this is the
         general part: a `**kwargs` ALONE is the footprint of a wrapper written
         without `functools.wraps`, so it proves nothing.
+    @note The answer depends only on the code object, so it is memoised on the
+        underlying function and on whether it is bound (`_keyword_answer`):
+        the window asked it a dozen times per keystroke (2026-10-17). A bound
+        method is keyed by its function, never by the instance, so the cache
+        keeps no window alive; a different (e.g. monkeypatched) function is
+        a different key.
     """
+    target = getattr(function, "__func__", None)
+    try:
+        if target is not None and hasattr(function, "__self__"):
+            return _keyword_answer(target, True, name)
+        return _keyword_answer(function, False, name)
+    except TypeError:  # unhashable callable: answer without the memo
+        return _keyword_answer.__wrapped__(function, False, name)
+
+
+@lru_cache(maxsize=1024)
+def _keyword_answer(function, bound: bool, name: str) -> bool:
+    """Answer of `accepts_keyword` for `function`; `bound` drops its first parameter (self)."""
     try:
         import inspect
         parameters = list(inspect.signature(function).parameters.values())
     except (TypeError, ValueError):  # builtin or object that cannot be introspected
         return False
+    if bound and parameters and parameters[0].kind in (
+            inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        parameters = parameters[1:]
     named = [p for p in parameters if p.kind not in (
         inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)]
     for parameter in parameters:
@@ -510,7 +531,7 @@ class GenerateWorker(_Cad3DRunWorker):
                 # starts.
                 if not self.single_component and not isinstance(self.params, PackageGeometry):
                     self.phase.emit('consolidated', tx("confronto con l'archivio condiviso"), 0, 0)
-                self.progress.emit(tx("Generazione del modello 3D tramite FreeCAD…"))
+                self.progress.emit(tx("Generazione del modello STEP tramite FreeCAD…"))
                 result = self._generate_model()
                 for warning in result.get('warnings', []):
                     self.warning.emit(warning)

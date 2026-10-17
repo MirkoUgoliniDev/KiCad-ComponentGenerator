@@ -36,7 +36,7 @@ tengono con **Tieni o lascia** (T) nella revisione.
 2. Seleziona un corpo nell'elenco o sulla foto e premi **Scegli modello
    KiCad…** (nella barra, con doppio clic sulla riga, oppure da
    **Parametri…**, la modale con le sezioni rilevatore locale, AI e modello
-   KiCad e le correzioni modificabili). Dalla scheda **Modello 3D** lo stesso
+   KiCad e le correzioni modificabili). Dalla scheda **Modello STEP** lo stesso
    selettore si apre con il tasto destro sul corpo e **Cambia modello
    KiCad…**, anche senza la foto.
 3. La finestra **Scelta del modello STEP** confronta il ritaglio della foto
@@ -52,12 +52,12 @@ tengono con **Tieni o lascia** (T) nella revisione.
    dalla rotazione del package sulla scheda. In alternativa scegli un file
    STEP manualmente, oppure **Nessuno corrisponde** per conservare il
    segnaposto.
-5. Premi **Applica correzioni**, poi **Rigenera modello 3D (STEP) con queste
+5. Premi **Applica correzioni**, poi **Rigenera modello STEP con queste
    annotazioni** (F5) nella
-   scheda Modello 3D. Annulla non cambia il componente. Non occorre ripetere
+   scheda Modello STEP. Annulla non cambia il componente. Non occorre ripetere
    l'analisi AI: queste operazioni sono gratuite.
 
-**Accetto, mi piace — ricorda questi modelli…** (scheda Modello 3D, dopo una
+**Accetto, mi piace — ricorda questi modelli…** (scheda Modello STEP, dopo una
 generazione riuscita) salva gli abbinamenti corpo/modello con un opt-out per
 riga; in una scheda futura vengono proposti subito, da confermare. L'archivio
 si rivede e si ripulisce con **Configurazione → Archivio abbinamenti

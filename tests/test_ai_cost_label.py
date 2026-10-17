@@ -111,7 +111,7 @@ def test_the_cost_survives_the_modal_restarting_for_the_freecad_phase(window):
     openrouter._record_usage(response(0.05, prompt=10))
     window.analysis_overlay.start('Analisi AI in corso', 'in corso…')
     window._on_extract_finished()
-    window.analysis_overlay.start('Generazione modello 3D', 'Avvio di FreeCAD…')
+    window.analysis_overlay.start('Generazione modello STEP', 'Avvio di FreeCAD…')
     assert '0.05' in window.analysis_overlay.cost.text()
 
 

@@ -273,9 +273,9 @@ def test_the_generation_worker_receives_the_positions(window, monkeypatch):
     monkeypatch.setattr(gui.GenerateWorker, "start", lambda worker: started.append(worker))
     window.footprint_text_positions = {"Value": (0.0, 9.0)}
     window._generate(footprint_only=True)
-    # CONTRACT CHANGED 2026-10-16: the worker receives BOTH anchors (the
-    # unchosen Reference converted from its default centre, as drawn).
-    assert started and started[0].text_positions["Value"] == (0.0, 9.0)
-    assert set(started[0].text_positions) == set(TEXT_KEYS)
+    # CONTRACT CHANGED 2026-10-17 (user, «Predefinito centrato»): only the
+    # chosen anchor; the unmoved Reference keeps the generator's centred
+    # default (from 2026-10-16 both anchors were passed).
+    assert started and started[0].text_positions == {"Value": (0.0, 9.0)}
     started[0].text_positions["Value"] = (1.0, 1.0)
     assert window.footprint_text_positions == {"Value": (0.0, 9.0)}, "the worker got a copy"

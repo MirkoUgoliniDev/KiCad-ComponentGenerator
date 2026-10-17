@@ -73,7 +73,7 @@ class ComponentEditorDialog(QDialog):
         layout = QVBoxLayout(self)
         note = QLabel("Origine al centro del modulo, X a destra, Y in basso come nel footprint; "
                       "Lung. = asse lungo del componente, Rot. = come sta sul modulo. "
-                      "Nessuna richiesta AI: dopo «Applica» il modello 3D si rigenera con FreeCAD.")
+                      "Nessuna richiesta AI: dopo «Applica» il modello STEP si rigenera con FreeCAD.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.table = QTableWidget(0, len(COLUMNS))

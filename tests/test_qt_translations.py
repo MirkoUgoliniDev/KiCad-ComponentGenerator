@@ -44,3 +44,43 @@ def test_a_language_without_a_qt_catalogue_falls_back_to_english_not_the_previou
     assert yes_text() == "Oui"
     assert not install_qt_translations("none")
     assert yes_text() == "Yes"
+
+
+def _scroll_names(tabs):
+    from PyQt6.QtWidgets import QToolButton
+    bar = tabs.tabBar()
+    return [bar.findChild(QToolButton, name).accessibleName()
+            for name in ("ScrollLeftButton", "ScrollRightButton")]
+
+
+def test_tab_scroll_buttons_built_before_a_switch_follow_it(qapp):  # noqa: F811
+    """@brief Positive (2026-10-17, S2): Qt writes these names only at construction.
+
+    A bar built in Italian kept «Scorri a sinistra» after a switch to German;
+    the reference is a bar built AFTER the switch, so the expected text comes
+    from Qt's own catalogue and not from a copy in the test.
+    """
+    from PyQt6.QtWidgets import QTabWidget, QWidget
+    assert install_qt_translations("it")
+    early = QTabWidget()
+    early.addTab(QWidget(), "A")
+    italian = _scroll_names(early)
+    assert install_qt_translations("de")
+    late = QTabWidget()
+    late.addTab(QWidget(), "A")
+    assert _scroll_names(late) != italian, "Qt's German catalogue must differ from Italian"
+    assert _scroll_names(early) == _scroll_names(late)
+    early.deleteLater()
+    late.deleteLater()
+
+
+def test_a_button_with_the_same_name_outside_a_tab_bar_is_left_alone(qapp):  # noqa: F811
+    """@brief Negative: only the tab bar's own buttons are Qt's; an app button keeps its name."""
+    from PyQt6.QtWidgets import QToolButton, QWidget
+    holder = QWidget()
+    button = QToolButton(holder)
+    button.setObjectName("ScrollLeftButton")
+    button.setAccessibleName("Nome dell'applicazione")
+    install_qt_translations("de")
+    assert button.accessibleName() == "Nome dell'applicazione"
+    holder.deleteLater()

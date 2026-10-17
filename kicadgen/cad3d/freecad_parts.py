@@ -1200,7 +1200,7 @@ def heartbeat_line(model_name, seconds):
         reason they are waiting. The tests verify it by importing those two
         functions.
     """
-    return (f"Importazione del modello 3D {model_name} ancora in corso da "
+    return (f"Importazione del modello STEP {model_name} ancora in corso da "
             f"{_elapsed_phrase(seconds)}, un modello di libreria grande puo' "
             f"richiedere minuti.")
 
@@ -1892,7 +1892,7 @@ def landmark_budget_line(model_name, seconds):
         the user would never know why that component stayed oriented by the
         envelope alone.
     """
-    return (f"Verso del modello 3D {model_name} non misurato entro "
+    return (f"Verso del modello STEP {model_name} non misurato entro "
             f"{_elapsed_phrase(seconds)}, il componente resta orientato "
             f"secondo il solo ingombro.")
 
