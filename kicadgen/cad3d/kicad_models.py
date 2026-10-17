@@ -45,7 +45,7 @@ from functools import lru_cache
 from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
-from .process_log import CANCEL_POLL_INTERVAL_S, NO_WINDOW_FLAGS, ProcessCancelled
+from .process_log import CANCEL_POLL_INTERVAL_S, NO_WINDOW_FLAGS, ProcessCancelled, kill_process_tree
 from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
@@ -1142,11 +1142,8 @@ def _measure_batch(freecad, paths, timeout, cancel):
                     env=environment, creationflags=NO_WINDOW_FLAGS) as process:
 
                 def kill_child():
-                    """The only place where the measurement child process is killed."""
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+                    """The only place where the measurement child process is killed (with its own children)."""
+                    kill_process_tree(process)
                     process.wait()
 
                 def progress_size():
@@ -3473,7 +3470,7 @@ def attach_models(components, log=None, library: Optional[Path] = None, progress
                 component["render_3d"] = False
                 report["render_3d"] = False
                 note(tx("Solo ipotesi del rilevatore per {get}: tenuta per la revisione, "
-                        "esclusa dal 3D.",
+                        "esclusa dal modello STEP.",
                         get=component.get('name')))
     _synchronize_preview_variants(components, note)
     if progress is not None:

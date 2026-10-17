@@ -26,6 +26,83 @@ def no_window_flags(platform: str = sys.platform) -> int:
 NO_WINDOW_FLAGS = no_window_flags()
 
 
+def _windows_descendants(pid: int) -> list:
+    """Process ids started, directly or not, by `pid`, deepest first (Windows Toolhelp snapshot)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return []
+    children = {}
+    try:
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(_Entry)
+        ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
+        while ok:
+            children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+            ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    found, frontier = [], [pid]
+    while frontier:
+        nxt = [child for parent in frontier for child in children.get(parent, []) if child not in found]
+        found.extend(nxt)
+        frontier = nxt
+    return list(reversed(found))
+
+
+def _windows_terminate(pid: int) -> None:
+    """End one process by id; a process already gone is not an error."""
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+    if handle:
+        try:
+            kernel32.TerminateProcess(handle, 1)
+        finally:
+            kernel32.CloseHandle(handle)
+
+
+def kill_process_tree(process, platform: str = sys.platform) -> None:
+    """@brief Kill a child process and every process it started.
+
+    @param process A `subprocess.Popen` still owned by the caller.
+    @param platform Platform name (tests pass another one).
+    @note `Popen.kill` ends only the direct child. On Windows a launcher
+        (a venv `python.exe`, a FreeCAD wrapper) starts the real program as
+        its own child, which then survived, kept the output file open and
+        made the temporary folder undeletable (2026-10-17, WinError 32 in
+        the suite). The descendants are found with a Toolhelp snapshot and
+        ended deepest first, through the Windows API: no helper process is
+        started (an external `taskkill` was itself a child to account for).
+        Elsewhere only the direct child is killed, as before.
+    @note Never raises for a process that already exited. A process id
+        reused after its process ended cannot be confused: the descendants
+        are collected while the child is still alive, so their parent ids
+        are live.
+    """
+    if platform == "win32" and process.poll() is None:
+        try:
+            for pid in _windows_descendants(process.pid):
+                _windows_terminate(pid)
+        except (OSError, AttributeError, ValueError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 #: How many heartbeats must fit in one silence window.
 #:
 #: The watchdog below kills the child after `timeout` seconds without output.
@@ -164,10 +241,7 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                                    if env is None else env)) as process:
             def kill_child():
                 """The only place where the child process is killed: by the watchdog and on cancellation."""
-                try:
-                    process.kill()
-                except OSError:
-                    pass
+                kill_process_tree(process)
 
             def expire():
                 timed_out.set()

@@ -24,16 +24,26 @@ The item built here:
   quarter (reading up the page). The anchor therefore stays where the file
   puts it.
 
+A text carrying KiCad markup (overbar «~{...}», superscript «^{...}»,
+subscript «_{...}», `core.kicad_text.kicad_text_layout`) is drawn by
+`KicadMarkupTextItem`: the markup characters are not shown, each styled run
+is stretched to its own KiCad advance cells at KiCad's script size (0.8)
+and baseline shift, and every overbar is a line of the text pen where KiCad
+draws it. A text without markup keeps the plain item, unchanged.
+
 The remaining difference with KiCad is the glyph shapes and their side
 bearings: measured against kicad-cli (tests/test_kicad_width_texts.py), the
 visible ends of a text lie within about a fifth of the size of KiCad's.
 """
 from __future__ import annotations
 
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetricsF, QPainterPath, QTextLayout, QTransform
+from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QPainterPath, QPainterPathStroker, QTextLayout,
+                         QTransform)
 from PyQt6.QtWidgets import QGraphicsSimpleTextItem
 
-from ..core.kicad_text import SCHEMATIC_DEFAULT_PEN_MM, kicad_advance_width, kicad_text_cells
+from ..core.kicad_text import (KICAD_PEN_CLAMP_RATIO, SCHEMATIC_DEFAULT_PEN_MM, kicad_advance_width,
+                               kicad_text_cells, kicad_text_layout)
 
 #: Pixel size of the reference font a text is laid out in before the item is
 #: scaled to KiCad's size: large, so the measured cap height is precise and
@@ -157,27 +167,39 @@ def kicad_text_item(text: str, size: float, x: float, y: float, *, base_font: QF
         baseline lie where KiCad lays them out (`kicad_text_cells`).
         sceneBoundingRect, shape and hit tests follow the stretch.
     @note Empty texts (no advance on either side) are not stretched.
+    @note A text carrying KiCad markup returns a `KicadMarkupTextItem`
+        (a QGraphicsSimpleTextItem subclass whose `text()` is still the text
+        as written): runs, script sizes, baseline shifts and overbars as
+        KiCad lays them out, with the same anchor placement; its base
+        transform is the identity (the stretch is per run).
     """
     font = reference_font(base_font)
-    item = QGraphicsSimpleTextItem(text)
-    item.setFont(font)
+    layout = kicad_text_layout(text)
+    factor = float(size) * mm_to_px / cap_height_px(font)
+    if layout.is_plain and layout.visible_text == text:
+        item = QGraphicsSimpleTextItem(text)
+        item.setFont(font)
+        qt_width = item.boundingRect().width()
+        kicad_width = kicad_advance_width(text, size) * mm_to_px
+        stretch = kicad_width / (qt_width * factor) if qt_width > 0 and kicad_width > 0 else 1.0
+        # Qt combines the rotation and scale properties first and the base
+        # transform after them, in the parent's axes: the stretch goes on the
+        # page axis the text reads along (y for a quarter-turned text). The
+        # properties stay the uniform cap scale and the quarter turn, as before.
+        item.setTransform(QTransform.fromScale(1.0, stretch) if vertical else QTransform.fromScale(stretch, 1.0))
+        ascent = text_baseline_px(text, font)
+    else:
+        # Markup: every run carries its own stretch inside the item.
+        item = KicadMarkupTextItem(text, font, size, thickness)
+        ascent = item.baseline_px()
     if colour is not None:
         item.setBrush(QBrush(QColor(colour)))
-    factor = float(size) * mm_to_px / cap_height_px(font)
-    qt_width = item.boundingRect().width()
-    kicad_width = kicad_advance_width(text, size) * mm_to_px
-    stretch = kicad_width / (qt_width * factor) if qt_width > 0 and kicad_width > 0 else 1.0
-    # Qt combines the rotation and scale properties first and the base
-    # transform after them, in the parent's axes: the stretch goes on the
-    # page axis the text reads along (y for a quarter-turned text). The
-    # properties stay the uniform cap scale and the quarter turn, as before.
-    item.setTransform(QTransform.fromScale(1.0, stretch) if vertical else QTransform.fromScale(stretch, 1.0))
     item.setScale(factor)
     left_mm, baseline_mm = kicad_text_cells(text, size, thickness, justify, vjustify)
     # Item origin (top-left of its layout) in the text's own frame, scene px:
     # `along` the reading direction and `up` towards the glyph tops.
     along = left_mm * mm_to_px
-    up = baseline_mm * mm_to_px + text_baseline_px(text, font) * factor
+    up = baseline_mm * mm_to_px + ascent * factor
     if vertical:
         item.setRotation(-90)
         item.setPos(x - up, y - along)
@@ -186,12 +208,125 @@ def kicad_text_item(text: str, size: float, x: float, y: float, *, base_font: QF
     return item
 
 
+class KicadMarkupTextItem(QGraphicsSimpleTextItem):
+    """@brief A text with KiCad markup drawn as KiCad draws it: markup hidden, scripts and overbars in place.
+
+    @note Item coordinates are the reference font's pixels before the
+        item's uniform scale, as for the plain item: x from the start of the
+        first advance cell, the baseline `baseline_px()` below the top. Each
+        run of `core.kicad_text.kicad_text_layout` is laid out in the
+        reference font, scaled by its script size and stretched so its
+        layout width equals its KiCad advance cells; overbars are stroked
+        with KiCad's pen (thickness clamped to 0.25 x size) and round caps.
+        The drawing is built once: `setText` changes `text()` only.
+    """
+
+    def __init__(self, text: str, font: QFont, size: float, thickness: float):
+        """@brief Build the drawing of `text` at KiCad's layout.
+
+        @param text The text as written (with its markup); `text()` returns it.
+        @param font The reference font (`reference_font`).
+        @param size KiCad text size, mm (sets the overbar pen in cap units).
+        @param thickness Stroke thickness KiCad draws the text with, mm.
+        """
+        super().__init__(text)
+        self.setFont(font)
+        layout = kicad_text_layout(text)
+        cap = cap_height_px(font)
+        # Item px per 1/21 of the size (capitals are `cap` px tall).
+        unit = cap / 21
+        metrics = QFontMetricsF(font)
+        visible = layout.visible_text
+        self._baseline = text_baseline_px(visible, font) if visible else metrics.ascent()
+        glyphs = QPainterPath()
+        for run in layout.runs:
+            outline = QPainterPath()
+            outline.addText(0.0, 0.0, font, run.text)
+            qt_width = metrics.horizontalAdvance(run.text)
+            target = run.advance * unit
+            stretch = target / (qt_width * run.scale) if qt_width > 0 and target > 0 else 1.0
+            transform = QTransform()
+            transform.translate(run.start * unit, self._baseline - run.rise * cap)
+            transform.scale(run.scale * stretch, run.scale)
+            glyphs.addPath(transform.map(outline))
+        bars = QPainterPath()
+        if layout.overbars and float(size) > 0:
+            pen = min(float(thickness), KICAD_PEN_CLAMP_RATIO * float(size)) * cap / float(size)
+            stroker = QPainterPathStroker()
+            stroker.setWidth(max(pen, 1e-3))
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            for bar in layout.overbars:
+                height = self._baseline - bar.height * cap
+                line = QPainterPath(QPointF(bar.start * unit, height))
+                line.lineTo(QPointF(bar.end * unit, height))
+                bars.addPath(stroker.createStroke(line))
+        self._glyphs = glyphs
+        self._bars = bars
+        box = QRectF(0.0, 0.0, layout.advance * unit, metrics.height())
+        for path in (glyphs, bars):
+            if not path.isEmpty():
+                box = box.united(path.boundingRect())
+        self._box = box
+
+    def baseline_px(self) -> float:
+        """@brief Distance, item px, from the top of the item's layout to its baseline.
+
+        @return The reference font's ascent of the visible text.
+        """
+        return self._baseline
+
+    def boundingRect(self) -> QRectF:
+        """@brief The layout box (KiCad's advance cells by the line height) united with the drawn ink.
+
+        @return Item-coordinate rectangle.
+        """
+        return QRectF(self._box)
+
+    def shape(self) -> QPainterPath:
+        """@brief Hit area: the bounding rectangle, as for the plain text item.
+
+        @return A path of `boundingRect`.
+        """
+        path = QPainterPath()
+        path.addRect(self._box)
+        return path
+
+    def paint(self, painter, option, widget=None) -> None:
+        """@brief Fill the glyph runs and the overbars with the item's brush.
+
+        @param painter The painter.
+        @param option Style options (unused).
+        @param widget Target widget (unused).
+        """
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.brush())
+        painter.drawPath(self._glyphs)
+        painter.drawPath(self._bars)
+        painter.restore()
+
+    def glyph_path(self) -> QPainterPath:
+        """@brief The glyph outlines the item fills, item coordinates (overbars excluded).
+
+        @return A copy of the glyph path.
+        """
+        return QPainterPath(self._glyphs)
+
+    def overbar_path(self) -> QPainterPath:
+        """@brief The stroked overbars the item fills, item coordinates.
+
+        @return A copy of the overbar path (empty without overbars).
+        """
+        return QPainterPath(self._bars)
+
+
 def kicad_text_stretch(item: QGraphicsSimpleTextItem) -> float:
     """@brief Horizontal stretch a `kicad_text_item` carries along its reading direction.
 
     @param item An item built by `kicad_text_item`.
     @return The scale of its base transform along the page axis it reads
-        along (1.0 for an unstretched item).
+        along (1.0 for an unstretched item, and for a
+        `KicadMarkupTextItem`, whose runs carry their own stretch).
     """
     transform = item.transform()
     return transform.m22() if item.rotation() % 180 else transform.m11()

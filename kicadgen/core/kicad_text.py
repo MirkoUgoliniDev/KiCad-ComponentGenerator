@@ -28,6 +28,9 @@ here from kicad-cli 10.0 SVG exports (read-only, 2026-10-16):
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
+
 #: Advances of KiCad's stroke font (newstroke), in 1/21 of the text size,
 #: grouped by advance. Measured with kicad-cli 10.0 `sym export svg` on
 #: «|c|» against «||» for every character listed and re-checked with
@@ -95,32 +98,355 @@ def kicad_text_margin(size: float, thickness: float = SCHEMATIC_DEFAULT_PEN_MM) 
     return KICAD_PEN_MARGIN_RATIO * min(float(thickness), KICAD_PEN_CLAMP_RATIO * float(size))
 
 
-def kicad_advance_units(text: str) -> int:
-    """@brief Sum of the stroke-font advances of a one-line text, in 1/21 of the size.
+# ── Markup: overbar ~{...}, superscript ^{...}, subscript _{...} ─────────
+# KiCad 10 parses every drawn text with the PEGTL grammar of
+# include/markup_parser.h and draws the tree in KIFONT::FONT::drawMarkup
+# (common/font/font.cpp). Rules reproduced here:
+# - a markup is «~{», «^{» or «_{» followed by text and nested markups up to
+#   its closing «}»; inside it «{identifier}» is kept as literal text and any
+#   other character but «}» is literal. Without a closing «}» it is not a
+#   markup and every character, «~{» included, is drawn literally; a lone
+#   «~», «^», «_», «{» or «}» is literal too (KiCad 10 has no «~» toggle);
+# - outside markups, «http://» or «https://» starts a URL that runs to the
+#   next space and is drawn literally (no markup inside it);
+# - empty markups («~{}», «^{}», «_{}») are discarded: no bar, no shift;
+# - styles nest as flags: subscript wins over superscript at any depth, an
+#   overbar inside a superscript keeps the superscript;
+# - sub/superscript glyphs are 0.8 x size (advance included) and their
+#   cursor moves 0.15 x 0.8 x size down / 0.35 x 0.8 x size up
+#   (include/font/stroke_font.h: m_superSubSize 0.8,
+#   m_subscriptBaselineOffset 0.15, m_superscriptBaselineOffset -0.35);
+# - an overbar is a line drawn with the text pen from 0.1 x size after the
+#   cursor where its span starts to 0.1 x size before the cursor where it
+#   ends (font.cpp barTrim), 1.23 x size above the cursor line
+#   (include/font/font_metrics.h m_OverbarHeight), whatever the style of
+#   its content.
+# Measured with kicad-cli 10.0 `sym export svg` and `fp export svg`
+# (2026-10-17) on «H» around the markup at sizes 1.0 and 2.0, pens 0.05,
+# 0.1524, 0.15 and 0.25 mm: the cursor line lies 1/21 x size above the
+# baseline, so a superscript baseline rises 0.28952 x size, a subscript one
+# drops 0.11048 x size and the bar lies 1.27762 x size above the baseline
+# (measured 0.2896, 0.1104 and 1.2776 x size, within 0.0001 mm); the bar
+# starts 0.1001 x size after the first cell of its span and ends
+# 0.0999 x size before the last; the justification box is the summed
+# advances (scripts at 0.8) plus the usual pen margin, and the vertical
+# justification does not depend on the markup.
 
-    @param text The text as KiCad shows it.
-    @return The summed advances; a character outside the table counts
-        `KICAD_ADVANCE_FALLBACK_UNITS` (declared heuristic).
-    @note The overbar/superscript/subscript markup openers «~{», «^{», «_{»
-        and their closing brace are not counted (approximation: KiCad draws
-        sub/superscripts smaller, not wider).
+#: Size of superscript and subscript glyphs, as a fraction of the text size.
+KICAD_SUPER_SUB_SIZE = 0.8
+#: Cursor shift of a superscript, as a fraction of its own (0.8) glyph size,
+#: towards the glyph tops (KiCad's -0.35 in a y-down frame).
+KICAD_SUPERSCRIPT_CURSOR_SHIFT = 0.35
+#: Cursor shift of a subscript, as a fraction of its own glyph size, towards
+#: the glyph bottoms.
+KICAD_SUBSCRIPT_CURSOR_SHIFT = 0.15
+#: Height of KiCad's glyph cursor line above the baseline, as a fraction of
+#: the glyph size (measured 1/21: see the markup notes above).
+KICAD_CURSOR_ABOVE_BASELINE = 1 / 21
+#: Height of the overbar above the cursor line, as a fraction of the size.
+KICAD_OVERBAR_ABOVE_CURSOR = 1.23
+#: Length cut from each end of an overbar, as a fraction of the size.
+KICAD_OVERBAR_TRIM = 0.1
+
+#: The replacements of KiCad's UnescapeString (common/string_utils.cpp).
+KICAD_ESCAPES = {"dblquote": '"', "quote": "'", "lt": "<", "gt": ">", "backslash": "\\", "slash": "/",
+                 "bar": "|", "comma": ",", "colon": ":", "space": " ", "dollar": "$", "tab": "\t",
+                 "return": "\n", "brace": "{"}
+
+
+def kicad_unescape(text: str) -> str:
+    """@brief The text KiCad shows for a text or property written `text`: its «{token}» escapes replaced.
+
+    @param text The string as written in the KiCad file.
+    @return KiCad's UnescapeString of it (common/string_utils.cpp, 10.0):
+        «{slash}», «{brace}» and the other `KICAD_ESCAPES` tokens replaced;
+        a token right after «$», «~», «^» or «_» kept with its braces (it
+        is a variable or a markup), unknown tokens kept, an unterminated
+        «{» kept with the rest unescaped.
+    @note Measured with kicad-cli 10.0: symbol texts and properties and
+        footprint texts and properties are shown unescaped, pin names and
+        numbers are NOT (a pin named «N{slash}A» shows the braces). The
+        caller decides; `kicad_text_layout` and the width functions take
+        the shown text.
     """
-    units = 0
-    depth = 0
+    if len(text) <= 2:
+        return text
+    out = []
+    previous = ""
     index = 0
     while index < len(text):
         char = text[index]
-        if char in '~^_' and text[index + 1:index + 2] == '{':
-            depth += 1
-            index += 2
-            continue
-        if char == '}' and depth:
-            depth -= 1
+        if char != "{":
+            out.append(char)
+            previous = char
             index += 1
             continue
-        units += KICAD_ADVANCE_UNITS.get(char, KICAD_ADVANCE_FALLBACK_UNITS)
+        depth, end = 1, index + 1
+        while end < len(text):
+            if text[end] == "{":
+                depth += 1
+            elif text[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            end += 1
+        token = text[index + 1:end]
+        if end >= len(text):
+            out.append("{" + kicad_unescape(token))
+            break
+        if previous in ("$", "~", "^", "_") or token not in KICAD_ESCAPES:
+            out.append("{" + kicad_unescape(token) + "}")
+        else:
+            out.append(KICAD_ESCAPES[token])
+        # KiCad's `prev` is the last INPUT character: the closing brace.
+        previous = "}"
+        index = end + 1
+    return "".join(out)
+
+
+def _is_identifier_start(char: str) -> bool:
+    """PEGTL identifier_first: ASCII letter or underscore."""
+    return char == "_" or ("a" <= char <= "z") or ("A" <= char <= "Z")
+
+
+def _is_identifier_other(char: str) -> bool:
+    """PEGTL identifier_other: ASCII letter, digit or underscore."""
+    return _is_identifier_start(char) or ("0" <= char <= "9")
+
+
+def _escape_sequence_end(text: str, index: int) -> int:
+    """End index of a «{identifier}» escape sequence starting at `index`, or -1."""
+    if text[index:index + 1] != "{" or not _is_identifier_start(text[index + 1:index + 2]):
+        return -1
+    end = index + 2
+    while end < len(text) and _is_identifier_other(text[end]):
+        end += 1
+    return end + 1 if text[end:end + 1] == "}" else -1
+
+
+def _url_end(text: str, index: int) -> int:
+    """End index of a URL (http:// or https://, then one or more non-spaces) starting at `index`, or -1."""
+    for prefix in ("https://", "http://"):
+        if text.startswith(prefix, index):
+            end = index + len(prefix)
+            while end < len(text) and text[end] != " ":
+                end += 1
+            return end if end > index + len(prefix) else -1
+    return -1
+
+
+def _parse_markup(text: str, index: int, memo: dict):
+    """(node, end) of the markup starting at `index`, or None: KiCad's `braces<ControlChar>` rule.
+
+    A node is (kind, children) with kind «~», «^» or «_»; a child is a
+    literal string or a nested node. Memoised per start index, since a
+    failed markup is retried at every enclosing level.
+    """
+    if index in memo:
+        return memo[index]
+    result = None
+    if text[index:index + 1] in ("~", "^", "_") and text[index + 1:index + 2] == "{":
+        children = []
+        literal = []
+        position = index + 2
+        while position < len(text):
+            if text[position] == "}":
+                if literal:
+                    children.append("".join(literal))
+                result = ((text[index], tuple(children)), position + 1)
+                break
+            nested = _parse_markup(text, position, memo)
+            if nested is not None:
+                if literal:
+                    children.append("".join(literal))
+                    literal = []
+                children.append(nested[0])
+                position = nested[1]
+                continue
+            escape_end = _escape_sequence_end(text, position)
+            if escape_end > 0:
+                literal.append(text[position:escape_end])
+                position = escape_end
+                continue
+            literal.append(text[position])
+            position += 1
+    memo[index] = result
+    return result
+
+
+def parse_kicad_markup(text: str) -> tuple:
+    """@brief KiCad's markup tree of a shown text (include/markup_parser.h, 10.0).
+
+    @param text The text as KiCad shows it (see `kicad_unescape`).
+    @return Tuple of children: literal strings and (kind, children) nodes,
+        kind «~» (overbar), «^» (superscript) or «_» (subscript). Unclosed
+        markups and URLs are literal; empty markups are kept here and
+        ignored by `kicad_text_layout`, as KiCad discards them.
+    """
+    memo: dict = {}
+    children = []
+    literal = []
+    index = 0
+    while index < len(text):
+        markup = _parse_markup(text, index, memo)
+        if markup is not None:
+            if literal:
+                children.append("".join(literal))
+                literal = []
+            children.append(markup[0])
+            index = markup[1]
+            continue
+        url_end = _url_end(text, index)
+        if url_end > 0:
+            literal.append(text[index:url_end])
+            index = url_end
+            continue
+        literal.append(text[index])
         index += 1
-    return units
+    if literal:
+        children.append("".join(literal))
+    return tuple(children)
+
+
+@dataclass(frozen=True)
+class KicadTextRun:
+    """@brief A run of characters KiCad draws with one style.
+
+    @note `start` and `advance` are in 1/21 of the text size along the
+        reading direction, from the start of the first advance cell;
+        `advance` already includes `scale`. `rise` is the baseline shift
+        towards the glyph tops, as a fraction of the size.
+    """
+    text: str
+    start: float
+    advance: float
+    scale: float = 1.0
+    rise: float = 0.0
+
+
+@dataclass(frozen=True)
+class KicadOverbar:
+    """@brief An overbar KiCad draws, as a line with the text pen.
+
+    @note `start` and `end` in 1/21 of the size from the start of the first
+        cell (already trimmed; `end` < `start` when the span is shorter
+        than the trims, as KiCad then draws it reversed); `height` above
+        the baseline as a fraction of the size.
+    """
+    start: float
+    end: float
+    height: float
+
+
+@dataclass(frozen=True)
+class KicadTextLayout:
+    """@brief How KiCad lays out a one-line text: styled runs, overbars and total advance.
+
+    @note `advance` in 1/21 of the size; an int for a text without
+        sub/superscripts, so plain texts keep their exact sums.
+    """
+    runs: tuple
+    overbars: tuple
+    advance: float
+
+    @property
+    def visible_text(self) -> str:
+        """@brief The characters KiCad draws, markup removed.
+
+        @return The concatenated run texts.
+        """
+        return "".join(run.text for run in self.runs)
+
+    @property
+    def is_plain(self) -> bool:
+        """@brief Whether the layout is one unstyled run without overbars.
+
+        @return True when every character is drawn at full size on the baseline.
+        """
+        return not self.overbars and all(run.scale == 1.0 and run.rise == 0.0 for run in self.runs)
+
+
+#: Baseline rise of a superscript, fraction of the size: its cursor shift
+#: plus the cursor line scaled down with the glyph (0.28952).
+KICAD_SUPERSCRIPT_RISE = (KICAD_SUPER_SUB_SIZE * KICAD_SUPERSCRIPT_CURSOR_SHIFT
+                          + (1 - KICAD_SUPER_SUB_SIZE) * KICAD_CURSOR_ABOVE_BASELINE)
+#: Baseline rise of a subscript, fraction of the size (-0.11048: it drops).
+KICAD_SUBSCRIPT_RISE = (-KICAD_SUPER_SUB_SIZE * KICAD_SUBSCRIPT_CURSOR_SHIFT
+                        + (1 - KICAD_SUPER_SUB_SIZE) * KICAD_CURSOR_ABOVE_BASELINE)
+#: Height of an overbar above the baseline, fraction of the size (1.27762).
+KICAD_OVERBAR_HEIGHT = KICAD_OVERBAR_ABOVE_CURSOR + KICAD_CURSOR_ABOVE_BASELINE
+
+
+def _string_units(text: str) -> int:
+    """Summed table advances of literal characters, 1/21 of the size."""
+    return sum(KICAD_ADVANCE_UNITS.get(char, KICAD_ADVANCE_FALLBACK_UNITS) for char in text)
+
+
+@lru_cache(maxsize=4096)
+def kicad_text_layout(text: str) -> KicadTextLayout:
+    """@brief KiCad's layout of a one-line shown text: styled runs, overbars and total advance.
+
+    @param text The text as KiCad shows it (escapes already replaced where
+        KiCad replaces them, see `kicad_unescape`).
+    @return A `KicadTextLayout`; for a text without markup, one run equal
+        to `text` and its plain advance sum.
+    @note Walks `parse_kicad_markup` as KiCad's drawMarkup does: the cursor
+        advances by each character's table advance (x 0.8 in a script);
+        overbars span the cursor positions of their content.
+    """
+    runs: list = []
+    bars: list = []
+    plain_units = 0
+    script_units = 0
+
+    def cursor() -> float:
+        return plain_units + KICAD_SUPER_SUB_SIZE * script_units if script_units else plain_units
+
+    def walk(children, script):
+        nonlocal plain_units, script_units
+        for child in children:
+            if isinstance(child, str):
+                units = _string_units(child)
+                scale = KICAD_SUPER_SUB_SIZE if script else 1.0
+                rise = {"^": KICAD_SUPERSCRIPT_RISE, "_": KICAD_SUBSCRIPT_RISE}.get(script, 0.0)
+                start = cursor()
+                if script:
+                    script_units += units
+                else:
+                    plain_units += units
+                previous = runs[-1] if runs else None
+                if previous is not None and previous.scale == scale and previous.rise == rise:
+                    runs[-1] = KicadTextRun(previous.text + child, previous.start, cursor() - previous.start,
+                                            scale, rise)
+                else:
+                    runs.append(KicadTextRun(child, start, cursor() - start, scale, rise))
+                continue
+            kind, nested = child
+            if not nested:
+                # KiCad's parse tree discards empty markups.
+                continue
+            # Subscript wins over superscript whatever the nesting order.
+            inner = "_" if "_" in (kind, script) else ("^" if "^" in (kind, script) else None)
+            start = cursor()
+            walk(nested, inner)
+            if kind == "~":
+                trim = KICAD_OVERBAR_TRIM * 21
+                bars.append(KicadOverbar(start + trim, cursor() - trim, KICAD_OVERBAR_HEIGHT))
+
+    walk(parse_kicad_markup(text), None)
+    return KicadTextLayout(tuple(runs), tuple(bars), cursor())
+
+
+def kicad_advance_units(text: str) -> float:
+    """@brief Sum of the stroke-font advances of a one-line text, in 1/21 of the size.
+
+    @param text The text as KiCad shows it.
+    @return The summed advances as KiCad's cursor moves (`kicad_text_layout`):
+        markup characters not counted, sub/superscript characters at 0.8; a
+        character outside the table counts `KICAD_ADVANCE_FALLBACK_UNITS`
+        (declared heuristic). An int for a text without sub/superscripts.
+    """
+    return kicad_text_layout(text).advance
 
 
 def kicad_text_width(text: str, size: float, thickness: float = SCHEMATIC_DEFAULT_PEN_MM) -> float:

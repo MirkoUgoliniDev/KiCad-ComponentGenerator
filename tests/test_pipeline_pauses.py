@@ -420,7 +420,7 @@ def test_the_late_free_path_reaches_freecad_with_the_corrections_and_no_ai_call(
     assert len(built) == 1, "lo STEP e' stato generato una volta"
     assert [(c.x, c.length, c.width) for c in built[0].components] == [(5.5, 7.5, 3.5)]
     log = window.ai_progress_text.toPlainText()
-    assert "Rigenerazione 3D" in window._log_plain_text() or "Rigenerazione 3D" in log
+    assert "Rigenerazione del modello STEP" in window._log_plain_text() or "Rigenerazione del modello STEP" in log
 
 
 def test_cancelling_the_late_review_changes_nothing_and_still_costs_nothing(

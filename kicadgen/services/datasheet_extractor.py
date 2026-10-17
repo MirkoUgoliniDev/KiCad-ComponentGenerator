@@ -1338,7 +1338,7 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
         data["_pin_map_conflict"] = tx(
             "Le due letture della numerazione non coincidono. Risposta principale ({main_view}): "
             "{main}. Lettura dedicata del disegno ({dedicated_view}, usata): {dedicated}. "
-            "Controlla il footprint sul disegno: accettala rigenerando footprint e 3D, "
+            "Controlla il footprint sul disegno: accettala rigenerando footprint e modello STEP, "
             "oppure ripeti l'analisi.",
             main_view=main_view or "unknown", dedicated_view=reading["view"],
             main=_numbering_summary([{"pin": p, "row": r, "col": c} for p, (r, c) in main.items()])

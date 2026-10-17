@@ -253,8 +253,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8915 passed,
-12 skipped and 19 subtests (2026-10-17, branch `ADVANCED` merged into `main`: metadata
+is 8961 passed,
+12 skipped and 19 subtests (2026-10-17 afternoon, branch `ADVANCED` merged into `main`:
+«il 3D» meaning the model renamed «modello STEP» in 24 messages, KiCad text markup and
+escapes drawn as KiCad 10, symbol editor redrawing only changed pins and writing the
+recovery draft on key release, THT spins saved at the end of the edit, profile cache keyed
+on SQLite's change counter, FreeCAD children killed with their whole process tree; before
+that, 8915 passed, same day: metadata
 fields bordered red/yellow by their KLC findings with the reason in the tooltip and a
 Datasheet hint; before that, same day, 8909 passed: status bar
 right at start-up, Qt tab scroll buttons retranslated, desktop fonts only in a child test

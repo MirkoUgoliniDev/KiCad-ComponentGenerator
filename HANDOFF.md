@@ -1,5 +1,83 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 17/10 pomeriggio — IN CORSO: «ok fixa tutto in modo preciso» (7 residui elencati all'utente)
+
+Partenza: `eeaf668` su ADVANCED (main `e0b7078`), suite 8915/12/19.
+1. «Rigenera 3D» -> «Rigenera STEP» (4 lingue, tooltip, scorciatoie, guida,
+   docs). Coordinatore.
+2. symbol_tab: passo di trascinamento su nodo NUOVO ~40 ms con 80 pin
+   (layout + scena completi + deepcopy) -> ridisegno incrementale. Agente A.
+3. symbol_tab: tasto con 900 righe 174 ms. Agente A.
+4. symbol_tab: frecce con ripetizione automatica scrivono la bozza di
+   recupero a ogni ripetizione -> scrittura al rilascio (isAutoRepeat),
+   perdita massima in un crash = la sola ripetizione in corso. Agente A.
+5. main_window: spin pad/foro del THT singolo salva il progetto a ogni scatto
+   (~67 ms con foto) -> salvataggio raccolto, garantito a fine modifica e
+   alla chiusura. Coordinatore.
+6. kicad_text_item / core.kicad_text: marcature KiCad ~{} ^{} _{} disegnate
+   come KiCad (sopralinea, apice, pedice), misurate con kicad-cli. Agente B.
+7. analysis_profiles: cache cieca a scrittura di un altro processo nello
+   stesso tick con stessa dimensione -> chiave anche sul contatore di
+   modifiche dell'intestazione SQLite (offset 24) se il db non e' in WAL.
+   Coordinatore.
+Commit solo con OK.
+CORREZIONE: il pulsante NON si chiamava «Rigenera 3D» (gia' «Rigenera modello
+STEP con queste annotazioni»; «Rigenera 3D» era solo nei commenti). Il punto
+1 e' diventato: 24 messaggi con «il/del/nel/dal 3D», «footprint e 3D», «3D
+da rigenerare», «Rigenerazione 3D» -> «modello STEP» in 4 lingue (fr «la
+3D» -> «le modèle STEP», de «das/dem 3D» -> «STEP-Modell»); «3D» come
+aggettivo (vista, anteprima, parametri, annotazioni, libreria 3D di KiCad)
+lasciato. Codice: main_window 15, photo_review_dialog 6, kicad_models 1,
+photo_global_inventory 1, datasheet_extractor 1 (messaggio, non prompt).
+FATTO 1 (263 test verdi), FATTO 7 (_database_signature con contatore
+dell'intestazione SQLite + stampo del -wal; 2 test, uno rosso senza), FATTO
+5 (niente salvataggio per scatto, salvataggio a editingFinished + autosave;
+tests/test_single_tht_spin_save.py, 2 rossi senza). In attesa di A e B.
+FATTO B (punto 6): core/kicad_text.py parser delle marcature KiCad 10
+(markup_parser.h), costanti misurate (scala 0,8, apice +0,2895 x size,
+pedice -0,1105, sopralinea 1,2776 sopra la base, rientro 0,1 x size),
+kicad_unescape ({slash}, {brace}... come UnescapeString), layout in cache;
+kicad_text_item: testo semplice = percorso di prima byte per byte, testo con
+marcature = KicadMarkupTextItem. tests/test_kicad_text_markup_b_layout.py
+(21, con kicad-cli e processo figlio dei font). Dubbio: 1/21 x size fra
+cursore e base ricavato dalle misure, non dal sorgente.
+COORDINATORE: testi mostrati sciolti dagli escape come KiCad (non i nomi e
+numeri dei pin): symbol.property_texts, Footprint.property_texts,
+main_window._footprint_property_texts e _drawing_text_item;
+tests/test_kicad_unescape_callers.py (4). Girato ad A: symbol_tab.
+FATTO A (punti 2-4 + escape): symbol_tab ridisegna solo i pin cambiati
+(cache per pin con chiave su posizione/angolo/nome/tipo/lunghezze/testo/
+nascosto/selezione/colori/font, radice propria con z come il ridisegno
+completo), auto-fit solo se scena/viewport/trasformazione cambiano, layout
+una volta per modifica, copy_rows (JSON) al posto di deepcopy, tasti con
+ripetizione automatica: bozza scritta alla pressione e al rilascio (anche
+uscita fuoco, finestra nascosta, set_data/set_recovery_path), garanzia
+nel docstring di _key_action; testi disegnati sciolti dagli escape, pin no.
+Misure: passo su nodo nuovo 80 pin 51 -> 11-17 ms; modifica tabella 900
+pin 380-513 -> 78-95 ms; freccia 900 pin su 4 lati 617 -> 120 ms.
+Test: test_symbol_editor_perf_a_incremental.py (9),
+test_symbol_editor_perf_a_key_repeat.py (6); 497 + 301 verdi correlati.
+Lasciati: griglia ~20 ms su simboli enormi (la cache di sfondo di Qt
+cambierebbe l'antialias, decisione dell'utente); layout_symbol 900 pin 8
+ms (validazione, proporzionata). Trappola: 900 pin su UN lato -> corpo
+oltre 1000 mm, ogni spostamento rifiutato; misurare con 4 lati.
+SUITE dopo i 7 punti: 2 falliti. (a) test_pipeline_pauses cercava ancora
+«Rigenerazione 3D» -> contratto aggiornato alla rinomina. (b)
+test_fixE_orchestration WinError 32 su freecad.out: CAUSA — Popen.kill
+uccide solo il figlio diretto; il python del venv su Windows e' un
+lanciatore che avvia il Python vero come SUO figlio, che sopravviveva e
+teneva aperto il file. CORRETTO: process_log.kill_process_tree (taskkill
+/F /T su Windows, poi kill), usato dal figlio del solido e dal figlio di
+misura. tests/test_kill_process_tree.py (nipote ucciso, file cancellabile;
+verificato che con la sola kill il file resta bloccato). Suite: 2 falliti
+(test_analysis_abort, test_matching_cancel registrano ogni Popen e
+vedevano taskkill come figlio uscito con 0). CORRETTO alla radice:
+nessun processo ausiliario — discendenti trovati con Toolhelp snapshot
+(ctypes) e terminati con TerminateProcess, dal piu' profondo. 116 verdi
+nei file coinvolti. SUITE COMPLETA: A 5451 verdi, 10 saltati, 19
+sottotest; B 3510 verdi, 2 saltati; 0 falliti (totale 8961). NULLA
+COMMITTATO (OK utente «ok bravo»): vedi STATO in testa.
+
 ## 17/10 — STATO: committato `a4a4ef7` su `ADVANCED` (bordi KLC), pushato; MERGIATO in `main` (`e0b7078`, pushato); di nuovo su `ADVANCED`. Prima, stesso giorno: `54c44dd` / merge `ac1e5c8`
 
 Istruzione dell'utente: «committa in questo branch, pusha e fai il merge in

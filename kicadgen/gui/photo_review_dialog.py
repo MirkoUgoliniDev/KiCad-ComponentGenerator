@@ -770,7 +770,7 @@ AI_ONLY_EXCLUDED_FILL_ALPHA = 6
 ## Second paragraph of the «Come si usa» popup: AI-only bodies are opt-in.
 _INFO_AI_ONLY = (
     "I contorni gialli tratteggiati sono corpi aggiunti dal solo modello, senza una "
-    "proposta del rilevatore: li vedi, ma restano fuori dalla tabella e dal 3D finché "
+    "proposta del rilevatore: li vedi, ma restano fuori dalla tabella e dal modello STEP finché "
     "non li tieni (T). Spostarne, ridimensionarne o modificarne uno vale come tenerlo.")
 
 
@@ -1832,7 +1832,7 @@ class PhotoReviewDialog(QDialog):
         self.keep_button = tool_button(
             "tool-select.svg", "Tieni o lascia il corpo aggiunto dal solo modello", "T",
             "I corpi aggiunti dal solo modello (gialli tratteggiati) partono esclusi: "
-            "tenuti, vanno nella tabella e nel 3D.", checkable=True, tr=tr)
+            "tenuti, vanno nella tabella e nel modello STEP.", checkable=True, tr=tr)
         self.keep_button.setEnabled(False)
         self.keep_button.clicked.connect(lambda _checked=False: self.toggle_keep())
         # «Copia formato» (user, 2026-09-30, HANDOFF 172): the same brush as
@@ -2474,7 +2474,7 @@ class PhotoReviewDialog(QDialog):
         if total:
             self.ai_only_label.setText(self._tr(
                 "Aggiunti dal solo modello: {total}. Ne tieni {kept}; {left_out} restano fuori "
-                "dalla tabella e dal 3D (T per tenerli).").format(
+                "dalla tabella e dal modello STEP (T per tenerli).").format(
                     total=total, kept=total - left_out, left_out=left_out))
 
     def _refresh_detector_summary(self):
@@ -3294,7 +3294,7 @@ class PhotoReviewDialog(QDialog):
         if ai_only_excluded(item.component):
             warnings.append(self._tr(
                 "Aggiunto dal solo modello, senza una proposta del rilevatore: escluso dalla "
-                "tabella e dal 3D finché non lo tieni (T)."))
+                "tabella e dal modello STEP finché non lo tieni (T)."))
         if not self.photo_rect.adjusted(-1e-7, -1e-7, 1e-7, 1e-7).contains(item.photo_bounds()):
             warnings.append(self._tr("Fuori dai bordi PCB: verificare posizione e dimensioni."))
         if self.type_undetermined(item.component):
@@ -3305,12 +3305,12 @@ class PhotoReviewDialog(QDialog):
             # a double click.
             warnings.append(self._tr(
                 "Il modello non ha stabilito il tipo di questo corpo: senza una scelta "
-                "manuale il 3D resta una scatola generica senza terminali. Doppio clic "
+                "manuale il modello STEP resta una scatola generica senza terminali. Doppio clic "
                 "per scegliere il modello KiCad: la ricerca è locale e non costa nulla."))
         component = item.component
         selection = component.get('model_selection') or {}
         if (component.get('model_match') or {}).get('status') == 'import_failed':
-            warnings.append(self._tr("Importazione STEP fallita: il 3D mostra un segnaposto, non il modello scelto."))
+            warnings.append(self._tr("Importazione STEP fallita: il modello STEP mostra un segnaposto, non il modello scelto."))
         if (component.get('model_match') or {}).get('status') == 'auto_matched' and selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad applicato automaticamente per compatibilità meccanica: identità e polarità non certificate; doppio clic per modificarlo."))
         elif (component.get('model_match') or {}).get('status') == 'library_matched' and selection.get('status') != 'confirmed':
