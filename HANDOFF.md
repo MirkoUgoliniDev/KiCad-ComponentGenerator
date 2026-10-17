@@ -24,7 +24,7 @@ aggancio diverse per decisione del 13-16/10, maniglie del footprint
 create al passaggio). Fasi B (strumenti a clic) e C (camera) opzionali.
 IN ATTESA dell'OK dell'utente sul piano.
 
-## 17/10 sera — FATTO: trascinamento di «U?»/Value in diretta (suite 8977: A 5451/10/19, B 3526/2, 0 falliti); hash sotto in «STATO»
+## 17/10 sera — FATTO e committato `c1cba37` su ADVANCED, mergiato in main `86c13d8`, pushati: trascinamento di «U?»/Value in diretta (suite 8977: A 5451/10/19, B 3526/2, 0 falliti)
 
 ## 17/10 sera — IN CORSO: trascinamento di «U?»/Value nell'editor del simbolo «un disastro» (utente), mentre REF** nell'anteprima footprint e' fluido
 
