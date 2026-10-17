@@ -1,5 +1,18 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 18/10 notte — FATTO e committato `e276472` su ADVANCED, mergiato in main `a50ef30`, pushati: CAMERA + GRIGLIA condivise (canvas_camera.py, canvas_grid.py) nelle due schede, suite 9361 (A 5760/10/19, B 3601/2, 0 falliti)
+
+Prossimo: FASE B, strumenti a clic (simbolo: filo, forme, simboli
+grafici — start_wire/add_wire_point/start_shape/add_shape_point/finish_* e
+posizionamento; footprint: modalita' disegno set_draw_mode +
+_on_footprint_draw_clicked/_finish/_cancel_footprint_drawing). Differenza
+D10 gia' nota: il footprint aggiunge il punto anche al rilascio dopo un
+trascinamento oltre startDragDistance, il simbolo solo alla pressione.
+Stesso metodo (piano scritto in docs/ prima, prove di parita' PRIMA, agenti
+su file disgiunti modulo/simbolo/footprint, revisione avversariale, suite in
+due meta', commit solo con OK). Nota di metodo: la macchina era carica per gli agenti
+in parallelo; i tempi si confrontano a ridosso nelle stesse condizioni.
+
 ## 17/10 notte — FATTO e committato `29056de` su ADVANCED, mergiato in main `e2f0363`, pushati: gestione dei gesti UNIFICATA (canvas_gestures.py) nelle due schede, suite 9075 (A 5523/10/19, B 3552/2, 0 falliti)
 
 IN CORSO (18/10 notte): FASE C camera + griglia. Piano scritto:
