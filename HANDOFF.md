@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 17/10 — STATO: committato `54c44dd` su `ADVANCED`, pushato; MERGIATO in `main` (`ac1e5c8`, pushato); di nuovo su `ADVANCED`
+## 17/10 — STATO: committato `a4a4ef7` su `ADVANCED` (bordi KLC), pushato; MERGIATO in `main` (`e0b7078`, pushato); di nuovo su `ADVANCED`. Prima, stesso giorno: `54c44dd` / merge `ac1e5c8`
 
 Istruzione dell'utente: «committa in questo branch, pusha e fai il merge in
 main, pusha e torna qui».
@@ -23,7 +23,7 @@ errore > avviso, rosso + motivo, «~» toglie il segno e ripristina il
 tooltip, giallo, cambio lingua). Verificato a schermo sulla copia di RS485
 (scratchpad marks.png). SUITE COMPLETA: A 5422 verdi, 10 saltati, 19
 sottotest; B 3493 verdi, 2 saltati; 0 falliti (totale 8915). In attesa
-dell'OK al commit. Database dei profili controllato: nessun
+dell'OK al commit. -> OK dell'utente («ok procedi»): committato a4a4ef7, merge e0b7078. Database dei profili controllato: nessun
 segreto, incluso nel commit. Numeri in CLAUDE.md riallineati.
 
 SUITE COMPLETA FINALE 17/10 (dopo S1-S4, «modello STEP», S3 centrato,
