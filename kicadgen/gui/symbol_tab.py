@@ -33,6 +33,11 @@ SCENE_UNITS_PER_MM = 10.0
 #: Before 2026-10-16 it was 0.178 mm, about 0.18 mm too low.
 PIN_NUMBER_GAP_MM = KICAD_PIN_NUMBER_ANCHOR_MM
 GRID_MM = PIN_GRID_MM
+#: Device pixels added around each rectangle of the region being painted
+#: before choosing the grid lines and dots to lay out
+#: (`_SymbolView._grid_indices`): a 1 px antialiased line spills one
+#: pixel on each side, a 1.5 px dot as well.
+GRID_PAINT_MARGIN_PX = 2
 
 #: Superseded drafts kept per project beside the recovery file (one file per
 #: pinout change that could not carry a pending draft over). Disk-usage bound,
@@ -598,6 +603,9 @@ class _SymbolView(QGraphicsView):
         #: Whether the key Qt is matching against the shortcuts right now is
         #: an automatic repeat (`event`), read once by `take_key_repeat`.
         self._key_repeat = False
+        #: Region (viewport pixels) of the paint event in progress, read by
+        #: `drawBackground` through `_grid_indices`; None outside a paint.
+        self._exposed_region = None
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
@@ -890,6 +898,58 @@ class _SymbolView(QGraphicsView):
             return False
         return self.drawing_grid_mm * SCENE_UNITS_PER_MM * self.transform().m11() >= FINE_GRID_MIN_PX
 
+    def paintEvent(self, event):
+        """@brief Qt override: keep the region this paint covers while the base class paints.
+
+        @param event Paint event; the base class paints as before.
+        @note Qt hands `drawBackground` only the bounding rectangle of the
+            exposed region and clips the pixels to the region itself. A
+            name edit at 900 pins dirties one pin and the eight resize
+            handles at the body corners: ten small rectangles whose bounding
+            rectangle is most of the viewport, over which the whole grid was
+            laid out (2026-10-17: 19 ms of a 60 ms edit, for a few visible
+            pixels). `_grid_indices` reads the region kept here.
+        """
+        self._exposed_region = event.region()
+        try:
+            super().paintEvent(event)
+        finally:
+            self._exposed_region = None
+
+    def _grid_indices(self, rect, step, axis):
+        """@brief Indices of the grid positions at `step` inside `rect` along `axis` that reach the region being painted.
+
+        @param rect Exposed scene rectangle handed to `drawBackground`.
+        @param step Grid step, scene units.
+        @param axis 0 for x (columns, vertical lines), 1 for y (rows, horizontal lines).
+        @return The range the grid always used (floor of the low edge to ceil
+            of the high edge) outside a paint event (`render`, a grab), when
+            the region is empty or when it is the whole viewport; otherwise
+            only the indices whose line, grown by GRID_PAINT_MARGIN_PX device
+            pixels, intersects the region (`QRegion.intersects`: PyQt6 gives
+            no access to the region's rectangles).
+        @note A line or dot that reaches no part of the region has no pixel
+            inside the area Qt clips to, so leaving it out changes no pixel.
+        """
+        from PyQt6.QtCore import QRectF
+        low, high = (rect.left(), rect.right()) if axis == 0 else (rect.top(), rect.bottom())
+        indices = range(math.floor(low / step), math.ceil(high / step) + 1)
+        region = self._exposed_region
+        if region is None or region.isEmpty() or (
+                region.rectCount() == 1 and region.boundingRect().contains(self.viewport().rect())):
+            return list(indices)
+        transform = self.viewportTransform()
+        margin = GRID_PAINT_MARGIN_PX
+        kept = []
+        for index in indices:
+            at = index * step
+            line = (QRectF(at, rect.top(), 0.0, rect.height()) if axis == 0
+                    else QRectF(rect.left(), at, rect.width(), 0.0))
+            strip = transform.mapRect(line).toAlignedRect().adjusted(-margin, -margin, margin, margin)
+            if region.intersects(strip):
+                kept.append(index)
+        return kept
+
     def drawBackground(self, painter, rect):
         """@brief Paint the pin grid as lines and the drawing grid as dots.
 
@@ -899,6 +959,10 @@ class _SymbolView(QGraphicsView):
             is also a node of the drawing grid; the dots are skipped when the
             drawing step equals the pin grid or is too dense on screen
             (`fine_grid_visible`).
+        @note Only the lines, columns and rows that reach the region being
+            painted are laid out (`_grid_indices`); each line still spans
+            `rect`, in the same order as before, so the pixels are those of
+            the full grid (tests/test_symbol_grid_paint_region.py).
         """
         super().drawBackground(painter, rect)
         if not self.show_grid:
@@ -906,10 +970,12 @@ class _SymbolView(QGraphicsView):
         painter.save()
         if self.fine_grid_visible():
             fine = self.drawing_grid_mm * SCENE_UNITS_PER_MM
-            dots = QPolygonF()
-            for column in range(math.floor(rect.left() / fine), math.ceil(rect.right() / fine) + 1):
-                for row in range(math.floor(rect.top() / fine), math.ceil(rect.bottom() / fine) + 1):
-                    dots.append(QPointF(column * fine, row * fine))
+            # Every crossing of the columns and rows that reach the region: a
+            # superset of the dots inside it (two far rectangles make a
+            # cross), never one outside `rect`; the whole grid for a full paint.
+            ys = [row * fine for row in self._grid_indices(rect, fine, 1)]
+            dots = QPolygonF([QPointF(column * fine, y)
+                              for column in self._grid_indices(rect, fine, 0) for y in ys])
             dot_pen = QPen(QColor(self.theme['grid_dots']), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
             dot_pen.setCosmetic(True)
             # Crisp dots: antialiasing would smear a 1.5 px point into a
@@ -923,10 +989,10 @@ class _SymbolView(QGraphicsView):
         pen = QPen(QColor(self.theme['grid']))
         pen.setCosmetic(True)
         painter.setPen(pen)
-        for index in range(math.floor(rect.left() / step), math.ceil(rect.right() / step) + 1):
+        for index in self._grid_indices(rect, step, 0):
             x = index * step
             painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
-        for index in range(math.floor(rect.top() / step), math.ceil(rect.bottom() / step) + 1):
+        for index in self._grid_indices(rect, step, 1):
             y = index * step
             painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
         painter.restore()
@@ -4808,6 +4874,28 @@ class SymbolTab(QWidget):
         for item in doomed:
             scene.removeItem(item)
 
+    @staticmethod
+    def _pin_picture_key(placed, pin_length, selected, style):
+        """@brief Everything `_draw_pin` reads for one pin: equal key, equal picture.
+
+        @param placed The positioned pin of the layout.
+        @param pin_length The symbol's default pin length, mm.
+        @param selected Whether the pin is drawn selected.
+        @param style The colours and font (`_pin_style`).
+        @return A hashable tuple: number, name, drawn position and angle,
+            resolved length, text size, hidden flag, selection and style.
+        @note The placed pin object itself is not the key: the first
+            geometry edit turns an automatic layout into a free one, writing
+            every pin's position and angle into its row (`_editable_rows`),
+            which changed the `SymbolPin` of all 900 pins while their
+            pictures stayed the same (2026-10-17: a first nudge rebuilt
+            every pin instead of the two that moved).
+        """
+        from ..generators.symbol import pin_length_of, pin_text_size_of
+        pin = placed.pin
+        return (pin.number, pin.name, placed.x, placed.y, placed.angle,
+                pin_length_of(pin, pin_length), pin_text_size_of(pin), pin.hidden, selected, style)
+
     def _pin_style(self):
         """Everything outside the pin itself that changes how a pin is drawn: colours and base font."""
         theme = self.theme
@@ -4893,10 +4981,11 @@ class SymbolTab(QWidget):
             roots of the pins whose key is unchanged (`_clear_scene`).
         @param symbol Layout to draw.
         @param keys {pin number: key} computed by `_draw` for this layout.
-        @note The key is everything a pin's picture depends on: the placed
-            pin (number, name, type, position, angle, length, text size,
-            hidden), the symbol's default pin length, the selection and the
-            style (`_pin_style`). Equal key, equal picture: a drag that moves
+        @note The key is everything a pin's picture depends on
+            (`_pin_picture_key`): number, name, drawn position and angle,
+            resolved length, text size, hidden flag, the selection and the
+            style (`_pin_style`), never the placed pin object, whose row
+            data can change without the picture. Equal key, equal picture: a drag that moves
             one pin, a name edit or a type change rebuilds one pin instead of
             all of them (2026-10-17: 80 pins cost about 18 ms per redraw,
             900 pins about 200 ms). Each pin lives under a root whose z
@@ -4934,7 +5023,8 @@ class SymbolTab(QWidget):
         if symbol is not None:
             style = self._pin_style()
             chosen = self._selection_ids()
-            keys = {p.pin.number: (p, symbol.pin_length, p.pin.number in chosen, style) for p in symbol.pins}
+            keys = {p.pin.number: self._pin_picture_key(p, symbol.pin_length, p.pin.number in chosen, style)
+                    for p in symbol.pins}
         kept = [entry[1] for number, entry in self._pin_items.items() if keys.get(number) == entry[0]]
         # The body outline too: it covers most of the view, and drawing it
         # again repaints the whole grid under it.

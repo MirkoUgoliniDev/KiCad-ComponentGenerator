@@ -1,6 +1,50 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 17/10 pomeriggio — IN CORSO: «ok fixa tutto in modo preciso» (7 residui elencati all'utente)
+## 17/10 sera — FATTO e committato: griglia dell'editor del simbolo piu' veloce SENZA cambiarne l'aspetto (hash sotto, in «STATO»)
+
+Utente: «non si puo' migliorare com'e' ora e vedere di ottimizzare?» ->
+niente cache di sfondo di Qt (cambierebbe l'antialias): si ottimizza il
+disegno attuale di symbol_tab.drawBackground (~893), oggi una chiamata
+drawLine per linea e un QLineF per linea, puntini in un QPolygonF costruito
+punto per punto in Python. Piano: misurare prima (sonda scratchpad
+probe_grid.py: 900 pin rimpiccioliti, 80 pin, 80 pin ingranditi con
+puntini), poi linee raccolte e disegnate in blocco (drawLines) e puntini
+costruiti senza il doppio ciclo Python; pixel IDENTICI (test di confronto
+immagine prima/dopo sulla stessa scena, piu' caso negativo con griglia
+spenta). Commit solo con OK.
+MISURE (sonde scratchpad probe_grid*.py, bench_grid.py): 900 pin
+rimpiccioliti = 641 linee, drawBackground 29 ms di un ridisegno completo di
+67; raccogliere le linee in blocco (drawLines) a pixel identici fa solo
+13,6 -> 12,5 ms: il costo e' la rasterizzazione antialiasing di Qt (4,6 ms
+senza AA, ma cambia l'aspetto: NON fatto). Puntini (2898): 9,5 ms, in
+Python. DUE CAUSE VERE, entrambe a pixel identici: (a) durante una
+modifica Qt passa a drawBackground solo il RETTANGOLO che contiene la
+regione sporca (57% dello schermo: la modifica di un nome ricrea le 8
+maniglie agli ANGOLI del corpo) e la griglia veniva elaborata su tutto il
+rettangolo (19-25 ms per modifica) anche se i pixel da aggiornare erano 10
+rettangolini; la regione vera e' nota solo a paintEvent. (b) la prima
+freccia su un layout automatico ricostruiva TUTTI i 900 pin: _editable_rows
+scrive position/angle in ogni riga (layout libero), la chiave della cache
+confrontava il PositionedPin intero (SymbolPin con position None -> lista)
+mentre i disegni erano identici. CORREZIONI: _SymbolView.paintEvent
+conserva event.region(); drawBackground disegna solo le linee/colonne/righe
+che toccano la regione (+2 px di margine per l'AA; fuori dal paint event o
+con regione = tutto lo schermo = tutto come prima). TRAPPOLA: in PyQt6
+QRegion non e' iterabile e non ha rects(): si chiede QRegion.intersects
+per ogni linea candidata (_grid_indices); chiave del pin = _pin_picture_key
+(numero, nome, x, y, angolo, lunghezza risolta, size testo, hidden,
+selezione, stile). Test tests/test_symbol_grid_paint_region.py: immagine
+byte per byte identica con regione sparsa (linee e puntini), linee fuori
+regione saltate, paintEvent vero con 2 rettangoli, prima freccia
+ricostruisce solo i pin mossi + negativi.
+MISURE DOPO (900 pin, probe_grid_edits.py): griglia per modifica 19-25 ->
+2,7-3,7 ms; freccia 115 -> 60 ms; modifica nome 62 -> 40 ms; selezione 61
+-> 38 ms. Ridisegno completo (fit, zoom, pan) invariato per costruzione
+(regione = tutto lo schermo -> nessun filtro). SUITE COMPLETA: A 5451
+verdi, 10 saltati, 19 sottotest; B 3519 verdi, 2 saltati; 0 falliti
+(totale 8970). NULLA COMMITTATO: in attesa dell'OK.
+
+## 17/10 pomeriggio — FATTO e committato `79dd6c1` su ADVANCED, mergiato in main `d32e3b5`, pushati: «ok fixa tutto in modo preciso» (7 residui)
 
 Partenza: `eeaf668` su ADVANCED (main `e0b7078`), suite 8915/12/19.
 1. «Rigenera 3D» -> «Rigenera STEP» (4 lingue, tooltip, scorciatoie, guida,

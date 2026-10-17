@@ -253,8 +253,10 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8961 passed,
-12 skipped and 19 subtests (2026-10-17 afternoon, branch `ADVANCED` merged into `main`:
+is 8970 passed,
+12 skipped and 19 subtests (2026-10-17 evening, branch `ADVANCED` merged into `main`: the
+symbol editor lays out its grid only where Qt paints and keys the pin cache on the pin's
+picture, same pixels; before that, 8961 passed, same day:
 «il 3D» meaning the model renamed «modello STEP» in 24 messages, KiCad text markup and
 escapes drawn as KiCad 10, symbol editor redrawing only changed pins and writing the
 recovery draft on key release, THT spins saved at the end of the edit, profile cache keyed
