@@ -42,7 +42,9 @@ MISURE DOPO (900 pin, probe_grid_edits.py): griglia per modifica 19-25 ->
 -> 38 ms. Ridisegno completo (fit, zoom, pan) invariato per costruzione
 (regione = tutto lo schermo -> nessun filtro). SUITE COMPLETA: A 5451
 verdi, 10 saltati, 19 sottotest; B 3519 verdi, 2 saltati; 0 falliti
-(totale 8970). NULLA COMMITTATO: in attesa dell'OK.
+(totale 8970). COMMITTATO `ddf7c6a` su ADVANCED (OK utente), MERGIATO in
+main `607dd01`, entrambi pushati; di nuovo su ADVANCED. Nessun punto
+richiesto resta aperto.
 
 ## 17/10 pomeriggio — FATTO e committato `79dd6c1` su ADVANCED, mergiato in main `d32e3b5`, pushati: «ok fixa tutto in modo preciso» (7 residui)
 
