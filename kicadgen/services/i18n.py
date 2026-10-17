@@ -2073,6 +2073,7 @@ DEFAULT_TRANSLATIONS = {
     "ui:Documenti": {"en": "Documents", "it": "Documenti", "fr": "Documents", "de": "Dokumente"},
     "ui:Revisione corpi": {"en": "Body review", "it": "Revisione corpi", "fr": "Révision des corps", "de": "Körperprüfung"},
     "ui:Pronto": {"en": "Ready", "it": "Pronto", "fr": "Prêt", "de": "Bereit"},
+    "ui:URL, percorso del file, oppure ~ se non c'è": {"en": "URL, file path, or ~ if there is none", "it": "URL, percorso del file, oppure ~ se non c'è", "fr": "URL, chemin du fichier, ou ~ s'il n'y en a pas", "de": "URL, Dateipfad oder ~, falls keines vorhanden"},
     "ui:Nessun progetto aperto": {"en": "No project open", "it": "Nessun progetto aperto", "fr": "Aucun projet ouvert", "de": "Kein Projekt geöffnet"},
     "ui:Solo per le schede con componenti.": {"en": "Only for boards with components.", "it": "Solo per le schede con componenti.", "fr": "Uniquement pour les cartes avec composants.", "de": "Nur für Platinen mit Bauteilen."},
     "status.project": {"en": "Project: {name}", "it": "Progetto: {name}", "fr": "Projet : {name}", "de": "Projekt: {name}"},

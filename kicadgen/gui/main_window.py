@@ -258,6 +258,12 @@ REFERENCE_BY_PACKAGE_FAMILY = {
 DEFAULT_REFERENCE = "U"
 
 
+#: Hint of the empty «Datasheet (URL o file)» field (user, 2026-10-17: «I do
+#: not understand what to enter»): a URL, a file path, or KiCad's «~» for
+#: a part without a datasheet.
+DATASHEET_HINT = "URL, percorso del file, oppure ~ se non c'è"
+
+
 def proposed_reference(type_family: str, package_family: str | None = None) -> str:
     """@brief Designator prefix proposed for a project from its declared families.
 
@@ -3247,6 +3253,10 @@ class MainWindow(QMainWindow):
         self.i18n.retranslate_widgets(self)
         self._realign_form_labels()
         self._refresh_metadata_help_tooltips()
+        if hasattr(self, "klc_list"):
+            # The marked fields' tooltips and the findings are composed
+            # texts: only a refresh writes them in the new language.
+            self._refresh_klc_findings()
         if hasattr(self, "guided_docs"):
             # Status line and role badges are composed texts (`i18n_skip`):
             # only a refresh writes them in the new language.
@@ -11120,6 +11130,7 @@ class MainWindow(QMainWindow):
         self.field_datasheet.setToolTip(
             "URL o percorso del documento, senza spazi: proprietà Datasheet di "
             "simbolo e footprint.")
+        self.field_datasheet.setPlaceholderText(DATASHEET_HINT)
         self.field_datasheet.textChanged.connect(lambda _text: self._refresh_klc_findings())
         form.addRow("Datasheet (URL o file):", self._metadata_field_row(self.field_datasheet, "datasheet"))
         self.field_fp_filters = QLineEdit()
@@ -11553,11 +11564,48 @@ class MainWindow(QMainWindow):
             # without one (tests, future callers) falls back to the table.
             item.setToolTip(finding.hint or klc_checks.fix_hint(finding.code))
             self.klc_list.addItem(item)
+        self._mark_metadata_fields(findings)
         self._refresh_install_gate(findings)
 
     #: Item data role holding the finding code of a «Controlli KiCad (KLC)»
     #: row; the empty-state row has none, which is how tests tell it apart.
     FINDING_CODE_ROLE = Qt.ItemDataRole.UserRole
+
+    def _metadata_fields(self) -> dict:
+        """@brief The editors of «Metadati del componente» by field key (`METADATA_HELP_TITLES`)."""
+        return {"reference": self.field_reference, "description": self.field_meta_description,
+                "keywords": self.field_meta_keywords, "datasheet": self.field_datasheet,
+                "fp_filters": self.field_fp_filters}
+
+    def _mark_metadata_fields(self, findings) -> None:
+        """@brief Border each metadata field with the severity of its KLC findings, reason in the tooltip.
+
+        @param findings The current KLC findings (`_klc_findings`).
+        @note User request (2026-10-17): a field to fix is shown on the
+            field, not only in the list below. The dynamic property `klc`
+            ('error', 'warning' or '') selects the red or yellow border of
+            `theme.APP_QSS`; the tooltip is the field's own explanation, in
+            the current language, followed by the findings. The field's
+            own tooltip source is kept in `_metadata_tooltip_sources` so a
+            language switch or a cleared finding restores it exactly.
+        """
+        from ..services.klc_checks import field_findings
+        grouped = field_findings(findings)
+        sources = getattr(self, "_metadata_tooltip_sources", None)
+        if sources is None:
+            sources = self._metadata_tooltip_sources = {}
+        for key, field in self._metadata_fields().items():
+            if key not in sources:
+                sources[key] = self.i18n.source_of(field.toolTip()) or field.toolTip()
+            severity, messages = grouped.get(key, ("", []))
+            if field.property("klc") != severity:
+                field.setProperty("klc", severity)
+                field.style().unpolish(field)
+                field.style().polish(field)
+            base = self.i18n.text(sources[key])
+            prefix = "⛔ " if severity == "error" else "⚠ "
+            field.setToolTip("\n\n".join([base] + [prefix + message for message in messages]))
+        self.field_datasheet.setPlaceholderText(self.i18n.text(DATASHEET_HINT))
 
     # ── Required metadata block of the installation (user, 2026-10-15) ──
 

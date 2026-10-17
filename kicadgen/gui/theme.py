@@ -137,6 +137,15 @@ APP_QSS = f"""
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus {{
         border: 1px solid {BLUE};
     }}
+    /* A field with a KiCad check finding (dynamic property `klc`, set by
+       MainWindow._mark_metadata_fields; user, 2026-10-17). After :focus so
+       the colour stays while the user types the fix. */
+    QLineEdit[klc="error"] {{
+        border: 1px solid {RED};
+    }}
+    QLineEdit[klc="warning"] {{
+        border: 1px solid {YELLOW};
+    }}
     /* Spin box buttons placed by this sheet, one above the other on the
        right (HANDOFF point 135). Left to the native style, Qt's «windows11»
        style puts them side by side while the style sheet still lays the text

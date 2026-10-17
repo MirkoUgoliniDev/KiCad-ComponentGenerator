@@ -253,8 +253,10 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 8909 passed,
-12 skipped and 19 subtests (2026-10-17, branch `ADVANCED` merged into `main`: status bar
+is 8915 passed,
+12 skipped and 19 subtests (2026-10-17, branch `ADVANCED` merged into `main`: metadata
+fields bordered red/yellow by their KLC findings with the reason in the tooltip and a
+Datasheet hint; before that, same day, 8909 passed: status bar
 right at start-up, Qt tab scroll buttons retranslated, desktop fonts only in a child test
 process, every visible «modello 3D» renamed «modello STEP» in four languages, unmoved
 Reference/Value written centred in footprint and symbol, opaque grey hints, and the
