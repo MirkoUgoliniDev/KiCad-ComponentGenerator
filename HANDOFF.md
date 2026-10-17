@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 17/10 pomeriggio — IN CORSO: «ok fixa tutto in modo preciso» (7 residui elencati all'utente)
+## 17/10 pomeriggio — FATTO e committato `79dd6c1` su ADVANCED, mergiato in main `d32e3b5`, pushati: «ok fixa tutto in modo preciso» (7 residui)
 
 Partenza: `eeaf668` su ADVANCED (main `e0b7078`), suite 8915/12/19.
 1. «Rigenera 3D» -> «Rigenera STEP» (4 lingue, tooltip, scorciatoie, guida,
