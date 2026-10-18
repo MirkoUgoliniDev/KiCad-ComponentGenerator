@@ -487,9 +487,11 @@ def validate_footprint_drawings(raw) -> list:
         positive size; a text keeps ``anchor`` only when it is
         `USER_TEXT_ANCHOR` (point = bottom-left corner), no ``anchor`` means a
         legacy centred text, any other anchor value drops the record;
-        a text keeps an ``angle`` that is a number of `USER_TEXT_ANGLES`
-        (90 stored as an int; 0 and an absent field are both stored as no
-        field, the default), any other angle value drops the record;
+        a text's ``angle`` must be a finite number that is a whole multiple
+        of 90; it is taken modulo 180 (180 -> 0, 270 and -90 -> 90, as the
+        symbol editor's texts and KiCad's "keep upright") and stored as the
+        int 90, or as no field for 0 (the default); any other angle value
+        (45, a string, a bool, NaN) drops the record;
         ``angle`` on a shape is ignored;
         an arc must also have a circumcentre KiCad can represent
         (`arc_centre_representable`: collinear points, or nearly collinear
@@ -543,9 +545,15 @@ def validate_footprint_drawings(raw) -> list:
             if anchor is not None and anchor != USER_TEXT_ANCHOR:
                 continue
             angle = record.get("angle")
-            if angle is not None and (isinstance(angle, bool) or not isinstance(angle, (int, float))
-                                      or angle not in USER_TEXT_ANGLES):
-                continue
+            if angle is not None:
+                if (isinstance(angle, bool) or not isinstance(angle, (int, float))
+                        or not math.isfinite(angle) or angle % 90):
+                    continue
+                # A hand-edited 180/270 keeps the user's text instead of
+                # dropping it: the same text, shown upright (plan C-M2).
+                angle = int(angle) % 180
+                if angle not in USER_TEXT_ANGLES:
+                    continue
             clean["text"] = text.strip()
             clean["size"] = round(float(size), 4)
             if anchor is not None:

@@ -3528,10 +3528,12 @@ class SymbolTab(QWidget):
         dispatched by `_run_graphic_menu_key`.
         @param index Index of the right-clicked element in the draft graphics.
         @param global_pos Screen position (QPoint) of the menu.
-        @note The clicked element becomes the selection first; an unknown
-            index then opens nothing.
+        @note A right click on a member of the selection keeps the whole
+            selection (the menu then acts on every selected element, as the
+            pin menu does); on any other element that element becomes the
+            selection. An unknown index then opens nothing.
         """
-        self._select_graphic(index)
+        self._select_graphic(index, additive=index in self.selected_graphics())
         graphics = self._graphics()
         if not 0 <= index < len(graphics):
             return
