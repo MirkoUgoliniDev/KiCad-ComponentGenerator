@@ -174,6 +174,7 @@ elemento (QGraphicsView memorizza il cursore del viewport) — da trattare
 con cura; dubbio: rilascio-dopo-trascinamento con 'Punto coincidente'.
 Suite completa in due meta' rilanciata dopo le correzioni (le prime due
 esecuzioni erano morte a meta', senza riepilogo).
+COMMIT fase B: b79a26b su ADVANCED, merge 4937a8a in main (pushati). Aperto: cursore a croce residuo nel simbolo.
 ESITO SUITE (fase B, dopo le correzioni): 9576 passed, 12 skipped, 19 subtests.
 Metà A: 4 test di tempo (fixE_orchestration x3, freecad_heartbeat) falliti sotto carico, verdi se rilanciati soli; metà B: 1 errore transitorio 'no such table: translations' in test_photo_detector_ui, verde da solo (63 passed). Trappola: i processi lanciati con & e senza wait muoiono con la shell.
 Prossimo: FASE B, strumenti a clic (simbolo: filo, forme, simboli
