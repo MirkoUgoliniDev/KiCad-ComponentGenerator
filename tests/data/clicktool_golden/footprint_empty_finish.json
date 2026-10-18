@@ -1,0 +1,34 @@
+{
+  "empty_enter": {
+    "calls": {
+      "_refresh_draw_markers": 2
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 0
+  },
+  "empty_right": {
+    "calls": {
+      "_refresh_draw_markers": 2
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 0
+  }
+}

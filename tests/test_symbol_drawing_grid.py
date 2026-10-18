@@ -84,7 +84,7 @@ def test_shape_points_snap_to_the_fine_grid_while_pins_keep_the_pin_grid(qapp):
         tab.start_shape('rectangle')
         tab.add_shape_point(0, 0)
         tab.add_shape_point(7.3, 2.6)
-        tab.view.wire_finished.emit(False)
+        tab.finish_shape(False)
         assert g.shape_handles(tab.graphics()[0])[1] == (7.366, 2.54)
         assert (7.366 / GRID_MM) % 1 != 0, 'the shape corner is off the pin grid: fine-grid snapping'
         # A pin dragged with the mouse to x = 1.2 mm lands on the pin grid

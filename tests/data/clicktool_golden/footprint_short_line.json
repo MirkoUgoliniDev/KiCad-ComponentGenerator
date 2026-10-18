@@ -1,0 +1,18 @@
+{
+  "one_point": {
+    "calls": {
+      "_refresh_draw_markers": 3
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 0
+  }
+}

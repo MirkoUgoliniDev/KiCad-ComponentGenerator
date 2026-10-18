@@ -1,0 +1,77 @@
+{
+  "armed": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "circle"
+    ],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "circle",
+    "undo": 0
+  },
+  "press_on_handle": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "circle"
+    ],
+    "clicks": [
+      [
+        4.0,
+        10.0
+      ]
+    ],
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            8.0
+          ],
+          [
+            4.0,
+            10.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {
+      "QGraphicsEllipseItem": 1
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "circle",
+    "undo": 0
+  }
+}

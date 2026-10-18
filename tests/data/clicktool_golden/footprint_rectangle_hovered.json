@@ -1,0 +1,156 @@
+{
+  "armed": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "rectangle"
+    ],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "rectangle",
+    "undo": 0
+  },
+  "closed": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_edit_footprint_draft": 1,
+      "_refresh_draw_markers": 3,
+      "save_footprint_draft": 1
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            1.0,
+            1.0
+          ],
+          [
+            5.0,
+            4.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              1.0,
+              1.0
+            ],
+            [
+              5.0,
+              4.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 1
+  },
+  "first": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "rectangle"
+    ],
+    "clicks": [
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "drawings": [],
+    "hover": [
+      1.0,
+      1.0
+    ],
+    "markers": {
+      "QGraphicsEllipseItem": 2,
+      "QGraphicsPathItem": 1
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "rectangle",
+    "undo": 0
+  },
+  "hover_1": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "rectangle"
+    ],
+    "clicks": [],
+    "drawings": [],
+    "hover": [
+      1.0,
+      1.0
+    ],
+    "markers": {
+      "QGraphicsEllipseItem": 1
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "rectangle",
+    "undo": 0
+  },
+  "hover_2": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "rectangle"
+    ],
+    "clicks": [
+      [
+        1.0,
+        1.0
+      ]
+    ],
+    "drawings": [],
+    "hover": [
+      3.0,
+      2.0
+    ],
+    "markers": {
+      "QGraphicsEllipseItem": 2,
+      "QGraphicsPathItem": 1
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "rectangle",
+    "undo": 0
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "collinear": {
+    "calls": {
+      "_refresh_draw_markers": 4
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [
+      [
+        "Disegno scartato.",
+        "Arco senza centro: i tre punti sono allineati o quasi. Sposta il punto intermedio fuori dalla retta."
+      ]
+    ],
+    "tool": null,
+    "undo": 0
+  }
+}

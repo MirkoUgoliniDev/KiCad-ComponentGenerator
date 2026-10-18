@@ -10,8 +10,9 @@ import os
 import logging
 import tempfile
 import time
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, QRectF, QPointF, QItemSelectionModel
-from PyQt6.QtGui import (QPalette, QAction, QColor, QFont, QPainter, QPen, QIcon)
+from PyQt6.QtGui import (QPalette, QAction, QColor, QContextMenuEvent, QFont, QPainter, QPen, QIcon)
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
@@ -20,6 +21,7 @@ from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, 
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
 from .canvas_camera import Camera
+from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
 from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
                               DragPlan, GestureController, HoverGroups, Identity, KeyRepeatFilter,
@@ -564,11 +566,6 @@ class _SymbolView(QGraphicsView):
     #: A click while placing a glyph (scene point), or None when placing is cancelled.
     place_requested = pyqtSignal(object)
     graphic_context_requested = pyqtSignal(int, object)
-    #: A click while drawing a wire: (scene point, Shift held). Shift frees
-    #: the segment from the orthogonal constraint, as in KiCad.
-    wire_point = pyqtSignal(object, bool)
-    #: The wire is finished (True) or abandoned (False).
-    wire_finished = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -581,8 +578,15 @@ class _SymbolView(QGraphicsView):
         self.setScene(QGraphicsScene(self))
         #: True while the next left click places the chosen glyph.
         self.placing = False
-        #: True while left clicks add wire points.
-        self.wiring = False
+        #: `PointCollector` of the wire and shape tools, set by the tab that hosts
+        #: them (`SymbolTab`); None until then.
+        self.collector = None
+        #: True from a right press consumed by a click tool until the next press: the
+        #: context-menu event that follows that press must not open a menu.
+        self._tool_took_right_press = False
+        #: `ClickToolRouter` of the same tools (press, release, double click, keys,
+        #: move, leave, hide), set together with `collector`.
+        self.clicktools = None
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
@@ -623,15 +627,22 @@ class _SymbolView(QGraphicsView):
         """
         return None if self.controller is None else self.controller.target
 
+    @property
+    def wiring(self):
+        """@brief True while a click tool (the wire or a shape tool) is armed.
+
+        @return `collector.armed`; read-only, the collector owns the state.
+        """
+        return self.collector is not None and self.collector.armed
+
     def mouseDoubleClickEvent(self, event):
         """@brief Qt override: a left double click ends the wire being drawn.
 
         @param event The mouse event; other double clicks reach the base class.
+        @note While a click tool is armed the router takes the double click: it adds
+            the point under the pointer (quietly) and then finishes the tool.
         """
-        if self.wiring and event.button() == Qt.MouseButton.LeftButton:
-            self.wiring = False
-            self.wire_finished.emit(True)
-            event.accept()
+        if self.clicktools is not None and self.clicktools.double_click(event):
             return
         super().mouseDoubleClickEvent(event)
 
@@ -646,15 +657,9 @@ class _SymbolView(QGraphicsView):
         # without a move (touch, automation, coalesced events) must first
         # reveal them like a move would (review, 2026-10-12).
         self.pointer_changed.emit(self.mapToScene(event.pos()))
-        if self.wiring and event.button() == Qt.MouseButton.LeftButton:
-            self.wire_point.emit(self.mapToScene(event.pos()),
-                                 bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
-            event.accept()
-            return
-        if self.wiring and event.button() == Qt.MouseButton.RightButton:
-            self.wiring = False
-            self.wire_finished.emit(True)
-            event.accept()
+        self._tool_took_right_press = False
+        if self.clicktools is not None and self.clicktools.press(event):
+            self._tool_took_right_press = event.button() == Qt.MouseButton.RightButton
             return
         if self.placing and event.button() == Qt.MouseButton.LeftButton:
             self.place_requested.emit(self.mapToScene(event.pos()))
@@ -720,6 +725,12 @@ class _SymbolView(QGraphicsView):
         if self.gesture is not None:
             event.accept()
             return
+        if self._tool_took_right_press and event.reason() == QContextMenuEvent.Reason.Mouse:
+            # The right press that finished or swallowed a click tool owns this context
+            # event: the wire it just made (or the pin under it) must not open a menu (X).
+            self._tool_took_right_press = False
+            event.accept()
+            return
         for item in self.items(event.pos()):
             target = item.data(0)
             if target is not None and target[0] == 'pin':
@@ -738,6 +749,8 @@ class _SymbolView(QGraphicsView):
         @param event The leave event.
         """
         self.pointer_left.emit()
+        if self.clicktools is not None:
+            self.clicktools.leave()
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -746,6 +759,9 @@ class _SymbolView(QGraphicsView):
         @param event The mouse event.
         """
         self.pointer_changed.emit(self.mapToScene(event.pos()))
+        if self.clicktools is not None:
+            # Not consuming: the readout and the pan/drag below go on.
+            self.clicktools.move(event)
         if self._rubber_start is not None:
             self._rubber.setGeometry(QRect(self._rubber_start, event.pos()).normalized())
             event.accept()
@@ -765,6 +781,8 @@ class _SymbolView(QGraphicsView):
 
         @param event The mouse event.
         """
+        if self.clicktools is not None and self.clicktools.release(event):
+            return
         if self._rubber_start is not None and event.button() == Qt.MouseButton.LeftButton:
             rect = QRect(self._rubber_start, event.pos()).normalized()
             self._rubber_start = None
@@ -790,15 +808,7 @@ class _SymbolView(QGraphicsView):
 
         @param event The key event; other keys reach the base class.
         """
-        if self.wiring and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.wiring = False
-            self.wire_finished.emit(True)
-            event.accept()
-            return
-        if self.wiring and event.key() == Qt.Key.Key_Escape:
-            self.wiring = False
-            self.wire_finished.emit(False)
-            event.accept()
+        if self.clicktools is not None and self.clicktools.key(event):
             return
         if event.key() == Qt.Key.Key_Escape and self.placing:
             self.placing = False
@@ -841,6 +851,8 @@ class _SymbolView(QGraphicsView):
             the tab installed, which sees the Hide event before this method.
         """
         self.cancel_interaction()
+        if self.clicktools is not None:
+            self.clicktools.hide(event.spontaneous())
         super().hideEvent(event)
 
     def set_grid_visible(self, visible):
@@ -1045,17 +1057,22 @@ class SymbolTab(QWidget):
         self._snap = True
         #: Canvas theme key: 'dark' (application) or 'kicad' (schematic colours).
         self._theme_key = 'dark'
-        #: Points of the wire being drawn, [] when none: `[x, y]` (symbol mm)
+        #: The rubber band path item of the tool being drawn (the wire or a shape),
+        #: reshaped in place on hover (`tool_preview_changed`); None when not drawn.
+        #: The points of the wire being drawn (`_wire_points`) are `[x, y]` (symbol mm)
         #: for a free grid point, `{"x", "y", "anchor"}` for a point attached
         #: to a pin's inner end or an element terminal (symbol_glyphs anchors).
-        self._wire_points = []
         self._wire_cursor_item = None
+        #: True while `finish` of a tool runs inside `start_wire`/`start_shape` (arming
+        #: another tool): the cancelled tool does not redraw, the new one will.
+        self._arming = False
+        #: True when `tool_finished` has just redrawn and kept the tool armed: the
+        #: re-arm's own empty-points redraw is skipped (`tool_points_changed`).
+        self._stay_redraw_done = False
+        #: Outcome of the last `tool_finished` (what `finish_wire`/`finish_shape` return).
+        self._finish_result = False
         #: True: each new wire segment is horizontal or vertical (Shift frees it).
         self._wire_orthogonal = True
-        #: Key of the shape tool in use (SHAPE_TOOLS) and its clicked points,
-        #: `(x, y)` in symbol mm on the grid; None / [] when no shape is being drawn.
-        self._shape_tool = None
-        self._shape_points = []
         layout = QVBoxLayout(self)
         self.title = QLabel(self.tx('Simbolo elettrico'))
         layout.addWidget(self.title)
@@ -1121,8 +1138,13 @@ class SymbolTab(QWidget):
         self.view.pin_context_requested.connect(self._pin_context_menu)
         self.view.place_requested.connect(self._place_requested)
         self.view.graphic_context_requested.connect(self._graphic_context_menu)
-        self.view.wire_point.connect(self._wire_point)
-        self.view.wire_finished.connect(self.finish_wire)
+        # The wire and the shape tools collect points through the shared click-tool
+        # state machine (`canvas_clicktools`); this tab is its host (`tool_*`).
+        self._collector = PointCollector(self, self)
+        self._router = ClickToolRouter(self.view, self._collector, self.view.camera,
+                                       on_arm=self.view.cancel_interaction)
+        self.view.collector = self._collector
+        self.view.clicktools = self._router
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
         self.table_toggle = icon_button('pinout-table.svg', 'Mostra/nascondi tabella pin')
         self.table_toggle.defaultAction().setCheckable(True)
@@ -2385,33 +2407,201 @@ class SymbolTab(QWidget):
         else:
             self.start_shape(key)
 
-    def _release_tools(self):
-        """Uncheck every tool and drop any shape or wire in progress (no commit)."""
+    # ── Click tools: the tab is the host of the shared state machine ──────────
+
+    #: The wire tool: open-ended, never persistent, no polygon close. A drag does not
+    #: add a point (a polyline would get a second vertex per drag, plan decision C1).
+    _WIRE_SPEC = ToolSpec('wire', drag_adds_release_point=False)
+
+    @staticmethod
+    def _shape_spec(key):
+        """@brief The `ToolSpec` of a shape tool of SHAPE_TOOLS.
+
+        @param key Tool key: line, rectangle, circle, arc, bezier or text.
+        @return The spec: the click count of the tool (0 = open-ended line), a
+            polygon close rule for the line (four points), and persistence for
+            every tool but the text (the text inserts through a dialog and is one-shot).
+            A press-move-release drag adds the release point, so a drag draws a
+            rectangle, a circle or a line like in the footprint preview (plan decision C1).
+        """
+        from ..generators.symbol_glyphs import shape_tool
+        count = shape_tool(key)[3]
+        return ToolSpec(key, count=count, close_after=4 if count == 0 else 0,
+                        persistent=key != 'text', drag_adds_release_point=True)
+
+    @property
+    def _wire_points(self):
+        """@brief The points of the wire being drawn, [] when no wire is armed.
+
+        @return A copy of the collector's points: `[x, y]` (symbol mm) for a free grid
+            point, `{"x", "y", "anchor"}` for a point attached to a pin end or terminal.
+        """
+        collector = getattr(self, '_collector', None)
+        if collector is None or collector.spec is None or collector.spec.key != 'wire':
+            return []
+        return collector.points
+
+    @property
+    def _shape_points(self):
+        """@brief The clicked points of the shape being drawn, `(x, y)` in symbol mm; [] when none.
+
+        @return A copy of the collector's points.
+        """
+        collector = getattr(self, '_collector', None)
+        if collector is None or collector.spec is None or collector.spec.key == 'wire':
+            return []
+        return collector.points
+
+    @property
+    def _shape_tool(self):
+        """@brief Key of the armed shape tool (SHAPE_TOOLS), None for the wire or no tool.
+
+        @return The tool key or None.
+        """
+        collector = getattr(self, '_collector', None)
+        if collector is None or collector.spec is None or collector.spec.key == 'wire':
+            return None
+        return collector.spec.key
+
+    def _uncheck_tool_buttons(self):
+        """@brief Show every click tool (wire button, palette tools) as inactive."""
         from ..generators.symbol_glyphs import SHAPE_TOOLS
         self.wire_button.defaultAction().setChecked(False)
         self.palette.set_tool_checked('wire', False)
         for key, _label, _kind, _count in SHAPE_TOOLS:
             self.palette.set_tool_checked(key, False)
-        self._wire_points = []
-        self._shape_tool = None
-        self._shape_points = []
-        self._wire_cursor_item = None
 
     def start_wire(self):
         """@brief Arm the wire tool: every click adds a point until the wire is closed."""
         if self._symbol is None:
             self.wire_button.defaultAction().setChecked(False)
             return
-        self.view.cancel_interaction()
         self.view.placing = False
-        self._release_tools()
-        self.view.wiring = True
-        self.wire_button.defaultAction().setChecked(True)
-        self.palette.set_tool_checked('wire', True)
-        self._wire_points = []
-        self.view.setFocus()
-        self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
+        self._arming = True
+        try:
+            self._router.arm(self._WIRE_SPEC)
+        finally:
+            self._arming = False
+
+    def tool_armed(self, spec):
+        """@brief Host callback: a click tool was armed; show it as active and print its hint.
+
+        @param spec The armed `ToolSpec` (`wire` or a shape tool).
+        """
+        self._uncheck_tool_buttons()
+        if spec.key == 'wire':
+            self.wire_button.defaultAction().setChecked(True)
+            self.palette.set_tool_checked('wire', True)
+            self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
+        else:
+            self.palette.set_tool_checked(spec.key, True)
+            self.set_status(self.tx(TOOL_HINTS[spec.key]))
+
+    def tool_disarmed(self, spec):
+        """@brief Host callback: the tool ended and nothing replaced it; show every tool as inactive.
+
+        @param spec The tool that ended.
+        """
+        self._uncheck_tool_buttons()
+        self._wire_cursor_item = None
+        # A tool ended through the direct API (`finish_wire`) did not pass through a router
+        # event, which is where the router unsets its cursor.
+        viewport = self.view.viewport()
+        if viewport.cursor().shape() == Qt.CursorShape.CrossCursor:
+            viewport.unsetCursor()
+
+    def tool_points_changed(self, spec, points):
+        """@brief Host callback: the collected points changed (or the tool was armed); redraw the dots.
+
+        @param spec The armed tool.
+        @param points A copy of the collected points.
+        @note A tool that stays armed after a commit or a refusal does not redraw
+            here: `tool_finished` has just redrawn the scene (`_stay_redraw_done`).
+        """
+        if self._stay_redraw_done and not points:
+            self._stay_redraw_done = False
+            return
+        self._stay_redraw_done = False
         self._draw(self._symbol)
+
+    def tool_preview_changed(self, spec, points, preview):
+        """@brief Host callback: the pointer moved to another point; reshape the rubber band IN PLACE.
+
+        @param spec The armed tool.
+        @param points A copy of the collected points.
+        @param preview The points a click at the pointer would append; [] when none.
+        @note No `_draw`: moving the pointer redraws nothing (a perf contract,
+            tests/test_symbol_clicktool_parity.py).
+        """
+        self._reshape_band(points, preview)
+
+    def _reshape_band(self, points, preview):
+        """@brief Set the rubber band path from the collected points and the preview.
+
+        @param points Collected points of the armed tool.
+        @param preview The points a click would append (the wire's corner included); [] for none.
+        """
+        item = self._wire_cursor_item
+        collector = getattr(self, '_collector', None)
+        if item is None or sip.isdeleted(item) or not points or collector is None or collector.spec is None:
+            return
+        if collector.spec.key == 'wire':
+            # The band runs from the last wire point to the points a click would
+            # append, with the same constraint as the click (corner included).
+            from PyQt6.QtGui import QPainterPath
+            lx, ly = self._xy(points[-1])
+            path = QPainterPath(QPointF(lx * SCENE_UNITS_PER_MM, -ly * SCENE_UNITS_PER_MM))
+            for x, y in map(self._xy, preview):
+                path.lineTo(x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM)
+            item.setPath(path)
+        else:
+            item.setPath(self._outline_path(self._shape_outline(list(points) + list(preview)),
+                                            SCENE_UNITS_PER_MM))
+
+    def tool_snap(self, spec, point, free, points):
+        """@brief Host callback: the points a click (or a hover) at a scene point would append.
+
+        @param spec The armed tool.
+        @param point Scene position (QPointF).
+        @param free True when Shift frees the wire segment from the orthogonal constraint.
+        @param points Tuple of the points collected so far.
+        @return The wire's snapped point(s) (anchor, corner), or the shape's drawing-grid
+            point; [] when the draft is invalid (nothing is drawn, so a point would be invisible)
+            or when a wire point repeats the last one.
+        """
+        if self._symbol is None:
+            return []
+        x, y = point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM
+        if spec.key == 'wire':
+            return self._next_wire_points(x, y, free, points)
+        return [self._grid_point(x, y)]
+
+    def tool_refused(self, spec, reason):
+        """@brief Host callback: a click added nothing (a repeated point).
+
+        @param spec The armed tool.
+        @param reason `canvas_clicktools.REFUSED_COINCIDENT`.
+        @note The refusal is reported on the status line (plan decision C3), except
+            with an invalid draft, where nothing is drawn and every click is ignored.
+        """
+        if self._symbol is not None:
+            self.set_status(self.tx('Punto coincidente con il precedente.'))
+
+    def tool_finished(self, spec, points, commit):
+        """@brief Host callback: the tool ended; commit the points as a wire or a shape, or abandon them.
+
+        @param spec The tool that ended.
+        @param points The collected points.
+        @param commit False abandons the points.
+        @return True when the shape tool stays armed (a persistent shape, or a shape
+            that could not be made); False for the wire, the text and every abandon.
+        """
+        self._wire_cursor_item = None
+        self._finish_result = False
+        if spec.key == 'wire':
+            self._commit_wire(points, commit)
+            return False
+        return self._commit_shape(spec.key, points, commit)
 
     @staticmethod
     def _xy(point):
@@ -2449,7 +2639,7 @@ class SymbolTab(QWidget):
             return {'x': px, 'y': py, 'anchor': anchor}
         return [round(x, 4), round(y, 4)]
 
-    def _next_wire_points(self, x, y, free=False):
+    def _next_wire_points(self, x, y, free=False, points=None):
         """The point(s) a click at (x, y) appends to the wire being drawn.
 
         With the orthogonal constraint on (and Shift not held) the segment
@@ -2462,14 +2652,16 @@ class SymbolTab(QWidget):
         vertical one (90/270) vertically; when the direction is unknown the
         corner is horizontal-first. A projection or corner that lands exactly
         on a pin end or terminal is stored anchored (`_exact_attachment`).
+        @param points The points collected so far; None reads the wire being drawn.
         @return [] when nothing changes (the target repeats the last point).
         """
         from ..generators.symbol_glyphs import anchor_direction
         graphics = self._graphics()
         point = self._wire_snap(float(x), float(y), graphics)
-        if not self._wire_points:
+        points = self._wire_points if points is None else points
+        if not points:
             return [point]
-        lx, ly = self._xy(self._wire_points[-1])
+        lx, ly = self._xy(points[-1])
         px, py = self._xy(point)
         if self._wire_orthogonal and not free:
             dx, dy = px - lx, py - ly
@@ -2506,8 +2698,8 @@ class SymbolTab(QWidget):
         @param y Symbol Y in mm.
         @param free True (Shift held) lets the segment be diagonal even with
             the orthogonal constraint on.
-        @return False when the draft is invalid (no symbol is drawn) or the point
-            repeats the last one.
+        @return False when the draft is invalid (no symbol is drawn), when the wire
+            tool is not armed, or when the point repeats the last one.
         @note A point within the snap tolerance of a pin's inner end or of an
             element terminal is stored anchored to it and follows it afterwards.
         """
@@ -2515,26 +2707,16 @@ class SymbolTab(QWidget):
             # Invalid draft: nothing is drawn, so a point taken now would be
             # invisible; the wire keeps its points until the draft is valid.
             return False
-        added = self._next_wire_points(x, y, free)
-        if not added:
+        if self._collector.spec is None or self._collector.spec.key != 'wire':
             return False
-        self._wire_points.extend(added)
-        self._draw(self._symbol)
-        return True
-
-    def _wire_point(self, point, free=False):
-        x, y = point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM
-        if self._shape_tool is not None:
-            self.add_shape_point(x, y)
-        else:
-            self.add_wire_point(x, y, free)
+        return self._collector.click(QPointF(x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM), free=free)
 
     # ── Shape tools (user, 2026-10-12) ──────────────────────────────────────
 
     def start_shape(self, key):
         """@brief Arm a shape tool (SHAPE_TOOLS): clicks on the grid draw the shape.
 
-        @param key Tool key: line, rectangle, circle, arc or bezier.
+        @param key Tool key: line, rectangle, circle, arc, bezier or text.
         @return True when the tool was armed (a symbol is loaded, key known).
         @note The line is closed by the user (double click, Enter, right
             button) like a wire; the other shapes close themselves at their
@@ -2546,17 +2728,12 @@ class SymbolTab(QWidget):
         if self._symbol is None or tool is None:
             self.palette.set_tool_checked(key, False)
             return False
-        self.view.cancel_interaction()
         self.view.placing = False
-        self._release_tools()
-        self.view.wiring = True
-        self._shape_tool = key
-        self._shape_points = []
-        self.palette.set_tool_checked(key, True)
-        self.view.setFocus()
-        self.set_status(self.tx(TOOL_HINTS[key]))
-        self._draw(self._symbol)
-        return True
+        self._arming = True
+        try:
+            return self._router.arm(self._shape_spec(key))
+        finally:
+            self._arming = False
 
     def shape_tool(self):
         """@brief The key of the shape tool in use, None when none is armed.
@@ -2611,23 +2788,25 @@ class SymbolTab(QWidget):
         @note When the tool needs a fixed number of points, the last one
             closes the shape (`finish_shape`).
         """
-        from ..generators.symbol_glyphs import shape_tool
         if self._shape_tool is None or self._symbol is None:
             return False
-        point = self._grid_point(x, y)
-        if self._shape_points and point == self._shape_points[-1]:
+        return self._collector.click(QPointF(x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM))
+
+    def _finish_tool(self, commit):
+        """@brief End the armed click tool through the collector; True when a wire or a shape was added.
+
+        @param commit False abandons the points.
+        @return The outcome of `tool_finished`; False when nothing was armed (the status
+            line is cleared and the scene redrawn, as an abandoned tool does).
+        """
+        self._finish_result = False
+        if not self._collector.finish(commit):
+            self._uncheck_tool_buttons()
+            self._wire_cursor_item = None
+            self.set_status('')
+            self._redraw_idle()
             return False
-        self._shape_points.append(point)
-        count = shape_tool(self._shape_tool)[3]
-        if count and len(self._shape_points) >= count:
-            self.finish_shape(True)
-        elif not count and len(self._shape_points) >= 4 and point == self._shape_points[0]:
-            # A line back onto its first point is a closed polygon
-            # (user, 2026-10-12): three or more sides, closed by the click.
-            self.finish_shape(True)
-        else:
-            self._draw(self._symbol)
-        return True
+        return self._finish_result
 
     def finish_shape(self, commit=True):
         """@brief Close the shape being drawn and insert it as a graphic element.
@@ -2644,52 +2823,68 @@ class SymbolTab(QWidget):
             click is a new element and the one just placed cannot be
             dragged (user, 2026-10-12).
         """
+        return self._finish_tool(commit)
+
+    def _commit_shape(self, key, points, commit):
+        """@brief Insert the clicked points as a shape element (the body of `tool_finished` for a shape).
+
+        @param key Shape tool key.
+        @param points The clicked points.
+        @param commit False abandons them.
+        @return True when the tool stays armed.
+        """
         from ..generators.symbol_glyphs import shape_instance
-        key, points = self._shape_tool, list(self._shape_points)
-        self._shape_points = []
-        self._wire_cursor_item = None
-        one_shot = False
-        if not commit or key is None or self._symbol is None:
-            self.view.wiring = False
-            self._release_tools()
+        if not commit or self._symbol is None:
             self.set_status('')
-            self._draw(self._symbol)
+            if not self._arming:
+                self._redraw_idle()
             return False
+        one_shot = False
         if key == 'text':
             answer = self._text_prompt()
             if answer is None:
-                self.view.wiring = True
-                self._draw(self._symbol)
-                return False
+                return self._shape_kept()
             record = shape_instance(key, points, text=answer[0], size=answer[1])
             one_shot = True
             if record is None:
                 self.set_status(self.tx('Testo non valido: serve una riga non vuota con dimensione maggiore di zero.'))
-                self.view.wiring = True
-                self._draw(self._symbol)
-                return False
+                return self._shape_kept()
         else:
             record = shape_instance(key, points)
         if record is None:
             self.set_status(self.tx('Forma non valida: i punti non la definiscono (serve un’estensione diversa da zero).'))
-            self.view.wiring = True
-            self._draw(self._symbol)
-            return False
+            return self._shape_kept()
         rows = self._free_rows(self.draft_rows(), self._symbol)
         graphics = self._graphics(rows) + [record]
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
-            self.view.wiring = True
-            return False
+            return self._shape_kept()       # refused: redraw so the click dots do not linger
+        self._finish_result = True
         if one_shot:
-            self.view.wiring = False
-            self._release_tools()
             self.set_status(self.tx(
                 'Testo inserito: trascinalo dal corpo o dalla maniglia; «Modifica testo…» nel menu per cambiarlo.'))
         else:
-            self.view.wiring = True
             self.set_status(self.tx('Forma inserita.') + ' ' + self.tx(TOOL_HINTS[key]) + ' '
                             + self.tx('Esc per lasciare lo strumento.'))
         self._select_graphic(len(graphics) - 1)
+        self._stay_redraw_done = not one_shot
+        return not one_shot
+
+    def _redraw_idle(self):
+        """@brief Redraw the scene after a tool ended, unless the tab is being destroyed.
+
+        @note A hidden or closing view cancels its armed tool (`hideEvent`); at
+            destruction the tab's own widget is already gone and drawing would raise.
+        """
+        if not sip.isdeleted(self):
+            self._draw(self._symbol)
+
+    def _shape_kept(self):
+        """@brief A shape that could not be made: redraw without its points and keep the tool armed.
+
+        @return True (the tool stays armed with an empty point list).
+        """
+        self._draw(self._symbol)
+        self._stay_redraw_done = True
         return True
 
     def _text_prompt(self, text='', size=1.27):
@@ -2756,19 +2951,21 @@ class SymbolTab(QWidget):
         @param commit False abandons the points.
         @return True when a wire was added.
         @note With a shape tool armed this closes the shape instead
-            (`finish_shape`): the view sends one signal for both.
+            (`finish_shape`): one collector serves both.
         """
-        if self._shape_tool is not None:
-            return self.finish_shape(commit)
-        points, self._wire_points = self._wire_points, []
-        self.view.wiring = False
-        self.wire_button.defaultAction().setChecked(False)
-        self.palette.set_tool_checked('wire', False)
-        self._wire_cursor_item = None
+        return self._finish_tool(commit)
+
+    def _commit_wire(self, points, commit):
+        """@brief Insert the clicked points as a wire element (the body of `tool_finished` for the wire).
+
+        @param points The wire points: `[x, y]` or anchored `{x, y, anchor}`.
+        @param commit False abandons them.
+        """
         if not commit or len(points) < 2 or self._symbol is None:
             self.set_status('')
-            self._draw(self._symbol)
-            return False
+            if not self._arming:
+                self._redraw_idle()
+            return
         from ..generators.symbol_glyphs import WIRE_KEY, new_instance_id
         rows = self._free_rows(self.draft_rows(), self._symbol)
         # `_free_rows` ran `symbol_graphics` on the rows: every element the
@@ -2781,16 +2978,21 @@ class SymbolTab(QWidget):
                             'fill': 'none', 'width': 0.254}],
             'terminals': []}]
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
-            return False
+            if not self._arming:
+                self._redraw_idle()         # refused: redraw so the click dots do not linger
+            return
+        self._finish_result = True
         self.set_status(self.tx('Filo inserito.'))
         self._select_graphic(len(graphics) - 1)
-        return True
 
     def _start_placing(self):
         """@brief Arm the next click in the symbol to place the chosen glyph."""
         if self._symbol is None or self.glyph_combo.currentData() is None:
             return
         self.view.cancel_interaction()
+        # One armed tool at a time (plan decision C11): a wire or shape tool would
+        # otherwise win the press and the glyph would never be placed.
+        self._router.disarm()
         self.view.placing = True
         self.view.setFocus()
         self.set_status(self.tx('Clicca nel simbolo dove posizionare l’elemento; Esc o tasto destro per annullare.'))
@@ -3773,23 +3975,8 @@ class SymbolTab(QWidget):
             self._cursor_position = point
             self._pointer_inside = True
             self._update_handle_visibility(point)
-            item = self._wire_cursor_item
-            if item is not None and self._shape_tool is not None and self._shape_points and self.view.wiring:
-                cursor = self._grid_point(point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM)
-                item.setPath(self._outline_path(self._shape_outline(self._shape_points + [cursor]),
-                                                SCENE_UNITS_PER_MM))
-            elif item is not None and self._wire_points and self.view.wiring:
-                # The rubber band from the last wire point follows the cursor
-                # with the same constraint a click would apply (corner included).
-                from PyQt6.QtGui import QPainterPath
-                from PyQt6.QtWidgets import QApplication
-                free = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
-                lx, ly = self._xy(self._wire_points[-1])
-                path = QPainterPath(QPointF(lx * SCENE_UNITS_PER_MM, -ly * SCENE_UNITS_PER_MM))
-                for x, y in map(self._xy, self._next_wire_points(
-                        point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM, free)):
-                    path.lineTo(x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM)
-                item.setPath(path)
+            # The tool being drawn follows the cursor (rubber band, `tool_preview_changed`).
+            self._router.hover_at(point)
         cursor = self._cursor_position
         value = '' if cursor is None else f'X {cursor.x()/10:.2f}  Y {-cursor.y()/10:.2f} mm  |  '
         value += f'{self.view.transform().m11()*100:.0f}%'
@@ -5060,6 +5247,10 @@ class SymbolTab(QWidget):
                 scene.addEllipse(x * scale - 2.5, -y * scale - 2.5, 5, 5, shape_pen, QColor(theme['wire']))
             self._wire_cursor_item = self._add_rubber_band(
                 scene, self._outline_path(self._shape_outline(self._shape_points), scale), shape_pen)
+        if self._wire_cursor_item is not None and self._collector.preview:
+            # A redraw while the pointer rests keeps the band on the cursor: the
+            # preview is not emitted again until it changes.
+            self._reshape_band(self._collector.points, self._collector.preview)
 
         def tag(item, target):
             item.setData(0, target)

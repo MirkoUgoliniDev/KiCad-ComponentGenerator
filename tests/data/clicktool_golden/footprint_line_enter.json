@@ -1,0 +1,98 @@
+{
+  "finished": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_edit_footprint_draft": 1,
+      "_refresh_draw_markers": 2,
+      "save_footprint_draft": 1
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "line",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            0.0
+          ],
+          [
+            2.0,
+            2.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "line",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              2.0,
+              0.0
+            ],
+            [
+              2.0,
+              2.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 1
+  },
+  "three_points": {
+    "calls": {
+      "_refresh_draw_markers": 4
+    },
+    "checked": [
+      "line"
+    ],
+    "clicks": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        2.0,
+        0.0
+      ],
+      [
+        2.0,
+        2.0
+      ]
+    ],
+    "drawings": [],
+    "hover": null,
+    "markers": {
+      "QGraphicsEllipseItem": 3
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "line",
+    "undo": 0
+  }
+}

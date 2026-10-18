@@ -388,10 +388,11 @@ def test_a_coinciding_click_and_a_degenerate_shape_are_said_not_silent(preview, 
     assert len(shown) == 1 and window._fp_draw_tool == "circle", \
         "the click is refused with a message, the tool stays armed"
     window._cancel_footprint_drawing()
-    # Degenerate at finish time (the line tool allows repeated clicks).
+    # Degenerate at finish time: a flat rectangle (both clicks on the same x).
+    # Was set through `_fp_draw_clicks`, now read-only: the clicks go through the host.
     window._toggle_footprint_draw_tool("rectangle")
-    window._fp_draw_clicks = [(0.0, 0.0), (0.0, 5.0)]  # flat rectangle
-    window._on_footprint_draw_finish()
+    window._on_footprint_draw_clicked(0, 0)          
+    window._on_footprint_draw_clicked(0, 5 * 20)
     assert len(shown) == 2 and window.footprint_drawings == [] and saves == []
 
 
@@ -703,7 +704,6 @@ def test_undo_and_redo_walk_the_drawing_history_like_the_symbol_editor(preview):
     assert [r["kind"] for r in window.footprint_drawings] == ["rectangle"]
     # A new edit after an undo forgets the redo branch.
     window._toggle_footprint_draw_tool("text")
-    window._fp_draw_clicks = [(1.0, 1.0)]
     window.footprint_drawings = window.footprint_drawings  # unchanged
     window._apply_footprint_drawings(window.footprint_drawings + validate_footprint_drawings(
         [record("text", ((1, 1),), text="X")]))

@@ -1,0 +1,57 @@
+{
+  "dragged": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_edit_footprint_draft": 1,
+      "_refresh_draw_markers": 5,
+      "save_footprint_draft": 1
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            6.0,
+            4.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              6.0,
+              4.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 1
+  }
+}

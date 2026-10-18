@@ -1,0 +1,353 @@
+{
+  "completing_press_then_drag": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_edit_footprint_draft": 1,
+      "_refresh_draw_markers": 4,
+      "save_footprint_draft": 1
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "circle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            2.0
+          ],
+          [
+            5.0,
+            2.0
+          ]
+        ],
+        "width": 0.12
+      },
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            3.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "circle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              2.0
+            ],
+            [
+              5.0,
+              2.0
+            ]
+          ],
+          "width": 0.12
+        },
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              4.0,
+              3.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": null,
+    "undo": 2
+  },
+  "jitter": {
+    "calls": {
+      "_refresh_draw_markers": 2
+    },
+    "checked": [
+      "circle"
+    ],
+    "clicks": [
+      [
+        2.0,
+        2.0
+      ]
+    ],
+    "drawings": [],
+    "hover": null,
+    "markers": {
+      "QGraphicsEllipseItem": 1
+    },
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "circle",
+    "undo": 0
+  },
+  "line_armed": {
+    "calls": {
+      "_refresh_draw_markers": 1
+    },
+    "checked": [
+      "line"
+    ],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "circle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            2.0
+          ],
+          [
+            5.0,
+            2.0
+          ]
+        ],
+        "width": 0.12
+      },
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            3.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "circle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              2.0
+            ],
+            [
+              5.0,
+              2.0
+            ]
+          ],
+          "width": 0.12
+        },
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              4.0,
+              3.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "line",
+    "undo": 2
+  },
+  "line_drag": {
+    "calls": {
+      "_refresh_draw_markers": 3
+    },
+    "checked": [
+      "line"
+    ],
+    "clicks": [
+      [
+        6.0,
+        6.0
+      ],
+      [
+        12.0,
+        6.0
+      ]
+    ],
+    "drawings": [
+      {
+        "kind": "circle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            2.0
+          ],
+          [
+            5.0,
+            2.0
+          ]
+        ],
+        "width": 0.12
+      },
+      {
+        "kind": "rectangle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            4.0,
+            3.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": [
+      9.0,
+      6.0
+    ],
+    "markers": {
+      "QGraphicsEllipseItem": 3,
+      "QGraphicsPathItem": 1
+    },
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "circle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              2.0
+            ],
+            [
+              5.0,
+              2.0
+            ]
+          ],
+          "width": 0.12
+        },
+        {
+          "kind": "rectangle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              4.0,
+              3.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [],
+    "tool": "line",
+    "undo": 2
+  },
+  "refused_press_then_drag": {
+    "calls": {
+      "_checkpoint_footprint_draft": 1,
+      "_draw_preview": 1,
+      "_edit_footprint_draft": 1,
+      "_refresh_draw_markers": 2,
+      "save_footprint_draft": 1
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [
+      {
+        "kind": "circle",
+        "layer": "F.SilkS",
+        "points": [
+          [
+            2.0,
+            2.0
+          ],
+          [
+            5.0,
+            2.0
+          ]
+        ],
+        "width": 0.12
+      }
+    ],
+    "hover": null,
+    "markers": {},
+    "recovery": {
+      "drawings": [
+        {
+          "kind": "circle",
+          "layer": "F.SilkS",
+          "points": [
+            [
+              2.0,
+              2.0
+            ],
+            [
+              5.0,
+              2.0
+            ]
+          ],
+          "width": 0.12
+        }
+      ],
+      "texts": {}
+    },
+    "redo": 0,
+    "texts": {},
+    "toasts": [
+      [
+        "Punto coincidente con il precedente.",
+        "Con la griglia attiva i click si agganciano ai suoi nodi: clicca un altro nodo o scegli una griglia pi\u00f9 fine."
+      ]
+    ],
+    "tool": null,
+    "undo": 1
+  }
+}
