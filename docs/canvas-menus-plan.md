@@ -125,6 +125,13 @@ clipboard and transforms.
   keeps it (it acts on the other elements).
 - C-M2: footprint text angle limited to 0/90 like the symbol's text (KiCad's
   "keep upright" shows 180/270 as 0/90 anyway).
+  Amended 2026-10-18 (user: «fixa tutto»): a saved angle that is any other
+  multiple of 90 (180, 270, -90, a hand-edited file) is normalised modulo 180
+  instead of dropping the whole text; 45, strings, bools and NaN still drop it.
+- C-M5 (user, 2026-10-18): a right click on a member of the symbol selection
+  keeps the whole selection (the «N elementi selezionati» menu is reachable
+  from the canvas), as the pin menu does; on any other element that element
+  becomes the selection.
 - C-M3: footprint gets Ctrl+C / Ctrl+V with the symbol's paste offset rule.
 - C-M4: the footprint menu gets a title line (kind name: «Linea»,
   «Rettangolo», «Cerchio», «Arco», «Testo» — existing translation keys of the

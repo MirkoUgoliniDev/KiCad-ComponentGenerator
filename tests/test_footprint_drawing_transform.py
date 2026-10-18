@@ -130,7 +130,21 @@ def test_validation_stores_angle_zero_as_no_field():
     assert "angle" not in record("text", ((1, 1),), text="HI", size=1.0), "absent stays absent"
 
 
-@pytest.mark.parametrize("bad", [45, 180, 270, -90, True, "90", float("nan"), [90]])
+@pytest.mark.parametrize("given, kept", [(180, None), (270, 90), (-90, 90), (360, None), (450.0, 90)])
+def test_a_hand_edited_quarter_turn_is_kept_modulo_180(given, kept):
+    """@brief Flipped 2026-10-18 (user: «fixa tutto»): was "180/270/-90 drop the whole text".
+
+    A multiple of 90 is the same upright text as 0/90 (symbol rule, KiCad keep
+    upright): the user's text is kept, the angle normalised. Negative twin:
+    `test_validation_drops_a_text_with_any_other_angle` (45, strings, bools, NaN).
+    """
+    raw = {"kind": "text", "layer": "F.SilkS", "width": 0.12, "points": [[1, 1]],
+           "text": "HI", "size": 1.0, "angle": given}
+    (clean,) = validate_footprint_drawings([raw])
+    assert clean.get("angle") == kept
+
+
+@pytest.mark.parametrize("bad", [45, 89.99999, True, "90", float("nan"), float("inf"), [90]])
 def test_validation_drops_a_text_with_any_other_angle(bad):
     raw = {"kind": "text", "layer": "F.SilkS", "width": 0.12, "points": [[1, 1]],
            "text": "HI", "size": 1.0, "angle": bad}

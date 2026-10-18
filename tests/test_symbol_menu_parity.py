@@ -192,13 +192,27 @@ def _keep_group(tab, monkeypatch, group):
     monkeypatch.setattr(tab, '_select_graphic', lambda *args, **kwargs: None)
 
 
-def test_today_a_right_click_collapses_the_selection_to_the_clicked_element(board, monkeypatch):
-    """@brief Records the current behaviour: a right-click on a group member shows the single menu."""
+def test_a_right_click_on_a_group_member_keeps_the_group(board, monkeypatch):
+    """@brief Flipped 2026-10-18 (user: «fixa tutto»): was "a right click on a group member collapses the selection".
+
+    Positive: right-clicking a member of a two-element selection keeps both
+    selected and opens the «2 elementi selezionati» menu, as the pin menu does.
+    Negative twin: `test_a_right_click_outside_the_group_selects_only_that_element`.
+    """
     board._selected_graphics = {1, 2}
     board._selected_graphic = 2
     seen = _open(board, 1, monkeypatch)
-    assert seen['rows'][0][0] == board.graphics()[1]['label']
-    assert board.selected_graphics() == [1]
+    assert seen['rows'] == _head('2 elementi selezionati')
+    assert board.selected_graphics() == [1, 2]
+
+
+def test_a_right_click_outside_the_group_selects_only_that_element(board, monkeypatch):
+    """@brief Negative twin: an element that is not selected becomes the only selection, single menu."""
+    board._selected_graphics = {1, 2}
+    board._selected_graphic = 2
+    seen = _open(board, 0, monkeypatch)
+    assert seen['rows'][0][0] == board.graphics()[0]['label']
+    assert board.selected_graphics() == [0]
 
 
 def test_several_elements_menu_stops_after_duplicate_and_keeps_mirror_with_a_text(board, monkeypatch):
