@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
 
+from .drawing_transform import bounds_centre, mirror_points_x, rotate_points_90
 from .kicad_text import kicad_centre_from_corner, kicad_centre_to_corner
 from .sexpr import YES, SExpr, Symbol, bare, sx
 from ..services.messages import tx
@@ -272,6 +273,10 @@ class FpText:
         text box); None (default) writes no justify node, so KiCad centres
         the text on `at`, and the output stays byte-identical to the one
         written before this option existed.
+    @param angle Text rotation, degrees counter-clockwise as KiCad counts
+        them (90 reads bottom-to-top); written as the third value of
+        ``(at x y angle)`` only when non-zero, so a text without rotation
+        is written byte-identical to the output before this option existed.
     """
 
     kind: str  # "user" | "reference" | "value"
@@ -281,15 +286,17 @@ class FpText:
     size: float = 1.0
     thickness: float = 0.15
     justify: Optional[Tuple[str, ...]] = None
+    angle: float = 0
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this text graphic to a KiCad S-expression.
 
-        @return The `fp_text` node with kind, text, position, layer, a fresh
-            uuid and the font effects (size, thickness, optional justify).
+        @return The `fp_text` node with kind, text, position (with the angle
+            when non-zero), layer, a fresh uuid and the font effects (size,
+            thickness, optional justify).
         """
         node = sx("fp_text", Symbol(self.kind), self.text)
-        node.add(_at_node(self.at))
+        node.add(_at_node(self.at, self.angle))
         node.add(sx("layer", self.layer))
         node.add(sx("uuid", _uuid()))
         node.add(_text_effects(self.size, self.thickness, self.justify))
@@ -397,6 +404,11 @@ USER_DRAW_TEXT_MM = 1.0
 USER_TEXT_ANCHOR = "left_bottom"
 #: KiCad justification written for a text record anchored at `USER_TEXT_ANCHOR`.
 USER_TEXT_JUSTIFY = ("left", "bottom")
+#: Angles, degrees, a text record's optional ``angle`` field may hold: a
+#: text is horizontal or turned a quarter turn to read bottom-to-top, as the
+#: symbol editor's texts (rotation taken modulo 180; KiCad's "keep upright"
+#: shows 180/270 as 0/90 anyway, plan decision C-M2). No field means 0.
+USER_TEXT_ANGLES = (0, 90)
 #: Field of the saved Reference/Value position mapping (``footprint_texts``
 #: of the project, ``texts`` of the footprint recovery file) that marks its
 #: points as BOTTOM-LEFT anchors (value `USER_TEXT_ANCHOR`, user,
@@ -468,13 +480,17 @@ def validate_footprint_drawings(raw) -> list:
     """@brief Keep the well-formed records of saved footprint user drawings.
 
     @param raw Whatever the project file holds under `footprint_drawings`.
-    @return List of {kind, points, layer, width[, text, size[, anchor]]}
+    @return List of {kind, points, layer, width[, text, size[, anchor][, angle]]}
         records whose kind and layer are known, whose points are pairs of
         finite numbers within `TEXT_POSITION_LIMIT_MM` in the count the kind
         requires, and whose text (text kind only) is one non-blank line of
         positive size; a text keeps ``anchor`` only when it is
         `USER_TEXT_ANCHOR` (point = bottom-left corner), no ``anchor`` means a
         legacy centred text, any other anchor value drops the record;
+        a text keeps an ``angle`` that is a number of `USER_TEXT_ANGLES`
+        (90 stored as an int; 0 and an absent field are both stored as no
+        field, the default), any other angle value drops the record;
+        ``angle`` on a shape is ignored;
         an arc must also have a circumcentre KiCad can represent
         (`arc_centre_representable`: collinear points, or nearly collinear
         ones whose centre falls outside `KICAD_COORD_LIMIT_MM`, are left
@@ -526,10 +542,18 @@ def validate_footprint_drawings(raw) -> list:
             anchor = record.get("anchor")
             if anchor is not None and anchor != USER_TEXT_ANCHOR:
                 continue
+            angle = record.get("angle")
+            if angle is not None and (isinstance(angle, bool) or not isinstance(angle, (int, float))
+                                      or angle not in USER_TEXT_ANGLES):
+                continue
             clean["text"] = text.strip()
             clean["size"] = round(float(size), 4)
             if anchor is not None:
                 clean["anchor"] = anchor
+            if angle:
+                # 0 is the default: not stored, so a text turned back and
+                # forth is the same record as one never turned.
+                clean["angle"] = int(angle)
         elif kind == "circle":
             # Second point on the rim: a zero radius draws nothing.
             if clean_points[0] == clean_points[1]:
@@ -561,6 +585,8 @@ def drawing_graphics(records) -> list:
     @note A text anchored at `USER_TEXT_ANCHOR` is written with
         ``(justify left bottom)`` at its point; a legacy text (no anchor)
         keeps KiCad's default centred justification, exactly as before.
+    @note A text's optional ``angle`` (90) is written as ``(at x y 90)``;
+        a text without it, or with 0, is written exactly as before.
     """
     items = []
     for record in records:
@@ -583,7 +609,7 @@ def drawing_graphics(records) -> list:
             justify = USER_TEXT_JUSTIFY if record.get("anchor") == USER_TEXT_ANCHOR else None
             items.append(FpText(kind="user", text=record["text"], at=points[0],
                                 layer=layer, size=record.get("size", USER_DRAW_TEXT_MM),
-                                justify=justify))
+                                justify=justify, angle=record.get("angle", 0)))
     return items
 
 
@@ -617,6 +643,157 @@ def migrate_centred_text(record: dict, corner_offset: Point) -> dict:
         return clean
     clean["points"] = [list(moved)]
     clean["anchor"] = USER_TEXT_ANCHOR
+    return clean
+
+
+def drawing_bounds(record: dict) -> Tuple[float, float, float, float]:
+    """@brief Axis-aligned bounding box, mm, of what a shape record draws.
+
+    @param record A validated shape record (line, rectangle, circle or arc).
+    @return (x_min, y_min, x_max, y_max) mm, Y down: a line's and a
+        rectangle's points; a circle's centre +- radius; an arc's start and
+        end plus every quarter point (0, 90, 180, 270 degrees on its circle)
+        the arc passes through, so the box is the drawn arc's, not its three
+        stored points'.
+    @note A text has no drawn box here: its geometry depends on the font
+        (its anchor is its stored point).
+    """
+    points = [(float(x), float(y)) for x, y in record["points"]]
+    kind = record["kind"]
+    if kind == "circle":
+        (cx, cy), (rx, ry) = points
+        radius = math.hypot(rx - cx, ry - cy)
+        points = [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+    elif kind == "arc":
+        start, mid, end = points
+        centre = _arc_centre(start, mid, end)
+        if centre is not None:
+            cx, cy = centre
+            radius = math.hypot(start[0] - cx, start[1] - cy)
+            turn = 2.0 * math.pi
+            a_start, a_mid, a_end = (math.atan2(y - cy, x - cx) % turn for x, y in (start, mid, end))
+            # The arc runs from start to end the way that passes through mid.
+            if (a_mid - a_start) % turn <= (a_end - a_start) % turn:
+                low, sweep = a_start, (a_end - a_start) % turn
+            else:
+                low, sweep = a_end, (a_start - a_end) % turn
+            points = [start, end]
+            for quarter in range(4):
+                angle = quarter * math.pi / 2.0
+                if (angle - low) % turn <= sweep:
+                    points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def drawing_centre(record: dict) -> Point:
+    """@brief Centre, mm, a drawing record turns and mirrors about.
+
+    @param record A validated drawing record.
+    @return A shape's `drawing_bounds` centre (computed by the shared
+        `drawing_transform.bounds_centre`); a text's anchor point.
+    """
+    if record["kind"] == "text":
+        x, y = record["points"][0]
+        return (float(x), float(y))
+    x0, y0, x1, y1 = drawing_bounds(record)
+    return bounds_centre([(x0, y0), (x1, y1)])
+
+
+def turn_drawing(record: dict, counter_clockwise_on_screen: bool) -> dict:
+    """@brief A copy of a drawing record turned a quarter turn, as the user sees it.
+
+    @param record A validated drawing record.
+    @param counter_clockwise_on_screen True for «antiorario» on the Y-down screen.
+    @return A new record. A shape: every point turned about the centre of its
+        `drawing_bounds` (`drawing_transform.rotate_points_90`), so a
+        rectangle stays axis aligned, a circle keeps its centre and an arc
+        keeps its start/mid/end order. A text: its anchor stays and its
+        ``angle`` toggles between 0 (no field) and 90, because a text is
+        horizontal or vertical (`USER_TEXT_ANGLES`, taken modulo 180 as the
+        symbol editor's texts); both senses give the same toggle.
+    @note The caller validates the result (`validate_footprint_drawings`): a
+        turned shape may leave `TEXT_POSITION_LIMIT_MM`.
+    """
+    clean = dict(record)
+    clean["points"] = [list(p) for p in record["points"]]
+    if record["kind"] == "text":
+        if record.get("angle", 0):
+            clean.pop("angle", None)
+        else:
+            clean["angle"] = 90
+        return clean
+    clean["points"] = rotate_points_90(record["points"], drawing_centre(record), counter_clockwise_on_screen)
+    return clean
+
+
+def mirror_drawing(record: dict) -> dict:
+    """@brief A copy of a shape record mirrored left-right about its bounding-box centre.
+
+    @param record A validated drawing record.
+    @return A new record: a shape's points mirrored about the vertical line
+        through the centre of its `drawing_bounds`
+        (`drawing_transform.mirror_points_x`; an arc keeps its start/mid/end
+        order, the mirrored three points define the mirrored arc); a text is
+        returned unchanged (a copy): KiCad never mirrors text glyphs and its
+        anchor is the mirror's own axis point (plan decision C-M1).
+    """
+    clean = dict(record)
+    clean["points"] = [list(p) for p in record["points"]]
+    if record["kind"] == "text":
+        return clean
+    clean["points"] = mirror_points_x(record["points"], drawing_centre(record)[0])
+    return clean
+
+
+def translate_drawing(record: dict, dx: float, dy: float) -> dict:
+    """@brief A copy of a drawing record moved by (dx, dy) mm.
+
+    @param record A drawing record (validated or not; only ``points`` is read).
+    @param dx Shift along X, mm.
+    @param dy Shift along Y (down), mm.
+    @return A new record whose every point is moved and rounded to 0.1 um.
+    """
+    clean = dict(record)
+    clean["points"] = [[round(float(x) + dx, 4) + 0.0, round(float(y) + dy, 4) + 0.0]
+                       for x, y in record["points"]]
+    return clean
+
+
+def resize_drawing(record: dict, *, width: Optional[float] = None, height: Optional[float] = None,
+                   radius: Optional[float] = None) -> dict:
+    """@brief A copy of a rectangle or circle record with a new size, its centre kept.
+
+    @param record A validated drawing record.
+    @param width New rectangle width, mm (None keeps it).
+    @param height New rectangle height, mm (None keeps it).
+    @param radius New circle radius, mm (None keeps it).
+    @return A new record. A rectangle keeps its centre and which corner is
+        stored first; a circle keeps its centre and the direction of its rim
+        point. Any other kind, or a size that does not apply to the kind, is
+        returned unchanged (a copy). A non-positive size gives a degenerate
+        record the caller's validation refuses.
+    """
+    clean = dict(record)
+    points = [[float(x), float(y)] for x, y in record["points"]]
+    clean["points"] = [list(p) for p in record["points"]]
+    if record["kind"] == "rectangle" and (width is not None or height is not None):
+        (x0, y0), (x1, y1) = points
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        half_w = abs(x1 - x0) / 2.0 if width is None else float(width) / 2.0
+        half_h = abs(y1 - y0) / 2.0 if height is None else float(height) / 2.0
+        sign_x = 1.0 if x0 >= x1 else -1.0
+        sign_y = 1.0 if y0 >= y1 else -1.0
+        clean["points"] = [[round(cx + sign_x * half_w, 4) + 0.0, round(cy + sign_y * half_h, 4) + 0.0],
+                           [round(cx - sign_x * half_w, 4) + 0.0, round(cy - sign_y * half_h, 4) + 0.0]]
+    elif record["kind"] == "circle" and radius is not None:
+        (cx, cy), (rx, ry) = points
+        old = math.hypot(rx - cx, ry - cy)
+        ux, uy = ((rx - cx) / old, (ry - cy) / old) if old > 0 else (1.0, 0.0)
+        r = float(radius)
+        clean["points"] = [list(record["points"][0]),
+                           [round(cx + ux * r, 4) + 0.0, round(cy + uy * r, 4) + 0.0]]
     return clean
 
 
