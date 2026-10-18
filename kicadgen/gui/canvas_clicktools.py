@@ -404,6 +404,9 @@ class ClickToolRouter:
         self._swallow_release = False
         #: True while the router believes the viewport shows the tool cursor.
         self._cursor_set = False
+        #: True after the tool cursor was unset: `QGraphicsView` may still hold it as the
+        #: "original" cursor of a hovered item and put it back on leaving that item.
+        self._stale_cursor = False
 
     # -- helpers ---------------------------------------------------------
 
@@ -439,6 +442,27 @@ class ClickToolRouter:
         elif not self._collector.armed and self._cursor_set:
             viewport.unsetCursor()
             self._cursor_set = False
+            self._stale_cursor = True
+
+    def settle_cursor(self, event) -> None:
+        """@brief Drop a tool cursor that `QGraphicsView` restored after the tool had ended.
+
+        @param event The mouse move, after the view's base class handled it.
+        @note The view saves the viewport cursor when the pointer enters an item
+            with its own cursor and restores it on leaving. A tool that ends
+            over such an item leaves the CrossCursor saved, and it comes back
+            on the next move off the item. Called after the base handling of
+            each move: when nothing is armed and no item under the pointer
+            has a cursor, a viewport still showing the CrossCursor is reset.
+        """
+        if not self._stale_cursor or not self._usable() or self._collector.armed:
+            return
+        if any(item.hasCursor() for item in self._view.items(self._viewport_pos(event))):
+            return
+        viewport = self._view.viewport()
+        if viewport.cursor().shape() == Qt.CursorShape.CrossCursor:
+            viewport.unsetCursor()
+        self._stale_cursor = False
 
     # -- public ----------------------------------------------------------
 
