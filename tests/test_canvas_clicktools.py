@@ -1206,3 +1206,25 @@ def test_settle_cursor_does_nothing_while_a_tool_is_armed_or_never_ended(router,
     view.viewport().setCursor(Qt.CursorShape.CrossCursor)     # what Qt's restore leaves behind
     router.settle_cursor(ev)
     assert view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor
+
+
+def test_a_drag_release_snapping_onto_the_last_point_is_dropped_silently(router, col, host):
+    """@brief A trembling click (moved past the drag distance, snapped back) shows no «Punto coincidente».
+
+    Positive: the release point equal to the pressed one is refused WITHOUT `tool_refused`.
+    Negative twin: a release on a different snapped point is added (a real drag closes the rectangle).
+    """
+    d = QApplication.startDragDistance()
+    router.arm(RECT_P)
+    host.snap_result = [(0, 0)]                                 # everything snaps to one node
+    router.press(press(50, 50))
+    host.calls.clear()
+    router.release(release(50 + d, 50))
+    assert host.named('refused') == [] and col.points == [(0, 0)]
+    router.disarm()
+    host.snap_result = None
+    router.arm(RECT_P)
+    host.calls.clear()
+    router.press(press(60, 60))
+    router.release(release(60 + 3 * d, 60))
+    assert host.named('finished'), "the real drag closed the rectangle"
