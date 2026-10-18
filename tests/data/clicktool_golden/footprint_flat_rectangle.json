@@ -1,0 +1,23 @@
+{
+  "flat": {
+    "calls": {
+      "_refresh_draw_markers": 3
+    },
+    "checked": [],
+    "clicks": [],
+    "drawings": [],
+    "hover": null,
+    "markers": {},
+    "recovery": null,
+    "redo": 0,
+    "texts": {},
+    "toasts": [
+      [
+        "Disegno scartato.",
+        "La forma \u00e8 degenere (raggio nullo o lato nullo): clicca punti distinti sulla griglia."
+      ]
+    ],
+    "tool": null,
+    "undo": 0
+  }
+}

@@ -2,6 +2,180 @@
 
 ## 18/10 notte — FATTO e committato `e276472` su ADVANCED, mergiato in main `a50ef30`, pushati: CAMERA + GRIGLIA condivise (canvas_camera.py, canvas_grid.py) nelle due schede, suite 9361 (A 5760/10/19, B 3601/2, 0 falliti)
 
+AUTORIZZATO 18/10 («ok procedi scatenando agenti esperti»): FASE B avviata.
+Passo 1 IN CORSO: architetto in sola lettura (agente Plan) produce
+l'inventario degli strumenti a clic delle due schede, il componente comune
+(canvas_clicktools.py, nome da confermare nel piano), le differenze e il
+contratto; il coordinatore ne ricava docs/canvas-clicktools-plan.md; poi 3
+agenti (M modulo + test unitari, S simbolo, F footprint) con prove di
+parita' PRIMA, revisione avversariale, suite in due meta', commit con OK.
+PIANO FASE B SCRITTO: docs/canvas-clicktools-plan.md (inventario S13-S15 /
+F6-F6b con righe, componente kicadgen/gui/canvas_clicktools.py: ToolSpec,
+ClickToolHost (7 callback), PointCollector, ClickToolRouter con regole di
+precedenza, contratto in 9 punti, migrazione, divisione M/S/F, trappole,
+misure). DECISIONI DEL COORDINATORE sulle differenze C1-C12 e X (spiegate
+nel piano §3): C1 rilascio dopo trascinamento = punto nelle forme di
+entrambe le schede, NON nel filo del simbolo (flag all'utente); C2 doppio
+clic = punto poi fine, con `quiet` (due clic rapidi su un rettangolo del
+simbolo oggi danno «Forma non valida»); C3 punto duplicato rifiutato con
+riga di stato nel simbolo; C5 persistenza invariata per scheda (flag);
+C6 uscita dalla vista cancella anteprima e marcatori in entrambe; C7 hide
+annulla lo strumento in entrambe (flag: un filo in corso si perde al cambio
+scheda); C8 Escape durante un pan: il pan prende il tasto, lo strumento
+sopravvive; C9 clic sinistro durante un pan scartato; C10 cursore a croce;
+C11 il posizionamento resta fuori dal router ma disarma la raccolta
+(corregge un conflitto latente); X menu contestuale dopo il clic destro che
+chiude un filo: da verificare con una sonda, se confermato il menu si
+ignora con strumento armato. IN CORSO: tre agenti in parallelo (M modulo,
+S simbolo, F footprint), parity PRIMA.
+FATTO M (fase B): kicadgen/gui/canvas_clicktools.py + tests/
+test_canvas_clicktools.py (110 verdi, 125 con la documentazione). API come
+nel piano §2 + `hover_at(scene_point)` (hover senza evento, legge
+QApplication.keyboardModifiers()) e `on_arm` nel costruttore del router.
+Deviazioni dal piano: router.arm = pan_cancel -> on_arm -> collector.arm ->
+setFocus -> CrossCursor sul viewport (il router possiede il cursore e lo
+riapplica a ogni move); tool_disarmed NON chiamato se l'host arma un altro
+strumento dentro tool_finished; arm emette tool_armed poi
+tool_points_changed(spec, []); un clic azzera l'anteprima memorizzata SENZA
+emettere (l'host ridisegna in tool_points_changed); riarmare lo stesso
+spec lo riavvia (ciclo limitato a 8); close_after lascia il punto di
+chiusura in points; pressione durante un pan: sinistro E destro scartati;
+punto di rilascio dopo trascinamento solo se la pressione ha lasciato una
+forma in corso; doppio clic solo se armato con punti; key False se non
+armato; move True ma mai accept(); punti confrontati con == (tipi valore,
+non QPointF). Fase 2 avviata per S e F con queste note.
+FATTO F fasi 1-2 (footprint su PointCollector + ClickToolRouter): parity
+tests/test_footprint_clicktool_parity.py 52 test (18 scenari, 17 rigiocati
+dall'API diretta come gemello; 27 golden in tests/data/clicktool_golden/
+footprint_*.json letti come JSON, rigenerati solo con
+KICADGEN_REGEN_CLICKTOOL_GOLDEN=1); insieme footprint verde
+(test_footprint_drawings 54, gesture_parity 25, text_anchor 10,
+gui_review_fixes 76, kept_scene_items 11, preview_grid 16,
+documentazione 15, canvas_*); PRIMA/DOPO uguali (34 refresh dei marcatori
+per 80 movimenti, chiusura rettangolo 2 refresh / 1 _edit_footprint_draft /
+1 _draw_preview / 1 checkpoint / 1 salvataggio / 1 annulla, hash pixel
+identici). FootprintView: click_collector e click_router in attach_host,
+router per primo in press/release/double click/key/move/leave/hide; tolti i
+cinque segnali draw_*, _draw_press e la gestione del cursore; _draw_mode
+proprieta' di sola lettura; set_draw_mode(active, spec=None) alias. Finestra
+= ClickToolHost; _fp_draw_tool e _fp_draw_clicks proprieta' di sola lettura
+sul collector; _toggle_footprint_draw_tool/_cancel_footprint_drawing/
+_on_footprint_draw_* involucri; tool_finished sempre False,
+_cancel_footprint_drawing PRIMA di _apply_footprint_drawings. Decisioni: C1
+resta ON; C2 doppio clic sull'ultimo vertice = vertice aggiunto UNA volta,
+fine linea, NESSUN toast (gemello: secondo clic semplice sullo stesso nodo
+= toast); C6, C8 gia' veri; C9 pressione sinistra o destra durante un pan
+scartata (e il punto si aggiunge dopo il rilascio del pan); C10 il router
+mette la croce, la ripristina dopo un Escape che annulla un pan, non tocca
+un cursore non suo. Test esistenti ritoccati: test_footprint_drawings.py (2
+test assegnavano _fp_draw_clicks); tolta dal registratore la chiave
+`_cancel_footprint_drawing` (contava il cablaggio, non il comportamento).
+DUE PUNTI SEGNALATI DA F, CORRETTI NEL MODULO DAL COORDINATORE (via M): (1)
+il router ricordava la pressione solo se il clic era accettato: premere sul
+vertice appena inserito (rifiutato come duplicato) e trascinare non
+aggiungeva piu' il punto di rilascio (il vecchio footprint si');
+regola corretta: si ricorda la pressione se DOPO di essa c'e' una forma in
+corso (punti non vuoti), accettata o rifiutata, non se la pressione ha
+chiuso/azzerato una forma; (2) hover(None) dopo un clic non emetteva nulla
+(anteprima memorizzata gia' [] ) e un punto di aggancio o fantasma
+dell'host restava: ora la leave emette SEMPRE una volta
+tool_preview_changed(spec, points, []) se armato. F aveva aggirato (2) con
+una chiamata a _on_footprint_draw_hover_left in leaveEvent: da togliere
+dopo la correzione. Nota F: «Undo e redo disarmano anche a pila vuota,
+apply e discard solo con modifica pendente» (invariato, fissato).
+FATTO M (correzioni dai punti di F): canvas_clicktools.py — (1) il router
+ricorda la pressione se dopo di essa c'e' una forma in corso (punti non
+vuoti e drag_adds_release_point), accettata o rifiutata come duplicato, non
+se la pressione ha chiuso/azzerato una forma; (2) hover(None) da armato
+emette SEMPRE tool_preview_changed(spec, points, []) una volta per chiamata
+(pulizia idempotente nell'host), da inattivo niente; hover(point) resta a
+sola variazione. 133 verdi (118 nel file del componente + documentazione).
+F e S avvisati: F toglie l'aggiramento in leaveEvent e riporta il test
+C1 al vecchio contratto; S non aggiunge percorsi di pulizia paralleli.
+FATTO F (correzioni): tolta la chiamata di aggiramento
+_on_footprint_draw_hover_left da FootprintView.leaveEvent (un solo percorso
+di pulizia: router.leave -> tool_preview_changed con anteprima vuota; il
+involucro _on_footprint_draw_hover_left ora e' solo collector.hover(None));
+test C1 riportato al vecchio contratto e rinominato
+test_c1_a_release_within_the_drag_distance_adds_nothing_and_a_refused_press_
+still_drags (pressione rifiutata + trascinamento aggiunge il punto di
+rilascio; rilascio entro la distanza niente; pressione che ha chiuso una
+forma + trascinamento niente; linea trascinata resta aperta), golden
+footprint_drag_jitter_circle.json rigenerato. Footprint: parity 52,
+drawings 54, gesture_parity 25, text_anchor 10, gui_review_fixes 76,
+kept_scene_items 11, preview_grid 16, canvas_camera 117, canvas_gestures
+44, canvas_grid 92, canvas_clicktools 118, documentazione 15; DOPO = PRIMA
+(34 refresh per 80 movimenti, stessi conteggi alla chiusura, stessi hash).
+Resta S (simbolo).
+FATTO S fasi 1-2 (symbol_tab.py su PointCollector + ClickToolRouter):
+tests/test_symbol_clicktool_parity.py 45 test (+ golden
+tests/data/clicktool_golden/symbol_session.json, letto con CRLF
+normalizzato e con test negativo proprio); 31 file di test verdi, ognuno in
+un processo (test_symbol*, perf_p2_symbol_drag, kept_scene_items,
+canvas_*, documentazione). La tab e' l'host (SymbolTab implementa i 7
+callback); la vista chiama il router per primo in press/release/double
+click/key/move (non consumante)/leave/hide; tolti dalla vista i rami
+wiring/placing del filo e i segnali wire_point/wire_finished (resta
+place_requested: il posizionamento resta fuori dal router); `view.wiring`,
+`_wire_points`, `_shape_points`, `_shape_tool` proprieta' di sola lettura sul
+collector; start_wire/start_shape/add_wire_point/add_shape_point/
+finish_wire/finish_shape/shape_tool/_release_tools involucri sottili;
+l'anteprima del filo resta aggiornata SUL POSTO in tool_preview_changed (0
+_draw per movimento, band path identici, grab di filo/rettangolo/linea a
+meta' IDENTICI: 0 pixel diversi). Valori di OGGI registrati dal vecchio
+codice (C1 solo il punto di pressione; C2 due clic rapidi = 1 punto e
+«Forma non valida»; C3 silenzioso; C6 la banda resta; C7 hide mantiene lo
+strumento; C8 Escape durante un pan annullava il filo e il pan continuava;
+C9 una pressione sinistra durante un pan aggiungeva un punto; C10 nessun
+cursore; C11 il filo vinceva su un posizionamento armato; X il menu
+contestuale si apriva dopo il clic destro che chiude un filo). DECISIONI
+APPLICATE nel simbolo con test positivi e negativi: C1 (forme ON, filo
+OFF), C2, C3 (riga di stato «Punto coincidente con il precedente.»,
+gia' nel catalogo a 4 lingue; bozza non valida resta silenziosa), C6, C7,
+C8, C9, C10 (croce sul viewport all'arm, tolta al disarm), C11
+(_start_placing chiama _router.disarm()), X. GOLDEN: rispetto alla sessione
+registrata prima dell'adozione cambia solo il passo del punto duplicato
+(testo di stato C3); conteggi, righe e bande identici.
+ERRATE DEL PIANO (trovate da S): (1) X «contextMenuEvent ignora con uno
+strumento armato» NON funziona per il filo: il clic destro che chiude il
+filo lo ha gia' disarmato quando arriva l'evento del menu; soluzione: la
+vista ricorda che un clic destro e' stato consumato da uno strumento e
+scarta l'evento di menu con ragione Mouse che segue (azzerato dalla
+pressione successiva; il tasto menu della tastiera non e' mai scartato).
+Trappola di tempo: su Windows l'evento arriva DOPO il rilascio, quando il
+rifit differito della camera ha gia' spostato il filo; i test devono
+svuotare il ciclo di eventi e ricalcolare le posizioni. (2) QTest.mouseDClick
+invia SOLO l'evento di doppio clic (non pressione, rilascio, doppio clic,
+rilascio): il banco costruisce la sequenza vera da eventi espliciti. (3)
+A riposo la vecchia banda era un percorso vuoto (un solo moveTo = 0
+elementi): l'anteprima si applica in _draw solo se non vuota. (4) Un hide
+alla distruzione della tab eseguiva tool_finished(commit=False) che
+chiamava _draw su un widget morto (RuntimeError): _redraw_idle() salta il
+ridisegno se sip.isdeleted(self) (colpira' qualunque adottante di C7). (5)
+tool_disarmed toglie anche una croce rimasta sul viewport (i finish
+dell'API diretta non passano dal router). (6) add_wire_point ora ritorna
+False se il filo non e' armato (prima aggiungeva comunque).
+DUBBI DI S: sopra un elemento con tag (pin, grafica) il cursore e' quello
+SizeAll dell'elemento, non la croce (come il vecchio codice); il percorso di
+commit fallito (_accept_geometry rifiuta) non ridisegna, come prima, quindi
+i puntini azzerati possono restare fino al prossimo ridisegno (difetto
+latente preesistente, lasciato); il test C1 e il test X sono sensibili al
+rifit della camera e all'ordine degli eventi. Una volta, a meta'
+adozione, test_documentation e' fallito senza riprodursi.
+REVISIONE AVVERSARIALE CONCLUSA (2026-10-18). Corretti: (1) HIGH release
+orfana dopo prompt modale del testo: press() azzera sempre _press/_swallow
+(test aggiunto); (3) hide spontaneo (minimizza) non cancella lo strumento;
+(4) hover_at salta lo snap doppio sullo stesso punto (_last_hover); (5) il
+commit rifiutato ora ridisegna (forma e filo): il difetto latente di sopra
+e' CHIUSO; (6) _fp_skip_disarm azzerato in finally; (7) _release_tools
+rimosso; (8) 3 copie duplicate dei test rimosse. NON corretto: (2) cursore
+a croce che resta dopo la fine dello strumento con il puntatore su un
+elemento (QGraphicsView memorizza il cursore del viewport) — da trattare
+con cura; dubbio: rilascio-dopo-trascinamento con 'Punto coincidente'.
+Suite completa in due meta' rilanciata dopo le correzioni (le prime due
+esecuzioni erano morte a meta', senza riepilogo).
+ESITO SUITE (fase B, dopo le correzioni): 9576 passed, 12 skipped, 19 subtests.
+Metà A: 4 test di tempo (fixE_orchestration x3, freecad_heartbeat) falliti sotto carico, verdi se rilanciati soli; metà B: 1 errore transitorio 'no such table: translations' in test_photo_detector_ui, verde da solo (63 passed). Trappola: i processi lanciati con & e senza wait muoiono con la shell.
 Prossimo: FASE B, strumenti a clic (simbolo: filo, forme, simboli
 grafici — start_wire/add_wire_point/start_shape/add_shape_point/finish_* e
 posizionamento; footprint: modalita' disegno set_draw_mode +

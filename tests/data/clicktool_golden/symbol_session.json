@@ -1,0 +1,6287 @@
+[
+ {
+  "counts": {},
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "rest",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Simbolo pronto per la verifica e l’esportazione.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": false
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "arm wire",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "wire click 1",
+  "tool": {
+   "band": [],
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [
+    [
+     -7.62,
+     5.08
+    ]
+   ],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {},
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "wire hover",
+  "tool": {
+   "band": [
+    [
+     -7.62,
+     5.08
+    ],
+    [
+     -2.54,
+     5.08
+    ]
+   ],
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [
+    [
+     -7.62,
+     5.08
+    ]
+   ],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "wire click 2 (projected)",
+  "tool": {
+   "band": [],
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [
+    [
+     -7.62,
+     5.08
+    ],
+    [
+     -2.54,
+     5.08
+    ]
+   ],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "wire duplicate click",
+  "tool": {
+   "band": [],
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [
+    [
+     -7.62,
+     5.08
+    ],
+    [
+     -2.54,
+     5.08
+    ],
+    [
+     -2.54,
+     2.54
+    ]
+   ],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 1,
+  "history_index": 0,
+  "recovery": false,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": null,
+  "step": "wire shift click",
+  "tool": {
+   "band": [],
+   "glyph_checked": false,
+   "palette": [
+    "wire"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "wire_button": true,
+   "wire_points": [
+    [
+     -7.62,
+     5.08
+    ],
+    [
+     -2.54,
+     5.08
+    ],
+    [
+     -2.54,
+     2.54
+    ],
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_accept_geometry": 1,
+   "_changed": 1,
+   "_draw": 2,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 2,
+  "history_index": 1,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 0,
+  "step": "wire right click",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Filo inserito.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": false
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 2,
+  "history_index": 1,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 0,
+  "step": "arm rectangle",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [
+    "rectangle"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": "rectangle",
+   "status": "Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_accept_geometry": 1,
+   "_changed": 1,
+   "_draw": 3,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 3,
+  "history_index": 2,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 1,
+  "step": "rectangle 1",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [
+    "rectangle"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": "rectangle",
+   "status": "Forma inserita. Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare Esc per lasciare lo strumento.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 3,
+  "history_index": 2,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 1,
+  "step": "rectangle 2 first corner and hover",
+  "tool": {
+   "band": [
+    [
+     -2.54,
+     -5.08
+    ],
+    [
+     2.54,
+     -5.08
+    ],
+    [
+     2.54,
+     -2.54
+    ],
+    [
+     -2.54,
+     -2.54
+    ],
+    [
+     -2.54,
+     -5.08
+    ]
+   ],
+   "glyph_checked": false,
+   "palette": [
+    "rectangle"
+   ],
+   "placing": false,
+   "shape_points": [
+    [
+     -2.54,
+     -5.08
+    ]
+   ],
+   "shape_tool": "rectangle",
+   "status": "Forma inserita. Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare Esc per lasciare lo strumento.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_accept_geometry": 1,
+   "_changed": 1,
+   "_draw": 2,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 4,
+  "history_index": 3,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 2,
+  "step": "rectangle 2",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [
+    "rectangle"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": "rectangle",
+   "status": "Forma inserita. Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare Esc per lasciare lo strumento.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 4,
+  "history_index": 3,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 2,
+  "step": "rectangle degenerate (duplicate)",
+  "tool": {
+   "band": [
+    [
+     2.54,
+     2.54
+    ]
+   ],
+   "glyph_checked": false,
+   "palette": [
+    "rectangle"
+   ],
+   "placing": false,
+   "shape_points": [
+    [
+     2.54,
+     2.54
+    ]
+   ],
+   "shape_tool": "rectangle",
+   "status": "Punto coincidente con il precedente.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_draw": 1
+  },
+  "history": 4,
+  "history_index": 3,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 2,
+  "step": "escape",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": false
+  }
+ },
+ {
+  "counts": {
+   "_accept_geometry": 1,
+   "_changed": 1,
+   "_draw": 6,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 5,
+  "history_index": 4,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 3,
+  "step": "polygon closed",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [
+    "line"
+   ],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": "line",
+   "status": "Forma inserita. Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per chiudere, Esc per annullare Esc per lasciare lo strumento.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": true
+  }
+ },
+ {
+  "counts": {
+   "_accept_geometry": 1,
+   "_changed": 1,
+   "_draw": 4,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 6,
+  "history_index": 5,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     },
+     {
+      "id": "<element 4>",
+      "key": "shape:text",
+      "label": "Testo",
+      "mirror": false,
+      "primitives": [
+       {
+        "angle": 0,
+        "fill": "none",
+        "justify": "left",
+        "kind": "text",
+        "points": [
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "size": 1.27,
+        "style": "default",
+        "text": "T1",
+        "vjustify": "bottom",
+        "width": 0.0
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "text_anchor": "bottom_left",
+      "x": -5.08,
+      "y": -5.08
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     },
+     {
+      "id": "<element 4>",
+      "key": "shape:text",
+      "label": "Testo",
+      "mirror": false,
+      "primitives": [
+       {
+        "angle": 0,
+        "fill": "none",
+        "justify": "left",
+        "kind": "text",
+        "points": [
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "size": 1.27,
+        "style": "default",
+        "text": "T1",
+        "vjustify": "bottom",
+        "width": 0.0
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "text_anchor": "bottom_left",
+      "x": -5.08,
+      "y": -5.08
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     },
+     {
+      "id": "<element 4>",
+      "key": "shape:text",
+      "label": "Testo",
+      "mirror": false,
+      "primitives": [
+       {
+        "angle": 0,
+        "fill": "none",
+        "justify": "left",
+        "kind": "text",
+        "points": [
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "size": 1.27,
+        "style": "default",
+        "text": "T1",
+        "vjustify": "bottom",
+        "width": 0.0
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "text_anchor": "bottom_left",
+      "x": -5.08,
+      "y": -5.08
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     },
+     {
+      "id": "<element 4>",
+      "key": "shape:text",
+      "label": "Testo",
+      "mirror": false,
+      "primitives": [
+       {
+        "angle": 0,
+        "fill": "none",
+        "justify": "left",
+        "kind": "text",
+        "points": [
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "size": 1.27,
+        "style": "default",
+        "text": "T1",
+        "vjustify": "bottom",
+        "width": 0.0
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "text_anchor": "bottom_left",
+      "x": -5.08,
+      "y": -5.08
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     },
+     {
+      "id": "<element 4>",
+      "key": "shape:text",
+      "label": "Testo",
+      "mirror": false,
+      "primitives": [
+       {
+        "angle": 0,
+        "fill": "none",
+        "justify": "left",
+        "kind": "text",
+        "points": [
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "size": 1.27,
+        "style": "default",
+        "text": "T1",
+        "vjustify": "bottom",
+        "width": 0.0
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "text_anchor": "bottom_left",
+      "x": -5.08,
+      "y": -5.08
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 4,
+  "step": "text",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Testo inserito: trascinalo dal corpo o dalla maniglia; «Modifica testo…» nel menu per cambiarlo.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": false
+  }
+ },
+ {
+  "counts": {
+   "_changed": 1,
+   "_draw": 1,
+   "layout_symbol": 1,
+   "save_draft": 1
+  },
+  "history": 6,
+  "history_index": 4,
+  "recovery": true,
+  "rows": [
+   {
+    "electrical_type": "passive",
+    "name": "P1",
+    "pin": "1",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P2",
+    "pin": "2",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     0.0
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P3",
+    "pin": "3",
+    "symbol_angle": 0,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     -7.62,
+     -2.54
+    ],
+    "symbol_side": "left"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P4",
+    "pin": "4",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     2.54
+    ],
+    "symbol_side": "right"
+   },
+   {
+    "electrical_type": "passive",
+    "name": "P5",
+    "pin": "5",
+    "symbol_angle": 180,
+    "symbol_body": [
+     10.16,
+     10.16
+    ],
+    "symbol_graphics": [
+     {
+      "id": "<element 0>",
+      "key": "wire",
+      "label": "Filo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -7.62,
+          5.08
+         ],
+         [
+          -2.54,
+          5.08
+         ],
+         [
+          -2.54,
+          2.54
+         ],
+         [
+          0.0,
+          0.0
+         ]
+        ],
+        "radius": 0.0,
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "wire",
+      "terminals": [],
+      "x": 0.0,
+      "y": 0.0
+     },
+     {
+      "id": "<element 1>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -2.54
+         ],
+         [
+          2.54,
+          2.54
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 5.08,
+      "y": 0.0
+     },
+     {
+      "id": "<element 2>",
+      "key": "shape:rectangle",
+      "label": "Rettangolo",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "rectangle",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 0.0,
+      "y": -3.81
+     },
+     {
+      "id": "<element 3>",
+      "key": "shape:line",
+      "label": "Linea",
+      "mirror": false,
+      "primitives": [
+       {
+        "fill": "none",
+        "kind": "polyline",
+        "points": [
+         [
+          -2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          -1.27
+         ],
+         [
+          2.54,
+          1.27
+         ],
+         [
+          -2.54,
+          -1.27
+         ]
+        ],
+        "radius": 0.0,
+        "style": "default",
+        "width": 0.254
+       }
+      ],
+      "rotation": 0,
+      "source": "shape",
+      "terminals": [],
+      "x": 2.54,
+      "y": 6.35
+     }
+    ],
+    "symbol_position": [
+     7.62,
+     0.0
+    ],
+    "symbol_side": "right"
+   }
+  ],
+  "selected_graphic": 4,
+  "step": "undo",
+  "tool": {
+   "band": null,
+   "glyph_checked": false,
+   "palette": [],
+   "placing": false,
+   "shape_points": [],
+   "shape_tool": null,
+   "status": "Modifiche non applicate.",
+   "wire_button": false,
+   "wire_points": [],
+   "wiring": false
+  }
+ }
+]

@@ -768,8 +768,8 @@ def test_fixed_count_shapes_close_at_their_last_click_and_land_on_the_grid(qapp)
         assert tab._shape_points == [] and tab._selected_graphic == 0
         # Clicks through the view signal reach the shape, Y up.
         tab.start_shape('circle')
-        tab.view.wire_point.emit(QPointF(0, 0), False)
-        tab.view.wire_point.emit(QPointF(2.54 * SCENE_UNITS_PER_MM, 0), False)
+        tab.view.collector.click(QPointF(0, 0))
+        tab.view.collector.click(QPointF(2.54 * SCENE_UNITS_PER_MM, 0))
         assert tab.graphics()[1]['primitives'][0] == {'kind': 'circle', 'points': [[0.0, 0.0]], 'radius': 2.54,
                                                       'fill': 'none', 'width': g.SHAPE_WIDTH_MM, 'style': 'default'}
         tab.start_shape('arc')
@@ -799,13 +799,13 @@ def test_a_line_is_closed_by_the_user_and_a_degenerate_shape_or_escape_adds_noth
         assert tab.add_shape_point(0, 0) and not tab.add_shape_point(0.3, -0.2), 'same grid point twice'
         assert tab.add_shape_point(2.54, 2.54) and tab.add_shape_point(5.08, 0)
         assert len(tab.graphics()) == 0, 'the line waits for the user to close it'
-        tab.view.wire_finished.emit(True)
+        tab.view.collector.finish(True)
         (line,) = tab.graphics()
         assert line['primitives'][0]['kind'] == 'polyline' and len(line['primitives'][0]['points']) == 3
         assert line['primitives'][0]['points'][0] == [-2.54, -1.27], 'relative to the centre of the bounds'
         # Esc releases the tool and abandons the points.
         tab.add_shape_point(0, 0)
-        tab.view.wire_finished.emit(False)
+        tab.view.collector.cancel()
         assert tab.shape_tool() is None and not tab.view.wiring and len(tab.graphics()) == 1
         # A rectangle without area is refused and the tool stays armed.
         tab.start_shape('rectangle')
@@ -937,7 +937,7 @@ def test_shape_handles_are_drawn_for_the_selected_shape_and_dragged_on_the_drawi
         tab.start_shape('rectangle')
         tab.add_shape_point(0, 0)
         tab.add_shape_point(5.08, 2.54)
-        tab.view.wire_finished.emit(False)
+        tab.view.collector.cancel()
         handles = [item.data(0) for item in tab.view.scene().items()
                    if item.data(0) and item.data(0)[0] == 'shape_point']
         assert sorted(handles) == [('shape_point', 0, 0), ('shape_point', 0, 1)]
@@ -1003,7 +1003,7 @@ def test_several_elements_are_selected_together_and_moved_turned_deleted_as_a_gr
             tab.start_shape('rectangle')
             tab.add_shape_point(x, 0)
             tab.add_shape_point(x + 2.54, 5.08)
-        tab.view.wire_finished.emit(False)
+        tab.view.collector.cancel()
         tab._toggle_graphic(0)
         assert tab.selected_graphics() == [0, 1]
         tab._toggle_graphic(1)
@@ -1025,7 +1025,7 @@ def test_several_elements_are_selected_together_and_moved_turned_deleted_as_a_gr
             tab.start_shape('rectangle')
             tab.add_shape_point(x, 0)
             tab.add_shape_point(x + 2.54, 2.54)
-        tab.view.wire_finished.emit(False)
+        tab.view.collector.cancel()
         from PyQt6.QtCore import QRectF
         tab._select_region(QRectF(-1 * SCENE_UNITS_PER_MM, -3 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM, 4 * SCENE_UNITS_PER_MM), False)
         assert tab.selected_graphics() == [0]
@@ -1088,7 +1088,7 @@ def test_a_line_back_onto_its_first_point_closes_a_polygon(qapp):
         tab.add_shape_point(0, 0)
         tab.add_shape_point(2.54, 0)
         assert tab.add_shape_point(0, 0) and len(tab.graphics()) == 1, 'two points back to the start: no polygon yet'
-        tab.view.wire_finished.emit(False)
+        tab.view.collector.cancel()
     finally:
         tab.deleteLater()
 

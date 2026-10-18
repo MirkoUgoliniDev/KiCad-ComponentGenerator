@@ -1662,12 +1662,15 @@ class MainWindow(QMainWindow):
         #: core.footprint.validate_footprint_drawings); drawn in every 2D
         #: preview and appended to the exported .kicad_mod (user, 2026-10-13).
         self.footprint_drawings: list = []
-        #: Armed palette tool of the footprint preview, or None.
-        self._fp_draw_tool: str | None = None
-        #: Points already clicked for the shape in progress, footprint mm.
-        self._fp_draw_clicks: list = []
         #: Snapped pointer position while a tool is armed, footprint mm, or None.
+        #: The armed tool and its clicked points live in the preview's
+        #: `PointCollector` (read through `_fp_draw_tool` / `_fp_draw_clicks`).
         self._fp_draw_hover: tuple | None = None
+        #: True from a tool being armed until the host reset its markers.
+        self._fp_draw_dirty = False
+        #: Set when the host already reset the draw state, so the collector's
+        #: `tool_disarmed` that follows does not reset (and redraw) it again.
+        self._fp_skip_disarm = False
         #: Index of the drawing whose handles are shown (-1: none).
         self._fp_hovered_drawing: int = -1
         #: Key of the REF**/Value text whose anchor square is shown ("": none),
@@ -14488,11 +14491,6 @@ class MainWindow(QMainWindow):
         # (user, 2026-10-13): free tools only, no numbered pads.
         canvas_row.addWidget(self._build_footprint_palette())
         outer.addLayout(canvas_row, 1)
-        self.preview_view.draw_clicked.connect(self._on_footprint_draw_clicked)
-        self.preview_view.draw_finish_requested.connect(self._on_footprint_draw_finish)
-        self.preview_view.draw_cancelled.connect(self._cancel_footprint_drawing)
-        self.preview_view.draw_hovered.connect(self._on_footprint_draw_hovered)
-        self.preview_view.draw_hover_left.connect(self._on_footprint_draw_hover_left)
         self.preview_view.drawing_hovered.connect(self._on_footprint_drawing_hovered)
         self.preview_view.text_hovered.connect(self._on_footprint_text_hovered)
         from .canvas_gestures import DeferredCheckpoint, bind_shortcuts
@@ -14570,60 +14568,165 @@ class MainWindow(QMainWindow):
         column.addStretch(1)
         return panel
 
+    # ── Footprint draw tools: the window is the ClickToolHost of the preview ──
+
+    def _fp_click_collector(self):
+        """@brief The preview's `PointCollector`, or None before the preview exists."""
+        return getattr(getattr(self, "preview_view", None), "click_collector", None)
+
+    @property
+    def _fp_draw_tool(self) -> str | None:
+        """@brief Key of the armed palette tool of the preview, or None (read-only)."""
+        collector = self._fp_click_collector()
+        spec = collector.spec if collector is not None else None
+        return spec.key if spec is not None else None
+
+    @property
+    def _fp_draw_clicks(self) -> list:
+        """@brief Copy of the points clicked for the shape in progress, footprint mm (read-only)."""
+        collector = self._fp_click_collector()
+        return collector.points if collector is not None else []
+
     def _toggle_footprint_draw_tool(self, key: str) -> None:
         """@brief Arm a palette tool of the preview, or disarm the armed one."""
+        from ..core.footprint import USER_DRAW_KINDS
+        from .canvas_clicktools import ToolSpec
         armed = self._fp_draw_tool != key
         self._cancel_footprint_drawing()
         if armed:
-            self._fp_draw_tool = key
             self._fp_draw_buttons[key].setChecked(True)
-            self.preview_view.set_draw_mode(True)
+            self.preview_view.set_draw_mode(True, ToolSpec(key, count=USER_DRAW_KINDS[key]))
 
     def _cancel_footprint_drawing(self) -> None:
-        """@brief Disarm the tool and forget the clicks of the shape in progress."""
-        self._fp_draw_tool = None
-        self._fp_draw_clicks = []
+        """@brief Disarm the tool and forget the clicks of the shape in progress.
+
+        @note Runs the draw-state reset (buttons, hover, handle drag, markers)
+            exactly once, whether or not a tool was armed: when one was, the
+            collector's `tool_disarmed` callback is told to leave it to this
+            call.
+        """
+        collector = self._fp_click_collector()
+        if collector is not None and collector.armed:
+            self._fp_skip_disarm = True
+            self.preview_view.set_draw_mode(False)
+            self._fp_skip_disarm = False
+        self._fp_draw_dirty = False
         self._fp_draw_hover = None
         self._fp_handle_drag = None
         self._fp_handle_origin = None
         for button in getattr(self, "_fp_draw_buttons", {}).values():
             button.setChecked(False)
-        if hasattr(self, "preview_view"):
-            self.preview_view.set_draw_mode(False)
         self._refresh_draw_markers()
+
+    def tool_snap(self, spec, point, free: bool, points) -> list:
+        """@brief `ClickToolHost`: the point a click or a hover at `point` would add, on the drawn grid.
+
+        @param spec The armed tool (unused: every footprint tool snaps alike).
+        @param point Raw scene position (px).
+        @param free Shift state (unused: the footprint has no free mode).
+        @param points Points collected so far (unused).
+        @return One footprint point in mm.
+        """
+        return [self._snapped_draw_point(point.x(), point.y())]
+
+    def tool_points_changed(self, spec, points: list) -> None:
+        """@brief `ClickToolHost`: a point was added; redraw the dots, ghost and snap marker.
+
+        @param spec The armed tool (unused).
+        @param points Copy of the collected points (the window reads them from the collector).
+        @note The empty list sent right after arming is skipped: there is
+            nothing to draw yet and `_cancel_footprint_drawing` just cleaned
+            the markers.
+        """
+        if points:
+            self._refresh_draw_markers()
+
+    def tool_preview_changed(self, spec, points: list, preview: list) -> None:
+        """@brief `ClickToolHost`: the hover moved; rebuild the markers only when the snapped node changed.
+
+        @param spec The armed tool (unused).
+        @param points Copy of the collected points (unused).
+        @param preview The snapped node a click would add, or [] when none.
+        @note The collector forgets its preview at every click without
+            telling, so the node is compared with the one already shown: the
+            number of rebuilds stays the number of snapped-node changes.
+        """
+        node = preview[0] if preview else None
+        if node != self._fp_draw_hover:
+            self._fp_draw_hover = node
+            self._refresh_draw_markers()
+
+    def tool_refused(self, spec, reason: str) -> None:
+        """@brief `ClickToolHost`: a click repeated the previous node; say so in a toast.
+
+        @param spec The armed tool (unused).
+        @param reason Why the click added nothing (`REFUSED_COINCIDENT`).
+        """
+        self._draw_feedback_toast(self.i18n.text(
+            "Punto coincidente con il precedente."), self.i18n.text(
+            "Con la griglia attiva i click si agganciano ai suoi nodi: "
+            "clicca un altro nodo o scegli una griglia più fine."))
+
+    def tool_finished(self, spec, points: list, commit: bool) -> bool:
+        """@brief `ClickToolHost`: store the finished shape as a drawing record (or abandon it).
+
+        @param spec The tool that ended.
+        @param points The clicked points (footprint mm).
+        @param commit False when the tool was cancelled: the cancel path
+            resets the state itself and nothing is stored.
+        @return Always False: every footprint tool is one-shot.
+        """
+        if commit:
+            self._fp_skip_disarm = True
+            try:
+                self._finish_footprint_drawing(spec.key, list(points))
+            finally:
+                self._fp_skip_disarm = False
+        return False
+
+    def tool_armed(self, spec) -> None:
+        """@brief `ClickToolHost`: check the palette button of the armed tool.
+
+        @param spec The tool now armed; its key names the palette button.
+        """
+        self._fp_draw_dirty = True
+        button = getattr(self, "_fp_draw_buttons", {}).get(spec.key)
+        if button is not None:
+            button.setChecked(True)
+
+    def tool_disarmed(self, spec) -> None:
+        """@brief `ClickToolHost`: the tool ended by Escape or a hide; reset the draw state once.
+
+        @param spec The tool that ended (unused).
+        """
+        if self._fp_skip_disarm:
+            self._fp_skip_disarm = False
+            return
+        if self._fp_draw_dirty:
+            self._cancel_footprint_drawing()
 
     def _on_footprint_draw_clicked(self, x: float, y: float) -> None:
         """@brief Collect one drawing click (scene px), snapped to the grid, in mm."""
-        if self._fp_draw_tool is None:
-            return
-        # Nodes of the grid actually drawn (its origin is the first pad, not
-        # the footprint origin); 0.1 mm when the grid is hidden.
-        point = self._snapped_draw_point(x, y)
-        # A double click sends its own press first: ignore the repeat. On a
-        # coarse grid two separate clicks can land on the SAME node (user,
-        # 2026-10-13: armed tool, one cross, «non funziona»): say it instead
-        # of silently waiting forever.
-        if self._fp_draw_clicks and self._fp_draw_clicks[-1] == point:
-            self._draw_feedback_toast(self.i18n.text(
-                "Punto coincidente con il precedente."), self.i18n.text(
-                "Con la griglia attiva i click si agganciano ai suoi nodi: "
-                "clicca un altro nodo o scegli una griglia più fine."))
-            return
-        self._fp_draw_clicks.append(point)
-        from ..core.footprint import USER_DRAW_KINDS
-        count = USER_DRAW_KINDS[self._fp_draw_tool]
-        if count and len(self._fp_draw_clicks) >= count:
-            self._on_footprint_draw_finish()
-        else:
-            self._refresh_draw_markers()
+        collector = self._fp_click_collector()
+        if collector is not None:
+            collector.click(QPointF(x, y))
 
     def _on_footprint_draw_finish(self) -> None:
         """@brief Close the shape in progress and store it as a drawing record."""
+        collector = self._fp_click_collector()
+        if collector is not None:
+            collector.finish(True)
+
+    def _finish_footprint_drawing(self, tool: str, points: list) -> None:
+        """@brief Build the record of a finished shape, reset the draw state, then apply it.
+
+        @param tool Palette tool key.
+        @param points Clicked points in footprint mm, in click order.
+        @note `_cancel_footprint_drawing` runs BEFORE `_apply_footprint_drawings`
+            so the markers are gone when the preview redraws.
+        """
         from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM, USER_TEXT_ANCHOR,
                                       USER_DRAW_WIDTH_MM, validate_footprint_drawings)
-        tool, points = self._fp_draw_tool, list(self._fp_draw_clicks)
-        if tool is None:
-            return
         count = USER_DRAW_KINDS[tool]
         if count and len(points) != count or not count and len(points) < 2:
             self._cancel_footprint_drawing()
@@ -15622,18 +15725,15 @@ class MainWindow(QMainWindow):
 
     def _on_footprint_draw_hovered(self, x: float, y: float) -> None:
         """@brief The pointer moved with a tool armed: snap marker and ghost follow it."""
-        if self._fp_draw_tool is None:
-            return
-        point = self._snapped_draw_point(x, y)
-        if point != self._fp_draw_hover:
-            self._fp_draw_hover = point
-            self._refresh_draw_markers()
+        collector = self._fp_click_collector()
+        if collector is not None:
+            collector.hover(QPointF(x, y))
 
     def _on_footprint_draw_hover_left(self) -> None:
         """@brief The pointer left the view: no snap marker, no ghost."""
-        if self._fp_draw_hover is not None:
-            self._fp_draw_hover = None
-            self._refresh_draw_markers()
+        collector = self._fp_click_collector()
+        if collector is not None:
+            collector.hover(None)
 
     def _ghost_path(self, points: list, tool: str | None = None, stored: bool = False):
         """@brief Dashed outline of a shape through `points` (mm).

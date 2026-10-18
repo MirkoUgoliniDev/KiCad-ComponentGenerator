@@ -5,13 +5,17 @@ stepped on the grid) run through `canvas_gestures.GestureController`, the
 same state machine as the symbol editor's: the view only decides WHAT was
 pressed, the window (the `GestureHost`) snaps and commits. Escape and Hide
 cancel through `CancelOnEscapeAndHide`; the text anchor squares are hover
-groups (`HoverGroups`) with the symbol editor's reveal margin.
+groups (`HoverGroups`) with the symbol editor's reveal margin. The draw
+tools collect their points through `canvas_clicktools` (a `PointCollector`
+driven by a `ClickToolRouter`), the same state machine as the symbol
+editor's wire and shape tools: the window is the `ClickToolHost`.
 """
 from PyQt6.QtCore import Qt, QRect, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QApplication, QGraphicsView
+from PyQt6.QtWidgets import QGraphicsView
 
 from .canvas_camera import Camera
+from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
 from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (
     HOVER_MARGIN_PX, CancelOnEscapeAndHide, GestureController, HoverGroups, KeyRepeatFilter,
@@ -82,18 +86,8 @@ class FootprintView(QGraphicsView):
     pad_context_requested = pyqtSignal(str)
     #: Right click on a text: key.
     text_context_requested = pyqtSignal(str)
-    #: Draw mode: a left click landed at this scene point.
-    draw_clicked = pyqtSignal(float, float)
-    #: Draw mode: the user asked to close the shape (double click, Enter, right click).
-    draw_finish_requested = pyqtSignal()
-    #: Draw mode: the user cancelled the shape in progress (Esc).
-    draw_cancelled = pyqtSignal()
     #: Right click on a user drawing (outside draw mode): its index.
     drawing_context_requested = pyqtSignal(int)
-    #: Draw mode: the pointer is at this scene point (snap marker and ghost shape).
-    draw_hovered = pyqtSignal(float, float)
-    #: Draw mode: the pointer left the viewport.
-    draw_hover_left = pyqtSignal()
     #: Outside draw mode: the pointer is over this drawing (-1: none).
     drawing_hovered = pyqtSignal(int)
     #: The text whose anchor square must show changed: its key ("" for none).
@@ -126,12 +120,11 @@ class FootprintView(QGraphicsView):
         #: the window's deferred checkpoint reads it. Installed by `attach_host`.
         self.key_repeat = KeyRepeatFilter(self)
         self._cancel_filter = None
-        #: True while a palette tool collects clicks: left clicks become
-        #: points instead of pans, and the keyboard closes or cancels.
-        self._draw_mode = False
-        #: Viewport point of the left press in draw mode, to tell a drag
-        #: (press here, release elsewhere) from a plain click.
-        self._draw_press = None
+        #: The shared click-tool state machine and its event router, created
+        #: by `attach_host` (the host receives the points); None until then.
+        self.click_collector: PointCollector | None = None
+        self.click_router: ClickToolRouter | None = None
+        self._click_host = None
         # Hover without a button pressed: the snap marker follows the pointer.
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -204,8 +197,25 @@ class FootprintView(QGraphicsView):
             cancels the drag before a deferred checkpoint is flushed.
         """
         self.gestures = GestureController(self, host, grab_mouse=False)
+        self._click_host = host
+        self.click_collector = PointCollector(host, self)
+        self.click_router = ClickToolRouter(self, self.click_collector, self.camera,
+                                            on_arm=self._on_click_tool_arm)
         self._cancel_filter = CancelOnEscapeAndHide(self.gestures, escape=True)
         install_canvas_filters(self, self.key_repeat, self._cancel_filter)
+
+    def _on_click_tool_arm(self):
+        """Router hook run before a tool is armed: end a drag and hide the text anchor square."""
+        self.cancel_interaction()
+        self._report_text_hover("")
+
+    @property
+    def _draw_mode(self):
+        """@brief Read-only: True while a draw tool is armed.
+
+        @return Whether the collector holds an armed tool.
+        """
+        return self.click_collector is not None and self.click_collector.armed
 
     def _dragging(self):
         """True while the controller runs a drag."""
@@ -250,21 +260,21 @@ class FootprintView(QGraphicsView):
         if self._handle_drag is not None:
             self.cancel_interaction()
 
-    def set_draw_mode(self, active):
-        """@brief Enter or leave drawing mode; the cursor shows the change.
+    def set_draw_mode(self, active, spec=None):
+        """@brief Arm or disarm a draw tool; the router owns the cursor.
 
-        @param active True routes left clicks to `draw_clicked` and the
-            keyboard to finish/cancel; False restores panning and drags.
+        @param active True arms `spec`; False cancels the armed tool.
+        @param spec The `ToolSpec` to arm; None arms a generic open-ended tool.
+        @note Arming cancels a pan and a drag, shows the CrossCursor on the
+            viewport and takes the focus (all in `ClickToolRouter.arm`).
+            Without a host (no `attach_host`) it does nothing.
         """
-        self._draw_mode = bool(active)
-        if self._draw_mode:
-            self.camera.pan_cancel()
-            self.cancel_interaction()
-            self._report_text_hover("")
-            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
-            self.setFocus()
+        if self.click_router is None:
+            return
+        if active:
+            self.click_router.arm(spec if spec is not None else ToolSpec("draw"))
         else:
-            self.viewport().unsetCursor()
+            self.click_router.disarm()
 
     def set_grid(self, step, origin=(0.0, 0.0), visible=True):
         """@brief Set an unbounded, scene-anchored reference grid in scene units.
@@ -539,20 +549,13 @@ class FootprintView(QGraphicsView):
         """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
 
         @param event Qt mouse press event.
-        @note In draw mode a left press is a drawing point and a right press
-            asks to close the shape; panning stays on the middle button.
+        @note With a draw tool armed the router sees the press first: a left
+            press is a drawing point and a right press closes the shape; a
+            press during a camera pan is swallowed; the middle button falls
+            through to the camera.
         """
-        if self._draw_mode:
-            if event.button() == Qt.MouseButton.LeftButton:
-                self._draw_press = event.pos()
-                point = self.mapToScene(event.pos())
-                self.draw_clicked.emit(point.x(), point.y())
-                event.accept()
-                return
-            if event.button() == Qt.MouseButton.RightButton:
-                self.draw_finish_requested.emit()
-                event.accept()
-                return
+        if self.click_router is not None and self.click_router.press(event):
+            return
         if event.button() == Qt.MouseButton.RightButton:
             if self._dragging():
                 # Decision D3 (2026-10-17, as the symbol editor): no menu over
@@ -630,9 +633,7 @@ class FootprintView(QGraphicsView):
         if self.camera.pan_active:
             self.camera.pan_move(event.pos())
             event.accept()
-        elif self._draw_mode:
-            point = self.mapToScene(event.pos())
-            self.draw_hovered.emit(point.x(), point.y())
+        elif self.click_router is not None and self.click_router.move(event):
             event.accept()
         else:
             # Hovering a drawing reveals its handles (user, 2026-10-13:
@@ -653,8 +654,8 @@ class FootprintView(QGraphicsView):
 
         @param event Qt leave event, forwarded to the base class.
         """
-        if self._draw_mode:
-            self.draw_hover_left.emit()
+        if self.click_router is not None and self._draw_mode:
+            self.click_router.leave()
         if self._handle_drag is None:
             self._report_hover(-1)
         if self._text_drag is None:
@@ -665,11 +666,12 @@ class FootprintView(QGraphicsView):
         """@brief Drop a drag through the controller, or apply the final pan displacement.
 
         @param event Qt mouse release event.
-        @note In draw mode a release away from its press is a DRAG: the
-            release point counts as the next drawing point, so a rectangle
-            or a circle can be drawn press-move-release as in a CAD, not
-            only click-click (user, 2026-10-13: «non funziona»). A release
-            at the press point is a plain click and adds nothing.
+        @note With a draw tool armed a release away from its press is a DRAG
+            (`ToolSpec.drag_adds_release_point`): the release point counts as
+            the next drawing point, so a rectangle or a circle can be drawn
+            press-move-release as in a CAD, not only click-click (user,
+            2026-10-13: «non funziona»). A release at the press point is a
+            plain click and adds nothing.
         """
         if self._dragging() and event.button() == Qt.MouseButton.LeftButton:
             kind = self.gestures.target[0]
@@ -681,12 +683,7 @@ class FootprintView(QGraphicsView):
                 self._report_text_hover(self._text_near(event.pos()))
             event.accept()
             return
-        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
-            press, self._draw_press = self._draw_press, None
-            if press is not None and (event.pos() - press).manhattanLength()                     >= QApplication.startDragDistance():
-                point = self.mapToScene(event.pos())
-                self.draw_clicked.emit(point.x(), point.y())
-            event.accept()
+        if self.click_router is not None and self.click_router.release(event):
             return
         if self.camera.pan_active and event.button() == self.camera.pan_button:
             self.camera.pan_end(event.pos())
@@ -699,18 +696,14 @@ class FootprintView(QGraphicsView):
 
         @param event Qt mouse double-click event.
         @note A fast second click reaches Qt as press, release, DOUBLE CLICK:
-            the second press never arrives. The double click therefore first
-            counts as that missing point (fixed-count shapes close on it),
+            the second press never arrives. The router therefore first counts
+            it as that missing point (fixed-count shapes close on it), QUIETLY,
             then as the finish request (which ends an open line; it is a
-            no-op when the point already closed the shape). The window
-            de-duplicates a repeated point, so a true double click on the
-            last vertex of a line does not add it twice.
+            no-op when the point already closed the shape). A repeated point
+            is not added twice and, being quiet, shows no refusal: a true
+            double click on the last vertex of a line just finishes it.
         """
-        if self._draw_mode and event.button() == Qt.MouseButton.LeftButton:
-            point = self.mapToScene(event.pos())
-            self.draw_clicked.emit(point.x(), point.y())
-            self.draw_finish_requested.emit()
-            event.accept()
+        if self.click_router is not None and self.click_router.double_click(event):
             return
         super().mouseDoubleClickEvent(event)
 
@@ -718,24 +711,18 @@ class FootprintView(QGraphicsView):
         """@brief Qt override: in draw mode Esc cancels and Enter closes the shape.
 
         @param event Qt key press event.
-        @note Escape also cancels a camera pan in progress, as the symbol
+        @note The router sees the key first (armed: Escape cancels a pan, else the
+            tool; Enter finishes). Escape also cancels a camera pan in progress, as the symbol
             editor does (2026-10-17): the camera stays where it is, the
             release that follows does nothing, and the key is consumed, so
             it does not also cancel an armed drawing tool. With no pan
             running, Escape reaches the draw tool as before.
         """
+        if self.click_router is not None and self.click_router.key(event):
+            return
         if event.key() == Qt.Key.Key_Escape and self.camera.pan_cancel():
             event.accept()
             return
-        if self._draw_mode:
-            if event.key() == Qt.Key.Key_Escape:
-                self.draw_cancelled.emit()
-                event.accept()
-                return
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.draw_finish_requested.emit()
-                event.accept()
-                return
         super().keyPressEvent(event)
 
     def hideEvent(self, event):
@@ -750,8 +737,7 @@ class FootprintView(QGraphicsView):
         self.camera.pan_cancel()
         self.cancel_interaction()
         self._report_text_hover("")
-        if self._draw_mode:
-            # The window disarms the tool and cleans its click markers.
-            self.draw_cancelled.emit()
-        self.viewport().unsetCursor()
+        if self.click_router is not None:
+            # The host disarms the tool and cleans its click markers.
+            self.click_router.hide(event.spontaneous())
         super().hideEvent(event)

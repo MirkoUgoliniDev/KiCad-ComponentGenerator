@@ -66,8 +66,7 @@ def test_symbol_tab_kept_items_are_unregistered_when_qt_deletes_them(qapp, wirin
     tab.set_data('Board', _rows())
     if wiring:
         tab.start_wire()
-        tab._wire_points = [[0.0, 0.0]]
-        tab._draw(tab._symbol)
+        assert tab.add_wire_point(0.0, 0.0), 'a wire point in progress draws the rubber band'
     kept = _kept_wrappers(tab)
     assert kept, 'the symbol must draw resize handles'
     assert (tab._wire_cursor_item is not None) == wiring
