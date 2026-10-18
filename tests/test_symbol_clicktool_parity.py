@@ -1118,3 +1118,29 @@ def test_golden_comparison_ignores_line_endings_but_not_content(tmp_path):
     changed = tmp_path / 'changed.json'
     changed.write_bytes(text.replace('"a"', '"b"').replace('\n', '\r\n').encode('utf-8'))
     assert not _golden_equals(changed, text)
+
+
+def test_a_tool_ended_over_an_element_leaves_no_cross_cursor_behind(tab, qapp):
+    """@brief QGraphicsView restores the item's "original" cursor on leaving it; that must not be the tool's cross.
+
+    Positive: the wire ends (Escape) while the pointer is over a shape with its
+    own cursor; after moving to empty space the cursor is not the CrossCursor.
+    Negative twin: while the tool IS armed, empty space keeps the CrossCursor.
+    """
+    tab.start_shape('rectangle')
+    _click(tab, qapp, -2.54, -2.54)
+    _click(tab, qapp, 2.54, 2.54)
+    tab.finish_shape(False)
+    _settle(qapp)
+    viewport = tab.view.viewport()
+    tab.view.setMouseTracking(True)
+    tab.start_wire()
+    _settle(qapp)
+    _move(tab, qapp, _vp(tab, 8, 8))
+    assert viewport.cursor().shape() == Qt.CursorShape.CrossCursor
+    _move(tab, qapp, _vp(tab, 2.54, 0))
+    assert viewport.cursor().shape() == Qt.CursorShape.SizeAllCursor
+    QTest.keyClick(tab.view, Qt.Key.Key_Escape)
+    qapp.processEvents()
+    _move(tab, qapp, _vp(tab, 8, 8))
+    assert viewport.cursor().shape() != Qt.CursorShape.CrossCursor

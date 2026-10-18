@@ -253,8 +253,8 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 9576 passed,
-12 skipped and 19 subtests (2026-10-18 night, branch `ADVANCED`: ONE shared click-tool layer, `kicadgen/gui/canvas_clicktools.py`, drives wire/shape/text/draw tools in BOTH the symbol editor and the footprint preview, see docs/canvas-clicktools-plan.md; before that, 9361 passed: the symbol editor and the
+is 9579 passed,
+12 skipped and 19 subtests (2026-10-18 night, branch `ADVANCED`: ONE shared click-tool layer, `kicadgen/gui/canvas_clicktools.py`, drives wire/shape/text/draw tools in BOTH the symbol editor and the footprint preview, see docs/canvas-clicktools-plan.md; a tool cursor that QGraphicsView restores after the tool ended is dropped by `settle_cursor`; before that, 9361 passed: the symbol editor and the
 footprint preview also share ONE camera (`kicadgen/gui/canvas_camera.py`: zoom clamped to
 per-tab limits, wheel ±4 notches, scrollbar pan without drift, memoised fit) and ONE grid
 painter (`kicadgen/gui/canvas_grid.py`: `ExposedRegion` + `paint_grid`, laid out only where

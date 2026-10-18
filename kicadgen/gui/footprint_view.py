@@ -648,6 +648,8 @@ class FootprintView(QGraphicsView):
             # text, same margin as the symbol editor's property anchors.
             self._report_text_hover(self._text_near(event.pos()))
             super().mouseMoveEvent(event)
+            if self.click_router is not None:
+                self.click_router.settle_cursor(event)
 
     def leaveEvent(self, event):
         """@brief Qt override: the snap marker and the hover handles go away with the pointer.

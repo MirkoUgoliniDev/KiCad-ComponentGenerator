@@ -1193,3 +1193,16 @@ def test_a_lost_release_does_not_swallow_the_next_unrelated_release(router, col,
     assert col.armed is False
     assert router.press(press(60, 60)) is False     # idle press resets the stale record
     assert router.release(release(60, 60)) is False
+
+
+def test_settle_cursor_does_nothing_while_a_tool_is_armed_or_never_ended(router, col, view):
+    """@brief `settle_cursor` only resets a stale cross: armed, or with no tool ever ended, it leaves the cursor alone."""
+    ev = move(20, 20)
+    router.settle_cursor(ev)                                  # nothing ended yet
+    router.arm(LINE)
+    router.settle_cursor(ev)                                  # armed
+    assert view.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    router.disarm()
+    view.viewport().setCursor(Qt.CursorShape.CrossCursor)     # what Qt's restore leaves behind
+    router.settle_cursor(ev)
+    assert view.viewport().cursor().shape() != Qt.CursorShape.CrossCursor

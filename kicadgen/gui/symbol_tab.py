@@ -775,6 +775,8 @@ class _SymbolView(QGraphicsView):
             event.accept()
             return
         super().mouseMoveEvent(event)
+        if self.clicktools is not None:
+            self.clicktools.settle_cursor(event)
 
     def mouseReleaseEvent(self, event):
         """@brief Qt override: finish the rubber band, pan or drag at the actual drop point.

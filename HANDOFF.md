@@ -174,6 +174,8 @@ elemento (QGraphicsView memorizza il cursore del viewport) — da trattare
 con cura; dubbio: rilascio-dopo-trascinamento con 'Punto coincidente'.
 Suite completa in due meta' rilanciata dopo le correzioni (le prime due
 esecuzioni erano morte a meta', senza riepilogo).
+COMMIT fase B: b79a26b su ADVANCED, merge 4937a8a in main (pushati). Aperto: cursore a croce residuo nel simbolo.
+FATTO, NON COMMITTATO (richiesto dall'utente): cursore a croce residuo; router.settle_cursor() chiamato dopo super().mouseMoveEvent in simbolo e footprint, test aggiunti (symbol 46, canvas 120); i 7 file mirati verdi; suite completa pulita al primo colpo: 9579 passed, 12 skipped, 19 subtests (A 5932, B 3647). Diagnosi: Causa: QGraphicsView salva il cursore del viewport (Cross) quando entra in un item con cursore e lo ripristina all'uscita, anche se lo strumento e' finito nel frattempo. Piano: il router segna 'cursore stantio' alla fine dello strumento con un cursore d'item attivo e lo toglie al primo movimento dopo il ripristino di Qt, se sotto il puntatore non c'e' un item con cursore; test in test_canvas_clicktools + simbolo + footprint.
 ESITO SUITE (fase B, dopo le correzioni): 9576 passed, 12 skipped, 19 subtests.
 Metà A: 4 test di tempo (fixE_orchestration x3, freecad_heartbeat) falliti sotto carico, verdi se rilanciati soli; metà B: 1 errore transitorio 'no such table: translations' in test_photo_detector_ui, verde da solo (63 passed). Trappola: i processi lanciati con & e senza wait muoiono con la shell.
 Prossimo: FASE B, strumenti a clic (simbolo: filo, forme, simboli
