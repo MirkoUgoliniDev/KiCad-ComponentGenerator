@@ -1664,7 +1664,11 @@ class MainWindow(QMainWindow):
         #: User drawings of the footprint preview (validated records, see
         #: core.footprint.validate_footprint_drawings); drawn in every 2D
         #: preview and appended to the exported .kicad_mod (user, 2026-10-13).
-        self.footprint_drawings: list = []
+        #: Revision of `footprint_drawings`: bumped by every assignment (the
+        #: property setter) and by `_bump_fp_drawings_revision` for an edit in
+        #: place; the drawing selection is valid for one revision only.
+        self._fp_drawings_revision = 0
+        self.footprint_drawings = []
         #: Snapped pointer position while a tool is armed, footprint mm, or None.
         #: The armed tool and its clicked points live in the preview's
         #: `PointCollector` (read through `_fp_draw_tool` / `_fp_draw_clicks`).
@@ -1695,6 +1699,19 @@ class MainWindow(QMainWindow):
         #: drawing-grid step further at each paste (shared clipboard of the
         #: symbol editor and the footprint preview, plan C-M3).
         self._fp_clipboard = ElementClipboard(translate_drawing)
+        from .canvas_selection import IndexSelection
+        #: Selected user drawings (shared selection model of the symbol
+        #: editor and the footprint preview, plan docs/canvas-selection-plan.md).
+        #: Valid only for the drawings revision it was made on
+        #: (`_fp_selection_revision`): read it through `_fp_selected_indices`.
+        self._fp_selection = IndexSelection()
+        #: `_fp_drawings_revision` the selection indexes; any other revision
+        #: (an edit, undo, redo, a load, a discard) clears it on the next read.
+        self._fp_selection_revision = None
+        #: (primary, members) a command that keeps the drawing indices (a
+        #: turn, a field edit) or adds drawings (a paste) carries into the
+        #: list it commits; None otherwise.
+        self._fp_selection_carry = None
         #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
         #: Consumed by `_flush_footprint_rewrite` just before its single
         #: attempt (a failed start is logged once, never retried in a loop)
@@ -8045,8 +8062,17 @@ class MainWindow(QMainWindow):
         return validate_yolo_settings(accepted)
 
     def _switch_project(self, name: str, state: dict) -> None:
-        """@brief Open `name` with the settings `state`, without saving them half-way."""
+        """@brief Open `name` with the settings `state`, without saving them half-way.
+
+        @note The element clipboards of BOTH tabs are emptied (plan
+            docs/canvas-selection-plan.md, item 3): what was copied belongs to
+            the project being closed, opened or newly created alike.
+        """
         self._flush_footprint_checkpoint()          # the closing project's deferred draft write
+        self._fp_clipboard.clear()
+        symbol_tab = getattr(self, "symbol_tab", None)
+        if symbol_tab is not None and hasattr(symbol_tab, "clear_clipboard"):
+            symbol_tab.clear_clipboard()
         self._restoring_project = True
         try:
             self._reset_project_runtime_state()
@@ -14520,6 +14546,10 @@ class MainWindow(QMainWindow):
             runner=self._fp_checkpoint.run,
             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
+        self.preview_view.drawing_toggled.connect(self._toggle_footprint_drawing_selection)
+        self.preview_view.band_selected.connect(self._select_footprint_drawings_in)
+        self.preview_view.background_clicked.connect(self._clear_footprint_selection)
+        self.preview_view.escape_idle.connect(self._clear_footprint_selection)
 
         return tab
 
@@ -14735,6 +14765,8 @@ class MainWindow(QMainWindow):
         @param points Clicked points in footprint mm, in click order.
         @note `_cancel_footprint_drawing` runs BEFORE `_apply_footprint_drawings`
             so the markers are gone when the preview redraws.
+        @note The stored drawing becomes the selection (as in the symbol
+            editor); a cancelled or refused shape leaves the selection unchanged.
         """
         from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM, USER_TEXT_ANCHOR,
                                       USER_DRAW_WIDTH_MM, validate_footprint_drawings)
@@ -14766,7 +14798,10 @@ class MainWindow(QMainWindow):
             self._draw_feedback_toast(self.i18n.text("Disegno scartato."),
                                       self._degenerate_drawing_text(record))
             return
-        self._apply_footprint_drawings(self.footprint_drawings + valid)
+        # The new drawing becomes the selection, as a new symbol element
+        # does; a cancelled or refused one (above) leaves the selection as it was.
+        new = len(self.footprint_drawings)
+        self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
 
     def _degenerate_drawing_text(self, record: dict) -> str:
         """@brief Translated reason why a drawing record was refused by the validator.
@@ -15179,7 +15214,9 @@ class MainWindow(QMainWindow):
         applied = self._fp_applied
         saved = (self.footprint_drawings, self.footprint_text_positions,
                  self.header_pad_overrides, self.package_geometry)
-        self.footprint_drawings = deepcopy(applied["drawings"])
+        # The drawings are swapped WITHOUT the property (no revision bump):
+        # the draft comes back unchanged, so its selection must stay valid.
+        self._footprint_drawings = deepcopy(applied["drawings"])
         self.footprint_text_positions = deepcopy(applied["texts"])
         self.header_pad_overrides = deepcopy(applied["pad_overrides"])
         if self.package_geometry is not None and applied["package_pins"] is not None:
@@ -15191,7 +15228,7 @@ class MainWindow(QMainWindow):
         try:
             yield
         finally:
-            (self.footprint_drawings, self.footprint_text_positions,
+            (self._footprint_drawings, self.footprint_text_positions,
              self.header_pad_overrides, self.package_geometry) = saved
             self._fp_draft_package = draft_package
             # The 2D preview draws `_last_params` first: it must keep showing
@@ -15614,29 +15651,263 @@ class MainWindow(QMainWindow):
         """@brief Re-apply the last undone footprint edit (Ctrl+Y), inside the draft."""
         self._step_footprint_history(self._fp_drawings_redo, self._fp_drawings_undo)
 
-    def _delete_hovered_drawing(self) -> None:
-        """@brief Delete key: remove the drawing under the pointer, if any."""
+    # ── Drawing selection (plan docs/canvas-selection-plan.md, phase D) ──
+
+    @property
+    def footprint_drawings(self) -> list:
+        """@brief The user drawings of the footprint draft (validated records).
+
+        @return The list the preview draws.
+        """
+        return self._footprint_drawings
+
+    @footprint_drawings.setter
+    def footprint_drawings(self, value: list) -> None:
+        """@brief Replace the drawings list; the drawings revision moves on.
+
+        @param value The new list of validated records.
+        @note Every replacement (an edit, undo, redo, a load, an apply or a
+            discard, a recovered or kept draft) bumps `_fp_drawings_revision`,
+            which invalidates the drawing selection (`_fp_selected_indices`).
+        """
+        self._footprint_drawings = value
+        self._bump_fp_drawings_revision()
+
+    def _bump_fp_drawings_revision(self) -> None:
+        """@brief Record that the drawings changed (call it after an edit IN PLACE of the list)."""
+        self._fp_drawings_revision = getattr(self, "_fp_drawings_revision", 0) + 1
+
+    def _fp_selected_indices(self) -> list:
+        """@brief The selected drawing indices, valid for the current drawings revision.
+
+        @return Sorted indices into `footprint_drawings`.
+        @note The selection belongs to the drawings revision it was made on:
+            when the drawings changed since (any replacement or edit in place
+            bumps `_fp_drawings_revision`), the selection is cleared, unless
+            the committing command carried it (`_fp_selection_carry`: a turn
+            or field edit keeps the indices, a paste selects what it added).
+        """
+        if self._fp_selection_revision != self._fp_drawings_revision:
+            carry, self._fp_selection_carry = self._fp_selection_carry, None
+            self._fp_selection.clear()
+            if carry is not None:
+                self._fp_selection.restore(carry)
+            self._fp_selection_revision = self._fp_drawings_revision
+        return self._fp_selection.indices(len(self.footprint_drawings))
+
+    def _commit_drawings(self, updated: list, carry=None) -> bool:
+        """@brief Commit a new drawings list (one undo step) carrying a selection into it.
+
+        @param updated The new validated list.
+        @param carry (primary, members) to select in `updated`; None keeps
+            the current selection when `updated` has the same length (the
+            indices still name the same drawings: a turn, a field edit, a
+            drag), and clears it otherwise.
+        @return The result of `_apply_footprint_drawings`.
+        """
+        selected = self._fp_selected_indices()
+        if carry is None and len(updated) == len(self.footprint_drawings) and selected:
+            carry = self._fp_selection.snapshot()
+        self._fp_selection_carry = carry
+        try:
+            return self._apply_footprint_drawings(updated)
+        finally:
+            # Consumed by the commit's redraw, or here; never left for a later list.
+            self._fp_selected_indices()
+            self._fp_selection_carry = None
+            self._refresh_drawing_selection()
+
+    def _fp_targets(self) -> list:
+        """@brief The drawings a keyboard command acts on.
+
+        @return The selection when there is one, else the drawing under the
+            pointer (as before the selection existed), else [].
+        """
+        selected = self._fp_selected_indices()
+        if selected:
+            return selected
         index = self._fp_hovered_drawing
-        if 0 <= index < len(self.footprint_drawings):
-            updated = deepcopy(self.footprint_drawings)
-            del updated[index]
-            self._apply_footprint_drawings(updated)
+        return [index] if 0 <= index < len(self.footprint_drawings) else []
+
+    def _select_footprint_drawing(self, index: int, additive: bool = False) -> None:
+        """@brief Make `index` the primary selected drawing; `additive` keeps the others.
+
+        @param index Index of a drawing; an unknown one does nothing.
+        @param additive True keeps the rest of the selection.
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        self._fp_selected_indices()
+        self._fp_selection.select(index, additive)
+        self._refresh_drawing_selection()
+
+    def _toggle_footprint_drawing_selection(self, index: int) -> None:
+        """@brief Ctrl+click: add the drawing to the selection, or remove it.
+
+        @param index Index of the drawing; an unknown one does nothing.
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        self._fp_selected_indices()
+        self._fp_selection.toggle(index)
+        self._refresh_drawing_selection()
+
+    def _clear_footprint_selection(self) -> None:
+        """@brief Select no drawing (background click, Escape with nothing else to cancel)."""
+        if self._fp_selected_indices():
+            self._fp_selection.clear()
+            self._refresh_drawing_selection()
+
+    def _footprint_drawing_scene_bounds(self, index: int):
+        """@brief Scene rectangle (px) of what drawing `index` draws, for the rubber band.
+
+        @param index Index of a drawing.
+        @return A shape's `core.footprint.drawing_bounds` (the geometry,
+            without the stroke) scaled to scene px; a text's drawn box (its
+            item's scene bounds); None when a text is not drawn.
+        """
+        from ..core.footprint import drawing_bounds
+        record = self.footprint_drawings[index]
+        if record["kind"] == "text":
+            return self.preview_view._drawing_bounds(index)
+        x0, y0, x1, y1 = (v * _FP_PREVIEW_MM_TO_PX for v in drawing_bounds(record))
+        return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    def _select_footprint_drawings_in(self, rect, additive: bool) -> None:
+        """@brief Rubber band: select the drawings whose WHOLE drawn bounds lie inside `rect`.
+
+        @param rect Scene rectangle (px) of the band.
+        @param additive True (Ctrl held) adds them to the current selection.
+        @note The containment rule is the shared `canvas_selection.encloses`
+            (the symbol editor's), which accepts a zero-height line.
+        """
+        from .canvas_selection import encloses
+        inside = []
+        for index in range(len(self.footprint_drawings)):
+            bounds = self._footprint_drawing_scene_bounds(index)
+            if bounds is None:
+                continue
+            if encloses(rect, (bounds.left(), bounds.top(), bounds.right(), bounds.bottom())):
+                inside.append(index)
+        self._fp_selected_indices()
+        self._fp_selection.set_many(inside, additive)
+        self._refresh_drawing_selection()
+
+    #: Item data role of the outline drawn around a selected text drawing.
+    _FP_SELECTION_BOX_ROLE = 0x53454C
+
+    def _fp_selected_colour(self) -> str:
+        """@brief The colour of selected elements, the SAME source as the symbol editor's.
+
+        @return `theme['selected']` of the symbol editor's active canvas
+            theme (`SymbolTab.theme`: #f9e2af on the dark theme, #0a7bd6 on
+            KiCad's light one); the dark theme's when the symbol tab is not
+            built yet.
+        @note Read at each restyle: a theme switch in the symbol tab shows in
+            the footprint preview at its next redraw or selection change.
+        """
+        from .symbol_tab import CANVAS_THEMES
+        symbol_tab = getattr(self, "symbol_tab", None)
+        theme = symbol_tab.theme if symbol_tab is not None else CANVAS_THEMES["dark"]
+        return theme["selected"]
+
+    def _style_drawing_item(self, item, record: dict, selected: bool, mm_to_px: float) -> None:
+        """@brief Colour a drawing's scene item: its layer colour, or the selection colour.
+
+        @param item A drawing item (stroked shape or text).
+        @param record Its drawing record.
+        @param selected True paints it in the symbol editor's selection colour
+            (`_fp_selected_colour`): a shape with a stroke 1.6 times thicker
+            (at least 2.5 scene px); a text in that colour plus an outline
+            box around it, so it stands out whatever its layer colour.
+        @param mm_to_px Scene px per mm.
+        """
+        colour = QColor(self._fp_selected_colour() if selected else _layer_color(record["layer"]))
+        if record["kind"] == "text":
+            item.setBrush(QBrush(colour))
+            for child in item.childItems():
+                if child.data(self._FP_SELECTION_BOX_ROLE) is not None:
+                    child.setParentItem(None)
+                    if child.scene() is not None:
+                        child.scene().removeItem(child)
+            if selected:
+                from PyQt6.QtWidgets import QGraphicsRectItem
+                # A child of the text item: it follows the text's scale and quarter turn.
+                box = QGraphicsRectItem(item.boundingRect(), item)
+                pen = QPen(colour, 1.5)
+                pen.setCosmetic(True)
+                box.setPen(pen)
+                box.setData(self._FP_SELECTION_BOX_ROLE, True)
+            return
+        width = max(1.0, record.get("width", 0.12) * mm_to_px)
+        pen = QPen(colour)
+        pen.setWidthF(max(2.5, width * 1.6) if selected else width)
+        item.setPen(pen)
+
+    def _refresh_drawing_selection(self) -> None:
+        """@brief Recolour the drawn drawings after the selection changed (no redraw)."""
+        from .footprint_view import DRAWING_KEY_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        selected = set(self._fp_selected_indices())
+        for item in scene.items():
+            index = item.data(DRAWING_KEY_ROLE)
+            if index is not None and 0 <= int(index) < len(self.footprint_drawings):
+                self._style_drawing_item(item, self.footprint_drawings[int(index)],
+                                         int(index) in selected, _FP_PREVIEW_MM_TO_PX)
+
+    def _delete_drawings(self, indices) -> bool:
+        """@brief Remove the drawings at `indices` as ONE undo step; the selection is cleared.
+
+        @param indices Indices into `footprint_drawings`; unknown ones are skipped.
+        @return True when something was removed.
+        """
+        doomed = {i for i in indices if 0 <= i < len(self.footprint_drawings)}
+        if not doomed:
+            return False
+        updated = [deepcopy(r) for i, r in enumerate(self.footprint_drawings) if i not in doomed]
+        return self._commit_drawings(updated, carry=(None, set()))
+
+    def _transform_drawings(self, indices, operation) -> bool:
+        """@brief Turn or mirror several drawings, each about its own centre, as ONE undo step.
+
+        @param indices Indices into `footprint_drawings`.
+        @param operation `record -> record` (`turn_drawing`, `mirror_drawing`).
+        @return True when the draft changed. A result the validation refuses
+            changes nothing at all and shows the «Modifica scartata.» toast
+            with the reason of the first refused drawing.
+        @note Each drawing turns about its own centre, as each symbol element
+            turns about its own origin.
+        """
+        from ..core.footprint import validate_footprint_drawings
+        chosen = [i for i in indices if 0 <= i < len(self.footprint_drawings)]
+        updated = deepcopy(self.footprint_drawings)
+        for index in chosen:
+            candidate = operation(self.footprint_drawings[index])
+            valid = validate_footprint_drawings([candidate])
+            if not valid:
+                self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
+                                          self._degenerate_drawing_text(candidate))
+                return False
+            updated[index] = valid[0]
+        if updated == self.footprint_drawings:
+            return False
+        return self._commit_drawings(updated)
+
+    def _delete_hovered_drawing(self) -> None:
+        """@brief Delete key: remove the selected drawings, else the drawing under the pointer."""
+        self._delete_drawings(self._fp_targets())
 
     def _duplicate_hovered_drawing(self) -> None:
-        """@brief Ctrl+D: duplicate the drawing under the pointer, one grid step away."""
-        index = self._fp_hovered_drawing
-        if 0 <= index < len(self.footprint_drawings):
-            self._duplicate_drawing(index)
+        """@brief Ctrl+D: duplicate the selected drawings (else the hovered one), one grid step away."""
+        self._duplicate_drawings(self._fp_targets())
 
     def _copy_hovered_drawing(self) -> None:
-        """@brief Ctrl+C: copy the drawing under the pointer, if any.
-
-        @note The footprint preview has no selection: the keyboard acts on
-            the hovered drawing, as Delete and Ctrl+D do.
-        """
-        index = self._fp_hovered_drawing
-        if 0 <= index < len(self.footprint_drawings):
-            self._copy_drawings([index])
+        """@brief Ctrl+C: copy the selected drawings, else the drawing under the pointer, if any."""
+        targets = self._fp_targets()
+        if targets:
+            self._copy_drawings(targets)
 
     def _copy_drawings(self, indices) -> int:
         """@brief Put the drawings at `indices` in the shared clipboard (the next paste restarts one step away).
@@ -15668,8 +15939,7 @@ class MainWindow(QMainWindow):
             a pasted drawing would not be valid (beyond the coordinate
             bound): nothing changes then, a toast says why, and the next
             paste lands where this one would have.
-        @note The footprint preview has no selection concept: the pasted
-            drawings are not selected (the symbol editor selects them).
+        @note The pasted drawings become the selection, as in the symbol editor.
         """
         from ..core.footprint import validate_footprint_drawings
         if not self._fp_clipboard:
@@ -15682,7 +15952,9 @@ class MainWindow(QMainWindow):
             self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
                                       self._degenerate_drawing_text(refused))
             return False
-        self._apply_footprint_drawings(deepcopy(self.footprint_drawings) + valid)
+        first = len(self.footprint_drawings)
+        added = set(range(first, first + len(valid)))
+        self._commit_drawings(deepcopy(self.footprint_drawings) + valid, carry=(max(added), added))
         self._fp_clipboard.advance(step)
         self.statusBar().showMessage(self.i18n.text("{count} elementi incollati.").format(count=len(valid)), 4000)
         return True
@@ -15693,11 +15965,20 @@ class MainWindow(QMainWindow):
         @param index Index of the drawing.
         @return True when the copy was added.
         """
-        if not 0 <= index < len(self.footprint_drawings):
+        return self._duplicate_drawings([index])
+
+    def _duplicate_drawings(self, indices) -> bool:
+        """@brief Copy drawings one grid step right and down as ONE undo step; the clipboard is kept.
+
+        @param indices Indices into `footprint_drawings`; unknown ones are skipped.
+        @return True when the copies were added; they become the selection.
+        """
+        chosen = [i for i in indices if 0 <= i < len(self.footprint_drawings)]
+        if not chosen:
             return False
         kept = self._fp_clipboard.snapshot()
         try:
-            self._copy_drawings([index])
+            self._copy_drawings(chosen)
             return self._paste_footprint_drawings()
         finally:
             self._fp_clipboard.restore(kept)
@@ -15724,7 +16005,7 @@ class MainWindow(QMainWindow):
             return False
         updated = deepcopy(self.footprint_drawings)
         updated[index] = valid[0]
-        return self._apply_footprint_drawings(updated)
+        return self._commit_drawings(updated)
 
     def _set_drawing_field(self, index: int, field: str, value) -> None:
         """@brief Change one field (layer, width, text) of a drawing, keeping it valid."""
@@ -15744,7 +16025,7 @@ class MainWindow(QMainWindow):
         from ..core.footprint import turn_drawing
         if not 0 <= index < len(self.footprint_drawings):
             return False
-        return self._replace_drawing(index, turn_drawing(self.footprint_drawings[index], counter_clockwise))
+        return self._transform_drawings([index], lambda r: turn_drawing(r, counter_clockwise))
 
     def _mirror_drawing(self, index: int) -> bool:
         """@brief Mirror a shape left-right about its bounding-box centre; a text is left as it is.
@@ -15755,24 +16036,30 @@ class MainWindow(QMainWindow):
         from ..core.footprint import mirror_drawing
         if not 0 <= index < len(self.footprint_drawings):
             return False
-        return self._replace_drawing(index, mirror_drawing(self.footprint_drawings[index]))
+        return self._transform_drawings([index], mirror_drawing)
 
     #: Title line of the drawing menu, by drawing kind (catalogue sources).
     FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "rectangle": "Rettangolo", "circle": "Cerchio",
                                     "arc": "Arco", "text": "Testo"}
 
-    def _footprint_drawing_menu_entries(self, record: dict) -> list:
+    def _footprint_drawing_menu_entries(self, record: dict, several: bool = False) -> list:
         """@brief The entries of a drawing's right-click menu, in the order shared with the symbol editor.
 
         @param record The drawing the menu is for.
+        @param several True for the menu of a multi-selection: it stops after
+            «Duplica», with «Specchia» enabled (it acts on the shapes), as
+            the symbol editor's multi-selection menu.
         @return `canvas_menus.MenuEntry` items: turn ±90, mirror (greyed out
-            for a text, plan C-M1), delete, copy, duplicate, the «Layer»
+            for a single text, plan C-M1), delete, copy, duplicate, the «Layer»
             submenu (colour swatches, current layer checked), properties,
             then after a separator «Modifica testo…» (text) or «Spessore del
             tratto…» (shape).
         """
         from . import canvas_menus as cm
         tx = self.i18n.text
+        if several:
+            return cm.rotate_entries(tx) + [cm.mirror_entry(tx), cm.delete_entry(tx, "Elimina disegno"),
+                                            cm.copy_entry(tx), cm.duplicate_entry(tx)]
         text = record["kind"] == "text"
         layers = tuple(cm.MenuEntry("layer:" + layer, tx(label), checkable=True,
                                     checked=layer == record["layer"],
@@ -15799,24 +16086,47 @@ class MainWindow(QMainWindow):
         @note Built and shown by `canvas_menus` (plan docs/canvas-menus-plan.md,
             phase C); every chosen entry is one `_apply_footprint_drawings`
             commit, a dismissed menu or a no-op changes nothing.
+        @note On a member of a multi-selection the menu is titled «{count}
+            elementi selezionati» and acts on every selected drawing (one
+            undo step); on any other drawing that drawing becomes the
+            selection and the single-drawing menu opens (as the symbol).
         """
         from . import canvas_menus as cm
+        from ..core.footprint import mirror_drawing, turn_drawing
         if not 0 <= index < len(self.footprint_drawings):
             return
         record = self.footprint_drawings[index]
-        title = self.i18n.text(self.FOOTPRINT_DRAWING_KIND_NAMES.get(record["kind"], ""))
-        menu, keys = cm.build_element_menu(self, title, self._footprint_drawing_menu_entries(record))
+        group = self._fp_selected_indices()
+        several = len(group) > 1 and index in group
+        if several:
+            self._select_footprint_drawing(index, additive=True)
+            title = self.i18n.text("{count} elementi selezionati").format(count=len(group))
+        else:
+            self._select_footprint_drawing(index)
+            title = self.i18n.text(self.FOOTPRINT_DRAWING_KIND_NAMES.get(record["kind"], ""))
+        menu, keys = cm.build_element_menu(self, title, self._footprint_drawing_menu_entries(record, several))
         chosen = cm.exec_element_menu(menu, keys, QCursor.pos())
         if chosen is None:
+            return
+        if several:
+            if chosen in (cm.ROTATE_CCW, cm.ROTATE_CW):
+                ccw = chosen == cm.ROTATE_CCW
+                self._transform_drawings(group, lambda r: turn_drawing(r, ccw))
+            elif chosen == cm.MIRROR:
+                self._transform_drawings(group, mirror_drawing)
+            elif chosen == cm.DELETE:
+                self._delete_drawings(group)
+            elif chosen == cm.COPY:
+                self._copy_drawings(group)
+            elif chosen == cm.DUPLICATE:
+                self._duplicate_drawings(group)
             return
         if chosen in (cm.ROTATE_CCW, cm.ROTATE_CW):
             self._turn_drawing(index, chosen == cm.ROTATE_CCW)
         elif chosen == cm.MIRROR:
             self._mirror_drawing(index)
         elif chosen == cm.DELETE:
-            updated = deepcopy(self.footprint_drawings)
-            del updated[index]
-            self._apply_footprint_drawings(updated)
+            self._delete_drawings([index])
         elif chosen == cm.COPY:
             self._copy_drawings([index])
         elif chosen == cm.DUPLICATE:
@@ -16054,8 +16364,11 @@ class MainWindow(QMainWindow):
         @note Called by the three 2D drawers after the geometry, like
             `_draw_footprint_texts`. Layer tells the colour: silkscreen like
             the generated silk, fabrication yellow, comments dimmed.
+        @note Selected drawings (`_fp_selected_indices`) are drawn in the
+            selection accent with a thicker stroke (`_style_drawing_item`).
         """
         from .footprint_view import DRAWING_KEY_ROLE
+        selected = set(self._fp_selected_indices())
         for index, record in enumerate(self.footprint_drawings):
             pen = QPen(QColor(_layer_color(record["layer"])))
             pen.setWidthF(max(1.0, record.get("width", 0.12) * mm_to_px))
@@ -16088,6 +16401,9 @@ class MainWindow(QMainWindow):
                 items = [text_item]
             hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
             for item in items:
+                if index in selected:
+                    # Selected drawings in the theme's selection accent.
+                    self._style_drawing_item(item, record, True, mm_to_px)
                 item.setData(DRAWING_KEY_ROLE, index)
                 item.setZValue(6)
                 item.setToolTip(hint)
@@ -16184,6 +16500,28 @@ class MainWindow(QMainWindow):
             ghost.setZValue(6)
         _screen_dot(scene, hx, hy, 7, YELLOW, YELLOW, 0x44524D, 8)
 
+    def _moved_drawing_ghost(self, index: int, delta: tuple):
+        """@brief Dashed outline of drawing `index` moved by `delta`, for a whole or group drag.
+
+        @param index Index of a drawing.
+        @param delta (dx, dy) mm of the drag.
+        @return A QPainterPath in scene px: a shape's outline at its moved
+            points (`_ghost_path`); a text's drawn box (the scene bounds of
+            its item) moved by the delta, since a text has no outline of its
+            own; None when the drawing is not drawn.
+        """
+        record = self.footprint_drawings[index]
+        dx, dy = delta
+        if record["kind"] == "text":
+            bounds = self.preview_view._drawing_bounds(index)
+            if bounds is None:
+                return None
+            path = QPainterPath()
+            path.addRect(bounds.translated(dx * _FP_PREVIEW_MM_TO_PX, dy * _FP_PREVIEW_MM_TO_PX))
+            return path
+        moved = [(round(x + dx, 4), round(y + dy, 4)) for x, y in record["points"]]
+        return self._ghost_path(moved, record["kind"], stored=True)
+
     def _refresh_drawing_handles(self) -> None:
         """@brief Show the handles of the hovered drawing, and the ghost of a handle drag.
 
@@ -16193,6 +16531,8 @@ class MainWindow(QMainWindow):
             dragged one shows the dashed outline the shape will take.
         @note A text has one stored point, its anchor: the bottom-left corner
             of the text (user, 2026-10-14), so its square is drawn there.
+        @note During a group drag (`_fp_drag_members`) every other selected
+            drawing shows its dashed outline at the same delta.
         """
         from .footprint_view import HANDLE_KEY_ROLE
         scene = getattr(self, "preview_scene", None)
@@ -16214,11 +16554,22 @@ class MainWindow(QMainWindow):
                 points = [(round(x + dx, 4), round(y + dy, 4)) for x, y in points]
             else:
                 points[drag[1]] = drag[2]
-            path = self._ghost_path(points, record["kind"], stored=True)
-            if path is not None:
-                ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
-                ghost.setData(0x48474F, True)
-                ghost.setZValue(8)
+            if drag[1] < 0:
+                # A whole drag moves the group (the selection when the
+                # dragged drawing belongs to it): each member shows its
+                # dashed outline at the same delta, a text its drawn box.
+                for member in self._fp_drag_members(index, -1):
+                    path = self._moved_drawing_ghost(member, drag[2])
+                    if path is not None:
+                        ghost = scene.addPath(path, _ghost_pen(_layer_color(self.footprint_drawings[member]["layer"])))
+                        ghost.setData(0x48474F, True)
+                        ghost.setZValue(8)
+            else:
+                path = self._ghost_path(points, record["kind"], stored=True)
+                if path is not None:
+                    ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
+                    ghost.setData(0x48474F, True)
+                    ghost.setZValue(8)
         # Same handles as the symbol editor: 6 px squares, yellow outline,
         # translucent green fill, constant screen size at any zoom. No extra
         # centre anchor: the whole drawing moves by its body, as an element
@@ -16310,7 +16661,7 @@ class MainWindow(QMainWindow):
 
         @param target `('text', key)` for a Reference/Value text, or
             `('handle', drawing index, point index)` with point index -1
-            for the whole drawing.
+            for the whole drawing (the drawing is selected on the press).
         @param point Scene position (px) of the press.
         @return A live `DragPlan` moving the text group, a stepped one for a handle, or None to refuse
             (unknown target or a text not drawn): the press then pans.
@@ -16324,6 +16675,14 @@ class MainWindow(QMainWindow):
             return DragPlan("live", live_items=[(group, group.pos())],
                             cursor=Qt.CursorShape.SizeAllCursor)
         if target[0] == "handle" and len(target) == 3:
+            # A press on a drawing selects it, as in the symbol editor: a
+            # body press on a member keeps the selection (it becomes the
+            # primary and the whole selection is dragged); a body press on
+            # another drawing, or any handle press (reshaping one drawing),
+            # makes that drawing the selection.
+            index = int(target[1])
+            body = int(target[2]) < 0
+            self._select_footprint_drawing(index, additive=body and index in self._fp_selected_indices())
             self._on_footprint_handle_pressed(int(target[1]), int(target[2]), point.x(), point.y())
             return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
         return None
@@ -16410,6 +16769,20 @@ class MainWindow(QMainWindow):
             self._fp_hovered_drawing = index
             self._refresh_drawing_handles()
 
+    def _fp_drag_members(self, index: int, point_index: int) -> list:
+        """@brief The drawings a drag of `(index, point_index)` moves.
+
+        @param index Dragged drawing.
+        @param point_index Its grabbed point, or -1 for its body.
+        @return The whole selection for a body drag of one of its members
+            (the press kept the selection, `gesture_begin`); [index] for a
+            handle drag or a drawing outside the selection.
+        """
+        selected = self._fp_selected_indices()
+        if point_index < 0 and index in selected:
+            return selected
+        return [index]
+
     def _whole_drag_delta(self, x: float, y: float) -> tuple:
         """@brief Translation (mm) of a whole-drawing drag from its grab node to the pointer."""
         point = self._snapped_draw_point(x, y)
@@ -16447,8 +16820,12 @@ class MainWindow(QMainWindow):
         @note A drag cancelled by a change of the drawings list never gets
             here: the controller ends it once with `commit=False`
             (`gesture_end`), so no stale index reaches the new list.
+        @note A body drag of a member of a multi-selection moves the whole
+            selection (`_fp_drag_members`) by the same snapped delta, as one
+            undo step, as the symbol editor's group drag; a handle drop
+            reshapes one drawing only.
         """
-        from ..core.footprint import validate_footprint_drawings
+        from ..core.footprint import translate_drawing, validate_footprint_drawings
         self._fp_handle_drag = None
         if not 0 <= index < len(self.footprint_drawings):
             return
@@ -16459,7 +16836,20 @@ class MainWindow(QMainWindow):
             if (dx, dy) == (0.0, 0.0):
                 self._refresh_drawing_handles()
                 return
-            record["points"] = [[round(px + dx, 4), round(py + dy, 4)] for px, py in record["points"]]
+            # Every member of the dragged group moves by the same snapped
+            # delta, as one commit; one refused member refuses the whole drop.
+            updated = deepcopy(self.footprint_drawings)
+            for member in self._fp_drag_members(index, point_index):
+                moved = translate_drawing(self.footprint_drawings[member], dx, dy)
+                if not validate_footprint_drawings([moved]):
+                    self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
+                                              self._degenerate_drawing_text(moved))
+                    self._refresh_drawing_handles()
+                    return
+                updated[member] = moved
+            self._commit_drawings(updated)
+            self._refresh_drawing_handles()
+            return
         else:
             if not point_index < len(record["points"]):
                 return
@@ -16475,13 +16865,16 @@ class MainWindow(QMainWindow):
             return
         updated = deepcopy(self.footprint_drawings)
         updated[index] = record
-        self._apply_footprint_drawings(updated)
+        # Same indices after the drop: the selection made by the press stays.
+        self._commit_drawings(updated)
         self._refresh_drawing_handles()
 
     def _build_symbol_tab(self):
         from .symbol_tab import SymbolTab
         self.symbol_tab = SymbolTab(tx=self.i18n.text)
         self.symbol_tab.edits_applied.connect(self._apply_symbol_pinout)
+        # The footprint selection highlight borrows the symbol's `selected` colour.
+        self.symbol_tab.theme_changed.connect(self._refresh_drawing_selection)
         self.symbol_tab.export_requested.connect(self._export_electrical_symbol)
         self.symbol_tab.pin_types_ai_requested.connect(self._suggest_pin_types)
         return self.symbol_tab

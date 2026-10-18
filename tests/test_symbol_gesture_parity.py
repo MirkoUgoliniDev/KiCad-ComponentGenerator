@@ -685,12 +685,14 @@ def test_s8_shift_band_selects_the_pins_inside_and_edits_nothing(tab7, qapp, mon
     b = _vp(tab7, p2.x + 3.0, p2.y - 1.0)
     counter = _Counter(tab7, monkeypatch)
     _press(tab7, qapp, a, Qt.KeyboardModifier.ShiftModifier)
-    assert tab7.view.gesture is None and tab7.view._rubber_start is not None and tab7.view._rubber.isVisible()
+    # Same contract, new holder (phase D, 2026-10-18): the band is the shared
+    # `canvas_selection.RubberBand` (`view.band`); was `view._rubber_start` / `view._rubber`.
+    assert tab7.view.gesture is None and tab7.view.band.active and tab7.view.band.visible
     _move(tab7, qapp, b)
     assert counter.take() == {}, 'the band edits nothing while it grows'
     _release(tab7, qapp, b, Qt.KeyboardModifier.ShiftModifier)
     assert counter.take() == {'_draw': 1}, 'the selection redraws, nothing is committed'
-    assert tab7.view._rubber_start is None and not tab7.view._rubber.isVisible()
+    assert not tab7.view.band.active and not tab7.view.band.visible
     assert tab7._selection_ids() == {'1', '2'}, 'the band replaced the previous selection'
     assert tab7.draft_rows() == before and len(tab7._history) == 1 and _recovery(tab7) is None
     empty = _empty_point(tab7)
@@ -1122,9 +1124,11 @@ def test_escape_still_cancels_a_pan_a_band_a_wire_and_a_placing_glyph(tab5, qapp
     assert not view.camera.pan_active
     _press(tab5, qapp, empty, Qt.KeyboardModifier.ShiftModifier)
     _move(tab5, qapp, empty + QPoint(20, 20))
-    assert view._rubber_start is not None and view._rubber.isVisible()
+    # Same contract, new holder (phase D, 2026-10-18): the band is the shared
+    # `canvas_selection.RubberBand` (`view.band`); was `view._rubber_start` / `view._rubber`.
+    assert view.band.active and view.band.visible
     QTest.keyClick(view, Qt.Key.Key_Escape)
-    assert view._rubber_start is None and not view._rubber.isVisible()
+    assert not view.band.active and not view.band.visible
     before = tab5.draft_rows()
     tab5.start_wire()
     assert tab5.add_wire_point(-5.0, 2.6) and view.wiring and tab5._wire_points

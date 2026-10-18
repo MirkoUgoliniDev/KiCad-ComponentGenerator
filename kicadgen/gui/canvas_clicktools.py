@@ -257,7 +257,7 @@ class PointCollector(QObject):
 
         @param point Raw scene position of the click.
         @param free True for an unconstrained point (Shift); passed to `tool_snap`.
-        @param quiet True suppresses `tool_refused` (the second click of a double click).
+        @param quiet True suppresses `tool_refused` (the second click of a double click, the release point of a drag).
         @return True when at least one point was appended; False when idle or refused.
         @note Order (contract rule 1): `tool_snap`; an empty result or a first
             appended point equal to the last collected one is refused
@@ -557,7 +557,8 @@ class ClickToolRouter:
             of the last vertex; not when it completed or cleared a shape.
             A release at least `QApplication.startDragDistance()` (manhattan,
             viewport px) from the press adds the release point, when the tool
-            has `drag_adds_release_point`. A release at the press, or after a
+            has `drag_adds_release_point`; it is a quiet click, so a release that
+            snaps back onto the last point is dropped silently. A release at the press, or after a
             double click, adds nothing.
         """
         if not self._usable() or event.button() != Qt.MouseButton.LeftButton:
@@ -576,7 +577,9 @@ class ClickToolRouter:
             spec = self._collector.spec
             if (spec is not None and spec.drag_adds_release_point
                     and abs(delta.x()) + abs(delta.y()) >= QApplication.startDragDistance()):
-                self._collector.click(self._scene(pos), free=self._shift(event))
+                # Quiet: a hand that trembled past the drag distance but snapped back
+                # onto the pressed point is a click, not a "coincident point" mistake.
+                self._collector.click(self._scene(pos), free=self._shift(event), quiet=True)
         self._sync_cursor()
         return True
 

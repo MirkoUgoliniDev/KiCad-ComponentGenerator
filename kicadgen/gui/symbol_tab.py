@@ -11,9 +11,9 @@ import logging
 import tempfile
 import time
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, QRectF, QPointF, QItemSelectionModel
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRectF, QPointF, QItemSelectionModel
 from PyQt6.QtGui import (QPalette, QAction, QColor, QContextMenuEvent, QFont, QPainter, QPen, QIcon)
-from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QRubberBand, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
+from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
                                  PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
@@ -22,6 +22,7 @@ from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
 from . import canvas_menus
 from .canvas_menus import ElementClipboard, MenuEntry
+from .canvas_selection import IndexSelection, RubberBand, encloses, is_click
 from .canvas_camera import Camera
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
 from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
@@ -576,6 +577,9 @@ class _SymbolView(QGraphicsView):
     #: Ctrl+click on a placed element: toggle it in the element selection.
     graphic_toggled = pyqtSignal(int)
     region_selected = pyqtSignal(object, bool)
+    #: A left click on the empty background (no drag), or an Escape with
+    #: nothing else to cancel: the host clears its selection.
+    clear_selection_requested = pyqtSignal()
     pointer_changed = pyqtSignal(object)
     #: The pointer left the viewport: hover-revealed handles go away.
     pointer_left = pyqtSignal()
@@ -613,8 +617,12 @@ class _SymbolView(QGraphicsView):
         # Navigation space is independent from the symbol bounds used by Fit.
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
         self.selection_mode = False
-        self._rubber_start = None
-        self._rubber = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        #: Selection rubber band, shared with the footprint preview (`canvas_selection`).
+        self.band = RubberBand(self)
+        #: Viewport position of a plain left press on no target (empty background,
+        #: or an untagged item such as the body outline), until its release: a
+        #: release on the same spot is a click that clears the selection.
+        self._clear_press = None
         self.theme = CANVAS_THEMES['dark']
         self.setBackgroundBrush(QColor(self.theme['canvas']))
         self.camera.auto_fit = True
@@ -676,6 +684,12 @@ class _SymbolView(QGraphicsView):
         # reveal them like a move would (review, 2026-10-12).
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         self._tool_took_right_press = False
+        self._clear_press = None
+        if self.band.active:
+            # A right or middle press while the band grows is swallowed: no
+            # context menu, no selection change until the band is released.
+            event.accept()
+            return
         if self.clicktools is not None and self.clicktools.press(event):
             self._tool_took_right_press = event.button() == Qt.MouseButton.RightButton
             return
@@ -690,12 +704,7 @@ class _SymbolView(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton and self.gesture is None:
             if self.selection_mode or event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                self._rubber_start = event.pos()
-                self._rubber_add = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                self._rubber.setGeometry(QRect(event.pos(), event.pos()))
-                self._rubber.show()
-                self.setFocus()
-                self.viewport().grabMouse()
+                self.band.begin(event.pos(), bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier))
                 event.accept()
                 return
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -711,6 +720,11 @@ class _SymbolView(QGraphicsView):
                         self.setFocus()
                         event.accept()
                         return
+        if (event.button() == Qt.MouseButton.LeftButton and self.gesture is None
+                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                and all(item.data(0) is None for item in self.items(event.pos()))):
+            # Candidate click-to-clear; a Ctrl (additive) click never clears.
+            self._clear_press = QPoint(event.pos())
         background_drag = event.button() == Qt.MouseButton.LeftButton and not self.items(event.pos())
         if (event.button() == Qt.MouseButton.MiddleButton or background_drag) and self.gesture is None:
             self.camera.pan_begin(event.button(), event.pos(), grab_mouse=True)
@@ -740,7 +754,7 @@ class _SymbolView(QGraphicsView):
 
         @param event The context-menu event; ignored on the background or during a drag.
         """
-        if self.gesture is not None:
+        if self.gesture is not None or self.band.active:
             event.accept()
             return
         if self._tool_took_right_press and event.reason() == QContextMenuEvent.Reason.Mouse:
@@ -780,8 +794,7 @@ class _SymbolView(QGraphicsView):
         if self.clicktools is not None:
             # Not consuming: the readout and the pan/drag below go on.
             self.clicktools.move(event)
-        if self._rubber_start is not None:
-            self._rubber.setGeometry(QRect(self._rubber_start, event.pos()).normalized())
+        if self.band.move(event.pos()):
             event.accept()
             return
         if self.camera.pan_active:
@@ -803,16 +816,18 @@ class _SymbolView(QGraphicsView):
         """
         if self.clicktools is not None and self.clicktools.release(event):
             return
-        if self._rubber_start is not None and event.button() == Qt.MouseButton.LeftButton:
-            rect = QRect(self._rubber_start, event.pos()).normalized()
-            self._rubber_start = None
-            self._rubber.hide()
-            self.viewport().releaseMouse()
-            self.region_selected.emit(self.mapToScene(rect).boundingRect(), self._rubber_add)
+        if self.band.active:
+            if event.button() == Qt.MouseButton.LeftButton:
+                additive = self.band.additive
+                rect = self.band.finish(event.pos())
+                # None: a Shift+click without a drag, which selects nothing.
+                if rect is not None:
+                    self.region_selected.emit(rect, additive)
             event.accept()
             return
         if self.camera.pan_active and event.button() == self.camera.pan_button:
             self.camera.pan_end(event.pos())
+            self._finish_clear_click(event)
             event.accept()
             return
         if self.gesture is not None and event.button() == Qt.MouseButton.LeftButton:
@@ -821,7 +836,19 @@ class _SymbolView(QGraphicsView):
             self.controller.release(self.mapToScene(event.pos()))
             event.accept()
             return
+        self._finish_clear_click(event)
         super().mouseReleaseEvent(event)
+
+    def _finish_clear_click(self, event):
+        """Ask the host to clear its selection when this left release ends a click on no target.
+
+        A plain left press on the empty background or on an untagged item (the
+        body outline) released on the same spot is a click, not a pan or a
+        drag: it clears the selection (user, 2026-10-18).
+        """
+        press, self._clear_press = self._clear_press, None
+        if press is not None and event.button() == Qt.MouseButton.LeftButton and is_click(press, event.pos()):
+            self.clear_selection_requested.emit()
 
     def keyPressEvent(self, event):
         """@brief Qt override: Enter/Escape finish or cancel wiring, placement and drags.
@@ -838,10 +865,14 @@ class _SymbolView(QGraphicsView):
         # A running drag never gets here: `CancelOnEscapeAndHide` (installed
         # on this view) consumes the Escape that cancels it; what is left is
         # the pan and the rubber band, which the view owns.
-        if event.key() == Qt.Key.Key_Escape and (self.camera.pan_active or self._rubber_start is not None):
+        if event.key() == Qt.Key.Key_Escape and (self.camera.pan_active or self.band.active):
             self.cancel_interaction()
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Escape and self.gesture is None:
+            # Nothing else to cancel: Escape clears the selection (user,
+            # 2026-10-18); the key still goes on as before.
+            self.clear_selection_requested.emit()
         super().keyPressEvent(event)
 
     def cancel_interaction(self):
@@ -851,15 +882,11 @@ class _SymbolView(QGraphicsView):
             its capture and tells the host once); the rubber band and the
             pan are the view's own and are dropped here.
         """
-        rubber = self._rubber_start is not None
-        self._rubber_start = None
-        self._rubber.hide()
-        # The camera releases its own capture and cursor; the rubber band
-        # grabbed the viewport through the tab, so it is released here.
+        # The camera releases its own capture and cursor; the band releases
+        # the viewport grab and cursor it took.
+        self.band.cancel()
+        self._clear_press = None
         self.camera.pan_cancel()
-        if rubber:
-            self.viewport().releaseMouse()
-            self.viewport().unsetCursor()
         if self.controller is not None:
             self.controller.cancel()
 
@@ -992,6 +1019,9 @@ class SymbolTab(QWidget):
     pin_types_ai_requested = pyqtSignal()
     export_requested = pyqtSignal()
     export_enabled_changed = pyqtSignal(bool)
+    #: The canvas colour scheme changed (`set_kicad_colors`): other views that
+    #: borrow `theme` (the footprint selection highlight) restyle on it.
+    theme_changed = pyqtSignal()
 
     def __init__(self, parent=None, tx=None):
         super().__init__(parent)
@@ -1065,10 +1095,9 @@ class SymbolTab(QWidget):
         #: `_changed` it calls (`_changed` lays out again on any difference).
         self._accepted_layout = None
         self._symbol = None
-        #: Index of the selected placed glyph in the rows' `symbol_graphics`, or None.
-        self._selected_graphic = None
-        #: Every selected element index (the primary included), for group operations.
-        self._selected_graphics = set()
+        #: Selected elements (shared `canvas_selection.IndexSelection`): its
+        #: primary is `_selected_graphic`, its members `_selected_graphics`.
+        self._element_selection = IndexSelection()
         #: Copied element records (`detached_copy`), pasted with Ctrl+V one
         #: step further each time (shared `canvas_menus.ElementClipboard`).
         self._clipboard = ElementClipboard(_moved_element_copy)
@@ -1153,6 +1182,7 @@ class SymbolTab(QWidget):
         self.view.selection_toggled.connect(self._toggle_selection)
         self.view.graphic_toggled.connect(self._toggle_graphic)
         self.view.region_selected.connect(self._select_region)
+        self.view.clear_selection_requested.connect(self.clear_selection)
         self.view.pointer_changed.connect(self._update_readout)
         self.view.pointer_left.connect(self._on_pointer_left)
         self.view.camera_changed.connect(self._update_readout)
@@ -2408,7 +2438,8 @@ class SymbolTab(QWidget):
 
         @param enabled True for the KiCad scheme.
         @note Display only: the exported symbol keeps «fill background» and
-            takes the colours of the schematic's own theme in KiCad.
+            takes the colours of the schematic's own theme in KiCad. Emits
+            `theme_changed` once the preview is redrawn.
         """
         self._theme_key = 'kicad' if enabled else 'dark'
         self.view.theme = self.theme
@@ -2420,6 +2451,7 @@ class SymbolTab(QWidget):
             action.setChecked(bool(enabled))
             action.blockSignals(blocked)
         self._draw(self._symbol)
+        self.theme_changed.emit()
 
     def _tool_chosen(self, key):
         """A palette tool click: the wire or one of the shape tools."""
@@ -3071,16 +3103,53 @@ class SymbolTab(QWidget):
         """
         return self._graphics()
 
+    @property
+    def _selected_graphic(self):
+        """@brief Index of the primary selected element in the rows' `symbol_graphics`, or None."""
+        return self._element_selection.primary
+
+    @_selected_graphic.setter
+    def _selected_graphic(self, index):
+        """Set the primary element directly (callers that restore a saved selection)."""
+        self._element_selection.primary = index
+
+    @property
+    def _selected_graphics(self):
+        """@brief Every selected element index (the primary normally included), for group operations."""
+        return self._element_selection.members
+
+    @_selected_graphics.setter
+    def _selected_graphics(self, indices):
+        """Replace the selected element set directly; the primary is left as it is."""
+        self._element_selection.members = set(indices)
+
     def _select_graphic(self, index, additive=False):
         """@brief Select one element (the primary); `additive` keeps the others selected."""
-        self._selected_graphic = index
-        if index is None:
-            self._selected_graphics = set()
-        else:
-            self._selected_graphics = (self._selected_graphics | {index}) if additive else {index}
+        self._element_selection.select(index, additive)
+        if index is not None:
             self._selected_pins = set()
             self._selected_pin = None
         self._draw(self._symbol)
+
+    def clear_selection(self):
+        """@brief Select nothing: no element and no pin.
+
+        @note Run by a click on the empty canvas background and by an Escape
+            with nothing else to cancel (user, 2026-10-18). With nothing
+            selected it returns at once, without a redraw.
+        """
+        if not self._element_selection and not self._selected_pins and self._selected_pin is None:
+            return
+        self._element_selection.clear()
+        if self._symbol is not None:
+            self._select_pins(set())
+        else:
+            self._selected_pins = set()
+            self._selected_pin = None
+
+    def clear_clipboard(self):
+        """@brief Empty the element clipboard (another project was opened or created)."""
+        self._clipboard.clear()
 
     def selected_graphics(self):
         """@brief The indices of every selected element, ascending (the primary included).
@@ -3091,18 +3160,16 @@ class SymbolTab(QWidget):
 
     def _selected_indices(self, count):
         """The selected element indices below `count` (the number of elements), ascending."""
-        chosen = {i for i in self._selected_graphics if 0 <= i < count}
-        if self._selected_graphic is not None and 0 <= self._selected_graphic < count:
-            chosen.add(self._selected_graphic)
-        return sorted(chosen)
+        return self._element_selection.indices(count)
 
     def _toggle_graphic(self, index):
         """Ctrl+click on an element: add it to or remove it from the selection."""
-        chosen = set(self.selected_graphics())
-        chosen.symmetric_difference_update({index})
-        self._selected_graphics = chosen
-        self._selected_graphic = index if index in chosen else (max(chosen) if chosen else None)
-        if chosen:
+        selection = self._element_selection
+        # Stale indices dropped first; the primary is then the highest, so a
+        # removal leaves the highest remaining element primary.
+        selection.set_many(self.selected_graphics())
+        selection.toggle(index)
+        if selection:
             self._selected_pins = set()
             self._selected_pin = None
         self._draw(self._symbol)
@@ -3223,6 +3290,10 @@ class SymbolTab(QWidget):
             or the former (text, size mm, justify)) rewrites a text element
             (`set_text`; the justification of a bottom-left anchored text
             does not change).
+        @note A committed 'delete' clears the WHOLE element selection: the
+            remaining indices shift, so a kept member would silently select
+            the element that takes its place (phase D, 2026-10-18). A refused
+            delete leaves the selection as it was.
         """
         if self._symbol is None or self._gesture_before is not None:
             return False
@@ -3230,9 +3301,18 @@ class SymbolTab(QWidget):
         graphics = self._graphics(rows)
         if not self._apply_graphic_edit(graphics, index, operation, value):
             return False
-        if operation == 'delete':
-            self._selected_graphic = None
-        return self._accept_geometry(self._with_graphics(rows, graphics))
+        if operation != 'delete':
+            return self._accept_geometry(self._with_graphics(rows, graphics))
+        selection = self._element_selection
+        kept = (selection.primary, set(selection.members))
+        # Cleared before the commit redraws: the old indices would name the
+        # elements that took the deleted one's place.
+        selection.clear()
+        if self._accept_geometry(self._with_graphics(rows, graphics)):
+            return True
+        selection.primary, selection.members = kept
+        self._draw(self._symbol)
+        return False
 
     def _apply_graphic_edit(self, graphics, index, operation, value=None):
         """Apply one `_edit_graphic` operation to the records `graphics`, in place, without committing.
@@ -3892,9 +3972,14 @@ class SymbolTab(QWidget):
         self._history_index = len(self._history) - 1
 
     def _restore_history(self, index):
+        """Replace the draft with history snapshot `index` (undo/redo); the element selection is cleared."""
         if self._gesture_before is not None or not 0 <= index < len(self._history):
             return
         self._history_index = index
+        # The element selection is made of indices into the replaced list:
+        # kept, it would select whatever element now has the same index
+        # (phase D, 2026-10-18; the footprint preview clears it too).
+        self._element_selection.clear()
         self._replaying = True
         try:
             self._populate(self._history[index])
@@ -3970,17 +4055,22 @@ class SymbolTab(QWidget):
             if bounds is None:
                 continue
             x0, y0, x1, y1 = bounds
-            scene_rect = QRectF(x0 * SCENE_UNITS_PER_MM, -y1 * SCENE_UNITS_PER_MM,
-                                (x1 - x0) * SCENE_UNITS_PER_MM, (y1 - y0) * SCENE_UNITS_PER_MM)
-            if rect.contains(scene_rect):
+            # Edge-by-edge test: a horizontal or vertical line and a text have
+            # a flat box, which `QRectF.contains` would always refuse.
+            if encloses(rect, (x0 * SCENE_UNITS_PER_MM, -y1 * SCENE_UNITS_PER_MM,
+                               x1 * SCENE_UNITS_PER_MM, -y0 * SCENE_UNITS_PER_MM)):
                 elements.add(index)
         if chosen:
             self._select_pins(chosen)
             return
-        self._selected_graphics = elements
-        # `_select_graphic` also drops the pin selection, so a later band
-        # with Ctrl held adds elements instead of reselecting the pins.
-        self._select_graphic(max(elements) if elements else None, additive=True)
+        # `elements` already holds the current selection when additive.
+        self._element_selection.set_many(elements)
+        if elements:
+            # The pin selection is dropped, so a later band with Ctrl held
+            # adds elements instead of reselecting the pins.
+            self._selected_pins = set()
+            self._selected_pin = None
+        self._draw(self._symbol)
 
     def _table_selection(self):
         if self._loading or self._gesture_before is not None or self._syncing_selection:

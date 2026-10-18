@@ -1085,6 +1085,8 @@ def test_golden_session(tab, qapp, monkeypatch):
     tab.start_shape('text')
     _click(tab, qapp, -5.08, -5.08)
     record('text')
+    # Flipped 2026-10-18 (phase D, golden regenerated): undo clears the element
+    # selection; was "selected_graphic": 4, the stale index of the undone text.
     tab.undo()
     record('undo')
     text = json.dumps(records, indent=1, sort_keys=True, ensure_ascii=False) + '\n'

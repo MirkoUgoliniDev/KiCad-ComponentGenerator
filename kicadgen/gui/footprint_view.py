@@ -21,6 +21,7 @@ from .canvas_gestures import (
     HOVER_MARGIN_PX, CancelOnEscapeAndHide, GestureController, HoverGroups, KeyRepeatFilter,
     install_canvas_filters,
 )
+from .canvas_selection import RubberBand, is_click
 
 #: Item data role carrying the key of a draggable text (Reference, Value).
 TEXT_KEY_ROLE = 0x544558
@@ -92,6 +93,15 @@ class FootprintView(QGraphicsView):
     drawing_hovered = pyqtSignal(int)
     #: The text whose anchor square must show changed: its key ("" for none).
     text_hovered = pyqtSignal(str)
+    #: Ctrl+click on a user drawing (body or handle): its index, to add or remove.
+    drawing_toggled = pyqtSignal(int)
+    #: A Shift+drag rubber band ended: its scene rectangle and whether Ctrl
+    #: was held at its start (additive).
+    band_selected = pyqtSignal(QRectF, bool)
+    #: A left click (press and release without a drag) on the empty background.
+    background_clicked = pyqtSignal()
+    #: Escape with nothing else to cancel (no tool, pan, band or drag).
+    escape_idle = pyqtSignal()
 
     def __init__(self, scene):
         """@brief A view without a gesture host: pan and zoom only until `attach_host`.
@@ -137,6 +147,11 @@ class FootprintView(QGraphicsView):
         self._hovered_text = ""
         #: Main grid step divided by this gives the drawing snap step.
         self._fine_divisor = DEFAULT_FINE_GRID_DIVISOR
+        #: The shared selection rubber band (Shift+drag), as the symbol editor's.
+        self.band = RubberBand(self)
+        #: Viewport position of a left press on the background that started a
+        #: pan; its release decides whether it was a click (`is_click`).
+        self._background_press = None
 
     @property
     def auto_fit(self):
@@ -553,8 +568,20 @@ class FootprintView(QGraphicsView):
             press is a drawing point and a right press closes the shape; a
             press during a camera pan is swallowed; the middle button falls
             through to the camera.
+        @note Selection (shared `canvas_selection`): Shift+left press starts
+            the rubber band, Ctrl+left press on a drawing emits
+            `drawing_toggled`; a plain press on a drawing is selected by the
+            host when its drag begins (`gesture_begin`); a left press on the
+            background pans, and its release without a drag emits
+            `background_clicked` (not for a Ctrl click, which is additive).
+            Any press while the band is drawn is swallowed.
         """
         if self.click_router is not None and self.click_router.press(event):
+            return
+        if self.band.active:
+            # Another button pressed while the rubber band is drawn: no menu,
+            # no pan, no selection change until the band is released.
+            event.accept()
             return
         if event.button() == Qt.MouseButton.RightButton:
             if self._dragging():
@@ -579,6 +606,22 @@ class FootprintView(QGraphicsView):
                 pad_index = item.data(0x504144)
                 if pad_index is not None:
                     self.pad_context_requested.emit(str(pad_index))
+                    event.accept()
+                    return
+        if event.button() == Qt.MouseButton.LeftButton and not self._dragging():
+            # Selection gestures shared with the symbol editor (plan
+            # docs/canvas-selection-plan.md): Shift+drag draws the rubber
+            # band anywhere (Ctrl held: additive); Ctrl+click on a drawing
+            # adds or removes it and starts no drag.
+            modifiers = event.modifiers()
+            if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                self.band.begin(event.pos(), bool(modifiers & Qt.KeyboardModifier.ControlModifier))
+                event.accept()
+                return
+            if modifiers & Qt.KeyboardModifier.ControlModifier:
+                index = self._drawing_at(event.pos())
+                if index >= 0:
+                    self.drawing_toggled.emit(index)
                     event.accept()
                     return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -614,6 +657,13 @@ class FootprintView(QGraphicsView):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             # Qt's implicit grab is enough; a click without a move keeps auto_fit.
             self.camera.pan_begin(event.button(), event.pos(), grab_mouse=False, keep_auto_fit=True)
+            # A left press on the background: its release without a drag
+            # clears the selection (`background_clicked`); a drag pans. An
+            # additive (Ctrl) click that misses every drawing keeps the
+            # selection: it was meant to add, not to start over.
+            additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            self._background_press = (event.pos() if event.button() == Qt.MouseButton.LeftButton
+                                      and not additive else None)
             event.accept()
         else:
             super().mousePressEvent(event)
@@ -628,6 +678,9 @@ class FootprintView(QGraphicsView):
         """
         if self._dragging():
             self.gestures.move(self.mapToScene(event.pos()))
+            event.accept()
+            return
+        if self.band.move(event.pos()):
             event.accept()
             return
         if self.camera.pan_active:
@@ -674,6 +727,8 @@ class FootprintView(QGraphicsView):
             press-move-release as in a CAD, not only click-click (user,
             2026-10-13: «non funziona»). A release at the press point is a
             plain click and adds nothing.
+        @note A rubber band ends here (`band_selected`); a left pan whose
+            release `is_click` of its press emits `background_clicked`.
         """
         if self._dragging() and event.button() == Qt.MouseButton.LeftButton:
             kind = self.gestures.target[0]
@@ -685,11 +740,21 @@ class FootprintView(QGraphicsView):
                 self._report_text_hover(self._text_near(event.pos()))
             event.accept()
             return
+        if self.band.active and event.button() == Qt.MouseButton.LeftButton:
+            additive = self.band.additive
+            rect = self.band.finish(event.pos())
+            if rect is not None:
+                self.band_selected.emit(rect, additive)
+            event.accept()
+            return
         if self.click_router is not None and self.click_router.release(event):
             return
         if self.camera.pan_active and event.button() == self.camera.pan_button:
+            press, self._background_press = self._background_press, None
             self.camera.pan_end(event.pos())
             event.accept()
+            if press is not None and event.button() == Qt.MouseButton.LeftButton and is_click(press, event.pos()):
+                self.background_clicked.emit()
         else:
             super().mouseReleaseEvent(event)
 
@@ -719,12 +784,21 @@ class FootprintView(QGraphicsView):
             release that follows does nothing, and the key is consumed, so
             it does not also cancel an armed drawing tool. With no pan
             running, Escape reaches the draw tool as before.
+        @note Then Escape cancels a rubber band; with nothing at all to
+            cancel (no tool, pan, band or drag) it emits `escape_idle`, on
+            which the host clears the drawing selection.
         """
         if self.click_router is not None and self.click_router.key(event):
             return
         if event.key() == Qt.Key.Key_Escape and self.camera.pan_cancel():
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Escape and self.band.cancel():
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and not self._dragging():
+            # Nothing else to cancel: the host clears the selection.
+            self.escape_idle.emit()
         super().keyPressEvent(event)
 
     def hideEvent(self, event):
@@ -737,6 +811,8 @@ class FootprintView(QGraphicsView):
             puts the dragged text back and drops the handle ghost.
         """
         self.camera.pan_cancel()
+        self.band.cancel()
+        self._background_press = None
         self.cancel_interaction()
         self._report_text_hover("")
         if self.click_router is not None:

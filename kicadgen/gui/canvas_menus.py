@@ -256,6 +256,11 @@ class ElementClipboard:
         self._offset = (round(self._offset[0] + float(step[0]), 4),
                         round(self._offset[1] + float(step[1]), 4))
 
+    def clear(self) -> None:
+        """@brief Forget the content and the offset (another project was opened)."""
+        self._records = []
+        self._offset = (0.0, 0.0)
+
     def snapshot(self) -> tuple:
         """@brief The current content and offset, for `restore` (Duplicate keeps the clipboard).
 
