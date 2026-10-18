@@ -91,6 +91,18 @@ APP_QSS = f"""
         background: {MANTLE};
         color: {TEXT};
         border: 1px solid {SURFACE1};
+        padding: 4px;
+    }}
+    /* Once QMenu::item:selected is styled, the style sheet lays every item out
+       with its own box: without an explicit padding the text runs into the
+       right border (user, 2026-10-18: the context menu text was cut). */
+    QMenu::item {{
+        padding: 4px 24px 4px 10px;
+    }}
+    /* A checkable item with an icon (the layer list) shows its state only
+       through this frame; the styled item would otherwise draw none. */
+    QMenu::icon:checked {{
+        border: 1px solid {SUBTEXT};
     }}
     QMenu::item:selected {{
         background: {SURFACE0};

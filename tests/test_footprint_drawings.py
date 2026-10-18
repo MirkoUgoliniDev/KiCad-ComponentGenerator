@@ -238,39 +238,13 @@ def test_the_context_menu_deletes_the_drawing(preview, monkeypatch):
     window.footprint_drawings = validate_footprint_drawings([record()])
     window._draw_preview()
     assert _drawing_items(window)
-
-    class FakeAction:
-        def __init__(self, label):
-            self.label = label
-
-        def setCheckable(self, _value):
-            pass
-
-        def setChecked(self, _value):
-            pass
-
-        def setIconVisibleInMenu(self, _value):
-            pass
-
-    class FakeMenu:
-        def __init__(self, *_a, **_k):
-            self.actions = []
-
-        def addAction(self, *args):
-            self.actions.append(FakeAction(args[-1]))      # (label) or (icon, label)
-            return self.actions[-1]
-
-        def addMenu(self, _label):
-            return FakeMenu()
-
-        def addSeparator(self):
-            pass
-
-        def exec(self, *_a):
-            return next(a for a in self.actions if "Elimina" in a.label)
-
-    from kicadgen.gui import main_window as gui
-    monkeypatch.setattr(gui, "QMenu", FakeMenu)
+    # Harness changed with phase C (docs/canvas-menus-plan.md): the menu is
+    # now built by the shared `canvas_menus` module, so the fake replaces
+    # `QMenu.exec` (used by both) instead of the window's `QMenu` name. The
+    # contract checked below is unchanged.
+    from PyQt6.QtWidgets import QMenu
+    monkeypatch.setattr(QMenu, "exec", lambda menu, *_a: next(
+        a for a in menu.actions() if "Elimina" in a.text()))
     window._footprint_drawing_context_menu(0)
     assert window.footprint_drawings == []
     # CONTRACT CHANGED 2026-10-14 (footprint draft, user): an edit stays in the
@@ -979,35 +953,28 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     text) while hovered: a right click on them must still open the menu.
     Negative: a right click on empty background opens no drawing menu."""
     from PyQt6.QtCore import QEvent, Qt
-    from kicadgen.gui import main_window as gui
+    from PyQt6.QtWidgets import QMenu
     window, saves, _generations = preview
-    menus, created = [], []
+    menus = []
 
-    class Action:
-        def __init__(self, label):
-            self.label = label
+    def layer_action(menu):
+        for action in menu.actions():
+            if action.menu() is not None:
+                found = layer_action(action.menu())
+                if found is not None:
+                    return found
+            elif action.text().startswith("Fabbricazione"):
+                return action
+        return None
 
-        def __getattr__(self, _name):
-            return lambda *_a, **_k: None
+    def fake_exec(menu, *_a):
+        menus.append(menu)
+        return layer_action(menu)
 
-    class Menu:
-        def __init__(self, *_a, **_k):
-            menus.append(self)
-
-        def addAction(self, *args):
-            created.append(Action(args[-1]))
-            return created[-1]
-
-        def addMenu(self, _label):
-            return Menu()
-
-        def addSeparator(self):
-            pass
-
-        def exec(self, *_a):
-            return next(a for a in created if a.label.startswith("Fabbricazione"))
-
-    monkeypatch.setattr(gui, "QMenu", Menu)
+    # Harness changed with phase C (docs/canvas-menus-plan.md): the menu is
+    # built by the shared `canvas_menus` module, so `QMenu.exec` (used by
+    # both) is replaced instead of the window's `QMenu` name; same contract.
+    monkeypatch.setattr(QMenu, "exec", fake_exec)
     window.chk_grid.setChecked(False)
     window.footprint_drawings = validate_footprint_drawings([
         record("text", ((10, 10),), text="NOTE")])

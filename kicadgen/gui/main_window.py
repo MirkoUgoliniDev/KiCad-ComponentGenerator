@@ -1011,7 +1011,9 @@ def _drawing_text_item(record, mm_to_px):
         for that text and pen, and placed as KiCad places it: an anchored
         record (`USER_TEXT_ANCHOR`, written ``(justify left bottom)``) from
         its bottom-left anchor, a legacy record (no justify written)
-        centred on its point.
+        centred on its point. A record with ``angle`` 90 is turned a
+        quarter turn about that point, reading bottom-to-top as KiCad
+        draws ``(at x y 90)``.
     @note CONTRACT CHANGED 2026-10-16 (user, «ok procedi»: KiCad's width,
         text by text, same helper as the symbol editor): before, the width
         was the desktop font's own and the baseline sat on the anchor; now
@@ -1027,6 +1029,7 @@ def _drawing_text_item(record, mm_to_px):
                             mm_to_px=mm_to_px, thickness=_drawn_text_thickness(),
                             justify="left" if anchored else "center",
                             vjustify="bottom" if anchored else "center",
+                            vertical=record.get("angle", 0) == 90,
                             colour=_layer_color(record["layer"]))
 
 
@@ -1686,6 +1689,12 @@ class MainWindow(QMainWindow):
         #: and the press point itself, while a text drag runs (the drop
         #: anchor is origin + (drop - press)); None otherwise.
         self._fp_text_drag: tuple | None = None
+        from .canvas_menus import ElementClipboard
+        from ..core.footprint import translate_drawing
+        #: Drawings copied with Ctrl+C / «Copia», pasted with Ctrl+V one
+        #: drawing-grid step further at each paste (shared clipboard of the
+        #: symbol editor and the footprint preview, plan C-M3).
+        self._fp_clipboard = ElementClipboard(translate_drawing)
         #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
         #: Consumed by `_flush_footprint_rewrite` just before its single
         #: attempt (a failed start is logged once, never retried in a loop)
@@ -14505,6 +14514,8 @@ class MainWindow(QMainWindow):
              ('Ctrl+Y', self._redo_footprint_drawing),
              ('Ctrl+Shift+Z', self._redo_footprint_drawing),
              ('Ctrl+D', self._duplicate_hovered_drawing),
+             ('Ctrl+C', self._copy_hovered_drawing),
+             ('Ctrl+V', self._paste_footprint_drawings),
              ('Delete', self._delete_hovered_drawing)],
             runner=self._fp_checkpoint.run,
             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -14761,13 +14772,34 @@ class MainWindow(QMainWindow):
         """@brief Translated reason why a drawing record was refused by the validator.
 
         @param record The refused record (kind and points as drawn).
-        @return The aligned-arc explanation when the record is an arc through
-            three distinct points whose centre KiCad cannot hold (collinear,
-            or so nearly collinear that the centre leaves KiCad's coordinate
-            range); otherwise the generic zero-radius/zero-side text.
+        @return The first reason that applies, in this order: a point beyond
+            `TEXT_POSITION_LIMIT_MM` (the drawing would leave the allowed
+            area: a move, turn, paste or edit pushed it out); a text that is
+            not one non-blank line of positive size; a stroke width outside
+            (0, 10] mm; the aligned-arc explanation when the record is an arc
+            through three distinct points whose centre KiCad cannot hold
+            (collinear, or so nearly collinear that the centre leaves KiCad's
+            coordinate range); otherwise the generic zero-radius/zero-side text.
+        @note The checks mirror `core.footprint.validate_footprint_drawings`,
+            so the reason names what the validator refused.
         """
-        from ..core.footprint import arc_centre_representable
+        from ..core.footprint import TEXT_POSITION_LIMIT_MM, arc_centre_representable
         points = [tuple(p) for p in record.get("points") or ()]
+        if any(not all(isinstance(v, (int, float)) and math.isfinite(v)
+                       and abs(v) <= TEXT_POSITION_LIMIT_MM for v in p) for p in points):
+            return self.i18n.text(
+                "Il disegno uscirebbe dall’area consentita (±{limit} mm dall’origine).").format(
+                limit=f"{TEXT_POSITION_LIMIT_MM:g}")
+        if record.get("kind") == "text":
+            text, size = record.get("text"), record.get("size", 1.0)
+            if (not isinstance(text, str) or not text.strip() or "\n" in text or "\r" in text
+                    or not isinstance(size, (int, float)) or not 0 < size <= 50):
+                return self.i18n.text(
+                    "Testo non valido: serve una riga non vuota con dimensione maggiore di zero.")
+        width = record.get("width", 0.12)
+        if not isinstance(width, (int, float)) or not 0 < width <= 10:
+            return self.i18n.text(
+                "Spessore del tratto non valido: deve essere maggiore di 0 e al massimo 10 mm.")
         if (record.get("kind") == "arc" and len(points) == 3 and len(set(points)) == 3
                 and not arc_centre_representable(*points)):
             return self.i18n.text(
@@ -15596,78 +15628,424 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self.footprint_drawings):
             self._duplicate_drawing(index)
 
-    def _duplicate_drawing(self, index: int) -> None:
-        """@brief Copy a drawing shifted by one grid step right and down (as the symbol does)."""
-        from ..core.footprint import validate_footprint_drawings
-        step_px = self.preview_view.grid_step() or 20.0
-        step = step_px / 20.0
-        copy = deepcopy(self.footprint_drawings[index])
-        copy["points"] = [[round(x + step, 4), round(y + step, 4)] for x, y in copy["points"]]
-        valid = validate_footprint_drawings([copy])
-        if valid:
-            self._apply_footprint_drawings(self.footprint_drawings + valid)
+    def _copy_hovered_drawing(self) -> None:
+        """@brief Ctrl+C: copy the drawing under the pointer, if any.
 
-    def _set_drawing_field(self, index: int, field: str, value) -> None:
-        """@brief Change one field (layer, width) of a drawing, keeping it valid."""
+        @note The footprint preview has no selection: the keyboard acts on
+            the hovered drawing, as Delete and Ctrl+D do.
+        """
+        index = self._fp_hovered_drawing
+        if 0 <= index < len(self.footprint_drawings):
+            self._copy_drawings([index])
+
+    def _copy_drawings(self, indices) -> int:
+        """@brief Put the drawings at `indices` in the shared clipboard (the next paste restarts one step away).
+
+        @param indices Indices into `footprint_drawings`; unknown ones are skipped.
+        @return Number of drawings copied; 0 leaves the clipboard as it was.
+        """
+        records = [self.footprint_drawings[i] for i in indices if 0 <= i < len(self.footprint_drawings)]
+        count = self._fp_clipboard.copy(records)
+        if count:
+            # Same words as the symbol editor's copy, in the window's status bar.
+            self.statusBar().showMessage(self.i18n.text("{count} elementi copiati.").format(count=count), 4000)
+        return count
+
+    def _footprint_paste_step(self) -> tuple:
+        """@brief (dx, dy) mm of one paste: one drawing-grid step right and down (Y down).
+
+        @return The step the duplicate has always used (`grid_step` of the
+            view, scene px, at 20 px per mm; 1 mm when the view reports none).
+        """
+        step = (self.preview_view.grid_step() or _FP_PREVIEW_MM_TO_PX) / _FP_PREVIEW_MM_TO_PX
+        return (step, step)
+
+    def _paste_footprint_drawings(self) -> bool:
+        """@brief Ctrl+V: add the clipboard's drawings one more grid step away than the previous paste.
+
+        @return True when the drawings were added (one undo step) and the
+            status bar says how many; False with an empty clipboard, or when
+            a pasted drawing would not be valid (beyond the coordinate
+            bound): nothing changes then, a toast says why, and the next
+            paste lands where this one would have.
+        @note The footprint preview has no selection concept: the pasted
+            drawings are not selected (the symbol editor selects them).
+        """
         from ..core.footprint import validate_footprint_drawings
-        record = deepcopy(self.footprint_drawings[index])
-        record[field] = value
+        if not self._fp_clipboard:
+            return False
+        step = self._footprint_paste_step()
+        batch = self._fp_clipboard.paste_batch(step)
+        valid = validate_footprint_drawings(batch)
+        if len(valid) != len(batch):
+            refused = next(r for r in batch if not validate_footprint_drawings([r]))
+            self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
+                                      self._degenerate_drawing_text(refused))
+            return False
+        self._apply_footprint_drawings(deepcopy(self.footprint_drawings) + valid)
+        self._fp_clipboard.advance(step)
+        self.statusBar().showMessage(self.i18n.text("{count} elementi incollati.").format(count=len(valid)), 4000)
+        return True
+
+    def _duplicate_drawing(self, index: int) -> bool:
+        """@brief Copy a drawing one grid step right and down; the clipboard is kept (as the symbol does).
+
+        @param index Index of the drawing.
+        @return True when the copy was added.
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return False
+        kept = self._fp_clipboard.snapshot()
+        try:
+            self._copy_drawings([index])
+            return self._paste_footprint_drawings()
+        finally:
+            self._fp_clipboard.restore(kept)
+
+    def _replace_drawing(self, index: int, record: dict) -> bool:
+        """@brief Put `record` at `index` as one undo step, when it is valid and differs.
+
+        @param index Index of the drawing to replace.
+        @param record The new record (validated here).
+        @return True when the draft changed; False for an invalid record
+            (nothing changes, a toast says why, as for a refused handle
+            drag) or one equal to the current drawing (no undo step is
+            recorded for a no-op).
+        """
+        from ..core.footprint import validate_footprint_drawings
+        if not 0 <= index < len(self.footprint_drawings):
+            return False
         valid = validate_footprint_drawings([record])
         if not valid:
-            return
+            self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
+                                      self._degenerate_drawing_text(record))
+            return False
+        if valid[0] == self.footprint_drawings[index]:
+            return False
         updated = deepcopy(self.footprint_drawings)
         updated[index] = valid[0]
-        self._apply_footprint_drawings(updated)
+        return self._apply_footprint_drawings(updated)
+
+    def _set_drawing_field(self, index: int, field: str, value) -> None:
+        """@brief Change one field (layer, width, text) of a drawing, keeping it valid."""
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        record = deepcopy(self.footprint_drawings[index])
+        record[field] = value
+        self._replace_drawing(index, record)
+
+    def _turn_drawing(self, index: int, counter_clockwise: bool) -> bool:
+        """@brief Turn a drawing a quarter turn as seen on screen (a text toggles 0/90).
+
+        @param index Index of the drawing.
+        @param counter_clockwise True for «antiorario».
+        @return True when the draft changed (see `core.footprint.turn_drawing`).
+        """
+        from ..core.footprint import turn_drawing
+        if not 0 <= index < len(self.footprint_drawings):
+            return False
+        return self._replace_drawing(index, turn_drawing(self.footprint_drawings[index], counter_clockwise))
+
+    def _mirror_drawing(self, index: int) -> bool:
+        """@brief Mirror a shape left-right about its bounding-box centre; a text is left as it is.
+
+        @param index Index of the drawing.
+        @return True when the draft changed.
+        """
+        from ..core.footprint import mirror_drawing
+        if not 0 <= index < len(self.footprint_drawings):
+            return False
+        return self._replace_drawing(index, mirror_drawing(self.footprint_drawings[index]))
+
+    #: Title line of the drawing menu, by drawing kind (catalogue sources).
+    FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "rectangle": "Rettangolo", "circle": "Cerchio",
+                                    "arc": "Arco", "text": "Testo"}
+
+    def _footprint_drawing_menu_entries(self, record: dict) -> list:
+        """@brief The entries of a drawing's right-click menu, in the order shared with the symbol editor.
+
+        @param record The drawing the menu is for.
+        @return `canvas_menus.MenuEntry` items: turn ±90, mirror (greyed out
+            for a text, plan C-M1), delete, copy, duplicate, the «Layer»
+            submenu (colour swatches, current layer checked), properties,
+            then after a separator «Modifica testo…» (text) or «Spessore del
+            tratto…» (shape).
+        """
+        from . import canvas_menus as cm
+        tx = self.i18n.text
+        text = record["kind"] == "text"
+        layers = tuple(cm.MenuEntry("layer:" + layer, tx(label), checkable=True,
+                                    checked=layer == record["layer"],
+                                    icon_object=_layer_swatch(_layer_color(layer)))
+                       for layer, label in self.FOOTPRINT_DRAW_LAYERS)
+        entries = cm.rotate_entries(tx) + [
+            cm.mirror_entry(tx, enabled=not text),
+            cm.delete_entry(tx, "Elimina disegno"),
+            cm.copy_entry(tx),
+            cm.duplicate_entry(tx),
+            cm.MenuEntry("", tx("Layer"), children=layers),
+            cm.properties_entry(tx),
+        ]
+        if text:
+            entries.append(cm.MenuEntry("edit_text", tx("Modifica testo…"), separator_before=True))
+        else:
+            entries.append(cm.MenuEntry("stroke_width", tx("Spessore del tratto…"), separator_before=True))
+        return entries
 
     def _footprint_drawing_context_menu(self, index: int) -> None:
-        """@brief Right click on a drawing: delete it, or edit a text's content."""
+        """@brief Right click on a drawing: the element menu shared with the symbol editor.
+
+        @param index Index of the drawing under the pointer.
+        @note Built and shown by `canvas_menus` (plan docs/canvas-menus-plan.md,
+            phase C); every chosen entry is one `_apply_footprint_drawings`
+            commit, a dismissed menu or a no-op changes nothing.
+        """
+        from . import canvas_menus as cm
         if not 0 <= index < len(self.footprint_drawings):
             return
         record = self.footprint_drawings[index]
-        menu = QMenu(self)
-        # Same entries as the symbol editor's element menu, where they apply.
-        duplicate_action = menu.addAction(self.i18n.text("Duplica (Ctrl+D)"))
-        layer_menu = menu.addMenu(self.i18n.text("Layer"))
-        layer_actions = {}
-        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
-            action = layer_menu.addAction(_layer_swatch(_layer_color(layer)), self.i18n.text(label))
-            action.setIconVisibleInMenu(True)
-            action.setCheckable(True)
-            action.setChecked(layer == record["layer"])
-            layer_actions[action] = layer
-        edit_action = width_action = None
-        if record["kind"] == "text":
-            menu.addSeparator()
-            edit_action = menu.addAction(self.i18n.text("Modifica testo…"))
-        else:
-            width_action = menu.addAction(self.i18n.text("Spessore del tratto…"))
-        menu.addSeparator()
-        delete_action = menu.addAction(self.i18n.text("Elimina disegno"))
-        chosen = menu.exec(QCursor.pos())
+        title = self.i18n.text(self.FOOTPRINT_DRAWING_KIND_NAMES.get(record["kind"], ""))
+        menu, keys = cm.build_element_menu(self, title, self._footprint_drawing_menu_entries(record))
+        chosen = cm.exec_element_menu(menu, keys, QCursor.pos())
         if chosen is None:
             return
-        if chosen is delete_action:
+        if chosen in (cm.ROTATE_CCW, cm.ROTATE_CW):
+            self._turn_drawing(index, chosen == cm.ROTATE_CCW)
+        elif chosen == cm.MIRROR:
+            self._mirror_drawing(index)
+        elif chosen == cm.DELETE:
             updated = deepcopy(self.footprint_drawings)
             del updated[index]
             self._apply_footprint_drawings(updated)
-        elif chosen is duplicate_action:
+        elif chosen == cm.COPY:
+            self._copy_drawings([index])
+        elif chosen == cm.DUPLICATE:
             self._duplicate_drawing(index)
-        elif chosen in layer_actions:
-            self._set_drawing_field(index, "layer", layer_actions[chosen])
-        elif chosen is width_action:
+        elif chosen.startswith("layer:"):
+            self._set_drawing_field(index, "layer", chosen[len("layer:"):])
+        elif chosen == cm.PROPERTIES:
+            self._edit_drawing_properties(index)
+        elif chosen == "stroke_width":
             value, accepted = QInputDialog.getDouble(
                 self, self.i18n.text("Spessore del tratto…"),
                 self.i18n.text("Spessore del tratto in mm"),
                 float(record.get("width", 0.12)), 0.01, 5.0, 3)
             if accepted:
                 self._set_drawing_field(index, "width", round(float(value), 4))
-        elif chosen is edit_action:
+        elif chosen == "edit_text":
             text, accepted = QInputDialog.getText(
                 self, self.i18n.text("Testo"), self.i18n.text("Testo da scrivere:"),
                 text=record.get("text", ""))
             if not accepted or not text.strip() or "\n" in text or "\r" in text:
                 return
             self._set_drawing_field(index, "text", text.strip())
+
+    def _drawing_properties_values(self, record: dict) -> dict:
+        """@brief The values the «Proprietà elemento…» dialog shows for a drawing.
+
+        @param record A validated drawing record.
+        @return {"layer", "width"} plus, for a text, "x", "y" (its anchor),
+            "text", "size", "angle"; for a shape, "x", "y" (its bounding-box
+            centre, rounded to 0.1 um) and "rect_width"/"rect_height"
+            (rectangle) or "radius" (circle). Line and arc: position only.
+        """
+        from ..core.footprint import drawing_centre
+        values = {"layer": record["layer"], "width": float(record.get("width", 0.12))}
+        cx, cy = drawing_centre(record)
+        values["x"], values["y"] = round(cx, 4) + 0.0, round(cy, 4) + 0.0
+        if record["kind"] == "text":
+            values.update(text=record["text"], size=float(record.get("size", 1.0)),
+                          angle=int(record.get("angle", 0)))
+        elif record["kind"] == "rectangle":
+            (x0, y0), (x1, y1) = record["points"]
+            values.update(rect_width=round(abs(x1 - x0), 4), rect_height=round(abs(y1 - y0), 4))
+        elif record["kind"] == "circle":
+            (cx0, cy0), (rx, ry) = record["points"]
+            values["radius"] = round(math.hypot(rx - cx0, ry - cy0), 4)
+        return values
+
+    def set_drawing_properties(self, index: int, values: dict) -> bool:
+        """@brief Apply the «Proprietà elemento…» values to a drawing as ONE undo step.
+
+        @param index Index of the drawing.
+        @param values Keys of `_drawing_properties_values`; only those that
+            differ from the drawing's current values are applied, so values
+            accepted unchanged change nothing (no rounding drift, no undo step).
+        @return True when the values are accepted: applied (one undo step) or
+            changing nothing (no undo step); False for an unknown index or a
+            result the validation refuses (nothing changes; the reason is
+            `_degenerate_drawing_text` of `_drawing_properties_record`).
+        @note A shape moves by its bounding-box centre and is resized about
+            that centre; a text moves by its anchor.
+        @note The dialog passes only the fields the user changed (compared
+            with each widget's own initial value), so a widget that had to
+            round or clamp the shown value never rewrites the drawing.
+        """
+        from ..core.footprint import validate_footprint_drawings
+        record = self._drawing_properties_record(index, values)
+        if record is None:
+            return False
+        valid = validate_footprint_drawings([record])
+        if not valid:
+            return False
+        if valid[0] != self.footprint_drawings[index]:
+            self._replace_drawing(index, valid[0])
+        return True
+
+    def _drawing_properties_record(self, index: int, values: dict):
+        """@brief The drawing at `index` with the «Proprietà elemento…» values applied, NOT validated.
+
+        @param index Index of the drawing.
+        @param values See `set_drawing_properties`.
+        @return The candidate record (the caller validates it and, when
+            refused, derives the reason from it); None for an unknown index.
+        """
+        from ..core.footprint import resize_drawing, translate_drawing
+        if not 0 <= index < len(self.footprint_drawings):
+            return None
+        current = self._drawing_properties_values(self.footprint_drawings[index])
+
+        def changed(key):
+            if key not in values or key not in current:
+                return False
+            new, old = values[key], current[key]
+            if isinstance(old, float):
+                return abs(float(new) - old) > 1e-9
+            return new != old
+
+        record = deepcopy(self.footprint_drawings[index])
+        if changed("layer"):
+            record["layer"] = values["layer"]
+        if changed("width"):
+            record["width"] = round(float(values["width"]), 4)
+        sizes = {key: float(values[source]) for key, source in
+                 (("width", "rect_width"), ("height", "rect_height"), ("radius", "radius"))
+                 if changed(source)}
+        if sizes:
+            record = resize_drawing(record, **sizes)
+        if changed("x") or changed("y"):
+            dx = float(values["x"]) - current["x"] if changed("x") else 0.0
+            dy = float(values["y"]) - current["y"] if changed("y") else 0.0
+            record = translate_drawing(record, dx, dy)
+        if record["kind"] == "text":
+            if changed("text"):
+                # Validation strips it and refuses a blank or multi-line text.
+                record["text"] = str(values["text"])
+            if changed("size"):
+                record["size"] = round(float(values["size"]), 4)
+            if changed("angle"):
+                record.pop("angle", None)
+                if int(values["angle"]) % 180:
+                    record["angle"] = 90
+        return record
+
+    def _edit_drawing_properties(self, index: int) -> None:
+        """@brief «Proprietà elemento…» of a drawing: layer, stroke, position, size; for a text its content.
+
+        @param index Index of the drawing.
+        @note OK applies the changed values as one undo step
+            (`set_drawing_properties`); refused values keep the dialog open
+            with the reason derived from the refused record, as in the
+            symbol editor.
+        @note "Changed" means different from the value the widget itself
+            showed when the dialog opened, never from the record: a spin box
+            rounds to 0.1 um and clamps to its range, so comparing its value
+            with the record would rewrite a drawing accepted unchanged.
+            The ranges are the validation bounds anyway (stroke (0, 10] mm,
+            radius up to the half diagonal of the +-500 mm square, positions
+            wide enough for the drawn bounds of a long arc).
+        @note A text has no stroke width row: KiCad's text stroke is not the
+            record's width (`FpText` writes its own thickness).
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return
+        record = self.footprint_drawings[index]
+        current = self._drawing_properties_values(record)
+        tx = self.i18n.text
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tx("Proprietà elemento…").rstrip("…"))
+        form = QFormLayout(dialog)
+        layer_box = QComboBox()
+        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
+            layer_box.addItem(_layer_swatch(_layer_color(layer)), tx(label), layer)
+        layer_box.setCurrentIndex(layer_box.findData(record["layer"]))
+        form.addRow(tx("Layer"), layer_box)
+
+        def spin(value, low, high, step=0.1):
+            box = QDoubleSpinBox()
+            box.setDecimals(4)
+            box.setRange(low, high)
+            box.setSingleStep(step)
+            box.setValue(float(value))
+            return box
+
+        from ..core.footprint import KICAD_COORD_LIMIT_MM, TEXT_POSITION_LIMIT_MM
+        # Bounds: the validator's own, or wider (the validator then refuses
+        # with its reason); never narrower, so no shown value is clamped.
+        span = 2.0 * TEXT_POSITION_LIMIT_MM
+        fields = {}
+        if record["kind"] != "text":
+            fields["width"] = spin(current["width"], 0.0001, 10.0, 0.01)
+            form.addRow(tx("Spessore del tratto in mm"), fields["width"])
+        for key in ("x", "y"):
+            # A long arc's drawn box may reach far beyond its stored points
+            # (its centre may lie up to KiCad's coordinate limit away).
+            fields[key] = spin(current[key], -4 * KICAD_COORD_LIMIT_MM, 4 * KICAD_COORD_LIMIT_MM)
+            form.addRow(f"{key.upper()} (mm)", fields[key])
+        text_edit = angle_box = None
+        if record["kind"] == "rectangle":
+            fields["rect_width"] = spin(current["rect_width"], 0.0, span)
+            form.addRow(tx("Larghezza (mm)"), fields["rect_width"])
+            fields["rect_height"] = spin(current["rect_height"], 0.0, span)
+            form.addRow(tx("Altezza (mm)"), fields["rect_height"])
+        elif record["kind"] == "circle":
+            fields["radius"] = spin(current["radius"], 0.0, math.ceil(span * math.sqrt(2.0)))
+            form.addRow(tx("Raggio (mm)"), fields["radius"])
+        elif record["kind"] == "text":
+            text_edit = QLineEdit(current["text"])
+            text_edit.setMaxLength(200)
+            form.addRow(tx("Testo"), text_edit)
+            fields["size"] = spin(current["size"], 0.0001, 50.0)
+            fields["size"].setSuffix(" mm")
+            form.addRow(tx("Dimensione"), fields["size"])
+            angle_box = QComboBox()
+            for angle in (0, 90):
+                angle_box.addItem(f"{angle}°", angle)
+            angle_box.setCurrentIndex(angle_box.findData(current["angle"]))
+            form.addRow(tx("Rotazione"), angle_box)
+        message = QLabel("")
+        message.setWordWrap(True)
+        form.addRow(message)
+        from PyQt6.QtWidgets import QDialogButtonBox
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tx("Annulla"))
+
+        def shown():
+            """What the widgets show now, by property key."""
+            values = {key: box.value() for key, box in fields.items()}
+            values["layer"] = layer_box.currentData()
+            if text_edit is not None:
+                values["text"] = text_edit.text()
+                values["angle"] = angle_box.currentData()
+            return values
+
+        initial = shown()
+
+        def accept():
+            now = shown()
+            changes = {key: value for key, value in now.items() if value != initial[key]}
+            if self.set_drawing_properties(index, changes):
+                dialog.accept()
+            else:
+                refused = self._drawing_properties_record(index, changes)
+                message.setText(self._degenerate_drawing_text(refused) if refused is not None else "")
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _draw_footprint_drawings(self, mm_to_px: float) -> None:
         """@brief Draw the user drawings and the clicks in progress on the scene.

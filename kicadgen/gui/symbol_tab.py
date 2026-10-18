@@ -20,6 +20,8 @@ from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, 
                                  property_texts, symbol_inputs, layout_symbol, symbol_property_positions)
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
+from . import canvas_menus
+from .canvas_menus import ElementClipboard, MenuEntry
 from .canvas_camera import Camera
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
 from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
@@ -226,6 +228,22 @@ def glyph_icon(glyph, size: int = 36) -> QIcon:
         painter.drawEllipse(QPointF(px, py), 1.6, 1.6)
     painter.end()
     return QIcon(pixmap)
+
+
+def _moved_element_copy(record, dx, dy):
+    """@brief A pasted copy of a clipboard element: new identity, origin moved by (dx, dy) mm.
+
+    Translate callback of the tab's `ElementClipboard`.
+    @param record Element record held by the clipboard (already detached from pins).
+    @param dx Shift right, mm.
+    @param dy Shift up (symbol Y up), mm.
+    @return A new record; `record` is not changed.
+    """
+    from ..generators.symbol_glyphs import detached_copy
+    copy = detached_copy(record)
+    copy['x'] = round(float(copy.get('x', 0.0)) + dx, 4)
+    copy['y'] = round(float(copy.get('y', 0.0)) + dy, 4)
+    return copy
 
 
 #: The KiCad fill modes and their labels (Italian source, translated by `tx`).
@@ -1051,8 +1069,9 @@ class SymbolTab(QWidget):
         self._selected_graphic = None
         #: Every selected element index (the primary included), for group operations.
         self._selected_graphics = set()
-        #: Copied element records (`detached_copy`), pasted with Ctrl+V.
-        self._clipboard = []
+        #: Copied element records (`detached_copy`), pasted with Ctrl+V one
+        #: step further each time (shared `canvas_menus.ElementClipboard`).
+        self._clipboard = ElementClipboard(_moved_element_copy)
         #: Grid step of the drawing tools and shape handles, mm (pins keep GRID_MM).
         self._grid_mm = DEFAULT_DRAWING_GRID_MM
         #: False: shape points are not snapped (rounded to 0.01 mm).
@@ -3151,34 +3170,29 @@ class SymbolTab(QWidget):
         if not chosen:
             return 0
         pin_ends = self._pin_ends()
-        self._clipboard = [detached_copy(graphics[i], graphics, pin_ends) for i in chosen]
+        self._clipboard.copy([detached_copy(graphics[i], graphics, pin_ends) for i in chosen])
         self.set_status(self.tx('{count} elementi copiati.').format(count=len(chosen)))
         return len(chosen)
 
     def paste(self, offset=None):
         """@brief Paste the clipboard, moved by `offset` (default one pin grid step right and down).
 
-        @param offset (dx, dy) in mm applied to every pasted element.
+        @param offset (dx, dy) in mm applied to every pasted element, on top of
+            the offset accumulated by the previous committed pastes.
         @return True when something was pasted; the pasted elements become the selection.
+        @note A refused paste (invalid geometry) does not move the next one.
         """
-        from ..generators.symbol_glyphs import detached_copy
         if not self._clipboard or self._symbol is None or self._gesture_before is not None:
             return False
-        dx, dy = (GRID_MM, -GRID_MM) if offset is None else (float(offset[0]), float(offset[1]))
+        step = (GRID_MM, -GRID_MM) if offset is None else (float(offset[0]), float(offset[1]))
         rows = self._free_rows(self.draft_rows(), self._symbol)
         graphics = self._graphics(rows)
         first = len(graphics)
-        for record in self._clipboard:
-            copy = detached_copy(record)
-            copy['x'] = round(float(copy.get('x', 0.0)) + dx, 4)
-            copy['y'] = round(float(copy.get('y', 0.0)) + dy, 4)
-            graphics.append(copy)
+        graphics.extend(self._clipboard.paste_batch(step))
         if not self._accept_geometry(self._with_graphics(rows, graphics)):
             return False
         # The next paste lands one step further, as in KiCad.
-        for record in self._clipboard:
-            record['x'] = round(float(record.get('x', 0.0)) + dx, 4)
-            record['y'] = round(float(record.get('y', 0.0)) + dy, 4)
+        self._clipboard.advance(step)
         self._selected_graphics = set(range(first, len(graphics)))
         self._select_graphic(len(graphics) - 1, additive=True)
         self.set_status(self.tx('{count} elementi incollati.').format(count=len(graphics) - first))
@@ -3189,11 +3203,11 @@ class SymbolTab(QWidget):
 
         @return True when the copies were placed, False when nothing was selected.
         """
-        kept = list(self._clipboard)
+        kept = self._clipboard.snapshot()
         if not self.copy_selected():
             return False
         done = self.paste()
-        self._clipboard = kept
+        self._clipboard.restore(kept)
         return done
 
     def _edit_graphic(self, index, operation, value=None):
@@ -3507,83 +3521,110 @@ class SymbolTab(QWidget):
             self._edit_selected_graphics('delete')
 
     def _graphic_context_menu(self, index, global_pos):
-        """@brief Rotate, mirror, delete a placed glyph, or fit the body to it."""
+        """@brief Right-click menu of a placed element: turn, mirror, delete, clipboard, properties, style.
+
+        The menu is built and shown by the shared `canvas_menus` module (same
+        words, icons and order as the footprint preview); the chosen key is
+        dispatched by `_run_graphic_menu_key`.
+        @param index Index of the right-clicked element in the draft graphics.
+        @param global_pos Screen position (QPoint) of the menu.
+        @note The clicked element becomes the selection first; an unknown
+            index then opens nothing.
+        """
         self._select_graphic(index)
         graphics = self._graphics()
         if not 0 <= index < len(graphics):
             return
-        menu = QMenu(self)
         group = self.selected_graphics()
         several = len(group) > 1 and index in group
-        title = menu.addAction(self.tx('{count} elementi selezionati').format(count=len(group)) if several
-                               else self.tx(str(graphics[index].get('label', ''))))
-        title.setEnabled(False)
-        menu.addSeparator()
-        menu.setToolTipsVisible(True)
+        title = (self.tx('{count} elementi selezionati').format(count=len(group)) if several
+                 else self.tx(str(graphics[index].get('label', ''))))
+        menu, keys = canvas_menus.build_element_menu(self, title, self._graphic_menu_entries(graphics[index], several))
+        chosen = canvas_menus.exec_element_menu(menu, keys, global_pos)
+        if chosen is not None:
+            self._run_graphic_menu_key(chosen, index, several)
+
+    def _graphic_menu_entries(self, record, several):
+        """@brief Entries of the element menu, in display order (title excluded).
+
+        @param record The right-clicked element.
+        @param several True for the menu of a multi-selection (it stops after «Duplica»).
+        @return List of `canvas_menus.MenuEntry`.
+        @note Decision C-M1 (2026-10-18): «Specchia» is greyed out on a single
+            element made of one text, whose origin is its anchor: KiCad never
+            mirrors the glyphs, so the mirror had no visible effect. A
+            multi-selection keeps it, since it acts on the other elements.
+        """
         from ..generators.symbol_glyphs import catalogue, is_wire
-        wire = is_wire(graphics[index])
+        tx = self.tx
+        wire = is_wire(record)
+        primitives = record.get('primitives') or [{}]
+        is_text = primitives[0].get('kind') == 'text'
+        entries = []
         # A wire is reshaped by dragging its vertices: turning or mirroring it
         # would detach its shape from the anchored ends (see `_edit_graphic`).
-        entries = [] if wire and not several else [
-            ('rotate-ccw.svg', 'Ruota di 90 gradi (antiorario)', 'rotate', 90),
-            ('rotate-cw.svg', 'Ruota di 90 gradi (orario)', 'rotate', -90),
-            ('format-painter.svg', 'Specchia', 'mirror', None),
-        ]
-        entries.append(('delete.svg', 'Elimina elemento', 'delete', None))
-        for asset, label, operation, value in entries:
-            action = menu.addAction(QIcon(str(Path(__file__).parent / 'assets' / asset)), self.tx(label))
-            action.setIconVisibleInMenu(True)
-            if several:
-                action.triggered.connect(lambda checked=False, op=operation, v=value: self._edit_selected_graphics(op, v))
-            else:
-                action.triggered.connect(lambda checked=False, op=operation, v=value: self._edit_graphic(index, op, v))
-        copy_action = menu.addAction(self.tx('Copia (Ctrl+C)'))
-        copy_action.triggered.connect(lambda checked=False: self.copy_selected())
-        duplicate_action = menu.addAction(self.tx('Duplica (Ctrl+D)'))
-        duplicate_action.triggered.connect(lambda checked=False: self.duplicate_selected())
+        if several or not wire:
+            lone_text = is_text and len(primitives) == 1
+            entries += canvas_menus.rotate_entries(tx)
+            entries.append(canvas_menus.mirror_entry(tx, enabled=several or not lone_text))
+        entries += [canvas_menus.delete_entry(tx, 'Elimina elemento'),
+                    canvas_menus.copy_entry(tx), canvas_menus.duplicate_entry(tx)]
         if several:
-            try:
-                menu.exec(global_pos)
-            finally:
-                menu.deleteLater()
-            return
-        properties_action = menu.addAction(self.tx('Proprietà elemento…'))
-        properties_action.triggered.connect(lambda checked=False: self._edit_element_properties(index))
-        primitives = graphics[index].get('primitives') or [{}]
-        is_text = primitives[0].get('kind') == 'text'
+            return entries
+        entries.append(canvas_menus.properties_entry(tx))
         if is_text:
-            menu.addSeparator()
-            text_action = menu.addAction(self.tx('Modifica testo…'))
-            text_action.triggered.connect(lambda checked=False: self.edit_text(index))
+            entries.append(MenuEntry('edit_text', tx('Modifica testo…'), separator_before=True))
         elif not wire:
             # Stroke width, fill (the three KiCad fill modes) and stroke type
             # for shapes and glyphs (user, 2026-10-12: properties of the drawn
             # shapes). A wire is a connection: it keeps the menu of deletion only.
-            menu.addSeparator()
             current_fill = str(primitives[0].get('fill', 'none'))
-            fill_menu = menu.addMenu(self.tx('Riempimento'))
-            for mode, label in FILL_LABELS:
-                action = fill_menu.addAction(self.tx(label))
-                action.setCheckable(True)
-                action.setChecked(mode == current_fill)
-                action.triggered.connect(lambda checked=False, m=mode: self._edit_graphic(index, 'fill', m))
             current_style = str(primitives[0].get('style', 'default'))
-            style_menu = menu.addMenu(self.tx('Tipo di linea'))
-            for mode, label in STYLE_LABELS:
-                action = style_menu.addAction(self.tx(label))
-                action.setCheckable(True)
-                action.setChecked(mode == current_style)
-                action.triggered.connect(lambda checked=False, m=mode: self._edit_graphic(index, 'style', m))
-            width_action = menu.addAction(self.tx('Spessore del tratto…'))
-            width_action.triggered.connect(lambda checked=False: self._ask_stroke_width(index))
-        glyph = None if wire else next((g for g in catalogue() if g.key == graphics[index].get('key')), None)
+            entries += [
+                MenuEntry('', tx('Riempimento'), separator_before=True, children=tuple(
+                    MenuEntry(f'fill:{mode}', tx(label), checkable=True, checked=mode == current_fill)
+                    for mode, label in FILL_LABELS)),
+                MenuEntry('', tx('Tipo di linea'), children=tuple(
+                    MenuEntry(f'style:{mode}', tx(label), checkable=True, checked=mode == current_style)
+                    for mode, label in STYLE_LABELS)),
+                MenuEntry('stroke_width', tx('Spessore del tratto…')),
+            ]
+        glyph = None if wire else next((g for g in catalogue() if g.key == record.get('key')), None)
         if glyph is not None and glyph.body_hint is not None:
-            fit = menu.addAction(self.tx('Adatta il rettangolo del corpo all’elemento'))
-            fit.triggered.connect(lambda checked=False: self.fit_body_to_graphic(index))
-        try:
-            menu.exec(global_pos)
-        finally:
-            menu.deleteLater()
+            entries.append(MenuEntry('fit_body', tx('Adatta il rettangolo del corpo all’elemento')))
+        return entries
+
+    def _run_graphic_menu_key(self, key, index, several):
+        """@brief Run the operation of a chosen element-menu entry.
+
+        @param key Key returned by `canvas_menus.exec_element_menu`.
+        @param index Index of the right-clicked element.
+        @param several True when the menu acted on a multi-selection.
+        """
+        transforms = {canvas_menus.ROTATE_CCW: ('rotate', 90), canvas_menus.ROTATE_CW: ('rotate', -90),
+                      canvas_menus.MIRROR: ('mirror', None), canvas_menus.DELETE: ('delete', None)}
+        if key in transforms:
+            operation, value = transforms[key]
+            if several:
+                self._edit_selected_graphics(operation, value)
+            else:
+                self._edit_graphic(index, operation, value)
+        elif key == canvas_menus.COPY:
+            self.copy_selected()
+        elif key == canvas_menus.DUPLICATE:
+            self.duplicate_selected()
+        elif key == canvas_menus.PROPERTIES:
+            self._edit_element_properties(index)
+        elif key == 'edit_text':
+            self.edit_text(index)
+        elif key.startswith('fill:'):
+            self._edit_graphic(index, 'fill', key.split(':', 1)[1])
+        elif key.startswith('style:'):
+            self._edit_graphic(index, 'style', key.split(':', 1)[1])
+        elif key == 'stroke_width':
+            self._ask_stroke_width(index)
+        elif key == 'fit_body':
+            self.fit_body_to_graphic(index)
 
     def _ask_stroke_width(self, index):
         """Ask the stroke width in mm for one element and apply it (0 = KiCad default)."""
