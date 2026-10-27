@@ -1,7 +1,7 @@
 # Regole di collaborazione
 
 - Quando si riprende il lavoro, leggere prima il riepilogo piu' recente
-  all'inizio di MEMORY.md e HANDOFF.md e verificare lo stato Git corrente.
+  all'inizio di docs/MEMORY.md e HANDOFF.md e verificare lo stato Git corrente.
 - Non creare commit senza una richiesta esplicita dell'utente. L'autorizzazione
   a un commit riguarda soltanto il lavoro presente al momento della richiesta:
   non si estende alle modifiche successive.

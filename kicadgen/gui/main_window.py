@@ -17413,10 +17413,10 @@ class MainWindow(QMainWindow):
             "Analisi AI della foto calibrata tramite OpenRouter; conserva posizioni e footprint.")
         self.btn_terminal_detail.clicked.connect(self._refine_photo_terminals)
         toolbar.addWidget(self.btn_terminal_detail)
-        # User decision 2026-09-13 (MEMORY.md): hide manual AI refinement
+        # User decision 2026-09-13 (docs/MEMORY.md): hide manual AI refinement
         # actions, keeping handlers and the automatic extraction unchanged.
         self.btn_terminal_detail.hide()
-        # Same decision (MEMORY.md, 2026-09-13): hidden, not removed. It was
+        # Same decision (docs/MEMORY.md, 2026-09-13): hidden, not removed. It was
         # below the component table, removed on 2026-09-26 with its panel.
         self.btn_lead_refinement = QPushButton("Affina reofori / saldature...")
         self.btn_lead_refinement.setToolTip(

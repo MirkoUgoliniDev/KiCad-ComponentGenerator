@@ -187,16 +187,16 @@ def test_the_notices_list_the_bundled_runtime_and_the_gpl_sources():
 
 
 def test_release_builds_use_pinned_versions():
-    constraints = (ROOT / "requirements-release-constraints.txt").read_text(encoding="utf-8")
+    constraints = (ROOT / "requirements/release-constraints.txt").read_text(encoding="utf-8")
     pins = dict(line.split("==") for line in constraints.splitlines()
                 if line and not line.startswith("#"))
     for package in ("PyQt6", "PyQt6-Qt6", "opencv-python", "numpy", "onnxruntime", "vtk", "pyinstaller"):
         assert package in pins, package
     assert "torch" not in pins and "ultralytics" not in pins  # never in the installer
     build = (ROOT / "scripts" / "build-windows.ps1").read_text(encoding="utf-8")
-    assert "requirements-release-constraints.txt" in build
+    assert "requirements/release-constraints.txt" in build
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    assert "-c requirements-release-constraints.txt" in workflow
+    assert "-c requirements/release-constraints.txt" in workflow
 
 
 # -- C5: release workflow permissions and tag handling --------------------------

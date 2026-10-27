@@ -58,7 +58,7 @@ def _runtime():
     except (ImportError, OSError) as exc:
         raise RuntimeError(
             tx("Per usare smd_classifier.pt installa il runtime: {command}",
-               command="python -m pip install -r requirements-smd.txt")
+               command="python -m pip install -r requirements/smd.txt")
         ) from exc
 
     class PackageNet(nn.Module):

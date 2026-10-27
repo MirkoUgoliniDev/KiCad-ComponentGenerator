@@ -1,5 +1,152 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — COMMIT, PUSH, MERGE (utente: «ok puoi committare e pushare poi mergiare in main e pushare?»)
+
+Suite 9809 (A 6090/10/19, B 3719/2, 0 falliti). Due commit su ADVANCED
+(correzione ricerca FreeCAD/KiCad; README + screenshot + script), push di
+ADVANCED, merge in main, push di main. Commit: `2b8a993` (fix ricerca), `b4a3346` (README); merge in main: vedi sotto.
+
+## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): README con screenshot e diagrammi Mermaid
+
+Utente: «puoi aggiungere delle immagini e dei grafici esplicativi rendendo
+il README.md mermaid?» -> domanda: screenshot generati dall'app vera o solo
+Mermaid + foto esistenti? Risposta «ok procedi!» letta come la PRIMA opzione
+(screenshot generati dall'app, da dire all'utente). Piano:
+- diagrammi Mermaid in README.md e README.it.md (GitHub li disegna):
+  flusso generale ingressi -> analisi -> revisione -> generazione -> KiCad;
+  catena della foto; consegna KiCad (anteprima isolata / progetto / globale);
+  architettura dei pacchetti.
+- screenshot PNG in docs/images/, catturati con QWidget.grab() da una
+  finestra costruita fuori schermo, SENZA chiamate AI e senza dati privati
+  (progetto di prova in una cartella temporanea, componente da parametri
+  manuali); script riproducibile tools/make_readme_screenshots.py.
+- nessuna modifica al codice di produzione.
+ESITO: tools/make_readme_screenshots.py (dati isolati in una cartella temporanea, COPIA del progetto, opzione --without-drawings che svuota i disegni manuali solo nella copia, percorso della pagina iniziale mostrato come C:\Users\<user>\Documents\KiCadGen); 12 PNG in docs/images (en-/it- start, project, footprint, symbol, step-model, kicad) dal progetto locale generated/ESP32-S3-DEVKIT-NXRX, che contiene disegni di prova («qweqeqe», cerchio, rettangolo nel footprint; «2q3qe» nel simbolo): l'originale NON e' stato toccato. README.md e README.it.md: tabella foto->STEP, «Come funziona», flusso dell'analisi, consegna KiCad, dipendenze dei pacchetti (4 diagrammi Mermaid per lingua, verificati col parser ufficiale mermaid 11.4.1 + jsdom nello scratchpad; controllo negativo rifiutato). Diagramma delle dipendenze reso onesto: services e' usato da tutti (messages.py), cad3d usa generators. La cache vale per le risposte sulle FOTO, non per i documenti (frase corretta). SEGNALATO, MAI AUTORIZZATO: StartPage.set_projects_available definita due volte identica (kicadgen/gui/start_page.py:496 e :512).
+
+## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): ricerca di FreeCAD (e KiCad) anche fuori da C:\Program Files
+
+Utente: «puoi fixare il buco della ricerca se qualcuno installa FreeCAD
+"solo per l'utente corrente"». Causa: find_freecadcmd guarda solo
+C:\Program Files[ (x86)]\FreeCAD*\bin (cartelle fisse); _find_installed di
+KiCad legge %ProgramFiles% ma non le installazioni per utente ne' altri
+dischi. Classe del problema = programma installato in una cartella non
+prevista. Correzione (vale per ENTRAMBI, stessa causa: KiCad incluso per la
+regola «generalizzare», da dire all'utente):
+- nuovo modulo kicadgen/services/installed_programs.py: radici
+  (%ProgramFiles%, %ProgramFiles(x86)%, %ProgramW6432%,
+  %LOCALAPPDATA%\Programs, + C:\ fissi come ripiego, senza doppioni) e
+  cartelle dichiarate dalle voci «Disinstalla» del registro (HKLM 64/32 bit,
+  HKCU): InstallLocation, altrimenti cartella di DisplayIcon, altrimenti di
+  UninstallString. Verificato su questa macchina: FreeCAD 1.1.4 NON scrive
+  InstallLocation (solo DisplayIcon ...\bin\FreeCAD.exe e
+  UninstallString), KiCad 10.0 si'.
+- find_freecadcmd e _find_installed usano entrambi; candidati senza doppioni
+  prima dell'ordinamento per versione.
+- conftest: fixture autouse che svuota le voci del registro reale (i test
+  che simulano «non installato» altrimenti troverebbero quello vero).
+- test: positivo/negativo per le voci del registro, per l'installazione per
+  utente e per la radice da variabile d'ambiente.
+- docs: INSTALLATION-WINDOWS.md, README.md/README.it.md, PACKAGING (l'MSI
+  continua a guardare solo Program Files: NON toccato, dice gia' «potrebbe
+  non aver trovato»).
+- PATH per FreeCAD: NON aggiunto (non richiesto; decisione documentata).
+ESITO (prima della suite completa): modulo e test scritti; tests/test_installed_programs.py 14 test (registro con e senza InstallLocation, voce orfana, nome che non inizia per FreeCAD, per utente FreeCAD e KiCad, ProgramFiles su altro disco, versione piu' nuova fra le fonti, doppioni); test esistenti di ricerca verdi (160 + packaging 34); prova reale: trovati FreeCAD 1.1 e KiCad 10.0 anche dal registro. Docs aggiornati: README.md, README.it.md, docs/INSTALLATION-WINDOWS.md, docs/PACKAGING-WINDOWS-MSI.md. IN CORSO: suite completa in due meta' (log .venv/run_full_1027.log).
+SUITE COMPLETA 27/10 (due meta'): A 6090/10/19, B 3719/2, totale 9809 passati, 12 saltati, 19 sottotest, 0 falliti.
+
+IN CODA (utente, 27/10): «puoi aggiungere delle immagini e dei grafici
+esplicativi rendendo il README.md mermaid?» -> dopo questa correzione,
+proporre il contenuto e aspettare l'OK prima di scrivere.
+
+## 27/10 — FATTO e committato `5722943` su ADVANCED (NON pushato, NON mergiato): skill e agente per produrre e pubblicare il setup
+
+Utente: «se io volessi realizzare un pacchetto per distribuire il software
+come un setup è già previsto? aggiungi agent e skill specifica ok?».
+Risposta: si', gia' previsto (PyInstaller + WiX 3.14 -> dist\KiCadGen-X.Y.Z.msi,
+docs/PACKAGING-WINDOWS-MSI.md, release.yml su tag vX.Y.Z; ultima build
+locale dist\KiCadGen-1.0.0.msi, nessun tag pubblicato). La skill
+installer-change copre il MODIFICARE il pacchetto; mancano il PRODURRE e
+PUBBLICARE. Da fare: skill `.claude/skills/build-installer/SKILL.md`
+(build, verifica, prova in VM, pubblicazione solo con OK, aperti: SHA-256
+WiX, firma, licenza YOLO, sorgenti GPL) e agente read-only
+`.claude/agents/release-readiness-reviewer.md` (controlli prima di un
+rilascio). Nessun codice toccato.
+ESITO: scritti build-installer/SKILL.md e release-readiness-reviewer.md.
+DOMANDA UTENTE intanto: «alla partenza al boot verifica la presenza di
+KiCad e FreeCAD?» -> SI', gia' fatto: main.py hand_over() ->
+MainWindow._warn_missing_external_applications (main_window.py ~3086), una
+volta, dopo lo splash, finestra solo se manca qualcosa; ricerca in
+services/system_dependencies.py (KiCad: KICAD_CLI_PATH, PATH, Program
+Files/KiCad/<ver>/bin) e cad3d/step_generator.find_freecadcmd (FreeCAD:
+FREECAD_CMD_PATH, C:\Program Files[ (x86)]\FreeCAD*\bin). SEGNALATO, MAI
+AUTORIZZATO: FreeCAD non cercato su PATH ne' in un'installazione per
+utente (probabile %LOCALAPPDATA%\Programs\FreeCAD*, da verificare);
+percorsi C:\ fissi invece di %ProgramFiles% (KiCad invece li legge).
+
+## 27/10 — FATTO e committato `2b17772` su ADVANCED (NON pushato, NON mergiato): skill e agenti di progetto in .claude/ (utente: «tutto»)
+
+Da fare: `tools: Read, Grep, Glob, Bash` nei revisori read-only
+(kicad-library-verifier, kicad-workflow-reviewer); 6 skill nuove in
+.claude/skills/: run-test-suite, update-handoff, add-ui-text,
+canvas-shared-change, photo-pipeline-change, pre-commit-check; 2 agenti
+read-only in .claude/agents/: generality-auditor, canvas-parity-reviewer.
+Contenuti ricavati da CLAUDE.md, HANDOFF e codice (nessuna regola nuova
+inventata: solo codifica delle regole esistenti). Nessun codice di
+produzione toccato.
+ESITO: scritti i 6 SKILL.md e i 2 agenti; `tools:` aggiunto ai due revisori.
+Fatti verificati sul codice prima di scriverli: tools/run_test_halves.py
+(first|second|both, `--` per gli argomenti pytest), DEFAULT_TRANSLATIONS in
+i18n.py + tabella `translations` del DB profili, test_i18n
+(test_every_ui_string_has_a_four_language_entry), marker allow_network,
+KICADGEN_REGEN_CLICKTOOL_GOLDEN, comando del controllo segreti del DB
+eseguito (risultato []). Trappola: `photo-cache/` nella radice NON e'
+ignorata da .gitignore (di solito sta nel progetto o sotto generated/).
+
+## 27/10 — FATTO e committato `8bf6951` su ADVANCED (NON pushato, NON mergiato): MEMORY.md e REVIEW_REPORT_2026-10-09.txt in docs/
+
+Utente: «gli altri .md possono essere messi dentro la cartella docs?» ->
+proposta accettata («ok»). Si spostano SOLO docs/MEMORY.md e
+docs/REVIEW_REPORT_2026-10-09.txt (git mv); riferimenti: AGENTS.md riga 4,
+due commenti in kicadgen/gui/main_window.py (~17416-17419). RESTANO nella
+radice, per scelta motivata: README.md/README.it.md (GitHub), AGENTS.md
+(convenzione agenti), HANDOFF.md (ripresa, regole), THIRD_PARTY_NOTICES.md
+(spec PyInstaller, finestra licenze, catalogo, test installer).
+ESITO: spostati, riferimenti aggiornati, tests/test_documentation.py verde.
+
+## 27/10 — FATTO e committato `7f2d1c7` su ADVANCED (NON pushato, NON mergiato): requirements opzionali in una cartella `requirements/`
+
+ESITO: spostati con git mv; 16 file aggiornati + commento di tests/conftest.py
+(nome spezzato su due righe, sfuggito alla sostituzione); catalogo SQLite
+senza occorrenze. Verifiche: 228 test verdi (packaging, app_paths,
+ci_workflows, fixC_installer, photo_yolo, photo_yolo_pt, documentation),
+build-windows.ps1 analizzato senza errori, `pip install --dry-run --no-deps`
+risolve i -r relativi di requirements/build.txt e requirements/yolo-pt.txt.
+Suite completa NON rieseguita (cambio di soli percorsi). Build/MSI reali non
+eseguiti: la prima build o il prossimo run della CI confermano il percorso.
+
+Utente: «riorganizziamo poi tutti questi requirements, possiamo metterli in
+una cartella?» -> proposta accettata («ok requirements principale nella
+radice»). Branch `ADVANCED`, base `bdbe8a5`. Da fare, in quest'ordine:
+- `git mv` requirements-{build,release-constraints,smd,yolo,yolo-pt}.txt
+  -> requirements/{build,release-constraints,smd,yolo,yolo-pt}.txt;
+  `requirements.txt` RESTA nella radice.
+- dentro i file spostati: `-r requirements.txt` -> `-r ../requirements.txt`,
+  `-r requirements-yolo.txt` -> `-r yolo.txt` (pip risolve -r rispetto al file).
+- riferimenti: .github/workflows/{release,tests}.yml, scripts/build-windows.ps1,
+  messaggi utente in kicadgen/services/photo_yolo.py e
+  smd_component_classifier.py, test (test_ci_workflows, test_fixC_installer,
+  test_photo_yolo, test_photo_yolo_pt), README.md, README.it.md,
+  THIRD_PARTY_NOTICES.md, docs/{CLASSIFICATORE_SMD,PACKAGING-WINDOWS-MSI,
+  yolo-photo-workflow}.md, skill installer-change. Le sezioni storiche
+  dell'handoff NON si riscrivono.
+- verifica: test_packaging, test_app_paths, i test toccati, parse del .ps1,
+  `pip install --dry-run -r requirements/build.txt` per i -r relativi.
+  Build reale dell'installer NON prevista (nessuna release).
+- In sospeso, domanda precedente all'utente: aggiungere a `.claude/` 6 skill
+  (run-test-suite, update-handoff, add-ui-text, canvas-shared-change,
+  photo-pipeline-change, pre-commit-check), 2 agenti read-only
+  (generality-auditor, canvas-parity-reviewer) e `tools:` read-only ai due
+  revisori esistenti. Nessuna risposta ancora: NON autorizzato.
+
 ## 18/10 notte — FATTO e committato `e276472` su ADVANCED, mergiato in main `a50ef30`, pushati: CAMERA + GRIGLIA condivise (canvas_camera.py, canvas_grid.py) nelle due schede, suite 9361 (A 5760/10/19, B 3601/2, 0 falliti)
 
 AUTORIZZATO 18/10 («ok procedi scatenando agenti esperti»): FASE B avviata.

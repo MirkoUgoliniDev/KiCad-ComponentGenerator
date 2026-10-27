@@ -21,13 +21,13 @@ nel risultato.
 Nella cartella del repository:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-smd.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements/smd.txt
 ```
 
 Se il runtime manca, il programma lo dice con il comando da eseguire. Il
 rilevatore YOLO di questa modalità usa, se il campo **Modello YOLO** è vuoto,
 `models/yolo/pcb_component_detector_yolov8m_best.pt` (lo stesso verificato
-nel progetto di origine) e richiede quindi anche `requirements-yolo-pt.txt`;
+nel progetto di origine) e richiede quindi anche `requirements/yolo-pt.txt`;
 un modello scelto esplicitamente ha precedenza.
 
 I pesi (`models/smd/smd_classifier.pt` e
@@ -35,7 +35,7 @@ I pesi (`models/smd/smd_classifier.pt` e
 con i sorgenti** e un checkout nuovo non ha le cartelle `models/yolo/` e
 `models/smd/`: vanno create quando si aggiungono i file. Poiché questa è la
 modalità predefinita dai sorgenti, senza pesi o senza i pacchetti di
-`requirements-smd.txt` e `requirements-yolo-pt.txt` l'analisi di una scheda
+`requirements/smd.txt` e `requirements/yolo-pt.txt` l'analisi di una scheda
 si ferma con un avviso prima di qualunque chiamata a pagamento (controlli
 `validate_yolo_setup` e `validate_smd_setup`). Per lavorare senza questi pesi
 basta scegliere un'altra voce in **Rilevamento foto**, nel riquadro

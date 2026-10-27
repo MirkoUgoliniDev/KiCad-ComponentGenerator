@@ -15,15 +15,18 @@ KiCadGen uses two free programs, installed separately:
   its initial library setup, then retry. The generated files use the KiCad 10
   formats, which KiCad 8 and 9 cannot read.
 
-Install them before or after KiCadGen. KiCad is found through the
-`KICAD_CLI_PATH` variable, on PATH, or in `C:\Program Files` (or
-`Program Files (x86)`). FreeCAD is **not** looked up on PATH: it is found
-through the `FREECAD_CMD_PATH` variable (full path of `freecadcmd.exe`) or in
-`C:\Program Files\FreeCAD*\bin\freecadcmd.exe` (or `Program Files (x86)`).
-The installer only looks in Program Files: on its last page it says which of
-them it **may not** have found. If KiCad is installed somewhere else, KiCadGen
-can still find it on PATH or through `KICAD_CLI_PATH`; FreeCAD installed
-somewhere else needs `FREECAD_CMD_PATH`.
+Install them before or after KiCadGen, for all users or for the current user
+only. KiCad is found through the `KICAD_CLI_PATH` variable, on PATH, or where
+it is installed; FreeCAD is **not** looked up on PATH: it is found through the
+`FREECAD_CMD_PATH` variable (full path of `freecadcmd.exe`) or where it is
+installed. «Where it is installed» means the Program Files folders, the
+per-user folder `%LOCALAPPDATA%\Programs` and any folder declared by the
+program's entry in Settings > Apps (its «Uninstall» registry entry), so a
+custom folder or another drive is found too. The variables remain for a
+portable copy that has no such entry.
+The installer itself only looks in Program Files: on its last page it says
+which of them it **may not** have found; KiCadGen searches further when it
+starts.
 
 ## 2. Install
 

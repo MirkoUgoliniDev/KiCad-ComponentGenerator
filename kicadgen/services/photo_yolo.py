@@ -197,7 +197,7 @@ def _dependencies():
         import onnxruntime as ort
     except (ImportError, OSError) as exc:
         raise ValueError(
-            "Local YOLO runtime is unavailable. Install requirements-yolo.txt "
+            "Local YOLO runtime is unavailable. Install requirements/yolo.txt "
             "in the application's Python environment (numpy, opencv-python and "
             f"CPU onnxruntime), then retry. Details: {exc}"
         ) from exc
@@ -231,7 +231,7 @@ def _image_dependencies():
         import cv2
     except (ImportError, OSError) as exc:
         raise ValueError(
-            "Local YOLO runtime is unavailable. Install requirements-yolo.txt "
+            "Local YOLO runtime is unavailable. Install requirements/yolo.txt "
             f"(numpy, opencv-python), then retry. Details: {exc}") from exc
     return np, cv2
 
@@ -450,7 +450,7 @@ def _setup_torch(path):
     except (ImportError, OSError) as exc:
         raise ValueError(
             "PyTorch support for .pt models is not installed. Install "
-            "requirements-yolo-pt.txt in the application's Python environment, or "
+            "requirements/yolo-pt.txt in the application's Python environment, or "
             "use an .onnx export of the same model. The Windows installer does not "
             f"include PyTorch. Details: {exc}") from exc
     try:

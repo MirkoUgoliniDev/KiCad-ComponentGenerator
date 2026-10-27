@@ -103,7 +103,7 @@ not endorsed by the dataset's authors.
 ## Python dependencies
 
 Installed from PyPI, not included in the repository. Versions are the ones
-pinned for release builds in `requirements-release-constraints.txt` (read on
+pinned for release builds in `requirements/release-constraints.txt` (read on
 2026-09-25 from the build environment); licenses are those declared in each
 package's metadata. The Windows package also carries every license file
 itself, see "Licenses shipped with the Windows installer" below.
@@ -121,7 +121,7 @@ itself, see "Licenses shipped with the Windows installer" below.
 | Pillow | 12.3.0 | MIT-CMU | images; included in the installer |
 | ONNX Runtime | 1.30.0 | MIT | `.onnx` YOLO models; included in the installer |
 | python-dotenv | 1.2.3 | BSD-3-Clause | settings; included in the installer |
-| Ultralytics | 8.4.163 | AGPL-3.0 | `.pt` YOLO models (optional, `requirements-yolo-pt.txt`); **not** in the installer |
+| Ultralytics | 8.4.163 | AGPL-3.0 | `.pt` YOLO models (optional, `requirements/yolo-pt.txt`); **not** in the installer |
 | PyTorch | 2.14.0 | BSD-3-Clause and others | `.pt` YOLO models (optional); **not** in the installer |
 | pytest | 9.1.1 | MIT | tests only |
 | PyInstaller | 6.22.3 | GPL-2.0 with bootloader exception | builds the installer; its bootloader is `KiCadGen.exe` |

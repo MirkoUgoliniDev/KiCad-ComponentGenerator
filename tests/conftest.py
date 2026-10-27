@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-# `tests` e' la cartella di questi test. Ultralytics 8.4.x (requirements-yolo-
-# pt.txt, modelli .pt) installa per errore un suo pacchetto `tests` di primo
+# `tests` e' la cartella di questi test. Ultralytics 8.4.x
+# (requirements/yolo-pt.txt, modelli .pt) installa per errore un suo pacchetto `tests` di primo
 # livello in site-packages; questa cartella non ha __init__.py, quindi per
 # Python e' un pacchetto «namespace» e quello di Ultralytics vince sempre,
 # e `from tests.test_photo_inventory_gui import ...` falliva in 17 file
@@ -154,6 +154,20 @@ def no_real_api_key_sources(monkeypatch, tmp_path):
     openrouter.invalidate_credit_cache()
     yield
     openrouter.invalidate_credit_cache()
+
+
+@pytest.fixture(autouse=True)
+def no_real_uninstall_registry(monkeypatch):
+    """@brief No test sees the programs registered in this machine's registry.
+
+    The FreeCAD and KiCad finders also read the «Uninstall» registry entries
+    (`installed_programs._uninstall_entries`). A test that fakes the program
+    folders to mean «not installed», or «only these versions», would
+    otherwise find the developer's real installation. Tests of the registry
+    path pass their own entries or patch this function themselves.
+    """
+    from kicadgen.services import installed_programs
+    monkeypatch.setattr(installed_programs, "_uninstall_entries", lambda: [])
 
 
 @pytest.fixture(autouse=True)
