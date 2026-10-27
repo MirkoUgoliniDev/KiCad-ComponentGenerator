@@ -23,10 +23,17 @@ def _project_python(root):
 
 #: Modules the packaged program cannot run without. The GUI module is last:
 #: importing it proves the whole application imports, not only the libraries.
-RUNTIME_MODULES = ("PyQt6", "PyQt6.QtWidgets", "PyQt6.QtSvg", "PIL", "cv2", "numpy",
+RUNTIME_MODULES = ("PyQt6", "PyQt6.QtWidgets", "PIL", "cv2", "numpy",
                    "pyvista", "pyvistaqt", "onnxruntime", "kicadgen.gui.main_window",
                    # Imported lazily by the window: the smoke test must still prove it.
                    "kicadgen.gui.preview_3d_vtk")
+
+#: Qt plugins the program needs, as (folder, library stem) under one of Qt's
+#: library paths. The toolbar icons are SVG files loaded through QIcon, which
+#: goes through the image-format plugin: the PyQt6.QtSvg Python module is
+#: never imported by the program and is not shipped (the 2026-10-27 build
+#: failed only because the check asked for it).
+RUNTIME_QT_PLUGINS = (("imageformats", "qsvg"),)
 
 #: Read-only files the program looks up through kicadgen.app_paths.resource_path.
 #: The FreeCAD scripts must be real files: freecadcmd runs them from disk.
@@ -77,7 +84,37 @@ def install_crash_reports(exit_process=os._exit):
     return report_and_stop
 
 
-def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None):
+def _qt_library_paths():
+    """Folders Qt searches for plugins, without creating an application.
+
+    ``QCoreApplication.libraryPaths`` is static: it lists ``QT_PLUGIN_PATH``
+    (set by PyInstaller's runtime hook in the executable) and then Qt's own
+    plugins folder (from the sources). An unimportable QtCore yields no path,
+    so the plugin check reports the plugin as missing.
+    """
+    from pathlib import Path
+    try:
+        from PyQt6.QtCore import QCoreApplication
+    except (ImportError, OSError):
+        return []
+    return [Path(path) for path in QCoreApplication.libraryPaths()]
+
+
+def _qt_plugin_present(library_paths, folder, stem):
+    """True when a plugin library ``stem`` (any platform prefix/suffix) is in ``folder`` of a library path."""
+    from pathlib import Path
+    for base in library_paths:
+        try:
+            names = [Path(entry).stem.lower() for entry in (Path(base) / folder).iterdir()]
+        except OSError:
+            continue
+        if stem in names or f"lib{stem}" in names:
+            return True
+    return False
+
+
+def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None,
+                  qt_plugins=RUNTIME_QT_PLUGINS, library_paths=None):
     """@brief Check that the program's modules import and its resources exist.
 
     Used by ``--check-runtime`` (the build's smoke test of KiCadGen.exe).
@@ -88,6 +125,10 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None):
     @param modules Module names to import.
     @param resources Path-part tuples that must exist as files; default
         ``RUNTIME_RESOURCES``, plus ``PACKAGE_RESOURCES`` in the executable.
+    @param qt_plugins (folder, stem) pairs of Qt plugins that must be found
+        under one of ``library_paths``; default ``RUNTIME_QT_PLUGINS``.
+    @param library_paths Folders searched for the plugins; default the ones
+        Qt itself would search (`_qt_library_paths`).
     @return 0 when everything is present, 1 otherwise (each problem printed,
         then a summary line listing what is missing).
     """
@@ -117,9 +158,21 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None):
         else:
             print(f"{'/'.join(parts)}: MISSING ({path})")
             missing.append("/".join(parts))
-    if failed_modules or missing:
+    missing_plugins = []
+    if qt_plugins:
+        if library_paths is None:
+            library_paths = _qt_library_paths()
+        searched = ", ".join(str(path) for path in library_paths) or "no Qt library path"
+        for folder, stem in qt_plugins:
+            if _qt_plugin_present(library_paths, folder, stem):
+                print(f"Qt plugin {folder}/{stem}: OK")
+            else:
+                print(f"Qt plugin {folder}/{stem}: MISSING (searched {searched})")
+                missing_plugins.append(f"{folder}/{stem}")
+    if failed_modules or missing or missing_plugins:
         print("Runtime check FAILED. Modules not importable: "
-              f"{', '.join(failed_modules) or 'none'}. Resources missing: {', '.join(missing) or 'none'}.",
+              f"{', '.join(failed_modules) or 'none'}. Resources missing: {', '.join(missing) or 'none'}. "
+              f"Qt plugins missing: {', '.join(missing_plugins) or 'none'}.",
               file=sys.stderr)
         return 1
     print("Runtime check OK.")

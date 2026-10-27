@@ -1,5 +1,38 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — IN CORSO: pubblicazione MANUALE della Release v1.0.0 (utente: «possiamo portarlo su git il pacchetto e linkarlo sul post di LinkedIn?» = strada B)
+
+Decisione utente: release subito con l'MSI costruito in locale, SENZA il
+workflow (la suite su GitHub non e' mai stata verde: test che presuppongono
+KiCad/FreeCAD/pesi; da sistemare DOPO, lavoro aperto). Passi: 1) commit su
+ADVANCED delle correzioni di oggi (Pillow 13 + certifi nei constraints e
+nelle notices, check-runtime sul plugin qsvg invece del modulo QtSvg, WiX
+senza FileSearch/@Id, docs, handoff), push, merge in main, push; 2) `gh
+release create v1.0.0 dist/KiCadGen-1.0.0.msi` su main con note scritte a
+mano (requisiti, SmartScreen, chiave API) e SHA-256 dell'MSI; il tag v1.0.0
+fa partire release.yml che FALLIRA' ai test: atteso, la Release esiste gia'
+con l'asset, il job publish non parte. Il tag e' permanente (ruleset).
+3) verifica del link releases/latest usato nel post LinkedIn.
+
+## 27/10 — IN CORSO: build dell'installer MSI (utente: «mi piacerebbe creare la build per distribuire in un setup, puoi farlo?»)
+
+Prima: Dependabot (appena acceso) segnala 252 avvisi, ma sono SOLO 2
+pacchetti contati 6 volte (uno per file requirements): Pillow 12.3.0 ->
+13.0.0 (quasi tutti gli avvisi, 4 critici) e certifi 2026.7.22 ->
+2026.10.18 (1 critico). Il codice usa solo API stabili di Pillow (open,
+exif_transpose, Resampling, BICUBIC, DecompressionBombError). Da fare:
+pip install nei due pacchetti in .venv; release-constraints.txt e
+THIRD_PARTY_NOTICES.md allineati; test immagini/rete; poi build con
+scripts/build-windows.ps1 (skill build-installer), MSI in dist/, NON
+installato sulla macchina di sviluppo, NON pubblicato (publish-release
+solo con OK esplicito).
+BUILD 27/10 FALLITA al passo 6: `KiCadGen.exe --check-runtime` esce 1 per «PyQt6.QtSvg: No module named». DIAGNOSI: il modulo Python QtSvg NON serve al programma (le icone SVG passano da QIcon -> plugin Qt imageformats/qsvg.dll, che E' nel pacchetto); anche l'MSI di settembre non lo conteneva (estratto con msiexec /a in una cartella temporanea, NON installato). Prova: nel .venv-build con QtSvg reso non importabile, QIcon(app-icon.svg) rende e main_window si importa. Il nome entro' in RUNTIME_MODULES con ae1d8e9 (25/09) DOPO la build di settembre. CORREZIONE: togliere PyQt6.QtSvg da RUNTIME_MODULES e controllare invece il plugin qsvg nella cartella plugin di Qt (QLibraryInfo), con test positivo/negativo; docs/PACKAGING-WINDOWS-MSI.md punto 6. Poi rilanciare la build. WiX: SHA-256 di wix314-binaries.zip calcolato dal file ufficiale scaricato da github.com/wixtoolset/wix3 release wix3141rtm (41.297.555 byte) = 6AC824E1642D6F7277D0ED7EA09411A508F6116BA6FAE0AA5F2C7DAA2FF43D31; candle/light/heat identici a C:\tools\wix314. La variabile WIX314_SHA256 NON e' ancora impostata sul repository (serve alla release su GitHub).
+CORREZIONE FATTA, NON committata: main.py senza PyQt6.QtSvg in RUNTIME_MODULES; nuovo RUNTIME_QT_PLUGINS=(("imageformats","qsvg"),) cercato nei QCoreApplication.libraryPaths() (statici, senza finestra: QT_PLUGIN_PATH del runtime hook PyInstaller prima, poi la cartella di Qt) con _qt_library_paths/_qt_plugin_present; check_runtime accetta qt_plugins e library_paths. Test test_check_runtime_requires_the_svg_image_plugin_not_the_qtsvg_module (positivo sui percorsi veri, negativo su cartella vuota, libqsvg.so accettato). 63 verdi (fixC_installer, packaging, launcher, documentation); `main.py --check-runtime` dai sorgenti OK. docs/PACKAGING-WINDOWS-MSI.md punto 6. SECONDA BUILD avviata (log .venv/build_1027b.log). Post LinkedIn aggiornato con il link releases/latest (valido solo DOPO la pubblicazione).
+SECONDA BUILD: exe OK (`Qt plugin imageformats/qsvg: OK`, `Runtime check OK`), ma candle rifiuta packaging/KiCadGen.wxs righe 58 e 66 (CNDL0303: con DirectorySearch Depth>1 la FileSearch non puo' avere @Id senza AssignToProperty). Gli Id FreeCadCmdX86/KiCadCliX86 vennero aggiunti il 16/10 (2fbbbe7) senza build reale, come l'handoff gia' avvertiva. CORREZIONE: tolti i due @Id (WiX li deriva dal DirectorySearch padre, quindi restano univoci); poi solo il passo MSI con scripts/build-msi.ps1 -Version 1.0.0 su dist/KiCadGen gia' costruito, e i test del .wxs in test_fixC_installer.
+MSI COSTRUITO 27/10 19:00: dist/KiCadGen-1.0.0.msi 168,6 MB (build-msi.ps1 sull'exe della seconda build); test_fixC_installer + test_packaging 37 verdi. Avviso light ICE03 (LGHT1076) riga 71 del .wxs: il testo di WIXUI_EXITDIALOGOPTIONALTEXT (415 car.) supera la lunghezza DICHIARATA della colonna CustomAction.Target, ma letto dall'MSI e' intero (415 car.): solo avviso di validazione, nessun troncamento. Exe avviato con KICADGEN_DATA_DIR temporanea: vivo dopo 12 s, chiuso. NON committato, NON installato qui, NON pubblicato. ATTENZIONE: i run «Tests» di GitHub del 27/10 17:42 su main e ADVANCED sono FALLITI: da capire prima della release (il workflow di release rilancia la stessa suite e il tag v* e' ora permanente).
+STORIA DEI RUN GITHUB («Tests», windows-latest): FALLITI su main e ADVANCED in OGNI run dal 18/10 (ce0dac9, 03f8222, 2044523, 643c6b1 del 27/10 mattina, 8405e1a): NON e' colpa del lavoro di oggi, e' una differenza d'ambiente mai affrontata (qui la suite e' verde: 9809). Run 40553144805 (main 8405e1a): prima meta' 13 falliti/6039 passati, seconda 14 falliti + 36 errori/3627. File: test_symbol_menu_parity (36 ERROR, StopIteration in conftest.pytest_runtest_setup), test_kicad_gate_remedies 11, test_symbol_residual_fixes 8, test_review_pass4 4, singoli: single_tht_face_texts, single_component_prompt, footprint_drawings, body_dimensions_declared. Diagnosi in corso. La release via tag e' BLOCCATA finche' la suite non passa su GitHub (o si decide altro con l'utente).
+CORREZIONE DELLA DIAGNOSI: la suite su GitHub NON E' MAI STATA VERDE: tests.yml nato il 27/09 (2b1dcd3), primo run il 10/10 (59a9c57), 72 failure + 28 cancelled, 0 success. Cause trovate (run 40553144805): (1) senza KiCad sul runner symbol_glyphs.catalogue() ricade su _builtin_glyphs(): la fixture `board` di test_symbol_menu_parity (riga 46, next() su body_hint) va in StopIteration -> 36 ERROR; gli 8 s7 di test_symbol_residual_fixes vogliono la geometria dei glifi KiCad (crystal, potentiometer). (2) 15 blocchi footprint_outline (test_kicad_gate_remedies 11, test_review_pass4 4): _footprint_alignment_block vede estensioni diverse; causa in verifica (riproduzione locale con .venv-build + offscreen). (3) test_single_component_prompt: il rilevatore predefinito yolo_smd cerca models/yolo/*.pt non tracciati -> QMessageBox.warning. (4) test_single_tht_face_texts: 'NoneType'.pin_numbers_3d. (5) test_body_dimensions_declared assert 0 == 1; test_footprint_drawings assert None == (0,-1,(1,0)). CRLF escluso: anche qui autocrlf=true, 53 file di test i/lf w/crlf.
+
 ## 27/10 — CORRETTO e committato `6be48ad` su ADVANCED, merge `8405e1a` in main, pushati: configure-github-repo.ps1 falliva con -Apply
 
 Prima esecuzione dell'utente con -Apply: 2 impostazioni applicate (Dependabot

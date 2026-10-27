@@ -280,6 +280,30 @@ def test_check_runtime_requires_the_license_manifest_only_in_the_package(tmp_pat
     assert main.check_runtime(resource_path=resolve, modules=()) == 0
 
 
+def test_check_runtime_requires_the_svg_image_plugin_not_the_qtsvg_module(tmp_path, capsys):
+    """The toolbar icons are SVG files: the Qt image plugin must ship, the QtSvg module need not.
+
+    The 2026-10-27 build failed on `PyQt6.QtSvg`, a module the program never
+    imports (QIcon loads SVG through the imageformats plugin, which was in the
+    package). Positive: Qt's real library paths hold the plugin. Negative: a
+    library path without it fails and names the plugin; any platform naming of
+    the library (`qsvg.dll`, `libqsvg.so`) satisfies the check.
+    """
+    main = _load("main.py", "kicadgen_main_under_test")
+    assert "PyQt6.QtSvg" not in main.RUNTIME_MODULES
+    assert ("imageformats", "qsvg") in main.RUNTIME_QT_PLUGINS
+    resolve = lambda *parts: tmp_path.joinpath(*parts)  # noqa: E731
+    assert main.check_runtime(resource_path=resolve, modules=(), resources=()) == 0
+    plugins = tmp_path / "plugins"
+    (plugins / "imageformats").mkdir(parents=True)
+    assert main.check_runtime(resource_path=resolve, modules=(), resources=(),
+                              library_paths=[plugins]) == 1
+    assert "imageformats/qsvg" in capsys.readouterr().err
+    (plugins / "imageformats" / "libqsvg.so").write_bytes(b"")
+    assert main.check_runtime(resource_path=resolve, modules=(), resources=(),
+                              library_paths=[plugins]) == 0
+
+
 def test_check_runtime_never_reads_dotenv():
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     body = source.split("def check_runtime", 1)[1].split("\ndef ", 1)[0]
