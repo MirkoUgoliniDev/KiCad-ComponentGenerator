@@ -118,7 +118,7 @@ itself, see "Licenses shipped with the Windows installer" below.
 | pyvista / pyvistaqt | 0.49.0 / 0.13.1 | MIT | 3D preview; included in the installer |
 | OpenCV (opencv-python) | 5.0.0.93 | Apache-2.0 | photo calibration; included in the installer |
 | NumPy | 2.5.3 | BSD-3-Clause and others | everywhere; included in the installer |
-| Pillow | 12.3.0 | MIT-CMU | images; included in the installer |
+| Pillow | 13.0.0 | MIT-CMU | images; included in the installer |
 | ONNX Runtime | 1.30.0 | MIT | `.onnx` YOLO models; included in the installer |
 | python-dotenv | 1.2.3 | BSD-3-Clause | settings; included in the installer |
 | Ultralytics | 8.4.163 | AGPL-3.0 | `.pt` YOLO models (optional, `requirements/yolo-pt.txt`); **not** in the installer |

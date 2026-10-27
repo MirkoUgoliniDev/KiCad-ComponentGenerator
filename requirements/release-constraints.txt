@@ -2,12 +2,13 @@
 # .github/workflows/release.yml pass this file with pip -c).
 # Read on 2026-09-25 from .venv-build, the environment of the last local
 # release build (Python 3.13.12). A constraint only pins a package that is
-# installed anyway; it never adds one. Update it deliberately, together
+# installed anyway; it never adds one. Pillow and certifi raised on
+# 2026-10-27 for the Dependabot advisories. Update it deliberately, together
 # with the versions in THIRD_PARTY_NOTICES.md, when a dependency changes.
 
 altgraph==0.17.5
 attrs==26.1.0
-certifi==2026.7.22
+certifi==2026.10.18
 charset-normalizer==3.5.1
 colorama==0.4.6
 contourpy==1.4.0
@@ -27,7 +28,7 @@ onnxruntime==1.30.0
 opencv-python==5.0.0.93
 packaging==26.3
 pefile==2024.8.26
-pillow==12.3.0
+pillow==13.0.0
 platformdirs==4.11.13
 pluggy==1.6.0
 pooch==1.9.0

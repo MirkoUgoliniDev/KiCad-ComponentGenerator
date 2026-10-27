@@ -54,8 +54,10 @@
       <DirectorySearch Id="FreeCadRoot" Path="[ProgramFiles64Folder]" Depth="2">
         <FileSearch Name="freecadcmd.exe" />
       </DirectorySearch>
+      <!-- No FileSearch/@Id under a Depth>1 DirectorySearch (candle CNDL0303):
+           WiX derives it from the parent, so the two searches stay distinct. -->
       <DirectorySearch Id="FreeCadRootX86" Path="[ProgramFilesFolder]" Depth="2">
-        <FileSearch Id="FreeCadCmdX86" Name="freecadcmd.exe" />
+        <FileSearch Name="freecadcmd.exe" />
       </DirectorySearch>
     </Property>
     <Property Id="KICADEXE">
@@ -63,7 +65,7 @@
         <FileSearch Name="kicad-cli.exe" />
       </DirectorySearch>
       <DirectorySearch Id="KiCadRootX86" Path="[ProgramFilesFolder]KiCad" Depth="2">
-        <FileSearch Id="KiCadCliX86" Name="kicad-cli.exe" />
+        <FileSearch Name="kicad-cli.exe" />
       </DirectorySearch>
     </Property>
     <SetProperty Id="WIXUI_EXITDIALOGOPTIONALTEXT" After="AppSearch" Sequence="first"
