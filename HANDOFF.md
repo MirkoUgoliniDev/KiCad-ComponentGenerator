@@ -1,5 +1,30 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — FATTO, NON committato (attende OK): skill e agente per produrre e pubblicare il setup
+
+Utente: «se io volessi realizzare un pacchetto per distribuire il software
+come un setup è già previsto? aggiungi agent e skill specifica ok?».
+Risposta: si', gia' previsto (PyInstaller + WiX 3.14 -> dist\KiCadGen-X.Y.Z.msi,
+docs/PACKAGING-WINDOWS-MSI.md, release.yml su tag vX.Y.Z; ultima build
+locale dist\KiCadGen-1.0.0.msi, nessun tag pubblicato). La skill
+installer-change copre il MODIFICARE il pacchetto; mancano il PRODURRE e
+PUBBLICARE. Da fare: skill `.claude/skills/build-installer/SKILL.md`
+(build, verifica, prova in VM, pubblicazione solo con OK, aperti: SHA-256
+WiX, firma, licenza YOLO, sorgenti GPL) e agente read-only
+`.claude/agents/release-readiness-reviewer.md` (controlli prima di un
+rilascio). Nessun codice toccato.
+ESITO: scritti build-installer/SKILL.md e release-readiness-reviewer.md.
+DOMANDA UTENTE intanto: «alla partenza al boot verifica la presenza di
+KiCad e FreeCAD?» -> SI', gia' fatto: main.py hand_over() ->
+MainWindow._warn_missing_external_applications (main_window.py ~3086), una
+volta, dopo lo splash, finestra solo se manca qualcosa; ricerca in
+services/system_dependencies.py (KiCad: KICAD_CLI_PATH, PATH, Program
+Files/KiCad/<ver>/bin) e cad3d/step_generator.find_freecadcmd (FreeCAD:
+FREECAD_CMD_PATH, C:\Program Files[ (x86)]\FreeCAD*\bin). SEGNALATO, MAI
+AUTORIZZATO: FreeCAD non cercato su PATH ne' in un'installazione per
+utente (probabile %LOCALAPPDATA%\Programs\FreeCAD*, da verificare);
+percorsi C:\ fissi invece di %ProgramFiles% (KiCad invece li legge).
+
 ## 27/10 — FATTO e committato `2b17772` su ADVANCED (NON pushato, NON mergiato): skill e agenti di progetto in .claude/ (utente: «tutto»)
 
 Da fare: `tools: Read, Grep, Glob, Bash` nei revisori read-only
