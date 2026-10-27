@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — IN CORSO: pubblicazione MANUALE della Release v1.0.0 (utente: «possiamo portarlo su git il pacchetto e linkarlo sul post di LinkedIn?» = strada B)
+## 27/10 — FATTO: Release v1.0.0 PUBBLICATA a mano (commit `951ea5e` su ADVANCED, merge `ddc1e14` in main, tag v1.0.0 su main) (utente: «possiamo portarlo su git il pacchetto e linkarlo sul post di LinkedIn?» = strada B)
 
 Decisione utente: release subito con l'MSI costruito in locale, SENZA il
 workflow (la suite su GitHub non e' mai stata verde: test che presuppongono
@@ -13,6 +13,7 @@ mano (requisiti, SmartScreen, chiave API) e SHA-256 dell'MSI; il tag v1.0.0
 fa partire release.yml che FALLIRA' ai test: atteso, la Release esiste gia'
 con l'asset, il job publish non parte. Il tag e' permanente (ruleset).
 3) verifica del link releases/latest usato nel post LinkedIn.
+ESITO: https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.0 con KiCadGen-1.0.0.msi (176.750.828 byte, SHA-256 7baa62dbb15a07b7c77d02d2ae58e4fd88be940ded8e32da2c43c92a1f8b73f3), note scritte a mano (requisiti FreeCAD/KiCad 10/chiave API, SmartScreen, pesi esclusi). Il tag ha avviato release.yml: fallimento ATTESO ai test (CI mai verde), il job publish non parte, la Release resta. LAVORO APERTO, RICHIESTO IMPLICITAMENTE (serve alla prossima release automatica): rendere onesti i test che presuppongono KiCad, FreeCAD e pesi YOLO sul runner (elenco e cause nella sezione sopra). Prossima versione: 1.0.1 (v1.0.0 e' permanente). NON provato: installazione dell'MSI in VM/Sandbox (da fare dall'utente).
 
 ## 27/10 — IN CORSO: build dell'installer MSI (utente: «mi piacerebbe creare la build per distribuire in un setup, puoi farlo?»)
 
