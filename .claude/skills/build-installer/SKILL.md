@@ -87,7 +87,10 @@ do not delete or move the tag without the user.
 ## 5. Before a first public release
 
 Run the `release-readiness-reviewer` agent and bring its findings to the
-user. Points still open in HANDOFF.md that the user decides: WiX SHA-256,
+user. Ask the user to run `scripts/configure-github-repo.ps1` (read-only
+without `-Apply`): it shows whether the branch and tag rulesets, secret
+scanning, Dependabot and the Actions restrictions are in place, and the
+release tags are protected only once it has been applied. Points still open in HANDOFF.md that the user decides: WiX SHA-256,
 code signing (cost), YOLO weights license, how to offer the GPL/LGPL sources
 with each release, VM install test.
 
