@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — FATTO e committato su ADVANCED, mergiato in main (hash nel log git): script per le impostazioni di sicurezza del repository GitHub
+## 27/10 — FATTO e committato `09d05db` su ADVANCED, merge `58ee5f3` in main, entrambi pushati: script per le impostazioni di sicurezza del repository GitHub
 
 Utente: «mi serve uno script per sistemare in maniera batch tutte le
 configurazioni del repository GitHub ... voglio essere sicuro che la gente
