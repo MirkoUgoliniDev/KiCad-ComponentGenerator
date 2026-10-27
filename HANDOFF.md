@@ -4,7 +4,7 @@
 
 Suite 9809 (A 6090/10/19, B 3719/2, 0 falliti). Due commit su ADVANCED
 (correzione ricerca FreeCAD/KiCad; README + screenshot + script), push di
-ADVANCED, merge in main, push di main. Hash: vedi riga sotto, scritta dopo.
+ADVANCED, merge in main, push di main. Commit: `2b8a993` (fix ricerca), `b4a3346` (README); merge in main: vedi sotto.
 
 ## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): README con screenshot e diagrammi Mermaid
 
