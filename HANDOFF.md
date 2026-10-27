@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — FATTO, NON committato (attende OK): requirements opzionali in una cartella `requirements/`
+## 27/10 — FATTO e committato `7f2d1c7` su ADVANCED (NON pushato, NON mergiato): requirements opzionali in una cartella `requirements/`
 
 ESITO: spostati con git mv; 16 file aggiornati + commento di tests/conftest.py
 (nome spezzato su due righe, sfuggito alla sostituzione); catalogo SQLite
