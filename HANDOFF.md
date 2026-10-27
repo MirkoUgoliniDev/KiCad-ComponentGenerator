@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — FATTO, NON committato (attende OK): skill e agenti di progetto in .claude/ (utente: «tutto»)
+## 27/10 — FATTO e committato `2b17772` su ADVANCED (NON pushato, NON mergiato): skill e agenti di progetto in .claude/ (utente: «tutto»)
 
 Da fare: `tools: Read, Grep, Glob, Bash` nei revisori read-only
 (kicad-library-verifier, kicad-workflow-reviewer); 6 skill nuove in
