@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — CORRETTO e committato (hash nel log git): configure-github-repo.ps1 falliva con -Apply
+## 27/10 — CORRETTO e committato `6be48ad` su ADVANCED, merge `8405e1a` in main, pushati: configure-github-repo.ps1 falliva con -Apply
 
 Prima esecuzione dell'utente con -Apply: 2 impostazioni applicate (Dependabot
 alerts, private vulnerability reporting: le due chiamate SENZA corpo), le
