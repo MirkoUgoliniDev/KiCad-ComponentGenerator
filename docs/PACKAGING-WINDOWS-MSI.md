@@ -24,10 +24,12 @@ is remembered in `HKLM\Software\KiCadGen\InstallFolder` and proposed again by
 the next upgrade. «Launch KiCadGen» starts the program from the folder
 actually chosen. On the last page the installer says which of FreeCAD and
 KiCad it **may not** have found: it looks for `freecadcmd.exe` and
-`kicad-cli.exe` in Program Files and Program Files (x86), as the program
-does, but it cannot see the `FREECAD_CMD_PATH` and `KICAD_CLI_PATH`
-overrides that the program also honours, nor PATH, which the program uses for
-KiCad only (FreeCAD is never looked up on PATH).
+`kicad-cli.exe` in Program Files and Program Files (x86) only. The program
+searches further at start-up: the per-user folder `%LOCALAPPDATA%\Programs`,
+the folders declared by the «Uninstall» registry entries
+(`kicadgen/services/installed_programs.py`), the `FREECAD_CMD_PATH` and
+`KICAD_CLI_PATH` overrides, and PATH for KiCad only (FreeCAD is never looked
+up on PATH).
 
 ## 2. Build
 

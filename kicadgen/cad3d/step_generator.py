@@ -575,17 +575,25 @@ def find_freecadcmd() -> str:
         (`_freecad_install_order`).
 
     The search order is the FREECAD_CMD_PATH environment variable first,
-    then the typical Windows installations under Program Files."""
+    then every installation found under the program roots (per machine and
+    per user, `installed_programs.program_roots`) or declared by FreeCAD's
+    «Uninstall» registry entries, which cover a folder the user chose; all
+    of them are ranked together."""
+    from ..services import installed_programs
+
     env_path = os.environ.get("FREECAD_CMD_PATH")
     if env_path and Path(env_path).is_file():
         return env_path
 
     candidates = []
-    for base in (r"C:\Program Files", r"C:\Program Files (x86)"):
+    for base in installed_programs.program_roots():
         candidates.extend(glob.glob(f"{base}\\FreeCAD*\\bin\\freecadcmd.exe"))
+    candidates.extend(installed_programs.executables_in(
+        installed_programs.registered_install_dirs(r"FreeCAD\b"), "freecadcmd.exe"))
     for base in ("/usr/bin", "/usr/local/bin"):
         candidates.extend(glob.glob(f"{base}/freecadcmd"))
 
+    candidates = installed_programs.unique_paths(candidates)
     if candidates:
         return _freecad_install_order(candidates)[0]
 

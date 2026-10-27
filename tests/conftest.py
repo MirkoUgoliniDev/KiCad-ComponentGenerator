@@ -157,6 +157,20 @@ def no_real_api_key_sources(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_real_uninstall_registry(monkeypatch):
+    """@brief No test sees the programs registered in this machine's registry.
+
+    The FreeCAD and KiCad finders also read the «Uninstall» registry entries
+    (`installed_programs._uninstall_entries`). A test that fakes the program
+    folders to mean «not installed», or «only these versions», would
+    otherwise find the developer's real installation. Tests of the registry
+    path pass their own entries or patch this function themselves.
+    """
+    from kicadgen.services import installed_programs
+    monkeypatch.setattr(installed_programs, "_uninstall_entries", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def drain_qt_thread_pool(monkeypatch, hang_watchdog):
     """@brief Ogni lavoro del pool globale di Qt finisce dentro il test che lo ha avviato.
 

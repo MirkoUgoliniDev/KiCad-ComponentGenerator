@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 
 from ..cad3d.step_generator import Cad3DError, find_freecadcmd
+from . import installed_programs
 from ..kicad_versions import newest_version_first
 
 
@@ -53,14 +54,13 @@ def _find_installed(program: str) -> str | None:
     @note Windows installs one folder per version (``KiCad/10.0/bin``); the
         newest is chosen by numeric version, not by text (``9.0`` sorts after
         ``10.0`` as text). Unversioned locations are kept as a fallback.
+    @note Besides the program roots (per machine and per user,
+        `installed_programs.program_roots`), the folders declared by KiCad's
+        «Uninstall» registry entries are searched, so an installation in a
+        folder the user chose is found too.
     """
     patterns = []
-    for root in filter(None, (
-            os.environ.get("ProgramFiles"),
-            os.environ.get("ProgramFiles(x86)"),
-            r"C:\Program Files",
-            r"C:\Program Files (x86)",
-    )):
+    for root in installed_programs.program_roots():
         patterns.extend((
             str(Path(root) / "KiCad" / "*" / "bin" / f"{program}.exe"),
             str(Path(root) / "KiCad" / "bin" / f"{program}.exe"),
@@ -70,10 +70,12 @@ def _find_installed(program: str) -> str | None:
         f"/usr/local/bin/{program}",
         f"/Applications/KiCad/KiCad.app/Contents/MacOS/{program}",
     ))
+    matches = [match for pattern in patterns for match in glob.glob(pattern)]
+    matches.extend(installed_programs.executables_in(
+        installed_programs.registered_install_dirs(r"KiCad\b"), f"{program}.exe"))
     candidates = {
         resolved_path
-        for pattern in patterns
-        for match in glob.glob(pattern)
+        for match in matches
         if (resolved_path := _existing_file(match)) is not None
     }
     # The version folder is the parent of ``bin``.
