@@ -1,5 +1,62 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — COMMIT, PUSH, MERGE (utente: «ok puoi committare e pushare poi mergiare in main e pushare?»)
+
+Suite 9809 (A 6090/10/19, B 3719/2, 0 falliti). Due commit su ADVANCED
+(correzione ricerca FreeCAD/KiCad; README + screenshot + script), push di
+ADVANCED, merge in main, push di main. Hash: vedi riga sotto, scritta dopo.
+
+## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): README con screenshot e diagrammi Mermaid
+
+Utente: «puoi aggiungere delle immagini e dei grafici esplicativi rendendo
+il README.md mermaid?» -> domanda: screenshot generati dall'app vera o solo
+Mermaid + foto esistenti? Risposta «ok procedi!» letta come la PRIMA opzione
+(screenshot generati dall'app, da dire all'utente). Piano:
+- diagrammi Mermaid in README.md e README.it.md (GitHub li disegna):
+  flusso generale ingressi -> analisi -> revisione -> generazione -> KiCad;
+  catena della foto; consegna KiCad (anteprima isolata / progetto / globale);
+  architettura dei pacchetti.
+- screenshot PNG in docs/images/, catturati con QWidget.grab() da una
+  finestra costruita fuori schermo, SENZA chiamate AI e senza dati privati
+  (progetto di prova in una cartella temporanea, componente da parametri
+  manuali); script riproducibile tools/make_readme_screenshots.py.
+- nessuna modifica al codice di produzione.
+ESITO: tools/make_readme_screenshots.py (dati isolati in una cartella temporanea, COPIA del progetto, opzione --without-drawings che svuota i disegni manuali solo nella copia, percorso della pagina iniziale mostrato come C:\Users\<user>\Documents\KiCadGen); 12 PNG in docs/images (en-/it- start, project, footprint, symbol, step-model, kicad) dal progetto locale generated/ESP32-S3-DEVKIT-NXRX, che contiene disegni di prova («qweqeqe», cerchio, rettangolo nel footprint; «2q3qe» nel simbolo): l'originale NON e' stato toccato. README.md e README.it.md: tabella foto->STEP, «Come funziona», flusso dell'analisi, consegna KiCad, dipendenze dei pacchetti (4 diagrammi Mermaid per lingua, verificati col parser ufficiale mermaid 11.4.1 + jsdom nello scratchpad; controllo negativo rifiutato). Diagramma delle dipendenze reso onesto: services e' usato da tutti (messages.py), cad3d usa generators. La cache vale per le risposte sulle FOTO, non per i documenti (frase corretta). SEGNALATO, MAI AUTORIZZATO: StartPage.set_projects_available definita due volte identica (kicadgen/gui/start_page.py:496 e :512).
+
+## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): ricerca di FreeCAD (e KiCad) anche fuori da C:\Program Files
+
+Utente: «puoi fixare il buco della ricerca se qualcuno installa FreeCAD
+"solo per l'utente corrente"». Causa: find_freecadcmd guarda solo
+C:\Program Files[ (x86)]\FreeCAD*\bin (cartelle fisse); _find_installed di
+KiCad legge %ProgramFiles% ma non le installazioni per utente ne' altri
+dischi. Classe del problema = programma installato in una cartella non
+prevista. Correzione (vale per ENTRAMBI, stessa causa: KiCad incluso per la
+regola «generalizzare», da dire all'utente):
+- nuovo modulo kicadgen/services/installed_programs.py: radici
+  (%ProgramFiles%, %ProgramFiles(x86)%, %ProgramW6432%,
+  %LOCALAPPDATA%\Programs, + C:\ fissi come ripiego, senza doppioni) e
+  cartelle dichiarate dalle voci «Disinstalla» del registro (HKLM 64/32 bit,
+  HKCU): InstallLocation, altrimenti cartella di DisplayIcon, altrimenti di
+  UninstallString. Verificato su questa macchina: FreeCAD 1.1.4 NON scrive
+  InstallLocation (solo DisplayIcon ...\bin\FreeCAD.exe e
+  UninstallString), KiCad 10.0 si'.
+- find_freecadcmd e _find_installed usano entrambi; candidati senza doppioni
+  prima dell'ordinamento per versione.
+- conftest: fixture autouse che svuota le voci del registro reale (i test
+  che simulano «non installato» altrimenti troverebbero quello vero).
+- test: positivo/negativo per le voci del registro, per l'installazione per
+  utente e per la radice da variabile d'ambiente.
+- docs: INSTALLATION-WINDOWS.md, README.md/README.it.md, PACKAGING (l'MSI
+  continua a guardare solo Program Files: NON toccato, dice gia' «potrebbe
+  non aver trovato»).
+- PATH per FreeCAD: NON aggiunto (non richiesto; decisione documentata).
+ESITO (prima della suite completa): modulo e test scritti; tests/test_installed_programs.py 14 test (registro con e senza InstallLocation, voce orfana, nome che non inizia per FreeCAD, per utente FreeCAD e KiCad, ProgramFiles su altro disco, versione piu' nuova fra le fonti, doppioni); test esistenti di ricerca verdi (160 + packaging 34); prova reale: trovati FreeCAD 1.1 e KiCad 10.0 anche dal registro. Docs aggiornati: README.md, README.it.md, docs/INSTALLATION-WINDOWS.md, docs/PACKAGING-WINDOWS-MSI.md. IN CORSO: suite completa in due meta' (log .venv/run_full_1027.log).
+SUITE COMPLETA 27/10 (due meta'): A 6090/10/19, B 3719/2, totale 9809 passati, 12 saltati, 19 sottotest, 0 falliti.
+
+IN CODA (utente, 27/10): «puoi aggiungere delle immagini e dei grafici
+esplicativi rendendo il README.md mermaid?» -> dopo questa correzione,
+proporre il contenuto e aspettare l'OK prima di scrivere.
+
 ## 27/10 — FATTO e committato `5722943` su ADVANCED (NON pushato, NON mergiato): skill e agente per produrre e pubblicare il setup
 
 Utente: «se io volessi realizzare un pacchetto per distribuire il software

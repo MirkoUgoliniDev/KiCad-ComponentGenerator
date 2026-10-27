@@ -14,6 +14,50 @@ English version: [README.md](README.md).
 > numerazione dei pin, quote, orientamento e distanze sui documenti del
 > costruttore prima di usare un risultato in una scheda.
 
+| Ingresso: una foto dall'alto e i documenti | Risultato: il modello STEP del modulo |
+|---|---|
+| <img src="docs/ESP32/AltaRisoluzione.jpg" alt="Foto dall'alto di una scheda di sviluppo ESP32-S3" width="180"> | <img src="docs/images/it-step-model.png" alt="Modello STEP generato da KiCadGen per la stessa scheda" width="600"> |
+
+## Come funziona
+
+```mermaid
+flowchart LR
+    subgraph IN["I tuoi ingressi"]
+        D["Documenti<br/>datasheet, pinout,<br/>disegno quotato"]
+        P["Foto dall'alto<br/>(solo schede)"]
+        T["Tipologia del componente"]
+    end
+    subgraph AN["Analisi"]
+        AI["Il modello AI legge<br/>i documenti"]
+        DET["Il rilevatore locale<br/>trova i corpi"]
+        RULES["Regole deterministiche<br/>trasformano le letture in mm"]
+    end
+    subgraph REV["Tu rivedi"]
+        R1["Finestra di revisione<br/>corpi sulla foto"]
+        R2["Editor di footprint,<br/>simbolo e STEP"]
+    end
+    subgraph OUT["Risultati"]
+        FP[".kicad_mod<br/>footprint"]
+        SY[".kicad_sym<br/>simbolo"]
+        ST[".step<br/>modello 3D"]
+    end
+    KI["Libreria KiCad<br/>di progetto o globale"]
+
+    D --> AI
+    T --> AI
+    P --> DET
+    AI --> RULES
+    DET --> RULES
+    RULES --> R1 --> R2
+    R2 --> FP & SY & ST
+    FP & SY & ST --> KI
+```
+
+Ogni passo lascia le sue tracce nella cartella del progetto (risposte AI,
+costi, log) e niente arriva a KiCad finché non lo installi. Le risposte AI
+sulle foto sono in cache: ripetere la stessa richiesta sulla stessa foto non
+si paga di nuovo.
+
 ## Scopo e non-obiettivi
 
 - **Componenti singoli** (a fori passanti o SMD): piazzole, fori e corpo dal
@@ -86,11 +130,14 @@ predefinita di PowerShell blocca `.venv\Scripts\Activate.ps1`. Funziona anche
 `python main.py --check-runtime` controlla import e risorse necessarie senza
 aprire finestre, leggere `.env` o chiamare un'AI.
 
-KiCad viene cercato tramite la variabile `KICAD_CLI_PATH`, sul PATH oppure in
-`C:\Program Files` (e `Program Files (x86)`). FreeCAD **non** viene cercato sul
-PATH: si trova tramite la variabile `FREECAD_CMD_PATH` (percorso completo di
-`freecadcmd.exe`) oppure in `C:\Program Files\FreeCAD*\bin\freecadcmd.exe` (e
-`Program Files (x86)`).
+KiCad viene cercato tramite la variabile `KICAD_CLI_PATH`, sul PATH oppure dove
+è installato. FreeCAD **non** viene cercato sul PATH: si trova tramite la
+variabile `FREECAD_CMD_PATH` (percorso completo di `freecadcmd.exe`) oppure dove
+è installato. «Dove è installato» vuol dire le cartelle Programmi, la cartella
+per utente `%LOCALAPPDATA%\Programs` (installazione «solo per l'utente
+corrente») e qualunque cartella dichiarata dalla voce del programma in
+Impostazioni > App: si trova anche in una cartella scelta a mano o su un altro
+disco.
 
 ## Account AI e provider
 
@@ -139,6 +186,8 @@ gratuite.
 
 ### Pagina iniziale e progetti
 
+![Pagina iniziale con i pulsanti Nuovo progetto e Apri progetto](docs/images/it-start.png)
+
 Senza un progetto aperto la finestra mostra una pagina iniziale: **Nuovo
 progetto…** (Ctrl+N), **Apri progetto…** (Ctrl+O) e l'elenco dei progetti
 recenti (un clic ne riapre uno; il menu del tasto destro lo toglie
@@ -179,6 +228,8 @@ Le schede sono **Progetto** (Ctrl+1), **Anteprima footprint** (Ctrl+2),
 **Esportazioni** (Ctrl+6).
 
 ## Dati in ingresso
+
+![Scheda Progetto, passo «Montaggio e analisi»](docs/images/it-project.png)
 
 La scheda Progetto guida la preparazione in due passi, **Documenti** e
 **Montaggio e analisi**, con **Continua** / **Indietro** (**Torna ai
@@ -278,6 +329,20 @@ progetto.
 
 Che cosa succede, in ordine:
 
+```mermaid
+flowchart TD
+    S(["Estrai parametri con AI"]) --> DOC["1 · Documenti<br/>quote, contatti, mappa dei pin,<br/>spessore della scheda con la provenienza"]
+    DOC --> Q{"Scheda con<br/>componenti?"}
+    Q -- "no: componente singolo THT/SMD" --> GEN
+    Q -- sì --> CAS["2 · Contatti a mezzo foro<br/>conteggio AI contro tacche sulla foto,<br/>riconteggio solo dei lati contraddetti"]
+    CAS --> YOLO["3 · Rilevatore locale<br/>YOLO propone i corpi"]
+    YOLO --> REV1["Finestra di revisione · fase 1<br/>togli i falsi corpi, disegna i mancanti"]
+    REV1 -- Annulla --> STOP(["Fermo prima di pagare"])
+    REV1 -- OK --> INV["4 · Inventario AI<br/>una chiamata globale, poi ritagli ingranditi<br/>per i corpi che la rete SMD non ha risolto"]
+    INV --> REV2["5 · Finestra di revisione · fase 2<br/>corpi riconciliati, lettura del rilevatore<br/>accanto a quella dell'AI"]
+    REV2 --> GEN["6 · Generazione<br/>footprint, candidati dalla libreria KiCad,<br/>solido STEP con FreeCAD"]
+```
+
 1. **Documenti**: quote, contatti, mappa dei pin, spessore della scheda e
    loro provenienza. Una nuova analisi che scarterebbe nomi dei pin scritti da
    te lo chiede prima. I dubbi sull'orientamento del package (corpo che copre
@@ -334,6 +399,8 @@ sulle proposte salvate.
 
 ### Anteprima footprint
 
+![Anteprima footprint con piazzole numerate, nomi dei pin e quote d'ingombro](docs/images/it-footprint.png)
+
 Il disegno 2D in scala con quote e numeri dei pin, una griglia (1 mm o
 0.1 in) con una sotto-griglia puntinata per i disegni, i colori dei layer di
 KiCad e la camera conservata. L'anteprima è una **bozza** come il simbolo: i
@@ -346,6 +413,8 @@ annulla/ripeti; **Applica** scrive il `.kicad_mod`, **Annulla** scarta,
 il file dalla scelta di montaggio senza chiamare l'AI né ricostruire il 3D.
 
 ### Simbolo elettrico
+
+![Editor del simbolo elettrico con i 44 pin del modulo e la palette dei glifi](docs/images/it-symbol.png)
 
 I numeri dei pin sono quelli delle piazzole del footprint e non si cambiano
 nella tabella; nomi e tipi elettrici sì. L'editor sposta i pin liberamente
@@ -362,6 +431,8 @@ iniziali sono *passive*: verificali sul datasheet prima di affidarti all'ERC
 di KiCad.
 
 ### Modello STEP
+
+![Scheda Modello STEP con la vista 3D e il cubo di navigazione](docs/images/it-step-model.png)
 
 Rotazione con il mouse, cubo di navigazione per le viste standard. Barra:
 numeri dei pin (visibili dal lato dei piedini, un controllo pratico della
@@ -406,6 +477,20 @@ foto dall'alto: restano da verificare.
 I file generati restano locali finché non li installi esplicitamente.
 
 ## La scheda KiCad
+
+![Scheda KiCad: file pronti, metadati con i controlli KLC, verifica e installazione](docs/images/it-kicad.png)
+
+```mermaid
+flowchart TD
+    F["File su disco:<br/>.kicad_mod · .kicad_sym · .step"] --> M{"I file corrispondono ai parametri<br/>e i metadati sono completi?"}
+    M -- no --> FIX["Rimedio indicato nella scheda<br/>Applica ai file · Aggiorna il file del simbolo ·<br/>Rigenera modello STEP"]
+    FIX --> M
+    M -- sì --> T["Prova in KiCad…<br/>progetto isolato in .kicad-preview,<br/>nessuna tabella di librerie toccata"]
+    T --> C{"Dove deve stare<br/>il componente?"}
+    C -- "in un progetto KiCad<br/>(consigliato)" --> PRJ["Installa nel progetto KiCad…<br/>KiCadGen.pretty + .3dshapes,<br/>fp-lib-table del progetto con ${KIPRJMOD}"]
+    C -- "in ogni progetto<br/>di questo computer" --> GLB["Installa come libreria globale…<br/>cartella stabile, fp-lib-table globale,<br/>percorsi assoluti"]
+    PRJ & GLB --> SAFE["Copia di sicurezza della tabella, file temporaneo,<br/>ripristino se un passo fallisce"]
+```
 
 **File pronti per KiCad** elenca footprint, simbolo e STEP con il loro stato.
 Installazione e prova isolata sono **bloccate finché i file su disco non
@@ -521,6 +606,27 @@ examples/, tools/                esempi da riga di comando e strumenti di manute
 packaging/, scripts/             spec PyInstaller, sorgente WiX, script di build e rilascio
 tests/                           test di regressione e GUI
 ```
+
+Come i pacchetti dipendono l'uno dall'altro (una freccia vuol dire «usa»):
+
+```mermaid
+flowchart TD
+    MAIN["main.py"] --> GUI["kicadgen/gui<br/>finestra Qt, anteprime, editor"]
+    GUI --> SRV["kicadgen/services<br/>provider AI, pipeline foto,<br/>profili, libreria KiCad"]
+    GUI --> GENS["kicadgen/generators<br/>footprint e simbolo"]
+    GUI --> CAD["kicadgen/cad3d<br/>orchestrazione FreeCAD,<br/>abbinamento modelli KiCad"]
+    SRV --> GENS
+    SRV --> CAD
+    GENS --> CORE["kicadgen/core<br/>modelli dati KiCad,<br/>scrittura S-expression"]
+    CAD --> GENS
+    CAD --> CORE
+    CAD -. "gira in un processo separato" .-> FC[("FreeCAD<br/>freecadcmd")]
+    SRV -. "controlli in sola lettura" .-> KC[("KiCad<br/>kicad-cli")]
+    SRV -. "HTTPS, a pagamento" .-> API[("OpenRouter /<br/>DeepSeek")]
+```
+
+Il diagramma mostra solo la direzione principale: ogni pacchetto usa anche
+`kicadgen/services/messages.py` per i messaggi tradotti.
 
 ## Test
 
