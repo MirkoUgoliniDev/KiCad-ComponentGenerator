@@ -1,5 +1,40 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — FATTO, NON committato (attende OK): requirements opzionali in una cartella `requirements/`
+
+ESITO: spostati con git mv; 16 file aggiornati + commento di tests/conftest.py
+(nome spezzato su due righe, sfuggito alla sostituzione); catalogo SQLite
+senza occorrenze. Verifiche: 228 test verdi (packaging, app_paths,
+ci_workflows, fixC_installer, photo_yolo, photo_yolo_pt, documentation),
+build-windows.ps1 analizzato senza errori, `pip install --dry-run --no-deps`
+risolve i -r relativi di requirements/build.txt e requirements/yolo-pt.txt.
+Suite completa NON rieseguita (cambio di soli percorsi). Build/MSI reali non
+eseguiti: la prima build o il prossimo run della CI confermano il percorso.
+
+Utente: «riorganizziamo poi tutti questi requirements, possiamo metterli in
+una cartella?» -> proposta accettata («ok requirements principale nella
+radice»). Branch `ADVANCED`, base `bdbe8a5`. Da fare, in quest'ordine:
+- `git mv` requirements-{build,release-constraints,smd,yolo,yolo-pt}.txt
+  -> requirements/{build,release-constraints,smd,yolo,yolo-pt}.txt;
+  `requirements.txt` RESTA nella radice.
+- dentro i file spostati: `-r requirements.txt` -> `-r ../requirements.txt`,
+  `-r requirements-yolo.txt` -> `-r yolo.txt` (pip risolve -r rispetto al file).
+- riferimenti: .github/workflows/{release,tests}.yml, scripts/build-windows.ps1,
+  messaggi utente in kicadgen/services/photo_yolo.py e
+  smd_component_classifier.py, test (test_ci_workflows, test_fixC_installer,
+  test_photo_yolo, test_photo_yolo_pt), README.md, README.it.md,
+  THIRD_PARTY_NOTICES.md, docs/{CLASSIFICATORE_SMD,PACKAGING-WINDOWS-MSI,
+  yolo-photo-workflow}.md, skill installer-change. Le sezioni storiche
+  dell'handoff NON si riscrivono.
+- verifica: test_packaging, test_app_paths, i test toccati, parse del .ps1,
+  `pip install --dry-run -r requirements/build.txt` per i -r relativi.
+  Build reale dell'installer NON prevista (nessuna release).
+- In sospeso, domanda precedente all'utente: aggiungere a `.claude/` 6 skill
+  (run-test-suite, update-handoff, add-ui-text, canvas-shared-change,
+  photo-pipeline-change, pre-commit-check), 2 agenti read-only
+  (generality-auditor, canvas-parity-reviewer) e `tools:` read-only ai due
+  revisori esistenti. Nessuna risposta ancora: NON autorizzato.
+
 ## 18/10 notte — FATTO e committato `e276472` su ADVANCED, mergiato in main `a50ef30`, pushati: CAMERA + GRIGLIA condivise (canvas_camera.py, canvas_grid.py) nelle due schede, suite 9361 (A 5760/10/19, B 3601/2, 0 falliti)
 
 AUTORIZZATO 18/10 («ok procedi scatenando agenti esperti»): FASE B avviata.

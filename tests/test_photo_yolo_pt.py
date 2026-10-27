@@ -165,7 +165,7 @@ def test_a_pt_with_an_unexpected_output_is_refused(tmp_path, monkeypatch):
 def test_without_pytorch_the_message_says_what_to_install(tmp_path, monkeypatch):
     """Nel programma installato PyTorch non c'e': errore chiaro, nessuna eccezione cruda."""
     monkeypatch.setitem(sys.modules, "ultralytics", None)
-    with pytest.raises(ValueError, match="requirements-yolo-pt.txt"):
+    with pytest.raises(ValueError, match="requirements/yolo-pt.txt"):
         yolo.validate_yolo_setup(_weights(tmp_path))
 
 

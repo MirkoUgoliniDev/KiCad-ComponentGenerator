@@ -56,9 +56,9 @@ Requirements:
   runs the other checks and skips that one. The generated
   files use the KiCad 10 formats (footprint `20260206`, symbol library
   `20251024`), which KiCad 8 and 9 cannot read;
-- optional local detectors: `requirements-yolo.txt` (ONNX Runtime, for `.onnx`
-  YOLO weights), `requirements-yolo-pt.txt` (Ultralytics/PyTorch, for `.pt`
-  weights), `requirements-smd.txt` (PyTorch/torchvision, for the local SMD
+- optional local detectors: `requirements/yolo.txt` (ONNX Runtime, for `.onnx`
+  YOLO weights), `requirements/yolo-pt.txt` (Ultralytics/PyTorch, for `.pt`
+  weights), `requirements/smd.txt` (PyTorch/torchvision, for the local SMD
   network). The weights are not in the repository: detectors go in
   `models/yolo/`, the SMD network in `models/smd/`.
 
@@ -66,7 +66,7 @@ Requirements:
 detector defaults to *YOLO + local SMD network (v3)*, which needs
 `models/smd/smd_classifier.pt` and
 `models/yolo/pcb_component_detector_yolov8m_best.pt` plus the packages of
-both `requirements-smd.txt` and `requirements-yolo-pt.txt`. These weights are
+both `requirements/smd.txt` and `requirements/yolo-pt.txt`. These weights are
 not distributed with the sources and a fresh checkout has no `models/`
 folders: create `models/yolo/` and `models/smd/` when you add the files.
 Without them a board analysis stops with a warning before any paid call; to

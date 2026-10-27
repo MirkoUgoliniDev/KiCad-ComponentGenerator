@@ -55,8 +55,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -IncludeYol
 The script:
 
 1. creates `.venv-build` (never the development `.venv`; recreated when it
-   is not Python 3.13) from `requirements-build.txt`, with the exact versions
-   of `requirements-release-constraints.txt` (`pip -c`; the release workflow
+   is not Python 3.13) from `requirements/build.txt`, with the exact versions
+   of `requirements/release-constraints.txt` (`pip -c`; the release workflow
    uses the same file);
 2. **generates** the initial profile database from the code with
    `tools\make_seed_db.py` (a fresh `ProfileStore` on an empty path) and

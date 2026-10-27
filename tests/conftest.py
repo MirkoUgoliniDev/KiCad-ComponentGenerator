@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-# `tests` e' la cartella di questi test. Ultralytics 8.4.x (requirements-yolo-
-# pt.txt, modelli .pt) installa per errore un suo pacchetto `tests` di primo
+# `tests` e' la cartella di questi test. Ultralytics 8.4.x
+# (requirements/yolo-pt.txt, modelli .pt) installa per errore un suo pacchetto `tests` di primo
 # livello in site-packages; questa cartella non ha __init__.py, quindi per
 # Python e' un pacchetto «namespace» e quello di Ultralytics vince sempre,
 # e `from tests.test_photo_inventory_gui import ...` falliva in 17 file

@@ -57,9 +57,9 @@ Requisiti:
   KiCad», che senza di esso esegue gli altri controlli e salta solo quella. I
   file generati usano i formati di KiCad 10 (footprint `20260206`, libreria di
   simboli `20251024`), che KiCad 8 e 9 non leggono;
-- rilevatori locali facoltativi: `requirements-yolo.txt` (ONNX Runtime, per
-  pesi YOLO `.onnx`), `requirements-yolo-pt.txt` (Ultralytics/PyTorch, per pesi
-  `.pt`), `requirements-smd.txt` (PyTorch/torchvision, per la rete SMD locale).
+- rilevatori locali facoltativi: `requirements/yolo.txt` (ONNX Runtime, per
+  pesi YOLO `.onnx`), `requirements/yolo-pt.txt` (Ultralytics/PyTorch, per pesi
+  `.pt`), `requirements/smd.txt` (PyTorch/torchvision, per la rete SMD locale).
   I pesi non sono nel repository: i rilevatori vanno in `models/yolo/`, la rete
   SMD in `models/smd/`.
 
@@ -67,7 +67,7 @@ Requisiti:
 foto parte da *YOLO + rete SMD locale (v3)*, che richiede
 `models/smd/smd_classifier.pt` e
 `models/yolo/pcb_component_detector_yolov8m_best.pt` più i pacchetti di
-entrambi `requirements-smd.txt` e `requirements-yolo-pt.txt`. Questi pesi non
+entrambi `requirements/smd.txt` e `requirements/yolo-pt.txt`. Questi pesi non
 sono distribuiti con i sorgenti e un checkout nuovo non ha le cartelle
 `models/`: crea `models/yolo/` e `models/smd/` quando aggiungi i file. Senza di
 essi l'analisi di una scheda si ferma con un avviso prima di qualunque chiamata

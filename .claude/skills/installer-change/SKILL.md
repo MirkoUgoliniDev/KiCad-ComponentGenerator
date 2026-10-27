@@ -22,7 +22,7 @@ tools/make_seed_db.py           seed profile DB generated from the code and veri
 tools/collect_licenses.py       license files of the build env + CPython -> _internal\licenses
 tools/make_app_icon.py          SVG -> .ico
 tools/make_installer_assets.py  banner, dialog image, license RTF
-requirements-release-constraints.txt  exact versions of release builds (pip -c)
+requirements/release-constraints.txt  exact versions of release builds (pip -c)
 .github/workflows/release.yml   tag -> build job (read-only) -> publish job (write) -> Release
 docs/PACKAGING-WINDOWS-MSI.md   and docs/INSTALLATION-WINDOWS.md
 ```

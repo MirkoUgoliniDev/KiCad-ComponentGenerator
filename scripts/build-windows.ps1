@@ -7,7 +7,7 @@ the MSI installer (WiX 3.14).
 Steps, each one stopping the build on failure:
   1. dedicated build environment .venv-build (never the development .venv),
      recreated when its Python is not 3.13, with the exact versions of
-     requirements-release-constraints.txt;
+     requirements/release-constraints.txt;
   2. initial profile database generated from the code by
      tools/make_seed_db.py (never a copy of data/analysis_profiles.sqlite3,
      which can hold stale defaults and developer metadata) and verified;
@@ -101,9 +101,9 @@ if (-not (Test-Path $python)) {
     Assert-LastCommand 'Creating .venv-build'
 }
 Write-Host 'Installing build requirements...'
-& $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements-build.txt') `
-    -c (Join-Path $Root 'requirements-release-constraints.txt')
-Assert-LastCommand 'Installing requirements-build.txt'
+& $python -m pip install --disable-pip-version-check -q -r (Join-Path $Root 'requirements/build.txt') `
+    -c (Join-Path $Root 'requirements/release-constraints.txt')
+Assert-LastCommand 'Installing requirements/build.txt'
 
 # -- 2. Initial profile database generated from the code -------------------------
 $seed = Join-Path $Root 'build\seed\data\analysis_profiles.sqlite3'

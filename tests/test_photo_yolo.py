@@ -135,7 +135,7 @@ def test_missing_optional_runtime_is_actionable(setup, monkeypatch, package):
             raise ImportError(f"missing {package}")
         return original(name, *args, **kwargs)
     monkeypatch.setattr(builtins, "__import__", guarded)
-    with pytest.raises(ValueError, match="requirements-yolo.txt"):
+    with pytest.raises(ValueError, match="requirements/yolo.txt"):
         yolo.validate_yolo_setup()
 
 

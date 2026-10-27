@@ -93,8 +93,8 @@ overhang the PCB and is not shifted to force its envelope inside the board.
 ## Local runtime
 
 ```powershell
-.venv/Scripts/python.exe -m pip install -r requirements-yolo.txt      # .onnx (onnxruntime)
-.venv/Scripts/python.exe -m pip install -r requirements-yolo-pt.txt   # .pt (Ultralytics / PyTorch)
+.venv/Scripts/python.exe -m pip install -r requirements/yolo.txt      # .onnx (onnxruntime)
+.venv/Scripts/python.exe -m pip install -r requirements/yolo-pt.txt   # .pt (Ultralytics / PyTorch)
 ```
 
 ONNX Runtime runs on CPU. The ONNX contract is a fixed float32 input
@@ -118,7 +118,7 @@ The detector loads both formats, chosen by the file extension:
 | Extension | Runtime | Output read by the detector |
 |---|---|---|
 | `.onnx` | onnxruntime (CPU) | raw `[1, 4 + classes, 8400]` |
-| `.pt` | PyTorch through Ultralytics (`requirements-yolo-pt.txt`) | standard head (YOLOv8): raw `[1, 4 + classes, 8400]`; end-to-end head (YOLO26, YOLOv10): the official one-to-one output `[1, 4 + classes, 300]` |
+| `.pt` | PyTorch through Ultralytics (`requirements/yolo-pt.txt`) | standard head (YOLOv8): raw `[1, 4 + classes, 8400]`; end-to-end head (YOLO26, YOLOv10): the official one-to-one output `[1, 4 + classes, 300]` |
 
 Every model goes through the same letterbox, thresholds, NMS, audit and
 review code; only the object running the network differs

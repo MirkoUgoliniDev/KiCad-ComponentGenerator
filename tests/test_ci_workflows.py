@@ -95,7 +95,7 @@ def test_the_push_workflow_is_read_only_and_uses_the_release_dependencies():
     assert workflow["jobs"]["test"]["permissions"] == {"contents": "read"}
     assert "secrets." not in text.replace(" no secrets.", "")  # expressions, not the comment
     assert "${{ secrets" not in text
-    assert "-c requirements-release-constraints.txt" in text
+    assert "-c requirements/release-constraints.txt" in text
     checkout = [s for s in workflow["jobs"]["test"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout")]
     assert checkout and checkout[0]["with"]["persist-credentials"] is False
 
