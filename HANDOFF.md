@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — FATTO, NON committato (attende OK): skill e agente per produrre e pubblicare il setup
+## 27/10 — FATTO e committato `5722943` su ADVANCED (NON pushato, NON mergiato): skill e agente per produrre e pubblicare il setup
 
 Utente: «se io volessi realizzare un pacchetto per distribuire il software
 come un setup è già previsto? aggiungi agent e skill specifica ok?».
