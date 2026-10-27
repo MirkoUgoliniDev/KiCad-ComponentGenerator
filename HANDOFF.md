@@ -1,5 +1,16 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — FATTO, NON committato (attende OK): MEMORY.md e REVIEW_REPORT_2026-10-09.txt in docs/
+
+Utente: «gli altri .md possono essere messi dentro la cartella docs?» ->
+proposta accettata («ok»). Si spostano SOLO docs/MEMORY.md e
+docs/REVIEW_REPORT_2026-10-09.txt (git mv); riferimenti: AGENTS.md riga 4,
+due commenti in kicadgen/gui/main_window.py (~17416-17419). RESTANO nella
+radice, per scelta motivata: README.md/README.it.md (GitHub), AGENTS.md
+(convenzione agenti), HANDOFF.md (ripresa, regole), THIRD_PARTY_NOTICES.md
+(spec PyInstaller, finestra licenze, catalogo, test installer).
+ESITO: spostati, riferimenti aggiornati, tests/test_documentation.py verde.
+
 ## 27/10 — FATTO e committato `7f2d1c7` su ADVANCED (NON pushato, NON mergiato): requirements opzionali in una cartella `requirements/`
 
 ESITO: spostati con git mv; 16 file aggiornati + commento di tests/conftest.py
