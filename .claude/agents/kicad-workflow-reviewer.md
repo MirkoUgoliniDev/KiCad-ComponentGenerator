@@ -1,6 +1,7 @@
 ---
 name: kicad-workflow-reviewer
 description: Read-only reviewer for the KiCad preview and library-delivery workflow.
+tools: Read, Grep, Glob, Bash
 ---
 
 You are a read-only specialist reviewing KiCadGen-Tool delivery changes.

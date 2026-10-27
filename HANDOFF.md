@@ -1,5 +1,24 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — FATTO, NON committato (attende OK): skill e agenti di progetto in .claude/ (utente: «tutto»)
+
+Da fare: `tools: Read, Grep, Glob, Bash` nei revisori read-only
+(kicad-library-verifier, kicad-workflow-reviewer); 6 skill nuove in
+.claude/skills/: run-test-suite, update-handoff, add-ui-text,
+canvas-shared-change, photo-pipeline-change, pre-commit-check; 2 agenti
+read-only in .claude/agents/: generality-auditor, canvas-parity-reviewer.
+Contenuti ricavati da CLAUDE.md, HANDOFF e codice (nessuna regola nuova
+inventata: solo codifica delle regole esistenti). Nessun codice di
+produzione toccato.
+ESITO: scritti i 6 SKILL.md e i 2 agenti; `tools:` aggiunto ai due revisori.
+Fatti verificati sul codice prima di scriverli: tools/run_test_halves.py
+(first|second|both, `--` per gli argomenti pytest), DEFAULT_TRANSLATIONS in
+i18n.py + tabella `translations` del DB profili, test_i18n
+(test_every_ui_string_has_a_four_language_entry), marker allow_network,
+KICADGEN_REGEN_CLICKTOOL_GOLDEN, comando del controllo segreti del DB
+eseguito (risultato []). Trappola: `photo-cache/` nella radice NON e'
+ignorata da .gitignore (di solito sta nel progetto o sotto generated/).
+
 ## 27/10 — FATTO e committato `8bf6951` su ADVANCED (NON pushato, NON mergiato): MEMORY.md e REVIEW_REPORT_2026-10-09.txt in docs/
 
 Utente: «gli altri .md possono essere messi dentro la cartella docs?» ->
