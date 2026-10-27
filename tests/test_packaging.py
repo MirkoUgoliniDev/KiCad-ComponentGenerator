@@ -68,8 +68,19 @@ def test_build_outputs_and_environment_are_ignored_by_git():
         assert entry in ignored, entry
 
 
+#: Every PowerShell script of the repository, read from the folder so that a new
+#: script is parsed too without anyone adding it to a list.
+POWERSHELL_SCRIPTS = sorted(path.name for path in (ROOT / "scripts").glob("*.ps1"))
+
+
+def test_the_known_powershell_scripts_are_found():
+    """Negative of the parse test: an empty glob would make it pass vacuously."""
+    assert {"build-windows.ps1", "build-msi.ps1", "publish-release.ps1",
+            "configure-github-repo.ps1"} <= set(POWERSHELL_SCRIPTS)
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="PowerShell non disponibile")
-@pytest.mark.parametrize("script", ["build-windows.ps1", "build-msi.ps1", "publish-release.ps1"])
+@pytest.mark.parametrize("script", POWERSHELL_SCRIPTS)
 def test_the_powershell_scripts_parse(script):
     """Come la skill installer-change: il parser di PowerShell, senza eseguire nulla."""
     path = ROOT / "scripts" / script

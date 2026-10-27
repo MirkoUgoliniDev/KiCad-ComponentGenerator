@@ -1,10 +1,46 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — FATTO e committato su ADVANCED, mergiato in main (hash nel log git): script per le impostazioni di sicurezza del repository GitHub
+
+Utente: «mi serve uno script per sistemare in maniera batch tutte le
+configurazioni del repository GitHub ... voglio essere sicuro che la gente
+non possa fare casini, ma non lo voglio fare a mano» -> piano accettato
+(«ok fai lo script che poi lo lancio ... deve coprire tutti i buchi»).
+Stato letto il 27/10 (sola lettura): nessuna protezione su main/ADVANCED,
+nessun ruleset, secret scanning + push protection spenti, Dependabot spento,
+segnalazione privata vulnerabilita' spenta, Actions allowed_actions=all,
+sha_pinning_required=false, approvazione PR esterne solo first_time,
+token Actions gia' read e senza approvazione PR, projects acceso, unico
+collaboratore l'utente, variabile WIX314_SHA256 assente.
+Da fare: scripts/configure-github-repo.ps1, senza parametri = solo confronto
+«oggi / dopo», con -Apply = applica, idempotente. Ruleset rami main+ADVANCED
+(no force push, no cancellazione, push diretto PERMESSO), ruleset tag v*
+(no spostamento, no cancellazione), secret scanning + push protection,
+Dependabot alerts + security updates, private vulnerability reporting,
+CodeQL default setup, Actions solo GitHub-owned con SHA obbligatorio,
+approvazione per tutti i contributori esterni, token read, projects spento.
+Lo script lo LANCIA L'UTENTE: io non applico nulla su GitHub.
+ESITO: scripts/configure-github-repo.ps1 scritto; analizzato senza errori in PowerShell 5.1 e 7.6; eseguito SOLO in lettura (senza -Apply): 11 impostazioni da cambiare, 1 gia' a posto (token Actions). sha_pinning_required NON imposto di proposito: i workflow gestiti da GitHub (CodeQL default setup, Dependabot) non sono fissati a un hash e verrebbero bloccati; i nostri workflow sono gia' fissati. tests/test_packaging.py ora analizza OGNI scripts/*.ps1 (glob) con un test negativo contro il glob vuoto: 28 verdi con test_documentation. Suite completa NON rieseguita (solo script PowerShell + test). Skill build-installer: riga che chiede di lanciare lo script prima di una release pubblica. DA FARE (utente): lanciare lo script con -Apply.
+
+## 27/10 — FATTO (fuori dal repository): immagine e testo per LinkedIn
+
+Utente: «vorrei pubblicare su LinkedIn, mi prepari un'immagine molto
+accattivante e un testo in inglese». File nello scratchpad della sessione
+(NON nel repository): linkedin/kicadgen-linkedin.png (1080x1350, dalle
+schermate vere del README + foto docs/ESP32/AltaRisoluzione.jpg),
+linkedin/post.txt, linkedin/make_post_image.py. Nessuna pubblicazione fatta.
+
+IN CODA (utente, 27/10): «dopo facciamo l'installer scaricabile ok?» ->
+skill build-installer + agente release-readiness-reviewer. Nessuna release
+mai pubblicata (v1.0.0 solo build locale). Decisioni aperte per l'utente:
+versione, SHA-256 di WiX (in CI: variabile WIX314_SHA256), firma digitale,
+licenza pesi YOLO (esclusi), sorgenti GPL/LGPL, prova in VM.
+
 ## 27/10 — COMMIT, PUSH, MERGE (utente: «ok puoi committare e pushare poi mergiare in main e pushare?»)
 
 Suite 9809 (A 6090/10/19, B 3719/2, 0 falliti). Due commit su ADVANCED
 (correzione ricerca FreeCAD/KiCad; README + screenshot + script), push di
-ADVANCED, merge in main, push di main. Commit: `2b8a993` (fix ricerca), `b4a3346` (README); merge in main: vedi sotto.
+ADVANCED, merge in main, push di main. Commit: `2b8a993` (fix ricerca), `b4a3346` (README); merge in main `643c6b1`, ADVANCED e main pushati.
 
 ## 27/10 — FATTO, committato su ADVANCED (hash nella sezione sotto): README con screenshot e diagrammi Mermaid
 
