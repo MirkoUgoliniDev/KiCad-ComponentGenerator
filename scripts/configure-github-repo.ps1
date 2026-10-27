@@ -62,22 +62,30 @@ function Invoke-GhApi {
     Never throws for an HTTP error: callers decide. Native stderr must not
     become a terminating error under 'Stop' (Windows PowerShell 5.1 turns it
     into NativeCommandError), hence the local 'Continue'.
+    The body goes through a UTF-8 file without BOM: piped into a native
+    program, Windows PowerShell 5.1 re-encodes the string and GitHub answers
+    «Problems parsing JSON» (seen on the first -Apply run, 2026-10-27).
     #>
     param([string]$Method, [string]$Path, $Body = $null)
     $ErrorActionPreference = 'Continue'
     $errFile = [System.IO.Path]::GetTempFileName()
+    $bodyFile = $null
     try {
         $ghArgs = @('api', '-X', $Method, '-H', 'Accept: application/vnd.github+json', $Path)
         if ($null -ne $Body) {
+            $bodyFile = [System.IO.Path]::GetTempFileName()
             $json = $Body | ConvertTo-Json -Depth 20 -Compress
-            $out = $json | & gh @ghArgs --input - 2> $errFile
-        } else {
-            $out = & gh @ghArgs 2> $errFile
+            [System.IO.File]::WriteAllText($bodyFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+            $ghArgs += @('--input', $bodyFile)
         }
+        $out = & gh @ghArgs 2> $errFile
         $code = $LASTEXITCODE
-        $err = (Get-Content -Raw -ErrorAction SilentlyContinue $errFile)
+        # Keep gh's own lines, not the PowerShell error-record decoration around them.
+        $err = (@(Get-Content -ErrorAction SilentlyContinue $errFile) |
+                Where-Object { $_ -match '^\s*(gh: |\{|This API|To request)' }) -join ' '
     } finally {
         Remove-Item -Force -ErrorAction SilentlyContinue $errFile
+        if ($bodyFile) { Remove-Item -Force -ErrorAction SilentlyContinue $bodyFile }
     }
     $text = ($out | Out-String).Trim()
     $data = $null
@@ -100,6 +108,19 @@ function Assert-GhReady {
     $ErrorActionPreference = 'Continue'
     & gh auth status 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'gh is not logged in. Run: gh auth login' }
+}
+
+#: Token scopes the changes need: 'repo' for the settings, 'admin:repo_hook'
+#: for the CodeQL default setup (GitHub refuses it otherwise).
+$RequiredScopes = @('repo', 'admin:repo_hook')
+
+function Get-MissingScopes {
+    <# Scopes of $RequiredScopes that the gh token lacks, read from 'gh auth status'. #>
+    $ErrorActionPreference = 'Continue'
+    $status = (& gh auth status 2>&1 | Out-String)
+    $line = ($status -split "`n" | Where-Object { $_ -match 'Token scopes' } | Select-Object -First 1)
+    $have = @([regex]::Matches("$line", "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+    return @($RequiredScopes | Where-Object { $have -notcontains $_ })
 }
 
 function Resolve-Repo {
@@ -310,6 +331,15 @@ if (-not $Apply) {
     if ($todo.Count -eq 0) { Write-Host 'Everything is already as wanted.' -ForegroundColor Green }
     else { Write-Host "$($todo.Count) setting(s) to change. Run again with -Apply to change them." -ForegroundColor Yellow }
     exit 0
+}
+
+$missing = @(Get-MissingScopes)
+if ($missing.Count -gt 0) {
+    Write-Host ''
+    Write-Host "The gh login lacks the scope(s): $($missing -join ', '). Nothing was changed." -ForegroundColor Red
+    Write-Host 'Grant them (a browser page opens), then run this script again with -Apply:' -ForegroundColor Yellow
+    Write-Host "  gh auth refresh -h github.com -s $($missing -join ',')"
+    exit 1
 }
 
 $failures = @()

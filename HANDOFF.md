@@ -1,5 +1,23 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 27/10 — CORRETTO e committato (hash nel log git): configure-github-repo.ps1 falliva con -Apply
+
+Prima esecuzione dell'utente con -Apply: 2 impostazioni applicate (Dependabot
+alerts, private vulnerability reporting: le due chiamate SENZA corpo), le
+altre 9 «Problems parsing JSON (HTTP 400)». CAUSA: in Windows PowerShell 5.1
+la stringa JSON passata via pipe a gh.exe viene ricodificata; io avevo
+provato solo la lettura, mai l'invio di un corpo (errore mio). CORREZIONE:
+corpo scritto in un file temporaneo UTF-8 senza BOM e passato con
+--input <file>; verificato in PS 5.1 con un PATCH senza effetti
+(has_issues=true, gia' true): exit 0. Inoltre CodeQL richiede lo scope
+admin:repo_hook che il token NON ha (ha gist, read:org, repo, workflow): ora
+lo script lo controlla PRIMA di cambiare qualcosa e stampa
+`gh auth refresh -h github.com -s admin:repo_hook`. Messaggi d'errore
+ripuliti dal contorno NativeCommandError. Stato letto dopo: 9 da cambiare,
+3 a posto. DA FARE (utente): gh auth refresh ..., poi -Apply. Commit della
+correzione: chiedere l'OK.
+APPLICATO DALL'UTENTE il 27/10: tutte e 12 le impostazioni a posto (verificato da gh api: ruleset rami e tag attivi, secret scanning + push protection + Dependabot updates abilitati, Actions = selected). Restano a mano: 2FA sull'account, variabile WIX314_SHA256.
+
 ## 27/10 — FATTO e committato `09d05db` su ADVANCED, merge `58ee5f3` in main, entrambi pushati: script per le impostazioni di sicurezza del repository GitHub
 
 Utente: «mi serve uno script per sistemare in maniera batch tutte le
