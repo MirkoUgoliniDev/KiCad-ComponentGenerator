@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 27/10 — FATTO, NON committato (attende OK): MEMORY.md e REVIEW_REPORT_2026-10-09.txt in docs/
+## 27/10 — FATTO e committato `8bf6951` su ADVANCED (NON pushato, NON mergiato): MEMORY.md e REVIEW_REPORT_2026-10-09.txt in docs/
 
 Utente: «gli altri .md possono essere messi dentro la cartella docs?» ->
 proposta accettata («ok»). Si spostano SOLO docs/MEMORY.md e
