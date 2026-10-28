@@ -1,14 +1,22 @@
 """@brief Classify SMD components locally and match them to installed KiCad models.
 
-@details The ``models/smd/smd_classifier.pt`` checkpoint (local, not in the installer) predicts visual
-component class and orientation from detector boxes. With photo calibration,
-the results are passed to KiCadGen's existing STEP and footprint matcher.
-Only the checkpoint is needed at runtime; the training project, YAML catalog,
-photos and dataset are not loaded. The classifier checkpoint has its own model
-role and is excluded from the local YOLO detector picker.
+@details The ``models/smd/smd_classifier.pt`` checkpoint, or its ONNX export
+``models/smd/smd_classifier.onnx`` (the file the Windows installer ships,
+made by ``tools/export_smd_onnx.py``), predicts visual component class and
+orientation from detector boxes. With photo calibration, the results are
+passed to KiCadGen's existing STEP and footprint matcher. Only the weights
+file is needed at runtime; the training project, YAML catalog, photos and
+dataset are not loaded. The classifier has its own model role and is
+excluded from the local YOLO detector picker.
 
-@note PyTorch and torchvision are optional and imported only when this service
-is used. Checkpoints are loaded with ``weights_only=True``.
+@note PyTorch and torchvision are optional and imported only for a ``.pt``
+file (loaded with ``weights_only=True``); an ``.onnx`` file needs
+onnxruntime only. Both formats go through the same crops, the same
+preprocessing (PIL letterbox, then NumPy normalisation) and the same
+four-view vote, so they give the same classes: the ONNX graph receives the
+normalised tensor and returns the two heads' logits. The checkpoint's
+metadata travel in the ONNX file under the ``smd_checkpoint`` key as JSON
+(see ONNX_METADATA_KEY and CHECKPOINT_METADATA_KEYS).
 @note Preprocessing contract (review 2026-10-27, F8): the crops are prepared
     exactly as the EXTERNAL training script prepared them -- letterbox to
     `_IMG_SIZE` with bicubic resampling, grey padding `_PAD`, ImageNet
@@ -20,6 +28,7 @@ is used. Checkpoints are loaded with ``weights_only=True``.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 from collections.abc import Mapping
@@ -41,6 +50,18 @@ _PAD = (114, 114, 114)
 _IMG_SIZE = 224
 _ANGLES = (0, 90, 180, 270)
 _MAX_CHECKPOINT_BYTES = 256 * 1024 * 1024
+
+#: ONNX metadata key holding the checkpoint's non-tensor fields as JSON.
+ONNX_METADATA_KEY = "smd_checkpoint"
+#: Checkpoint keys copied into the ONNX metadata: what validation, inference
+#: and the model window read. `args` is NOT among them: it records the
+#: training command with the maintainer's local output path, and `state_dict`
+#: is the graph itself.
+CHECKPOINT_METADATA_KEYS = ("format", "arch", "img_size", "classes", "orientations",
+                            "suggested_threshold", "preprocessing", "trained", "epoch",
+                            "catalog_sha256", "metrics")
+#: Names of the ONNX graph's single input and two outputs (export contract).
+ONNX_INPUT, ONNX_OUTPUTS = "images", ("class_logits", "rotation_logits")
 
 #: The preprocessing recipe this module applies to every crop, in the form a
 #: checkpoint may declare under its `preprocessing` key. Values are plain
@@ -108,6 +129,82 @@ def _runtime():
     return torch, transforms, PackageNet
 
 
+def _onnx_runtime():
+    """Load onnxruntime, the only runtime an .onnx network needs."""
+    try:
+        import onnxruntime
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            tx("Per usare la rete SMD in formato ONNX installa il runtime: {command}",
+               command="python -m pip install -r requirements/yolo.txt")
+        ) from exc
+    return onnxruntime
+
+
+def _is_onnx(path) -> bool:
+    """True for a weights file read with onnxruntime, by its extension."""
+    return Path(path).suffix.lower() == ".onnx"
+
+
+def _preprocess(views, np):
+    """Letterboxed PIL crops -> normalised float32 batch [N, 3, S, S].
+
+    The same operations, in the same order, as torchvision's ToTensor
+    (uint8 / 255) followed by Normalize ((x - mean) / std) in float32, so
+    that the batch is bit-identical to the one the training script built;
+    tests compare it with torchvision's output.
+    """
+    letterbox = _Letterbox()
+    mean = np.asarray(_MEAN, np.float32).reshape(3, 1, 1)
+    std = np.asarray(_STD, np.float32).reshape(3, 1, 1)
+    batch = []
+    for view in views:
+        pixels = np.asarray(letterbox(view), np.uint8).transpose(2, 0, 1)
+        scaled = pixels.astype(np.float32) / np.float32(255)
+        batch.append((scaled - mean) / std)
+    return np.ascontiguousarray(np.stack(batch), dtype=np.float32)
+
+
+def _softmax(logits, np):
+    """Row-wise softmax of a float32 [N, K] array, computed in float64 like torch's float32 within rounding."""
+    shifted = logits.astype(np.float64) - logits.max(axis=1, keepdims=True)
+    exp = np.exp(shifted)
+    return exp / exp.sum(axis=1, keepdims=True)
+
+
+def _open_network(path, device="auto"):
+    """Validate a weights file and return (metadata, network).
+
+    `network(batch)` takes a normalised float32 [N, 3, S, S] NumPy array and
+    returns the two heads' logits as float32 NumPy arrays [N, classes] and
+    [N, 4]: a PackageNet on `device` for a .pt, an onnxruntime session (CPU)
+    for an .onnx. Only this object differs between the formats.
+    """
+    import numpy as np
+    if _is_onnx(path):
+        session, metadata = _load_onnx(path)
+        input_name = session.get_inputs()[0].name
+
+        def run_onnx(batch):
+            class_logits, rotation_logits = session.run(None, {input_name: batch})
+            return (np.asarray(class_logits, np.float32), np.asarray(rotation_logits, np.float32))
+        return metadata, run_onnx
+    torch, _, PackageNet = _runtime()
+    checkpoint = _load_checkpoint(path, torch)
+    _validate_checkpoint(checkpoint, path, torch, PackageNet)
+    net = PackageNet(len(checkpoint["classes"]))
+    net.load_state_dict(checkpoint["state_dict"])
+    selected_device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
+    net.to(selected_device).eval()
+
+    def run_torch(batch):
+        with torch.inference_mode():
+            class_logits, rotation_logits = net(torch.from_numpy(batch).to(selected_device))
+        return (class_logits.detach().cpu().numpy().astype(np.float32),
+                rotation_logits.detach().cpu().numpy().astype(np.float32))
+    return checkpoint, run_torch
+
+
 def _crop(image, box, margin):
     x1, y1, x2, y2 = box
     dx, dy = (x2 - x1) * margin, (y2 - y1) * margin
@@ -121,22 +218,75 @@ def _crop(image, box, margin):
 def validate_smd_setup(model_path=None):
     """@brief Validate the optional local SMD classifier checkpoint.
 
-    @param model_path Optional checkpoint path; defaults to the SMD
-        classifier resource.
-    @return The validated checkpoint path.
-    @throws FileNotFoundError When the checkpoint is missing.
-    @throws RuntimeError When PyTorch/torchvision are unavailable.
-    @throws ValueError When the checkpoint metadata is incompatible.
+    @param model_path Optional weights path (.pt or .onnx); defaults to the
+        SMD classifier resource (app_paths.smd_model_path).
+    @return The validated weights path.
+    @throws FileNotFoundError When the file is missing.
+    @throws RuntimeError When the runtime of the format (PyTorch/torchvision
+        for .pt, onnxruntime for .onnx) is unavailable.
+    @throws ValueError When the metadata or the network are incompatible.
     @note Call before paid extraction so a missing or incompatible local model
         fails before any remote work begins.
     """
     path = Path(model_path) if model_path is not None else smd_model_path()
     if not path.is_file():
         raise FileNotFoundError(tx("Rete SMD non trovata: {path}", path=path))
+    if _is_onnx(path):
+        _load_onnx(path)
+        return path
     torch, _, PackageNet = _runtime()
     checkpoint = _load_checkpoint(path, torch)
     _validate_checkpoint(checkpoint, path, torch, PackageNet)
     return path
+
+
+def _load_onnx(path):
+    """Open an .onnx network, validate its metadata and its graph; return (session, metadata).
+
+    The metadata are the checkpoint fields (CHECKPOINT_METADATA_KEYS) as
+    JSON under ONNX_METADATA_KEY. The graph must take one float32 input
+    [N, 3, img_size, img_size] (N fixed or symbolic) and return exactly two
+    float32 outputs [N, classes] and [N, 4], in this order: the class head
+    and the rotation head of PackageNet.
+    """
+    size = Path(path).stat().st_size
+    if size <= 0 or size > _MAX_CHECKPOINT_BYTES:
+        raise ValueError(tx("Dimensione checkpoint SMD non valida: {path}", path=path))
+    onnxruntime = _onnx_runtime()
+    try:
+        options = onnxruntime.SessionOptions()
+        options.intra_op_num_threads = 4
+        session = onnxruntime.InferenceSession(str(path), sess_options=options,
+                                               providers=["CPUExecutionProvider"])
+    except Exception as exc:
+        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
+                            path=path)) from exc
+    raw = dict(session.get_modelmeta().custom_metadata_map).get(ONNX_METADATA_KEY)
+    try:
+        metadata = json.loads(raw) if isinstance(raw, str) else None
+    except ValueError:
+        metadata = None
+    if not isinstance(metadata, Mapping):
+        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
+                            path=path))
+    _validate_metadata(metadata, path)
+    inputs, outputs = session.get_inputs(), session.get_outputs()
+
+    def batch_shape(shape, last):
+        # The batch axis may be symbolic (dynamic export) or a fixed count.
+        return (len(shape) == len(last) + 1 and (not isinstance(shape[0], int) or shape[0] >= 1)
+                and list(shape[1:]) == list(last))
+    if (len(inputs) != 1 or inputs[0].type != "tensor(float)"
+            or not batch_shape(list(inputs[0].shape), [3, _IMG_SIZE, _IMG_SIZE])):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="ONNX input"))
+    expected = ([len(metadata["classes"])], [4])
+    if (len(outputs) != 2 or any(output.type != "tensor(float)" for output in outputs)
+            or not all(batch_shape(list(output.shape), last)
+                       for output, last in zip(outputs, expected))):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="ONNX outputs"))
+    return session, metadata
 
 
 #: Below this many validation samples the declared accuracy says little about
@@ -155,12 +305,16 @@ def describe_smd_checkpoint(model_path=None) -> dict:
         catalog_sha256, and validation (samples, accuracy, balanced_accuracy)
         when the checkpoint carries metrics, else None.
     @throws The same exceptions as validate_smd_setup.
-    @note Loads with ``weights_only=True`` (_load_checkpoint): no code from
-        the file runs, so the model window may call this on its own.
+    @note Loads with ``weights_only=True`` (_load_checkpoint) or reads the
+        ONNX metadata: no code from the file runs, so the model window may
+        call this on its own.
     """
     path = validate_smd_setup(model_path)
-    torch, _, _ = _runtime()
-    checkpoint = _load_checkpoint(path, torch)
+    if _is_onnx(path):
+        checkpoint = _load_onnx(path)[1]
+    else:
+        torch, _, _ = _runtime()
+        checkpoint = _load_checkpoint(path, torch)
     metrics = checkpoint.get("metrics") if isinstance(checkpoint.get("metrics"), Mapping) else {}
     val = metrics.get("val") if isinstance(metrics.get("val"), Mapping) else None
     validation = None
@@ -193,32 +347,9 @@ def _validate_checkpoint(checkpoint, path, torch, PackageNet):
     state-dict schema without allocating a second ResNet's weights during the
     preflight. Inference still loads into its real model with strict matching.
     """
-    if not isinstance(checkpoint, Mapping):
-        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
-                            path=path))
-    if (checkpoint.get("format") != _FORMAT or checkpoint.get("arch") != "resnet18"
-            or checkpoint.get("img_size") != _IMG_SIZE):
-        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
-                            path=path))
-    validate_preprocessing(checkpoint, path)
-    classes = checkpoint.get("classes")
-    orientations = checkpoint.get("orientations")
-    threshold = checkpoint.get("suggested_threshold", 0.0)
+    _validate_metadata(checkpoint, path)
+    classes = checkpoint["classes"]
     state = checkpoint.get("state_dict")
-    if (not isinstance(classes, list) or not classes or len(classes) > 512
-            or any(not isinstance(label, str) or not label.strip() for label in classes)
-            or len(set(classes)) != len(classes)):
-        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
-                            path=path, reason="classes"))
-    if (not isinstance(orientations, Mapping) or set(orientations) != set(classes)
-            or any(value not in ("none", "axis", "full")
-                   for value in orientations.values())):
-        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
-                            path=path, reason="orientations"))
-    if (isinstance(threshold, bool) or not isinstance(threshold, Real)
-            or not math.isfinite(float(threshold)) or not 0 <= float(threshold) <= 1):
-        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
-                            path=path, reason="suggested_threshold"))
     if not isinstance(state, Mapping):
         raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
                             path=path, reason="state_dict"))
@@ -243,6 +374,39 @@ def _validate_checkpoint(checkpoint, path, torch, PackageNet):
                 torch.isfinite(value).all().item()):
             raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
                                 path=path, reason=f"state_dict {name} non finito"))
+
+
+def _validate_metadata(checkpoint, path):
+    """Check the fields both formats share: format, architecture, recipe, classes, orientations, threshold.
+
+    The tensors are checked apart: the state dict for a .pt
+    (_validate_checkpoint), the graph's shapes for an .onnx (_load_onnx).
+    """
+    if not isinstance(checkpoint, Mapping):
+        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
+                            path=path))
+    if (checkpoint.get("format") != _FORMAT or checkpoint.get("arch") != "resnet18"
+            or checkpoint.get("img_size") != _IMG_SIZE):
+        raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
+                            path=path))
+    validate_preprocessing(checkpoint, path)
+    classes = checkpoint.get("classes")
+    orientations = checkpoint.get("orientations")
+    threshold = checkpoint.get("suggested_threshold", 0.0)
+    if (not isinstance(classes, list) or not classes or len(classes) > 512
+            or any(not isinstance(label, str) or not label.strip() for label in classes)
+            or len(set(classes)) != len(classes)):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="classes"))
+    if (not isinstance(orientations, Mapping) or set(orientations) != set(classes)
+            or any(value not in ("none", "axis", "full")
+                   for value in orientations.values())):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="orientations"))
+    if (isinstance(threshold, bool) or not isinstance(threshold, Real)
+            or not math.isfinite(float(threshold)) or not 0 <= float(threshold) <= 1):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="suggested_threshold"))
 
 
 def validate_preprocessing(checkpoint, path):
@@ -630,75 +794,65 @@ def classify_photo_boxes(
     if not crops:
         return []
 
-    torch, transforms, PackageNet = _runtime()
+    import numpy as np
     path = Path(model_path) if model_path is not None else smd_model_path()
-    checkpoint = _load_checkpoint(path, torch)
-    _validate_checkpoint(checkpoint, path, torch, PackageNet)
+    checkpoint, network = _open_network(path, device)
     classes, orientations = list(checkpoint["classes"]), checkpoint["orientations"]
-    net = PackageNet(len(classes))
-    net.load_state_dict(checkpoint["state_dict"])
-    selected_device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
-    net.to(selected_device).eval()
-    transform = transforms.Compose([
-        _Letterbox(), transforms.ToTensor(), transforms.Normalize(_MEAN, _STD),
-    ])
     threshold = max(0.5, float(checkpoint.get("suggested_threshold") or 0))
     results = []
-    with torch.inference_mode():
-        for start in range(0, len(crops), batch_size):
-            if cancel is not None and cancel.is_set():
-                raise RuntimeError(tx("Classificazione SMD annullata"))
-            chunk = crops[start:start + batch_size]
-            class_sum = rotation_sum = None
-            # Pose chosen by each of the four rotated views, brought back to
-            # the initial orientation: if they do not agree, the mean hides a
-            # coin toss (audit 2026-10-02: SOD-123F at 0.54/0.46).
-            view_poses = []
-            for turn in range(4):
-                views = [crop.rotate(90 * turn, expand=True) if turn else crop for crop in chunk]
-                tensor = torch.stack([transform(view) for view in views]).to(selected_device)
-                class_logits, rotation_logits = net(tensor)
-                probabilities = torch.softmax(class_logits, dim=1)
-                turns = torch.roll(torch.softmax(rotation_logits, dim=1), -turn, dims=1)
-                class_sum = probabilities if class_sum is None else class_sum + probabilities
-                rotation_sum = turns if rotation_sum is None else rotation_sum + turns
-                view_poses.append(turns.argmax(dim=1).cpu().tolist())
-            class_probs, rotation_probs = (class_sum / 4).cpu().tolist(), (rotation_sum / 4).cpu().tolist()
-            for offset, (probabilities, turns) in enumerate(zip(class_probs, rotation_probs)):
-                ranked = sorted(zip(classes, probabilities), key=lambda item: item[1], reverse=True)
-                label, confidence = ranked[0]
-                accepted = label != "_other" and confidence >= threshold
-                box = clean_boxes[start + offset]
-                rotation_kind = orientations.get(label, "none") if accepted else "none"
-                rotation, rotation_confidence, rotation_basis = _rotation(rotation_kind, turns, box)
-                views_agree = len({poses[offset] for poses in view_poses}) == 1
-                measured = measured_rows[start + offset]
-                if measured is not None:
-                    size = [measured["length_mm"], measured["width_mm"]]
-                    size_basis = "measured_edges"
-                else:
-                    size = ([round((box[2] - box[0]) * float(mm_per_pixel[0]), 3),
-                             round((box[3] - box[1]) * float(mm_per_pixel[1]), 3)]
-                            if mm_per_pixel is not None else None)
-                    size_basis = "detector_box"
-                kind, package = _kind_package(label) if accepted else ("generic", "")
-                status = ("needs_scale" if size is None else "unresolved") if accepted else (
-                    "unknown" if label == "_other" else "low_confidence")
-                results.append({
-                    "box_px": list(box), "class": label, "kind": kind, "package": package,
-                    "body": _body_topology(label) if accepted else None,
-                    "class_confidence": confidence, "accepted": accepted, "threshold": threshold,
-                    "rotation_deg": rotation, "rotation_confidence": rotation_confidence,
-                    "rotation_basis": rotation_basis,
-                    "rotation_kind": rotation_kind, "rotation_views_agree": views_agree,
-                    "size_basis": size_basis, "measured_mm": measured,
-                    "terminal_count": CLASS_TERMINAL_COUNTS.get(label) if accepted else None,
-                    "size_mm": size, "footprint": None, "footprint_status": status,
-                    "footprint_candidates": [], "step_model": None, "step_candidates": [],
-                    "model_match": None, "model_status": status,
-                    "top_classes": [{"class": name, "confidence": probability}
-                                    for name, probability in ranked[:3]],
-                })
+    for start in range(0, len(crops), batch_size):
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError(tx("Classificazione SMD annullata"))
+        chunk = crops[start:start + batch_size]
+        class_sum = rotation_sum = None
+        # Pose chosen by each of the four rotated views, brought back to
+        # the initial orientation: if they do not agree, the mean hides a
+        # coin toss (audit 2026-10-02: SOD-123F at 0.54/0.46).
+        view_poses = []
+        for turn in range(4):
+            views = [crop.rotate(90 * turn, expand=True) if turn else crop for crop in chunk]
+            class_logits, rotation_logits = network(_preprocess(views, np))
+            probabilities = _softmax(class_logits, np)
+            turns = np.roll(_softmax(rotation_logits, np), -turn, axis=1)
+            class_sum = probabilities if class_sum is None else class_sum + probabilities
+            rotation_sum = turns if rotation_sum is None else rotation_sum + turns
+            view_poses.append(turns.argmax(axis=1).tolist())
+        class_probs, rotation_probs = (class_sum / 4).tolist(), (rotation_sum / 4).tolist()
+        for offset, (probabilities, turns) in enumerate(zip(class_probs, rotation_probs)):
+            ranked = sorted(zip(classes, probabilities), key=lambda item: item[1], reverse=True)
+            label, confidence = ranked[0]
+            accepted = label != "_other" and confidence >= threshold
+            box = clean_boxes[start + offset]
+            rotation_kind = orientations.get(label, "none") if accepted else "none"
+            rotation, rotation_confidence, rotation_basis = _rotation(rotation_kind, turns, box)
+            views_agree = len({poses[offset] for poses in view_poses}) == 1
+            measured = measured_rows[start + offset]
+            if measured is not None:
+                size = [measured["length_mm"], measured["width_mm"]]
+                size_basis = "measured_edges"
+            else:
+                size = ([round((box[2] - box[0]) * float(mm_per_pixel[0]), 3),
+                         round((box[3] - box[1]) * float(mm_per_pixel[1]), 3)]
+                        if mm_per_pixel is not None else None)
+                size_basis = "detector_box"
+            kind, package = _kind_package(label) if accepted else ("generic", "")
+            status = ("needs_scale" if size is None else "unresolved") if accepted else (
+                "unknown" if label == "_other" else "low_confidence")
+            results.append({
+                "box_px": list(box), "class": label, "kind": kind, "package": package,
+                "body": _body_topology(label) if accepted else None,
+                "class_confidence": confidence, "accepted": accepted, "threshold": threshold,
+                "rotation_deg": rotation, "rotation_confidence": rotation_confidence,
+                "rotation_basis": rotation_basis,
+                "rotation_kind": rotation_kind, "rotation_views_agree": views_agree,
+                "size_basis": size_basis, "measured_mm": measured,
+                "terminal_count": CLASS_TERMINAL_COUNTS.get(label) if accepted else None,
+                "size_mm": size, "footprint": None, "footprint_status": status,
+                "footprint_candidates": [], "step_model": None, "step_candidates": [],
+                "model_match": None, "model_status": status,
+                "top_classes": [{"class": name, "confidence": probability}
+                                for name, probability in ranked[:3]],
+            })
     if phase is not None and any(row['accepted'] and row['size_mm'] for row in results):
         phase('kicad', tx('abbinamento dei componenti SMD alla libreria KiCad'))
     _attach_kicad_results(results, model_root, log, cancel)

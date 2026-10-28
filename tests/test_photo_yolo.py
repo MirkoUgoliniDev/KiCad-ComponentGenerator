@@ -1220,3 +1220,72 @@ def test_a_box_merely_touching_a_body_box_is_not_its_pad(setup):
                                        include_review_candidates=True)
     small = [row for row in rows if row['_yolo_confidence'] == pytest.approx(.8)][0]
     assert not small.get('_yolo_on_body_of') and not small['_yolo_low_confidence']
+
+
+# An end-to-end ONNX export (YOLO26 with `nms=False`) returns the one-to-one
+# detections [1, K, 6]. Since 2026-10-28 the ONNX path reads them with the
+# same conversion as the .pt path, so the installed program (ONNX only) finds
+# the bodies the checkpoint finds. Verified the same day on two real photos:
+# the export matches the PyTorch one-to-one output row for row (3e-4).
+def _end_to_end_session(session, names=_NAMES, rows=300):
+    session.outputs[0].shape = [1, rows, 6]
+    session.metadata["names"] = repr(dict(enumerate(names)))
+    session.metadata["end2end"] = "True"
+    raw = np.zeros((1, rows, 6), np.float32)
+    # Row 0: one box, class 10 ("ic"), 0.9. Row 1: the SAME anchor again with
+    # class 13 ("pads"), as the one-to-one head ranks anchors x classes.
+    # Row 2: another box with a class id that is not integral -> no class.
+    raw[0, 0] = [10, 20, 50, 60, 0.9, 10]
+    raw[0, 1] = [10, 20, 50, 60, 0.3, 13]
+    raw[0, 2] = [100, 100, 140, 120, 0.8, 2.7]
+    session.raw = raw
+    return raw
+
+
+def test_end_to_end_onnx_export_is_read_like_the_checkpoint(setup):
+    """@brief Positive: [1, K, 6] output -> rows [1, 25, K], the .pt conversion."""
+    session, _ = setup
+    raw = _end_to_end_session(session)
+    info = yolo.validate_yolo_setup()
+    assert info["output_shape"] == [1, 25, 300] and info["model_output_shape"] == [1, 300, 6]
+    assert info["raw_head"].startswith("one-to-one")
+    assert not session.calls
+    model_session, input_name, np_module, *_ = yolo._setup(None)
+    out = model_session.run(None, {input_name: np.zeros((1, 3, 640, 640), np.float32)})[0]
+    assert out.shape == (1, 25, 300) and out.dtype == np.float32
+    assert np.array_equal(out, yolo._one_to_one_rows(raw, list(range(25 - 4)), np_module))
+    # Centre/size from the corners, both classes of the same anchor merged in
+    # the first row, the second row emptied, the non-integral id dropped.
+    assert out[0, :4, 0].tolist() == [30, 40, 40, 40]
+    assert out[0, 4 + 10, 0] == pytest.approx(0.9) and out[0, 4 + 13, 0] == pytest.approx(0.3)
+    assert not out[0, :, 1].any() and not out[0, 4:, 2].any()
+
+
+def test_end_to_end_onnx_export_with_other_classes_is_remapped_by_name(setup):
+    """@brief Positive: a 16-class end-to-end export (YOLO26 «_l») keeps its names."""
+    session, _ = setup
+    declared = ["IC", "LED", "battery", "buzzer", "capacitor", "clock", "connector", "diode",
+                "display", "fuse", "inductor", "potentiometer", "relay", "resistor",
+                "switch", "transistor"]
+    _end_to_end_session(session, names=declared, rows=100)
+    session.raw[0, 0, 5] = 0      # model class 0 = "IC" -> detector class 10
+    session.raw[0, 1, 5] = 1      # model class 1 = "LED" -> detector class 12
+    info = yolo.validate_yolo_setup()
+    assert info["class_order"] == "remapped by name" and info["output_shape"] == [1, 25, 100]
+    assert "pads" in info["missing_classes"]
+    model_session, input_name, *_ = yolo._setup(None)
+    out = model_session.run(None, {input_name: np.zeros((1, 3, 640, 640), np.float32)})[0]
+    assert out[0, 4 + 10, 0] == pytest.approx(0.9) and out[0, 4 + 12, 0] == pytest.approx(0.3)
+    assert not out[0, 4 + 13].any()
+
+
+@pytest.mark.parametrize("shape", [[1, 300, 5], [1, 300, 7], [1, "rows", 6], [1, 0, 6],
+                                   [2, 300, 6], [300, 6], [1, 300, 6, 1]])
+def test_an_output_that_is_neither_grid_nor_end_to_end_is_rejected(setup, shape):
+    """@brief Negative: only [1, 4 + classes, 8400] or [1, K, 6] with a fixed K>=1."""
+    session, _ = setup
+    session.outputs[0].shape = shape
+    session.metadata["end2end"] = "True"   # the metadata alone must not open the door
+    with pytest.raises(ValueError, match="compatible local YOLO model"):
+        yolo.validate_yolo_setup()
+    assert not session.calls

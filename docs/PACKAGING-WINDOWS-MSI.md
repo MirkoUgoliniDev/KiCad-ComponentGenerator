@@ -85,18 +85,23 @@ The script:
 
 The script returns to the caller's folder when it ends, also on failure.
 
-### YOLO weights and PyTorch: not shipped
+### YOLO weights: every ONNX, only with the switch
 
-`models\yolo\pcb_yolov8s.onnx` is **not** in the package by default: its license
-is ambiguous (MIT model card, AGPL metadata; see `docs\yolo-photo-workflow.md`).
-`-IncludeYoloModel` ships it; use it only once redistribution is allowed.
-Without the weights the program works; the local detector asks for an
-`.onnx` file in the «YOLO model» field.
+`-IncludeYoloModel` ships **every** `models\yolo\*.onnx`: the base model and
+the ONNX exports of the development checkpoints made with
+`tools\export_yolo_onnx.py` (their licenses were reviewed on 2026-10-28, see
+`THIRD_PARTY_NOTICES.md`; the user chose to ship all of them, about 330 MB).
+The switch is off by default so that a checkout without the weights (Git
+ignores them) still builds; the official setup is built with it. A `.pt`
+never ships: the package has no PyTorch. Without the weights the program
+works; the local detector asks for an `.onnx` file in the «YOLO model» field.
 
-PyTorch, Ultralytics and the SMD checkpoint are excluded (size, license):
-in the installed program `.pt` weights give a clear error and the «YOLO +
-local SMD network (v3)» detector is disabled with the reason in its tooltip;
-the default detector there is «Local YOLO + AI verification».
+PyTorch and Ultralytics are excluded (size): in the installed program `.pt`
+weights give a clear error. The SMD network ships as its ONNX export
+(`models\smd\smd_classifier.onnx`, `tools\export_smd_onnx.py`), so «YOLO +
+local SMD network (v3)» is the default detector there too, as from the
+sources; an installation built without the weights disables it with the
+reason in its tooltip and defaults to «Local YOLO + AI verification».
 
 ## 3. Release
 

@@ -7,9 +7,12 @@ name: Windows MSI release
 #             as a workflow artifact;
 #   publish - write access, runs no project code: downloads the artifact and
 #             creates the GitHub Release of the tag.
-# The YOLO weights are NOT shipped (license to be clarified, see
-# docs/yolo-photo-workflow.md). The tag reaches the scripts only through the
-# TAG environment variable, never interpolated into a script.
+# The YOLO weights are not in Git: tools/fetch_model_weights.py downloads them
+# from the permanent GitHub release «models» and verifies their SHA-256
+# against packaging/model-weights.json before the build ships them all
+# (-IncludeYoloModel; licenses in THIRD_PARTY_NOTICES.md). The tag reaches
+# the scripts only through the TAG environment variable, never interpolated
+# into a script.
 #
 # Actions are pinned to the commits resolved from their official major tags.
 on:
@@ -97,6 +100,15 @@ jobs:
           path: ${{ runner.temp }}/kicadgen-test-hang-*.txt
           if-no-files-found: ignore
 
+      - name: Fetch the model weights
+        shell: pwsh
+        timeout-minutes: 20
+        run: |
+          # Standard library only; a file whose SHA-256 differs from the
+          # manifest fails the build, so a replaced asset never ships.
+          python tools/fetch_model_weights.py
+          if ($LASTEXITCODE -ne 0) { throw "Model weights not fetched ($LASTEXITCODE)." }
+
       - name: Build the executable and the MSI
         shell: pwsh
         env:
@@ -104,7 +116,7 @@ jobs:
           # wix314-binaries.zip, set by the maintainer as a repository
           # variable. Without it the download is refused (fail closed).
           KICADGEN_WIX_SHA256: ${{ vars.WIX314_SHA256 }}
-        run: ./scripts/build-windows.ps1 -Package msi
+        run: ./scripts/build-windows.ps1 -Package msi -IncludeYoloModel
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

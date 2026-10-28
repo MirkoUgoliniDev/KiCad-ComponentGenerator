@@ -39,15 +39,23 @@ def test_every_resource_the_spec_ships_exists():
     assert (ROOT / "kicadgen" / "cad3d" / "freecad_build_body.py").is_file()
 
 
-def test_the_yolo_weights_are_never_shipped_by_default():
-    """Licenza dei pesi ambigua: entrano solo con un'opzione esplicita."""
+def test_the_yolo_weights_ship_only_with_the_switch_and_every_onnx_goes():
+    """@brief The weights enter only with -IncludeYoloModel; then EVERY models/yolo/*.onnx.
+
+    Contract changed on 2026-10-28 (user: «mettiamo tutti»): after the license
+    review the official setup ships the base model and the three ONNX
+    exports, never a .pt (no PyTorch in the package). The switch stays so
+    that a checkout without the weights still builds.
+    """
     spec = (ROOT / "packaging" / "KiCadGen.spec").read_text(encoding="utf-8")
-    included = [line for line in spec.splitlines() if "pcb_yolov8s.onnx" in line]
-    assert included, "il pacchetto deve sapere dove stanno i pesi quando richiesti"
+    assert 'for folder in ("yolo", "smd"):' in spec and '.glob("*.onnx")' in spec
+    assert "pcb_yolov8s.onnx" not in spec, "no single file is privileged any more"
+    assert ".pt" not in spec.split("KICADGEN_BUNDLE_YOLO_MODEL", 1)[1].split("binaries = []", 1)[0]
     assert 'os.environ.get("KICADGEN_BUNDLE_YOLO_MODEL") == "1"' in spec
     build = (ROOT / "scripts" / "build-windows.ps1").read_text(encoding="utf-8")
     assert "[switch]$IncludeYoloModel" in build
     assert "$env:KICADGEN_BUNDLE_YOLO_MODEL = '0'" in build
+    assert "-Filter '*.onnx'" in build and "tools\\export_yolo_onnx.py" in build
 
 
 def test_the_seed_database_is_generated_from_the_code_not_copied():

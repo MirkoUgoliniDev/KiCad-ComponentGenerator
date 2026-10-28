@@ -151,12 +151,39 @@ def test_new_window_defaults_to_smd_network_without_restoring_custom_session_pat
         fresh.close()
 
 
-def test_frozen_window_defaults_to_yolo_because_the_smd_runtime_is_absent(monkeypatch):
-    """@brief Caso negativo: nel binario frozen PyTorch e i pesi SMD non ci sono."""
+def _frozen_without_network(monkeypatch, tmp_path):
+    """A frozen program whose models/smd holds no network (installation built without weights)."""
     monkeypatch.setattr(gui, "is_frozen", lambda: True)
+    monkeypatch.setattr(gui, "smd_weights_path", lambda name=None: tmp_path / "smd" / "smd_classifier.onnx")
+
+
+def test_frozen_window_defaults_to_yolo_when_the_smd_network_is_absent(monkeypatch, tmp_path):
+    """@brief Negative: a frozen program WITHOUT the network's file falls back to YOLO."""
+    _frozen_without_network(monkeypatch, tmp_path)
     fresh = gui.MainWindow()
     try:
         assert fresh._photo_detector_options() == ("yolo", None)
+    finally:
+        fresh.close()
+
+
+def test_frozen_window_keeps_the_smd_route_when_its_onnx_network_is_installed(monkeypatch, tmp_path):
+    """@brief Positive (2026-10-28): the installed program ships models/smd/smd_classifier.onnx -> route on and default.
+
+    The rule is the presence of the file, not the packaging: the same
+    frozen program answers differently with and without the network.
+    """
+    network = tmp_path / "smd" / "smd_classifier.onnx"
+    network.parent.mkdir()
+    network.write_bytes(b"graph")
+    monkeypatch.setattr(gui, "is_frozen", lambda: True)
+    monkeypatch.setattr(gui, "smd_weights_path", lambda name=None: network)
+    assert gui.smd_route_available()
+    fresh = gui.MainWindow()
+    try:
+        assert fresh._photo_detector_options()[0] == "yolo_smd"
+        index = fresh.combo_photo_detector.findData("yolo_smd")
+        assert fresh.combo_photo_detector.model().item(index).isEnabled()
     finally:
         fresh.close()
 
@@ -165,7 +192,10 @@ def test_smd_mode_selects_the_verified_yolo_and_preserves_manual_override(window
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData('yolo_smd'))
     detector, path = window._photo_detector_options()
     assert detector == 'yolo_smd'
-    assert path.name == 'pcb_component_detector_yolov8m_best.pt'
+    # The checkpoint when it is there (developer's machine), else its ONNX
+    # export (runner, installed program); test_the_smd_route_falls_back_...
+    # checks the rule itself.
+    assert path.name == _smd_route_default_name()
     assert path.name in window.field_yolo_model.placeholderText()
     assert window.btn_pick_yolo_model.isEnabled()
     assert 'SMD' in window.combo_photo_detector.currentText()
@@ -175,9 +205,9 @@ def test_smd_mode_selects_the_verified_yolo_and_preserves_manual_override(window
 
 
 def test_frozen_build_keeps_saved_smd_mode_visible_but_unavailable_before_ai(
-    window, monkeypatch,
+    window, monkeypatch, tmp_path,
 ):
-    monkeypatch.setattr(gui, "is_frozen", lambda: True)
+    _frozen_without_network(monkeypatch, tmp_path)
     index = window.combo_photo_detector.findData("yolo_smd")
     window.combo_photo_detector.setCurrentIndex(index)
     window._refresh_photo_detector_controls()
@@ -611,18 +641,40 @@ def test_the_smd_button_opens_the_model_window_on_the_smd_folder(window, monkeyp
     assert window.field_smd_model.text() == ("" if expected == "" else str(other))
 
 
+def _smd_route_default_name() -> str:
+    """The YOLO weights the SMD route uses on this machine: the checkpoint, else its ONNX export."""
+    return (gui.DEFAULT_YOLO_PT if gui.yolo_weights_path(gui.DEFAULT_YOLO_PT).is_file()
+            else gui.DEFAULT_YOLO_SMD_ONNX)
+
+
+def test_the_smd_route_falls_back_to_the_onnx_export_of_its_detector(monkeypatch, tmp_path):
+    """@brief 2026-10-28: without the .pt (installed program) the route runs the ONNX export of the same model.
+
+    Positive: the checkpoint present -> the checkpoint. Negative: absent ->
+    the ONNX export, never the base ONNX detector of the other routes.
+    """
+    monkeypatch.delenv("KICADGEN_YOLO_MODEL", raising=False)
+    monkeypatch.setattr(gui, "yolo_weights_path", lambda name: tmp_path / "yolo" / name)
+    (tmp_path / "yolo").mkdir()
+    assert gui.MainWindow._default_yolo_weights("yolo_smd").name == gui.DEFAULT_YOLO_SMD_ONNX
+    assert gui.MainWindow._default_yolo_weights("yolo").name == gui.DEFAULT_YOLO_ONNX
+    (tmp_path / "yolo" / gui.DEFAULT_YOLO_PT).write_bytes(b"checkpoint")
+    assert gui.MainWindow._default_yolo_weights("yolo_smd").name == gui.DEFAULT_YOLO_PT
+
+
 @pytest.mark.parametrize("detector, default_name", [
-    ("yolo_smd", Path(gui.DEFAULT_YOLO_PT).name),
+    ("yolo_smd", None),
     ("yolo", Path(gui.DEFAULT_YOLO_ONNX).name),
 ])
 def test_the_yolo_picker_proposes_the_default_of_the_chosen_detector(
         window, monkeypatch, detector, default_name):
-    """@brief Review B2 (2026-10-02): the SMD route runs the .pt weights, not the ONNX file.
+    """@brief Review B2 (2026-10-02): the SMD route runs its own weights, not the base ONNX file.
 
     @note Confirming the default leaves the field empty, so the detector's
         own default keeps applying; the other detector is the negative case.
     """
     from kicadgen.gui import yolo_model_dialog
+    default_name = default_name or _smd_route_default_name()
     monkeypatch.delenv("KICADGEN_YOLO_MODEL", raising=False)
     window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData(detector))
     seen = {}
@@ -649,7 +701,7 @@ def test_the_environment_override_applies_to_the_smd_route_too(window, monkeypat
     window.field_yolo_model.clear()
     assert window._photo_detector_options() == ("yolo_smd", weights)
     monkeypatch.delenv("KICADGEN_YOLO_MODEL")
-    assert window._photo_detector_options()[1].name == Path(gui.DEFAULT_YOLO_PT).name
+    assert window._photo_detector_options()[1].name == _smd_route_default_name()
 
 
 def test_a_project_without_the_smd_field_does_not_inherit_the_previous_one(window, tmp_path):

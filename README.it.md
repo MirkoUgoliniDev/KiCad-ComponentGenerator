@@ -107,13 +107,24 @@ Requisiti:
   I pesi non sono nel repository: i rilevatori vanno in `models/yolo/`, la rete
   SMD in `models/smd/`.
 
+**Pesi dei modelli.** Il setup Windows contiene tutti i rilevatori ONNX (il
+modello base e le esportazioni ONNX dei tre checkpoint di sviluppo, circa
+330 MB). Dai sorgenti, scarica gli stessi file in `models/yolo/` con
+`python tools/fetch_model_weights.py`: li prende dalla release permanente
+[models](https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/models)
+di GitHub e verifica ogni SHA-256 con `packaging/model-weights.json`. Tra
+questi c'è la rete SMD come esportazione ONNX (`models/smd/smd_classifier.onnx`).
+I checkpoint `.pt` non sono pubblicati; `tools/export_yolo_onnx.py` e
+`tools/export_smd_onnx.py` convertono un checkpoint nell'ONNX che il setup legge.
+
 **Rilevatore predefinito dai sorgenti.** Avviato dai sorgenti, il rilevamento
-foto parte da *YOLO + rete SMD locale (v3)*, che richiede
-`models/smd/smd_classifier.pt` e
-`models/yolo/pcb_component_detector_yolov8m_best.pt` più i pacchetti di
-entrambi `requirements/smd.txt` e `requirements/yolo-pt.txt`. Questi pesi non
-sono distribuiti con i sorgenti e un checkout nuovo non ha le cartelle
-`models/`: crea `models/yolo/` e `models/smd/` quando aggiungi i file. Senza di
+foto parte da *YOLO + rete SMD locale (v3)*, che richiede la rete SMD e il
+rilevatore YOLOv8m: o i checkpoint `.pt` (`models/smd/smd_classifier.pt`,
+`models/yolo/pcb_component_detector_yolov8m_best.pt`, con i pacchetti di
+`requirements/smd.txt` e `requirements/yolo-pt.txt`) o le loro esportazioni
+ONNX, che `tools/fetch_model_weights.py` scarica e che bastano con il solo
+`requirements/yolo.txt`. Un checkout nuovo non ha le cartelle `models/`: le
+crea lo strumento di scaricamento. Senza di
 essi l'analisi di una scheda si ferma con un avviso prima di qualunque chiamata
 a pagamento; per lavorare senza pesi locali scegli un'altra voce in
 **Rilevamento foto** (per esempio *AI (attuale)*) nel riquadro **Strumenti AI**.
@@ -656,12 +667,15 @@ che possono essere diverse da quella del codice**. Sono elencati uno per uno in
 - nel repository non ci sono pesi né le loro cartelle: `models/yolo/` per i
   rilevatori e `models/smd/` per la rete SMD si creano quando aggiungi i file
   (Git ignora i file di pesi `.pt` e `.onnx`). I checkpoint usati
-  nello sviluppo dichiarano AGPL-3.0 nei metadati. La licenza del modello ONNX
-  di base non è ancora chiarita (MIT nella model card, AGPL-3.0 nei
-  metadati);
-- i modelli YOLO26 di Roboflow sono addestrati sul
+  nello sviluppo dichiarano AGPL-3.0 nei metadati. Il modello ONNX di base è
+  ridistribuito come AGPL-3.0 (MIT nella model card, AGPL-3.0 nei metadati:
+  vale la più restrittiva);
+- il modello YOLO26 Large è addestrato sul
   [dataset CompDetect](https://universe.roboflow.com/dataset-lmrsw/compdetect),
-  con licenza [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Il
+  con licenza [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); il
+  YOLOv8m sul dataset
+  [Detecting the PCB object](https://universe.roboflow.com/arshiasbn-4s0xh/detecting-the-pcb-object)
+  di Arshiasbn, con licenza MIT. Il
   dataset è stato esportato da Roboflow per l'addestramento; le elaborazioni
   applicate davvero (ridimensionamento, aumentazione, conversione, filtri,
   modifiche alle classi) **vanno registrate** in `THIRD_PARTY_NOTICES.md` e

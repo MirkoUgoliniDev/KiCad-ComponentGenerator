@@ -181,9 +181,11 @@ def test_the_notices_list_the_bundled_runtime_and_the_gpl_sources():
                    "opencv_videoio_ffmpeg", "OpenSSL", "SQLite", "libffi",
                    "Source code of GPL/LGPL components", "compdetect-dnwth-2-yolo26l-t1"):
         assert needle in notices, needle
-    # The Large model's Roboflow license is still unverified: keep saying so.
+    # The Large model's Roboflow license was read on its model page on
+    # 2026-10-28: the notices quote it and no longer call it unverified.
     large = notices.split("### Roboflow YOLO26 Large", 1)[1].split("###", 1)[0]
-    assert "to be verified" in large
+    assert "License shown by Roboflow: AGPL-3.0" in large
+    assert "to be verified" not in large
 
 
 def test_release_builds_use_pinned_versions():

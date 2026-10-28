@@ -520,3 +520,135 @@ def test_a_box_outside_the_photo_is_not_sent_to_the_ai_recheck(monkeypatch):
     assert report.calibration['smd_ai_recheck_count'] == 1
     assert report.calibration['smd_resolved_count'] == 0
     assert '_smd_ai_recheck' not in outside
+
+
+# ── ONNX export of the network (2026-10-28) ───────────────────────────────
+# The installed program has no PyTorch: the network ships as an .onnx graph
+# that takes the normalised batch and returns the two heads' logits, with the
+# checkpoint's metadata as JSON under ONNX_METADATA_KEY. Verified the same day
+# on real boxes of two photos: same classes, same rotations, confidences
+# within 1e-5 of the checkpoint's. Here a fake onnxruntime drives the route.
+import json
+import sys
+
+_ONNX_META = {"format": "smdmap-classifier-2", "arch": "resnet18", "img_size": 224,
+              "classes": ["SOT-23", "_other"],
+              "orientations": {"SOT-23": "full", "_other": "none"},
+              "suggested_threshold": 0.0, "trained": "20261001-162356", "epoch": 40,
+              "catalog_sha256": "ab" * 32,
+              "metrics": {"val": {"samples": 42, "accuracy": 1.0, "balanced_accuracy": 1.0}}}
+
+
+def _fake_onnx(monkeypatch, metadata=_ONNX_META, *, in_shape=("batch", 3, 224, 224),
+               out_shapes=(("batch", 2), ("batch", 4)), fail_session=False):
+    """Install a fake onnxruntime whose session answers like ControlledNet of the torch tests."""
+    calls = []
+
+    class Session:
+        def __init__(self, path, sess_options, providers):
+            if fail_session:
+                raise RuntimeError("not a protobuf")
+            calls.append(("open", path, providers))
+
+        def get_modelmeta(self):
+            return SimpleNamespace(custom_metadata_map={
+                smd.ONNX_METADATA_KEY: json.dumps(metadata)} if metadata is not None else {})
+
+        def get_inputs(self):
+            return [SimpleNamespace(name="images", type="tensor(float)", shape=list(in_shape))]
+
+        def get_outputs(self):
+            return [SimpleNamespace(name=n, type="tensor(float)", shape=list(s))
+                    for n, s in zip(("class_logits", "rotation_logits"), out_shapes)]
+
+        def run(self, names, feeds):
+            batch = feeds["images"]
+            assert batch.dtype == np.float32 and batch.flags.c_contiguous
+            turn = len([c for c in calls if c[0] == "run"]) % 4
+            calls.append(("run", batch))
+            classes = np.zeros((len(batch), 2), np.float32)
+            classes[:, 0] = 10
+            rotation = np.roll(np.array([0., 10., 0., 0.], np.float32), turn)
+            return [classes, np.repeat(rotation[None], len(batch), axis=0)]
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(
+        InferenceSession=Session, SessionOptions=SimpleNamespace))
+    return calls
+
+
+def test_an_onnx_network_gives_the_same_answer_as_the_checkpoint_route(network, monkeypatch, tmp_path):
+    """@brief Positive: the .onnx route returns the same rows as the torch route, from the same preprocessing."""
+    calls = _fake_onnx(monkeypatch)
+    onnx_path = tmp_path / "smd_classifier.onnx"
+    onnx_path.write_bytes(b"graph")
+    image = Image.fromarray(np.arange(40 * 60 * 3, dtype=np.uint8).reshape(40, 60, 3))
+    (tmp_path / "x.pt").write_bytes(b"mock checkpoint")   # torch.load is faked by `network`
+    expected = smd.classify_photo_boxes(image, [[10, 10, 30, 30]], model_path=tmp_path / "x.pt")[0]
+    result = smd.classify_photo_boxes(image, [[10, 10, 30, 30]], model_path=onnx_path)[0]
+    assert calls[0] == ("open", str(onnx_path), ["CPUExecutionProvider"])
+    assert result == expected and result["rotation_deg"] == 90 and result["accepted"]
+    # Same batches as the torch route, bit for bit, for the four views.
+    runs = [c[1] for c in calls if c[0] == "run"]
+    assert len(runs) == 4 and all(np.array_equal(r, t.numpy()) for r, t in zip(runs, network.calls))
+
+
+def test_describe_and_validate_read_the_onnx_metadata(monkeypatch, tmp_path):
+    """@brief Positive: the model window's description comes from the JSON metadata, no PyTorch involved."""
+    _fake_onnx(monkeypatch)
+    monkeypatch.setattr(smd, "_runtime", lambda: pytest.fail("PyTorch must not be loaded for .onnx"))
+    onnx_path = tmp_path / "smd_classifier.onnx"
+    onnx_path.write_bytes(b"graph")
+    assert smd.validate_smd_setup(onnx_path) == onnx_path
+    info = smd.describe_smd_checkpoint(onnx_path)
+    assert info["classes"] == ["SOT-23", "_other"] and info["epochs"] == 40
+    assert info["validation"] == {"samples": 42, "accuracy": 1.0, "balanced_accuracy": 1.0}
+    assert info["threshold"] == 0.5 and info["catalog_sha256"] == "ab" * 32
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    (dict(metadata=None), "non compatibile"),
+    (dict(metadata={**_ONNX_META, "img_size": 256}), "non compatibile"),
+    (dict(metadata={**_ONNX_META, "orientations": {"SOT-23": "full"}}), "orientations"),
+    (dict(in_shape=(1, 3, 256, 256)), "ONNX input"),
+    (dict(in_shape=("batch", 224, 224, 3)), "ONNX input"),
+    (dict(out_shapes=(("batch", 3), ("batch", 4))), "ONNX outputs"),
+    (dict(out_shapes=(("batch", 2),)), "ONNX outputs"),
+    (dict(fail_session=True), "non compatibile"),
+])
+def test_an_onnx_file_that_does_not_match_the_network_is_refused(monkeypatch, tmp_path, kwargs, reason):
+    """@brief Negative: missing/wrong metadata, other input size or layout, other head sizes, unreadable graph."""
+    _fake_onnx(monkeypatch, **kwargs)
+    onnx_path = tmp_path / "smd_classifier.onnx"
+    onnx_path.write_bytes(b"graph")
+    with pytest.raises(ValueError, match=reason):
+        smd.validate_smd_setup(onnx_path)
+
+
+def test_a_missing_onnx_runtime_is_actionable(monkeypatch, tmp_path):
+    """@brief Negative: without onnxruntime the error names the requirements file."""
+    import builtins
+    original = builtins.__import__
+
+    def guarded(name, *args, **kwargs):
+        if name == "onnxruntime":
+            raise ImportError("missing")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    onnx_path = tmp_path / "smd_classifier.onnx"
+    onnx_path.write_bytes(b"graph")
+    with pytest.raises(RuntimeError, match="requirements/yolo.txt"):
+        smd.validate_smd_setup(onnx_path)
+
+
+def test_the_default_weights_fall_back_to_the_onnx_export(monkeypatch, tmp_path):
+    """@brief app_paths.smd_model_path(): the checkpoint when present, else the ONNX export, else the checkpoint's name."""
+    from kicadgen import app_paths
+    monkeypatch.setattr(app_paths, "resource_path", lambda *parts: tmp_path.joinpath(*parts))
+    folder = tmp_path / "models" / "smd"
+    folder.mkdir(parents=True)
+    assert app_paths.smd_model_path() == folder / "smd_classifier.pt"
+    (folder / "smd_classifier.onnx").write_bytes(b"x")
+    assert app_paths.smd_model_path() == folder / "smd_classifier.onnx"
+    (folder / "smd_classifier.pt").write_bytes(b"x")
+    assert app_paths.smd_model_path() == folder / "smd_classifier.pt"
+    assert app_paths.smd_model_path("other.onnx") == folder / "other.onnx"
