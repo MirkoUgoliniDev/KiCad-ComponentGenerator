@@ -1,11 +1,58 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 28/10 notte — HANDOFF PER DOMANI (utente: «fai un handoff per domani, poi spegni pc»). main = ADVANCED = `7de9475`, pushati, albero pulito, PC spento.
+
+RELEASE v1.0.2 PUBBLICATA dal workflow (prima release automatica):
+https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.2
+KiCadGen-1.0.2.msi 462 MB con i 5 modelli ONNX (4 YOLO + rete SMD).
+Suite locale 10253 passati, 14 saltati, 19 sottotest; run «Tests» e «Windows
+MSI release» verdi su GitHub.
+
+FATTO OGGI (dettagli nelle sezioni sotto): licenze dei modelli chiuse con
+l'utente; pesi come asset della release permanente «models»
+(tools/fetch_model_weights.py + packaging/model-weights.json, SHA-256);
+YOLO26 esportati end-to-end (tools/export_yolo_onnx.py, photo_yolo legge
+[1,K,6]); rete SMD esportata (tools/export_smd_onnx.py,
+smd_component_classifier legge .onnx) -> «YOLO + rete SMD» disponibile e
+predefinita anche nel setup; release.yml scarica i pesi e costruisce con
+-IncludeYoloModel; README con «Dove prendere i modelli»; cancello di
+publish-release.ps1 che accetta QUALUNQUE run verde del commit.
+
+DA FARE DOMANI, in ordine:
+1. PROVA DELL'MSI 1.0.2 IN VM (spetta all'utente; checklist nella skill
+   build-installer): installazione, avvio dal collegamento, analisi foto con
+   «YOLO + rete SMD» (ora predefinita nel setup: verificare che la voce sia
+   attiva e che il modello YOLO proposto sia pcb_component_detector_yolov8m_best.onnx),
+   cambio lingua, guida e licenze, reinstallazione sopra, disinstallazione.
+   Registrare l'esito qui.
+2. Medium YOLO26: i suoi dati risultano quelli di Arshiasbn (21 classi) ma
+   l'id Roboflow porta a CompDetect v1: chiedere all'utente di guardare le
+   classi della v1 nel suo workspace; poi chiudere «to be verified» in
+   THIRD_PARTY_NOTICES.md e yolo_models.KNOWN_MODELS (dataset_status).
+3. H3 datum Z con connettori mostrati: decisione dell'utente, escluso finora.
+4. v1.0.1 e' un tag senza Release (permanente): lasciare cosi'.
+
+TRAPPOLE DI OGGI (da non ripetere):
+- Mentre si aspetta il run «Tests» del commit da pubblicare NON spingere su
+  nessun ramo: la concurrency cancella il run dello stesso commit sull'altro
+  ramo (successo due volte). Lo script ora tollera un run cancellato se uno
+  e' verde, ma il tempo di attesa si perde comunque.
+- Dopo `gh release upload` gli asset rispondono 404 per qualche minuto.
+- Export Ultralytics: nms=False ATTIVA il ramo end2end, nms=None esporta la
+  griglia grezza; per YOLO26 serve end2end, altrimenti i corpi cambiano.
+- urlopen come default di parametro non si monkeypatcha (opener=None).
+- Le frasi «to be verified»/«must be confirmed» in THIRD_PARTY_NOTICES.md
+  sono lette dai test su UNA riga: non spezzarle.
+- Il test della cache footprint riscrive un file della stessa dimensione
+  entro un tick di mtime: _rewrite_observably nel test, limite documentato
+  in _footprint_listing.
+
 ## 28/10 sera — COMMITTATO: pesi pubblicati, ONNX e setup: commit `e2c5c4f` su ADVANCED, merge `8cec8ee` in main, entrambi pushati. Suite 10253 passati, 14 saltati, 19 sottotest.
 
 RICHIESTA UTENTE (dopo il push): nella sezione «Licensing» dei README un
 punto che spieghi come scaricare i modelli -> aggiunto in README.md e
 README.it.md (release «models», tools/fetch_model_weights.py, setup che li
-contiene gia'); commit da fare con OK.
+contiene gia'); committato.
 BUILD LOCALE FATTA (utente: «devi fare il build del setup che includa i
 modelli»): `scripts/build-windows.ps1 -Package msi -IncludeYoloModel`, log
 .venv/build_1028.log: 5 .onnx in dist\KiCadGen\_internal\models (yolo 4 +
