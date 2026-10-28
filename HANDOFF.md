@@ -34,7 +34,8 @@ sposta avanti l'mtime di un tick SOLO se il file system ha lasciato
 (size, mtime_ns) identici — il contratto verificato e' «una modifica
 osservabile viene vista», non «il rilevatore vede cio' che non puo'».
 test_kicad_model_footprints + documentation: 60 verdi. Committato e pushato;
-in attesa del run «Tests» verde, poi CHIEDERE OK per publish 1.0.2.
+in attesa del run «Tests» verde per 731a6c8; OK UTENTE («ok procedi!») al
+publish 1.0.2 da main appena verde.
 UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
 pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
 scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,
