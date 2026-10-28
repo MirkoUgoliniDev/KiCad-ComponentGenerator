@@ -6,10 +6,14 @@ RICHIESTA UTENTE (dopo il push): nella sezione «Licensing» dei README un
 punto che spieghi come scaricare i modelli -> aggiunto in README.md e
 README.it.md (release «models», tools/fetch_model_weights.py, setup che li
 contiene gia'); commit da fare con OK.
-OK UTENTE («devi fare il build del setup che includa i modelli»): build
-locale in corso con `scripts/build-windows.ps1 -IncludeYoloModel` (log
-.venv/build_1028.log). Da verificare: 5 .onnx in dist\KiCadGen\_internal\models,
---check-runtime, dimensione MSI (~510 MB atteso). README non ancora committato.
+BUILD LOCALE FATTA (utente: «devi fare il build del setup che includa i
+modelli»): `scripts/build-windows.ps1 -Package msi -IncludeYoloModel`, log
+.venv/build_1028.log: 5 .onnx in dist\KiCadGen\_internal\models (yolo 4 +
+smd 1), «Runtime check OK» (onnxruntime OK), MSI dist\KiCadGen-1.0.0.msi
+460,1 MB (482.469.967 byte; prima 177 MB), solo i soliti avvisi ICE60.
+NON installato sulla macchina di sviluppo (regola). README committato
+(merge 6e6b4f2 in main). OK UTENTE alla release 1.0.1 da main: il publish
+richiede il run «Tests» verde su GitHub per il commit corrente -> in attesa.
 UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
 pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
 scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,
