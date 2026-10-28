@@ -28,6 +28,8 @@ from kicadgen.generators.castellated_module import (
     SMD_WITH_DRILLED_PADS_NOTE, pad_positions, through_hole_inset_from_rows,
 )
 from kicadgen.core.footprint import FpCircle, FpText
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 SCRIPT = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_build_body.py"
 
@@ -705,7 +707,7 @@ def test_an_invalid_style_from_the_model_is_rejected(bad):
 def _run_extraction(monkeypatch, tmp_path, sides):
     from kicadgen.services import datasheet_extractor as ext
     source = tmp_path / "drawing.pdf"
-    source.write_bytes(b"%PDF-1.4 offline")
+    source.write_bytes(MINIMAL_PDF)
     call = Mock(return_value=dict(layout="castellated", confidence="high", castellated_sides=sides))
     monkeypatch.setattr(ext, "api_key", lambda: "offline")
     monkeypatch.setattr(ext, "check_credit", lambda **kw: None)

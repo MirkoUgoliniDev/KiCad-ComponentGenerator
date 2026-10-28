@@ -19,6 +19,7 @@ from kicadgen.cad3d import step_generator as cad, kicad_models
 from kicadgen.cad3d.body_params import Body3DParams
 from kicadgen.generators.castellated_module import CastellatedModuleParams, CastellatedSide, ComponentBox
 from kicadgen.generators.pin_header import PinHeaderParams
+from tests.test_review_1027_sweep import fake_freecad_writing_the_step
 
 SRC = Path(__file__).resolve().parents[1] / "kicadgen" / "cad3d" / "freecad_build_body.py"
 
@@ -64,17 +65,18 @@ def test_markings_are_printed_only_on_explicit_request(decide, marking):
 
 
 def _capture_payload(monkeypatch):
-    """Sostituisce freecadcmd con un finto che legge il JSON e "scrive" lo STEP."""
+    """Sostituisce freecadcmd con un finto che legge il JSON e "scrive" lo STEP.
+
+    CONTRACT CHANGED 2026-10-27 (review sweep, S4): every `_run_freecad` call
+    now goes through `process_log.run_logged`, also without progress and
+    cancel, so the double moved from `subprocess.run` to the
+    `subprocess.Popen` that run_logged starts the child with
+    (`tests.test_review_1027_sweep.fake_freecad_writing_the_step`). The
+    recorded payload is the same.
+    """
     seen = []
-
-    def fake_run(command, **kwargs):
-        payload = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
-        seen.append(payload)
-        Path(payload["step_path"]).write_text("ISO-10303-21;", encoding="utf-8")
-        return SimpleNamespace(stdout="KICADGEN_STEP_OK\n", stderr="", returncode=0)
-
     monkeypatch.setattr(cad, "find_freecadcmd", lambda: "freecadcmd")
-    monkeypatch.setattr(cad.subprocess, "run", fake_run)
+    fake_freecad_writing_the_step(monkeypatch, seen)
     monkeypatch.setattr(kicad_models, "attach_models", lambda components, **kw: None)
     return seen
 

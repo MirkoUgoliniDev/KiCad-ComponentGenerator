@@ -23,6 +23,7 @@ from kicadgen.core.kicad_text import (  # noqa: F401 (re-exported, see kicad_tex
     kicad_corner_from_centre,
     kicad_text_margin,
 )
+from kicadgen.core.sexpr import format_number, quote
 from kicadgen.fsutil import replace_file
 
 ELECTRICAL_TYPES = (
@@ -64,6 +65,12 @@ class LocalizedText:
     """
 
     def __init__(self, template: str, english: str, **values) -> None:
+        """@brief Keep the Italian template, its English rendering and the placeholder values.
+
+        @param template Italian catalogue template (`ui:<template>` key).
+        @param english English rendering with the same placeholders.
+        @param values Named placeholder values, possibly `LocalizedText`.
+        """
         self.template = template
         self.english = english
         self.values = values
@@ -108,6 +115,10 @@ class SymbolError(ValueError):
     """
 
     def __init__(self, text: LocalizedText) -> None:
+        """@brief Wrap the localized message; `str(self)` is its English text.
+
+        @param text The message as a `LocalizedText`.
+        """
         self.text = text
         super().__init__(str(text))
 
@@ -257,16 +268,43 @@ def _datasheet(value: str) -> str:
     return _text(value, _label('Datasheet', 'Datasheet'))
 
 
-def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
+#: The character KiCad substitutes for every space of a pin name when it
+#: loads a symbol (`SCH_PIN::SetName`): a name written with spaces does not
+#: survive the round trip, so the writer applies the same substitution.
+PIN_NAME_SPACE_SUBSTITUTE = '_'
+
+
+def normalize_pin_name(name: str) -> str:
+    """@brief Apply to a pin name the rewriting KiCad applies when it loads the symbol.
+
+    KiCad replaces each space of a pin name with an underscore on load, so
+    a name saved as «A 5» is shown as «A_5». Writing the substituted name
+    keeps the file equal to what KiCad will keep (review 2026-10-27, G2).
+
+    @param name The pin name, already free of control characters.
+    @return The name with every space replaced by `PIN_NAME_SPACE_SUBSTITUTE`.
+    """
+    return name.replace(' ', PIN_NAME_SPACE_SUBSTITUTE)
+
+
+def normalize_pins(pins: Iterable[SymbolPin], notes: list | None = None) -> tuple[SymbolPin, ...]:
     """@brief Validate identities; preserve names/order and default unknown types passive.
 
     @param pins The pins to check, in their intended order.
+    @param notes Optional list that receives a `LocalizedText` for every
+        silent normalisation worth telling the user (a pin name whose spaces
+        became underscores); None discards them.
     @return A tuple of copies with number, name, electrical type, length,
         hidden flag and text size normalized; order preserved.
-    @throws SymbolError When an item is not a SymbolPin, a number is empty
-        or duplicated, a side is unknown, a length is not a multiple of
-        1.27 mm up to 12.7 mm, a text size is outside 0.5-5.08 mm, or no pin
-        is given.
+    @throws SymbolError When an item is not a SymbolPin, a number is empty,
+        duplicated or holds whitespace, a side is unknown, a length is not
+        a multiple of 1.27 mm up to 12.7 mm, a text size is outside
+        0.5-5.08 mm, or no pin is given.
+    @note A pin NUMBER with inner whitespace is refused, not rewritten: the
+        footprint pad keeps the number as given while KiCad rewrites the
+        symbol's on load (space to underscore), so the two would no longer
+        match and the mismatch would be silent. A pin NAME is only a label:
+        it gets KiCad's own rewriting (`normalize_pin_name`) and a note.
     """
     result = []
     seen = set()
@@ -274,11 +312,26 @@ def normalize_pins(pins: Iterable[SymbolPin]) -> tuple[SymbolPin, ...]:
         if not isinstance(pin, SymbolPin):
             raise SymbolError(_message('Pin non valido: atteso un SymbolPin.', 'Expected SymbolPin'))
         number = _text(pin.number, _label('Numero del pin', 'Pin number'), required=True)
+        if any(ch.isspace() for ch in number):
+            raise SymbolError(_message(
+                'Numero di pin «{number}»: non può contenere spazi (KiCad lo riscriverebbe e non '
+                'corrisponderebbe più al pad del footprint).',
+                'Pin number «{number}»: must not contain spaces (KiCad would rewrite it and it would '
+                'no longer match the footprint pad)', number=number))
         if number in seen:
             raise SymbolError(_message('Numero di pin duplicato: {number}.', 'Duplicate pin number: {number}',
                               number=number))
         seen.add(number)
         name = _text(pin.name, _label('Nome del pin {number}', 'Pin {number} name', number=number))
+        normalized_name = normalize_pin_name(name)
+        if normalized_name != name:
+            if notes is not None:
+                notes.append(_message(
+                    'Pin {number}: nome «{name}» scritto come «{normalized}», come farebbe KiCad al '
+                    'caricamento (gli spazi diventano «_»).',
+                    'Pin {number}: name «{name}» written as «{normalized}», as KiCad does on load '
+                    '(spaces become «_»)', number=number, name=name, normalized=normalized_name))
+            name = normalized_name
         if pin.side not in ('left', 'right', 'top', 'bottom'):
             raise SymbolError(_message('Pin {number}: lato non valido.', 'Pin {number}: invalid side', number=number))
         electrical_type = pin.electrical_type if pin.electrical_type in ELECTRICAL_TYPES else 'passive'
@@ -747,12 +800,13 @@ def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
     return SymbolLayout(half_width * 2, half_height * 2, spacing, spacing, tuple(positioned))
 
 
-def _quote(value: str) -> str:
-    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-
-def _num(value: float) -> str:
-    return f'{value:.4f}'.rstrip('0').rstrip('.') or '0'
+#: Quoting and number formatting are the shared ones of `core.sexpr`, so a
+#: symbol file escapes the same characters and writes the same digits as a
+#: footprint file (review 2026-10-27, G3/G5: the former private copies wrote
+#: `-0` for a centred pin and escaped only `\` and `"`). The old names stay
+#: for the callers written against them.
+_quote = quote
+_num = format_number
 
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,

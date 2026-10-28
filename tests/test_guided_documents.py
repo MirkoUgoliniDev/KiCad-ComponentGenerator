@@ -140,12 +140,17 @@ def test_project_change_refreshes_cards_instead_of_reusing_previous_files(window
     assert list(window.guided_docs.cards) == ['a.png']
 
 
-def test_guided_metadata_follows_document_migration(window, monkeypatch, tmp_path):
+def test_guided_metadata_follows_document_migration(window, tmp_path):
+    """@brief The document roles follow a whole-project rename.
+
+    The per-file migration helper (`_migrate_docs_to_new_name`) was
+    unreachable and is gone (review 2026-10-27, A6): the only rename is the
+    one of the whole project folder, which carries docs/ and its manifest.
+    """
     source = image_file(tmp_path / 'a.png')
     store = DocumentSet(window._docs_dir())
     store.import_file(['top', 'hires'], source)
-    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.Yes)
-    window._migrate_docs_to_new_name('NewName')
+    assert window._rename_project_folder('NewName') == 'NewName'
     window.field_name.setText('NewName')
     paths, roles = gui.MainWindow._selected_documents(window)
     assert roles == {'a.png': ['top', 'hires']}
@@ -153,7 +158,13 @@ def test_guided_metadata_follows_document_migration(window, monkeypatch, tmp_pat
     assert source.exists()
 
 
-def test_guided_migration_conflict_leaves_both_sets_untouched(window, monkeypatch, tmp_path):
+def test_guided_migration_conflict_leaves_both_sets_untouched(window, tmp_path):
+    """@brief A destination that already exists refuses the rename: nothing moves.
+
+    Before, the migration helper merged the documents file by file and
+    reported the conflict; the whole-project rename refuses an existing
+    destination outright, so both sets stay exactly as they were.
+    """
     store = DocumentSet(window._docs_dir())
     source = image_file(tmp_path / 'top.png')
     original = store.import_file('top', source)
@@ -161,9 +172,8 @@ def test_guided_migration_conflict_leaves_both_sets_untouched(window, monkeypatc
     destination.mkdir(parents=True)
     conflict = destination / 'top.png'
     conflict.write_bytes(b'existing destination')
-    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.StandardButton.Yes)
-    assert window._migrate_docs_to_new_name('NewName') == window._component_name()
-    assert 'nessun documento spostato o sovrascritto' in window.ai_progress_text.toPlainText()
+    assert window._rename_project_folder('NewName') == window._component_name()
+    assert "Rinomina annullata: esiste gia' NewName." in window.ai_progress_text.toPlainText()
     assert original.exists() and store.path.exists()
     assert conflict.read_bytes() == b'existing destination'
 

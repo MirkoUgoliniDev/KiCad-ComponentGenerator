@@ -40,8 +40,13 @@ def _tab():
 
 
 @pytest.fixture
-def board(qapp):
-    """A tab holding, in order: a glyph with a body hint, a rectangle, a text, a wire."""
+def board(qapp, glyph_library):
+    """A tab holding, in order: a glyph with a body hint, a rectangle, a text, a wire.
+
+    The glyph comes from the suite's own symbol library (`glyph_library`):
+    without KiCad the built-in catalogue has no glyph with a body hint and
+    this fixture errored on the GitHub runner (CI review 2026-10-27, I2).
+    """
     tab = _tab()
     hinted = next(glyph.key for glyph in g.catalogue() if glyph.body_hint is not None)
     assert tab.place_glyph(hinted, 30.48, 30.48)

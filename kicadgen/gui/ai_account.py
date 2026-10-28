@@ -108,6 +108,8 @@ class _UsageBridge(QObject):
 
 
 class _BalanceSignals(QObject):
+    """Carrier of a balance answer (token, status, error text) to the GUI thread."""
+
     ready = pyqtSignal(int, object, str)
 
 
@@ -115,6 +117,12 @@ class _BalanceTask(QRunnable):
     """Reads the balance off the GUI thread: it is a network request."""
 
     def __init__(self, token: int, provider: str = providers.PROVIDER_OPENROUTER):
+        """@brief Prepare one balance request identified by a token.
+
+        @param token Value the line compares against its latest request, so
+            that a late answer of an older request is ignored.
+        @param provider providers.PROVIDER_OPENROUTER or PROVIDER_DEEPSEEK.
+        """
         super().__init__()
         self.token = token
         self.provider = provider
@@ -127,6 +135,13 @@ class _BalanceTask(QRunnable):
                       else openrouter.credit_status(force_refresh=True))
         except Exception as exc:  # noqa: BLE001 - reported on the row, never fatal
             self.signals.ready.emit(self.token, None, str(exc))
+            return
+        except BaseException as exc:  # noqa: BLE001 - nothing may leave a QRunnable
+            # Invariant (review 2026-10-27, C5): a BaseException escaping a
+            # QRunnable (SystemExit, KeyboardInterrupt, a cancelled future)
+            # kills the process without a traceback. It is reported like any
+            # other failure, by its class name, and the line stays usable.
+            self.signals.ready.emit(self.token, None, type(exc).__name__)
             return
         self.signals.ready.emit(self.token, status, "")
 

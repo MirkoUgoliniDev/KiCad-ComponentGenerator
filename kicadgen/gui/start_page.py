@@ -509,22 +509,6 @@ class StartPage(QWidget):
         self.btn_open.setCursor(Qt.CursorShape.PointingHandCursor if available
                                 else Qt.CursorShape.ArrowCursor)
 
-    def set_projects_available(self, available: bool) -> None:
-        """@brief Enable «Apri progetto…» only while the working folder holds a project.
-
-        @param available True when at least one project exists in the folder.
-        @note User decision (2026-09-30, HANDOFF 170): a command that would
-            open an empty list is disabled, and its tooltip says why and what
-            to do (create a project, or choose another folder). «Nuovo» stays
-            enabled: it is the way out.
-        """
-        available = bool(available)
-        self.btn_open.setEnabled(available)
-        self.btn_open.setToolTip(self._tr(self._open_tooltip) if available else self._tr(
-            NO_PROJECTS_TOOLTIP))
-        self.btn_open.setCursor(Qt.CursorShape.PointingHandCursor if available
-                                else Qt.CursorShape.ArrowCursor)
-
     def _elide_root(self) -> None:
         width = max(self.root_path.width(), self.fontMetrics().averageCharWidth() * 20)
         self.root_path.setText(self.root_path.fontMetrics().elidedText(

@@ -813,6 +813,10 @@ class ExtractWorker(QThread):
         self._review_answered = threading.Event()
         self._review_result = None
 
+    #: Seconds between two checks of `cancel_event` while the worker waits
+    #: for the photo review to be answered (see `_review_proposals`).
+    REVIEW_WAIT_SLICE_S = 0.5
+
     def _review_proposals(self, photo_png, proposals, length_mm, width_mm):
         """@brief Ask the interface which bodies to keep, and wait.
 
@@ -820,17 +824,26 @@ class ExtractWorker(QThread):
         @param proposals Proposals of the local detector.
         @param length_mm Board extent along X, in mm.
         @param width_mm Board extent along Y, in mm.
-        @return The proposals to keep, or None when the review is cancelled.
+        @return The proposals to keep, or None when the review is cancelled
+            or the extraction is stopped while the review is open.
         @note Runs on the worker thread: the signal crosses the threads and
             the answer comes back through deliver_review. The wait is
             deliberate -- the paid call must not start before someone has
             looked.
+        @note Review 2026-10-27, C6: the wait is sliced so that `cancel_event`
+            («Interrompi» (stop), or the window closing) ends it even when no
+            answer ever arrives; an unbounded wait would leave the thread
+            blocked for ever, and the application exit waiting for it. The
+            slice only bounds the reaction time to the stop; an answer is
+            seen as soon as it is delivered.
         """
         self._review_result = None
         self._review_answered.clear()
         self.review_requested.emit(photo_png or b"", [dict(p) for p in proposals],
                                    float(length_mm), float(width_mm))
-        self._review_answered.wait()
+        while not self._review_answered.wait(self.REVIEW_WAIT_SLICE_S):
+            if self.cancel_event.is_set():
+                return None
         return self._review_result
 
     def deliver_review(self, kept) -> None:
@@ -895,7 +908,7 @@ class ExtractWorker(QThread):
             self.done.emit(params)
         except ExtractionError as exc:
             self.error.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
+        except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
             self.error.emit(tx("Errore API: {exc}", exc=exc))
 
 
@@ -1104,5 +1117,5 @@ class ReconcileWorker(QThread):
                                   smd_model_path=self.smd_model_path),
                 **phase_kwargs(reconcile_saved_proposals, self._forward_phase))
             self.done.emit(report)
-        except Exception as exc:  # noqa: BLE001 - errori rete/API riportati in UI
+        except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
             self.error.emit(tx("Rilancio dell'inventario fallito: {exc}", exc=exc))

@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import math
 
+from .ai_diagnostics import CallCancelled
 from .messages import tx
+from .openrouter import OpenRouterError
 from .photo_audit import write_stage_audit
 from .photo_grounding import (REFERENCE_TOKEN_PX, cached_call, detail_grid,
                               model_image_limits, model_px_per_mm)
@@ -168,8 +170,10 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
         (PROMPT_VERSION). The request and response are written to a
         ``marking-reading`` audit under ``<cache_dir>/yolo-audit`` (pruned like
         the other audits, photo_audit.AUDIT_RETENTION_PER_KIND).
-    @note Errors of this optional step never fail the inventory: they are
-        logged and the inventory markings stay.
+    @note Provider, validation and cache errors of this optional step never
+        fail the inventory: they are logged and the inventory markings stay.
+    @throws CallCancelled When the user cancelled during the paid call: the
+        cancellation is re-raised, never downgraded to a failed reading.
     """
     height_px, width_px = photo.shape[:2]
     native = min(width_px / length_mm, height_px / width_mm)
@@ -217,7 +221,17 @@ def read_markings(photo, components, length_mm, width_mm, model, call, log,
     try:
         data = cached_call(call, kwargs, cache_dir, tx("Lettura delle sigle"), log,
                            expected_ids=expected)
-    except Exception as exc:  # noqa: BLE001 - optional step: the inventory stays valid
+    except CallCancelled:
+        # A cancellation is the user's decision, not a failure of this
+        # optional step: it must reach the caller, which stops the analysis,
+        # instead of being logged as a failed reading and letting the
+        # analysis finish as a success (review 2026-10-27, F1).
+        raise
+    except (OpenRouterError, ValueError, OSError) as exc:
+        # Provider, answer-validation and cache I/O errors are the failures
+        # this optional step downgrades to a note: the inventory stays valid
+        # with its own markings. ToolArgumentsError is an OpenRouterError.
+        # Any other exception is a defect and propagates as such.
         log(tx("Lettura delle sigle non riuscita ({exc}): restano le sigle dell'inventario.",
                exc=exc))
         return 0

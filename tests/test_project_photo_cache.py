@@ -80,7 +80,9 @@ def test_a_rename_carries_cache_and_review_along(window, tmp_path):  # noqa: F81
     (old / PHOTO_CACHE_SUBDIR / "yolo-audit" / "yolo-1.json").write_text("[]", encoding="utf-8")
     (old / REVIEW_BUNDLE_SUBDIR).mkdir()
     (old / REVIEW_BUNDLE_SUBDIR / "proposals.json").write_text("{}", encoding="utf-8")
-    assert window._migrate_docs_to_new_name("NomeNuovo") == "NomeNuovo"
+    # The whole-project rename carries every folder (review 2026-10-27, A6:
+    # the per-folder migration helper was unreachable and is gone).
+    assert window._rename_project_folder("NomeNuovo") == "NomeNuovo"
     new = old.parent / "NomeNuovo"
     assert (new / PHOTO_CACHE_SUBDIR / "global-inventory-abc.json").is_file()
     assert (new / PHOTO_CACHE_SUBDIR / "yolo-audit" / "yolo-1.json").is_file()
@@ -89,7 +91,11 @@ def test_a_rename_carries_cache_and_review_along(window, tmp_path):  # noqa: F81
 
 
 def test_a_rename_never_overwrites_what_the_destination_already_has(window, tmp_path):  # noqa: F811
-    """@brief Negativo: un file gia' presente nella destinazione non viene toccato."""
+    """@brief Negativo: una destinazione gia' esistente rifiuta la rinomina, nulla si tocca.
+
+    The whole-project rename refuses an existing destination outright
+    (before, the per-folder migration merged and skipped the duplicates).
+    """
     DocumentSet(window._docs_dir()).import_file("top", _image(tmp_path / "a.png"))
     old = window._project_dir()
     (old / REVIEW_BUNDLE_SUBDIR).mkdir(parents=True)
@@ -98,11 +104,12 @@ def test_a_rename_never_overwrites_what_the_destination_already_has(window, tmp_
     new = old.parent / "NomeNuovo"
     (new / REVIEW_BUNDLE_SUBDIR).mkdir(parents=True)
     (new / REVIEW_BUNDLE_SUBDIR / "proposals.json").write_text("destinazione", encoding="utf-8")
-    window._migrate_docs_to_new_name("NomeNuovo")
+    assert window._rename_project_folder("NomeNuovo") == window._component_name()
     assert (new / REVIEW_BUNDLE_SUBDIR / "proposals.json").read_text(encoding="utf-8") == "destinazione"
     assert (old / REVIEW_BUNDLE_SUBDIR / "proposals.json").read_text(encoding="utf-8") == "vecchia"
-    assert (new / REVIEW_BUNDLE_SUBDIR / "photo.png").is_file()
-    assert "esistevano gia'" in window.ai_progress_text.toPlainText()
+    assert (old / REVIEW_BUNDLE_SUBDIR / "photo.png").is_file()
+    assert not (new / REVIEW_BUNDLE_SUBDIR / "photo.png").exists()
+    assert "Rinomina annullata: esiste gia' NomeNuovo." in window.ai_progress_text.toPlainText()
 
 
 def test_a_corrected_default_text_reaches_an_existing_database(tmp_path):

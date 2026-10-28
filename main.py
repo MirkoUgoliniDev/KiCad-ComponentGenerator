@@ -51,6 +51,32 @@ RUNTIME_RESOURCES = (
 PACKAGE_RESOURCES = (("licenses", "MANIFEST.txt"),)
 
 
+def provider_secrets():
+    """@brief The provider API keys in use now, for the crash report scrubber.
+
+    @return The OpenRouter and DeepSeek keys the services would use (empty
+        strings when a provider has none), read from every source the
+        services read: the environment, the Windows Credential Manager and
+        the ``.env`` files.
+    @note Called only while a crash report is being written. The keys of a
+        ``.env`` file are popped from the process environment by `main` and
+        the Credential Manager keys never enter it, so `crash_report.scrub`
+        cannot find them in the environment: without this callable only the
+        ``sk-`` pattern masked them (review 2026-10-27, I8). The services
+        are imported here, lazily, so that `kicadgen.crash_report` stays
+        standard library only and a failing import loses one mask, never the
+        report (the scrubber swallows exceptions of this callable).
+    """
+    from kicadgen.services import openrouter, providers
+    values = []
+    for read_key in (openrouter.api_key, providers.deepseek_api_key):
+        try:
+            values.append(read_key())
+        except Exception:  # noqa: BLE001 - no key, or an unreadable store: nothing to mask
+            values.append("")
+    return values
+
+
 def install_crash_reports(exit_process=os._exit):
     """@brief Write a crash report for every unhandled exception, then stop as before.
 
@@ -68,7 +94,7 @@ def install_crash_reports(exit_process=os._exit):
     """
     from kicadgen import crash_report
     from kicadgen.app_paths import logs_dir
-    crash_report.install(logs_dir)
+    crash_report.install(logs_dir, secrets=provider_secrets)
     report = sys.excepthook
 
     def report_and_stop(exc_type, exc_value, exc_tb):

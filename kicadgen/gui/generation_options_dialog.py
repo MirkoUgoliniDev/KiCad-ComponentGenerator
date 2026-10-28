@@ -10,6 +10,16 @@ class GenerationOptionsDialog(QDialog):
     """@brief Edit generation options before a component is produced."""
     def __init__(self, include_nc_pins=True, parent=None, *,
                  silk_pin_labels=False, pause_after_inventory=True):
+        """@brief Build the options form preloaded with the current values.
+
+        @param include_nc_pins Current value of «Includi i pin NC».
+        @param parent Owner window.
+        @param silk_pin_labels Current value of «Incidi le sigle dei pin».
+        @param pause_after_inventory Current value of the pause for the photo
+            review before the paid reading.
+        @note Nothing is saved here: the caller reads the check boxes after
+            the dialog is accepted, so «Annulla» leaves every option as it was.
+        """
         super().__init__(parent)
         self.setWindowTitle("Opzioni di generazione")
         self.setModal(True)

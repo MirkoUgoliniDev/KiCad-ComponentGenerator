@@ -136,6 +136,18 @@ clipboard and transforms.
 - C-M4: the footprint menu gets a title line (kind name: «Linea»,
   «Rettangolo», «Cerchio», «Arco», «Testo» — existing translation keys of the
   palette when present).
+- C-M6 (review 2026-10-27, D3): the footprint's Reference/Value texts had a
+  context menu with «Posizione predefinita» (`_footprint_text_context_menu`);
+  the symbol's property texts had none, so a moved property could not be put
+  back from the canvas. Same menu in the symbol: `_SymbolView.contextMenuEvent`
+  emits `property_context_requested(key, global_pos)` for a `('property',
+  key)` item (text or anchor square); `SymbolTab._property_context_menu`
+  builds it through `canvas_menus` (no title, as the footprint; the entry is
+  greyed out while the property follows its default; the menu is released by
+  `exec_element_menu`) and `SymbolTab.reset_property(key)` removes the key
+  from `symbol_properties` in one history entry, the other property keeping
+  its choice. Tests in `tests/test_review_1027_canvas.py`; negative: a right
+  click on the empty canvas opens nothing.
 
 ## 5. Method
 

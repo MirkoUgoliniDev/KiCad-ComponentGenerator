@@ -93,6 +93,40 @@ def test_the_empty_source_stays_empty(tmp_path):
 _CALLS = {"tx": 0, "warning": 0, "_warn": 0, "marked": 1}
 
 
+def _is_get_logger(node):
+    """@brief Whether `node` is a call of `logging.getLogger(...)` or `getLogger(...)`."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) == "getLogger"
+
+
+def _logger_names(tree):
+    """@brief Names bound to `logging.getLogger(...)` anywhere in a module."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_get_logger(node.value):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
+
+
+def _is_logger(receiver, loggers):
+    """@brief Whether the receiver of a `.warning(...)` call is a Python logger."""
+    return _is_get_logger(receiver) or (isinstance(receiver, ast.Name) and receiver.id in loggers)
+
+
+def test_logging_calls_are_not_message_templates():
+    """@brief Positive: a logger line is skipped. Negative: `messages.warning` is still collected."""
+    tree = ast.parse("import logging\n_LOG = logging.getLogger(__name__)\n"
+                     "_LOG.warning('dev %s', 1)\nlogging.getLogger('x').warning('dev2')\n"
+                     "messages.warning('Modello {x}', x=1)\n")
+    loggers = _logger_names(tree)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "warning"]
+    skipped = [_is_logger(c.func.value, loggers) for c in calls]
+    assert sorted(skipped) == [False, True, True]
+
+
 def message_templates():
     """@brief Ogni modello scritto come letterale in tx/warning/marked/_warn del pacchetto.
 
@@ -102,13 +136,22 @@ def message_templates():
     """
     found = {}
     for path in sorted(PACKAGE.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        loggers = _logger_names(tree)
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             f = node.func
             name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
             index = _CALLS.get(name)
             if index is None or len(node.args) <= index:
+                continue
+            if isinstance(f, ast.Attribute) and _is_logger(f.value, loggers):
+                # CONTRACT CHANGED 2026-10-27: `logger.warning("... %s", x)`
+                # is a Python logging line for developers (English,
+                # %-placeholders, no handler shows it in the GUI); `tx` never
+                # formats it, so a catalogue entry would only pretend it is
+                # covered. Only the message helpers are collected.
                 continue
             arg = node.args[index]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):

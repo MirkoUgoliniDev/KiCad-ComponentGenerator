@@ -43,6 +43,8 @@ from kicadgen.services.datasheet_extractor import (
     UNDECLARED_SOURCE, VALUE_SOURCES, _params_from_tool_arguments, _validate_main_response,
     normalize_document_roles, photo_document_indices)
 
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 # ── 1. No sample data in the prompts ─────────────────────────────────────────
 
 #: Fragments that identify the sample boards the prompts were first written
@@ -73,7 +75,7 @@ def _run_extraction(monkeypatch, tmp_path, names, roles, answer=None):
     paths = []
     for name in names:
         path = tmp_path / name
-        path.write_bytes(b"%PDF-1.4 offline" if name.endswith(".pdf") else _TINY_PNG)
+        path.write_bytes(MINIMAL_PDF if name.endswith(".pdf") else _TINY_PNG)
         paths.append(path)
     call = Mock(return_value=answer or dict(
         layout="castellated", confidence="high", body_length_mm=40, body_width_mm=20,

@@ -13,5 +13,9 @@ pyvistaqt
 # le chiamate HTTP usano solo la stdlib (urllib), serve solo leggere il .env
 python-dotenv
 
+# PDF datasheets are rewritten without their metadata before the upload
+# (kicadgen/services/datasheet_extractor.py); pure Python, BSD-3-Clause.
+pypdf
+
 # Test
 pytest

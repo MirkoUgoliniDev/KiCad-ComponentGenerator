@@ -148,7 +148,10 @@ def dialogs(monkeypatch):
     monkeypatch.setattr(gui, "launch_preview", lambda *a, **k: None)
     monkeypatch.setattr(gui, "detect_external_applications", lambda: SimpleNamespace(
         pcbnew="pcbnew.exe", kicad_cli="kicad-cli.exe"))
-    monkeypatch.setattr(gui, "global_fp_lib_table_path", lambda *_: None)
+    # CONTRACT CHANGED 2026-10-27 (review K): the global installation resolves
+    # the table WITH its KiCad version, to name both before writing.
+    monkeypatch.setattr(gui, "resolve_global_fp_lib_table", lambda *_: SimpleNamespace(
+        path=None, version="10.0", version_source="kicad-cli"))
     monkeypatch.setattr(gui, "record_kicad_export", lambda **k: True)
     return seen
 

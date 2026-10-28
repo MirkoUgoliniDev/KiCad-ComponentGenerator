@@ -157,6 +157,61 @@ def no_real_api_key_sources(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def machine_independent_glyph_catalogue():
+    """@brief Every test starts and ends with an empty glyph catalogue cache.
+
+    `symbol_glyphs.catalogue()` is `lru_cache`d for the process and reads
+    KiCad's symbol library when KiCad is installed, the built-in shapes
+    otherwise. A test that patches `kicad_symbols_dir` (see `glyph_library`)
+    or probes the fallback must not inherit the catalogue a previous test
+    built, nor leave its own to the next one: the result depended on the
+    test order and on the machine (CI review 2026-10-27, I11).
+    """
+    from kicadgen.generators import symbol_glyphs
+    symbol_glyphs.catalogue.cache_clear()
+    yield
+    symbol_glyphs.catalogue.cache_clear()
+
+
+#: The hand-written symbol library of the suite (KiCad 10 format, not a copy
+#: of KiCad's CC-BY-SA libraries): a resistor «R» with its pins 3.81 mm from
+#: the origin, a three-terminal «R_Potentiometer», a two-terminal «Crystal»,
+#: «C», «L», «D», «LED» and a «Relay_SPST-NO» whose background-filled body
+#: rectangle gives the glyph a `body_hint`.
+GLYPH_FIXTURE_LIBRARY = _TESTS_DIR / "data" / "glyph_fixture.kicad_sym"
+
+
+@pytest.fixture
+def glyph_library(monkeypatch, tmp_path):
+    """@brief The glyph catalogue read from the suite's own symbol library, KiCad installed or not.
+
+    @param monkeypatch pytest fixture; the patch of `kicad_symbols_dir` is undone after the test.
+    @param tmp_path Folder that plays the role of KiCad's `share/kicad/symbols`.
+    @return The folder holding one copy of `GLYPH_FIXTURE_LIBRARY` per
+        library name of `KICAD_GLYPHS` (`Device.kicad_sym`, `Relay.kicad_sym`,
+        ...), so the catalogue resolves every entry it can find in the
+        fixture and skips the others, as it does with a partial install.
+    @note On the GitHub runner KiCad is absent and the catalogue fell back to
+        the built-in shapes (resistor pins at 5.08 mm, no potentiometer, no
+        crystal, no body hint), which made 40 tests of the symbol editor fail
+        (CI review 2026-10-27, I2). A test of glyph geometry needs its own
+        data, not an installed program; the built-in fallback keeps its own
+        tests (`test_s7_on_grid_terminals_keep_the_origin_on_the_grid`).
+        The cache is cleared before and after: `catalogue` is `lru_cache`d.
+    """
+    import shutil
+    from kicadgen.generators import symbol_glyphs
+    folder = tmp_path / "kicad-symbols"
+    folder.mkdir()
+    for library in sorted({entry[3] for entry in symbol_glyphs.KICAD_GLYPHS}):
+        shutil.copyfile(GLYPH_FIXTURE_LIBRARY, folder / f"{library}.kicad_sym")
+    monkeypatch.setattr(symbol_glyphs, "kicad_symbols_dir", lambda: folder)
+    symbol_glyphs.catalogue.cache_clear()
+    yield folder
+    symbol_glyphs.catalogue.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def no_real_uninstall_registry(monkeypatch):
     """@brief No test sees the programs registered in this machine's registry.
 

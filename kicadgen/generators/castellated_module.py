@@ -62,6 +62,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import Footprint, FpRect, FpText, Pad, fab_reference_text
+from ..core.output_names import validate_output_name
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
@@ -339,7 +340,8 @@ def fallback_through_hole_inset(pad_diameter_mm: float) -> float:
     """
     return round(pad_diameter_mm / 2 + MIN_HOLE_WALL_MM, 4)
 
-#: Etichette leggibili (GUI, messaggi d'errore).
+#: Human-readable edge labels inserted as values into GUI and error
+#: messages: Italian source words, like the `tx` templates they fill.
 EDGE_LABELS = {
     "left": "sinistro",
     "right": "destro",
@@ -1613,6 +1615,11 @@ class CastellatedModuleParams:
         self._validate_finite_numbers()
         if not self.name.strip():
             raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
+        # The name becomes the stem of every generated file and of the
+        # `.3dshapes` folder: the shared rule refuses a path such as
+        # "..\evil" here too, so a script caller is protected exactly like
+        # the window (2026-10-27 review, H4).
+        validate_output_name(self.name)
         if self.body_length <= 0 or self.body_width <= 0:
             raise ValueError(tx("Le dimensioni del corpo devono essere > 0."))
         if not self.sides:

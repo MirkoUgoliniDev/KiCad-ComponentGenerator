@@ -53,6 +53,15 @@ class _KeyCheckWorker(QThread):
     checked = pyqtSignal(object, object)
 
     def __init__(self, key: str, checker: Callable, parent=None):
+        """@brief Prepare one key check (or balance read) owned by QApplication.
+
+        @param key API key passed to `checker`; forgotten by the worker as
+            soon as the request starts, so no finished thread holds it.
+        @param checker Callable(key) -> status; its exception is reported
+            through `checked` with the tracebacks removed (see `run`).
+        @param parent Owner of the thread; the dialog passes
+            QApplication.instance() (see the class docstring).
+        """
         super().__init__(parent)
         self._key = key
         self._checker = checker

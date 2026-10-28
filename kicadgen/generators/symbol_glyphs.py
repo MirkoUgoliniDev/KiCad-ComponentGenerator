@@ -28,16 +28,22 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ..core.sexpr import format_number, quote
 from ..services.messages import tx
 
 #: Key of the placed record that is a free wire rather than a catalogue glyph.
 WIRE_KEY = "wire"
+
+#: Backslash escapes KiCad's lexer decodes inside a quoted string, the
+#: inverse of the sequences `core.sexpr.quote` writes.
+_STRING_UNESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
 
 #: Unit vector of a pin/terminal angle towards the body: 0 right, 90 up,
 #: 180 left, 270 down (KiCad's convention, also the editor's).
@@ -213,7 +219,12 @@ def parse_sexpr(text: str):
             out = []
             while j < n and text[j] != '"':
                 if text[j] == "\\" and j + 1 < n:
-                    out.append(text[j + 1])
+                    # KiCad's lexer decodes the escapes its writer produces
+                    # (`\n`, `\r`, `\t`, `\\`, `\"`); any other escaped
+                    # character stands for itself. Resolving `\n` as a bare
+                    # «n» (the former behaviour) corrupted a text read back
+                    # from a library (review 2026-10-27, G8).
+                    out.append(_STRING_UNESCAPES.get(text[j + 1], text[j + 1]))
                     j += 2
                 else:
                     out.append(text[j])
@@ -1779,6 +1790,15 @@ def validate_instances(instances) -> list[dict]:
                 if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
                         or len(primitive.get("points", ())) != 1:
                     raise ValueError(tx("Elementi grafici del simbolo non validi."))
+                # A control character (newline, tab, NUL...) has no place in
+                # a one-line symbol text: a hand-edited or legacy project
+                # record carrying one used to reach the `.kicad_sym` as a
+                # raw newline inside the quotes, and KiCad 10 then refused
+                # the whole library (review 2026-10-27, G1). Refused here,
+                # where the record is checked, with a message naming the cause.
+                if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in primitive["text"]):
+                    raise ValueError(tx("Testo dell'elemento grafico del simbolo con caratteri di controllo "
+                                        "(a capo, tabulazione): non ammessi."))
                 _finite_or_raise(primitive.get("size", TEXT_SIZE_MM))
                 if float(primitive.get("size", TEXT_SIZE_MM)) <= 0:
                     raise ValueError(tx("Elementi grafici del simbolo non validi."))
@@ -1821,13 +1841,13 @@ def _validate_point(point) -> None:
 
 # ── Serialisation ──────────────────────────────────────────────────────────
 
-def _num(value: float) -> str:
-    return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
-
-
-def _quote_text(value: str) -> str:
-    """A KiCad quoted string: backslashes and double quotes escaped."""
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+#: Numbers and quoted strings come from the shared `core.sexpr` writers so a
+#: glyph line escapes and rounds exactly like the rest of the symbol and of
+#: the footprint files (review 2026-10-27, G1/G3/G5: the former private
+#: copies wrote `-0` and let control characters through). The old names stay
+#: for the tests and callers written against them.
+_num = format_number
+_quote_text = quote
 
 
 def serialize_graphics(instances: Iterable[dict], indent: str = "      ",

@@ -34,6 +34,8 @@ from kicadgen.services.datasheet_extractor import (
     _openai_tool, _params_from_tool_arguments, _merge_photo_components,
 )
 
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 def test_extract_requires_at_least_one_file():
     with pytest.raises(ExtractionError, match="Nessun file"):
@@ -44,7 +46,10 @@ def test_tool_only_requests_pad_shapes_the_generator_can_represent():
     properties = _openai_tool()['function']['parameters']['properties']
     shapes = properties['package_geometry']['properties']['pins']['items']['properties']['shape']['enum']
     assert 'custom' not in shapes
-    assert 'trapezoid' in shapes
+    # CONTRACT CHANGED 2026-10-27 (review G7): a PinSpec has no `rect_delta`,
+    # so a trapezoid was written as a plain rectangle; it is no longer asked for.
+    assert 'trapezoid' not in shapes
+    assert {'circle', 'rect', 'oval', 'roundrect'} <= set(shapes)
 
 
 def test_overlapping_explicit_pad_ranges_are_rejected():
@@ -67,7 +72,7 @@ def test_duplicate_pin_repair_preserves_geometry_and_labels(tmp_path, monkeypatc
     from kicadgen.services import datasheet_extractor as ext
     from unittest.mock import Mock
     source = tmp_path / "drawing.pdf"
-    source.write_bytes(b"%PDF-1.4 offline")
+    source.write_bytes(MINIMAL_PDF)
     sides = [dict(edge="top", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "1"]),
              dict(edge="bottom", count=2, pitch_mm=2.54, first_pin=1, pin_names=["G", "TX"])]
     call = Mock(side_effect=[dict(layout="castellated", castellated_sides=sides),
@@ -94,7 +99,7 @@ def test_extract_rejects_too_many_files(tmp_path, monkeypatch):
     files = []
     for i in range(MAX_FILES + 1):
         f = tmp_path / f"doc{i}.pdf"
-        f.write_bytes(b"%PDF-1.4")
+        f.write_bytes(MINIMAL_PDF)
         files.append(f)
     with pytest.raises(ExtractionError, match="Troppi file"):
         extract_pin_header_params(files)
@@ -103,7 +108,7 @@ def test_extract_rejects_too_many_files(tmp_path, monkeypatch):
 def test_extract_requires_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     f = tmp_path / "doc.pdf"
-    f.write_bytes(b"%PDF-1.4")
+    f.write_bytes(MINIMAL_PDF)
     with pytest.raises(ExtractionError, match="OPENROUTER_API_KEY"):
         extract_pin_header_params([f])
 
@@ -117,7 +122,7 @@ def test_content_block_rejects_unsupported_extension(tmp_path):
 
 def test_content_block_rejects_oversized_file(tmp_path, monkeypatch):
     f = tmp_path / "doc.pdf"
-    f.write_bytes(b"%PDF-1.4")
+    f.write_bytes(MINIMAL_PDF)
     monkeypatch.setattr(
         "kicadgen.services.datasheet_extractor.MAX_FILE_BYTES", 1
     )
@@ -127,7 +132,7 @@ def test_content_block_rejects_oversized_file(tmp_path, monkeypatch):
 
 def test_content_block_builds_pdf_file_block(tmp_path):
     f = tmp_path / "doc.pdf"
-    f.write_bytes(b"%PDF-1.4 fake content")
+    f.write_bytes(MINIMAL_PDF)
     block = _file_to_content_block(f)
     assert block["type"] == "file"
     assert block["file"]["filename"] == "doc.pdf"

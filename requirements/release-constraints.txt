@@ -3,8 +3,9 @@
 # Read on 2026-09-25 from .venv-build, the environment of the last local
 # release build (Python 3.13.12). A constraint only pins a package that is
 # installed anyway; it never adds one. Pillow and certifi raised on
-# 2026-10-27 for the Dependabot advisories. Update it deliberately, together
-# with the versions in THIRD_PARTY_NOTICES.md, when a dependency changes.
+# 2026-10-27 for the Dependabot advisories; pypdf added the same day (PDF
+# metadata stripping). Update it deliberately, together with the versions in
+# THIRD_PARTY_NOTICES.md, when a dependency changes.
 
 altgraph==0.17.5
 attrs==26.1.0
@@ -37,6 +38,7 @@ Pygments==2.21.0
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.7
 pyparsing==3.3.3
+pypdf==6.21.3
 PyQt6==6.11.0
 PyQt6-Qt6==6.11.2
 PyQt6_sip==13.12.0

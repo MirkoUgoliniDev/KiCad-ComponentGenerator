@@ -33,7 +33,12 @@ the selection. With nothing selected, the footprint commands act on the
 drawing under the pointer as today.
 
 The symbol keeps its pin selection (pins and elements are exclusive, as
-today); "clear" clears both.
+today); "clear" clears both. A plain (non-additive) rubber band is a NEW
+selection: when it encloses nothing it clears the pins too, as the
+footprint and KiCad do (review 2026-10-27, D5: `_select_region` kept the
+pins when the band chose no element); only an additive (Ctrl) band keeps
+them. The pin table is cleared with the pins. Tests in
+`tests/test_review_1027_canvas.py`, with the additive negative twin.
 
 ## 3. Shared code — `kicadgen/gui/canvas_selection.py` (DONE, tests in `tests/test_canvas_selection.py`)
 

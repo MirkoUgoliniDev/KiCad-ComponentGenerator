@@ -64,10 +64,13 @@ def test_name_migration_without_documents_preserves_log_and_continues_it(window,
 
 
 @pytest.mark.parametrize("docs_state", ["absent", "empty", "populated"])
-@pytest.mark.parametrize("entry", ["move", "migrate", "extracted"])
+@pytest.mark.parametrize("entry", ["move", "extracted"])
 def test_failed_log_move_refuses_rename_and_preserves_project(
     window, monkeypatch, docs_state, entry,
 ):
+    # The "migrate" entry (`_migrate_docs_to_new_name`) is gone with the
+    # helper, unreachable from the GUI (review 2026-10-27, A6): the rename
+    # from the analysis proposal is the "extracted" entry below.
     source = _prepare_project(window, docs_state)
     old_project = window._project_dir()
     original = source.read_bytes()
@@ -81,8 +84,6 @@ def test_failed_log_move_refuses_rename_and_preserves_project(
     monkeypatch.setattr(shutil, "move", fail_move)
     if entry == "move":
         assert window._move_log_to(destination) is False
-    elif entry == "migrate":
-        assert window._migrate_docs_to_new_name("LogRenamed") == "LogOriginal"
     else:
         params = _extracted("LogRenamed")
         window._on_extracted(params)
@@ -136,7 +137,8 @@ def test_same_path_move_and_name_migration_do_not_delete_or_duplicate_log(window
     monkeypatch.setattr(Path, "unlink", unexpected_file_operation)
     assert window._move_log_to(source.parent) is True
     assert source.read_bytes() == original
-    assert window._migrate_docs_to_new_name("LogOriginal") == "LogOriginal"
+    # A rename to the same name is a no-op of the whole-project rename.
+    assert window._rename_project_folder("LogOriginal") == "LogOriginal"
     assert source.read_bytes() == original
     assert (window._docs_dir() / "datasheet.pdf").read_bytes() == b"original document"
 

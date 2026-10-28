@@ -21,25 +21,37 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-#: Where the prices were read, and when.
+#: Where the prices were read, and when. Re-read on 2026-10-27 (review E4):
+#: prices, aliases and the peak rule below match the page on that date.
 PRICES_SOURCE = "https://api-docs.deepseek.com/quick_start/pricing"
-PRICES_CHECKED = "2026-09-27"
+PRICES_CHECKED = "2026-10-27"
 
 #: USD per 1M tokens, OFF-PEAK: (input cache hit, input cache miss, output).
-#: Peak hours cost twice as much (PEAK_FACTOR).
+#: Peak hours cost twice as much (PEAK_FACTOR). Page table of 2026-10-27:
+#: deepseek-flash $0.003/$0.006, $0.15/$0.3, $0.6/$1.2 (off-peak/peak);
+#: deepseek-v4-pro $0.022/$0.044, $0.66/$1.32, $1.98/$3.96.
 PRICES = {
     "deepseek-flash": (0.003, 0.15, 0.60),
     "deepseek-v4-pro": (0.022, 0.66, 1.98),
 }
-#: Names DeepSeek still accepts and bills at the price of another model.
+#: Names DeepSeek still accepts and bills at the price of another model
+#: (page of 2026-10-27: «deepseek-v4-flash» and «deepseek-v4-flash-vision-exp»
+#: are served by DeepSeek-V4.1-Flash and billed at the Flash price).
 ALIASES = {
     "deepseek-v4-flash": "deepseek-flash",
     "deepseek-v4-flash-vision-exp": "deepseek-flash",
 }
+#: Published rule, VERIFIED on PRICES_SOURCE on 2026-10-27 (footnote 2 of the
+#: page): «Off-peak rates are half of the peak rates», hence peak = 2 x the
+#: off-peak prices stored above.
 PEAK_FACTOR = 2.0
-#: Peak windows, UTC, Monday to Friday: [start hour, end hour).
-#: (Chinese public holidays are off-peak too; they are not modelled: on those
-#: days the cost computed here is an upper bound.)
+#: Peak windows, UTC, Monday to Friday: [start hour, end hour). Published
+#: text of 2026-10-27: «Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC,
+#: Monday through Friday, excluding Chinese public holidays. All other hours
+#: are off-peak, including weekends and Chinese public holidays in full.»
+#: Chinese public holidays are not modelled (no calendar in the program): on
+#: those days the cost computed here is an upper bound, never lower than the
+#: bill.
 PEAK_HOURS_UTC = ((1, 4), (6, 10))
 
 

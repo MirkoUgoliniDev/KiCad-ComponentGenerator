@@ -158,6 +158,16 @@ class ProfileError(ValueError):
 class ProfileStore:
     """@brief Persist and retrieve component analysis profiles in SQLite."""
     def __init__(self,path=None,*,legacy_config=None,legacy_path=None):
+        """@brief Open (creating if needed) the profile database.
+
+        @param path SQLite file; when omitted, `KICADGEN_PROFILE_DB` or the
+            application data copy seeded from the distributed database.
+        @param legacy_config Optional legacy configuration mapping imported
+            once into the database.
+        @param legacy_path Optional path of a legacy configuration file
+            imported once into the database.
+        @throws ProfileError When the database cannot be opened or migrated.
+        """
         # From source, the repository database (as before); when installed,
         # the user's copy, created on first start from the distributed one.
         if not path and not os.environ.get('KICADGEN_PROFILE_DB'):

@@ -175,6 +175,11 @@ class AnchoredPopup(QFrame):
     """
 
     def __init__(self, widgets, parent: QWidget):
+        """@brief Build the popup around `widgets`, laid out vertically in a scroll area.
+
+        @param widgets Widgets shown top to bottom inside the popup.
+        @param parent Window the popup is confined to (see the class notes).
+        """
         super().__init__(parent, Qt.WindowType.Popup)
         self.setObjectName("info_popup")
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -272,6 +277,11 @@ class InfoPopup(AnchoredPopup):
     """
 
     def __init__(self, html_text: str, parent: QWidget):
+        """@brief Build the popup with one wrapped rich-text label.
+
+        @param html_text Instructions in Qt rich text.
+        @param parent Window the popup is confined to.
+        """
         self.label = QLabel(html_text)
         self.label.setTextFormat(Qt.TextFormat.RichText)
         self.label.setWordWrap(True)

@@ -253,8 +253,17 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 9809 passed,
-12 skipped and 19 subtests (2026-10-27, branch `ADVANCED`: FreeCAD and KiCad found wherever
+is 10207 passed,
+14 skipped and 19 subtests (2026-10-28 night, branch `ADVANCED`: full adversarial review of the
+whole codebase by ten read-only agents and its fixes by eleven fixing agents on disjoint files —
+the GitHub suite failed only because tests assumed KiCad, FreeCAD and untracked weights (window
+fixture fakes FreeCAD, hand-written glyph library fixture, AI detector in the prompt test); PDFs
+uploaded without metadata (pypdf); linked fp-lib-table kept linked; failed STEP removal keeps the
+block; recent project of another folder commits that folder; Cancel during marking reading
+stops the analysis; KiCad text control characters refused; shared output-name rule in
+kicadgen/core/output_names.py; every FreeCAD launch through run_logged; process tree kill
+checks creation times; see HANDOFF.md 27/10-28/10. The run had 2 failures, both then fixed and
+re-run green, not a second full run; before that, 9809 passed, 2026-10-27: FreeCAD and KiCad found wherever
 they are installed — per-user `%LOCALAPPDATA%\Programs`, the declared `%ProgramFiles%`, the
 folders of their «Uninstall» registry entries — through `kicadgen/services/installed_programs.py`,
 tests isolated from the real registry by a conftest fixture; optional requirements moved into

@@ -126,6 +126,15 @@ class ProjectNameDialog(QDialog):
     """
 
     def __init__(self, root, title: str, current: str = "", tr=None, parent=None):
+        """@brief Build the name field with its live validation.
+
+        @param root Working folder whose sub-folders are the existing projects.
+        @param title Window title (source text, translated by `tr`).
+        @param current Name of the project being renamed, "" for a new one;
+            it is the one existing name that is not refused.
+        @param tr Translation function (Italian source -> shown text).
+        @param parent Owner window.
+        """
         super().__init__(parent)
         self._tr = tr or (lambda text: text)
         self._root = Path(root)
@@ -210,6 +219,13 @@ class OpenProjectDialog(QDialog):
     """@brief Choose one of the existing projects of the library root."""
 
     def __init__(self, root, current: str = "", tr=None, parent=None):
+        """@brief List the projects of the root, most recent first, with the current one selected.
+
+        @param root Working folder whose sub-folders are the projects.
+        @param current Name of the open project, preselected when listed.
+        @param tr Translation function (Italian source -> shown text).
+        @param parent Owner window.
+        """
         super().__init__(parent)
         self._tr = tr or (lambda text: text)
         self.setWindowTitle(self._tr("Apri progetto"))
@@ -278,6 +294,13 @@ class ProjectKindDialog(QDialog):
     )
 
     def __init__(self, tr=None, selected="", parent=None):
+        """@brief Build the two-stage choice, preselecting `selected` when it is a known key.
+
+        @param tr Translation function (message key -> shown text).
+        @param selected Project kind key already chosen (one of the OPTIONS
+            values), or "" to start with nothing selected.
+        @param parent Owner window.
+        """
         super().__init__(parent)
         self._tr = tr or (lambda text: text)
         self.setWindowTitle(self._tr("project_kind.title"))

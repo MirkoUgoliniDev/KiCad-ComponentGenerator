@@ -16,6 +16,12 @@ def test_verification_is_guarded_and_uses_applied_snapshot(window, monkeypatch):
         def exec(self):
             assert window._background_work_running()
             assert not window._can_leave_project()
+
+        # CONTRACT CHANGED 2026-10-27 (review B6): the window releases every modal
+        # it opens (`MainWindow._run_modal` calls `deleteLater`), so a fake dialog
+        # must answer it like the QDialog it stands for.
+        def deleteLater(self):
+            pass
     monkeypatch.setattr(component_check_dialog, 'ComponentCheckDialog', Dialog)
     window._verify_component()
     assert captured[0]['pending']

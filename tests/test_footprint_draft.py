@@ -339,6 +339,12 @@ def test_the_verification_passes_the_footprint_draft_state(project, monkeypatch)
 
         def exec(self):
             return 0
+
+        # CONTRACT CHANGED 2026-10-27 (review B6): the window releases every modal
+        # it opens (`MainWindow._run_modal` calls `deleteLater`), so a fake dialog
+        # must answer it like the QDialog it stands for.
+        def deleteLater(self):
+            pass
     monkeypatch.setattr(component_check_dialog, "ComponentCheckDialog", Dialog)
     window._verify_component()
     window._apply_footprint_drawings(validate_footprint_drawings([record()]))

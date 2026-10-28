@@ -16,6 +16,8 @@ import pytest
 from kicadgen.services import datasheet_extractor as extractor
 from kicadgen.services import photo_global_inventory, photo_inventory, photo_yolo
 from kicadgen.services.datasheet_extractor import _files_sent_message, _LOG_NAME_CHARS
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 
 def _tiny_png() -> bytes:
@@ -147,7 +149,7 @@ def test_the_extraction_log_names_the_documents_and_their_roles(monkeypatch, tmp
     """
     long_name = 'foto-dall-alto-ad-altissima-risoluzione-rev-C.png'
     paths = [tmp_path / 'pinout.pdf', tmp_path / long_name]
-    paths[0].write_bytes(b'%PDF-1.4 offline')
+    paths[0].write_bytes(MINIMAL_PDF)
     paths[1].write_bytes(_TINY_PNG)
     roles = {'pinout.pdf': 'pinout', long_name: 'hires'}
     call = Mock(return_value=dict(

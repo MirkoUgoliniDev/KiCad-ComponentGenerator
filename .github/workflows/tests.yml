@@ -2,8 +2,14 @@ name: Tests
 
 # Runs the test suite on every push and pull request, with the same Python and
 # the same pinned dependencies as the release build (release.yml), on the same
-# Windows runner. FreeCAD and KiCad are not installed: the tests that need them
-# skip themselves. Read-only token, no persisted Git credentials, no secrets.
+# Windows runner. FreeCAD, KiCad and the git-ignored model weights are not
+# installed: the suite must not depend on them. Tests of the generation flow
+# fake the FreeCAD probe (tests/qt_fixtures.py), tests of glyph geometry read
+# the suite's own symbol library (tests/data/glyph_fixture.kicad_sym), tests
+# that would need a detector model choose the AI detector, and a test whose
+# subject IS the external program (kicad-cli, FreeCAD) skips with the reason
+# (see .claude/skills/ci-green). Read-only token, no persisted Git
+# credentials, no secrets.
 # The suite runs in two processes (tools/run_test_halves.py, HANDOFF point 113)
 # and every step has a timeout.
 #

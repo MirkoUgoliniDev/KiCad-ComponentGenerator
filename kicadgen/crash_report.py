@@ -15,8 +15,9 @@ any other handler) still happens.
     local variables. The user's home folder in paths is replaced by "~", any
     other ``Users\\<name>`` / ``/home/<name>`` segment by ``<user>``, and
     OpenRouter-style API keys (plus the values of the variables in
-    SECRET_ENV_VARS, each read alone, never listed) are masked, because the user is invited to attach
-    the file to a public GitHub issue.
+    SECRET_ENV_VARS, each read alone, never listed, plus the values the
+    optional ``secrets`` callable of `install` returns) are masked, because
+    the user is invited to attach the file to a public GitHub issue.
 @note The hooks never raise: a failure while writing the report is
     swallowed, and the previous hook is always called.
 """
@@ -31,7 +32,7 @@ import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, Union
+from typing import Callable, Iterable, Optional, Union
 
 #: Sub-folder of the log folder that holds the reports.
 REPORTS_DIRNAME = "crash-reports"
@@ -45,6 +46,13 @@ REPORT_PREFIX = "crash-"
 REPORT_SUFFIX = ".log"
 
 PathProvider = Callable[[], Union[str, os.PathLike]]
+#: Callable returning the secret values in use at crash time (API keys from
+#: any source). It is called by `scrub` only, must not need the network and
+#: may raise: a failure leaves the other masks in place.
+SecretsProvider = Callable[[], Iterable[str]]
+#: Shortest value worth masking by value: shorter strings would be found all
+#: over an ordinary traceback and the report would become unreadable.
+MIN_SECRET_LENGTH = 8
 
 _state: dict = {
     "installed": False,
@@ -53,6 +61,8 @@ _state: dict = {
     "previous_sys": None,
     "previous_threading": None,
     "busy": False,
+    # Optional callable returning the secret values in use (see `install`).
+    "secrets": None,
 }
 
 #: Environment variables whose VALUE is masked wherever it appears, whatever
@@ -152,6 +162,14 @@ def scrub(text: str) -> str:
     @return The text with the home folder replaced by "~", other user folder
         names and the first folder under a per-user UNC share by "<user>",
         and API keys by "<redacted>".
+    @note Keys are masked by value from three sources, because the ``sk-``
+        pattern alone only covers today's key shapes: the variables of
+        SECRET_ENV_VARS as found in the environment, and the values the
+        ``secrets`` callable given to `install` returns (`current_secrets`).
+        The launcher wires that callable to the services' key readers: the
+        keys of a ``.env`` file are popped from the environment at start-up
+        and the Windows Credential Manager keys never enter it, so without
+        the callable only the pattern protected them (review 2026-10-27, I8).
     @note A user name with spaces is masked whole only when the text proves
         where it ends: a path separator or the quote that opened the path
         follows it, here or at another occurrence of the same name. Without
@@ -160,10 +178,10 @@ def scrub(text: str) -> str:
         end of a line has the same shape as ``/Users/alice is missing``.
     """
     result = str(text)
-    for name in SECRET_ENV_VARS:
-        secret = os.environ.get(name, "").strip()
-        if len(secret) >= 8:
-            result = result.replace(secret, "<redacted>")
+    # Longest first: when one secret contains another, the longer one is
+    # replaced whole instead of leaving its ends around a "<redacted>".
+    for secret in sorted(current_secrets(), key=len, reverse=True):
+        result = result.replace(secret, "<redacted>")
     result = _KEY_PATTERN.sub("<redacted>", result)
     try:
         home = str(Path.home())
@@ -178,6 +196,29 @@ def scrub(text: str) -> str:
         # The prefix is the one group that took part (two alternatives in UNC).
         result = pattern.sub(lambda m: m.group(m.lastindex) + "<user>", result)
     return result
+
+
+def current_secrets() -> set[str]:
+    """@brief The secret values to mask by value right now.
+
+    @return The stripped values of SECRET_ENV_VARS present in the environment
+        and the strings returned by the ``secrets`` callable of `install`,
+        each at least MIN_SECRET_LENGTH characters long; never the names.
+    @note Never raises: a callable that fails (a Credential Manager that
+        cannot be read, a service that cannot be imported) contributes
+        nothing and the environment values are still masked. The values are
+        read at call time, so a key saved after start-up is masked too.
+    """
+    values: set[str] = set()
+    for name in SECRET_ENV_VARS:
+        values.add(os.environ.get(name, "").strip())
+    provider = _state["secrets"]
+    if provider is not None:
+        try:
+            values.update(str(value).strip() for value in provider() if value)
+        except Exception:  # noqa: BLE001 - a failing provider must not lose the report
+            pass
+    return {value for value in values if len(value) >= MIN_SECRET_LENGTH}
 
 
 def _mask_proven_names(text: str) -> str:
@@ -336,22 +377,37 @@ def _threading_hook(args) -> None:
         pass
 
 
-def install(log_dir_provider: PathProvider, *, max_reports: int = DEFAULT_MAX_REPORTS) -> None:
+def install(log_dir_provider: PathProvider, *, max_reports: int = DEFAULT_MAX_REPORTS,
+            secrets: Optional[SecretsProvider] = None) -> None:
     """@brief Install the crash hooks for the whole process.
 
     @param log_dir_provider Callable returning the log folder; it is called
         at crash time, so a folder chosen after startup is honoured. The
         reports go to ``<folder>/crash-reports``.
     @param max_reports Reports kept after each write (at least 1).
-    @note Idempotent: a second call only updates the provider and the limit,
-        and the hook installed before the first call stays the one chained.
-    @note Behaviour change to be aware of: PyQt6 aborts the process on an
-        exception raised in a slot only while `sys.excepthook` is the default
-        one. With these hooks installed the report is written and the event
-        loop continues.
+    @param secrets Optional callable returning the secret values in use
+        (API keys from the Credential Manager, a ``.env`` file, anywhere),
+        called by `scrub` at crash time so that each value is masked
+        wherever it appears in the report. None keeps the environment
+        variables and the key pattern as the only masks. The caller imports
+        whatever the callable needs inside it: this module stays standard
+        library only.
+    @note Idempotent: a second call only updates the provider, the limit and
+        the secrets callable, and the hook installed before the first call
+        stays the one chained.
+    @note What happens after the report depends on the hook chained after
+        this one. By itself this module only writes the report and calls
+        the previous `sys.excepthook`, so with the default one a slot
+        exception would be printed and the event loop would go on. The
+        launcher (`main.install_crash_reports`) does not leave it there: it
+        wraps this hook so that, after the report and the traceback, the
+        process EXITS, as PyQt6 did before the reports existed, because a
+        window that keeps running after an unhandled exception may be in an
+        inconsistent state. Worker-thread exceptions end only their thread.
     """
     _state["provider"] = log_dir_provider
     _state["max_reports"] = max(1, int(max_reports))
+    _state["secrets"] = secrets
     if _state["installed"]:
         return
     _state["previous_sys"] = sys.excepthook
@@ -374,7 +430,7 @@ def uninstall() -> None:
     if threading.excepthook is _threading_hook:
         threading.excepthook = _state["previous_threading"] or threading.__excepthook__
     _state.update(installed=False, provider=None, previous_sys=None,
-                  previous_threading=None, max_reports=DEFAULT_MAX_REPORTS)
+                  previous_threading=None, max_reports=DEFAULT_MAX_REPORTS, secrets=None)
 
 
 def latest_reports(limit: Optional[int] = None,

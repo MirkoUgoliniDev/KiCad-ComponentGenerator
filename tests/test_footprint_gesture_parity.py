@@ -750,6 +750,11 @@ def test_d3_a_right_click_is_ignored_during_a_drag_and_opens_the_menu_when_idle(
             opened.append(list(self.actions))
             return None
 
+        # CONTRACT CHANGED 2026-10-27 (review B6): the text menu is released
+        # with `deleteLater` once answered, like the QMenu it stands for.
+        def deleteLater(self):
+            pass
+
     monkeypatch.setattr(gui, "QMenu", FakeMenu)
     rec = _Recorder(window, monkeypatch)
     group = _group(window, "Reference")

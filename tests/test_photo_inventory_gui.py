@@ -763,6 +763,10 @@ def test_settings_preserve_legacy_defaults_but_runtime_uses_one_model(window, mo
             assert current_vision_model == "vendor/old-photo"
             assert parent is window
         def exec(self): return QDialog.DialogCode.Accepted
+        # Every modal is released after exec() (`MainWindow._run_modal`,
+        # review 2026-10-27 A7): the stub stands in for a QDialog, so it
+        # offers the same release call.
+        def deleteLater(self): pass
         def prompt(self): return "prompt"
         def single_prompt(self): return "single"
         def numbering_prompt(self): return "numbering"

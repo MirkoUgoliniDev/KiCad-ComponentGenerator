@@ -105,6 +105,14 @@ def show_info(parent, title, text, *, text_key=None, **values):
 class ProfileEditor(QDialog):
     """@brief Edit one AI profile or the shared defaults."""
     def __init__(self, store, key='', parent=None, *, new=False):
+        """@brief Build the editor for one component type, a new one, or the shared defaults.
+
+        @param store Profile store (read on open, written only on OK).
+        @param key Component type key to edit; "" with `new` False edits the
+            shared defaults.
+        @param parent Owner window; its ``i18n`` translates the labels.
+        @param new True to create a new type (the key is typed in the form).
+        """
         super().__init__(parent)
         self.i18n = _find_i18n(parent)
         self.store, self.key, self.new = store, key, new
@@ -255,6 +263,13 @@ class ProfileEditor(QDialog):
 class ProfilesDialog(QDialog):
     """@brief Provide CRUD management for AI analysis profiles."""
     def __init__(self, store, parent=None):
+        """@brief Build the list of profiles with its new/edit/delete commands.
+
+        @param store Profile store the list is read from and written to.
+        @param parent Owner window; its ``i18n`` translates the labels.
+        @note `changed` tells the caller whether anything was written, so
+            that the main window reloads its profile cache only when needed.
+        """
         super().__init__(parent)
         self.i18n = _find_i18n(parent)
         self.store = store

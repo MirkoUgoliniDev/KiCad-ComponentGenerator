@@ -1230,6 +1230,11 @@ class _ImportHeartbeat:
     """
 
     def __init__(self, path, interval=None):
+        """@brief Prepare the heartbeat of one model import.
+
+        @param path Model file being imported (only its name is printed).
+        @param interval Seconds between beats; None = the job's interval.
+        """
         self._name = _model_file_name(path)
         self._interval = float(interval) if interval else _HEARTBEAT_INTERVAL_S
         self._stop = threading.Event()

@@ -104,9 +104,14 @@ not endorsed by the dataset's authors.
 
 Installed from PyPI, not included in the repository. Versions are the ones
 pinned for release builds in `requirements/release-constraints.txt` (read on
-2026-09-25 from the build environment); licenses are those declared in each
-package's metadata. The Windows package also carries every license file
-itself, see "Licenses shipped with the Windows installer" below.
+2026-09-25 from the build environment, pypdf and the transitive packages on
+2026-10-27); licenses are those declared in each package's metadata. The
+Windows package also carries every license file itself, see "Licenses shipped
+with the Windows installer" below. **The authoritative list of what a given
+build bundles is `_internal\licenses\MANIFEST.txt` inside that package**,
+written by `tools/collect_licenses.py` from the build environment: this table
+is kept by hand and lists the direct dependencies first, then the transitive
+packages the installer bundles with them.
 
 | Package | Version | License | Where it is used |
 |---|---|---|---|
@@ -121,10 +126,37 @@ itself, see "Licenses shipped with the Windows installer" below.
 | Pillow | 13.0.0 | MIT-CMU | images; included in the installer |
 | ONNX Runtime | 1.30.0 | MIT | `.onnx` YOLO models; included in the installer |
 | python-dotenv | 1.2.3 | BSD-3-Clause | settings; included in the installer |
+| pypdf | 6.21.3 | BSD-3-Clause | PDF datasheets rewritten without their metadata before upload; included in the installer |
 | Ultralytics | 8.4.163 | AGPL-3.0 | `.pt` YOLO models (optional, `requirements/yolo-pt.txt`); **not** in the installer |
 | PyTorch | 2.14.0 | BSD-3-Clause and others | `.pt` YOLO models (optional); **not** in the installer |
 | pytest | 9.1.1 | MIT | tests only |
 | PyInstaller | 6.22.3 | GPL-2.0 with bootloader exception | builds the installer; its bootloader is `KiCadGen.exe` |
+
+Transitive packages the installer bundles with the ones above (pulled in by
+pyvista, OpenCV, ONNX Runtime and the build tools; versions from
+`requirements/release-constraints.txt`, licenses from each package's metadata
+as read on 2026-10-27):
+
+| Package | Version | License | Pulled in by |
+|---|---|---|---|
+| matplotlib | 3.11.2 | PSF-based (metadata: "Python Software Foundation License") | pyvista |
+| contourpy | 1.4.0 | BSD-3-Clause | matplotlib |
+| cycler | 0.12.1 | BSD-3-Clause (metadata classifier: "BSD License") | matplotlib |
+| fonttools | 4.66.0 | MIT | matplotlib |
+| kiwisolver | 1.5.1 | BSD-3-Clause (metadata classifier: "BSD License") | matplotlib |
+| pyparsing | 3.3.3 | MIT | matplotlib |
+| python-dateutil | 2.9.0.post0 | Apache-2.0 or BSD-3-Clause (metadata: "Dual License") | matplotlib |
+| six | 1.17.0 | MIT | python-dateutil |
+| packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | matplotlib, pooch, build tools |
+| pooch | 1.9.0 | BSD-3-Clause | pyvista |
+| platformdirs | 4.11.13 | MIT | pooch |
+| requests | 2.34.2 | Apache-2.0 | pooch |
+| certifi | 2026.10.18 | MPL-2.0 | requests |
+| charset-normalizer | 3.5.1 | MIT | requests |
+| idna | 3.20 | BSD-3-Clause | requests |
+| urllib3 | 2.8.0 | MIT | requests |
+| scooby | 0.12.0 | MIT | pyvista |
+| protobuf | 7.36.2 | BSD-3-Clause (metadata: "3-Clause BSD License") | ONNX Runtime |
 
 The Windows installer bundles PyQt6, which is GPL-3.0: the installer as a whole
 is distributed under terms compatible with GPL-3.0 and AGPL-3.0.

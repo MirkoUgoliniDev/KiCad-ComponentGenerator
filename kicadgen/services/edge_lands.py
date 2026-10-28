@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover - optional dependency
     cv2 = None
     np = None
 
+from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX
 from ..generators.castellated_module import MIN_HOLE_WALL_MM
 from .messages import tx
 from .photo_refine import (MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO, _lab,
@@ -64,9 +65,12 @@ LAND_ROW_RATIO = 0.5
 #: stray protrusion does not widen it.
 LAND_WIDTH_QUANTILE = 75
 
-#: Pixels of uncertainty on each measured boundary: the outline of a patch
-#: on a photograph is one pixel wide on each side.
-EDGE_UNCERTAINTY_PX = 1.0
+# Pixels of uncertainty on each measured boundary of a land: the SAME
+# quantity as the outline uncertainty of the notches, the inventory boxes and
+# the refined contours, so it is imported from its single source
+# (cad3d.measurement_uncertainty.EDGE_UNCERTAINTY_PX, review 2026-10-27 F4)
+# instead of a second value of its own. Every tolerance below is expressed
+# in multiples of it, never as a literal pixel count.
 
 #: Half width of the search window of one contact, in pitches: wider than
 #: half a pitch so a land that nearly fills the pitch is seen whole, with

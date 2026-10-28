@@ -87,6 +87,12 @@ class _Job(QRunnable):
     """Hash a file, or check it with the detector, off the GUI thread."""
 
     def __init__(self, kind: str, path: str):
+        """@brief Prepare one job of kind "sha256" or "check" on `path`.
+
+        @param kind "sha256" to hash the file, anything else to load it with
+            the detector and read its classes.
+        @param path Model file.
+        """
         super().__init__()
         self.kind, self.path = kind, path
         self.signals = _Signals()
@@ -155,7 +161,7 @@ class YoloModelDialog(QDialog):
         self.details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        # I testi lunghi vanno a capo (`_breakable`): nessuno scorrimento in orizzontale.
+        # Long texts wrap (`_breakable`) instead of scrolling horizontally.
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         holder = QWidget()
         holder_layout = QVBoxLayout(holder)

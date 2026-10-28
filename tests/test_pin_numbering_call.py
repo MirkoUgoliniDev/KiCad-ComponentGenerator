@@ -13,6 +13,8 @@ from kicadgen.services import datasheet_extractor as ext
 from kicadgen.services.datasheet_extractor import (
     ExtractedParams, apply_dedicated_numbering, numbering_documents, read_pin_numbering)
 
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 U_NUMBERING = [{"pin": 1, "row": 0, "col": 0}, {"pin": 7, "row": 0, "col": 6},
                {"pin": 8, "row": 0, "col": 7}, {"pin": 9, "row": 1, "col": 7},
                {"pin": 10, "row": 1, "col": 6}, {"pin": 16, "row": 1, "col": 0}]
@@ -286,7 +288,7 @@ def test_a_lifted_drill_keeps_a_solderable_ring():
 
 def test_pdf_only_drawings_get_the_unconfirmed_note(offline, monkeypatch, tmp_path):
     pdf = tmp_path / "ds.pdf"
-    pdf.write_bytes(b"%PDF-1.4 fake")
+    pdf.write_bytes(MINIMAL_PDF)
     monkeypatch.setattr(ext, "call_tool", Mock(return_value=dict(_MAIN)))
     logs = []
     params = ext.extract_pin_header_params(

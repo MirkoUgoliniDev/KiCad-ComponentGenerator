@@ -362,8 +362,14 @@ def _terminal_points(record):
     return [(t.x, t.y) for t in g.placed_terminals(record)]
 
 
+# The resistor, potentiometer and crystal below come from the suite's own
+# symbol library (`glyph_library`, CI review 2026-10-27, I2): their geometry
+# (pins 3.81 mm from the origin, three terminals, two terminals) is the
+# contract under test, and the built-in fallback catalogue of a machine
+# without KiCad has none of it. The fallback keeps its own negative case in
+# `test_s7_on_grid_terminals_keep_the_origin_on_the_grid`.
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
-def test_s7_half_pitch_terminals_land_on_the_pin_grid(qapp, rotation):
+def test_s7_half_pitch_terminals_land_on_the_pin_grid(qapp, glyph_library, rotation):
     tab = SymbolTab()
     tab.resize(1200, 800)
     try:
@@ -410,7 +416,7 @@ def test_s7_on_grid_terminals_keep_the_origin_on_the_grid(qapp):
         tab.deleteLater()
 
 
-def test_s7_an_old_project_glyph_is_not_moved_on_load(qapp):
+def test_s7_an_old_project_glyph_is_not_moved_on_load(qapp, glyph_library):
     """Data compatibility: a resistor saved with its origin on the grid stays where it was."""
     tab = SymbolTab()
     tab.resize(1200, 800)
@@ -550,7 +556,7 @@ def _old_resistor_tab():
     return tab
 
 
-def test_s7_properties_confirmed_unchanged_do_not_move_an_old_glyph(qapp):
+def test_s7_properties_confirmed_unchanged_do_not_move_an_old_glyph(qapp, glyph_library):
     tab = _old_resistor_tab()
     try:
         assert tab.set_element_geometry(0, 0.0, 0.0, rotation=0, mirror=False)
@@ -561,7 +567,7 @@ def test_s7_properties_confirmed_unchanged_do_not_move_an_old_glyph(qapp):
         tab.deleteLater()
 
 
-def test_s7_properties_with_a_new_position_snap_the_terminals(qapp):
+def test_s7_properties_with_a_new_position_snap_the_terminals(qapp, glyph_library):
     """Negative: a real edit in the dialog is a placement and snaps by the terminals."""
     tab = _old_resistor_tab()
     try:
@@ -573,7 +579,7 @@ def test_s7_properties_with_a_new_position_snap_the_terminals(qapp):
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
-def test_s7_potentiometer_puts_the_most_terminals_on_the_grid(qapp, rotation):
+def test_s7_potentiometer_puts_the_most_terminals_on_the_grid(qapp, glyph_library, rotation):
     record = g.instance_from_glyph(next(x for x in g.catalogue() if x.key == "potentiometer"), 0, 0, rotation)
     x, y = symbol_tab_module.snap_glyph_origin(record, 0.4, -0.3)
     points = _terminal_points(dict(record, x=x, y=y))
@@ -583,7 +589,7 @@ def test_s7_potentiometer_puts_the_most_terminals_on_the_grid(qapp, rotation):
 
 @pytest.mark.parametrize("key", ["resistor", "capacitor", "inductor", "diode", "led", "crystal"])
 @pytest.mark.parametrize("rotation", [0, 90])
-def test_s7_two_terminal_glyphs_keep_every_terminal_on_the_grid(key, rotation):
+def test_s7_two_terminal_glyphs_keep_every_terminal_on_the_grid(glyph_library, key, rotation):
     record = g.instance_from_glyph(next(x for x in g.catalogue() if x.key == key), 0, 0, rotation)
     x, y = symbol_tab_module.snap_glyph_origin(record, 1.1, 0.7)
     assert _on(GRID_MM, [c for p in _terminal_points(dict(record, x=x, y=y)) for c in p])

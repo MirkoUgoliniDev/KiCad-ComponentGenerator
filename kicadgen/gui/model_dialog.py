@@ -133,6 +133,11 @@ class _NumericItem(QTableWidgetItem):
     """
 
     def __init__(self, text: str, value: float):
+        """@brief Show `text` while sorting by `value`.
+
+        @param text Formatted cell text shown to the user (for example "2.00").
+        @param value Numeric sort key; NaN (undeclared price) sorts last.
+        """
         super().__init__(text)
         # An undeclared price (NaN, DeepSeek API) goes to the bottom: NaN is
         # not orderable and an inconsistent comparison breaks Qt's sorting.

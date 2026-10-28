@@ -549,6 +549,10 @@ class ElidedLabel(QLabel):
     """
 
     def __init__(self, parent=None):
+        """@brief Build the label with no ink colour set (the palette's is used).
+
+        @param parent Owner widget.
+        """
         super().__init__(parent)
         #: Ink colour. This card's style sheet changes the colour per tool,
         #: and here the painting is done by hand: the value is kept instead
@@ -575,6 +579,12 @@ class AnalysisSpinner(QWidget):
     """@brief Animated ring that also names the tool at work by its shape."""
 
     def __init__(self, parent=None):
+        """@brief Build the 56 px ring, idle, with no tool mark.
+
+        @param parent Owner widget.
+        @note The ring does not animate itself: the overlay advances `angle`
+            with its own timer, so one clock drives every animated part.
+        """
         super().__init__(parent)
         self.setFixedSize(56, 56)
         self.angle = 0
@@ -765,6 +775,12 @@ class TransferAnimation(QWidget):
     PACKETS = 4
 
     def __init__(self, parent=None):
+        """@brief Build the 150 x 56 px animation showing documents as the source.
+
+        @param parent Owner widget.
+        @note Like AnalysisSpinner it is advanced by the overlay's timer, not
+            by a timer of its own.
+        """
         super().__init__(parent)
         self.setFixedSize(150, 56)
         self.source = "documents"
@@ -872,6 +888,12 @@ class AnalysisOverlay(QWidget):
     operation_finished = pyqtSignal()
 
     def __init__(self, parent, *, i18n=None):
+        """@brief Build the card over `parent`, hidden until an operation starts.
+
+        @param parent Window the card covers; it is resized with it.
+        @param i18n Translation catalogue for the texts, or None for the
+            source language.
+        """
         super().__init__(parent)
         self.i18n = i18n
         self.setObjectName("analysisOverlay")

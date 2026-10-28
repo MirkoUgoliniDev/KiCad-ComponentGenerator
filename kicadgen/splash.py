@@ -146,7 +146,10 @@ class ProcessSplash:
     """
 
     def __init__(self, process):
-        """@param process The started Popen with a writable `stdin` pipe."""
+        """@brief Wrap an already started splash process.
+
+        @param process The started Popen with a writable `stdin` pipe.
+        """
         self.process = process
         self._ended = False
 

@@ -22,6 +22,8 @@ from .ai_diagnostics import CallCancelled
 from .document_roles import PHOTO_SUFFIXES
 from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
 # Constants only: photo_refine handles the absence of OpenCV on its own.
+from ..cad3d.measurement_uncertainty import (ASSUMED_SCALE_PX_PER_MM, EDGE_UNCERTAINTY_PX,
+                                             elongation_hinge)
 from ..core.validation import positive_number
 from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
 
@@ -148,7 +150,64 @@ def detection_tool(kinds):
     }}
 
 
-def decode_detections(raw, region, body_length, body_width, source, log):
+#: Elongation (long side / short side) a box must show before its shape is
+#: allowed to contradict the rotation the model declared, when the pixel
+#: size of the box is NOT known (no `photo_px`). DECLARED FALLBACK, not a
+#: rule: without pixels the side uncertainty cannot be derived, and this is
+#: the value the decoders used before review 2026-10-27 (set on the sample
+#: boards, where the model's proportions were within 20% of the true ones).
+#: Every pipeline caller passes `photo_px`, which makes it unnecessary; it
+#: stays for callers that only hold normalised boxes.
+UNKNOWN_SCALE_ELONGATION_HINGE = 1.2
+
+
+def axes_contradict(long_mm, short_mm, region, photo_px, body_length, body_width):
+    """@brief Whether a box's shape contradicts the long axis the model declared.
+
+    The model says which axis is the long one (rotation 0/180: X, 90/270:
+    Y); the box says the opposite when the side it calls short is the longer
+    one. That is a contradiction only beyond what the edge uncertainty can
+    explain: a square body can be reported with sides differing by
+    2 * EDGE_UNCERTAINTY_PX, so the hinge is `elongation_hinge` of the
+    declared-long side in pixels (review 2026-10-27, F7; replaces the
+    undeclared factor 1.2).
+
+    @param long_mm Side the declared rotation calls the long one, in mm.
+    @param short_mm Side the declared rotation calls the short one, in mm.
+    @param region Normalised (x0, y0, x1, y1) of the view on the board.
+    @param photo_px (width, height) in pixels of the view the box was drawn
+        on, or None when unknown (then UNKNOWN_SCALE_ELONGATION_HINGE).
+    @param body_length Board extent along X, in mm.
+    @param body_width Board extent along Y, in mm.
+    @return True when the box is elongated the other way beyond the uncertainty.
+    """
+    if short_mm <= long_mm:
+        return False
+    scale = _view_scale_px_per_mm(region, photo_px, body_length, body_width)
+    if scale is None:
+        return short_mm > long_mm * UNKNOWN_SCALE_ELONGATION_HINGE
+    return short_mm / long_mm > elongation_hinge(long_mm * scale)
+
+
+def _view_scale_px_per_mm(region, photo_px, body_length, body_width):
+    """Coarser of the two pixel scales of a view, in px/mm, or None when unknown."""
+    if photo_px is None:
+        return None
+    try:
+        width_px, height_px = (float(v) for v in photo_px)
+    except (TypeError, ValueError):
+        return None
+    rx0, ry0, rx1, ry1 = region
+    scales = []
+    for pixels, span in ((width_px, (rx1 - rx0) * body_length),
+                         (height_px, (ry1 - ry0) * body_width)):
+        if math.isfinite(pixels) and pixels > 0 and math.isfinite(span) and span > 0:
+            scales.append(pixels / span)
+    # The coarser axis bounds the uncertainty of any side in mm.
+    return min(scales) if len(scales) == 2 else None
+
+
+def decode_detections(raw, region, body_length, body_width, source, log, photo_px=None):
     """@brief Convert crop boxes to board-normalized boxes and millimetres, discarding unmeasurable entries.
 
     The chain is crop box -> normalized board box -> mm.
@@ -159,6 +218,10 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     @param body_width Board extent along Y, in mm.
     @param source Label of the view, used in the log and stored as `_source`.
     @param log Progress callback receiving every discard or correction.
+    @param photo_px (width, height) in pixels of the view the boxes were drawn
+        on; it gives the edge uncertainty in mm that decides when a box's
+        shape may contradict the declared rotation (`axes_contradict`). None
+        falls back to UNKNOWN_SCALE_ELONGATION_HINGE.
     @return List of component dictionaries with x_mm, y_mm, length_mm, width_mm,
         height_mm, rotation_deg and `_box`; empty when `raw` is not a list.
     @note No exception escapes: the ValueError raised for an invalid entry is
@@ -200,10 +263,11 @@ def decode_detections(raw, region, body_length, body_width, source, log):
                 item.pop(key, None)
             copy_mechanical_metadata(item, entry)
             # An inconsistent angle does not make the rectangle unusable. For
-            # clearly elongated shapes we keep the measured geometry,
-            # normalise the local axes and flag the orientation as doubtful.
-            # On almost square ones the orientation read by the AI stays.
-            if width > length * 1.2:
+            # shapes elongated the other way beyond the edge uncertainty we
+            # keep the measured geometry, normalise the local axes and flag
+            # the orientation as doubtful. Within the uncertainty the
+            # orientation read by the AI stays: the box cannot contradict it.
+            if axes_contradict(length, width, region, photo_px, body_length, body_width):
                 length, width = width, length
                 angle = (angle + 90) % 360
                 item["_uncertain"] = True
@@ -242,17 +306,22 @@ def decode_detections(raw, region, body_length, body_width, source, log):
     return result
 
 
-#: Position uncertainty of ONE box edge, in pixels of the calibrated photo on
-#: which the boxes are normalised. It is the physical lower limit, the
-#: quantisation: no detector places an edge better than one pixel of the
-#: image it saw (the detail strips are cropped from the same photo, same
-#: pixels). Declared fallback: the true localisation error of a vision model
-#: is usually larger, but it is not measured; with this minimum two boxes are
-#: merged only when they really coincide, and the less precise duplicates stay
-#: distinct and flagged as «possibile doppione» (possible duplicate) for the
-#: review instead of being silently merged.
-#: An estimate of the detector error (for instance from the comparison with
-#: measured edges) would make it unnecessary.
+#: Position uncertainty of ONE box edge drawn by a vision model, in pixels
+#: of the calibrated photo on which the boxes are normalised. It is the
+#: physical lower limit, the quantisation: no model places an edge better
+#: than one pixel of the image it saw (the detail strips are cropped from
+#: the same photo, same pixels). It is NOT the outline uncertainty of a
+#: measurement on the photo (cad3d.measurement_uncertainty.EDGE_UNCERTAINTY_PX,
+#: 2 px): that one is the growth of the edge mask (blur + dilation) of the
+#: OpenCV outline, a process a drawn box does not go through; review
+#: 2026-10-27 F4 kept the two apart for that reason, under different names.
+#: Declared fallback: the true localisation error of a vision model is
+#: usually larger, but it is not measured; with this minimum two boxes are
+#: merged only when they really coincide, and the less precise duplicates
+#: stay distinct and flagged as «possibile doppione» (possible duplicate)
+#: for the review instead of being silently merged. An estimate of the
+#: model error (for instance from the comparison with measured edges) would
+#: make it unnecessary.
 DETECTION_EDGE_UNCERTAINTY_PX = 1.0
 
 
@@ -322,7 +391,60 @@ def same_body(first, second, tolerance):
 MIN_PACKAGE_PIXELS = MIN_PACKAGE_PIXELS_HINT
 
 
-def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
+#: Metadata key of the crop box when it refers to the ORIGINAL photo pixels.
+CROP_BBOX_ORIGINAL_KEY = "crop_bbox_original_px"
+#: Metadata key of the crop box when it refers to the DESKEWED canvas: the
+#: original photo was rotated (see the `deskew` entry) before the crop, so
+#: the box cannot be applied to the file whose SHA-256 is recorded.
+CROP_BBOX_DESKEWED_KEY = "crop_bbox_deskewed_px"
+
+
+def crop_provenance(box, deskew_deg, canvas_width, canvas_height):
+    """@brief Metadata entries naming honestly which pixels a crop box refers to.
+
+    @param box [x0, y0, x1, y1] of the board crop, in pixels of the image it
+        was cut from.
+    @param deskew_deg Rotation applied to the original photo before the crop
+        (degrees, as `photo_refine.deskew_board_report` returns it), or None
+        when the crop was cut from the original pixels.
+    @param canvas_width Width in pixels of the image the box refers to.
+    @param canvas_height Height in pixels of the image the box refers to.
+    @return Dict with CROP_BBOX_ORIGINAL_KEY (unrotated photo) or with
+        CROP_BBOX_DESKEWED_KEY plus `deskew` = {angle_deg, canvas_width,
+        canvas_height} (rotated photo). Never both keys: a reader applying
+        the box to the original file must find nothing rather than a box of
+        another canvas (review 2026-10-27, F9).
+    """
+    if deskew_deg is None:
+        return {CROP_BBOX_ORIGINAL_KEY: list(box)}
+    return {CROP_BBOX_DESKEWED_KEY: list(box),
+            "deskew": {"angle_deg": float(deskew_deg), "canvas_width": int(canvas_width),
+                       "canvas_height": int(canvas_height)}}
+
+
+def crop_box_from_metadata(metadata):
+    """@brief Read the crop box of an inventory metadata dict, old or new layout.
+
+    @param metadata Mapping written by `prepare_photo` (or an older run that
+        only knew CROP_BBOX_ORIGINAL_KEY).
+    @return (box, frame) with frame "original" when the box applies to the
+        original photo and "deskewed" when it applies to the rotated canvas
+        described by `metadata["deskew"]`; (None, None) when there is no box.
+    @note Migration: a record written before 2026-10-27 carries only the
+        original key, even for a deskewed photo; it is returned as "original"
+        because nothing in it says otherwise.
+    """
+    if not isinstance(metadata, dict):
+        return None, None
+    if isinstance(metadata.get(CROP_BBOX_DESKEWED_KEY), list):
+        return list(metadata[CROP_BBOX_DESKEWED_KEY]), "deskewed"
+    if isinstance(metadata.get(CROP_BBOX_ORIGINAL_KEY), list):
+        return list(metadata[CROP_BBOX_ORIGINAL_KEY]), "original"
+    return None, None
+
+
+def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None, *,
+                        crop_py=None, body_width=None):
     """Warn when the resolution is below the indicative threshold for small parts.
 
     The inventory is limited not by the algorithm but by the available pixels: at
@@ -330,34 +452,61 @@ def _warn_if_too_coarse(crop_px, body_length, warn, smallest_part_mm=None):
     the risk of losing detail would not be visible. The threshold neither
     certifies nor rules out the completeness of the inventory.
 
+    The calibration is axis by axis (a photo with other proportions is
+    corrected per axis), so the verdict is given on the COARSER of the two
+    scales: a body is lost when it is too small along either axis (review
+    2026-10-27, F6). The warning text and the return value both name the
+    axis it was judged on.
+
+    @param crop_px Width of the board crop in pixels (X axis).
+    @param body_length Board extent along X, in mm.
+    @param warn Callback receiving the warning text.
     @param smallest_part_mm Short side of the smallest body expected on the
         board, in mm; None = photo_refine.SMALLEST_EXPECTED_PART_MM, which is a
         declared ASSUMPTION (not a measurement of this board). The warning reports
         it, so the reader knows against which size it was issued.
+    @param crop_py Height of the board crop in pixels (Y axis); None when the
+        Y scale is not known, in which case X alone is judged.
+    @param body_width Board extent along Y, in mm; paired with crop_py.
+    @return "X" or "Y", the axis whose scale produced the warning, or None
+        when no warning was given.
     """
     if smallest_part_mm is None:
         smallest_part_mm = SMALLEST_EXPECTED_PART_MM
-    if not (crop_px > 0 and math.isfinite(body_length) and body_length > 0
-            and math.isfinite(smallest_part_mm) and smallest_part_mm > 0):
+    if not (math.isfinite(smallest_part_mm) and smallest_part_mm > 0):
         return
-    scale = crop_px / body_length
+    axes = []
+    for pixels, extent, axis in ((crop_px, body_length, "X"), (crop_py, body_width, "Y")):
+        if (pixels is not None and extent is not None and pixels > 0
+                and math.isfinite(extent) and extent > 0):
+            axes.append((pixels / extent, pixels, extent, axis))
+    if not axes:
+        return None
+    # The coarser axis decides: its scale, pixels and needed pixels fill the
+    # message, so «questa ne ha {crop_px}» (this one has) refers to that axis,
+    # and the message names it: on a photo calibrated axis by axis a reader
+    # could otherwise compare the pixels with the wrong side of the board
+    # (review 2026-10-27, F6). Template with {axis}: catalogue entry needed.
+    scale, crop_px, body_length, axis = min(axes)
     readable = scale * smallest_part_mm
     if readable >= MIN_PACKAGE_PIXELS:
-        return
+        return None
     needed = math.ceil(MIN_PACKAGE_PIXELS / smallest_part_mm * body_length)
-    warn(tx("Risoluzione della foto usata per l'inventario: {scale:.1f} px/mm. Un "
-            "corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
+    warn(tx("Risoluzione della foto usata per l'inventario lungo l'asse {axis}: {scale:.1f} px/mm. "
+            "Un corpo con il lato corto di {smallest:.2f} mm (il piu' piccolo che si "
             "assume presente, non una misura di questa scheda) occupa {readable:.2f} px, "
             "sotto la soglia indicativa di {MIN_PACKAGE_PIXELS} px. Alcuni dettagli "
             "potrebbero non essere distinguibili; l'inventario potrebbe essere incompleto, ma questo non dimostra che manchino componenti. "
-            "Per raggiungere la soglia servirebbe una foto originale con la scheda larga almeno {needed:.0f} px "
-            "(questa ne ha {crop_px}).",
+            "Per raggiungere la soglia servirebbe una foto originale con la scheda di almeno {needed:.0f} px "
+            "lungo l'asse {axis} (questa ne ha {crop_px}).",
+            axis=axis,
             scale=scale,
             smallest=smallest_part_mm,
             readable=readable,
             MIN_PACKAGE_PIXELS=MIN_PACKAGE_PIXELS,
             needed=needed,
             crop_px=crop_px))
+    return axis
 
 
 def box_of(item):
@@ -588,15 +737,19 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
 
     original = image
     frame = find_board(image, length, width)
+    # Rotation applied to the photo before the crop, in degrees: None when
+    # the crop box refers to the original pixels.
+    deskew_deg = None
     if frame is None:
         # A freehand photo is almost always skewed by a few degrees, and
         # find_board tolerates less than one. It is straightened and retried:
         # it is a rigid rotation, the scale stays the true one.
-        from .photo_refine import deskew_board
-        straight = deskew_board(image, length, width)
+        from .photo_refine import deskew_board_report
+        straight = deskew_board_report(image, length, width)
         if straight is None:
             return not_found(original)
-        image, frame = straight, find_board(straight, length, width)
+        image, deskew_deg = straight
+        frame = find_board(image, length, width)
         if frame is None:
             return not_found(original)
     # find_board does not correct perspective nor swap axes: the declared
@@ -629,8 +782,9 @@ def prepare_photo(path, length, width, metadata=None, *, frame_callback=None):
         with open(path, 'rb') as stream:
             source_bytes = stream.read()
         metadata.update(source_sha256=hashlib.sha256(source_bytes).hexdigest(),
-                        crop_bbox_original_px=[x0,y0,x1,y1],
                         image_width=x1-x0,image_height=y1-y0)
+        metadata.update(crop_provenance([x0, y0, x1, y1], deskew_deg, image.shape[1],
+                                        image.shape[0]))
         # Background profiles along the edges, to count the half-holes
         # (edge_notches): they need the whole image and its background, which
         # are gone after the crop. Private key: whoever uses it removes it.
@@ -1217,11 +1371,17 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
     log(what)
     boxes = [_clamped_box(row['_box']) for row in rows]
     inside = [index for index, box in enumerate(boxes) if box is not None]
+    # A row whose edges were measured on the photo (measure_proposal_edges)
+    # is matched on its measured sides and angle, not on the axis-aligned
+    # box that encloses it (review 2026-10-27, F5).
+    measured = [({'length_mm': rows[index]['length_mm'], 'width_mm': rows[index]['width_mm'],
+                  'rotation_deg': rows[index].get('rotation_deg') or 0.0}
+                 if rows[index].get('_edges_measured') else None) for index in inside]
     try:
         found = classify_photo_boxes(
             photo, [boxes[index] for index in inside], box_format='normalized',
             box_frame_px=frame_px, mm_per_pixel=mm_per_pixel, model_path=network,
-            log=log, cancel=cancel, phase=announce) if inside else []
+            log=log, cancel=cancel, phase=announce, measured_mm=measured) if inside else []
     except Exception as exc:
         # It is decided from the cancellation channel, not from the type or text.
         if _cancel_requested(cancel):
@@ -1643,7 +1803,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         log(tx("Vista dall'alto usata, indicata da {top_photo_source}: {name}.",
                top_photo_source=top_photo_source,
                name=path.name))
-    _warn_if_too_coarse(photo.shape[1], length, warn)
+    _warn_if_too_coarse(photo.shape[1], length, warn, crop_py=photo.shape[0], body_width=width)
     import cv2
     ok, encoded = cv2.imencode(".png", photo)
     report.photo_png = encoded.tobytes() if ok else None
@@ -1904,7 +2064,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                         max_tokens=8192, has_pdf=False)
             if not isinstance(data, dict):
                 raise ValueError(tx("risposta non strutturata"))
-            group = decode_detections(data.get("components"),region,length,width,label,warn)
+            group = decode_detections(data.get("components"),region,length,width,label,warn,
+                                      photo_px=(crop.shape[1], crop.shape[0]))
             for c in group:
                 if c.get("kind") not in kinds:
                     c["kind"] = "generic"

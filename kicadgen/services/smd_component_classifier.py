@@ -9,6 +9,14 @@ role and is excluded from the local YOLO detector picker.
 
 @note PyTorch and torchvision are optional and imported only when this service
 is used. Checkpoints are loaded with ``weights_only=True``.
+@note Preprocessing contract (review 2026-10-27, F8): the crops are prepared
+    exactly as the EXTERNAL training script prepared them -- letterbox to
+    `_IMG_SIZE` with bicubic resampling, grey padding `_PAD`, ImageNet
+    normalisation `_MEAN`/`_STD` (see `PREPROCESSING`). A checkpoint that
+    declares its own recipe under the `preprocessing` key is checked against
+    it and refused on a mismatch; a checkpoint without that key is accepted
+    on the assumption that it was trained with this very recipe, which only
+    the training project can guarantee.
 """
 from __future__ import annotations
 
@@ -23,20 +31,42 @@ from typing import Sequence
 from PIL import Image, ImageOps
 
 from ..app_paths import smd_model_path
+from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX, elongation_hinge
 from .messages import tx
 
 _FORMAT = "smdmap-classifier-2"
 _MEAN = (0.485, 0.456, 0.406)
 _STD = (0.229, 0.224, 0.225)
 _PAD = (114, 114, 114)
+_IMG_SIZE = 224
 _ANGLES = (0, 90, 180, 270)
 _MAX_CHECKPOINT_BYTES = 256 * 1024 * 1024
+
+#: The preprocessing recipe this module applies to every crop, in the form a
+#: checkpoint may declare under its `preprocessing` key. Values are plain
+#: lists/strings so that a JSON or torch-saved dict compares equal.
+PREPROCESSING = {
+    "resize": "letterbox",
+    "interpolation": "bicubic",
+    "pad_rgb": list(_PAD),
+    "mean": list(_MEAN),
+    "std": list(_STD),
+    "img_size": _IMG_SIZE,
+}
+#: Tolerance when comparing declared mean/std with the module's: the values
+#: are the ImageNet statistics written with three decimals; a checkpoint that
+#: stored them as float32 differs by rounding, not by recipe.
+_RECIPE_TOLERANCE = 1e-4
 
 
 class _Letterbox:
     """Keep the resize, rounding and padding used for the trained crops."""
 
-    def __init__(self, size=224):
+    def __init__(self, size=_IMG_SIZE):
+        """@brief Letterbox to a square canvas of `size` pixels (PREPROCESSING["img_size"]).
+
+        @param size Side of the square network input, in pixels.
+        """
         self.size = size
 
     def __call__(self, image):
@@ -167,9 +197,10 @@ def _validate_checkpoint(checkpoint, path, torch, PackageNet):
         raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
                             path=path))
     if (checkpoint.get("format") != _FORMAT or checkpoint.get("arch") != "resnet18"
-            or checkpoint.get("img_size") != 224):
+            or checkpoint.get("img_size") != _IMG_SIZE):
         raise ValueError(tx("Checkpoint non compatibile con la rete SMD v3 ResNet18/224: {path}",
                             path=path))
+    validate_preprocessing(checkpoint, path)
     classes = checkpoint.get("classes")
     orientations = checkpoint.get("orientations")
     threshold = checkpoint.get("suggested_threshold", 0.0)
@@ -214,25 +245,89 @@ def _validate_checkpoint(checkpoint, path, torch, PackageNet):
                                 path=path, reason=f"state_dict {name} non finito"))
 
 
-def _rotation(orientation, probs, box):
+def validate_preprocessing(checkpoint, path):
+    """@brief Refuse a checkpoint whose declared preprocessing differs from this module's.
+
+    @param checkpoint Mapping loaded from the checkpoint file.
+    @param path Checkpoint path, for the error message only.
+    @throws ValueError When `preprocessing` is present but is not a mapping,
+        names a key this module does not implement, or gives a different
+        value for a key it shares with PREPROCESSING (numbers compared
+        within _RECIPE_TOLERANCE).
+    @note A checkpoint WITHOUT the key is accepted: see the module docstring
+        for the contract with the external training script.
+    """
+    declared = checkpoint.get("preprocessing")
+    if declared is None:
+        return
+
+    def mismatch(reason):
+        return ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                             path=path, reason=f"preprocessing {reason}"))
+    if not isinstance(declared, Mapping):
+        raise mismatch("non e' un dizionario")
+    for key, value in declared.items():
+        if key not in PREPROCESSING:
+            # A step we do not perform (another crop, a colour transform):
+            # the crops the network will see are not the ones it learnt on.
+            raise mismatch(f"{key} sconosciuto")
+        expected = PREPROCESSING[key]
+        if not _same_recipe_value(value, expected):
+            raise mismatch(f"{key}: {value!r} invece di {expected!r}")
+
+
+def _same_recipe_value(value, expected):
+    """Compare one declared recipe value with the module's, tolerating float rounding."""
+    if isinstance(expected, str):
+        return isinstance(value, str) and value.strip().lower() == expected
+    if isinstance(expected, list):
+        try:
+            values = [float(v) for v in value]
+        except (TypeError, ValueError):
+            return False
+        return (len(values) == len(expected) and all(
+            math.isfinite(v) and abs(v - float(e)) <= _RECIPE_TOLERANCE
+            for v, e in zip(values, expected)))
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    return math.isfinite(float(value)) and abs(float(value) - float(expected)) <= _RECIPE_TOLERANCE
+
+
+#: `rotation_basis` values: the axis was decided by the elongation of the box
+#: beyond its uncertainty, or by the network's vote.
+ROTATION_BASIS_BOX = "box_aspect"
+ROTATION_BASIS_NETWORK = "network"
+
+
+def _rotation(orientation, probs, box, edge_px=EDGE_UNCERTAINTY_PX):
+    """Axis or pose of one box: (angle, confidence, basis).
+
+    For an `axis` class the box's shape overrides the network's axis vote
+    ONLY when its elongation exceeds `elongation_hinge` of the short side:
+    below that, the difference between the sides is within what two edges
+    each uncertain by `edge_px` can produce, and the shape says nothing
+    (review 2026-10-27, F3; replaces a fixed 1.25 that one pixel could flip
+    on a 1210). The confidence stays the one the network gives that axis
+    (audit 2026-10-02: an imposed 0.99 showed in review a certainty the
+    network did not have).
+    """
     if orientation == "none":
-        return None, None
+        return None, None, None
     if orientation == "axis":
         horizontal, vertical = probs[0] + probs[2], probs[1] + probs[3]
         width, height = box[2] - box[0], box[3] - box[1]
-        # The axis is decided by the shape of the box; the confidence stays
-        # the one the network gives that axis (audit 2026-10-02: an imposed
-        # 0.99 showed in review a certainty the network did not have).
-        if width >= 1.25 * height:
-            return 0, horizontal
-        if height >= 1.25 * width:
-            return 90, vertical
-        return (0, horizontal) if horizontal >= vertical else (90, vertical)
+        hinge = elongation_hinge(min(width, height), edge_px)
+        if width > hinge * height:
+            return 0, horizontal, ROTATION_BASIS_BOX
+        if height > hinge * width:
+            return 90, vertical, ROTATION_BASIS_BOX
+        return ((0, horizontal, ROTATION_BASIS_NETWORK) if horizontal >= vertical
+                else (90, vertical, ROTATION_BASIS_NETWORK))
     if orientation != "full":
         raise ValueError(tx("Orientamento non valido nel checkpoint: {orientation}",
                             orientation=repr(orientation)))
     index = max(range(4), key=probs.__getitem__)
-    return _ANGLES[index], probs[index]
+    return _ANGLES[index], probs[index], ROTATION_BASIS_NETWORK
 
 
 #: Classes of the checkpoint whose body is a rectangular chip with two
@@ -321,6 +416,37 @@ def _kind_package(label):
     return "generic", ""
 
 
+def _checked_measurements(measured_mm, count):
+    """One validated measurement dict (or None) per box, in the boxes' order.
+
+    @throws ValueError When the sequence length differs from the box count
+        or an entry is neither None nor a dict of finite positive sides with
+        a finite rotation.
+    """
+    if measured_mm is None:
+        return [None] * count
+    rows = list(measured_mm)
+    if len(rows) != count:
+        raise ValueError(tx("Riquadro non valido: {box}", box="measured_mm"))
+    checked = []
+    for entry in rows:
+        if entry is None:
+            checked.append(None)
+            continue
+        if not isinstance(entry, Mapping):
+            raise ValueError(tx("Riquadro non valido: {box}", box=entry))
+        try:
+            length = float(entry["length_mm"])
+            width = float(entry["width_mm"])
+            rotation = float(entry.get("rotation_deg") or 0.0)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(tx("Riquadro non valido: {box}", box=entry)) from exc
+        if not all(math.isfinite(v) for v in (length, width, rotation)) or min(length, width) <= 0:
+            raise ValueError(tx("Riquadro non valido: {box}", box=entry))
+        checked.append({"length_mm": length, "width_mm": width, "rotation_deg": rotation})
+    return checked
+
+
 def _attach_kicad_results(rows, library, log, cancel):
     """Use existing CAD measurements and actual footprint-to-STEP links."""
     pending = [row for row in rows if row["accepted"] and row["size_mm"] is not None]
@@ -332,10 +458,18 @@ def _attach_kicad_results(rows, library, log, cancel):
     paths_by_root = {}
     for row in pending:
         length, width = sorted(row["size_mm"], reverse=True)
+        measured = row.get("measured_mm")
+        # A body measured on its own edges (photo_refine) carries its true
+        # sides and its angle: the matcher gets those, not the axis-aligned
+        # box that encloses an oblique body (a 5 x 5 QFN at 45 degrees
+        # encloses 7.1 x 7.1; review 2026-10-27, F5). The network's pose is
+        # a verse on top of the measured angle, it does not replace it.
+        rotation = measured["rotation_deg"] if measured else row["rotation_deg"]
         component = {
             "kind": row["kind"], "class": row["kind"],
             "package": row["package"], "length_mm": length, "width_mm": width,
-            "rotation_deg": row["rotation_deg"], "bbox_basis": "unknown",
+            "rotation_deg": rotation,
+            "bbox_basis": "measured_edges" if measured else "unknown",
             "_source": "SMD local", "_smd_class": row["class"],
             "_smd_confidence": row["class_confidence"], "_smd_body": row.get("body"),
         }
@@ -400,12 +534,19 @@ def classify_photo_boxes(
     log=None,
     cancel=None,
     phase=None,
+    measured_mm: Sequence[dict | None] | None = None,
 ) -> list[dict]:
     """@brief Classify photo boxes and optionally match them to KiCad footprints and STEP models.
 
     @param photo Image path, PIL RGB image or OpenCV uint8 BGR array.
     @param boxes Bounding boxes as ``[x1, y1, x2, y2]`` in pixels, or 0..1
         coordinates when ``box_format='normalized'``.
+    @param measured_mm Optional, one entry per box: a dict with `length_mm`,
+        `width_mm` and `rotation_deg` when that body's edges were measured
+        on the photo, else None. A measured body is matched on its own sides
+        and angle (`size_mm` = [length, width], `size_basis` =
+        "measured_edges"); an unmeasured one on the axis-aligned box
+        (`size_basis` = "detector_box").
     @param model_path Optional SMD checkpoint; defaults to models/smd/smd_classifier.pt.
     @param mm_per_pixel Optional positive ``(scale_x, scale_y)`` calibration.
     @param model_root Optional KiCad library root used by the existing matcher.
@@ -447,6 +588,7 @@ def classify_photo_boxes(
     if mm_per_pixel is not None and (len(mm_per_pixel) != 2 or any(
             not math.isfinite(float(v)) or float(v) <= 0 for v in mm_per_pixel)):
         raise ValueError(tx("mm_per_pixel deve contenere due scale positive (X, Y)"))
+    measured_rows = _checked_measurements(measured_mm, len(boxes))
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
         raise ValueError(tx("batch_size deve essere un intero positivo"))
     if box_format not in ("pixels", "normalized"):
@@ -528,11 +670,17 @@ def classify_photo_boxes(
                 accepted = label != "_other" and confidence >= threshold
                 box = clean_boxes[start + offset]
                 rotation_kind = orientations.get(label, "none") if accepted else "none"
-                rotation, rotation_confidence = _rotation(rotation_kind, turns, box)
+                rotation, rotation_confidence, rotation_basis = _rotation(rotation_kind, turns, box)
                 views_agree = len({poses[offset] for poses in view_poses}) == 1
-                size = ([round((box[2] - box[0]) * float(mm_per_pixel[0]), 3),
-                         round((box[3] - box[1]) * float(mm_per_pixel[1]), 3)]
-                        if mm_per_pixel is not None else None)
+                measured = measured_rows[start + offset]
+                if measured is not None:
+                    size = [measured["length_mm"], measured["width_mm"]]
+                    size_basis = "measured_edges"
+                else:
+                    size = ([round((box[2] - box[0]) * float(mm_per_pixel[0]), 3),
+                             round((box[3] - box[1]) * float(mm_per_pixel[1]), 3)]
+                            if mm_per_pixel is not None else None)
+                    size_basis = "detector_box"
                 kind, package = _kind_package(label) if accepted else ("generic", "")
                 status = ("needs_scale" if size is None else "unresolved") if accepted else (
                     "unknown" if label == "_other" else "low_confidence")
@@ -541,7 +689,9 @@ def classify_photo_boxes(
                     "body": _body_topology(label) if accepted else None,
                     "class_confidence": confidence, "accepted": accepted, "threshold": threshold,
                     "rotation_deg": rotation, "rotation_confidence": rotation_confidence,
+                    "rotation_basis": rotation_basis,
                     "rotation_kind": rotation_kind, "rotation_views_agree": views_agree,
+                    "size_basis": size_basis, "measured_mm": measured,
                     "terminal_count": CLASS_TERMINAL_COUNTS.get(label) if accepted else None,
                     "size_mm": size, "footprint": None, "footprint_status": status,
                     "footprint_candidates": [], "step_model": None, "step_candidates": [],

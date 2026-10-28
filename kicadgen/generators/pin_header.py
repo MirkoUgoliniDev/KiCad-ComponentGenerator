@@ -22,6 +22,7 @@ from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text
+from ..core.output_names import validate_output_name
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
@@ -36,6 +37,37 @@ from .castellated_module import MIN_HOLE_WALL_MM
 #: that touch or that the DRC flags at once. It is a LOWER BOUND of
 #: manufacturability, not a recommended distance.
 MIN_PAD_GAP_MM = MIN_HOLE_WALL_MM
+
+
+def pin_key(pin) -> str:
+    """@brief The one identity of a header pin: its number as text.
+
+    `pin_map`, `populated_pins` and `pad_overrides` reach this module from
+    JSON (text keys), from the GUI (ints) and from tests (either): every
+    comparison between them goes through this key, so `{"1": ...}` and
+    `{1: ...}` name the same pin and `1` is pin 1 whatever its type (review
+    2026-10-27, G4: an int comparison missed a str-keyed pin 1 and a set
+    difference reported str populated pins as missing from an int map).
+
+    @param pin A pin number, int or str.
+    @return `str(pin)` with surrounding blanks removed.
+    """
+    return str(pin).strip()
+
+
+def _pin_order(pin) -> tuple:
+    """Sort key: numeric pins in numeric order, then text pins alphabetically."""
+    key = pin_key(pin)
+    return (0, int(key), "") if key.isdigit() else (1, 0, key)
+
+
+def is_pin_one(pin) -> bool:
+    """@brief Tell whether a pin is the pin numbered 1 (the square pad, the silk dot).
+
+    @param pin A pin number, int or str.
+    @return True for 1 and "1" alike, via `pin_key`.
+    """
+    return pin_key(pin) == "1"
 
 
 @dataclass
@@ -103,6 +135,11 @@ class PinHeaderParams:
             raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
         if not self.name.strip():
             raise ValueError(tx("Il nome del footprint non puo' essere vuoto."))
+        # The name becomes the stem of every generated file and of the
+        # `.3dshapes` folder: the shared rule refuses a path such as
+        # "..\evil" here too, so a script caller is protected exactly like
+        # the window (2026-10-27 review, H4).
+        validate_output_name(self.name)
         if self.rows < 1 or self.cols < 1:
             raise ValueError(tx("Righe e colonne devono essere >= 1."))
         if self.pitch <= 0:
@@ -117,6 +154,13 @@ class PinHeaderParams:
             raise ValueError(tx("La forma dei pad header deve essere circle o rect."))
         if self.pin_map:
             seen = {}
+            # Two keys naming the same pin (1 and "1") would place one pin
+            # twice: refused on the shared text identity.
+            keys = [pin_key(pin) for pin in self.pin_map]
+            if len(keys) != len(set(keys)):
+                duplicate = next(key for key in keys if keys.count(key) > 1)
+                raise ValueError(tx("Pin {pin} compare due volte nella mappa dei pin (come numero e "
+                                    "come testo).", pin=duplicate))
             for pin, position in self.pin_map.items():
                 row, col = position
                 if not (0 <= row < self.rows) or not (0 <= col < self.cols):
@@ -140,9 +184,9 @@ class PinHeaderParams:
                     )
                 seen[position] = pin
         if self.pad_overrides:
-            positions = {str(pin) for pin, _, _ in pin_positions(self)}
+            positions = {pin_key(pin) for pin, _, _ in pin_positions(self)}
             for number, override in self.pad_overrides.items():
-                if str(number) not in positions or not isinstance(override, dict):
+                if pin_key(number) not in positions or not isinstance(override, dict):
                     raise ValueError(tx("Override pad header non valido: {number}.", number=number))
                 shape = override.get("shape")
                 size = override.get("size")
@@ -160,16 +204,23 @@ class PinHeaderParams:
             if not self.pin_map:
                 max_pin = self.rows * self.cols
                 for p in self.populated_pins:
-                    if p < 1 or p > max_pin:
+                    # The automatic numbers are integers: a text pin is read
+                    # as its number ("3" is pin 3), anything else is out of
+                    # the automatic range by definition.
+                    key = pin_key(p)
+                    index = int(key) if key.isdigit() else 0
+                    if index < 1 or index > max_pin:
                         raise ValueError(
                             tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
                                pin=p, max_pin=max_pin)
                         )
             # With an explicit map a populated pin without a position would be
             # dropped silently (pin_positions iterates only the map): the footprint
-            # would lose a pin of the source pinout.
+            # would lose a pin of the source pinout. Compared on the text key:
+            # int and str spellings of one pin are the same pin.
             if self.pin_map:
-                missing = sorted(set(self.populated_pins) - set(self.pin_map))
+                missing = sorted({pin_key(p) for p in self.populated_pins}
+                                 - {pin_key(p) for p in self.pin_map}, key=_pin_order)
                 if missing:
                     raise ValueError(
                         tx("I pin {pins} sono popolati ma non hanno una posizione nella mappa "
@@ -207,7 +258,7 @@ class PinHeaderParams:
         pads = sorted(pin_positions(self), key=lambda item: item[1])
         if not pads:
             return
-        sizes = [float(overrides.get(str(pin), {}).get("size", self.pad_diameter))
+        sizes = [float(overrides.get(pin_key(pin), {}).get("size", self.pad_diameter))
                  for pin, _x, _y in pads]
         window = max(sizes) + MIN_PAD_GAP_MM
         if not window > 0:
@@ -234,10 +285,11 @@ class PinHeaderParams:
                 radius_a, radius_b = sizes[index_a] / 2, sizes[index_b] / 2
                 if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
                     continue
-                shape_a = overrides.get(str(pin_a), {}).get(
-                    "shape", "rect" if self.pad_shape == "rect" or pin_a == 1 else "circle")
-                shape_b = overrides.get(str(pin_b), {}).get(
-                    "shape", "rect" if self.pad_shape == "rect" or pin_b == 1 else "circle")
+                # Pin 1 is square whatever the spelling of its number (G4).
+                shape_a = overrides.get(pin_key(pin_a), {}).get(
+                    "shape", "rect" if self.pad_shape == "rect" or is_pin_one(pin_a) else "circle")
+                shape_b = overrides.get(pin_key(pin_b), {}).get(
+                    "shape", "rect" if self.pad_shape == "rect" or is_pin_one(pin_b) else "circle")
                 gap = pad_copper_gap(xa, ya, shape_a, radius_a,
                                      xb, yb, shape_b, radius_b)
                 if gap < MIN_PAD_GAP_MM - 1e-9:
@@ -299,18 +351,23 @@ def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]
         along the row spacing.
     """
     row_spacing = params.effective_row_spacing()
+    # Membership is decided on the text identity (`pin_key`): populated pins
+    # and map keys may be ints or strings and still name the same pin. The
+    # pin is yielded as the caller spelled it, so int-keyed data keeps ints.
+    populated = (None if params.populated_pins is None
+                 else {pin_key(p) for p in params.populated_pins})
 
     if params.pin_map:
-        for pin in sorted(params.pin_map):
+        for pin in sorted(params.pin_map, key=_pin_order):
             row, col = params.pin_map[pin]
-            if params.populated_pins is None or pin in params.populated_pins:
+            if populated is None or pin_key(pin) in populated:
                 yield pin, col * params.pitch, row * row_spacing
         return
 
     pin = 1
     for col in range(params.cols):
         for row in range(params.rows):
-            if params.populated_pins is None or pin in params.populated_pins:
+            if populated is None or pin_key(pin) in populated:
                 yield pin, col * params.pitch, row * row_spacing
             pin += 1
 
@@ -377,12 +434,14 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     positions = list(pin_positions(params))
     pads = []
     for pin, x, y in positions:
-        override = (params.pad_overrides or {}).get(str(pin), {})
-        shape = override.get("shape", "rect" if pin == 1 and params.pad_shape == "circle"
+        override = (params.pad_overrides or {}).get(pin_key(pin), {})
+        # The square pad marks pin 1 by its text identity: an int-keyed and
+        # a str-keyed pin map give the same footprint (G4).
+        shape = override.get("shape", "rect" if is_pin_one(pin) and params.pad_shape == "circle"
                              else params.pad_shape)
         size = float(override.get("size", params.pad_diameter))
         pads.append(Pad(
-            number=str(pin),
+            number=pin_key(pin),
             pad_type="thru_hole",
             shape=shape,
             at=(x, y),

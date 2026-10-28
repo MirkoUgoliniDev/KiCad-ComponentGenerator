@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import QMessageBox
 from kicadgen.gui.main_window import MainWindow
 from kicadgen.services.datasheet_extractor import ExtractedParams
 from qt_window_teardown import dispose_window, stub_3d_preview
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 
 @pytest.fixture
@@ -55,7 +57,7 @@ def _with_documents(window, tmp_path, name):
     window.field_name.setText(name)
     docs = window._docs_dir()
     docs.mkdir(parents=True)
-    (docs / "datasheet.pdf").write_bytes(b"%PDF fake")
+    (docs / "datasheet.pdf").write_bytes(MINIMAL_PDF)
     (docs / "foto.png").write_bytes(b"PNG fake")
     return docs
 
@@ -91,15 +93,24 @@ def test_docs_follow_the_component_when_the_proposal_is_accepted(window, tmp_pat
     assert window.docs_list.count() == 2
 
 
-def test_an_unnamed_component_takes_the_proposal_without_asking(window, tmp_path):
-    """Senza un nome scelto non c'e' nulla da rispettare, e "NUOVO_COMPONENTE"
-    come cartella non serve a nessuno."""
+def test_an_unnamed_component_never_takes_the_proposal(window, tmp_path):
+    """@brief A result never names the project by itself (review 2026-10-27, A6).
+
+    An extraction cannot start without a name (`_extract_block_reason`), so
+    the branch that adopted the proposal for a nameless project was
+    unreachable and is gone: a result arriving with the name field empty
+    leaves it empty and only logs the proposal.
+    """
     window.field_library_root.setText(str(tmp_path))
     window.field_name.setText("")
+    assert window._extract_block_reason()
 
-    window._on_extracted(_extracted("NOME_NUOVO"))
+    params = _extracted("NOME_NUOVO")
+    window._on_extracted(params)
 
-    assert window.field_name.text() == "NOME_NUOVO"
+    assert window.field_name.text() == ""
+    assert "NOME_NUOVO" in window.ai_progress_text.toPlainText()
+    assert not (tmp_path / "NOME_NUOVO").exists()
 
 
 def test_extracted_fillets_populate_the_annotations(window, tmp_path):

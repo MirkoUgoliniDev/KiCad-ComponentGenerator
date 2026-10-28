@@ -61,6 +61,7 @@ import functools
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
+from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX
 from .messages import tx
 
 try:
@@ -118,17 +119,31 @@ SEARCH_MARGIN_MM = 2.0
 #: Area of the contour found relative to the estimated one: outside this
 #: range it is not the same component (too small, or too large because merged
 #: with a neighbour by the morphological closing).
+#: DECLARED HEURISTIC (review 2026-10-27, F2): it filters a contour that is a
+#: fragment of the body (a marking, one terminal) or a blob of the body plus
+#: a neighbour. The bounds were set on the sample boards (ESP32 module and
+#: the synthetic photos of tests/test_photo_refine.py), not derived from a
+#: physical quantity: a proposal's size is an AI estimate whose error is not
+#: measured. They would become unnecessary with a measured size uncertainty
+#: of the proposal (then the range would be size +- that uncertainty).
 AREA_RATIO_RANGE = (0.4, 1.8)
-#: Maximum accepted shift between estimated centre and measured centre.
-MAX_SHIFT_MM = 2.0
 #: Minimum fraction of the minimum rectangle (minAreaRect) actually filled by
 #: the contour: a solid component fills almost all of it, a blob resulting
 #: from the merging of several nearby pieces ("dumbbell" or "L" shape) fills
 #: a much smaller fraction.
+#: DECLARED HEURISTIC: a rectangular package fills its minimum rectangle
+#: entirely, so any value well below 1 separates it from a welded blob; the
+#: 0.45 was chosen on the sample boards to tolerate rounded corners and a
+#: contour chipped by shadows. A contour closed with the convex hull of the
+#: body would make it unnecessary.
 MIN_FILL_RATIO = 0.45
 #: How far the elongation (long side / short side) of the contour may depart
 #: from the estimated one: a merged blob is almost always much more or much
 #: less elongated than the component it should represent.
+#: DECLARED HEURISTIC: it filters a blob whose shape is not the proposal's;
+#: the 1.5 was set on the sample boards, where the AI's proportions are
+#: within that factor of the true ones. A measured size uncertainty of the
+#: proposal would replace it with `elongation_hinge` of the proposal's sides.
 MAX_ELONGATION_RATIO = 1.5
 #: Position uncertainty of a contour point, in pixels. Declared fallback: it
 #: is the quantisation of the contour (one pixel), not a measurement of this
@@ -579,6 +594,24 @@ def deskew_board(image, body_length: float, body_width: float):
     @return The straightened image, or None when there is nothing to
         straighten or the tilt is too large for a top view.
     """
+    report = deskew_board_report(image, body_length, body_width)
+    return None if report is None else report[0]
+
+
+def deskew_board_report(image, body_length: float, body_width: float):
+    """@brief `deskew_board` that also reports the rotation it applied.
+
+    The caller that records provenance needs to say that the crop box it
+    stores refers to a ROTATED canvas, not to the original photo whose
+    SHA-256 sits beside it (review 2026-10-27, F9): the applied tilt and the
+    canvas size make the transformation reproducible.
+
+    @param image BGR photo.
+    @param body_length Declared board extent along X, in mm.
+    @param body_width Declared board extent along Y, in mm.
+    @return (straightened image, applied rotation in degrees, counter-clockwise
+        positive as cv2.getRotationMatrix2D takes it), or None as `deskew_board`.
+    """
     if cv2 is None or not all(math.isfinite(v) and v > 0 for v in (body_length, body_width)):
         return None
     background = estimate_background(image)
@@ -622,8 +655,9 @@ def deskew_board(image, body_length: float, body_width: float):
     new_h = int(width * math.sin(radians) + height * math.cos(radians)) + 2
     matrix[0, 2] += new_w / 2 - cx
     matrix[1, 2] += new_h / 2 - cy
-    return cv2.warpAffine(image, matrix, (new_w, new_h), flags=cv2.INTER_CUBIC,
-                          borderValue=background.bgr)
+    straight = cv2.warpAffine(image, matrix, (new_w, new_h), flags=cv2.INTER_CUBIC,
+                              borderValue=background.bgr)
+    return straight, float(tilt)
 
 
 @dataclass(frozen=True)
@@ -1149,6 +1183,40 @@ def _axis_rotation(angle: float, rw: float, rh: float, short_side_px: float) -> 
     return round(axis, 1)
 
 
+def centre_on_hypothesis(x_mm: float, y_mm: float, component: dict, edge_mm: float) -> bool:
+    """@brief Whether a measured centre lies on the body the proposal describes.
+
+    The proposal is «a body of length x width, centred here, turned by
+    rotation_deg». A contour is that body only if its centre falls inside
+    the proposal's own rectangle, grown on every side by the edge
+    uncertainty of the photo: the bound is the hypothesis itself, in its own
+    frame, not an absolute distance. So a contour of the same size one body
+    width away (a silkscreen outline beside an 0402, a twin passive) is
+    refused for a structural reason -- its centre is outside the proposed
+    body -- while a proposal whose centre merely sits off the true centre,
+    but still on the body, is corrected (review 2026-10-27, F2; replaces the
+    absolute 2 mm cap, which accepted any same-size contour within 2 mm).
+
+    @param x_mm Measured centre X in board millimetres.
+    @param y_mm Measured centre Y in board millimetres.
+    @param component Proposal with x_mm, y_mm, length_mm, width_mm and an
+        optional rotation_deg (degrees, any value; 0 = length along X).
+    @param edge_mm Position uncertainty of one edge, in millimetres at the
+        photo scale (EDGE_UNCERTAINTY_PX / scale).
+    @return True when the measured centre is on the proposed body.
+    """
+    dx = float(x_mm) - float(component["x_mm"])
+    dy = float(y_mm) - float(component["y_mm"])
+    angle = math.radians(float(component.get("rotation_deg") or 0.0))
+    cosine, sine = math.cos(angle), math.sin(angle)
+    # Displacement expressed along the proposal's own axes (length, width).
+    along = dx * cosine + dy * sine
+    across = -dx * sine + dy * cosine
+    slack = max(float(edge_mm), 0.0)
+    return (abs(along) <= float(component["length_mm"]) / 2 + slack
+            and abs(across) <= float(component["width_mm"]) / 2 + slack)
+
+
 def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=None,
                           margin_mm: Optional[float] = None) -> Optional[dict]:
     """@brief Measure the real edges of one component in the photo, or return None when unclear.
@@ -1251,7 +1319,9 @@ def refine_component_edges(image, frame: BoardFrame, component: dict, forbidden=
         long_span = max(max(rw, rh) - 2 * MORPH_GROWTH_PX, 1.0)
         short_span = max(min(rw, rh) - 2 * MORPH_GROWTH_PX, 1.0)
     x_mm, y_mm = frame.to_mm(x0 + rcx, y0 + rcy)
-    if math.hypot(x_mm - float(component["x_mm"]), y_mm - float(component["y_mm"])) > MAX_SHIFT_MM:
+    if not centre_on_hypothesis(x_mm, y_mm, component, EDGE_UNCERTAINTY_PX / frame.scale):
+        # The contour is a real body but not the one proposed: a neighbour,
+        # or a silkscreen outline of the same size next to the body.
         return None
     measured_length = long_span / frame.scale
     measured_width = short_span / frame.scale

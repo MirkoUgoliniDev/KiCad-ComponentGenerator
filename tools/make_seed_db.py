@@ -27,9 +27,16 @@ def verify_seed(path: Path) -> None:
 
     @param path The seed database to check.
     @throws SeedError When the file is not a SQLite database, a metadata
-        value records a local path (``legacy_backup`` included), or the stored
-        defaults differ from ``analysis_profiles.factory_defaults()``.
+        value records a local path (``legacy_backup`` included), the stored
+        defaults differ from ``analysis_profiles.factory_defaults()``, the
+        translations are not the bundled catalogue complete in every
+        language of ``i18n.LANGUAGES``, or the component types are not the
+        built-in ones of ``component_types.COMPONENT_TYPES``.
     @note The check reads the file with a read-only connection.
+    @note Translations and component types are verified too (review
+        2026-10-27, I10): a seed with a language missing, or with a stale
+        built-in type, shipped unnoticed before, because the old check read
+        only ``metadata`` and ``ai_defaults``.
     """
     from kicadgen.services.analysis_profiles import PROFILE_FIELDS, factory_defaults
 
@@ -40,6 +47,9 @@ def verify_seed(path: Path) -> None:
     try:
         metadata = dict(connection.execute("SELECT name, value FROM metadata"))
         defaults = dict(connection.execute("SELECT name, value FROM ai_defaults"))
+        translations = connection.execute("SELECT key, language, text FROM translations").fetchall()
+        types = connection.execute(
+            "SELECT key, label, family, instructions, active, builtin FROM component_types").fetchall()
     finally:
         connection.close()
     # A fresh store records legacy_backup as an empty string; any other value
@@ -55,6 +65,59 @@ def verify_seed(path: Path) -> None:
                    if defaults.get(name) not in (value, value.strip()))
     if stale:
         raise SeedError(f"Seed database defaults differ from the code: {stale}")
+    _verify_translations(translations)
+    _verify_component_types(types)
+
+
+def _verify_translations(rows: list[tuple[str, str, str]]) -> None:
+    """Check the translations table against the bundled catalogue, language by language.
+
+    Every key must carry every language of ``i18n.LANGUAGES`` with the
+    bundled text, and the table must hold nothing else: the count equals
+    the catalogue's. A missing language would show the Italian source text
+    to the users of that language; an extra row would be a leftover of the
+    machine that built the seed.
+    """
+    from kicadgen.services.i18n import DEFAULT_TRANSLATIONS, LANGUAGES
+
+    expected = {(key, language): text
+                for key, values in DEFAULT_TRANSLATIONS.items()
+                for language, text in values.items()}
+    stored = {(key, language): text for key, language, text in rows}
+    incomplete = sorted(key for key in DEFAULT_TRANSLATIONS
+                        if any((key, language) not in stored for language in LANGUAGES))
+    if incomplete:
+        raise SeedError(f"Seed database translations miss a language for: {incomplete[:5]}"
+                        + (" ..." if len(incomplete) > 5 else ""))
+    if len(rows) != len(expected):
+        raise SeedError(f"Seed database holds {len(rows)} translation rows, "
+                        f"the bundled catalogue has {len(expected)}.")
+    different = sorted(key for key, text in stored.items() if expected.get(key) != text)
+    if different:
+        raise SeedError(f"Seed database translations differ from the catalogue: {different[:5]}")
+
+
+def _verify_component_types(rows) -> None:
+    """Check the component types are exactly the built-in ones, active and unchanged.
+
+    The seed must offer every type of ``COMPONENT_TYPES`` with its label and
+    instructions as the code defines them, all built-in and active, and no
+    type added on the machine that built the seed.
+    """
+    from kicadgen.services.component_types import COMPONENT_TYPES
+
+    expected = {t.key: t for t in COMPONENT_TYPES}
+    stored = {key: (label, family, instructions, active, builtin)
+              for key, label, family, instructions, active, builtin in rows}
+    if set(stored) != set(expected):
+        raise SeedError("Seed database component types differ from the code: "
+                        f"missing {sorted(set(expected) - set(stored))}, "
+                        f"extra {sorted(set(stored) - set(expected))}")
+    stale = sorted(key for key, (label, family, instructions, active, builtin) in stored.items()
+                   if (label, instructions, int(active), int(builtin))
+                   != (expected[key].label, expected[key].prompt, 1, 1))
+    if stale:
+        raise SeedError(f"Seed database component types are stale or not built-in: {stale}")
 
 
 def make_seed(output: Path) -> Path:

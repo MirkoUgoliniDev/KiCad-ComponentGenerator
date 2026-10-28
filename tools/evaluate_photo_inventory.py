@@ -8,7 +8,10 @@ Examples (run from the repository root):
       --overlay generated/reference-evaluation/reference-overlay.png
 
 Input: a component list, or {"components": [...], "crop_bbox_original_px":
-[left, top, right, bottom]}. Every component must contain _box normalized to
+[left, top, right, bottom]}. An inventory of a photo that prepare_photo had to
+straighten carries "crop_bbox_deskewed_px" plus "deskew" instead: that box
+lives on the ROTATED canvas, the reference boxes on the original photo, and
+the tool refuses it with an explicit message (see inventory_crop). Every component must contain _box normalized to
 the WHOLE calibrated PCB crop (not a tile, millimeters, or original image).
 An explicit --crop takes precedence over input crop metadata. Otherwise --photo
 recomputes the crop exactly as prepare_photo does. The fixture's recorded crop
@@ -119,6 +122,48 @@ def validate_reference(reference):
     if count is not None and count != len(components):
         raise ValueError("reference annotation.count differs from component list")
     return reference
+
+
+#: Message of the refusal of a deskewed inventory; a test reads it.
+DESKEWED_REFUSAL = (
+    "inventory crop refers to the deskewed canvas (crop_bbox_deskewed_px, photo rotated by "
+    "{angle} deg before the crop), not to the original photo: its _box values cannot be "
+    "mapped to the reference's original pixels, because the metadata do not record the "
+    "rotation centre and a rotated box is no longer an axis-aligned rectangle there. "
+    "Evaluate an inventory of an upright photo instead")
+
+
+def inventory_crop(metadata):
+    """@brief Crop box of an inventory metadata dict in ORIGINAL photo pixels, or None.
+
+    Reads the crop through `photo_inventory.crop_box_from_metadata`, the same
+    reader the application uses, so the old layout (only
+    ``crop_bbox_original_px``) and the new one (``crop_bbox_deskewed_px`` plus
+    ``deskew``, review 2026-10-27, F9) are told apart in one place.
+
+    @param metadata Inventory JSON object (or {} for a bare component list).
+    @return The crop box as a list in original-photo pixels, or None when the
+        inventory records no crop.
+    @throws ValueError When the box refers to the deskewed canvas: the
+        prediction boxes are normalised to a crop of the ROTATED photo, and
+        neither an inventory crop nor an explicit --crop in original pixels
+        can turn them into original-photo boxes. Refusing is the only honest
+        answer; a wrong box would silently degrade every IoU.
+    @note The deskew cannot be re-applied here: `deskew` records the angle
+        and the canvas size, not the rotation centre that
+        `photo_refine.deskew_board_report` used, so the transform is not
+        reproducible from the metadata alone.
+    """
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    # Imported lazily: the module is pure Python at import time (OpenCV is
+    # optional there), so the scoring CLI still runs with `python -S`.
+    from kicadgen.services.photo_inventory import crop_box_from_metadata
+    box, frame = crop_box_from_metadata(metadata)
+    if frame == "deskewed":
+        deskew = metadata.get("deskew") if isinstance(metadata.get("deskew"), dict) else {}
+        raise ValueError(DESKEWED_REFUSAL.format(angle=deskew.get("angle_deg", "?")))
+    return box
 
 
 def normalized_to_original(box, crop):
@@ -435,9 +480,13 @@ def main(argv=None):
             for key, reference_key in (("body_length_mm", "length_mm"), ("body_width_mm", "width_mm")):
                 if key in metadata and not math.isclose(positive_number(metadata[key], key), reference["board"][reference_key], rel_tol=1e-6):
                     raise ValueError(f"inventory {key} differs from reference")
+            # Read the inventory crop FIRST, even when --crop is given: a
+            # deskewed inventory is refused whatever crop is supplied, because
+            # its _box values are normalised to a crop of the rotated canvas.
+            recorded_crop = inventory_crop(metadata)
             crop, source = args.crop, "explicit --crop"
             if crop is None:
-                crop, source = metadata.get("crop_bbox_original_px"), "inventory crop_bbox_original_px"
+                crop, source = recorded_crop, "inventory crop_bbox_original_px"
             if crop is None and args.photo:
                 crop, source = calibrate_crop(args.photo, reference), "recomputed find_board / prepare_photo rounding"
             if crop is None:

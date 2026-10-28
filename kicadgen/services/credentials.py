@@ -181,15 +181,33 @@ def read_secret(target: str) -> Optional[str]:
                                  exc=type(exc).__name__)) from None
     finally:
         library.CredFree(pointer)
+    invalid = tx("La voce {target} del Gestore credenziali non contiene un testo valido.",
+                 target=target)
     if len(blob) % 2:
-        raise CredentialError(tx("La voce {target} del Gestore credenziali non contiene "
-                                 "un testo valido.", target=target))
+        raise CredentialError(invalid)
     try:
         # A writer that included the terminating NUL leaves it in the blob.
-        return blob.decode("utf-16-le").rstrip("\x00")
+        text = blob.decode("utf-16-le").rstrip("\x00")
     except UnicodeDecodeError:
-        raise CredentialError(tx("La voce {target} del Gestore credenziali non contiene "
-                                 "un testo valido.", target=target)) from None
+        raise CredentialError(invalid) from None
+    # Invariant (review 2026-10-27, E5): what comes back is a key, not just
+    # decodable text. A UTF-8 blob of even length written by another tool
+    # decodes as UTF-16 into CJK-looking garbage without any error, and sent
+    # as a header it would earn an HTTP 401 that blames the provider. Two
+    # structural checks tell the two encodings apart, so that «Account AI»
+    # can ask for the key to be re-entered instead:
+    # - an API key is made of ASCII characters, and every ASCII character
+    #   encoded in UTF-16-LE carries a NUL high byte: a blob without a single
+    #   NUL was never written as UTF-16 text (an 8-bit blob pairs its bytes
+    #   into code points >= U+2020, so it also never contains a NUL);
+    # - a key has no blank nor control character (`providers.key_text_problem`
+    #   applies the same rule to a pasted key; it is not imported here because
+    #   providers imports this module). Non-ASCII printable text is still
+    #   accepted: the round trip must return whatever was stored as UTF-16.
+    if (not text or b"\x00" not in blob or not text.isprintable()
+            or any(c.isspace() for c in text)):
+        raise CredentialError(invalid)
+    return text
 
 
 def write_secret(target: str, secret: str) -> None:

@@ -31,7 +31,7 @@ from typing import Any, Optional
 from ..app_paths import env_files
 from .messages import tx
 from .openrouter import (TRANSIENT_HTTP_STATUSES, OpenRouterError, _diagnostic_context,
-                         _retry_after, _safe_error_text)
+                         _json_from_response, _retry_after, _safe_error_text)
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_DEEPSEEK = "deepseek"
@@ -241,7 +241,9 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
                                      method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.load(response)
+            # Bounded read (review 2026-10-27, E6): a body over the limit is
+            # an undecodable answer, handled by the branch below.
+            return _json_from_response(response)
     except urllib.error.HTTPError as exc:
         transient = type(exc.code) is int and exc.code in TRANSIENT_HTTP_STATUSES
         detail = _error_detail(exc, key)
@@ -261,9 +263,15 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         # the answer, or an undecodable body, come AFTER the request was sent:
         # a chat request may have been billed (audit 138, B10).
         sent = not isinstance(exc, urllib.error.URLError)
+        # `unreachable` means exactly «the request never left»: the URLError
+        # case. A read timeout, a closed connection or an over-sized body
+        # after the POST was sent is NOT unreachable, it is a possibly billed
+        # call (review 2026-10-27, E7): the two flags are mutually exclusive
+        # for a POST, so the caller never reads «provider down» for a call
+        # that may have been charged.
         error = ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
                                          reason=_network_reason(exc)), key),
-                              unreachable=not isinstance(exc, (ValueError, IncompleteRead)))
+                              unreachable=isinstance(exc, urllib.error.URLError))
         error.possibly_billed = sent and body is not None and (
             isinstance(exc, (TimeoutError, ValueError, IncompleteRead)))
         raise error from None

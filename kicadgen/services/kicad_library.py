@@ -31,6 +31,12 @@ class KiCadLibraryError(RuntimeError):
     """
 
     def __init__(self, message: str, *, code: str = "unexpected", **context):
+        """@brief Keep the English message, the catalog code and its context.
+
+        @param message English diagnostic for logs and non-GUI callers.
+        @param code Stable key used by the GUI translation catalog.
+        @param context Values interpolated into the localized message.
+        """
         super().__init__(message)
         self.code = code
         self.context = context
@@ -109,13 +115,67 @@ class PreviewProject:
 
 @dataclass(frozen=True)
 class LibraryInstallResult:
-    """@brief Describe files installed into one KiCad footprint library."""
+    """@brief Describe files installed into one KiCad footprint library.
+
+    @note ``replaced`` and ``removed`` (review 2026-10-27, A3) say what the
+        install did to files that existed before it: ``replaced`` were
+        overwritten with the new copies, ``removed`` were deleted because the
+        source no longer provides them (a WRL the component lost). The GUI
+        can word its report with them; both are empty for a first install.
+    """
 
     identifier: str
     footprint_path: Path
     step_path: Path
     wrl_path: Path | None
     table_path: Path
+    replaced: tuple[Path, ...] = ()
+    removed: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class InstallPlan:
+    """@brief What `install_component_library` would do, computed without writing.
+
+    @details Returned by `plan_component_install` so the GUI can ask the
+    overwrite confirmation with the same facts the install will act on, in
+    one place (review 2026-10-27, A1/A3/D1). Every path is the user's path,
+    links not resolved.
+    @note ``replaced`` lists the existing targets the install overwrites and
+        ``removed`` those it deletes (a WRL present in the library when the
+        source has none). A dangling symbolic link counts as existing: it is
+        listed in ``replaced`` so the user is asked, and the install then
+        refuses it (``target_link_unresolved``) because nothing can be
+        written through it.
+    @note ``linked`` lists the targets, the table included, that are symbolic
+        or hard links: the install writes THROUGH them so the other name sees
+        the new content too, and a rollback restores both.
+    """
+
+    targets: tuple[Path, ...]
+    replaced: tuple[Path, ...]
+    removed: tuple[Path, ...]
+    linked: tuple[Path, ...]
+    table_path: Path
+    table_exists: bool
+    library_uri: str
+
+
+@dataclass(frozen=True)
+class GlobalTableLocation:
+    """@brief The per-user global fp-lib-table of one installed KiCad.
+
+    @note ``version`` is the ``<major>.<minor>`` settings folder and
+        ``version_source`` says where it came from: ``"kicad-cli"`` (the
+        output of ``kicad-cli version``) or ``"folder"`` (the version folder
+        in the executable path, used when the command gives nothing usable).
+        Exposed before any write so the GUI can name the table and the
+        version in its confirmation (review 2026-10-27, D1).
+    """
+
+    path: Path
+    version: str
+    version_source: str
 
 
 _SAFE_LIBRARY_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
@@ -810,12 +870,141 @@ def _write_durably(path: Path, payload: bytes) -> None:
         os.fsync(stream.fileno())
 
 
+def _is_symlink(path: Path) -> bool:
+    """Whether `path` itself is a symbolic link (module-level so tests can fake one)."""
+    return path.is_symlink()
+
+
+def _resolve_link(path: Path) -> Path:
+    """@brief Final target of a symbolic link, which must exist.
+
+    @param path A symbolic link (see `_is_symlink`).
+    @return The real path, every link of the chain followed.
+    @throws OSError When the chain does not end at an existing entry
+        (dangling link) or cannot be followed (a loop, a denied folder).
+    @note Module-level so tests can fake a link without the privilege Windows
+        requires to create one.
+    """
+    return path.resolve(strict=True)
+
+
+def _write_target(path: Path) -> Path:
+    """@brief The file the bytes meant for `path` must be written to.
+
+    @param path A target of ours: an installed file, a library table, a
+        preview file. May be a symbolic link kept by the user (a dotfiles
+        checkout of ``~/.config/kicad/<version>/fp-lib-table``).
+    @return `path` itself for a plain file or a missing one; for a symbolic
+        link, the real file it leads to.
+    @throws KiCadLibraryError ``target_link_unresolved`` (context ``path``,
+        ``error``) when the link is dangling or cannot be followed: nothing
+        can be written through it, and writing a plain file in its place
+        would silently discard the user's link.
+    @throws KiCadLibraryError ``install_target_is_folder`` when the link
+        leads to a folder.
+    @note SAFETY BOUNDARY (review 2026-10-27, A1): every publisher of this
+        module (`_atomic_write_bytes`, `_atomic_copy`, `_restore_file`, the
+        install staging, `update_fp_lib_table`) resolves its target here
+        BEFORE creating the scratch file, so the scratch is a sibling of the
+        real file (same volume, atomic rename) and the rename replaces the
+        real file, never the link. ``os.replace`` onto a symbolic link used
+        to delete the link and leave a plain file in its place: the linked
+        copy kept the old content and the user was never told.
+    """
+    if not _is_symlink(path):
+        return path
+    try:
+        real = _resolve_link(path)
+    except OSError as exc:
+        raise KiCadLibraryError(
+            f"{path} is a symbolic link that cannot be followed ({exc}); "
+            "nothing can be written through it. Repair or remove the link, "
+            "then retry. No file was changed.",
+            code="target_link_unresolved", path=path, error=exc,
+        ) from exc
+    if real.is_dir():
+        raise _target_is_folder(path)
+    return real
+
+
+def _hard_linked(target: Path) -> bool:
+    """@brief Whether `target` is a regular file reachable under another name.
+
+    @param target An existing path, links already resolved (`_write_target`).
+    @return True when the file has more than one hard link; False for a
+        missing path, a folder or a file with a single name.
+    @note ``st_nlink`` is reported by Windows (NTFS) and POSIX alike; a file
+        system that does not count links reports 1, so such a file is
+        published by the ordinary atomic replace.
+    """
+    try:
+        info = os.stat(target)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_nlink > 1
+
+
+def _write_in_place(source: Path, target: Path) -> None:
+    """@brief Overwrite the existing inode of `target` with the bytes of `source`.
+
+    @param source Complete file already on disk (a scratch or rollback copy).
+    @param target Existing hard-linked file (`_hard_linked`); it keeps its
+        inode, so every other name of it sees the new content.
+    @throws OSError When `target` cannot be opened for writing (read-only
+        attribute, held open) or the write fails: the same PermissionError
+        class a refused replace raises, mapped by the callers to
+        ``install_write_refused`` naming `target`.
+    @note SAFETY BOUNDARY (review 2026-10-27, A1): unlike the atomic rename,
+        this write is not crash-atomic, so it is used ONLY where a copy of
+        the previous content already exists on disk before it starts: the
+        staged ``.kicadgen-backup`` of `update_fp_lib_table`, the rollback
+        folder of `install_component_library`, or the rollback copy itself
+        in `_restore_file` (which is never deleted before the write
+        succeeded). Refusing hard links instead would have kept the atomic
+        guarantee but left the user with a dotfiles table that cannot be
+        updated at all; the in-place write keeps BOTH names of the file in
+        agreement, which is what the link is for.
+    """
+    with open(source, "rb") as stream, open(target, "r+b") as out:
+        out.truncate(0)
+        shutil.copyfileobj(stream, out)
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def _publish_scratch(scratch: Path, target: Path) -> None:
+    """@brief Make `target` hold the complete, fsynced bytes of `scratch`.
+
+    @param scratch Sibling scratch file of `target`, fully written and
+        flushed; consumed (renamed or removed) on success.
+    @param target Real file to publish (links already resolved by
+        `_write_target`), existing or not.
+    @throws OSError From `replace_file` or `_write_in_place`; `scratch` is
+        then left for the caller's cleanup.
+    @note The ONE place that chooses between the atomic rename (plain or
+        missing target) and the in-place overwrite (hard-linked target, see
+        `_write_in_place`). Every publisher of this module goes through it so
+        the link classes are handled identically for the library table, the
+        installed footprint and models, the preview files and the rollback.
+    """
+    if _hard_linked(target):
+        _write_in_place(scratch, target)
+        _unlink_quietly(scratch)
+        return
+    replace_file(scratch, target)
+
+
 def _atomic_write_bytes(target: Path, payload: bytes) -> None:
-    """Write bytes durably through a sibling scratch file and an atomic replace."""
+    """Write bytes durably through a sibling scratch file and an atomic replace.
+
+    The target is resolved through a symbolic link first (`_write_target`,
+    may raise ``target_link_unresolved``) and published by `_publish_scratch`.
+    """
+    target = _write_target(target)
     temporary = _temporary_sibling(target)
     try:
         _write_durably(temporary, payload)
-        replace_file(temporary, target)
+        _publish_scratch(temporary, target)
     finally:
         _unlink_quietly(temporary)
 
@@ -826,12 +1015,17 @@ def _atomic_write_text(target: Path, text: str) -> None:
 
 
 def _atomic_copy(source: Path, target: Path) -> None:
-    """Copy a file (writable, see `_copy_writable`) durably through a scratch file and a replace."""
+    """Copy a file (writable, see `_copy_writable`) durably through a scratch file and a replace.
+
+    Like `_atomic_write_bytes`, the target is resolved through a symbolic
+    link first and published by `_publish_scratch`.
+    """
+    target = _write_target(target)
     temporary = _temporary_sibling(target)
     try:
         _copy_writable(source, temporary)
         _fsync_file(temporary)
-        replace_file(temporary, target)
+        _publish_scratch(temporary, target)
     finally:
         _unlink_quietly(temporary)
 
@@ -1087,34 +1281,53 @@ def _publish_table_backup(table: Path, fresh: Path) -> None:
         and with it every global installation.
     @note Called only after the table write succeeded: rotating before it
         shifted, and discarded, the history even when the write then failed.
+    @note The history is COMPACTED, not shifted slot by slot (review
+        2026-10-27, A2): the copies that exist, newest first, take the slots
+        after `fresh` in order, whatever gaps the history had. A missing
+        ``.kicadgen-backup`` with ``.1`` and ``.2`` present used to leave
+        ``.1`` empty and discard the content of ``.2``, keeping two states
+        where three fit. Only the exact names of `_table_backup_history` are
+        touched: a ``.3`` or a ``.2.notes.txt`` next to them is foreign and
+        never moved.
     """
     history = _table_backup_history(table)
-    for path in history:
-        if path.exists():
-            _clear_readonly(path)
+    # Existing copies, newest first, gaps skipped: these are the states kept.
+    present = [path for path in history if path.exists()]
+    for path in present:
+        _clear_readonly(path)
     moved: list[tuple[Path, Path]] = []
-    oldest = history[-1]
-    # The first shift overwrites the oldest copy. It is first moved aside, so
-    # a rotation failing halfway can put it back: an undo that restores only
-    # the shifted copies lost it (review 2026-10-15, L1).
+    # The copy that falls off the retained history is moved aside, never
+    # deleted, so a rotation failing halfway can put it back: an undo that
+    # restores only the shifted copies lost it (review 2026-10-15, L1).
     aside: Path | None = None
     try:
-        if oldest.exists() and history[-2].exists():
-            scratch = _temporary_sibling(oldest)
+        # Oldest first: each copy moves to a slot no earlier than the one the
+        # next-older copy just left, so no copy is overwritten before it moved.
+        for position in range(len(present) - 1, -1, -1):
+            source = present[position]
+            if position + 1 < len(history):
+                destination = history[position + 1]
+            else:
+                destination = _temporary_sibling(source)
+                aside = destination
+            if source == destination:
+                continue
             try:
-                replace_file(oldest, scratch)
+                replace_file(source, destination)
             except BaseException:
-                # Still empty: it must never be "restored" over the oldest copy.
-                _unlink_quietly(scratch)
+                if destination == aside:
+                    # Still empty: it must never be "restored" over the copy.
+                    _unlink_quietly(aside)
+                    aside = None
                 raise
-            aside = scratch
-        for index in range(len(history) - 1, 0, -1):
-            if history[index - 1].exists():
-                replace_file(history[index - 1], history[index])
-                moved.append((history[index - 1], history[index]))
+            moved.append((source, destination))
         replace_file(fresh, history[0])
     except BaseException as exc:
-        failures = _undo_backup_moves(moved, aside, oldest)
+        failures = _undo_backup_moves(moved)
+        if aside is not None and aside.exists() and not failures:
+            # Put back by the undo above when it was moved; an aside that
+            # still exists after a complete undo is the empty scratch.
+            _unlink_quietly(aside)
         if failures:
             raise KiCadLibraryError(
                 f"The backups of {table} could not be put back in order after "
@@ -1127,19 +1340,17 @@ def _publish_table_backup(table: Path, fresh: Path) -> None:
         _unlink_quietly(aside)
 
 
-def _undo_backup_moves(moved: list[tuple[Path, Path]], aside: Path | None,
-                       oldest: Path) -> list[str]:
+def _undo_backup_moves(moved: list[tuple[Path, Path]]) -> list[str]:
     """@brief Reverse the moves of a failed backup rotation, newest move first.
 
-    @param moved (source, destination) of every move that succeeded, in order.
-    @param aside Scratch file holding the oldest copy, or None when it was not
-        moved aside (or the move aside itself failed).
-    @param oldest Path the oldest copy must return to.
+    @param moved (source, destination) of every move that succeeded, in
+        order; the copy moved aside (to a scratch name) is one of them.
     @return One message per copy that could not be put back; empty when the
         history is exactly as before.
     @note At the first failed undo the remaining ones stop: each of them would
         replace a file that still holds a copy not yet moved back. The
-        messages name every copy left out of place so none is lost silently.
+        messages name every copy left out of place, the scratch name of the
+        copy moved aside included, so none is lost silently.
     """
     failures: list[str] = []
     for position, (source, destination) in enumerate(reversed(moved)):
@@ -1151,14 +1362,6 @@ def _undo_backup_moves(moved: list[tuple[Path, Path]], aside: Path | None,
                 failures.append(
                     f"{earlier_destination} -> {earlier_source}: not attempted")
             break
-    if aside is not None and aside.exists():
-        if failures:
-            failures.append(f"oldest backup kept in {aside} (for {oldest})")
-        else:
-            try:
-                replace_file(aside, oldest)
-            except OSError as error:
-                failures.append(f"{aside} -> {oldest}: {error}")
     return failures
 
 
@@ -1198,8 +1401,15 @@ def update_fp_lib_table(
         then the history rotates. A failed write leaves the history as it was;
         a failed rotation puts the previous table back, so no change is ever
         left without its backup.
+    @note A table that is a symbolic link is updated THROUGH the link: the
+        real file is rewritten and the backup history sits next to it, so the
+        link survives and both names show the new table. A hard-linked table
+        is overwritten in place after its backup is staged (`_publish_scratch`).
+        A dangling link is refused (``target_link_unresolved``).
     """
-    table = Path(table_path)
+    # Resolved first so the scratch file, the backups and the final rename
+    # all work on the real file, never on the link (review 2026-10-27, A1).
+    table = _write_target(Path(table_path))
     original_bytes: bytes | None = None
     if table.is_file():
         original_bytes = table.read_bytes()
@@ -1367,10 +1577,19 @@ def _restore_file(backup: Path, target: Path) -> None:
     The backup is flushed to disk before the rename (`_fsync_file`): it was
     written by a plain copy, and a power loss right after the rename could
     otherwise leave the restored file empty.
+
+    A symbolic-link target is restored through the link (`_write_target`) and
+    a hard-linked one in place (`_write_in_place`), so every name of the file
+    shows the restored content; the backup is the pre-change copy itself and
+    is not deleted before the write succeeded (review 2026-10-27, A1).
     """
+    target = _write_target(target)
     target.parent.mkdir(parents=True, exist_ok=True)
+    _fsync_file(backup)
+    if _hard_linked(target):
+        _write_in_place(backup, target)
+        return
     try:
-        _fsync_file(backup)
         os.replace(backup, target)
     except OSError:
         _atomic_copy(backup, target)
@@ -1443,6 +1662,67 @@ def _same_content(first: Path, second: Path) -> bool:
         return False
 
 
+def _is_link(path: Path) -> bool:
+    """Whether `path` is a symbolic link or a hard-linked file (for `InstallPlan.linked`)."""
+    return _is_symlink(path) or _hard_linked(path)
+
+
+def plan_component_install(
+        artifacts: ComponentArtifacts, destination_root: str | os.PathLike[str],
+        *, library_name: str = "KiCadGen", project_library: bool = True,
+        table_path: str | os.PathLike[str] | None = None) -> InstallPlan:
+    """@brief Pre-flight of `install_component_library`: what it would touch.
+
+    @param artifacts Validated generated artifacts of one component.
+    @param destination_root Folder receiving ``<library>.pretty`` and
+        ``<library>.3dshapes``.
+    @param library_name Library nickname registered in the table.
+    @param project_library Portable ``${KIPRJMOD}`` library when True.
+    @param table_path Table to update; defaults to the project table.
+    @return The targets, the files that would be replaced or removed, the
+        linked ones and the table (see `InstallPlan`). Nothing is written.
+    @throws KiCadLibraryError ``invalid_library_name``,
+        ``install_target_is_folder`` (a folder where a file must go).
+    @note The install itself calls this, so the confirmation the GUI asks on
+        the plan and the install's own checks cannot disagree: a dangling
+        link, a hard link or a WRL to remove is the same here and there.
+    """
+    if not _SAFE_LIBRARY_NAME.fullmatch(library_name):
+        raise KiCadLibraryError(
+            "Library name may contain only letters, numbers, '.', '_', '+' and '-'.",
+            code="invalid_library_name",
+        )
+    root = Path(destination_root).expanduser().resolve()
+    pretty_dir = root / f"{library_name}.pretty"
+    shapes_dir = root / f"{library_name}.3dshapes"
+    target_footprint = pretty_dir / f"{artifacts.name}.kicad_mod"
+    target_step = shapes_dir / f"{artifacts.name}.step"
+    target_wrl_path = shapes_dir / f"{artifacts.name}.wrl"
+    targets = (target_footprint, target_step, target_wrl_path)
+    for target in targets:
+        if target.is_dir() and not _is_symlink(target):
+            # Overwriting cannot help: a file never replaces a folder. Saying
+            # "read-only or held open" sent the user looking for the wrong cause.
+            raise _target_is_folder(target)
+    # A dangling symbolic link fails ``exists()`` but is still something in
+    # the place of the file: it counts as existing so the user is asked
+    # before it is touched (review 2026-10-27, A1).
+    existing = [path for path in targets if path.exists() or _is_symlink(path)]
+    # The WRL is removed, not replaced, when the source has none (A3).
+    removed = tuple(path for path in existing
+                    if path == target_wrl_path and artifacts.wrl_path is None)
+    replaced = tuple(path for path in existing if path not in removed)
+    destination_table = Path(table_path) if table_path else root / "fp-lib-table"
+    linked = tuple(path for path in (*existing, destination_table) if _is_link(path))
+    library_uri = (f"${{KIPRJMOD}}/{library_name}.pretty"
+                   if project_library else pretty_dir.as_posix())
+    return InstallPlan(
+        targets=targets, replaced=replaced, removed=removed, linked=linked,
+        table_path=destination_table, table_exists=destination_table.is_file(),
+        library_uri=library_uri,
+    )
+
+
 def install_component_library(
         artifacts: ComponentArtifacts, destination_root: str | os.PathLike[str],
         *, library_name: str = "KiCadGen", project_library: bool = True,
@@ -1488,44 +1768,46 @@ def install_component_library(
         installed files, or the rollback copies, impossible to replace later.
     @note The installed copy is named ``<artifacts.name>`` inside, like its
         file (see name_footprint); the source footprint is not modified.
+    @note Linked targets (review 2026-10-27, A1): a target or table that is a
+        symbolic link is written through the link (`_write_target`), a
+        hard-linked one in place (`_publish_scratch`), so the other name of
+        the file sees the new content and the rollback restores both. A
+        dangling link counts as an existing file for ``files_exist`` and,
+        once overwriting is allowed, is refused as ``target_link_unresolved``
+        before anything is written. The returned paths are the user's paths.
     """
-    if not _SAFE_LIBRARY_NAME.fullmatch(library_name):
-        raise KiCadLibraryError(
-            "Library name may contain only letters, numbers, '.', '_', '+' and '-'.",
-            code="invalid_library_name",
-        )
-    root = Path(destination_root).expanduser().resolve()
-    pretty_dir = root / f"{library_name}.pretty"
-    shapes_dir = root / f"{library_name}.3dshapes"
-    target_footprint = pretty_dir / f"{artifacts.name}.kicad_mod"
-    target_step = shapes_dir / f"{artifacts.name}.step"
-    target_wrl_path = shapes_dir / f"{artifacts.name}.wrl"
+    plan = plan_component_install(
+        artifacts, destination_root, library_name=library_name,
+        project_library=project_library, table_path=table_path)
+    target_footprint, target_step, target_wrl_path = plan.targets
+    root = target_footprint.parents[1]
+    pretty_dir = target_footprint.parent
+    shapes_dir = target_step.parent
     target_wrl = target_wrl_path if artifacts.wrl_path else None
-    targets = [target_footprint, target_step, target_wrl_path]
-    for target in targets:
-        if target.is_dir() and not target.is_symlink():
-            # Overwriting cannot help: a file never replaces a folder. Saying
-            # "read-only or held open" sent the user looking for the wrong cause.
-            raise _target_is_folder(target)
-    existing = [path for path in targets if path.exists()]
+    existing = [*plan.replaced, *plan.removed]
     if existing and not overwrite:
         raise KiCadLibraryError(
             "Component files already exist:\n" + "\n".join(map(str, existing)),
             code="files_exist", files="\n".join(map(str, existing)),
         )
 
-    destination_table = Path(table_path) if table_path else root / "fp-lib-table"
-    table_existed = destination_table.is_file()
+    destination_table = plan.table_path
+    table_existed = plan.table_exists
     if not table_existed and not project_library:
         # A global table holding only KiCadGen would make KiCad skip its
         # first-run setup of the standard libraries.
         raise _global_table_missing(destination_table)
+    # Every target is resolved through its link BEFORE the first write: a
+    # dangling link is refused here, and the scratch files, rollback copies
+    # and renames below all work on the real files (review 2026-10-27, A1).
+    real = {target: _write_target(target) for target in plan.targets}
+    _write_target(destination_table)
+    real_footprint, real_step, real_wrl = (real[t] for t in plan.targets)
     # A non-UTF-8 table is refused here, before the first write.
     table_original = (_decode_utf8(destination_table.read_bytes(),
                                    destination_table, keep_newlines=True)
                       if table_existed else _EMPTY_TABLE)
-    library_uri = (f"${{KIPRJMOD}}/{library_name}.pretty"
-                   if project_library else pretty_dir.as_posix())
+    library_uri = plan.library_uri
     # Validate the table update and the footprint before the first write.
     _updated_fp_lib_table_text(
         table_original, library_name, library_uri, destination_table,
@@ -1555,13 +1837,15 @@ def install_component_library(
     try:
         pretty_dir.mkdir(parents=True, exist_ok=True)
         shapes_dir.mkdir(parents=True, exist_ok=True)
-        staged_footprint = _temporary_sibling(target_footprint)
-        staged.append((staged_footprint, target_footprint))
-        staged_step = _temporary_sibling(target_step)
-        staged.append((staged_step, target_step))
+        # Scratch files are siblings of the REAL files (same volume as the
+        # final rename), so a linked target is never replaced by a plain file.
+        staged_footprint = _temporary_sibling(real_footprint)
+        staged.append((staged_footprint, real_footprint))
+        staged_step = _temporary_sibling(real_step)
+        staged.append((staged_step, real_step))
         if target_wrl is not None:
-            staged_wrl = _temporary_sibling(target_wrl)
-            staged.append((staged_wrl, target_wrl))
+            staged_wrl = _temporary_sibling(real_wrl)
+            staged.append((staged_wrl, real_wrl))
         aliases.update({temporary: target for temporary, target in staged})
         # Every staged file is on disk before its rename publishes it: the
         # rollback folder is deleted after a successful install, so a power
@@ -1586,7 +1870,7 @@ def install_component_library(
     installed: list[Path] = []
     table_backup: Path | None = None
     try:
-        for target in targets:
+        for target in real.values():
             if target.is_file():
                 backup = rollback_dir / f"{len(backups)}-{target.name}"
                 aliases[backup] = target
@@ -1599,12 +1883,17 @@ def install_component_library(
         for temporary, target in staged:
             # Retried like every other atomic write: an antivirus or KiCad's
             # file watcher holding the target for an instant must not undo
-            # the whole installation (review 2026-10-15, M5).
-            replace_file(temporary, target)
+            # the whole installation (review 2026-10-15, M5). A hard-linked
+            # target is overwritten in place: its rollback copy was taken
+            # just above (`_publish_scratch`).
+            _publish_scratch(temporary, target)
             installed.append(target)
-        if artifacts.wrl_path is None and target_wrl_path.is_file():
-            target_wrl_path.unlink()
-            installed.append(target_wrl_path)
+        if artifacts.wrl_path is None and real_wrl.is_file():
+            # Removal, not replacement: reported in LibraryInstallResult.removed
+            # so the GUI can say so (review 2026-10-27, A3). Unlinking one
+            # name of a hard-linked file leaves the other name untouched.
+            real_wrl.unlink()
+            installed.append(real_wrl)
         update_fp_lib_table(
             destination_table, library_name, library_uri,
             replace_entry=replace_library_entry,
@@ -1633,6 +1922,7 @@ def install_component_library(
     return LibraryInstallResult(
         f"{library_name}:{artifacts.name}", target_footprint, target_step,
         target_wrl, destination_table,
+        replaced=plan.replaced, removed=plan.removed,
     )
 
 
@@ -1699,11 +1989,11 @@ def kicad_settings_version(text: str | None) -> str | None:
     return None
 
 
-def global_fp_lib_table_path(
+def resolve_global_fp_lib_table(
         kicad_cli_path: str | os.PathLike[str],
         *, environ: dict[str, str] | None = None,
         platform: str | None = None,
-        version_runner=None) -> Path:
+        version_runner=None) -> GlobalTableLocation:
     """@brief Resolve the per-user global fp-lib-table for the installed KiCad.
 
     @details Mirrors KiCad's settings path: ``$KICAD_CONFIG_HOME/<version>``
@@ -1720,18 +2010,22 @@ def global_fp_lib_table_path(
     @param version_runner Callable taking the executable Path and returning
         the command's stdout or None; defaults to running ``kicad-cli
         version`` (read-only). Injected by tests that have no KiCad.
-    @return Path of the table; the file may not exist yet.
+    @return The table path (the file may not exist yet), the settings version
+        and where that version came from (`GlobalTableLocation`), so a caller
+        can name them BEFORE writing (review 2026-10-27, D1).
     @throws KiCadLibraryError ``version_unknown`` when no version is found.
     """
     executable = Path(kicad_cli_path)
     runner = _run_kicad_cli_version if version_runner is None else version_runner
     version = kicad_settings_version(runner(executable))
+    version_source = "kicad-cli"
     if version is None:
         version = next(
             (part for part in reversed(executable.parts)
              if re.fullmatch(r"\d+\.\d+", part)),
             None,
         )
+        version_source = "folder"
     if version is None:
         raise KiCadLibraryError(
             "Unable to determine the installed KiCad version.",
@@ -1740,7 +2034,8 @@ def global_fp_lib_table_path(
     values = os.environ if environ is None else environ
     override = (values.get("KICAD_CONFIG_HOME") or "").strip()
     if override:
-        return Path(override).expanduser() / version / "fp-lib-table"
+        table = Path(override).expanduser() / version / "fp-lib-table"
+        return GlobalTableLocation(table, version, version_source)
     current_platform = sys.platform if platform is None else platform
     if current_platform == "win32":
         base = Path(values.get("APPDATA") or Path.home() / "AppData" / "Roaming")
@@ -1748,4 +2043,24 @@ def global_fp_lib_table_path(
         base = Path.home() / "Library" / "Preferences"
     else:
         base = Path(values.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return base / "kicad" / version / "fp-lib-table"
+    return GlobalTableLocation(
+        base / "kicad" / version / "fp-lib-table", version, version_source)
+
+
+def global_fp_lib_table_path(
+        kicad_cli_path: str | os.PathLike[str],
+        *, environ: dict[str, str] | None = None,
+        platform: str | None = None,
+        version_runner=None) -> Path:
+    """@brief Path of the per-user global fp-lib-table (see `resolve_global_fp_lib_table`).
+
+    @param kicad_cli_path Path of kicad-cli.
+    @param environ Environment used instead of ``os.environ`` (tests).
+    @param platform Platform used instead of ``sys.platform`` (tests).
+    @param version_runner Version command replacement (tests).
+    @return Path of the table; the file may not exist yet.
+    @throws KiCadLibraryError ``version_unknown`` when no version is found.
+    """
+    return resolve_global_fp_lib_table(
+        kicad_cli_path, environ=environ, platform=platform,
+        version_runner=version_runner).path
