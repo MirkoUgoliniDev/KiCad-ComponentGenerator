@@ -2,7 +2,20 @@
 
 ## 28/10 sera — COMMITTATO: pesi pubblicati, ONNX e setup: commit `e2c5c4f` su ADVANCED, merge `8cec8ee` in main, entrambi pushati. Suite 10253 passati, 14 saltati, 19 sottotest.
 
-APERTO: l'MSI con i modelli NON e' ancora stato costruito ne' provato
+RICHIESTA UTENTE (dopo il push): nella sezione «Licensing» dei README un
+punto che spieghi come scaricare i modelli -> aggiunto in README.md e
+README.it.md (release «models», tools/fetch_model_weights.py, setup che li
+contiene gia'); commit da fare con OK.
+OK UTENTE («devi fare il build del setup che includa i modelli»): build
+locale in corso con `scripts/build-windows.ps1 -IncludeYoloModel` (log
+.venv/build_1028.log). Da verificare: 5 .onnx in dist\KiCadGen\_internal\models,
+--check-runtime, dimensione MSI (~510 MB atteso). README non ancora committato.
+UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
+pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
+scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,
+scarica i pesi e costruisce l'MSI sul runner. Chiesta conferma di versione
+e ramo prima di lanciare (regola della skill build-installer).
+PRIMA: l'MSI con i modelli NON era ancora stato costruito ne' provato
 (ne' in locale con `scripts/build-windows.ps1 -IncludeYoloModel`, ne' con la
 release automatica, che ora scarica i pesi): i cambiamenti a spec e build
 sono coperti solo dai test di packaging. Prossimo passo proposto all'utente:
