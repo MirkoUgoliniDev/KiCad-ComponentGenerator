@@ -5,4 +5,4 @@
 
 #: Program version: a single source, read by the About window, by the
 #: executable build and by the MSI installer (three numbers, as the MSI wants).
-__version__ = "1.0.1"
+__version__ = "1.0.2"
