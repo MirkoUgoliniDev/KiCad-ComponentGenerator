@@ -1,5 +1,232 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 28/10 giorno — IN CORSO: verifica licenze dataset/pesi con l'utente (nessuna modifica al codice)
+
+- YOLOv8m Colab: CHIUSO. Screenshot dell'utente di
+  https://universe.roboflow.com/arshiasbn-4s0xh/detecting-the-pcb-object/dataset/3
+  -> «License: MIT», autore Arshiasbn, versione v3 (2025-12-23) con 2047
+  immagini, divisione 1788 train / 173 valid / 86 test: stessi numeri train/val
+  del dataset Hugging Face Arshia82sbn (MIT). Dati MIT, attribuzione richiesta.
+- YOLO26 large: workspace Roboflow dell'utente `mirko-ugolini-gmail-com`,
+  progetto privato CompDetect (slug compdetect-dnwth, 583 immagini, 4 modelli),
+  modello https://app.roboflow.com/mirko-ugolini-gmail-com/compdetect-dnwth/models
+  `compdetect-dnwth-2-yolo26l-t1`, licenza dei PESI mostrata da Roboflow:
+  AGPL-3.0 (screenshot utente). Manca ancora: da dove vengono le 583 immagini
+  (copia di universe dataset-lmrsw/compdetect, CC BY 4.0?). Annotate di
+  CompDetect: UN solo lotto «Forked on 9/25/2026», 583 immagini tutte annotate,
+  «job created when the project was created as part of being forked from
+  another project» -> nessuna immagine caricata dall'utente; il progetto
+  d'origine non e' nominato. CHIUSO con la pagina Universe
+  https://universe.roboflow.com/dataset-lmrsw/compdetect (screenshot utente):
+  «License: CC BY 4.0», by «Dataset», 583 immagini, 16 classi identiche a
+  quelle del checkpoint large, stessa miniatura (scheda ESP32) -> dati del
+  large = CompDetect CC BY 4.0, attribuzione gia' nelle notices. Large: pesi
+  AGPL-3.0 + dati CC BY 4.0 -> pubblicabile.
+- CORREZIONE (28/10 giorno) dell'handoff del 27/10 notte, che diceva «YOLO26
+  large: 16 classi uguali al medium»: FALSO. Rilette le classi dai data.pkl con
+  pickletools (senza eseguire codice): il MEDIUM ha 21 classi (battery, button,
+  buzzer, capacitor, clock, connector, diode, display, fuse, heatsink, ic,
+  inductor, led, pads, pins, potentiometer, relay, resistor, switch,
+  transformer, transistor) IDENTICHE e nello stesso ordine al YOLOv8m Colab,
+  cioe' il dataset Arshiasbn (MIT), non CompDetect (16 classi, maiuscole IC/LED).
+  Dati del medium = dataset Arshiasbn MIT, nonostante l'id Roboflow
+  «compdetect-dnwth-1» nelle notices (id da ricontrollare: il progetto
+  «Detecting the PCB object» del workspace ha 2 modelli). Licenza comunque
+  permissiva -> pubblicabile.
+- pcb_yolov8s.onnx: DECISIONE UTENTE «allora metti AGPL-3.0.!!» (dopo la
+  spiegazione: riaddestrato da pesi Ultralytics AGPL, MIT da solo non
+  dichiarabile con certezza).
+- IN CORSO: THIRD_PARTY_NOTICES.md aggiornato con questi esiti (utente:
+  «metti AGPL-3.0»). Conseguenza obbligata (test_yolo_models confronta le due
+  fonti): allineare KNOWN_MODELS in kicadgen/services/yolo_models.py (Large
+  licenza confermata; YOLOv8m dati Arshiasbn confermati, 21 classi; ONNX
+  licenza confermata AGPL, dati ancora da verificare; Medium dati Arshiasbn
+  ma DA VERIFICARE finche' l'utente non guarda le classi della v1 di
+  CompDetect), il contratto di tests/test_fixC_installer.py che pretendeva
+  «to be verified» sul Large, e i README EN/IT («unresolved», «pending»).
+  FATTO, non committato: test mirati (yolo_models, yolo_model_dialog, fixC,
+  packaging, review_1027_ci, licenses_dialog, documentation) 121 passati.
+  Trappola: la frase «to be verified» in THIRD_PARTY_NOTICES non va spezzata
+  su due righe, il test la cerca su una riga.
+- NUOVA RICHIESTA utente: «possiamo quindi includere la cartella models dentro
+  GitHub ed inserirla nel setup installer?» -> risposta con proposta (asset di
+  Release, non nel git; setup solo ONNX), in attesa di scelta.
+  build-windows.ps1 oggi: solo -IncludeYoloModel per pcb_yolov8s.onnx, spento
+  di default «license to be clarified» (commento da aggiornare).
+  DECISIONE UTENTE: «ok» -> pesi come ASSET della Release GitHub, NON nel git;
+  il setup li contiene gia'. PIANO (da confermare, una domanda alla volta):
+  A) esportare i tre YOLO .pt in ONNX con uscita grezza [1, 4+classi, 8400]
+     (photo_yolo.py ~542 accetta solo quella; YOLO26 e' end2end di default) e
+     verificare offline su una foto che ONNX e .pt diano gli stessi corpi;
+  B) controllare che i metadati ONNX non contengano percorsi di addestramento;
+  C) rete SMD: percorso ONNX nuovo in smd_component_classifier.py (oggi solo
+     torch) per renderla disponibile nel programma installato;
+  D) build-windows.ps1 / KiCadGen.spec / test: includere gli ONNX scelti;
+  E) caricare gli ONNX come asset della Release -> SOLO con OK esplicito.
+  Dimensioni: MSI 1.0.0 = 177 MB; ogni ONNX ~45-53 MB (tutti e 5 ~ +230 MB).
+  Utente ha chiesto se mettere PyTorch nell'MSI: torch nel venv = 539 MB ->
+  «aspetta hai ragione. facciamo la conversione ... la puoi fare tu?» -> OK
+  ESPLICITO al passo A (conversione), eseguita dal coordinatore.
+  Contratto ONNX di photo_yolo._setup: input float32 [1,3,640,640], UNA uscita
+  grezza [1, 4+classi, 8400], metadati names/task=detect/imgsz/batch/stride.
+  Export Ultralytics con nms=False, batch=1, imgsz=640, non dinamico; per
+  YOLO26 (end2end) va forzata l'uscita one2many. Uscite nello scratchpad prima,
+  copiate in models/yolo/ solo dopo il confronto .pt vs .onnx sulla foto.
+  Domanda ancora aperta: quali modelli nel setup (tutti ~400 MB o solo alcuni).
+  ESITO PASSO A (28/10 sera, scratchpad/onnx, nulla copiato in models/):
+  installati nel venv onnx 1.23.2 + onnxslim 0.1.98 (servono all'export, da
+  aggiungere a requirements/yolo-pt.txt). Export con nms=None (ATTENZIONE:
+  nms=False in Ultralytics 8.4 ATTIVA il ramo end2end, non il contrario).
+  Uscite float32 [1, 4+classi, 8400], metadati ok; i .onnx pesano 81-103 MB
+  (i .pt erano fp16) -> ok come asset di Release (limite 2 GB), non nel git.
+  Metadato «description» conteneva il percorso di addestramento: riscritto
+  con onnx.save; scansione dei byte: nessun percorso residuo.
+  CONFRONTO .pt vs .onnx con detect_yolo_components su due foto reali
+  (generated/ESP32-S3-DEVKIT-NXRX e RS485, docs/AltaRisoluzione.jpg):
+  YOLOv8m IDENTICO (93=93, 43=43). YOLO26 l e m DIVERSI (111 vs 127, 44 vs
+  47, 160 vs 201, 49 vs 53; confidenze diverse): causa = con il .pt
+  photo_yolo._force_one_to_one usa il ramo one2one (NMS-free, [1,300,6]),
+  l'export grezzo usa il ramo one2many + NMS del rilevatore. Per una
+  conversione fedele l'ONNX YOLO26 va esportato end2end ([1,300,6]) e
+  photo_yolo._setup deve accettare anche quella forma (oggi rifiuta tutto
+  cio' che non e' [1, 4+classi, 8400]) riusando la conversione gia' scritta
+  per torch. Modifica di codice: da proporre all'utente, NON autorizzata.
+  PROVA (scratchpad/onnx/e2e): export YOLO26 l e m con nms=False -> uscita
+  [1,300,6]; confrontata con la rete PyTorch in modalita' one2one sullo
+  STESSO tensore letterbox delle due foto: le 300 righe coincidono come
+  insieme (distanza massima per riga 0.0003, stesso numero di righe sopra
+  0.05 e 0.25, stesse classi); l'ordine delle righe a pari punteggio puo'
+  differire fra i due runtime (per questo il confronto e' per insieme).
+  => la conversione fedele di YOLO26 e' l'ONNX end2end + lettura di
+  [1, K, 6] in photo_yolo._setup (riuso di _one_to_one_rows con una
+  _EndToEndSession analoga a _RemappedSession). OK UTENTE («ok procedi»):
+  IN CORSO la modifica di photo_yolo._setup: accettare anche l'uscita ONNX
+  end2end [1, K, 6] (K>0, 6 colonne x0 y0 x1 y1 conf classe), convertita con
+  _one_to_one_rows come per torch; metadato end2end non vincolante (si guarda
+  la forma). FATTO (non committato): _EndToEndSession +
+  _end_to_end_output_shape in photo_yolo.py, info["raw_head"] anche per ONNX,
+  3 test nuovi in tests/test_photo_yolo.py (positivo 21 classi, positivo 16
+  classi rimappate, negativo su 7 forme); test_photo_yolo + _pt + fixA_detector
+  184 verdi. docs/yolo-photo-workflow.md e requirements/yolo-pt.txt (onnx,
+  onnxslim) aggiornati. CONFRONTO FINALE con il lettore nuovo: YOLO26 l e m
+  ONNX end2end IDENTICI ai .pt su entrambe le foto (111=111, 44=44, 160=160,
+  49=49). FATTO: tools/export_yolo_onnx.py (ramo end2end se la testa ha
+  one2one_cv2, descrizione riscritta, verifica con photo_yolo._setup, SHA
+  stampato) + tests/test_export_yolo_onnx.py (6 test, senza torch). Eseguito
+  sui tre .pt -> models/yolo/*.onnx (git-ignorati):
+  yolo26_roboflow_l.onnx 99,4 MB SHA 66528ed9...76b29b (end2end, 16 classi);
+  yolo26_roboflow_m.onnx 81,8 MB SHA c3169e2b...541988 (end2end, 21 classi);
+  yolov8m_best.onnx 103,7 MB SHA bb040d1f...2bf8752 (grezzo, 21 classi).
+  Le voci complete (SHA interi) stanno in THIRD_PARTY_NOTICES.md e in
+  yolo_models.KNOWN_MODELS (aggiunte, cosi' la finestra «Modello YOLO» li
+  riconosce). Riesportando con un'altra versione di Ultralytics l'SHA cambia.
+  DECISIONE UTENTE («mettiamo tutti ok?»): nel setup TUTTI i .onnx di
+  models/yolo (base 45 MB + l 99 + m 82 + v8m 104 -> MSI ~510 MB).
+  FATTO passo D (non committato): KiCadGen.spec include ogni models/yolo/*.onnx
+  con KICADGEN_BUNDLE_YOLO_MODEL=1; build-windows.ps1 -IncludeYoloModel
+  elenca i file e fallisce senza .onnx; test_packaging contratto aggiornato
+  («mettiamo tutti»); docs/PACKAGING-WINDOWS-MSI.md, yolo-photo-workflow.md,
+  skill build-installer e installer-change aggiornati. test_packaging +
+  fixC + review_1027_ci + documentation: 99 verdi. Predefinito del rilevatore
+  invariato (pcb_yolov8s.onnx). Rete SMD: da chiedere dopo.
+  PROBLEMA APERTO (da decidere con l'utente): release.yml costruisce l'MSI
+  sul runner GitHub, che NON ha i pesi (git-ignorati) e chiama
+  build-windows.ps1 SENZA -IncludeYoloModel -> la release automatica
+  uscirebbe senza modelli. Proposta: release permanente «models» su GitHub
+  con i 4 .onnx come asset; passo nel workflow che li scarica, verifica lo
+  SHA-256 contro yolo_models.KNOWN_MODELS e poi costruisce con il flag.
+  OK UTENTE («ok») alla proposta e alla pubblicazione dei 4 .onnx. IN CORSO:
+  (1) packaging/model-weights.json = manifesto tracciato {file, sha256, url}
+  (unica fonte degli URL; gli SHA devono stare in KNOWN_MODELS: test);
+  (2) tools/fetch_model_weights.py (solo stdlib: scarica in models/yolo,
+  verifica SHA-256, rifiuta file diversi, salta quelli gia' corretti) + test
+  con urlopen finto; (3) release.yml: passo «Fetch the model weights» prima
+  della build e build con -IncludeYoloModel; (4) gh release create models
+  (tag «models», non v*) con i 4 .onnx come asset -> pubblicazione.
+  FATTO (1)(2)(3), non committato: manifesto, tool (stdlib, .part + rename,
+  file presente con SHA giusto saltato, sbagliato sostituito), 10 test in
+  tests/test_fetch_model_weights.py (incluso: ogni SHA del manifesto e' in
+  KNOWN_MODELS e nelle notices), release.yml con il passo «Fetch the model
+  weights» e build con -IncludeYoloModel; README EN/IT: paragrafo «Pesi dei
+  modelli». Trappola trovata: urlopen legato come default di parametro non
+  si puo' monkeypatchare -> risolto con opener=None. (4) FATTO: release
+  PUBBLICATA https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/models
+  (tag «models» su main, non latest) con i 4 .onnx; `python
+  tools/fetch_model_weights.py --target <tmp>` scarica e verifica i 4 file
+  (329,6 MB). Trappola: nei primi minuti dopo la pubblicazione il download
+  rispondeva 404 (propagazione degli asset), poi tutto ok.
+  RETE SMD: chiesto all'utente se procedere (export ONNX della ResNet18 +
+  lettura ONNX in smd_component_classifier.py con preprocessing numpy/cv2
+  identico a torchvision + confronto .pt/.onnx + setup/manifesto + voce
+  «YOLO + rete SMD» accesa nel programma installato). OK UTENTE («procedi»).
+  PIANO SMD: (a) leggere smd_component_classifier.py (checkpoint, PackageNet,
+  transforms, classi) e dove la GUI/installer spengono la voce; (b)
+  tools/export_smd_onnx.py: torch.onnx.export della ResNet18 con input
+  [1,3,S,S] float32 gia' normalizzato? NO: per non duplicare la
+  normalizzazione, l'ONNX riceve l'immagine RGB 0-1 e la normalizzazione
+  (mean/std) sta DENTRO il grafo; metadati: classi, lato S, versione del
+  catalogo; (c) percorso ONNX nel classificatore (onnxruntime, resize+crop
+  con cv2 identici a torchvision), scelto dall'estensione; (d) confronto
+  .pt/.onnx sui ritagli delle due foto; (e) setup: models/smd/*.onnx,
+  manifesto, release «models», voce accesa nel programma installato.
+  DISEGNO DECISO (dopo lettura di smd_component_classifier.py): il
+  preprocessing resta in PIL (letterbox bicubico, gia' condiviso) e
+  ToTensor+Normalize diventano numpy float32 nello stesso ordine di
+  operazioni (test esistente test_board_edge_... confronta bit a bit con
+  torchvision); l'ONNX riceve il tensore GIA' normalizzato [N,3,224,224]
+  (asse N dinamico) e restituisce (class_logits [N,C], rotation_logits
+  [N,4]); softmax/roll/argmax in numpy per entrambi i percorsi. I metadati
+  del checkpoint (format, arch, img_size, classes, orientations,
+  suggested_threshold, preprocessing, trained, epoch, catalog_sha256,
+  metrics) vanno in un metadato ONNX «smd_checkpoint» (JSON); «args» NON
+  si copia (contiene C:\Lavori\...\smd_classifier.pt). Validazione: parte
+  comune sui metadati + per .pt lo state_dict con torch, per .onnx le forme
+  di input/uscita della sessione. smd_model_path() senza nome: .pt se
+  esiste, altrimenti .onnx. GUI: yolo_smd disponibile anche nel frozen se
+  il file predefinito esiste; dialogo «Scegli la rete SMD» elenca .pt e
+  .onnx; testi UI «(.pt)» da aggiornare con la skill add-ui-text.
+  FATTO (non committato): smd_component_classifier.py rifattorizzato
+  (_onnx_runtime, _is_onnx, _preprocess numpy, _softmax, _load_onnx,
+  _validate_metadata separata dallo state_dict, _open_network che restituisce
+  (metadati, rete) per entrambi i formati; ciclo di inferenza in numpy);
+  test esistenti 38 verdi, incluso il confronto bit a bit con torchvision.
+  app_paths: DEFAULT_SMD_ONNX, smd_model_path() senza nome sceglie .pt se
+  c'e', altrimenti .onnx. tools/export_smd_onnx.py scritto (torch.onnx.export
+  dynamo=False, asse batch dinamico, metadati JSON, verifica con
+  validate_smd_setup e confronto dei logit su un lotto casuale).
+  FATTO: export reale models/smd/smd_classifier.onnx 44,8 MB SHA
+  d8f32982...2baac9, nessun percorso locale nel file; PARITA' .pt/.onnx sui
+  riquadri YOLO delle due foto: ESP32 57/57 classi e rotazioni uguali, RS485
+  42/42, differenza massima di confidenza 2e-7, stessi accettati. Test ONNX
+  finti (+6) nel test del classificatore (47 verdi), tests/test_export_smd_onnx.py
+  (3). GUI: smd_route_available() in main_window (frozen -> solo se il file
+  c'e'), default yolo_smd se disponibile, _default_yolo_weights usa l'export
+  ONNX del v8m quando il .pt manca, testi smd_unavailable/smd_picker
+  aggiornati, dialogo «Scegli la rete SMD» elenca .pt e .onnx.
+  FATTO: catalogo i18n (2 chiavi rinominate «.pt o .onnx», 1 nuova per il
+  runtime ONNX), spec e build (models/smd/*.onnx), manifesto con campo «dir»
+  (predefinito yolo), fetch tool con sottocartella (--target models),
+  notices (sezione «Local SMD package classifier (ONNX export)»), docs
+  PACKAGING/yolo-photo-workflow/README; test_photo_detector_ui: i test
+  «frozen» simulano l'assenza del file (prima bastava is_frozen) + test
+  positivo frozen con rete ONNX + test del ripiego all'export ONNX del v8m.
+  Test mirati GUI/dialogo/i18n/fetch/packaging/docs/workflow: 173 verdi.
+  IN CORSO: suite completa in due meta' in sottofondo
+  (.venv/run_full_1028b_first.log e _second.log). OK UTENTE («ok»):
+  smd_classifier.onnx CARICATO nella release «models» (5 asset, note
+  aggiornate); fetch tool provato da zero: 5 file scaricati e verificati
+  (yolo/ e smd/). DB profili riallineato aprendo ProfileStore (traduzioni
+  13924 -> 13936). SUITE COMPLETA VERDE (due meta', .venv/run_full_1028b_*.log):
+  A 6118 passati/10 saltati/19 sottotest, B 4135 passati/4 saltati, 0
+  falliti -> 10253 passati, 14 saltati, 19 sottotest. Controllo segreti e
+  residui di debug sul diff: nulla. IN ATTESA dell'OK dell'utente al commit
+  (ADVANCED; merge in main e push solo se chiesti). Dopo: ripulire i percorsi di addestramento dai .pt,
+  conversione ONNX, pubblicazione come asset di Release -> NON autorizzati.
+- Rete SMD: CHIUSO. Utente: «Rete SMD addestrata su dati miei» -> dati e pesi
+  dell'utente, li licenzia lui (proposta: AGPL-3.0 come il progetto).
+- Da fare dopo, NON ancora autorizzato: aggiornare THIRD_PARTY_NOTICES.md
+  (YOLOv8m dati MIT + attribuzione; medium indicato con «21 classi» ma ne ha 16).
+
 ## 28/10 notte — CHIUSA la revisione avversariale completa: commit `c33d012` su ADVANCED, merge `754e9b8` in main, pushati, PC spento (utente: «committa tutto, mergia in main e fai push di main e spegni il pc»)
 
 SUITE COMPLETA (due meta', .venv/run_full_1028.log): A 6094 passati/1 fallito/10

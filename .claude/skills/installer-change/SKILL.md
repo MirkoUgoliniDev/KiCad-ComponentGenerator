@@ -44,8 +44,8 @@ docs/PACKAGING-WINDOWS-MSI.md   and docs/INSTALLATION-WINDOWS.md
   `THIRD_PARTY_NOTICES.md` too.
 - **The release workflow keeps write access out of the build job**; the tag
   goes through the `TAG` environment variable, never `${{ }}` in a script.
-- **The YOLO weights are opt-in** (`-IncludeYoloModel`) until their license
-  is clarified.
+- **The YOLO weights enter only with `-IncludeYoloModel`**, then every
+  `models\yolo\*.onnx` (never a `.pt`); the official setup uses the switch.
 - **Uninstall never removes user data** (`%LOCALAPPDATA%\KiCadGen`, `Documents\KiCadGen`).
 
 ## 3. Verify

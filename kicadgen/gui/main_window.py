@@ -80,7 +80,8 @@ from ..services.kicad_export_history import record_export as record_kicad_export
 from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, resource_path, user_data_dir
-from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, SMD_MODELS_DIR, YOLO_MODELS_DIR,
+from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, DEFAULT_YOLO_SMD_ONNX, SMD_MODELS_DIR,
+                         YOLO_MODELS_DIR,
                          smd_model_path as smd_weights_path,
                          yolo_model_path as yolo_weights_path)
 # Only the parameter validation (standard library): onnxruntime and PyTorch
@@ -114,6 +115,20 @@ Preview3DVtk = None
 #: Milliseconds the splash stays after `window.show()`: covers the first
 #: paint and the desktop's window-open animation (Windows 11: ~200 ms).
 SPLASH_HANDOVER_MS = 300
+
+
+def smd_route_available() -> bool:
+    """@brief Whether «YOLO + rete SMD» can run in this installation.
+
+    @return True from the sources (a missing network is reported when the
+        analysis starts, before any paid call, as for the other local
+        detectors); in the frozen program only when the network's weights
+        are installed (models/smd, the ONNX export since 2026-10-28).
+    @note Before, the route was simply off in the frozen program (no PyTorch
+        and no weights). The rule is the presence of the file, not the
+        packaging: an installation built without the weights still says so.
+    """
+    return not is_frozen() or smd_weights_path().is_file()
 
 
 def _preview_3d_class():
@@ -427,10 +442,10 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
     "yolo_smd": {"it": "YOLO + rete SMD locale (v3)", "en": "YOLO + local SMD network (v3)",
                  "fr": "YOLO + réseau SMD local (v3)", "de": "YOLO + lokales SMD-Netz (v3)"},
     "smd_unavailable": {
-        "it": "Non disponibile nell'app Windows installata: rete SMD e runtime PyTorch non inclusi.",
-        "en": "Unavailable in the installed Windows app: the SMD network and PyTorch runtime are not included.",
-        "fr": "Indisponible dans l’application Windows installée : le réseau SMD et le runtime PyTorch ne sont pas inclus.",
-        "de": "In der installierten Windows-App nicht verfügbar: SMD-Netz und PyTorch-Laufzeit sind nicht enthalten.",
+        "it": "Non disponibile: questa installazione non include la rete SMD (models\\smd\\smd_classifier.onnx).",
+        "en": "Unavailable: this installation does not include the SMD network (models\\smd\\smd_classifier.onnx).",
+        "fr": "Indisponible : cette installation n’inclut pas le réseau SMD (models\\smd\\smd_classifier.onnx).",
+        "de": "Nicht verfügbar: diese Installation enthält das SMD-Netz (models\\smd\\smd_classifier.onnx) nicht.",
     },
     "yolo_only": {"it": "Solo YOLO locale (pretest, nessuna AI)",
                   "en": "Local YOLO only (pretest, no AI)",
@@ -444,10 +459,10 @@ _PHOTO_DETECTOR_TRANSLATIONS = {
               "fr": "Modèle YOLO :", "de": "YOLO-Modell:"},
     "smd_model": {"it": "Modello rete SMD:", "en": "SMD network model:",
                   "fr": "Modèle réseau SMD :", "de": "SMD-Netzmodell:"},
-    "smd_picker": {"it": "Seleziona la rete SMD (.pt) per questa sessione",
-                   "en": "Select the SMD network (.pt) for this session",
-                   "fr": "Choisir le réseau SMD (.pt) pour cette session",
-                   "de": "SMD-Netz (.pt) für diese Sitzung auswählen"},
+    "smd_picker": {"it": "Seleziona la rete SMD (.pt o .onnx) per questa sessione",
+                   "en": "Select the SMD network (.pt or .onnx) for this session",
+                   "fr": "Choisir le réseau SMD (.pt ou .onnx) pour cette session",
+                   "de": "SMD-Netz (.pt oder .onnx) für diese Sitzung auswählen"},
     "smd_help": {
         "it": "File .pt della rete che classifica i corpi, facoltativo, solo per questa sessione. Lascia vuoto per usare {path}. Viene controllato prima di partire.",
         "en": "Optional .pt file of the network that classifies the bodies, for this session only. Leave empty to use {path}. It is checked before starting.",
@@ -2502,7 +2517,7 @@ class MainWindow(QMainWindow):
         smd_index = self.combo_photo_detector.findData("yolo_smd")
         if smd_index >= 0:
             smd_item = self.combo_photo_detector.model().item(smd_index)
-            if is_frozen():
+            if not smd_route_available():
                 reason = self._photo_detector_text("smd_unavailable")
                 smd_item.setEnabled(False)
                 self.combo_photo_detector.setItemData(
@@ -2555,8 +2570,8 @@ class MainWindow(QMainWindow):
         single = self._is_single_component_project()
         detector = "ai" if single else self.combo_photo_detector.currentData()
         local = detector in ("yolo", "yolo_only", "yolo_smd") and not (
-            detector == "yolo_smd" and is_frozen())
-        smd = detector == "yolo_smd" and not is_frozen()
+            detector == "yolo_smd" and not smd_route_available())
+        smd = detector == "yolo_smd" and smd_route_available()
         default_path = self._default_yolo_weights(detector)
         self.field_yolo_model.setPlaceholderText(self._photo_detector_text("default", path=default_path))
         self.field_yolo_model.setToolTip(self._photo_detector_text("path_help", path=default_path))
@@ -2672,8 +2687,10 @@ class MainWindow(QMainWindow):
 
         @param detector Photo detector key of the combo.
         @return KICADGEN_YOLO_MODEL when set, else the default of the
-            detector: the PyTorch weights for 'yolo_smd' (the SMD route runs
-            ultralytics), the ONNX file for the other local detectors.
+            detector: for 'yolo_smd' the PyTorch weights when they are there
+            (the route was built on them), else their ONNX export, which is
+            what the installed program has (2026-10-28); the base ONNX file
+            for the other local detectors.
         @note Before, the picker always proposed the ONNX file as «in uso»,
             also in 'yolo_smd', and OK replaced the weights actually used
             (adversarial review B2, 2026-10-02); 'yolo_smd' also ignored the
@@ -2682,7 +2699,10 @@ class MainWindow(QMainWindow):
         override = os.environ.get("KICADGEN_YOLO_MODEL", "").strip()
         if override:
             return Path(override)
-        return yolo_weights_path(DEFAULT_YOLO_PT if detector == "yolo_smd" else DEFAULT_YOLO_ONNX)
+        if detector == "yolo_smd":
+            checkpoint = yolo_weights_path(DEFAULT_YOLO_PT)
+            return checkpoint if checkpoint.is_file() else yolo_weights_path(DEFAULT_YOLO_SMD_ONNX)
+        return yolo_weights_path(DEFAULT_YOLO_ONNX)
 
     def _pick_session_vlm_model(self) -> None:
         """@brief Choose the model that looks at the photo, for this session only.
@@ -3782,10 +3802,11 @@ class MainWindow(QMainWindow):
         self.combo_photo_detector.addItem("", "yolo_only")
         self.combo_photo_detector.addItem("", "yolo_smd")
         # User default (2026-10-02): the local SMD network classifies and only
-        # what it does not resolve goes to the AI. In the frozen binary the network
-        # is not there (no PyTorch nor weights): there YOLO with AI reconciliation stays.
+        # what it does not resolve goes to the AI. Since 2026-10-28 the installed
+        # program ships the network as ONNX: only an installation WITHOUT the
+        # file falls back to YOLO with AI reconciliation.
         self.combo_photo_detector.setCurrentIndex(
-            self.combo_photo_detector.findData("yolo" if is_frozen() else "yolo_smd"))
+            self.combo_photo_detector.findData("yolo_smd" if smd_route_available() else "yolo"))
         self.combo_photo_detector.currentIndexChanged.connect(self._on_photo_detector_changed)
         # First row of the box (user, 2026-09-25): the choice of the
         # detector decides which of the rows below are needed.
@@ -5290,7 +5311,7 @@ class MainWindow(QMainWindow):
             # The chosen detector is kept apart so the log below can still
             # tell the user that it will not run (test contract of 2026-10-02).
             photo_detector, yolo_model_path = "ai", None
-        if photo_detector == "yolo_smd" and is_frozen():
+        if photo_detector == "yolo_smd" and not smd_route_available():
             self.group_ai_tools.setExpanded(True)
             QMessageBox.warning(
                 self, self._photo_detector_text("error_title"),

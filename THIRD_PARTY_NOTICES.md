@@ -28,7 +28,12 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 - Roboflow model id: `compdetect-dnwth-1-yolo26m-t1`
 - License declared in the checkpoint: AGPL-3.0 (https://ultralytics.com/license)
 - License shown by Roboflow: AGPL-3.0
-- Training data: CompDetect dataset (see below)
+- Training data: PCB object detection dataset by Arshiasbn (see below). The
+  checkpoint's 21 classes match that dataset's class list name for name and
+  in order (read from the checkpoint on 2026-10-28); they do not match the
+  16 classes of CompDetect. The Roboflow model id above, however, belongs to
+  the maintainer's CompDetect project: which data its version 1 held is
+  **to be verified** in the maintainer's workspace.
 - Classes: the detector's 21 PCB classes, in the detector's order
 
 ### Roboflow YOLO26 Large
@@ -39,8 +44,11 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 - Roboflow model id: `compdetect-dnwth-2-yolo26l-t1` (read from the
   maintainer's Roboflow model URL)
 - License declared in the checkpoint: AGPL-3.0 (https://ultralytics.com/license)
-- License shown by Roboflow: **to be verified on the model page before
-  publishing**
+- License shown by Roboflow: AGPL-3.0 (model page in the maintainer's private
+  workspace, checked on 2026-10-28)
+- Training data: CompDetect dataset (see below). The maintainer's project is a
+  fork of it: same 583 images and same 16 classes, all images in the single
+  batch created by the fork (checked on 2026-10-28)
 - Classes: 16 (IC, LED, battery, buzzer, capacitor, clock, connector, diode,
   display, fuse, inductor, potentiometer, relay, resistor, switch,
   transistor); the detector reads them by name
@@ -53,17 +61,58 @@ metadata (`license` field of the checkpoint, read on 2026-09-25).
 - License declared in the checkpoint: AGPL-3.0 (https://ultralytics.com/license)
 - Ultralytics code and YOLOv8 base weights: AGPL-3.0, unless an Ultralytics
   Enterprise license applies
-- Training data: `dataset.verified.yaml` in the Colab notebook; **the source
-  and license of that dataset must be confirmed**
+- Training data: `dataset.verified.yaml` in the Colab notebook, built from the
+  PCB object detection dataset by Arshiasbn (see below): the checkpoint's 21
+  classes match that dataset's class list name for name and in order
+
+### Roboflow YOLO26 Large (ONNX export)
+
+- Local file: `models/yolo/pcb_component_detector_yolo26_roboflow_l.onnx`
+- SHA-256: `66528ed90ad53e91b697d58fa1b9dacf45f35363798089107fa2efdb4776b29b`
+- Exported on 2026-10-28 from the checkpoint above with
+  `tools/export_yolo_onnx.py` (Ultralytics 8.4.163, end-to-end output
+  `[1, 300, 6]`, float32, 99.4 MB); the training data path Ultralytics
+  writes into the `description` metadata was replaced
+- Roboflow model id: `compdetect-dnwth-2-yolo26l-t1`
+- License: AGPL-3.0, the checkpoint's; training data: CompDetect (see below)
+- Verified: same bodies as the checkpoint through the detector on two photos
+
+### Roboflow YOLO26 Medium (ONNX export)
+
+- Local file: `models/yolo/pcb_component_detector_yolo26_roboflow_m.onnx`
+- SHA-256: `c3169e2ba2cbbed794039e983f14a21e4ebc6e217574a132fdd80285e0541988`
+- Exported on 2026-10-28 from the checkpoint above with
+  `tools/export_yolo_onnx.py` (Ultralytics 8.4.163, end-to-end output
+  `[1, 300, 6]`, float32, 81.8 MB); `description` metadata replaced
+- Roboflow model id: `compdetect-dnwth-1-yolo26m-t1`
+- License: AGPL-3.0, the checkpoint's; training data: as the checkpoint's,
+  the dataset by Arshiasbn, with the same point **to be verified**
+- Verified: same bodies as the checkpoint through the detector on two photos
+
+### YOLOv8m trained in Colab (ONNX export)
+
+- Local file: `models/yolo/pcb_component_detector_yolov8m_best.onnx`
+- SHA-256: `bb040d1f2758bbd1f812362832d80d6de376437ca256d1a30a27c30452bf8752`
+- Exported on 2026-10-28 from the checkpoint above with
+  `tools/export_yolo_onnx.py` (Ultralytics 8.4.163, raw output
+  `[1, 25, 8400]`, float32, 103.7 MB); `description` metadata replaced
+- Base model: Ultralytics `yolov8m.pt`
+- License: AGPL-3.0, the checkpoint's; training data: the dataset by
+  Arshiasbn (MIT, see below)
+- Verified: same bodies as the checkpoint through the detector on two photos
 
 ### Base ONNX model
 
 - Local file: `models/yolo/pcb_yolov8s.onnx`
 - SHA-256: `bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29`
 - Source: `Arshia82sbn/pcb-yolov8s-detection`
-- License: **unresolved**. The model card says MIT; the embedded ONNX metadata
-  says AGPL-3.0. Treat it as AGPL-3.0 until clarified. Details are in
+- License: AGPL-3.0. The author's model card says MIT, but the embedded ONNX
+  metadata says AGPL-3.0: the model is a YOLOv8s fine-tuned from Ultralytics
+  weights, which are AGPL-3.0, so this project redistributes it under
+  AGPL-3.0 (maintainer's decision, 2026-10-28). Details are in
   `docs/yolo-photo-workflow.md`.
+- Training data: not named by the author on the model card;
+  **to be verified**
 
 ## SMD package classifier weights
 
@@ -79,10 +128,24 @@ detector found. Its folder is ignored by Git like the detectors'.
   BSD-3-Clause), trained by the maintainer outside this repository
 - Use: package class and orientation of the bodies the detector found
   (`kicadgen/services/smd_component_classifier.py`, detector «YOLO + rete SMD»)
-- Training data and license of the weights: **to be confirmed before any
-  redistribution**
-- Distribution: not included in the Windows installer (the SMD route is not
-  available in the packaged program)
+- Training data: the maintainer's own images (maintainer's statement,
+  2026-10-28); no third-party dataset
+- License of the weights: AGPL-3.0, like the project's own code
+- Distribution: the checkpoint is not published; its ONNX export below is
+
+### Local SMD package classifier (ONNX export)
+
+- Local file: `models/smd/smd_classifier.onnx`
+- SHA-256: `d8f329822cfd17a823d861919a40575ade34a93b9df14d87ed15eb4df02baac9`
+- Exported on 2026-10-28 from the checkpoint above with
+  `tools/export_smd_onnx.py` (PyTorch 2.14 ONNX export, opset 17, input
+  `[N, 3, 224, 224]`, outputs class and rotation logits, 44.8 MB); the
+  checkpoint's metadata travel in the file as JSON, the training command
+  with the maintainer's local path does not
+- License: AGPL-3.0, like the checkpoint
+- Distribution: asset of the GitHub release «models», shipped by the Windows
+  installer (`-IncludeYoloModel`); verified on 2026-10-28 on real boxes of
+  two photos: same classes and rotations as the checkpoint
 
 ## CompDetect dataset
 
@@ -90,7 +153,7 @@ detector found. Its folder is ignored by Git like the detectors'.
 - Source: https://universe.roboflow.com/dataset-lmrsw/compdetect
 - License shown on the source page: CC BY 4.0
   (https://creativecommons.org/licenses/by/4.0/)
-- Use: training data of the Roboflow YOLO26 models above
+- Use: training data of the Roboflow YOLO26 Large model above
 - Distribution: the dataset (images and annotations) is **not** part of this
   repository and is not redistributed by this project
 - Changes: exported from Roboflow for training. **Any resize, augmentation,
@@ -99,6 +162,21 @@ detector found. Its folder is ignored by Git like the detectors'.
 
 The dataset is credited to its authors at the source above. This project is
 not endorsed by the dataset's authors.
+
+## PCB object detection dataset by Arshiasbn
+
+- Dataset: Detecting the PCB object, by Arshiasbn
+- Source: https://universe.roboflow.com/arshiasbn-4s0xh/detecting-the-pcb-object
+  (version 3: 2047 images, split 1788 train / 173 valid / 86 test), also
+  published on Hugging Face as `Arshia82sbn/pcb-object-detection-dataset`
+- License shown on both source pages: MIT; the author asks to be cited as
+  «Arshia, 2026, Hugging Face»
+- Use: training data of the YOLO26 Medium and of the YOLOv8m model above
+- Distribution: the dataset (images and annotations) is **not** part of this
+  repository and is not redistributed by this project
+
+The dataset is credited to its author at the sources above. This project is
+not endorsed by the dataset's author.
 
 ## Python dependencies
 

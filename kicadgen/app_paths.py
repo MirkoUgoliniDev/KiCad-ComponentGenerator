@@ -75,7 +75,13 @@ SMD_MODELS_DIR = ("models", "smd")
 #: Default weights of each folder.
 DEFAULT_YOLO_ONNX = "pcb_yolov8s.onnx"
 DEFAULT_YOLO_PT = "pcb_component_detector_yolov8m_best.pt"
+#: ONNX export of DEFAULT_YOLO_PT (tools/export_yolo_onnx.py): the detector
+#: of the «YOLO + rete SMD» route where PyTorch is absent (installed program).
+DEFAULT_YOLO_SMD_ONNX = "pcb_component_detector_yolov8m_best.onnx"
 DEFAULT_SMD_MODEL = "smd_classifier.pt"
+#: ONNX export of the SMD network (tools/export_smd_onnx.py): the file the
+#: Windows installer ships, read with onnxruntime only.
+DEFAULT_SMD_ONNX = "smd_classifier.onnx"
 
 
 def yolo_model_path(name: str = DEFAULT_YOLO_ONNX) -> Path:
@@ -87,13 +93,23 @@ def yolo_model_path(name: str = DEFAULT_YOLO_ONNX) -> Path:
     return resource_path(*YOLO_MODELS_DIR, name)
 
 
-def smd_model_path(name: str = DEFAULT_SMD_MODEL) -> Path:
-    """@brief Path of the SMD network's checkpoint in its folder (it may not exist).
+def smd_model_path(name: str | None = None) -> Path:
+    """@brief Path of the SMD network's weights in its folder (it may not exist).
 
-    @param name File name inside SMD_MODELS_DIR.
+    @param name File name inside SMD_MODELS_DIR; None chooses the default:
+        the PyTorch checkpoint (DEFAULT_SMD_MODEL) when it is there, else the
+        ONNX export (DEFAULT_SMD_ONNX), which is what the installed program
+        has. With neither file the checkpoint's path is returned, so the
+        caller's «file not found» names the usual file.
     @return The absolute path.
     """
-    return resource_path(*SMD_MODELS_DIR, name)
+    if name is not None:
+        return resource_path(*SMD_MODELS_DIR, name)
+    checkpoint = resource_path(*SMD_MODELS_DIR, DEFAULT_SMD_MODEL)
+    if checkpoint.is_file():
+        return checkpoint
+    exported = resource_path(*SMD_MODELS_DIR, DEFAULT_SMD_ONNX)
+    return exported if exported.is_file() else checkpoint
 
 
 def _local_app_data() -> Path:

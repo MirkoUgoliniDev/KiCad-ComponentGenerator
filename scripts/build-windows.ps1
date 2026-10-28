@@ -29,14 +29,16 @@ use a virtual machine or Windows Sandbox.
 app-image: only the executable folder. msi: executable and installer.
 
 .PARAMETER IncludeYoloModel
-Ship models\yolo\pcb_yolov8s.onnx; off by default (license to be clarified).
+Ship every models\yolo\*.onnx (the official setup does); off by default so that a
+checkout without weights still builds.
 #>
 param(
     [ValidateSet('app-image', 'msi')]
     [string]$Package = 'msi',
-    # Include models\yolo\pcb_yolov8s.onnx. OFF by default: the license of those
-    # weights is ambiguous (MIT model card, AGPL metadata) and they must not be
-    # redistributed until it is clarified.
+    # Include every models\yolo\*.onnx (never a .pt: the package has no PyTorch).
+    # OFF by default so that a checkout without the weights still builds; the
+    # official setup is built with it (user, 2026-10-28, after the license
+    # review of THIRD_PARTY_NOTICES.md).
     [switch]$IncludeYoloModel
 )
 
@@ -120,8 +122,12 @@ Assert-LastCommand 'Rendering the application icon'
 
 # -- 5. PyInstaller ---------------------------------------------------------------
 if ($IncludeYoloModel) {
-    if (-not (Test-Path (Join-Path $Root 'models\yolo\pcb_yolov8s.onnx'))) { throw 'models\yolo\pcb_yolov8s.onnx not found.' }
-    Write-Host 'Including the YOLO weights (license must allow redistribution).' -ForegroundColor Yellow
+    # The detectors (models\yolo) and the SMD network (models\smd), ONNX only.
+    $weights = @(Get-ChildItem -Path (Join-Path $Root 'models\yolo'), (Join-Path $Root 'models\smd') -Filter '*.onnx' -File -ErrorAction SilentlyContinue)
+    if ($weights.Count -eq 0) { throw 'No models\yolo\*.onnx found; export the checkpoints with tools\export_yolo_onnx.py (and tools\export_smd_onnx.py) or drop the switch.' }
+    foreach ($file in $weights) {
+        Write-Host ("Including the weights {0}\{1} ({2:N1} MB)." -f $file.Directory.Name, $file.Name, ($file.Length / 1MB)) -ForegroundColor Yellow
+    }
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '1'
 } else {
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '0'

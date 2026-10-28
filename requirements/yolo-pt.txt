@@ -3,3 +3,7 @@
 # part of the Windows installer; install it only where .pt models are used.
 -r yolo.txt
 ultralytics>=8.4
+# Needed only to export a .pt checkpoint to .onnx for the installer
+# (tools/export_yolo_onnx.py); Ultralytics imports them at export time.
+onnx>=1.12.0,<2.0.0
+onnxslim>=0.1.82

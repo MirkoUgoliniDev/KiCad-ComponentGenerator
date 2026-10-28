@@ -2,7 +2,7 @@
 
 @details User request (2026-10-02): the «Modello rete SMD» button opens a
 window with the model's information instead of a bare file dialog, like
-«Scegli il modello YOLO». On the left, the ``.pt`` files of models/smd, plus
+«Scegli il modello YOLO». On the left, the ``.pt`` and ``.onnx`` files of models/smd, plus
 the one in use and any file added with «Altro file...»; on the right, the
 selected file: size, date, SHA-256 and what the checkpoint declares about
 itself (architecture, training date and epochs, classes, kinds of rotation,
@@ -73,7 +73,7 @@ class SmdModelDialog(QDialog):
         """@brief Build the list and select the network in use.
 
         @param current Path in the «Modello rete SMD» field ("" = the default).
-        @param models_dir Folder whose ``.pt`` files are listed (models/smd).
+        @param models_dir Folder whose ``.pt`` and ``.onnx`` files are listed (models/smd).
         @param default Path used when the field is empty (shown as default).
         @param tr Translation function (Italian source -> shown text).
         @param parent Owner window.
@@ -119,7 +119,7 @@ class SmdModelDialog(QDialog):
         body.addWidget(scroll, 3)
 
         self.other_button = QPushButton(self._tr("Altro file..."))
-        self.other_button.setToolTip(self._tr("Sceglie una rete .pt fuori da questa cartella."))
+        self.other_button.setToolTip(self._tr("Sceglie una rete .pt o .onnx fuori da questa cartella."))
         self.other_button.clicked.connect(self._choose_other)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                         | QDialogButtonBox.StandardButton.Cancel)
@@ -142,7 +142,7 @@ class SmdModelDialog(QDialog):
     # ── list ──────────────────────────────────────────────────────────
 
     def _files(self):
-        """The (path, size in bytes) of the folder's .pt files plus the extra ones, without duplicates.
+        """The (path, size in bytes) of the folder's .pt/.onnx files plus the extra ones, without duplicates.
 
         Invariant (review 2026-10-27, C1): a file that vanishes while the
         window is open -- deleted, renamed, or on a drive that went away --
@@ -153,7 +153,10 @@ class SmdModelDialog(QDialog):
         """
         seen, files = set(), []
         try:
-            folder = sorted(self._models_dir.glob("*.pt")) if self._models_dir.is_dir() else []
+            # Both formats of the network (2026-10-28): the checkpoint and its
+            # ONNX export, which is the one the installed program has.
+            folder = (sorted(path for suffix in ("*.pt", "*.onnx") for path in self._models_dir.glob(suffix))
+                      if self._models_dir.is_dir() else [])
         except OSError:
             # The folder itself became unreadable: only the extra files remain.
             folder = []
@@ -217,7 +220,7 @@ class SmdModelDialog(QDialog):
     def _choose_other(self) -> None:
         """«Altro file...»: add a checkpoint from anywhere and select it."""
         selected, _ = QFileDialog.getOpenFileName(
-            self, self._tr("Altro file..."), str(self._models_dir), "PyTorch (*.pt)")
+            self, self._tr("Altro file..."), str(self._models_dir), "PyTorch, ONNX (*.pt *.onnx)")
         if selected:
             self._extra.append(selected)
             self._fill(select=selected)
@@ -248,7 +251,7 @@ class SmdModelDialog(QDialog):
         path = self.selected_path()
         ok_button = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
         if not path:
-            self.details.setText(self._tr("Nessuna rete .pt in questa cartella: usa "
+            self.details.setText(self._tr("Nessuna rete .pt o .onnx in questa cartella: usa "
                                           "«Altro file...»."))
             ok_button.setEnabled(False)
             return

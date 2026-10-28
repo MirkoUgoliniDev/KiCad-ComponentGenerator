@@ -1,0 +1,32 @@
+{
+  "_comment": "ONNX weights the Windows setup ships. They are not in Git: tools/fetch_model_weights.py downloads them into models/<dir> from the permanent GitHub release «models» and refuses any file whose SHA-256 differs. Every SHA-256 here must also be in THIRD_PARTY_NOTICES.md; the detectors' also in kicadgen/services/yolo_models.py (KNOWN_MODELS).",
+  "release": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/models",
+  "weights": [
+    {
+      "file": "pcb_yolov8s.onnx",
+      "sha256": "bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29",
+      "url": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/download/models/pcb_yolov8s.onnx"
+    },
+    {
+      "file": "pcb_component_detector_yolo26_roboflow_l.onnx",
+      "sha256": "66528ed90ad53e91b697d58fa1b9dacf45f35363798089107fa2efdb4776b29b",
+      "url": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/download/models/pcb_component_detector_yolo26_roboflow_l.onnx"
+    },
+    {
+      "file": "pcb_component_detector_yolo26_roboflow_m.onnx",
+      "sha256": "c3169e2ba2cbbed794039e983f14a21e4ebc6e217574a132fdd80285e0541988",
+      "url": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/download/models/pcb_component_detector_yolo26_roboflow_m.onnx"
+    },
+    {
+      "file": "pcb_component_detector_yolov8m_best.onnx",
+      "sha256": "bb040d1f2758bbd1f812362832d80d6de376437ca256d1a30a27c30452bf8752",
+      "url": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/download/models/pcb_component_detector_yolov8m_best.onnx"
+    },
+    {
+      "file": "smd_classifier.onnx",
+      "dir": "smd",
+      "sha256": "d8f329822cfd17a823d861919a40575ade34a93b9df14d87ed15eb4df02baac9",
+      "url": "https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/download/models/smd_classifier.onnx"
+    }
+  ]
+}

@@ -4,7 +4,8 @@
 not calibrate, download weights, infer package identity, or measure height: the
 height it writes is an estimate from the detector class and the plan
 (photo_heights), always marked `_height_estimated`.
-Weights are a local .onnx file (onnxruntime, CPU) or a local .pt checkpoint
+Weights are a local .onnx file (onnxruntime, CPU; raw score grid or the
+end-to-end detections of an NMS-free head) or a local .pt checkpoint
 (PyTorch/Ultralytics, optional install); both go through the same letterbox,
 thresholds, NMS and audit code.
 @note The recipe is chosen per run through yolo_settings (defaults in
@@ -313,6 +314,48 @@ class _RemappedSession:
                 for raw in self._session.run(output_names, feeds)]
 
 
+class _EndToEndSession:
+    """@brief ONNX session of an end-to-end export, read as raw rows.
+
+    An end-to-end export (YOLO26, YOLOv10 with `nms=False`) returns the
+    one-to-one detections [1, K, 6] instead of the score grid. They are
+    converted with _one_to_one_rows exactly as the .pt path does, so the
+    installed program (ONNX only) finds the same bodies as the checkpoint.
+    """
+
+    def __init__(self, session, mapping, np):
+        """@brief Wrap an onnxruntime session whose output is [1, K, 6].
+
+        @param session The onnxruntime InferenceSession of the model.
+        @param mapping Model class index -> index in _CLASSES.
+        @param np The numpy module (passed in so the import stays lazy).
+        """
+        self._session, self._mapping, self._np = session, list(mapping), np
+
+    def run(self, output_names, feeds):
+        """@brief Run the model and convert its detections into raw rows.
+
+        @param output_names Output names forwarded to the wrapped onnxruntime session.
+        @param feeds Input feeds forwarded to the wrapped session.
+        @return A one-element list holding [1, 4 + len(_CLASSES), K] float32
+            rows, scores in _CLASSES order (see _one_to_one_rows).
+        """
+        raw = self._session.run(output_names, feeds)[0]
+        return [_one_to_one_rows(self._np.asarray(raw, dtype=self._np.float32),
+                                 self._mapping, self._np)]
+
+
+def _end_to_end_output_shape(shape) -> bool:
+    """@brief True for the fixed output shape of an end-to-end export, [1, K, 6].
+
+    @param shape The declared output shape of the ONNX model.
+    @return True when it is exactly [1, K, 6] with K a positive integer; a
+        symbolic K (dynamic export) is not accepted, as for the standard head.
+    """
+    return (len(shape) == 3 and shape[0] == 1 and shape[2] == 6
+            and isinstance(shape[1], int) and not isinstance(shape[1], bool) and shape[1] >= 1)
+
+
 class _TorchSession:
     """A PyTorch detection network behind the `run` interface of onnxruntime.
 
@@ -538,9 +581,16 @@ def _setup(model_path):
         metadata = dict(session.get_modelmeta().custom_metadata_map)
         names = ast.literal_eval(metadata["names"])
         mapping = class_mapping(names)
+        # Two exports are read: the standard score grid and the end-to-end
+        # detections [1, K, 6] of an NMS-free head. The shape decides, not
+        # the `end2end` metadata: Ultralytics writes that key from the
+        # export arguments, and a hand-edited file could say anything.
+        output_shape = list(outputs[0].shape) if len(outputs) == 1 else []
+        end_to_end = _end_to_end_output_shape(output_shape)
         if (len(outputs) != 1 or outputs[0].type != "tensor(float)"
-                or list(outputs[0].shape) != [1, 4 + len(names), 8400]):
-            raise ValueError(f"expected one raw YOLOv8 float32 output [1, {4 + len(names)}, 8400]")
+                or (not end_to_end and output_shape != [1, 4 + len(names), 8400])):
+            raise ValueError(f"expected one float32 output, raw [1, {4 + len(names)}, 8400] "
+                             "or end-to-end [1, K, 6]")
         if metadata.get("task") != "detect":
             raise ValueError("model task metadata must be 'detect'")
         for key, expected in (("imgsz", [640, 640]), ("batch", 1), ("stride", 32)):
@@ -552,22 +602,27 @@ def _setup(model_path):
     except Exception as exc:
         raise ValueError(
             f"Cannot load compatible local YOLO model {path}: {end_sentence(exc)} Use a "
-            "self-contained PCB YOLOv8 ONNX export with fixed 640 input, raw "
-            "[1, 4 + classes, 8400] output and classes among: " + ", ".join(_CLASSES)
-            + "; check the CPU onnxruntime installation."
+            "self-contained PCB YOLO ONNX export with fixed 640 input, raw "
+            "[1, 4 + classes, 8400] or end-to-end [1, K, 6] output and classes among: "
+            + ", ".join(_CLASSES) + "; check the CPU onnxruntime installation."
         ) from exc
     # The detector reads the scores in the order of _CLASSES: a model with a
     # different table goes through a session that reorders them. With the
-    # detector's table the session stays the onnxruntime one.
-    if mapping != list(range(len(_CLASSES))):
+    # detector's table the session stays the onnxruntime one. End-to-end
+    # detections are always converted (and remapped) by _one_to_one_rows.
+    if end_to_end:
+        session = _EndToEndSession(session, mapping, np)
+    elif mapping != list(range(len(_CLASSES))):
         session = _RemappedSession(session, mapping, np)
     info = {
         "model_path": str(path), "model_sha256": hashlib.sha256(weights).hexdigest(),
         "model_format": "onnx",
         "model_metadata": metadata, "classes": list(_CLASSES),
+        "raw_head": "one-to-one (end-to-end; anchor x class rows merged per box)"
+                    if end_to_end else "standard",
         "input_shape": list(inputs[0].shape),
-        "output_shape": [1, 4 + len(_CLASSES), 8400],
-        "model_output_shape": list(outputs[0].shape),
+        "output_shape": [1, 4 + len(_CLASSES), output_shape[1] if end_to_end else 8400],
+        "model_output_shape": output_shape,
         "providers": providers, "runtime": getattr(ort, "__version__", "unknown"),
         **_mapping_info(names, mapping),
     }

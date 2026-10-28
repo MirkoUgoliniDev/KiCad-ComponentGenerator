@@ -20,7 +20,7 @@ single-component types never run the inventory):
 
 | Entry | What runs |
 |---|---|
-| **YOLO + local SMD network (v3)** | default from the sources. YOLO proposes, the local SMD network classifies the kept bodies, only unresolved bodies go to the paid crop reading. Disabled in the installed Windows program (no PyTorch, no checkpoint) with the reason in its tooltip. |
+| **YOLO + local SMD network (v3)** | default from the sources. YOLO proposes, the local SMD network classifies the kept bodies, only unresolved bodies go to the paid crop reading. In the installed Windows program the network is its ONNX export (`models/smd/smd_classifier.onnx`, same classes as the checkpoint); only an installation without that file disables the entry, with the reason in its tooltip. |
 | **Local YOLO + AI verification** | default in the installed program. YOLO proposes, the AI inventory and the crop reading verify. |
 | **AI (current)** | no local detector: the AI localizes on the full view and detail grid. |
 | **Vision model only (no local detector)** | the vision model alone. |
@@ -98,18 +98,31 @@ overhang the PCB and is not shifted to force its envelope inside the board.
 ```
 
 ONNX Runtime runs on CPU. The ONNX contract is a fixed float32 input
-`[1,3,640,640]` and a raw output `[1, 4 + classes, 8400]`; an arbitrary YOLO
-ONNX export is not necessarily compatible. No model is downloaded
-automatically.
+`[1,3,640,640]` and ONE float32 output: either the raw score grid
+`[1, 4 + classes, 8400]` (standard head, Ultralytics export with `nms=None`)
+or the end-to-end detections `[1, K, 6]` of an NMS-free head (YOLO26,
+YOLOv10: export with `nms=False`, K fixed, usually 300). The shape decides,
+not the `end2end` metadata. An arbitrary YOLO ONNX export is not
+necessarily compatible (dynamic axes, NMS baked in, other image sizes). No
+model is downloaded automatically.
+
+To convert a YOLO26 checkpoint for the installed program, export its
+end-to-end branch: with the raw grid the detector would run its own NMS on
+the one-to-many branch and find different bodies than the checkpoint
+(measured on 2026-10-28: 127 against 111 on one photo). The end-to-end export
+reproduces the checkpoint's one-to-one output row for row (within 3e-4).
+Ultralytics writes the training data path into the `description` metadata:
+rewrite it before publishing the file.
 
 The locally tested ONNX weight originated from
 `Arshia82sbn/pcb-yolov8s-detection`, SHA-256
 `bfc398bb93ce61d9d7d00389db51b651bd90c4e2141163a0ae6dad79a247ae29`. It is
-ignored by Git and **not shipped** in the Windows installer by default: its
-model-card MIT licence and its embedded AGPL metadata conflict, and the
-`build-windows.ps1 -IncludeYoloModel` switch must be used only once
-redistribution is allowed (see `PACKAGING-WINDOWS-MSI.md`). Without weights
-the program works and asks for a file in the «YOLO model» field.
+ignored by Git and redistributed under AGPL-3.0 (its model-card MIT licence
+and its embedded AGPL metadata conflict; maintainer's decision of
+2026-10-28). The Windows installer ships it, with every other
+`models/yolo/*.onnx`, only when built with `build-windows.ps1
+-IncludeYoloModel` (see `PACKAGING-WINDOWS-MSI.md`). Without weights the
+program works and asks for a file in the «YOLO model» field.
 
 ## ONNX and PyTorch models
 
@@ -117,7 +130,7 @@ The detector loads both formats, chosen by the file extension:
 
 | Extension | Runtime | Output read by the detector |
 |---|---|---|
-| `.onnx` | onnxruntime (CPU) | raw `[1, 4 + classes, 8400]` |
+| `.onnx` | onnxruntime (CPU) | raw `[1, 4 + classes, 8400]`; end-to-end export: `[1, K, 6]` converted to `[1, 4 + classes, K]` like the `.pt` one-to-one output |
 | `.pt` | PyTorch through Ultralytics (`requirements/yolo-pt.txt`) | standard head (YOLOv8): raw `[1, 4 + classes, 8400]`; end-to-end head (YOLO26, YOLOv10): the official one-to-one output `[1, 4 + classes, 300]` |
 
 Every model goes through the same letterbox, thresholds, NMS, audit and

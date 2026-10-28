@@ -41,8 +41,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -Package ap
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1                      # executable + MSI
 ```
 
-`-IncludeYoloModel` ships `models\yolo\pcb_yolov8s.onnx`: **do not use it**
-until the user has cleared the weights' license (ambiguous MIT/AGPL). The
+`-IncludeYoloModel` ships every `models\yolo\*.onnx`; the official setup uses
+it (licenses reviewed on 2026-10-28, user's choice: all models). The exports
+come from `tools\export_yolo_onnx.py`; a `.pt` never ships. The
 build uses `.venv-build` (never `.venv`), the pinned versions of
 `requirements/release-constraints.txt`, a seed database generated from the
 code (never the developer's own) and ends with `KiCadGen.exe --check-runtime`.

@@ -39,14 +39,19 @@ datas = [
     # tools/collect_licenses.py.
     (str(LICENSES), "licenses"),
 ]
-# Pesi YOLO: licenza non chiarita (model card MIT, metadati AGPL; vedi
-# THIRD_PARTY_NOTICES.md). Il codice e' AGPL-3.0 dal 2026-09-25, ma i pesi
-# hanno una licenza loro: mai nel pacchetto per default, solo con
-# scripts/build-windows.ps1 -IncludeYoloModel, quando la licenza e' chiarita.
-# Senza pesi il programma funziona; il rilevatore locale chiede un file .onnx.
+# YOLO weights: they have licenses of their own (THIRD_PARTY_NOTICES.md), so
+# they enter the package only with scripts/build-windows.ps1 -IncludeYoloModel.
+# Since 2026-10-28 every .onnx of models/yolo ships (the base model and the
+# ONNX exports of tools/export_yolo_onnx.py; the user chose all of them), never
+# a .pt: the package has no PyTorch. Without weights the program works and the
+# local detector asks for an .onnx file.
 if os.environ.get("KICADGEN_BUNDLE_YOLO_MODEL") == "1":
-    # Dal 2026-10-02 i rilevatori stanno in models/yolo (app_paths.YOLO_MODELS_DIR).
-    datas.append((str(ROOT / "models" / "yolo" / "pcb_yolov8s.onnx"), "models/yolo"))
+    # Since 2026-10-02 the detectors live in models/yolo (app_paths.YOLO_MODELS_DIR)
+    # and the SMD network in models/smd; its ONNX export ships too (2026-10-28),
+    # so «YOLO + rete SMD» works in the installed program.
+    for folder in ("yolo", "smd"):
+        for weights in sorted((ROOT / "models" / folder).glob("*.onnx")):
+            datas.append((str(weights), f"models/{folder}"))
 binaries = []
 hiddenimports = []
 for package in ("pyvista", "pyvistaqt", "vtkmodules", "onnxruntime"):
