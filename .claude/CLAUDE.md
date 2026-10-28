@@ -253,8 +253,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 10207 passed,
-14 skipped and 19 subtests (2026-10-28 night, branch `ADVANCED`: full adversarial review of the
+is 10253 passed,
+14 skipped and 19 subtests (2026-10-28 evening, branch `ADVANCED` merged into `main` as `8cec8ee`:
+model licenses reviewed, weights published as assets of the GitHub release «models», YOLO26
+end-to-end and SMD network exported to ONNX and read by the program, setup shipping every
+models/*/*.onnx fetched with SHA-256 verification — the MSI with the models not yet built;
+before that, 10207 passed, 2026-10-28 night: full adversarial review of the
 whole codebase by ten read-only agents and its fixes by eleven fixing agents on disjoint files —
 the GitHub suite failed only because tests assumed KiCad, FreeCAD and untracked weights (window
 fixture fakes FreeCAD, hand-written glyph library fixture, AI detector in the prompt test); PDFs
