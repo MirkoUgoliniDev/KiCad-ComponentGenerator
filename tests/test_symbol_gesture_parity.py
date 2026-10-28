@@ -674,8 +674,11 @@ def _empty_point(tab):
 def test_s8_shift_band_selects_the_pins_inside_and_edits_nothing(tab7, qapp, monkeypatch):
     """@brief S8 positive and negative: a band over pins selects them; a band over nothing edits nothing.
 
-    Pinned contract: a band that contains no pin and no element leaves the
-    pin selection as it was (`_select_region` only resets the elements).
+    Pinned contract: a plain (non-additive) band that contains no pin and no
+    element clears the pin selection too, as the footprint and KiCad do; an
+    additive band keeps it. CONTRACT CHANGED 2026-10-27 (review D5,
+    docs/canvas-selection-plan.md §2): the band used to keep the pins and
+    clear only the elements, leaving a half-cleared selection.
     """
     before = tab7.draft_rows()
     tab7._select_pins({'5'}, '5')
@@ -699,7 +702,7 @@ def test_s8_shift_band_selects_the_pins_inside_and_edits_nothing(tab7, qapp, mon
     _press(tab7, qapp, empty, Qt.KeyboardModifier.ShiftModifier)
     _move(tab7, qapp, empty + QPoint(20, 20))
     _release(tab7, qapp, empty + QPoint(20, 20), Qt.KeyboardModifier.ShiftModifier)
-    assert tab7._selection_ids() == {'1', '2'}, 'a band around nothing keeps the pin selection (today)'
+    assert tab7._selection_ids() == set(), 'a plain band around nothing clears the pin selection (review D5)'
     assert tab7.draft_rows() == before and len(tab7._history) == 1
 
 

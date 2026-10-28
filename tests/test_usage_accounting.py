@@ -111,7 +111,9 @@ def test_the_request_asks_the_api_for_the_cost(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def read(self):
+        # CONTRACT CHANGED 2026-10-27 (review E6): bodies are read with a size
+        # bound, read(limit + 1), as http.client.HTTPResponse.read(amt) allows.
+        def read(self, size=-1):
             return b'{"choices": [{"message": {"tool_calls": [{"function": {"name": "t", "arguments": "{}"}}]}}]}'
 
     def fake_urlopen(request, timeout=None):

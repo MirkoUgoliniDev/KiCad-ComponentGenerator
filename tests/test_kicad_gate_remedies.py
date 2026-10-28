@@ -83,6 +83,13 @@ def _remedy_footprint_invalid(window, monkeypatch, folder):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
 
 
+def _setup_footprint_pending_write(window, monkeypatch, folder):
+    # CONTRACT CHANGED 2026-10-27 (review B5): an applied footprint edit not
+    # yet in the .kicad_mod (here: recorded by the project as behind) blocks
+    # the preview and the installations until «Applica ai file» rewrites it.
+    window._fp_file_stale = True
+
+
 def _setup_footprint_pads(window, monkeypatch, folder):
     window.field_cols.setValue(2)
 
@@ -140,6 +147,7 @@ def _remedy_remove_model(window, monkeypatch, folder):
 CASES = {
     "busy": (_setup_busy, _remedy_busy),
     "footprint_invalid": (_setup_footprint_invalid, _remedy_footprint_invalid),
+    "footprint_pending_write": (_setup_footprint_pending_write, _remedy_apply_files),
     "footprint_pads": (_setup_footprint_pads, _remedy_apply_files),
     "footprint_outline": (_setup_footprint_outline, _remedy_apply_files),
     "symbol_pads": (_setup_symbol_pads, _remedy_update_symbol),

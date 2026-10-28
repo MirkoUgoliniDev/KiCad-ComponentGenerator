@@ -244,7 +244,13 @@ def test_a_neighbour_stops_the_measure_from_grabbing_it():
     frame = crop_frame(image, LENGTH_MM, WIDTH_MM)
     wide = refine_component_edges(image, frame, dict(proposal), None, SEARCH_MARGIN_MM)
 
-    assert wide is not None and wide["x_mm"] == pytest.approx(neighbour[0], abs=0.3), (
-        "la finestra larga non ha agganciato il vicino: il test non prova la regola")
+    # CONTRACT CHANGED 2026-10-27 (review F2, photo_refine.centre_on_hypothesis):
+    # this precondition used to assert that the WIDE window grabbed the
+    # neighbour, to prove that only the narrow window protected the body. The
+    # measured centre must now lie on the proposed body itself, so the class of
+    # defect is closed at its root and the wide window is safe too: the stricter
+    # contract is that NEITHER window turns the neighbour into this body.
+    assert wide is None or wide["x_mm"] != pytest.approx(neighbour[0], abs=0.3), (
+        "the wide window moved the body onto its neighbour")
     assert "_edges_measured" not in narrow
     assert narrow["x_mm"] == pytest.approx(0.0)

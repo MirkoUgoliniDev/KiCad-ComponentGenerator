@@ -783,9 +783,26 @@ _PREVIEW_PLACEMENT = contextvars.ContextVar('preview_placement', default=None)
 
 
 class _Preview(QRunnable):
+    """Render one candidate's thumbnail off the GUI thread."""
+
     def __init__(self, token, path, rotation, dimensions=None, color=None,
                  view=DEFAULT_PREVIEW_VIEW, placement=None, board_rotation=0.0,
                  colors=True):
+        """@brief Prepare one thumbnail render identified by a dialog token.
+
+        @param token Value the dialog compares against its current preview
+            token, so that a late thumbnail of an older request is dropped.
+        @param path STEP/WRL file to render.
+        @param rotation Native-model Z override in degrees, or None to keep
+            the CAD bounding-box axis inference (then `dimensions` is used).
+        @param dimensions (length, width) in mm for the axis inference.
+        @param color Body colour override, or None.
+        @param view Camera preset (DEFAULT_PREVIEW_VIEW by default).
+        @param placement Component placement keys (PREVIEW_PLACEMENT_KEYS)
+            published to the renderer through a context variable.
+        @param board_rotation Rotation of the board in the preview, degrees.
+        @param colors False to render without the model's own colours.
+        """
         super().__init__()
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
@@ -811,6 +828,11 @@ class _Preview(QRunnable):
                                       **extra))
         except Exception:
             result = None
+        except BaseException:  # noqa: BLE001 - nothing may leave a QRunnable
+            # Invariant (review 2026-10-27, C5): a BaseException escaping a
+            # QRunnable kills the process without a traceback; a missing
+            # thumbnail is the same harmless outcome as any other failure.
+            result = None
         self.signals.ready.emit(self.token, result)
 
 
@@ -831,6 +853,10 @@ class _Index(QRunnable):
         try:
             result = list(library_models())
         except Exception:
+            result = []
+        except BaseException:  # noqa: BLE001 - nothing may leave a QRunnable
+            # Same invariant as _Preview.run (review 2026-10-27, C5): an empty
+            # index is reported instead of letting the exception abort Qt.
             result = []
         self.signals.ready.emit(self.token, result)
 

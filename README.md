@@ -610,7 +610,8 @@ The diagram shows the main direction only: every package also uses
 .venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
 ```
 
-The suite is large (about 8 500 tests) and is run in two halves in CI
+The suite is large (close to ten thousand tests; the current count is kept
+in `HANDOFF.md`) and is run in two halves in CI
 (`tools/run_test_halves.py`) because a single process can die with a native
 Qt/VTK crash. Use a fresh temporary directory for every run.
 

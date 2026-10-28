@@ -34,6 +34,7 @@ shapes of ``freecad_parts``: this module does not decide, it proposes.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -216,9 +217,29 @@ DEFAULT_SIZE_TOLERANCE = 0.30
 #: photograph cannot tell them apart, so the name decides.
 NAME_TIEBREAK_MARGIN = 0.05
 
-#: Index of the envelopes already measured, next to the library or in the user
-#: cache. Measuring a STEP requires FreeCAD: it is done once per model.
+#: Index of the envelopes already measured, in the user cache (read also from
+#: beside the library, where older versions wrote it). Measuring a STEP
+#: requires FreeCAD: it is done once per model.
 INDEX_FILENAME = ".kicadgen-model-sizes-v4.json"
+
+#: Memo of the models whose measurement STALLED (no output within the silence
+#: timeout), in the user cache only. A stalled model is not a measurement, so
+#: it never enters INDEX_FILENAME; it is remembered here so that the next
+#: generation whose shortlist contains it does not pay the full silence
+#: timeout again (2026-10-27 review, H2). Keyed like the index: a rewritten
+#: file changes key and is measured again.
+STALL_FILENAME = ".kicadgen-model-stalls-v1.json"
+
+#: Seconds of SILENCE granted to one model measurement before the child is
+#: declared stalled (see `measure_models`). Single source: the stall memo
+#: compares against this number to decide whether a retry is worth paying.
+MEASURE_SILENCE_TIMEOUT_S = 300
+
+#: Seconds a killed measuring child is waited for before giving up on it: a
+#: TerminateProcess that the system refuses (process in a kernel call) must
+#: not hang the matching forever (2026-10-27 review, H9). It is a bound on
+#: the reaping, not on the measurement.
+KILL_REAP_GRACE_S = 5.0
 
 # Resource budget, not a geometric threshold: never launch a library-wide CAD batch.
 MAX_CANDIDATE_MEASUREMENTS = 64
@@ -455,6 +476,69 @@ def _marked_model_is_named(path: Path, component: dict) -> bool:
     return any(stem == _normalize(token) for token in _marking_model_tokens(component))
 
 
+#: Per-thread listing scope of `_model_files` (see `_listing_scope`).
+_MODEL_LISTINGS = threading.local()
+
+
+def _walk_model_files(root: Path) -> list[Path]:
+    """One walk of `root`: every file with a model suffix, sorted by path.
+
+    `os.scandir` without a `stat` per file, symlinked folders not descended
+    (as `Path.rglob` does not); an unreadable folder is skipped, as rglob
+    skips it. A missing root lists nothing instead of raising.
+    """
+    listing, pending = [], [str(root)]
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    elif os.path.splitext(entry.name)[1].lower() in MODEL_SUFFIXES:
+                        listing.append(Path(entry.path))
+        except OSError:
+            continue
+    listing.sort()
+    return listing
+
+
+def _model_files(root: Path) -> list[Path]:
+    """Model files under `root`, listed once per `_listing_scope` (2026-10-27 review, H10).
+
+    Outside a scope every call walks the library, as the three `rglob` walks
+    it replaces did; inside one (an `attach_models` call) the first walk of a
+    root is reused for every component, so a generation lists the library
+    once per root instead of three times per component. The list is shared,
+    never mutated by callers.
+    """
+    scope = getattr(_MODEL_LISTINGS, "scope", None)
+    key = os.path.normcase(str(Path(root).absolute()))
+    if scope is not None and key in scope:
+        return scope[key]
+    files = _walk_model_files(Path(root))
+    if scope is not None:
+        scope[key] = files
+    return files
+
+
+@contextmanager
+def _listing_scope():
+    """Reuse one library listing for every lookup made inside the block.
+
+    Nested scopes join the outer one. The scope is per thread, so two
+    generations running in parallel never share a listing taken by the other.
+    """
+    if getattr(_MODEL_LISTINGS, "scope", None) is not None:
+        yield
+        return
+    _MODEL_LISTINGS.scope = {}
+    try:
+        yield
+    finally:
+        _MODEL_LISTINGS.scope = None
+
+
 def _marked_model_paths(component: dict, root: Path) -> list[Path]:
     """Find STEP files named by a literal marking inside one KiCad root."""
     tokens = _marking_model_tokens(component)
@@ -462,7 +546,7 @@ def _marked_model_paths(component: dict, root: Path) -> list[Path]:
         return []
     paths = []
     try:
-        for path in root.rglob("*"):
+        for path in _model_files(root):
             if path.suffix.lower() in (".step", ".stp") and _marked_model_matches(path, component):
                 paths.append(path)
     except OSError:
@@ -488,7 +572,7 @@ def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
     if not library or not wanted:
         return []
     exact, prefix, partial = [], [], []
-    for path in library.rglob("*"):
+    for path in _model_files(library):
         if path.suffix.lower() not in MODEL_SUFFIXES:
             continue
         stem = _normalize(path.stem)
@@ -516,23 +600,33 @@ def candidates(package: str, library: Optional[Path] = None) -> list[Path]:
 
 
 def _index_path(library: Path) -> Path:
-    """Envelope index file, writable even without system permissions."""
-    beside = library / INDEX_FILENAME
-    if os.access(library, os.W_OK):
-        return beside
+    """Preferred envelope index file: the user cache, never the library folder.
+
+    SAFETY BOUNDARY (2026-10-27 review, H6): a library folder that happens to
+    be writable is still somebody else's data -- a KiCad PCM repository under
+    Documents, a vendor archive -- and this program must not leave service
+    files in it. The path beside the library is kept only as a READ source,
+    so an index written there by older versions is still replayed and
+    migrates to the user cache on the next save.
+    """
     return model_size_cache.user_cache_dirs()[0] / INDEX_FILENAME
 
 
-def _index_paths(library):
-    """Try actual cache writes, not just os.access, before falling back to user data.
+def _index_write_paths(library) -> list:
+    """Destinations `save_index` may write: the user cache folders only."""
+    return [folder / INDEX_FILENAME for folder in model_size_cache.user_cache_dirs()]
 
-    The user-level fallbacks follow `model_size_cache.user_cache_dirs`, so
+
+def _index_paths(library):
+    """Every index file worth READING: user caches first, then beside the library.
+
+    The user-level paths follow `model_size_cache.user_cache_dirs`, so
     KICADGEN_DATA_DIR and the installed layout are honoured; the historic
-    %LOCALAPPDATA%\\kicadgen index stays in the list, readable, and migrates
-    on the next save.
+    %LOCALAPPDATA%\\kicadgen index and the one beside the library stay in the
+    list, readable, and migrate on the next save. `library` is a Path.
     """
-    user_caches = [folder / INDEX_FILENAME for folder in model_size_cache.user_cache_dirs()]
-    return list(dict.fromkeys((_index_path(library), library / INDEX_FILENAME, *user_caches)))
+    return list(dict.fromkeys((_index_path(library), library / INDEX_FILENAME,
+                               *_index_write_paths(library))))
 
 
 def load_index(library: Optional[Path] = None) -> dict:
@@ -559,7 +653,75 @@ def save_index(index: dict, library: Optional[Path] = None) -> None:
     library = library or find_library()
     if not library:
         return
-    model_size_cache.save(index, _index_paths(Path(library)))
+    # Written to the user cache only: the copy beside the library is read for
+    # migration and never rewritten (see _index_path). The entries of every
+    # readable source are merged first, so an index beside the library still
+    # migrates into the user cache even though it is no longer a destination.
+    library = Path(library)
+    merged = dict(model_size_cache.load(_index_paths(library)))
+    merged.update(index)
+    model_size_cache.save(merged, _index_write_paths(library))
+
+
+def _stall_paths() -> list:
+    """Stall memo files, preferred first; read and written in the user cache only."""
+    return [folder / STALL_FILENAME for folder in model_size_cache.user_cache_dirs()]
+
+
+def load_stalls() -> dict:
+    """@brief Read the memo of the models whose measurement stalled.
+
+    @return Mapping index key -> stall record, empty when none is readable.
+    """
+    return model_size_cache.load(_stall_paths())
+
+
+def record_stalls(stalled: dict) -> None:
+    """@brief Remember models that stalled, with the silence timeout they were given.
+
+    @param stalled Mapping model path -> timeout in seconds that expired.
+    @note The record carries the file identity inside itself, not only in the
+        key (pattern of `freecad_parts._cached_landmark`): a corrupted or
+        badly merged memo cannot make one model inherit another's give-up.
+        A failure to write is not a fault: the model is simply measured again.
+    """
+    records = {}
+    for path, timeout in stalled.items():
+        model = Path(path)
+        identity = model_size_cache.file_identity(model)
+        if identity is None:
+            # Without an identity nothing could invalidate the record: it is
+            # not written, and the model stays retryable.
+            continue
+        records[index_key(model)] = {"status": "stalled", "timeout_s": float(timeout),
+                                     "model": identity}
+    if records:
+        model_size_cache.save(records, _stall_paths())
+
+
+def stall_remembered(stalls: dict, path: Path, timeout: float) -> bool:
+    """@brief Whether measuring `path` again, with `timeout`, would only repeat a known stall.
+
+    @param stalls Memo from `load_stalls`.
+    @param path Model about to be measured.
+    @param timeout Silence timeout the measurement would be given, seconds.
+    @return True when the same file (identity inside the record) already
+        stalled with a timeout at least as large: paying it again would reach
+        the same give-up. A larger timeout, a rewritten file or a record
+        without a verifiable identity all answer False, so the model is
+        measured again.
+    """
+    record = stalls.get(index_key(path))
+    if not isinstance(record, dict) or record.get("status") != "stalled":
+        return False
+    identity = model_size_cache.file_identity(path)
+    if identity is None or record.get("model") != identity:
+        return False
+    try:
+        spent = float(record.get("timeout_s"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(spent) and spent >= float(timeout)
 
 
 def index_key(path: Path) -> str:
@@ -568,14 +730,14 @@ def index_key(path: Path) -> str:
     @param path Model file whose index key is wanted.
     @return "<absolute path>:<size>:<mtime_ns>", or the absolute path alone
         when the file cannot be inspected.
-    @note Must stay identical to `model_size_cache.file_identity` (a test
-        checks it).
+    @note One recipe only: the string is `model_size_cache.file_identity`'s.
+        The sole difference is the fallback for a file that cannot be
+        inspected -- `file_identity` answers None (no key, measure again),
+        this function keeps the historic "path alone" so that index stamps
+        of listings stay strings.
     """
-    try:
-        stat = path.stat()
-        return f"{path.absolute()}:{stat.st_size}:{stat.st_mtime_ns}"
-    except OSError:
-        return str(path.absolute())
+    path = Path(path)
+    return model_size_cache.file_identity(path) or str(path.absolute())
 
 
 def _sexpr(text: str) -> list:
@@ -787,7 +949,11 @@ class _FootprintIndex:
     __slots__ = ("listing", "entries", "by_name", "variable")
 
     def __init__(self, root: Path, listing: list):
-        """Scan `root` once; `listing` is the detector snapshot taken BEFORE the scan."""
+        """@brief Scan `root` once.
+
+        @param root Footprint library root.
+        @param listing Detector snapshot taken BEFORE the scan (see `_footprint_listing`).
+        """
         self.listing = listing
         self.entries = []
         self.by_name = {}
@@ -962,16 +1128,17 @@ def measure(path):
     shape = Part.read(path)
     box = shape.BoundBox
     total = [box.XLength, box.YLength, box.ZLength]
-    # Ingombro del solo corpo: sezione presa in alto, non a meta'. I reofori
-    # stanno bassi e a meta' altezza rientrano ancora nella sezione; sopra lo
-    # standoff resta il solo corpo. Verificato: al 65% un SOT-223 da' 3.47 x
-    # 6.47 (corpo reale 3.5 x 6.5) e un SOIC-8 da' 3.75 x 4.75 (3.9 x 4.9),
-    # mentre al 50% davano rispettivamente 5.25 e 5.02 sul lato corto.
+    # Envelope of the body alone: the section is taken high up, not at half
+    # height. Leads sit low and at half height they still fall inside the
+    # section; above the standoff only the body remains. Verified: at 65 % a
+    # SOT-223 gives 3.47 x 6.47 (real body 3.5 x 6.5) and a SOIC-8 gives
+    # 3.75 x 4.75 (3.9 x 4.9), while at 50 % they gave 5.25 and 5.02 on the
+    # short side.
     #
-    # Serve perche' un rettangolo misurato sulla foto puo' aver seguito il
-    # corpo oppure l'estensione totale coi reofori aperti: sono due letture
-    # entrambe legittime dello stesso pezzo, e confrontarne una sola faceva
-    # rifiutare package giusti.
+    # Needed because a rectangle measured on the photograph may have followed
+    # the body or the total extent with the leads spread: both are legitimate
+    # readings of the same part, and comparing only one of them made correct
+    # packages be refused.
     body = None
     try:
         middle = box.ZMin + box.ZLength * 0.65
@@ -987,9 +1154,9 @@ def measure(path):
 
 
 sizes = {}
-# Ogni misura finita viene scritta SUBITO, riga per riga: se il processo
-# viene ucciso su richiesta a meta' lotto, cio' che era gia' stato misurato
-# sopravvive e finisce in cache invece di essere rifatto alla corsa dopo.
+# Every finished measurement is written AT ONCE, line by line: if the process
+# is killed on request half-way through the batch, what was already measured
+# survives and reaches the cache instead of being redone on the next run.
 with open(os.path.join(folder, "progress.jsonl"), "w", encoding="utf-8") as done:
     for path in paths:
         try:
@@ -1024,7 +1191,26 @@ def _partial_measurements(progress_path: Path) -> dict:
     return measured
 
 
-def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
+class _Measurements(dict):
+    """@brief Mapping path -> measurement that also remembers which models stalled.
+
+    @note A plain dict for every consumer (equality, `.get`, JSON): the
+        public contract of `measure_models` -- `None` for a model that could
+        not be measured -- does not change. `stalled` (path -> timeout in
+        seconds) is the side channel that lets `model_sizes` tell a stall,
+        which is worth remembering, from an unreadable file, which is not.
+    """
+
+    def __init__(self, *args, stalled=None, **kwargs):
+        """@brief Build the mapping like a dict, with an optional stall memo.
+
+        @param stalled Mapping path -> expired timeout (seconds), copied.
+        """
+        super().__init__(*args, **kwargs)
+        self.stalled = dict(stalled or {})
+
+
+def measure_models(paths, timeout: int = MEASURE_SILENCE_TIMEOUT_S, *, cancel=None) -> dict:
     """@brief Measure model body and total X/Y/Z dimensions in mm using FreeCAD.
 
     One invocation for the whole batch: opening one process for each file
@@ -1071,7 +1257,7 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
         freecad = find_freecadcmd()
     except Exception:  # noqa: BLE001 - without FreeCAD there are no measures
         return {}
-    measured = {}
+    measured = _Measurements()
     remaining = list(readable)
     _announce_measuring(True, len(readable))
     try:
@@ -1082,11 +1268,14 @@ def measure_models(paths, timeout: int = 300, *, cancel=None) -> dict:
 
 def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
     """Measure `remaining` in batches, skipping a model that stalls (see `measure_models`)."""
+    stalled = getattr(measured, "stalled", {})
     while remaining:
         outcome, batch, stopped = _measure_batch(freecad, remaining, timeout, cancel)
         measured.update(batch)
         if stopped is not None:
-            stopped.measured = dict(measured)
+            # The stalls seen before the stop travel with the haul: they were
+            # paid for too, and the memo must not forget them.
+            stopped.measured = _Measurements(measured, stalled=stalled)
             raise stopped
         if outcome != "stalled":
             return measured
@@ -1098,8 +1287,36 @@ def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
         if not pending:
             return measured
         measured[pending[0]] = None
+        # Remembered with the timeout that expired: the same file with a
+        # budget no larger is not worth paying the silence again.
+        stalled[pending[0]] = timeout
         remaining = pending[1:]
     return measured
+
+
+def _reap_killed_child(process, grace_s: float = KILL_REAP_GRACE_S) -> bool:
+    """@brief Wait for a child that was just killed, with a bound.
+
+    @param process `subprocess.Popen` whose tree was just terminated.
+    @param grace_s Seconds to wait before giving up on the reaping.
+    @return True when the child exited within the grace, False when it is
+        still alive (the kill was refused or is still being delivered).
+    @note SAFETY BOUNDARY (2026-10-27 review, H9): an unbounded `wait()`
+        after the kill would hang the matching -- and the cancel that asked
+        for it -- whenever TerminateProcess is refused. The child left behind
+        is logged and the measuring continues without it: its exchange
+        folder is temporary and the output goes to a file, so a straggler
+        cannot block this process.
+    """
+    import subprocess
+    try:
+        process.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        logging.getLogger(__name__).warning(
+            "measuring child pid %s did not exit within %.1f s after the kill; left behind",
+            getattr(process, "pid", "?"), grace_s)
+        return False
 
 
 def _measure_batch(freecad, paths, timeout, cancel):
@@ -1144,7 +1361,8 @@ def _measure_batch(freecad, paths, timeout, cancel):
                 def kill_child():
                     """The only place where the measurement child process is killed (with its own children)."""
                     kill_process_tree(process)
-                    process.wait()
+                    # Bounded: a refused TerminateProcess must not hang here.
+                    _reap_killed_child(process)
 
                 def progress_size():
                     try:
@@ -1226,6 +1444,13 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
             index[key] = normalize_model_measurement(path, index[key])
     missing = [p for p in paths if size_distance(index.get(index_key(p)), 1, 1) is None]
     if missing:
+        # A model that already stalled with this very timeout is not measured
+        # again (2026-10-27 review, H2): it stays None, exactly as it ended the
+        # run that gave up on it, but without paying the silence once more.
+        # A larger timeout or a rewritten file makes `stall_remembered` False.
+        stalls = load_stalls()
+        missing = [p for p in missing if not stall_remembered(stalls, p, MEASURE_SILENCE_TIMEOUT_S)]
+    if missing:
         stopped = None
         try:
             # The channel is passed ONLY when present: the signature seen by
@@ -1240,6 +1465,11 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
             if size_distance(value, 1, 1) is not None:
                 index[index_key(path)] = normalize_model_measurement(path, value)
         save_index(index, library)
+        # Stalls are a separate memo, never an index entry: the index holds
+        # measurements only, and a stall is the absence of one.
+        stalled = getattr(measured, "stalled", None)
+        if stalled:
+            record_stalls(stalled)
         if stopped is not None:
             raise stopped
     return {str(p): index.get(index_key(p)) for p in paths}
@@ -1661,6 +1891,12 @@ def resolve_model(package: str, length_mm: float, width_mm: float, *,
     @return Legacy dimensional proposal path or None for synthetic fallback.
     @note This low-level API does not certify identity. New callers must use
         model_candidates and explicit model_selection before attaching a solid.
+    @note LEGACY API (2026-10-27 review, H12): no production code calls it
+        any more; it is kept because its tests (test_kicad_models,
+        test_kicad_model_footprints, test_kicad_model_compatibility) pin the
+        dimensional contract that `model_candidates` builds on -- tolerance,
+        rotated readings, land-pattern vetoes. Remove it together with those
+        tests only when that contract is covered through `model_candidates`.
 
     It does not trust the proposed name: a wrong package would give a wrong
     solid that looks exact, which is the worst error. Among the candidates
@@ -1938,15 +2174,20 @@ def _family_paths(component, root, basis):
         # and suffix variants remain alternatives. Even clearly distant cold
         # chip sizes are measured, so filename hints cannot fabricate uniqueness.
         prefix, folder = _ENDCAP_CHIP_CATALOG[endcap_family]
-        paths = [p for p in (root / folder).rglob("*")
-                 if p.suffix.lower() in (".step", ".stp")
+        # Same files `(root / folder).rglob("*")` listed, through the shared
+        # listing of the root: a path is kept when that folder is one of its
+        # ancestors.
+        subtree = os.path.normcase(str((root / folder).absolute())) + os.sep
+        paths = [p for p in _model_files(root)
+                 if os.path.normcase(str(p)).startswith(subtree)
+                 and p.suffix.lower() in (".step", ".stp")
                  and re.match(prefix + r"_\d{4,6}(?:_|$)", p.stem, re.I)]
     elif alternatives:
         # Ambiguity broadens only to the stated alternatives, never to all ICs.
         paths = list(dict.fromkeys(p for token in alternatives for p in candidates(token, root)
                                    if p.suffix.lower() in (".step", ".stp")))
     else:
-        paths = [p for p in root.rglob("*") if p.suffix.lower() in (".step", ".stp")
+        paths = [p for p in _model_files(root) if p.suffix.lower() in (".step", ".stp")
                  and _candidate_family(p) in families]
         # A family-only declaration is still structural evidence, even when it
         # lacks a numeric package identifier: QFN prose must not discover SO/SOT.
@@ -3239,6 +3480,27 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
 
 def attach_models(components, log=None, library: Optional[Path] = None, progress=None,
                   *, cancel=None) -> int:
+    """@brief Attach explicit choices or supported mechanical estimates, clearing stale paths.
+
+    @param components Mutable component dictionaries containing model_selection.
+    @param log Optional diagnostic callback.
+    @param library Optional library root for API compatibility.
+    @param progress Optional callback(done, total) called once per component.
+    @param cancel Optional cancellation channel (`is_set()`), None = not
+        interruptible.
+    @return Number of paths attached (see `_attach_models`).
+    @throws MatchingCancelled When the cancellation arrives (see `_attach_models`).
+    @note Thin wrapper over `_attach_models`: it opens one `_listing_scope`
+        so that the library is listed once per root for the whole call
+        instead of three times per component (2026-10-27 review, H10). The
+        full contract is documented on the wrapped function.
+    """
+    with _listing_scope():
+        return _attach_models(components, log, library, progress, cancel=cancel)
+
+
+def _attach_models(components, log=None, library: Optional[Path] = None, progress=None,
+                   *, cancel=None) -> int:
     """@brief Attach explicit choices or supported mechanical estimates, clearing stale paths.
 
     @param components Mutable component dictionaries containing model_selection.

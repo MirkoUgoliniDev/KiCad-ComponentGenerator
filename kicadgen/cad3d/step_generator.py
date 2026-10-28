@@ -33,6 +33,7 @@ from .measurement_uncertainty import (
     ASSUMED_SCALE_PX_PER_MM, SCALE_KEY, SOURCE_ASSUMED, SOURCE_DECLARED, UNCERTAINTY_KEY,
     component_edge_uncertainty, side_uncertainty_mm,
 )
+from ..core.output_names import validate_output_name
 from .process_log import NO_WINDOW_FLAGS, ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
 from ..fsutil import replace_file
@@ -60,12 +61,6 @@ CAD_ABORT_MESSAGE = tx("Generazione 3D interrotta su richiesta dell'utente.")
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 
 _CFLAGS = NO_WINDOW_FLAGS
-
-
-def _safe_name(name: str, index: int) -> str:
-    """Name usable as a FreeCAD object name (letters, digits and _ only)."""
-    cleaned = "".join(c if c.isalnum() else "_" for c in (name or "").strip())
-    return f"Cmp{index}_{cleaned}"[:40] if cleaned else f"Cmp{index}"
 
 
 #: Minimum distance kept between a component's edge and the module's edge,
@@ -453,7 +448,7 @@ def _output_text(value) -> str:
 def _timeout_error(exc) -> "Cad3DError":
     """@brief Turn a FreeCAD watchdog timeout into the application's CAD error.
 
-    @param exc subprocess.TimeoutExpired raised by run_logged or subprocess.run.
+    @param exc subprocess.TimeoutExpired raised by run_logged (silence watchdog).
     @return Cad3DError carrying the last lines of the child's output, so the
         interface shows the FreeCAD tail instead of an "unexpected error".
     """
@@ -739,6 +734,51 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
     return notches, contacts, silk_texts, notes
 
 
+def header_side_pitch(side) -> tuple:
+    """@brief Pitch of the male header drawn under one castellated side.
+
+    @param side `CastellatedSide` of the module.
+    @return (pitch_mm, assumed): the declared pitch and False, or the
+        reference 2.54 mm header pitch and True when the side declares none
+        (a single contact may have pitch 0: there is no neighbour to measure).
+    @note The one place where the substitution is decided: the pins and the
+        note that declares the estimate both read it, so they cannot disagree.
+    """
+    from .header_geometry import REFERENCE_PITCH_MM
+    if side.pitch > 0:
+        return side.pitch, False
+    return REFERENCE_PITCH_MM, True
+
+
+def header_pitch_notes(params: CastellatedModuleParams) -> list:
+    """@brief Notes for every side whose header pitch is the reference, not a declared one.
+
+    @param params Validated module description.
+    @return One translated note per side drawn with the assumed pitch, naming
+        the side and the pitch; empty when every side declares its pitch.
+    @note Project invariant: an estimate that reaches the model is recorded in
+        the notes (2026-10-27 review, H7). The note is emitted only for sides
+        that actually receive a header pin, so a board drawn without pins
+        says nothing about a pitch nobody used.
+    """
+    placements = iter(pad_positions(params))
+    notes = []
+    for side in params.sides:
+        pitch, assumed = header_side_pitch(side)
+        drawn = False
+        for _number in side.numbers():
+            placement = next(placements)
+            if (style_has_through_hole(placement.style)
+                    and params.contact_geometry(placement).has_thru_holes):
+                drawn = True
+        if assumed and drawn:
+            notes.append(tx(
+                "Pin 3D: il lato {edge} non dichiara un passo (un solo contatto): lo strip "
+                "maschio e' disegnato al passo di riferimento {pitch} mm, una stima.",
+                edge=side.edge, pitch=f"{pitch:g}"))
+    return notes
+
+
 def castellated_header_pins(params: CastellatedModuleParams):
     """@brief Where a male header can be soldered on a castellated module.
 
@@ -759,11 +799,10 @@ def castellated_header_pins(params: CastellatedModuleParams):
     @note A side with a single contact may declare no pitch (0): the
         reference 2.54 mm header is drawn, which is an estimate.
     """
-    from .header_geometry import REFERENCE_PITCH_MM
     placements = iter(pad_positions(params))
     pins, pitches, skipped = [], [], []
     for side in params.sides:
-        pitch = side.pitch if side.pitch > 0 else REFERENCE_PITCH_MM
+        pitch, _assumed = header_side_pitch(side)
         for _number in side.numbers():
             placement = next(placements)
             if (style_has_through_hole(placement.style)
@@ -1073,7 +1112,8 @@ def generate_castellated_3d_model(
         castellated_header_pins(params) if getattr(body, "show_pins_3d", True) else ([], [], []))
     header_payload = ({"pin_style": "male_header", "header_pitches": header_pitches}
                       if header_pins else {})
-    header_notes = []
+    # An assumed pitch is an estimate: said in the notes, never silent.
+    header_notes = header_pitch_notes(params) if header_pins else []
     if header_pins and header_skipped:
         header_notes.append(tx(
             "Pin 3D: {count} contatti a solo mezzo foro ({numbers}) restano senza pin "
@@ -1620,10 +1660,19 @@ def staging_path(final: Path) -> Path:
     return final.with_name(f"{final.stem}{STAGING_MARKER}{final.suffix}")
 
 
-def _published_outputs(step_path: Path, wrl_path: Path, mesh_path: Path) -> dict:
-    """Map each shipped 3D output to its (final, staging) paths."""
-    return {key: (final, staging_path(final))
-            for key, final in (("step", step_path), ("wrl", wrl_path), ("mesh", mesh_path))}
+def _published_outputs(step_path: Path, wrl_path: Path, mesh_path: Path,
+                       fcstd_path: Optional[Path] = None) -> dict:
+    """Map each 3D output of a run to its (final, staging) paths.
+
+    The FreeCAD source (.FCStd) is staged like the shipped exports when the
+    caller names it (2026-10-27 review, H8): written straight to its final
+    name, a kill left a truncated file and a failed save left the previous
+    run's file looking current.
+    """
+    outputs = [("step", step_path), ("wrl", wrl_path), ("mesh", mesh_path)]
+    if fcstd_path is not None:
+        outputs.append(("fcstd", fcstd_path))
+    return {key: (final, staging_path(final)) for key, final in outputs}
 
 
 def _remove_output(path: Path, *, quiet: bool = False) -> None:
@@ -1657,9 +1706,10 @@ def _discard_outputs(published: dict, *, quiet: bool = False) -> None:
         cancelled, so the folder only ever holds outputs whose export
         completed in the latest run. They are deleted, not moved aside: an
         old model is never a valid result for the current footprint, so there
-        is nothing worth restoring. The FreeCAD source (.FCStd) is not a
-        shipped output and is left alone. Every file is attempted before the
-        first error is raised.
+        is nothing worth restoring. The FreeCAD source (.FCStd) follows the
+        same rule when `published` names it: a stale source from an earlier
+        run must not sit next to a newer STEP. Every file is attempted before
+        the first error is raised.
     """
     first_error = None
     for final, staged in published.values():
@@ -1713,6 +1763,13 @@ def _run_freecad(
     call exits with `Cad3DError(CAD_ABORT_MESSAGE)`, i.e. through the path
     by which the interface already brings the window back to rest.
 
+    Every call runs the child through `process_log.run_logged`, also without
+    `progress` and without `cancel` (plain script callers): the timeout is
+    always FREECAD_SILENCE_TIMEOUT_S seconds of SILENCE, restarted by every
+    line and heartbeat, and on expiry the whole process tree is killed
+    (contract changed 2026-10-27, H5: before, that path used subprocess.run,
+    an overall-duration cap that killed only the direct child).
+
     The SAME channel covers both halves of the 3D phase: the matching of the
     library models, which precedes this call, receives it from the caller
     (`attach_models` -> `model_candidates` -> `model_sizes` ->
@@ -1743,6 +1800,10 @@ def _run_freecad(
     for t in face_texts:
         t.validate()
 
+    # SAFETY BOUNDARY: the name is joined to output_dir below; a name holding
+    # a separator or ".." would write outside it (2026-10-27 review, H4).
+    # Same rule as the interface, through the shared helper.
+    validate_output_name(name)
     freecadcmd = freecadcmd_path or find_freecadcmd()
 
     shapes_dir = output_dir / f"{name}.3dshapes"
@@ -1807,7 +1868,7 @@ def _run_freecad(
     # there and renames it only after that export succeeded (see
     # _published_outputs). Written after extra_payload for the same reason as
     # the heartbeat: no caller may point the child back at the final names.
-    published = _published_outputs(step_path, wrl_path, mesh_path)
+    published = _published_outputs(step_path, wrl_path, mesh_path, fcstd_path)
     payload["staging_paths"] = {key: str(staged) for key, (_, staged) in published.items()}
     # User cache folders (index of the native model directions): the
     # child cannot import kicadgen.app_paths, so it receives them here, with
@@ -1836,60 +1897,55 @@ def _run_freecad(
             # run, no older STEP/WRL/preview can be mistaken for its result.
             _discard_outputs(published)
             launched = True
-            if progress:
-                from .process_log import ProcessCancelled, run_logged
-                # freecadcmd, once the script is done, tries to open as a document every
-                # extra argument -- i.e. OUR parameter file -- and writes
-                # «File format not supported: <that file>». It is expected by
-                # construction and harmless: it stays in freecad.log, but it does not reach
-                # the window, where it looked like an error (user, 2026-09-26). The
-                # criterion is the exact path of the file we pass, not the
-                # FreeCAD text: a line naming other files always passes.
-                params_names = {json_path, json_path.replace("\\", "/"), Path(json_path).name}
-                user_progress = progress
+            # EVERY caller goes through run_logged: with or without a listener,
+            # with or without a cancel channel. Reading the child's lines is
+            # what makes the silence watchdog restart at every heartbeat, the
+            # cancel work and the whole process tree die on expiry; the old
+            # subprocess.run branch for plain script callers could only cap
+            # the OVERALL duration and killed only the direct child (review
+            # 2026-10-27, H5, completed 2026-10-27). The child's environment is
+            # run_logged's default, the same copy of os.environ with
+            # PYTHONDONTWRITEBYTECODE=1 that `child_environment` builds, and it
+            # decodes the child's UTF-8 output (reconfigured stdout, JSON
+            # warnings) with errors="replace".
+            from .process_log import ProcessCancelled, run_logged
+            # freecadcmd, once the script is done, tries to open as a document every
+            # extra argument -- i.e. OUR parameter file -- and writes
+            # «File format not supported: <that file>». It is expected by
+            # construction and harmless: it stays in freecad.log, but it does not reach
+            # the window, where it looked like an error (user, 2026-09-26). The
+            # criterion is the exact path of the file we pass, not the
+            # FreeCAD text: a line naming other files always passes.
+            params_names = {json_path, json_path.replace("\\", "/"), Path(json_path).name}
+            # Without a listener (script callers) the lines are read and logged
+            # all the same: nobody is notified, but the watchdog still sees them.
+            user_progress = progress or (lambda line: None)
 
-                def progress(line, _forward=user_progress):  # noqa: F811 - filter declared above
-                    if "not supported" in str(line) and any(n in str(line) for n in params_names):
-                        return
-                    _forward(line)
-                # Seconds of SILENCE, not of work: the count restarts at every line
-                # FreeCAD prints, and every long step beats (see
-                # heartbeat_interval_s in the payload above). A limit on the
-                # overall duration killed the work of the following components
-                # because of the first slow import, and it was all the more likely
-                # the larger the module was.
-                try:
-                    # The channel is passed ONLY when present: so the signature
-                    # seen by non-interactive callers (and their replacements
-                    # in the tests) stays as before.
-                    result = run_logged(
-                        [freecadcmd, str(_SCRIPT_PATH), json_path],
-                        output_dir / "freecad.log", progress=progress,
-                        timeout=FREECAD_SILENCE_TIMEOUT_S, creationflags=_CFLAGS,
-                        **({"cancel": cancel} if cancel is not None else {}),
-                    )
-                except ProcessCancelled as exc:
-                    raise Cad3DError(CAD_ABORT_MESSAGE) from exc
-                except subprocess.TimeoutExpired as exc:
-                    raise _timeout_error(exc) from exc
-            else:
-                # DECLARED LIMIT: without `progress` nobody reads the lines, so
-                # here the timeout stays what subprocess.run can do -- the
-                # OVERALL DURATION -- and the heartbeat cannot save it. It is the path
-                # used only by non-interactive scripts and tests, where there is no
-                # modal to inform; the interface always passes `progress`. To
-                # make it unnecessary the stdout would have to be read here too.
-                # The child writes UTF-8 (reconfigured stdout, JSON warnings): the
-                # locale codec (cp1252) mangled its accented letters.
-                try:
-                    result = subprocess.run(
-                        [freecadcmd, str(_SCRIPT_PATH), json_path],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace",
-                        timeout=FREECAD_SILENCE_TIMEOUT_S, creationflags=_CFLAGS,
-                        env=child_environment(),
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    raise _timeout_error(exc) from exc
+            def progress(line, _forward=user_progress):  # noqa: F811 - filter declared above
+                """Forward a child line, holding back FreeCAD's complaint about our params file."""
+                if "not supported" in str(line) and any(n in str(line) for n in params_names):
+                    return
+                _forward(line)
+            # Seconds of SILENCE, not of work: the count restarts at every line
+            # FreeCAD prints, and every long step beats (see
+            # heartbeat_interval_s in the payload above). A limit on the
+            # overall duration killed the work of the following components
+            # because of the first slow import, and it was all the more likely
+            # the larger the module was.
+            try:
+                # The channel is passed ONLY when present: so the signature
+                # seen by non-interactive callers (and their replacements
+                # in the tests) stays as before.
+                result = run_logged(
+                    [freecadcmd, str(_SCRIPT_PATH), json_path],
+                    output_dir / "freecad.log", progress=progress,
+                    timeout=FREECAD_SILENCE_TIMEOUT_S, creationflags=_CFLAGS,
+                    **({"cancel": cancel} if cancel is not None else {}),
+                )
+            except ProcessCancelled as exc:
+                raise Cad3DError(CAD_ABORT_MESSAGE) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise _timeout_error(exc) from exc
         finally:
             try:
                 os.unlink(json_path)
@@ -1939,7 +1995,8 @@ def _run_freecad(
         # An optional output without its success marker is not a result of
         # this run, even if a file with its name exists (e.g. the child died
         # between the rename and the print): it must not ship.
-        for key, marker in (("wrl", "KICADGEN_WRL_OK"), ("mesh", "KICADGEN_MESH_OK")):
+        for key, marker in (("wrl", "KICADGEN_WRL_OK"), ("mesh", "KICADGEN_MESH_OK"),
+                            ("fcstd", "KICADGEN_FCSTD_OK")):
             if marker not in output:
                 _remove_output(published[key][0], quiet=True)
 

@@ -123,7 +123,11 @@ def test_anchor_travels_in_the_freecad_payload(tmp_path, monkeypatch):
         return original_dump(obj, fp, *args, **kwargs)
 
     monkeypatch.setattr(step_generator.json, "dump", capture_dump)
-    monkeypatch.setattr(step_generator.subprocess, "run", fake_subprocess)
+    # CONTRACT CHANGED 2026-10-27 (review sweep, S4): `_run_freecad` starts
+    # the child through `process_log.run_logged` on every path, which opens
+    # it with `subprocess.Popen`; the stop moved there from `subprocess.run`.
+    from kicadgen.cad3d import process_log
+    monkeypatch.setattr(process_log.subprocess, "Popen", fake_subprocess)
     with pytest.raises(Exception):
         step_generator._run_freecad(
             "P", [[1, 0.0, 0.0]], Body3DParams(5, 5, 5), tmp_path,

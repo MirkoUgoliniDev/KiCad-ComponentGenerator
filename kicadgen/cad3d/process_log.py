@@ -26,8 +26,12 @@ def no_window_flags(platform: str = sys.platform) -> int:
 NO_WINDOW_FLAGS = no_window_flags()
 
 
-def _windows_descendants(pid: int) -> list:
-    """Process ids started, directly or not, by `pid`, deepest first (Windows Toolhelp snapshot)."""
+def _windows_children_map() -> dict:
+    """Parent pid -> child pids of every live process (Windows Toolhelp snapshot).
+
+    The snapshot records the parent pid a process was STARTED with and never
+    updates it: see `select_descendants` for why that alone cannot be trusted.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -42,7 +46,7 @@ def _windows_descendants(pid: int) -> list:
     kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
     if not snapshot or snapshot == wintypes.HANDLE(-1).value:
-        return []
+        return {}
     children = {}
     try:
         entry = _Entry()
@@ -53,12 +57,86 @@ def _windows_descendants(pid: int) -> list:
             ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
     finally:
         kernel32.CloseHandle(snapshot)
-    found, frontier = [], [pid]
+    return children
+
+
+def _windows_creation_time(pid: int):
+    """Creation time of a live process as a FILETIME integer, or None.
+
+    None means "could not be verified": the process cannot be opened (gone,
+    or owned by another account) or GetProcessTimes refused. The caller treats
+    None as "do not touch", never as "assume it is ours".
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        creation, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        ok = kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exited),
+                                      ctypes.byref(kernel), ctypes.byref(user))
+        if not ok:
+            return None
+        return (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def select_descendants(pid: int, children: dict, creation_time) -> list:
+    """@brief Processes genuinely started, directly or not, by `pid`, deepest first.
+
+    @param pid Root of the tree (the child this program launched and still owns).
+    @param children Mapping parent pid -> list of child pids, as the operating
+        system reports it (Windows: the Toolhelp snapshot).
+    @param creation_time Callable pid -> comparable creation stamp, or None
+        when the process cannot be inspected.
+    @return Pids to terminate, deepest first, so a launcher dies after the
+        program it started.
+    @note SAFETY BOUNDARY (2026-10-27 review, H1). Windows stores the parent
+        pid a process was created with and never rewrites it when that parent
+        exits. Pids are reused, so a process whose long-gone parent had pid P
+        shows up as a child of whatever process holds P today -- possibly a
+        descendant of the FreeCAD child we are about to kill. Killing by
+        parentage alone could therefore terminate a FOREIGN process (the
+        user's editor) on a cancel or a timeout. The physical criterion that
+        tells the two apart is time: a real child is created AFTER its parent,
+        while a process older than its claimed parent cannot have been started
+        by it. Every candidate is kept only if its creation stamp is known and
+        not earlier than its parent's; an unverifiable candidate (None) is
+        skipped and its own claimed children are not explored, because their
+        link to the tree cannot be proved either. The root itself must be
+        verifiable: without its stamp nothing is selected and only the direct
+        child is killed by the caller, as before the tree kill existed.
+    """
+    found = []
+    root_born = creation_time(pid)
+    if root_born is None:
+        return []
+    frontier = [(pid, root_born)]
     while frontier:
-        nxt = [child for parent in frontier for child in children.get(parent, []) if child not in found]
-        found.extend(nxt)
+        nxt = []
+        for parent, parent_born in frontier:
+            for child in children.get(parent, []):
+                if child == pid or child in found:
+                    continue
+                born = creation_time(child)
+                if born is None or born < parent_born:
+                    # Unverifiable, or older than its claimed parent: a
+                    # pid-reuse orphan that is not ours. Never killed.
+                    continue
+                found.append(child)
+                nxt.append((child, born))
         frontier = nxt
     return list(reversed(found))
+
+
+def _windows_descendants(pid: int) -> list:
+    """Process ids started, directly or not, by `pid`, deepest first, verified by creation time."""
+    return select_descendants(pid, _windows_children_map(), _windows_creation_time)
 
 
 def _windows_terminate(pid: int) -> None:
@@ -86,10 +164,11 @@ def kill_process_tree(process, platform: str = sys.platform) -> None:
         ended deepest first, through the Windows API: no helper process is
         started (an external `taskkill` was itself a child to account for).
         Elsewhere only the direct child is killed, as before.
-    @note Never raises for a process that already exited. A process id
-        reused after its process ended cannot be confused: the descendants
-        are collected while the child is still alive, so their parent ids
-        are live.
+    @note Never raises for a process that already exited. The descendants
+        are collected while the child is still alive, and each one is kept
+        only when its creation time proves it was started by its claimed
+        parent (`select_descendants`): a pid reused by an unrelated program
+        is never terminated.
     """
     if platform == "win32" and process.poll() is None:
         try:

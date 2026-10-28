@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 from ..cad3d.annotations import (ANNOTATION_CONVENTION, EdgeFilletAnnotation,
                                   FaceTextAnnotation, swap_front_back)
 from ..cad3d.body_params import Body3DParams
+from ..cad3d.output_names import validate_output_name
 from ..cad3d.step_generator import (
     CAD_ABORT_MESSAGE, Cad3DError, find_freecadcmd, generate_3d_model,
     generate_castellated_3d_model, generate_single_package_3d_model,
@@ -69,9 +70,10 @@ from ..services.kicad_library import (
     KiCadLibraryError,
     create_preview_project,
     discover_component_artifacts,
-    global_fp_lib_table_path,
     install_component_library,
     launch_preview,
+    plan_component_install,
+    resolve_global_fp_lib_table,
 )
 from ..services.kicad_export_history import load_history as load_kicad_export_history
 from ..services.kicad_export_history import record_export as record_kicad_export
@@ -1599,6 +1601,13 @@ class MainWindow(QMainWindow):
     """@brief Coordinate the six-tab component generation workflow."""
 
     def __init__(self, profile_store=None):
+        """@brief Build the main window: parameters, tabs, menus, workers and the start page.
+
+        @param profile_store ProfileStore of the analysis profiles and of the
+            translation catalogue; None opens the bundled/user database.
+        @throws ProfileError, sqlite3.Error, OSError, ValueError When the
+            profile database cannot be opened; `main` reports them in a box.
+        """
         super().__init__()
         self._refresh_window_title()
         # Size requested for startup; reserve space for the native frame/taskbar.
@@ -2079,7 +2088,7 @@ class MainWindow(QMainWindow):
                                          silk_pin_labels=self._silk_pin_labels(),
                                          pause_after_inventory=self._inventory_pause_enabled())
         self.i18n.retranslate_widgets(dialog)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         checked = dialog.include_nc_pins()
         pause = dialog.pause_after_inventory()
@@ -2111,7 +2120,7 @@ class MainWindow(QMainWindow):
             current_family=self._selected_family(),
         )
         self.i18n.retranslate_widgets(dialog)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
 
         try:
@@ -2348,7 +2357,7 @@ class MainWindow(QMainWindow):
             previous = self.profile_store.get_type(self._profile_key())
             dialog = ProfilesDialog(self.profile_store, self)
             self.i18n.retranslate_widgets(dialog)
-            dialog.exec()
+            self._run_modal(dialog)
             if dialog.changed:
                 current = self.profile_store.get_type(self._profile_key())
                 changed_instructions = previous != current
@@ -2596,7 +2605,7 @@ class MainWindow(QMainWindow):
         from .yolo_settings_dialog import YoloSettingsDialog
         dialog = YoloSettingsDialog(self._chosen_yolo_settings(), self)
         self._yolo_settings_dialog = dialog
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
         self._yolo_settings = values
@@ -2758,8 +2767,11 @@ class MainWindow(QMainWindow):
         expensive) model without changing the default saved in the SQLite
         profile.
         """
+        # The title goes through the catalogue like every visible text
+        # (review 2026-10-27, A5): the picker shows it as it receives it.
         chosen = pick_model(
-            self._effective_model(), self, title="Modello solo per questa sessione"
+            self._effective_model(), self,
+            title=self.i18n.text("Modello solo per questa sessione"),
         )
         if not chosen:
             return
@@ -2802,7 +2814,7 @@ class MainWindow(QMainWindow):
         box.setText(self._about_html())
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         self._about_box = box
-        box.exec()
+        self._run_modal(box)
 
     def _license_texts(self) -> tuple[str, str]:
         """@brief Read the program license and the third-party notices.
@@ -2916,7 +2928,7 @@ class MainWindow(QMainWindow):
         box.setText(f"<table>{rows}</table>")
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         self._shortcuts_box = box
-        box.exec()
+        self._run_modal(box)
 
     def _open_user_guide(self) -> None:
         """@brief «Guida d'uso»: open the HTML guide shipped with the program."""
@@ -3039,6 +3051,26 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, title, tx("Risposta di GitHub non utilizzabile ({error}).",
                                                 error=result.error))
 
+    @staticmethod
+    def _run_modal(dialog) -> int:
+        """@brief Run a modal dialog and release it once it has been answered.
+
+        @param dialog A QDialog (QMessageBox included) built for one question.
+        @return What `dialog.exec()` returned.
+        @note One pattern for every modal built on this window (review
+            2026-10-27, A7): a dialog parented to the window is otherwise
+            kept alive by Qt until the window closes, and each opening of the
+            About box, a project question or a settings dialog added one more
+            hidden child. `deleteLater` is deferred to the event loop, so the
+            caller can still read the answer (`clickedButton`, `values`,
+            `project_name`) right after this returns; an attribute that keeps
+            the dialog for the tests holds a widget scheduled for deletion.
+        """
+        try:
+            return dialog.exec()
+        finally:
+            dialog.deleteLater()
+
     def _show_licenses(self) -> None:
         """@brief Show the program license and the third-party notices, read-only.
 
@@ -3119,7 +3151,7 @@ class MainWindow(QMainWindow):
         continue_button = message.addButton(
             self.i18n.text("Continua"), QMessageBox.ButtonRole.AcceptRole)
         message.setDefaultButton(continue_button)
-        message.exec()
+        self._run_modal(message)
         return True
 
     # ── Layout ──────────────────────────────────────────────────────
@@ -3295,6 +3327,8 @@ class MainWindow(QMainWindow):
             # The marked fields' tooltips and the findings are composed
             # texts: only a refresh writes them in the new language.
             self._refresh_klc_findings()
+        # The export history shows its kinds translated at draw time (B2).
+        self._refresh_kicad_export_history()
         if hasattr(self, "guided_docs"):
             # Status line and role badges are composed texts (`i18n_skip`):
             # only a refresh writes them in the new language.
@@ -4747,7 +4781,9 @@ class MainWindow(QMainWindow):
                     "ATTENZIONE: il footprint ha modifiche non applicate. Verifica, test, "
                     "esportazione e installazione usano il footprint applicato: usa Applica "
                     "nella scheda Footprint per includerle.")
-            if getattr(self, "_fp_file_stale", False):
+            if getattr(self, "_fp_file_stale", False) and not alignment:
+                # With a complete output the gate already reports this as
+                # `footprint_pending_write` (B5): one message, one remedy.
                 status += "\n" + self.i18n.text(
                     "ATTENZIONE: il file .kicad_mod non contiene le ultime modifiche applicate "
                     "al footprint: usa «Aggiorna solo il footprint» prima di installare.")
@@ -4940,13 +4976,18 @@ class MainWindow(QMainWindow):
             return
         if not self._can_leave_project():
             return
+        # The kind question comes BEFORE the working folder moves and the
+        # open project closes (review 2026-10-27, A9): a cancelled question
+        # must leave everything as it was, not a changed folder with nothing
+        # open. The answer is then handed to `_open_project_at`.
+        prepared = self._prepare_project_open(folder)
+        if prepared is None:
+            return
         if folder.parent != self._library_root():
-            previous = self.field_library_root.blockSignals(True)
-            self.field_library_root.setText(str(folder.parent))
-            self.field_library_root.blockSignals(previous)
+            self._set_library_root_quietly(str(folder.parent))
             self._update_project_path_label()
             self._switch_project("", self._general_project_state)
-        self._open_project_at(folder, save_current=False)
+        self._open_project_at(folder, save_current=False, prepared=prepared)
 
     def _refresh_window_title(self) -> None:
         """@brief Show the open project and the product version in the title bar.
@@ -5088,7 +5129,7 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         self._board_size_dialog = dialog
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return None
         length, width = (field.value() for field in fields)
         if self._is_castellated():
@@ -5103,6 +5144,14 @@ class MainWindow(QMainWindow):
         return length, width
 
     def _refresh_docs_list(self) -> None:
+        """@brief Re-read the project's docs/ folder into the document list.
+
+        @note A folder that exists but cannot be listed (permissions, a
+            disconnected disk) leaves the list empty and costs one log line,
+            said once per folder: this runs from Qt slots (every change of the
+            name or working folder), where an escaping OSError ends the
+            process through the crash hook (review 2026-10-27, A3).
+        """
         if not hasattr(self, "docs_list"):
             return
         self.docs_list.clear()
@@ -5112,20 +5161,40 @@ class MainWindow(QMainWindow):
             # a path that does not exist.
             return
         docs_dir = self._docs_dir()
-        if docs_dir.is_dir():
-            for f in sorted(docs_dir.iterdir()):
-                if f.is_file() and f.suffix.lower() in SUFFIXES:
-                    item = QListWidgetItem(f.name)
-                    item.setFlags(
-                        item.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    # The documentation just loaded must be included in the
-                    # extraction without also requiring a temporary selection
-                    # of the row.
-                    item.setCheckState(Qt.CheckState.Checked)
-                    self.docs_list.addItem(item)
+
+        def say_unreadable(exc: OSError) -> None:
+            # Every refresh of the same unreadable folder would repeat the
+            # line; it is said again only for another folder or after the
+            # folder could be read in between.
+            if getattr(self, "_docs_list_unreadable", None) != docs_dir:
+                self._docs_list_unreadable = docs_dir
+                self._append_log(tx("Cartella dei documenti non leggibile: {path} ({exc}).",
+                                    path=docs_dir, exc=exc))
+
+        try:
+            entries = sorted(docs_dir.iterdir()) if docs_dir.is_dir() else []
+            self._docs_list_unreadable = None
+        except OSError as exc:
+            entries = []
+            say_unreadable(exc)
+        for f in entries:
+            if f.is_file() and f.suffix.lower() in SUFFIXES:
+                item = QListWidgetItem(f.name)
+                item.setFlags(
+                    item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                # The documentation just loaded must be included in the
+                # extraction without also requiring a temporary selection
+                # of the row.
+                item.setCheckState(Qt.CheckState.Checked)
+                self.docs_list.addItem(item)
         if hasattr(self, 'guided_docs'):
-            self.guided_docs.refresh()
+            try:
+                self.guided_docs.refresh()
+            except OSError as exc:
+                # The guided box reads the same folder for its status line:
+                # the same system refusal must not escape this slot either.
+                say_unreadable(exc)
             if hasattr(self, 'i18n'):
                 self.i18n.retranslate_widgets(self.guided_docs)
         # The «Documenti» (documents) step follows the list just re-read.
@@ -5289,8 +5358,29 @@ class MainWindow(QMainWindow):
             self._on_extract_finished()
             self._on_extract_error(str(exc))
 
+    def _run_models(self) -> tuple[str, ...]:
+        """@brief Every model identifier the next paid run may call.
+
+        @return The extraction model, the photo model and, when the profile
+            names one, the per-body crop reading model (`crop_model`; blank
+            means «the photo model», see `analysis_profiles.resolve`).
+        @note The key check must look at the same set the worker receives
+            (review 2026-10-27, A8): a DeepSeek main and photo model with an
+            OpenRouter crop model still needs the OpenRouter key, and before
+            the crop model was not consulted. A profile that cannot be read
+            adds nothing here; the caller reports that problem itself.
+        """
+        models = [self._effective_model(), self._vision_model()]
+        try:
+            crop_model = self._profile_values().get('crop_model')
+        except (ProfileError, sqlite3.Error, OSError):
+            crop_model = None
+        if isinstance(crop_model, str) and crop_model.strip():
+            models.append(crop_model.strip())
+        return tuple(models)
+
     def _ensure_api_key(self) -> bool:
-        """@brief Before a paid AI run: True when an OpenRouter key is configured.
+        """@brief Before a paid AI run: True when every provider of `_run_models()` has a key.
 
         @return False when there is none; the user is offered «Account AI...»
             and the run does not start either way (a key saved there is used
@@ -5303,7 +5393,7 @@ class MainWindow(QMainWindow):
         from ..services import openrouter
         from ..services.providers import (PROVIDER_DEEPSEEK, ProviderKeyMissing,
                                           deepseek_api_key, provider_of)
-        models = (self._effective_model(), self._vision_model())
+        models = self._run_models()
         if any(provider_of(model) == PROVIDER_DEEPSEEK for model in models):
             try:
                 deepseek_api_key()
@@ -5337,7 +5427,7 @@ class MainWindow(QMainWindow):
         dialog.select_provider(self._balance_provider())
         dialog.key_changed.connect(self.ai_account.refresh_balance)
         self._ai_account_dialog = dialog
-        dialog.exec()
+        self._run_modal(dialog)
 
     def _start_extract_worker(self, doc_paths, document_roles, profile,
                               photo_detector, yolo_model_path,
@@ -5429,8 +5519,11 @@ class MainWindow(QMainWindow):
             # Always said, not only when it differs from the main model: it is
             # the paid call that looks at the photograph, and it must be written
             # in the log before starting, not deduced afterwards from the invoice.
+            # One catalogue template with the model as a placeholder (review
+            # 2026-10-27, A4): the sentence used to be composed from an
+            # untranslated Italian prefix and a translated suffix.
             self._on_ai_progress(
-                f"Chiamata sulla fotografia affidata a {verification_model}"
+                tx("Chiamata sulla fotografia affidata a {model}", model=verification_model)
                 + (tx(" (scelto per questa sessione).") if self._vlm_model else tx(" (da impostazioni).")))
         elif verification_model != model:
             self._on_ai_progress(tx("Rilevamento dei corpi affidato a {verification_model}.",
@@ -7855,7 +7948,15 @@ class MainWindow(QMainWindow):
         from ..cad3d.annotations import EdgeFilletAnnotation, FaceTextAnnotation
         # Validate before changing fields. Files read from disk have already
         # passed this check; direct callers must obey the same contract.
-        package_geometry = saved_package_geometry(state.get("package_geometry"))
+        legacy_pads = []
+        package_geometry = saved_package_geometry(state.get("package_geometry"), legacy_pads)
+        if legacy_pads:
+            # G7 (review 2026-10-27): an older version saved «trapezoid» pads
+            # and wrote them as rectangles; they load as rectangles, said once.
+            self._append_log(tx(
+                "Pad {pads}: la forma «trapezio» salvata da una versione precedente non ha la "
+                "geometria che KiCad richiede ed era già scritta come rettangolo; caricati come "
+                "rettangoli.", pads=", ".join(legacy_pads)))
         if package_geometry is not None:
             # The folder is the project's identity, including after a rename.
             package_geometry.name = self._component_name()
@@ -8283,7 +8384,7 @@ class MainWindow(QMainWindow):
         apply_button.setEnabled(bool(can_apply))
         box.setDefaultButton(stay_button)
         box.setEscapeButton(stay_button)
-        box.exec()
+        self._run_modal(box)
         chosen = box.clickedButton()
         if chosen is apply_button:
             return self.PENDING_EDITS_APPLY
@@ -8419,6 +8520,28 @@ class MainWindow(QMainWindow):
         self._on_library_root_changed()
         self._library_root_committed = self.field_library_root.text()
 
+    def _set_library_root_quietly(self, text: str) -> None:
+        """@brief Show `text` in «Area di lavoro» as a program decision, without the change slots.
+
+        @param text The working folder to show.
+        @note Every blocked `setText` of the root field goes through here so
+            that `_library_root_committed` follows the text. The committed
+            folder is what `_library_root()` answers while the user is typing
+            and what `_on_library_root_focus_left` puts back: a blocked
+            `setText` that left it behind made the autosave, a finishing
+            worker and the symbol recovery write under the PREVIOUS working
+            folder, and a focus-out showed that folder again (review
+            2026-10-27, A1). The slots stay blocked because the caller has
+            already saved/closed or kept the project itself.
+        """
+        field = self.field_library_root
+        previous = field.blockSignals(True)
+        try:
+            field.setText(text)
+        finally:
+            field.blockSignals(previous)
+        self._library_root_committed = field.text()
+
     def _on_library_root_focus_left(self) -> None:
         """@brief Leaving the «Area di lavoro» field without Enter drops the typed text.
 
@@ -8465,9 +8588,7 @@ class MainWindow(QMainWindow):
         if normalised(self._library_root() / self._component_name()) == normalised(folder):
             return
         if self._background_work_running() or self._automatic_generation_active:
-            self.field_library_root.blockSignals(True)
-            self.field_library_root.setText(str(folder.parent))
-            self.field_library_root.blockSignals(False)
+            self._set_library_root_quietly(str(folder.parent))
             self._update_project_path_label()
             self._refresh_start_page()
             self.ai_account.refresh()
@@ -8476,9 +8597,7 @@ class MainWindow(QMainWindow):
         # The normal save looks at `_project_dir()`, which now points to
         # the other folder: it is written explicitly into the project's one.
         if not self._can_leave_project(folder):
-            previous = self.field_library_root.blockSignals(True)
-            self.field_library_root.setText(str(folder.parent))
-            self.field_library_root.blockSignals(previous)
+            self._set_library_root_quietly(str(folder.parent))
             self._update_project_path_label()
             self._refresh_start_page()
             self.ai_account.refresh()
@@ -8577,12 +8696,12 @@ class MainWindow(QMainWindow):
         kind_dialog = ProjectKindDialog(
             tr=lambda key: self.i18n.tr("ui:" + key, default=key),
             selected="", parent=self)
-        if kind_dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(kind_dialog) != QDialog.DialogCode.Accepted:
             return
         selected_type = kind_dialog.selected_type()
         dialog = ProjectNameDialog(self._library_root(), "Nuovo progetto",
                                    tr=self.i18n.text, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         name = dialog.project_name()
         # Creating docs/ is not enough to reject a name already in use: a
@@ -8622,22 +8741,28 @@ class MainWindow(QMainWindow):
         from .project_dialogs import OpenProjectDialog
         dialog = OpenProjectDialog(self._library_root(), self._component_name(),
                                    tr=self.i18n.text, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selected_name():
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted or not dialog.selected_name():
             return
         self._open_project_at(self._library_root() / dialog.selected_name())
 
-    def _open_project_at(self, folder: Path, *, save_current: bool = True) -> None:
-        """@brief Open the project `folder` of the current working folder.
+    def _prepare_project_open(self, folder: Path):
+        """@brief Read the settings of `folder` and ask its kind when nothing says it.
 
-        @param folder Project folder; its parent must be `_library_root()`,
-            because from here on the project is addressed by name.
-        @note Applies the project's own settings when its project_config.json
-            is readable; a refused file is neither applied nor overwritten.
+        @param folder Project folder about to be opened.
+        @return `(saved, config_loaded, kind_migrated)`: the state to apply
+            (None for the general settings), whether a project_config.json
+            was read, and whether the kind just chosen must be saved at once;
+            or None when the user cancelled the kind question.
+        @note Every decision of an open is taken here, BEFORE any state
+            changes: `_open_recent_project` moves the working folder and
+            closes the open project only once this has returned a state, so
+            a cancelled question leaves folder and project as they were
+            (review 2026-10-27, A9). A refused project_config.json is noted
+            in `_project_config_refused` only when the open goes on; on a
+            cancel the previous value comes back.
         """
-        if save_current and not self._can_leave_project():
-            return
-        name = folder.name
         from .project_state import ProjectConfigError, read_project_config
+        refused_before = self._project_config_refused
         non_finite = []
         try:
             saved = read_project_config(folder, non_finite)
@@ -8661,8 +8786,9 @@ class MainWindow(QMainWindow):
             kind_dialog = ProjectKindDialog(
                 tr=lambda key: self.i18n.tr("ui:" + key, default=key),
                 selected=current_type or self._profile_key(), parent=self)
-            if kind_dialog.exec() != QDialog.DialogCode.Accepted:
-                return
+            if self._run_modal(kind_dialog) != QDialog.DialogCode.Accepted:
+                self._project_config_refused = refused_before
+                return None
             base_state = saved if isinstance(saved, dict) else self._general_project_state
             try:
                 saved = self._state_for_project_type(base_state, kind_dialog.selected_type())
@@ -8671,6 +8797,30 @@ class MainWindow(QMainWindow):
                 # open with what the project carries (review C, 11).
                 self._append_log(tx("ATTENZIONE tipologia non applicata: {exc}", exc=exc))
                 saved = base_state
+        return saved, config_loaded, kind_migrated
+
+    def _open_project_at(self, folder: Path, *, save_current: bool = True,
+                         prepared: tuple | None = None) -> None:
+        """@brief Open the project `folder` of the current working folder.
+
+        @param folder Project folder; its parent must be `_library_root()`,
+            because from here on the project is addressed by name.
+        @param save_current False when the caller has already settled the
+            open project (`_can_leave_project`).
+        @param prepared The result of `_prepare_project_open(folder)` when the
+            caller had to ask the kind before changing anything else; None
+            asks here, after the leave question.
+        @note Applies the project's own settings when its project_config.json
+            is readable; a refused file is neither applied nor overwritten.
+        """
+        if save_current and not self._can_leave_project():
+            return
+        name = folder.name
+        if prepared is None:
+            prepared = self._prepare_project_open(folder)
+            if prepared is None:
+                return
+        saved, config_loaded, kind_migrated = prepared
         # Without a file (project born before project_config.json) the general
         # settings apply, not those of the project opened before.
         self._switch_project(name, saved if saved is not None else self._general_project_state)
@@ -8726,9 +8876,11 @@ class MainWindow(QMainWindow):
     def _rename_project(self) -> None:
         """@brief «Rinomina progetto…»: new name, never that of another project.
 
-        @note Same move as for the name proposed by the analysis
-            (`_migrate_docs_to_new_name`): documents, diary, `photo-cache/` and
-            `photo-review/` follow the name.
+        @note The whole project folder moves (`_rename_project_folder`):
+            documents, diary, `photo-cache/`, `photo-review/` and the
+            generated KiCad outputs follow the name. It is the only way a
+            project changes name; the name an analysis proposes is logged,
+            never applied by itself.
         """
         if self._project_change_blocked():
             return
@@ -8740,7 +8892,7 @@ class MainWindow(QMainWindow):
         from .project_dialogs import ProjectNameDialog
         dialog = ProjectNameDialog(self._library_root(), "Rinomina progetto", current=current,
                                    tr=self.i18n.text, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         # Check here too, not only in the OK button of the window: the
         # name of another project would merge two projects (audit 25/09).
@@ -8759,6 +8911,9 @@ class MainWindow(QMainWindow):
         applied = self._rename_project_folder(dialog.project_name())
         if applied != current:
             self.field_name.setText(applied)
+            # Only now the diary resolves under the new name: a line written
+            # before this point would recreate the old folder (A2 above).
+            self._remove_stale_previews(self._project_dir(), current)
             # The symbol editor was bound to the old name: footprint link
             # «KiCadGen:OLD» and the recovery file under OLD\ (audit
             # 2026-10-15, item 9). Rebound here, whatever tab is showing; a
@@ -8793,71 +8948,6 @@ class MainWindow(QMainWindow):
         name = self._component_name()
         tab.rename_project(name, f"KiCadGen:{name}", self._symbol_recovery_path())
         self._refresh_symbol_tab()
-
-    def _migrate_docs_to_new_name(self, new_name: str) -> str:
-        """Move the documents into the folder of the new component name.
-
-        The docs/ folder lives inside the component folder, which takes its
-        name from the "Nome" field: when the AI extraction proposes a
-        different name, without this move the files loaded before would stay
-        in the old folder and disappear from the list (and could no longer be
-        selected for a new extraction). Returns the effective name: a refused
-        rename or conflicting documents keep the current project, without
-        discarding the AI result and without interrupting the generation.
-        """
-        old_name = self._component_name()
-        if not old_name:
-            # Without a name there is no component folder (`_project_dir`
-            # rejects it on purpose, since 21:55) and the block on the name prevents
-            # loading documents: there is nothing to move, the proposal
-            # is taken as it is. The buffered log lines are
-            # flushed by the first writer with the new name.
-            return new_name
-        old_docs = self._docs_dir()
-        new_docs = Path(self.field_library_root.text().strip()) / new_name / DOCS_SUBDIR
-        if new_docs.resolve() == old_docs.resolve():
-            if new_name != old_name:
-                # Only the capitalisation changes: on a disk that does not distinguish it
-                # (Windows) it is the same folder, and before the rename did
-                # nothing, without saying so (reviewer 2, defect 9).
-                return self._rename_folder_case(old_docs.parent, new_docs.parent,
-                                                old_name, new_name)
-            return old_name
-        files = [f for f in old_docs.iterdir() if f.is_file()] if old_docs.is_dir() else []
-        if not files:
-            if not self._move_log_to(new_docs.parent):
-                return old_name
-            self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
-            return new_name
-
-        # The rename asks for no confirmation: it interrupted the analysis midway
-        # with a modal, right while the worker was still working. It stays
-        # traced in the AI log, so it is always known which folder is in use.
-        self._on_ai_progress(
-            tx("Rinomina automatica: il progetto {old_name} diventa {new_name}; "
-               "{n_files} documenti spostati nella nuova cartella.",
-               old_name=old_name,
-               new_name=new_name,
-               n_files=len(files)))
-
-        if (old_docs / MANIFEST).is_file() and any((new_docs / f.name).exists() for f in files):
-            # A notice, not a question: there is nothing to decide and nothing has been
-            # touched. A modal here interrupted the analysis and covered the
-            # final account just shown.
-            message = self.i18n.tr(
-                'component.rename_conflict', new_name=new_name, old_name=old_name)
-            self._on_ai_progress(message)
-            return old_name
-        if not self._move_log_to(new_docs.parent):
-            return old_name
-        new_docs.mkdir(parents=True, exist_ok=True)
-        for f in files:
-            target = new_docs / f.name
-            if target.exists():
-                continue
-            shutil.move(str(f), str(target))
-        self._move_analysis_folders_to(old_docs.parent, new_docs.parent)
-        return new_name
 
     def _rename_project_folder(self, new_name: str) -> str:
         """@brief Rename the whole project and keep generated KiCad outputs usable.
@@ -9155,7 +9245,11 @@ class MainWindow(QMainWindow):
 
         if self._project_config_refused is not None and self._project_config_refused == old_project:
             self._project_config_refused = new_project
-        self._remove_stale_previews(new_project, old_name)
+        # The stale isolated previews are removed by `_rename_project` once the
+        # name field carries the new name: anything logged between the move
+        # and that update resolves `_log_file()` under the OLD name and
+        # recreates the old folder with only the diary inside (review
+        # 2026-10-27, A2).
         return new_name
 
     def _remove_stale_previews(self, project: Path, old_name: str) -> None:
@@ -9167,9 +9261,11 @@ class MainWindow(QMainWindow):
             files the program generates (`kicad_library.create_preview_project`),
             rebuilt by the next «Prova in KiCad» under the new name; the old
             ones would be a second, outdated board. Removed after the rename
-            succeeded, so the rename's own rollback is unaffected; a board that
-            KiCad holds open (its lock file exists) is left alone and said so,
-            like any file the system refuses.
+            succeeded AND the name field was updated, so the rename's own
+            rollback is unaffected and the lines logged here land in the
+            renamed project's diary; a board that KiCad holds open (its lock
+            file exists) is left alone and said so, like any file the system
+            refuses.
         """
         from ..services.kicad_library import PREVIEW_DIR_NAME, kicad_lock_file
         folder = project / PREVIEW_DIR_NAME
@@ -9189,13 +9285,6 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 self._append_log(tx("Anteprima KiCad con il nome vecchio non rimossa: {path} "
                                     "({exc}).", path=stale, exc=exc))
-
-    def _rename_folder_case(self, old_project: Path, new_project: Path,
-                            old_name: str, new_name: str) -> str:
-        """@brief Compatibility wrapper for a case-only whole-project rename."""
-        if old_project != self._project_dir() or new_project.name != new_name:
-            return old_name
-        return self._rename_project_folder(new_name)
 
     def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
         """@brief Bring into the renamed folder everything the analysis produced.
@@ -9479,7 +9568,7 @@ class MainWindow(QMainWindow):
             keep = box.addButton(self.i18n.text("Lascia così"), QMessageBox.ButtonRole.RejectRole)
             box.setDefaultButton(keep)
             box.setEscapeButton(keep)
-            box.exec()
+            self._run_modal(box)
             return self.GEOMETRY_DOUBT_SWAP if box.clickedButton() is swap else self.GEOMETRY_DOUBT_KEEP
         confirm = box.addButton(self.i18n.text("Confermo i dati"), QMessageBox.ButtonRole.AcceptRole)
         j_lead = (box.addButton(self.i18n.text("Piedini a J"), QMessageBox.ButtonRole.YesRole)
@@ -9487,7 +9576,7 @@ class MainWindow(QMainWindow):
         back = box.addButton(self.i18n.text("Torna indietro"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(back)
         box.setEscapeButton(back)
-        box.exec()
+        self._run_modal(box)
         clicked = box.clickedButton()
         if j_lead is not None and clicked is j_lead:
             return self.GEOMETRY_DOUBT_J_LEAD
@@ -9685,7 +9774,7 @@ class MainWindow(QMainWindow):
                                        QMessageBox.ButtonRole.DestructiveRole)
         box.setDefaultButton(keep)
         box.setEscapeButton(keep)
-        box.exec()
+        self._run_modal(box)
         return (self.USER_PIN_NAMES_REPLACE if box.clickedButton() is replace_button
                 else self.USER_PIN_NAMES_KEEP)
 
@@ -9698,7 +9787,10 @@ class MainWindow(QMainWindow):
             # (review C, 3).
             try:
                 geometry_data = dict(params.package_geometry)
-                geometry_data.setdefault("name", params.name or self._component_name())
+                # The package carries the PROJECT name, never the analysis's raw
+                # proposal (sweep 2026-10-27): the geometry now validates its name as a
+                # file name, and a proposal such as «LM358/LM2904» lost the pads.
+                geometry_data["name"] = self._component_name() or "Package"
                 validated_package_geometry = package_from_mapping(geometry_data)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(tx(
@@ -9743,15 +9835,15 @@ class MainWindow(QMainWindow):
         # Rewriting it on our own meant moving docs/ on every analysis and leaving in
         # the work area a folder for every name ever proposed.
         self._log_proposed_name(params.name)
-        if params.name and not self._component_name():
-            # No name chosen: there is nothing to respect and the proposal
-            # is better than "NUOVO_COMPONENTE".
-            params.name = self._migrate_docs_to_new_name(params.name)
-            self.field_name.setText(params.name)
-        else:
-            # Everything that is generated carries the chosen name: footprint,
-            # model and folders must stay in agreement with each other.
-            params.name = self._component_name() or params.name
+        # Everything that is generated carries the chosen name: footprint,
+        # model and folders must stay in agreement with each other. A name is
+        # always present here: an extraction cannot start without one
+        # (`_extract_block_reason`), and a result of a run whose project
+        # changed meanwhile is discarded by `_analysis_result_is_current`.
+        # The branch that adopted the proposal for a nameless project, with
+        # its document migration, was unreachable and is gone (review
+        # 2026-10-27, A6).
+        params.name = self._component_name() or params.name
         # After the name, because the package lives in the component folder.
         self._store_extraction_review_bundle()
         self._refresh_reopen_review_button()
@@ -9777,7 +9869,10 @@ class MainWindow(QMainWindow):
             try:
                 if self.package_geometry is None:
                     geometry_data = dict(params.package_geometry)
-                    geometry_data.setdefault("name", params.name or self._component_name())
+                    # The package carries the PROJECT name, never the analysis's raw
+                    # proposal (sweep 2026-10-27): the geometry now validates its name as a
+                    # file name, and a proposal such as «LM358/LM2904» lost the pads.
+                    geometry_data["name"] = self._component_name() or "Package"
                     self.package_geometry = package_from_mapping(geometry_data)
                 self._append_log(
                     f"Geometria package acquisita: {self.package_geometry.family}, "
@@ -12409,11 +12504,35 @@ class MainWindow(QMainWindow):
     def _kicad_files_alignment_block(self):
         """@brief The first (code, reason) of a file on disk not matching the parameters, or None.
 
-        @return The footprint block first (regenerating the footprint is the
+        @return The pending footprint write first (`_footprint_pending_block`),
+            then the footprint block (regenerating the footprint is the
             first step), then the symbol one (review pass 2, M1), then the STEP one.
         """
-        return (self._footprint_alignment_block() or self._symbol_alignment_block()
-                or self._step_alignment_block())
+        return (self._footprint_pending_block() or self._footprint_alignment_block()
+                or self._symbol_alignment_block() or self._step_alignment_block())
+
+    def _footprint_pending_block(self):
+        """@brief (code, reason) while an APPLIED footprint edit is not in the .kicad_mod yet.
+
+        @return (`footprint_pending_write`, translated reason) while a rewrite
+            is pending (`_fp_rewrite_dirty`: queued, or refused because the
+            window was busy or the working folder changed) or the project
+            records that its file is behind (`_fp_file_stale`); None otherwise.
+        @note INVARIANT (review 2026-10-27, B5): the preview and the
+            installations copy the .kicad_mod on disk. Pads and outline are
+            compared by `_footprint_alignment_block`, but an applied drawing
+            or text position changes neither, so without this block the
+            pre-edit file was copied while the gate read «ready». The remedy
+            is «Applica ai file», which regenerates the footprint from the
+            applied state and clears both flags.
+        """
+        if not (getattr(self, "_fp_rewrite_dirty", False)
+                or getattr(self, "_fp_file_stale", False)):
+            return None
+        return ("footprint_pending_write", self.i18n.text(
+            "File non aggiornati: una modifica applicata al footprint non è ancora scritta nel "
+            "file .kicad_mod. Premi «Applica ai file» per riscriverlo prima di provarlo o "
+            "installarlo."))
 
     def _kicad_work_busy(self) -> bool:
         """@brief True while background work may be rewriting the files (audit 2026-10-15, M3).
@@ -12434,6 +12553,7 @@ class MainWindow(QMainWindow):
     KICAD_BLOCK_REMEDIES = {
         "busy": None,                               # wait for the work to end
         "footprint_invalid": None,                  # correct the fields
+        "footprint_pending_write": "btn_apply_metadata",  # «Applica ai file» (B5)
         "footprint_pads": "btn_apply_metadata",     # «Applica ai file»
         "footprint_outline": "btn_apply_metadata",
         "symbol_pads": "btn_update_symbol_file",    # «Aggiorna il file del simbolo»
@@ -12531,10 +12651,23 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 QMessageBox.warning(self, self.i18n.text("Modello STEP obsoleto"), self.i18n.text(
                     "Impossibile eliminare {path}: {error}").format(path=path, error=exc))
-        self._step_source_pads = None
-        self._step_source_body = None
         self._invalidate_generated_mesh()
-        self._append_log(tx("Modello STEP obsoleto rimosso: {files}.", files=", ".join(removed)))
+        if self._step_still_on_disk():
+            # INVARIANT (review 2026-10-27, B1): the source records are what
+            # makes the gate see a STEP as obsolete. While the .step is still
+            # on disk (locked by another program, read-only) the records stay,
+            # so the `step_*` block keeps the KiCad commands off: clearing
+            # them made the gate read «unknown», and an installation copied
+            # the obsolete model.
+            self._append_log(tx(
+                "Modello STEP obsoleto non rimosso: il file .step è ancora su disco (bloccato o "
+                "in sola lettura); i comandi KiCad restano bloccati finché non viene eliminato."))
+        else:
+            # The STEP is really gone: nothing on disk can be stale any more.
+            self._step_source_pads = None
+            self._step_source_body = None
+        if removed:
+            self._append_log(tx("Modello STEP obsoleto rimosso: {files}.", files=", ".join(removed)))
         self._refresh_output_actions()
 
     def _refresh_kicad_remedies(self) -> None:
@@ -12705,6 +12838,12 @@ class MainWindow(QMainWindow):
         self._refresh_klc_findings()
 
     def _verify_component(self):
+        """@brief «Verifica componente per KiCad»: run the component checks in a modal dialog.
+
+        @note Refused while work runs; the open dialog counts as work in
+            progress for the KiCad gate, and a footprint rewrite deferred
+            while it was open is retried when it closes.
+        """
         from .component_check_dialog import ComponentCheckDialog
         if self._background_work_running() or self._automatic_generation_active:
             QMessageBox.information(self, self.i18n.text('Verifica componente per KiCad'),
@@ -12725,7 +12864,7 @@ class MainWindow(QMainWindow):
         # the KiCad commands follow it on opening and on closing (review pass 2, L6).
         self._refresh_kicad_command_gate()
         try:
-            dialog.exec()
+            self._run_modal(dialog)
         finally:
             self._component_review_dialog = None
             self._refresh_kicad_command_gate()
@@ -12753,8 +12892,39 @@ class MainWindow(QMainWindow):
             Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
         self.file_paths_toggle.setText(self._file_paths_toggle_text(expanded))
 
+    #: Stable codes of the export-history `kind`, with the Italian catalogue
+    #: source of their display name (review 2026-10-27, B2). The history is a
+    #: JSON file kept across sessions and languages: it stores the CODE, and
+    #: the name is translated each time the table is drawn.
+    EXPORT_KIND_NAMES = {
+        "project_library": "Libreria di progetto",
+        "global_library": "Libreria globale",
+        "symbol_file": "File simbolo",
+    }
+    #: Rows written before the codes stored the Italian name itself: it is
+    #: mapped back to its code so an old history shows in the chosen language.
+    _LEGACY_EXPORT_KINDS = {name: code for code, name in EXPORT_KIND_NAMES.items()}
+
+    def _export_kind_text(self, kind) -> str:
+        """@brief Display text of an export-history `kind` in the current language.
+
+        @param kind A stable code, a legacy Italian name or any other value.
+        @return The translated name for a known code or legacy name; any
+            other value shown as it is (a record from a newer version).
+        """
+        text = "" if kind is None else str(kind)
+        code = self._LEGACY_EXPORT_KINDS.get(text, text)
+        name = self.EXPORT_KIND_NAMES.get(code)
+        return self.i18n.text(name) if name else text
+
     def _refresh_kicad_export_history(self) -> None:
-        """Refresh the concise, persistent list of KiCad exports."""
+        """@brief Refresh the concise, persistent list of KiCad exports.
+
+        @note The history file is outside the program's control (a user may
+            edit it, a newer version may add fields): a field that is not a
+            string is shown as text, and a malformed row never stops the
+            window from being built (review 2026-10-27, B8).
+        """
         table = getattr(self, "kicad_export_table", None)
         if table is None:
             return
@@ -12762,10 +12932,18 @@ class MainWindow(QMainWindow):
         # The table has a tab of its own: every record kept on disk is shown.
         table.setRowCount(len(records))
         for row, record in enumerate(records):
-            destination = record.get("destination", "")
-            values = (record.get("component", ""), record.get("kind", ""),
-                      Path(destination).name or destination,
-                      record.get("timestamp", "").replace("T", " ")[:19])
+            # Every field is coerced to text: `load_history` guarantees a
+            # dict per row, not the type of each value.
+            def field(key):
+                value = record.get(key, "")
+                return "" if value is None else str(value)
+            destination = field("destination")
+            try:
+                short_destination = Path(destination).name or destination
+            except (TypeError, ValueError):
+                short_destination = destination
+            values = (field("component"), self._export_kind_text(record.get("kind")),
+                      short_destination, field("timestamp").replace("T", " ")[:19])
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setToolTip(str(destination) if column == 2 else str(value))
@@ -12809,11 +12987,18 @@ class MainWindow(QMainWindow):
                 "di aver installato la libreria nel progetto giusto.").format(
                     name=self._component_name()),
         )
+        # Review 2026-10-27, B7: the symbol is written automatically beside
+        # the footprint, so the page names that file; the button calls the
+        # export itself (clicking a disabled toolbar button did nothing) and
+        # says why when the export cannot run.
         add_page(
-            "3. Esporta e registra il simbolo elettrico",
-            "Esporta il simbolo .kicad_sym, poi in KiCad apri Gestisci librerie di simboli "
-            "e aggiungi il file alla tabella del progetto o a quella globale.",
-            (("Esporta simbolo KiCad…", self.btn_export_symbol.click),),
+            "3. Registra il simbolo elettrico",
+            self.i18n.text(
+                "Il simbolo elettrico è già scritto nella cartella del componente, nel file "
+                "{name}.kicad_sym. In KiCad apri Gestisci librerie di simboli e aggiungi quel "
+                "file alla tabella del progetto o a quella globale. Per salvarne una copia "
+                "altrove usa «Esporta simbolo KiCad…».").format(name=self._component_name()),
+            (("Esporta simbolo KiCad…", self._export_symbol_from_wizard),),
         )
         add_page(
             "4. Collega simbolo e footprint",
@@ -12829,7 +13014,25 @@ class MainWindow(QMainWindow):
             "La scheda KiCadGen conserva lo storico delle esportazioni effettuate da questo tool.",
         )
         self.i18n.retranslate_widgets(wizard)
-        wizard.exec()
+        self._run_modal(wizard)
+
+    def _export_symbol_from_wizard(self) -> None:
+        """@brief «Esporta simbolo KiCad…» of the usage wizard: export, or say why not.
+
+        @note `_export_electrical_symbol` reports a refusal (unapplied edits,
+            rows not matching the pads) in the status line of the Symbol tab,
+            which the modal wizard hides: here the same reason is shown in a
+            message box, so the click is never silent (review 2026-10-27, B7).
+        """
+        if self.symbol_tab.has_pending_edits():
+            reason = self.i18n.text(
+                "Il simbolo ha modifiche non applicate: applicale o annullale nella scheda Simbolo.")
+        else:
+            reason = self._symbol_pad_mismatch()
+        if reason:
+            QMessageBox.information(self, self.i18n.text("Esporta simbolo KiCad"), reason)
+            return
+        self._export_electrical_symbol()
 
     @staticmethod
     def _note_with_icons(note, *buttons) -> QHBoxLayout:
@@ -12847,6 +13050,7 @@ class MainWindow(QMainWindow):
         return row
 
     def _open_project_dir(self) -> None:
+        """@brief Open the component folder in the file manager, once a footprint exists."""
         if not self._refresh_output_actions():
             self._append_log(tx("Genera prima il footprint del componente corrente."))
             return
@@ -13004,24 +13208,31 @@ class MainWindow(QMainWindow):
         if not destination:
             return
         try:
-            table_path = global_fp_lib_table_path(applications.kicad_cli)
+            # The table and the KiCad version it belongs to are resolved
+            # BEFORE any write, so the confirmation of `_install_kicad_library`
+            # names them (review 2026-10-27, K/D1): a user with two KiCad
+            # versions sees which one receives the library.
+            location = resolve_global_fp_lib_table(applications.kicad_cli)
         except KiCadLibraryError as exc:
             QMessageBox.warning(
                 self, self.i18n.text("Configurazione KiCad non disponibile"),
                 self._kicad_error_text(exc))
             return
         self._install_kicad_library(
-            Path(destination), project_library=False, table_path=table_path,
-            artifacts=artifacts)
+            Path(destination), project_library=False, table_path=location.path,
+            table_version=location.version, artifacts=artifacts)
 
     def _install_kicad_library(
             self, destination: Path, *, project_library: bool,
-            table_path: Path | None = None, artifacts=None) -> None:
+            table_path: Path | None = None, table_version: str | None = None,
+            artifacts=None) -> None:
         """@brief Install with an explicit overwrite decision and final report.
 
         @param destination Folder that receives KiCadGen.pretty/.3dshapes.
         @param project_library True for a portable project library.
         @param table_path Global fp-lib-table, for a global installation.
+        @param table_version KiCad settings version that owns `table_path`
+            (`GlobalTableLocation.version`), named in the global confirmation.
         @param artifacts Discovered artifacts, or None to discover them.
         @note The common sink of both installations checks the required
             metadata again, so no caller (button, menu, wizard, test or a
@@ -13030,6 +13241,15 @@ class MainWindow(QMainWindow):
         @note The sink also refuses while work runs or while the files do not
             match the parameters (`_refuse_kicad_command`): the files are
             copied below, so this is the last point where it can be checked.
+        @note The gate is checked AGAIN right before every install call
+            (review 2026-10-27, B3): each modal question spins the event
+            loop, and a deferred footprint rewrite (`_retry_footprint_rewrite`)
+            or a finished worker can change the files while the user reads it.
+        @note The confirmation is worded from `plan_component_install`, the
+            same pre-flight the install runs (review 2026-10-27, K): files
+            overwritten, files deleted (a WRL the component no longer has)
+            and links written through. A global installation always asks,
+            naming the table and its KiCad version before anything is written.
         """
         artifacts = artifacts or self._current_kicad_artifacts()
         if artifacts is None:
@@ -13040,26 +13260,33 @@ class MainWindow(QMainWindow):
             return
         if not self._confirm_klc_errors():
             return
-        targets = (
-            destination / "KiCadGen.pretty" / f"{artifacts.name}.kicad_mod",
-            destination / "KiCadGen.3dshapes" / f"{artifacts.name}.step",
-            destination / "KiCadGen.3dshapes" / f"{artifacts.name}.wrl",
-        )
-        existing = [path for path in targets if path.exists()]
-        overwrite = False
-        if existing:
+        try:
+            plan = plan_component_install(
+                artifacts, destination, library_name="KiCadGen",
+                project_library=project_library, table_path=table_path)
+        except KiCadLibraryError as exc:
+            QMessageBox.warning(
+                self, self.i18n.text("Installazione KiCad non riuscita"),
+                self._kicad_error_text(exc))
+            return
+        overwrite = bool(plan.replaced or plan.removed)
+        if overwrite or not project_library:
             answer = QMessageBox.question(
-                self, self.i18n.text("Componente già presente"),
-                self.i18n.tr(
-                    "kicad.overwrite_component", files="\n".join(map(str, existing))),
+                self, self.i18n.text(
+                    "Componente già presente" if overwrite else "Libreria globale KiCad"),
+                self._install_plan_text(plan, project_library, table_version),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-            overwrite = True
         replace_entry = False
         while True:
+            # INVARIANT (B3): nothing is copied unless the gate holds NOW,
+            # after the questions above (and the entry-conflict one below)
+            # gave the event loop a chance to rewrite the files.
+            if self._refuse_kicad_command():
+                return
             try:
                 result = install_component_library(
                     artifacts, destination, library_name="KiCadGen",
@@ -13097,7 +13324,18 @@ class MainWindow(QMainWindow):
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
             footprint=result.footprint_path, table=result.table_path)
-        kind = "Libreria di progetto" if project_library else "Libreria globale"
+        # The report says what the install did to files that were already
+        # there (K): overwritten, or deleted because the source lost them.
+        replaced = tuple(getattr(result, "replaced", ()) or ())
+        removed = tuple(getattr(result, "removed", ()) or ())
+        if replaced:
+            message += "\n\n" + self.i18n.tr(
+                "kicad.result_replaced", files="\n".join(map(str, replaced)))
+        if removed:
+            message += "\n\n" + self.i18n.tr(
+                "kicad.result_removed", files="\n".join(map(str, removed)))
+        # A stable code is persisted, translated only when shown (B2).
+        kind = "project_library" if project_library else "global_library"
         if record_kicad_export(component=artifacts.name, kind=kind,
                                source=str(artifacts.component_dir),
                                destination=str(destination)):
@@ -13109,6 +13347,33 @@ class MainWindow(QMainWindow):
         self.label_kicad_status.setText(message)
         QMessageBox.information(
             self, self.i18n.text("Installazione KiCad completata"), message)
+
+    def _install_plan_text(self, plan, project_library: bool,
+                           table_version: str | None) -> str:
+        """@brief Confirmation text of an installation, worded from its plan.
+
+        @param plan `InstallPlan` of `plan_component_install`.
+        @param project_library True for a project library (no table section).
+        @param table_version KiCad settings version of the global table, or None.
+        @return The sections that apply (global table, files overwritten,
+            files deleted, links written through) and the closing question.
+        """
+        sections = []
+        if not project_library:
+            sections.append(self.i18n.tr(
+                "kicad.plan_global_table", table=plan.table_path,
+                version=table_version or "?"))
+        if plan.replaced:
+            sections.append(self.i18n.tr(
+                "kicad.plan_replaced", files="\n".join(map(str, plan.replaced))))
+        if plan.removed:
+            sections.append(self.i18n.tr(
+                "kicad.plan_removed", files="\n".join(map(str, plan.removed))))
+        if plan.linked:
+            sections.append(self.i18n.tr(
+                "kicad.plan_linked", files="\n".join(map(str, plan.linked))))
+        sections.append(self.i18n.tr("kicad.plan_question"))
+        return "\n\n".join(sections)
 
     #: Name of the journal written in the component folder. It is there and not
     #: in a system folder because it belongs to the component: whoever opens that
@@ -13486,9 +13751,14 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _validate_output_name(name):
-        if (not name or name in ('.', '..') or name != name.rstrip(' .')
-                or re.search(r'[<>:"/\\|?*\x00-\x1f]', name)):
-            raise ValueError(tx("Il nome del componente non è un nome di file valido."))
+        """@brief Refuse a component name that is not a plain file name.
+
+        @param name Component name the files will carry.
+        @throws ValueError With the user-facing message.
+        @note One shared rule (review 2026-10-27, H4): the window and the
+            script callers of the generators refuse the same names.
+        """
+        validate_output_name(name)
 
     def _validate_automatic_input(self, params, *, require_body_dimensions=True):
         """@brief Refuse an extraction the automatic generation cannot use safely.
@@ -13519,7 +13789,10 @@ class MainWindow(QMainWindow):
             # the board's pin matrix if the package payload is malformed.
             try:
                 geometry_data = dict(params.package_geometry)
-                geometry_data.setdefault("name", params.name or self._component_name())
+                # The package carries the PROJECT name, never the analysis's raw
+                # proposal (sweep 2026-10-27): the geometry now validates its name as a
+                # file name, and a proposal such as «LM358/LM2904» lost the pads.
+                geometry_data["name"] = self._component_name() or "Package"
                 package_from_mapping(geometry_data)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(
@@ -13746,6 +14019,15 @@ class MainWindow(QMainWindow):
                             "pad: {pins}.", pins=", ".join(dropped)))
 
     def _confirm_output_overwrite(self, params, project_dir, body):
+        """@brief Ask before a generation overwrites the component's files.
+
+        @param params Parameters about to be generated (their `name` names the files).
+        @param project_dir Component folder.
+        @param body 3D body, or None when no STEP/WRL/preview will be written.
+        @return True when nothing would be overwritten or the user confirmed.
+        @note The symbol file is listed only when the generation rewrites it
+            (no unapplied symbol edits that survive the generation).
+        """
         targets = [project_dir / f'{params.name}.pretty' / f'{params.name}.kicad_mod']
         symbol_tab = getattr(self, "symbol_tab", None)
         if (symbol_tab is None or not symbol_tab.has_pending_edits()
@@ -14217,12 +14499,30 @@ class MainWindow(QMainWindow):
         """@brief A footprint was written: keep the symbol rows in step and save the symbol.
 
         @param path Path of the footprint written.
+        @note Currency is tested before any side effect on the window
+            (review 2026-10-27, B4): a stale result only updates the records
+            that describe the file on disk (read-back cache, written metadata).
         """
         if self._automatic_generation_active:
             self._automatic_footprint_done = True
         # Our own write: never trust a cached read-back of the previous file,
         # whatever the file system's timestamp resolution (review pass 2, L3).
         self._written_pads_cache = None
+        # The metadata the worker wrote into this file are now the ones on
+        # disk (M1), current result or not: this record describes the FILE.
+        # `sender()` is the worker that wrote it; a direct call (no worker)
+        # records nothing.
+        self._note_metadata_written(getattr(self.sender(), "metadata_snapshot", None))
+        self._append_log(f"OK -> {path}")
+        if not self._cad_result_is_current():
+            # INVARIANT (review 2026-10-27, B4): a result of parameters the
+            # window no longer holds must not drive the window. The pinout
+            # is not reconciled with its pads, the symbol is not saved over
+            # it and the footprint is not declared in step with the project:
+            # the gate compares the file with the CURRENT parameters and
+            # asks for a regeneration.
+            self._refresh_output_actions()
+            return
         # The applied pinout follows the pads just written (review pass 3,
         # H1): rows of pads the footprint no longer has are dropped here, so
         # the symbol below is exported and the editor never shows a state it
@@ -14235,14 +14535,7 @@ class MainWindow(QMainWindow):
         # Every generation writes the APPLIED footprint: the file is in step
         # with the project again (the autosave records it).
         self._fp_file_stale = False
-        # The metadata the worker wrote into this file are now the applied
-        # ones (M1). `sender()` is the worker that wrote it; a direct call
-        # (no worker) records nothing.
-        self._note_metadata_written(getattr(self.sender(), "metadata_snapshot", None))
         self._refresh_output_actions()
-        self._append_log(f"OK -> {path}")
-        if not self._cad_result_is_current():
-            return
         self._draw_preview()
         self._draw_preview_3d()
 
@@ -15170,7 +15463,7 @@ class MainWindow(QMainWindow):
         stay_button = box.addButton(self.i18n.text("Resta"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(stay_button)
         box.setEscapeButton(stay_button)
-        box.exec()
+        self._run_modal(box)
         chosen = box.clickedButton()
         if chosen is apply_button:
             return self.PENDING_EDITS_APPLY
@@ -16906,7 +17199,7 @@ class MainWindow(QMainWindow):
         self._component_review_dialog = dialog
         self._refresh_kicad_command_gate()       # busy while open (review pass 2, L6)
         try:
-            if dialog.exec() == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
+            if self._run_modal(dialog) == QDialog.DialogCode.Accepted and snapshot == self.symbol_tab.draft_rows():
                 self.symbol_tab.use_pin_type_suggestions(dialog.selected())
         finally:
             self._component_review_dialog = None
@@ -17136,6 +17429,12 @@ class MainWindow(QMainWindow):
             return None
 
     def _export_electrical_symbol(self):
+        """@brief «Esporta simbolo KiCad…»: save a copy of the applied symbol where the user chooses.
+
+        @note Refused, with the reason in the Symbol tab status, while the
+            editor holds unapplied edits or the rows do not match the
+            footprint pads; a successful export is added to the history.
+        """
         # Keep direct invocations as safe as the disabled toolbar button: an
         # export must never silently use older geometry than the visible draft.
         if self.symbol_tab.has_pending_edits():
@@ -17167,7 +17466,8 @@ class MainWindow(QMainWindow):
             return
         path = str(exported)
         message = self.i18n.text("Simbolo esportato: {path}").format(path=path)
-        if record_kicad_export(component=self._component_name(), kind="File simbolo",
+        # A stable code is persisted, translated only when shown (B2).
+        if record_kicad_export(component=self._component_name(), kind="symbol_file",
                                source=str(self._project_dir()), destination=str(Path(path))):
             self._refresh_kicad_export_history()
         else:
@@ -17178,9 +17478,10 @@ class MainWindow(QMainWindow):
         self._append_log(message)
 
     def _show_pinout_dialog(self) -> None:
+        """@brief Edit the pinout table in a modal dialog and apply the accepted rows."""
         dialog = PinoutDialog(self.pinout, self._component_name(), self)
         self.i18n.retranslate_widgets(dialog)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         edited = dialog.edited_pinout()
         if edited == self.pinout:
@@ -18031,6 +18332,13 @@ class MainWindow(QMainWindow):
         self._set_3d_status(message, STATUS_INFO)
 
     def _on_terminal_detail_done(self, components):
+        """@brief Apply the terminal detail of the photo bodies, unless the data changed meanwhile.
+
+        @param components Photo components with their `terminal_geometry`.
+        @note A result whose model revision, photo or components differ from
+            the window's is discarded with a log line; otherwise the bodies
+            are replaced and the generated mesh invalidated.
+        """
         worker = self._terminal_worker
         if (worker._model_revision != self._model_revision
                 or worker._photo_snapshot != self._photo_png
@@ -18292,7 +18600,7 @@ class MainWindow(QMainWindow):
         components, _ = self._attach_accepted_component_images(components, include_png=True)
         dialog = ConsolidateDialog(components, self, i18n=self.i18n)
         self.i18n.retranslate_widgets(dialog)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         chosen = dialog.selected_components()
         if not chosen:
@@ -18332,7 +18640,7 @@ class MainWindow(QMainWindow):
         """@brief Open the archive list, where wrong entries can be deleted."""
         dialog = AcceptedModelsDialog(parent=self, i18n=self.i18n)
         self.i18n.retranslate_widgets(dialog)
-        dialog.exec()
+        self._run_modal(dialog)
 
     def _show_accepted_models_for_board(self) -> None:
         """@brief Open the archive from the 3D tab, this board's entries first.
@@ -18346,7 +18654,7 @@ class MainWindow(QMainWindow):
                                       components=self._photo_components_from_table(),
                                       roots=_search_roots(None))
         self.i18n.retranslate_widgets(dialog)
-        dialog.exec()
+        self._run_modal(dialog)
 
     def _show_generated_mesh(self, step_path: Path) -> None:
         """Show in the preview the mesh of the solid just generated (fillets and text included)."""
@@ -19376,6 +19684,11 @@ class MainWindow(QMainWindow):
         return params
 
     def _draw_preview(self) -> None:
+        """@brief Redraw the 2D footprint preview from the current parameters.
+
+        @note Dispatches by parameter kind (package, castellated module, pin
+            header); without parameters the scene is cleared.
+        """
         # The parameters are created before the tabs (`_init_parameters`): the
         # component type chosen while the Progetto (project) tab is being built
         # changes them when the preview does not exist yet, and there is nothing to redraw.
@@ -19643,6 +19956,11 @@ class MainWindow(QMainWindow):
         self._fit_preview()
 
     def _edit_preview_pad(self, token: str) -> None:
+        """@brief Open the pad editor for a pad clicked in the 2D preview.
+
+        @param token "header:<number>" or "package:<index>:<number>"; a
+            package pad of a header-mounted part edits the header pad.
+        """
         parts = str(token).split(":", 2)
         mode = self.combo_mounting.currentData()
         if parts[0] == "header" and len(parts) == 2:
@@ -19714,7 +20032,7 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
         updated = deepcopy(self.header_pad_overrides)
         if shape.currentData() == "default":
@@ -19936,11 +20254,17 @@ class MainWindow(QMainWindow):
         if key not in TEXT_KEYS:
             return
         menu = QMenu(self)
-        reset = menu.addAction(self.i18n.text("Posizione predefinita"))
-        reset.setEnabled(key in self.footprint_text_positions)
-        chosen = menu.exec(QCursor.pos())
-        if chosen is reset:
-            self._set_footprint_text_position(key, None)
+        try:
+            reset = menu.addAction(self.i18n.text("Posizione predefinita"))
+            reset.setEnabled(key in self.footprint_text_positions)
+            chosen = menu.exec(QCursor.pos())
+            if chosen is reset:
+                self._set_footprint_text_position(key, None)
+        finally:
+            # A menu parented to the window lives until the window closes:
+            # each right click added one more hidden child (review
+            # 2026-10-27, B6). Deferred, so the chosen action is still valid above.
+            menu.deleteLater()
 
     def _edit_package_pad(self, pad_index: int) -> None:
         """@brief Edit the selected package pad's shape, dimensions and, for a holed pad, its drill.
@@ -19962,8 +20286,11 @@ class MainWindow(QMainWindow):
         choices = (
             ("Cerchio", "circle"), ("Quadrato", "square"),
             ("Rettangolo", "rect"), ("Ovale", "oval"),
-            ("Rettangolo arrotondato", "roundrect"), ("Trapezio", "trapezoid"),
+            ("Rettangolo arrotondato", "roundrect"),
         )
+        # No «Trapezio» (review 2026-10-27, G7): a package pad has no
+        # `rect_delta`, so the shape was saved as a trapezoid and written as
+        # a plain rectangle. Only shapes `PinSpec` can describe are offered.
         for label, value in choices:
             shape.addItem(self.i18n.text(label), value)
         current_shape = ("square" if pin.shape == "rect" and
@@ -20002,7 +20329,7 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
 
         selected_shape = shape.currentData()
@@ -20160,6 +20487,10 @@ class MainWindow(QMainWindow):
     # ── Cambio tab ─────────────────────────────────────────────────
 
     def _on_tab_changed(self, index: int) -> None:
+        """@brief Realign the commands and refresh the content of the tab just shown.
+
+        @param index Index of the current tab (Qt `currentChanged`).
+        """
         self._refresh_output_actions()
         # The realignment may have turned this tab off and moved the
         # window elsewhere (nested currentChanged): the work of a tab
@@ -20373,6 +20704,25 @@ class MainWindow(QMainWindow):
             self._loading_cursor_set = False
 
 
+def _startup_error_language() -> str:
+    """@brief Language of the start-up error box, never raising.
+
+    @return The configured language when config.json can be read and names
+        one of LANGUAGES, "it" (the source language) otherwise.
+    @note SAFETY BOUNDARY (review 2026-10-27, B9): this runs in the handler
+        of a failed start-up. Reading the configuration again may fail for
+        the same reason the window did (unreadable file, broken JSON), and an
+        exception here would replace the explanatory message box with a
+        traceback; any failure falls back to Italian.
+    """
+    try:
+        config = load_config()
+        language = config.get("language", "it") if isinstance(config, dict) else "it"
+    except Exception:  # noqa: BLE001 - last-resort handler, see the note above
+        return "it"
+    return language if language in LANGUAGES else "it"
+
+
 def main(splash=None) -> None:
     """@brief Start the Qt application, show the main window and run the event loop until exit.
 
@@ -20393,7 +20743,7 @@ def main(splash=None) -> None:
     try:
         window = MainWindow()
     except (ProfileError, sqlite3.Error, OSError, ValueError) as exc:
-        language = load_config().get("language", "it")
+        language = _startup_error_language()
         title = DEFAULT_TRANSLATIONS["ui:Database profili non disponibile"].get(
             language, DEFAULT_TRANSLATIONS["ui:Database profili non disponibile"]["en"])
         template = DEFAULT_TRANSLATIONS["startup.profile_database_error"].get(

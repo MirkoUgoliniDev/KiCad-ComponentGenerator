@@ -8,6 +8,8 @@ pin passano nei fori della scheda stessa), non una soglia tarata sul caso:
 positivo e negativi la distinguono per struttura.
 """
 from kicadgen.services.datasheet_extractor import ExtractedParams, fit_body_to_pin_field
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 
 def _params(**changes):
@@ -64,7 +66,7 @@ def test_the_extraction_applies_the_check_before_returning(tmp_path, monkeypatch
     """
     from kicadgen.services import datasheet_extractor as ext
     source = tmp_path / "drawing.pdf"
-    source.write_bytes(b"%PDF-1.4 offline")
+    source.write_bytes(MINIMAL_PDF)
     payload = dict(layout="matrix", rows=2, cols=22, pitch_mm=2.54, row_spacing_mm=22.86,
                    pad_diameter_mm=1.7, drill_mm=1.0, confidence="medium",
                    body_length_mm=63.3, body_width_mm=25.4, body_height_mm=3.2,

@@ -917,7 +917,9 @@ def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: fl
             continue
         if side is None:
             if edge in listed:
-                continue      # lato elencato due volte: nessun confronto possibile
+                # The side was listed twice in the declaration, so there is no
+                # single declared count to compare the photo against: skip it.
+                continue
             along, across = scales[edge]
             result = count_notches(profile, along, None, across_px_per_mm=across)
             if result.found is not None:

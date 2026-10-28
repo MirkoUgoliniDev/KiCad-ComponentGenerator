@@ -114,6 +114,12 @@ class _AcceptingDialog:
     def exec(self):
         return QDialog.DialogCode.Accepted
 
+    # CONTRACT CHANGED 2026-10-27 (review B6): the window releases every modal
+    # it opens (`MainWindow._run_modal` calls `deleteLater`), so a fake dialog
+    # must answer it like the QDialog it stands for.
+    def deleteLater(self):
+        pass
+
     def selected_components(self):
         return [c for c in self.components if am.eligibility(c)[0]]
 

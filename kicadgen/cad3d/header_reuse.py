@@ -47,6 +47,13 @@ class HeaderModelReuse:
     """
 
     def __init__(self, directory, params, body, context):
+        """@brief Bind the snapshot file of `directory` to this run's inputs.
+
+        @param directory Output folder holding the snapshot.
+        @param params Component parameters of the run.
+        @param body 3D body parameters (show_pins_3d decides the reuse).
+        @param context Extra inputs that take part in the reuse key.
+        """
         self.path = Path(directory) / '.header-model-reuse.json'
         self.show = bool(body.show_pins_3d)
         self.key = None

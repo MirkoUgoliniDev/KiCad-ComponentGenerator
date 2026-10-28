@@ -210,6 +210,13 @@ def test_the_window_sends_the_single_prompt_for_a_single_part(window, monkeypatc
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.profile_store.save_defaults(dict(system_prompt="BOARD", system_prompt_single="SINGLE",
                                             numbering_prompt="NUMBERING"))
+    # This test is about which prompt the window sends, not about the photo
+    # detector. The default detector (yolo_smd) validates its weights before
+    # the extraction starts and, where the git-ignored model files are absent
+    # (the GitHub runner), stops on a QMessageBox.warning that the suite's
+    # modal guard turns into a failure (CI review 2026-10-27, I3). The AI
+    # detector needs no local file, as in test_automatic_generation.py.
+    window.combo_photo_detector.setCurrentIndex(window.combo_photo_detector.findData("ai"))
     combo = window.combo_component_type
     combo.setCurrentIndex(combo.findData("single_tht"))
     window._extract_with_ai()

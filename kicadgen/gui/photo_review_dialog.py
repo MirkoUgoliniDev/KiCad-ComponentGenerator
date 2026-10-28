@@ -115,6 +115,14 @@ class _MatchWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, component):
+        """@brief Prepare one candidate search on a private copy of `component`.
+
+        @param component Component row the candidates are searched for; copied
+            so that the dialog may keep editing its own row meanwhile.
+        @note Owned by QApplication, not by the dialog: a thread destroyed
+            while running aborts the process (same rule as
+            `model_dialog._ModelsWorker`).
+        """
         super().__init__(QApplication.instance())
         self.component = deepcopy(component)
 
@@ -265,6 +273,11 @@ class _PhotoView(QGraphicsView):
     zoom_changed = pyqtSignal()
 
     def __init__(self, scene, parent=None):
+        """@brief Build the view over `scene` in auto-fit mode, with no tool armed.
+
+        @param scene Scene holding the photograph and the outlines.
+        @param parent Owner widget (the review dialog).
+        """
         super().__init__(scene, parent)
         self._draw_mode = False
         self._lasso_mode = False
@@ -579,6 +592,10 @@ class _NumberLabel(QGraphicsSimpleTextItem):
     """@brief Screen-sized ID label with an opaque backing, readable on any PCB color."""
 
     def __init__(self, parent):
+        """@brief Build the bold white label as a child of its component outline.
+
+        @param parent Graphics item the label follows (the component outline).
+        """
         super().__init__(parent)
         font = self.font()
         font.setBold(True)
@@ -1308,6 +1325,7 @@ class _DetectorGhost(QGraphicsRectItem):
     """
 
     def __init__(self):
+        """@brief Build the dotted outline, hidden and inert, above the outlines."""
         super().__init__()
         pen = QPen(QColor(DETECTOR_GHOST_COLOR), DETECTOR_GHOST_WIDTH_PX)
         pen.setCosmetic(True)
@@ -1329,6 +1347,10 @@ class _BoardBackdrop(QGraphicsRectItem):
     """
 
     def __init__(self, rect):
+        """@brief Build the hidden backdrop covering `rect`, below the photograph.
+
+        @param rect Scene rectangle of the photograph (QRectF or compatible).
+        """
         super().__init__(QRectF(rect))
         pen = QPen(QColor(BOARD_BORDER_COLOR), BOARD_BORDER_WIDTH_PX)
         pen.setCosmetic(True)
@@ -1356,6 +1378,11 @@ class _ResizeHandle(QGraphicsRectItem):
     EDGES = ((-1, -1), (1, -1), (1, 1), (-1, 1), (1, 0), (-1, 0), (0, 1), (0, -1))
 
     def __init__(self, item, edge):
+        """@brief Build one screen-sized grip of `item` for the local edge `edge`.
+
+        @param item Component outline the grip belongs to and resizes.
+        @param edge Local edge signs ``(eu, ev)``, one of EDGES.
+        """
         super().__init__(-HANDLE_HALF_PX, -HANDLE_HALF_PX, 2*HANDLE_HALF_PX, 2*HANDLE_HALF_PX, item)
         self.item = item
         self.edge = edge
@@ -1432,6 +1459,12 @@ class _ComponentItem(QGraphicsPolygonItem):
     """@brief Selectable, movable and resizable outline of one component."""
 
     def __init__(self, editor, component):
+        """@brief Build the outline of `component` with its number, halo and eight grips.
+
+        @param editor Review dialog: it owns the photo transform and is told
+            of every geometry change.
+        @param component The component row (dict) the outline edits in place.
+        """
         super().__init__()
         self.editor = editor
         self.component = component
@@ -1790,7 +1823,11 @@ class PhotoReviewDialog(QDialog):
                                   else component[key])
                     if not math.isfinite(value) or (key in ("length_mm", "width_mm", "height_mm") and value <= 0):
                         raise ValueError(f"Invalid component {key}")
-        except (KeyError, TypeError, OverflowError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            # ValueError is in the list on purpose (review 2026-10-27, C8):
+            # `float("n/a")` raises it, and a text that is not a number must
+            # reach the caller as the same geometry message as a missing or
+            # non-finite one, not as Python's own "could not convert" text.
             raise ValueError("Invalid PCB dimensions or component geometry") from exc
         self._items = []
         self._applied = False

@@ -46,8 +46,14 @@ Atom = Union[str, int, float, bool, Symbol]
 Token = Union["SExpr", Atom]
 
 
-def _format_number(value: float) -> str:
+def format_number(value: float) -> str:
     """@brief Format a number the way KiCad does: no useless trailing zeros.
+
+    This is THE number formatter of every KiCad file this program writes
+    (footprints through `SExpr`, symbols and symbol glyphs through their
+    line writers): one implementation, so a value renders the same in every
+    file and the "-0" contract below holds everywhere (review 2026-10-27,
+    G3/G5: two private copies wrote `-0` for centred pins).
 
     @param value Finite int or float, in the file's unit (mm, degrees...).
     @return Text with at most 6 decimals; negative zero (including values
@@ -73,9 +79,26 @@ def _format_number(value: float) -> str:
 _STRING_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
 
-def _quote(text: str) -> str:
-    """Quote a string for a KiCad S-expression, escaping what KiCad escapes."""
-    return '"' + "".join(_STRING_ESCAPES.get(ch, ch) for ch in text) + '"'
+def quote(text: str) -> str:
+    """@brief Quote a string for a KiCad S-expression, escaping what KiCad escapes.
+
+    This is THE string quoter of every KiCad file this program writes; the
+    symbol writers must not keep their own copy (review 2026-10-27, G1/G5:
+    a copy that escaped only `\\` and `"` let a raw newline into a
+    `.kicad_sym`, which KiCad 10 refuses as a whole).
+
+    @param text The string value (any Python text).
+    @return The text between double quotes with `\\`, `"`, newline, carriage
+        return and tab written as KiCad's backslash sequences, so the output
+        never holds a raw control character inside the quotes.
+    """
+    return '"' + "".join(_STRING_ESCAPES.get(ch, ch) for ch in str(text)) + '"'
+
+
+#: Private aliases kept for the modules and tests written against the old
+#: names; new code imports `format_number` and `quote`.
+_format_number = format_number
+_quote = quote
 
 
 def _format_atom(value: Atom) -> str:

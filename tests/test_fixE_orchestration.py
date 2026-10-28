@@ -364,17 +364,31 @@ def _run(tmp_path, **kw):
 
 
 def test_a_silent_child_becomes_a_cad_error_with_its_tail(monkeypatch, tmp_path):
-    """@brief Non-interactive path: TimeoutExpired -> Cad3DError with the output tail."""
-    seen = {}
+    """@brief Non-interactive path: the silence watchdog -> Cad3DError with the output tail.
 
-    def fake_run(command, **kwargs):
-        seen.update(kwargs)
-        raise subprocess.TimeoutExpired(command, 300, output=b"riga 1\nultima riga\n")
-    monkeypatch.setattr(cad.subprocess, "run", fake_run)
+    CONTRACT CHANGED 2026-10-27 (review sweep, S4): without progress and
+    cancel `_run_freecad` no longer calls `subprocess.run` (a cap on the
+    overall duration); it goes through `process_log.run_logged`, so the
+    double is the `subprocess.Popen` run_logged opens. The child prints two
+    lines and falls silent; the watchdog (silence timeout shortened for the
+    test) kills it. Still asserted: UTF-8 decoding with replacement and the
+    no-bytecode environment of the child.
+    """
+    from tests.test_review_1027_sweep import FakeFreecadProcess
+    started = []
+
+    def fake_popen(command, **kwargs):
+        child = FakeFreecadProcess(command, ["riga 1\n", "ultima riga\n"], hang=True, **kwargs)
+        started.append(child)
+        return child
+    monkeypatch.setattr(process_log.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cad, "FREECAD_SILENCE_TIMEOUT_S", 0.3)
     with pytest.raises(cad.Cad3DError, match="ultima riga"):
         _run(tmp_path)
+    seen = started[0].kwargs
     assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
     assert seen["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert started[0].killed.is_set()
 
 
 def test_the_logged_path_converts_the_watchdog_timeout_too(monkeypatch, tmp_path):

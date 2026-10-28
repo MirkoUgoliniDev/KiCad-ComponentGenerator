@@ -34,10 +34,70 @@ class ProjectConfigError(ValueError):
     """@brief A project file that exists but must not be applied."""
 
 
-def saved_package_geometry(value):
+#: Pad shapes an older version accepted for a package pad, mapped to the
+#: shape KiCad actually drew from the file it wrote (review 2026-10-27, G7):
+#: a "trapezoid" was written without its `rect_delta`, which KiCad loads as a
+#: plain rectangle. The mapping keeps what the user already had in KiCad.
+LEGACY_PAD_SHAPES = {"trapezoid": "rect"}
+
+
+def _migrated_pad_shapes(value, notes: list | None):
+    """Copy of a package mapping with the legacy pad shapes mapped (see LEGACY_PAD_SHAPES).
+
+    The numbers of the pads changed are appended to `notes` when given; a
+    mapping without legacy shapes is returned unchanged (same object).
+    """
+    pins = value.get("pins") if isinstance(value, dict) else None
+    if not isinstance(pins, list):
+        return value
+    changed = []
+    migrated = []
+    for pin in pins:
+        if isinstance(pin, dict) and pin.get("shape") in LEGACY_PAD_SHAPES:
+            changed.append(str(pin.get("number", "?")))
+            pin = dict(pin, shape=LEGACY_PAD_SHAPES[pin["shape"]])
+        migrated.append(pin)
+    if not changed:
+        return value
+    if notes is not None:
+        notes.extend(changed)
+    return dict(value, pins=migrated)
+
+
+#: Stand-in name for a saved package whose own name is not a valid file name.
+#: Never shown or written: the window replaces the name with the project
+#: folder's right after loading (`_apply_project_state`).
+SAVED_PACKAGE_PLACEHOLDER_NAME = "Package"
+
+
+def _without_untrusted_package_name(value):
+    """Copy of a package mapping whose saved name cannot block the project from loading.
+
+    Since the review of 2026-10-27 `PackageGeometry.validate` applies the
+    output-file-name rule, but older projects saved the AI's raw component
+    name there (e.g. «LM358/LM2904»). That name was never authoritative: the
+    folder is the project's identity and replaces it after loading. So an
+    invalid saved name is swapped for a neutral placeholder before validation
+    instead of refusing the whole project; a valid one is kept as it is, and
+    the caller's mapping is never modified.
+    """
+    from ..core.output_names import is_valid_output_name
+
+    if not isinstance(value, dict):
+        return value
+    name = value.get("name")
+    if isinstance(name, str) and is_valid_output_name(name):
+        return value
+    return {**value, "name": SAVED_PACKAGE_PLACEHOLDER_NAME}
+
+
+def saved_package_geometry(value, legacy_pads: list | None = None):
     """@brief Restore explicit pads from a saved project, or None for legacy projects.
 
     @param value Package mapping, or None when the project has no explicit package.
+    @param legacy_pads Optional list that receives the numbers of the pads
+        whose legacy shape was mapped (`LEGACY_PAD_SHAPES`), so the caller can
+        say so; the saved value itself is never modified.
     @return Validated PackageGeometry, or None for an absent optional field.
     @throws ProjectConfigError For malformed geometry: the project remains
         protected from autosave instead of silently becoming a pin-header project.
@@ -45,6 +105,8 @@ def saved_package_geometry(value):
     if value is None:
         return None
     from ..core.package_geometry import package_from_mapping
+    value = _migrated_pad_shapes(value, legacy_pads)
+    value = _without_untrusted_package_name(value)
     try:
         return package_from_mapping(value)
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as exc:

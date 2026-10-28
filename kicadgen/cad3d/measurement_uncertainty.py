@@ -32,8 +32,16 @@ from ..core.validation import positive_number
 #: a DECLARED fallback: it would be made unnecessary by an uncertainty
 #: estimated on the photo itself (measured edge noise), passed as
 #: `measurement_uncertainty_mm`.
-#: The value is repeated here, not imported, because this module also runs
-#: where the photo pipeline (OpenCV) is not loaded.
+#: SINGLE SOURCE (review 2026-10-27, F4): every consumer of the OUTLINE
+#: uncertainty -- the edge notches and lands measured on the board outline,
+#: the duplicate tolerance of the photo inventory, the contour acceptance of
+#: photo_refine, the elongation hinges of the classifier and the decoders --
+#: imports this constant instead of repeating a value of its own, so the same
+#: physical quantity cannot drift into four different numbers. It lives in
+#: cad3d, not in the photo pipeline, because it is also needed where OpenCV
+#: is not loaded. The DETECTOR box uncertainty (photo_yolo
+#: `_BOX_UNCERTAINTY_INPUT_PX`, derived from the network stride) is a
+#: different quantity and keeps its own name.
 EDGE_UNCERTAINTY_PX = 2.0
 
 #: Fallback scale when the photo is not known, in px/mm.
@@ -51,7 +59,7 @@ ASSUMED_SCALE_PX_PER_MM = 24.0
 SOURCE_DECLARED = "declared"
 #: The uncertainty comes from the photo scale (px/mm).
 SOURCE_PHOTO_SCALE = "photo_scale"
-#: Nessun dato: ripiego dichiarato (ASSUMED_SCALE_PX_PER_MM).
+#: No data at all: the declared fallback (ASSUMED_SCALE_PX_PER_MM) is used.
 SOURCE_ASSUMED = "assumed"
 
 #: Component key holding the uncertainty already in mm, per edge.
@@ -105,6 +113,32 @@ def component_edge_uncertainty(component, default_scale_px_per_mm=None) -> tuple
     if scale is None:
         scale = positive_number(default_scale_px_per_mm)
     return edge_uncertainty_mm(declared_mm=read(UNCERTAINTY_KEY), scale_px_per_mm=scale)
+
+
+def elongation_hinge(short_side_px, edge_px: float = EDGE_UNCERTAINTY_PX) -> float:
+    """@brief Smallest long/short ratio a box must show before its shape says anything.
+
+    A side of a box is the distance between two edges, each located within
+    `edge_px`: a SQUARE body can therefore be reported with sides differing
+    by up to 2 * edge_px, i.e. with a ratio up to (short + 2 * edge_px) /
+    short. Only above that ratio is the elongation a property of the body
+    rather than of the measurement, and only then may the shape of the box
+    override another reading of the axis (the network's vote, the model's
+    declared rotation).
+
+    @param short_side_px Short side of the box, in pixels of the image the
+        box was drawn on. Non-finite or non-positive values mean «unknown»
+        and give +inf: a box of unknown pixel size can never override.
+    @param edge_px Position uncertainty of one edge, in the same pixels.
+    @return Ratio strictly above 1, or math.inf when the short side is unknown.
+    @note Shared criterion of the SMD classifier (`_rotation`), the photo
+        decoders (`decode_detections`, `decode_boxes`) and the verification
+        (`apply_classifications`), review 2026-10-27 F3/F7.
+    """
+    short = positive_number(short_side_px)
+    if short is None:
+        return float("inf")
+    return 1.0 + 2.0 * float(edge_px) / short
 
 
 def side_uncertainty_mm(edge_mm: float) -> float:

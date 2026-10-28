@@ -10,22 +10,78 @@ from ..services.component_check import verify_component, Check
 
 
 class _CheckWorker(QThread):
+    """Run `verify_component` off the GUI thread and stream each check back.
+
+    @note Ownership (review 2026-10-27, C7): the thread belongs to
+        QApplication, not to the dialog, exactly like
+        `model_dialog._ModelsWorker`. A QThread destroyed while running
+        aborts the whole process, and a dialog can be destroyed without
+        passing through `closeEvent` (a parent window deleted, an
+        application quit): with QApplication as the owner the worker
+        outlives the dialog, deletes itself when finished, and the
+        application exit waits for it instead of destroying it.
+    """
+
     result = pyqtSignal(object)
 
-    def __init__(self, args, parent):
-        super().__init__(parent)
+    def __init__(self, args, parent=None):
+        """@brief Prepare one verification run owned by QApplication.
+
+        @param args Keyword arguments of `verify_component`.
+        @param parent Ignored for ownership: QApplication.instance() is the
+            owner when there is one, so that no dialog can destroy the
+            running thread (see the class note). Kept for signature
+            compatibility.
+        """
+        application = QApplication.instance()
+        super().__init__(application if application is not None else parent)
         self.args = args
+        if application is not None:
+            # Quitting while a KiCad command is in flight would destroy the
+            # running thread: wait for it instead. The wait is bounded by
+            # the 60 s limit of each KiCad command.
+            application.aboutToQuit.connect(self.wait)
+        self.finished.connect(self._release)
 
     def run(self):
+        """@brief QThread override: run every check, emitting each result as it completes.
+
+        @note Any failure of the verification itself is reported as one ERROR
+            check so that the dialog always reaches its verdict.
+        """
         try:
             verify_component(**self.args, emit=self.result.emit)
         except Exception as exc:
             self.result.emit(Check('ERROR', 'Verifica interrotta', str(exc)))
 
+    def _release(self):
+        """Drop the exit-time wait and delete the thread once finished.
+
+        Left connected, at exit Qt would call `wait` on an object already
+        removed by `deleteLater` (same sequence as `model_dialog._ModelsWorker`).
+        """
+        application = QApplication.instance()
+        if application is not None:
+            try:
+                application.aboutToQuit.disconnect(self.wait)
+            except TypeError:
+                # Never connected or already disconnected: nothing to undo.
+                pass
+        self.deleteLater()
+
 
 class ComponentCheckDialog(QDialog):
     """@brief Run artifact checks in a worker and present a copyable report."""
     def __init__(self, args, parent=None, tx=lambda s: s):
+        """@brief Build the report window and start the verification worker.
+
+        @param args Keyword arguments of `verify_component` (directory, name,
+            rows...).
+        @param parent Owner window.
+        @param tx Translation function (Italian source -> shown text).
+        @note The worker starts on the next event-loop turn, so the window is
+            laid out before the first result arrives.
+        """
         super().__init__(parent)
         self.tx = tx
         self.results = []
@@ -87,7 +143,8 @@ class ComponentCheckDialog(QDialog):
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self.report.toPlainText()))
         buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
         layout.addWidget(buttons)
-        self.worker = _CheckWorker(args, self)
+        # Owned by QApplication, not by this window: see _CheckWorker.
+        self.worker = _CheckWorker(args)
         self.worker.result.connect(self._result)
         self.worker.finished.connect(self._finished)
         self._running = True

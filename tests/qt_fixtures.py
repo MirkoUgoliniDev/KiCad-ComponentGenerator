@@ -119,6 +119,17 @@ def window(qapp, monkeypatch, tmp_path):
     # chiave finta, mai usata in rete (i lavori AI sono sostituiti nei test);
     # il caso senza chiave ha i suoi test in test_ai_account_menu.py.
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-fixture")
+    # The suite must not depend on what is installed on the machine that
+    # runs it (CI review 2026-10-27, I1). `MainWindow.__init__` probes
+    # FreeCAD once (`find_freecadcmd`) and, when it is missing, starts with
+    # `_freecad_available = False` and the STEP group off: on the GitHub
+    # runner, which has no FreeCAD, 19 tests of the generation flow then
+    # exercised the footprint-only path instead of their contract. Here the
+    # probe answers as on the developer's PC; FreeCAD is never run by these
+    # tests (the CAD workers are replaced). The «FreeCAD missing» branch has
+    # its own tests, which set `_freecad_available = False` themselves
+    # (tests/test_board_pipeline.py, tests/test_generated_files_alignment.py).
+    monkeypatch.setattr(gui, "find_freecadcmd", lambda: "freecadcmd")
     w = gui.MainWindow()
     # Geometry/lifecycle tests inject their document selection independently of
     # the guided uploader; uploader integration has dedicated tests.

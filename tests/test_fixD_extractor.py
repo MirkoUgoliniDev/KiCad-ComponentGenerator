@@ -14,6 +14,8 @@ from kicadgen.services.datasheet_extractor import (
     ExtractionCancelled, ExtractionError, _castellated_sides, _params_from_tool_arguments,
     _pin_map_seen_from_top)
 
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 def matrix(**extra):
     data = {"layout": "matrix", "rows": 2, "cols": 4, "pitch_mm": 2.54,
@@ -221,7 +223,7 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(ext, "api_key", lambda: "offline")
     monkeypatch.setattr(ext, "check_credit", lambda **kw: None)
     path = tmp_path / "drawing.pdf"
-    path.write_bytes(b"%PDF-1.4 offline")
+    path.write_bytes(MINIMAL_PDF)
     return path
 
 
@@ -335,7 +337,7 @@ def test_d9_a_cancellation_inside_the_inventory_is_not_downgraded(offline, monke
 
 def test_d11_file_too_large_message_is_a_template(monkeypatch, tmp_path):
     path = tmp_path / "big.pdf"
-    path.write_bytes(b"%PDF")
+    path.write_bytes(MINIMAL_PDF)
     monkeypatch.setattr(ext, "MAX_FILE_BYTES", 1)
     with pytest.raises(ExtractionError, match=r"big\.pdf troppo grande \(0\.0 MB, max 0 MB\)"):
         ext._file_to_content_block(path)

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from typing import Optional, Sequence
+from .output_names import validate_output_name
 from ..services.messages import tx
 
 
@@ -18,8 +19,14 @@ PACKAGE_FAMILIES = {
     "castellated", "custom",
 }
 PAD_TYPES = {"smd", "thru_hole", "np_thru_hole", "connect"}
-# Custom pads require an anchor and primitives, which PinSpec cannot describe.
-PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
+# Custom pads require an anchor and primitives, and trapezoid pads require
+# KiCad's `rect_delta` (which side shrinks, by how much): a PinSpec carries
+# only a centre, a size and a rotation, so neither can be described here.
+# "trapezoid" used to be accepted and written WITHOUT its delta, which KiCad
+# loads as a plain rectangle: refusing it is the honest option (review
+# 2026-10-27, G7). `core.footprint.Pad` still writes a trapezoid when given
+# its `rect_delta` explicitly.
+PAD_SHAPES = {"circle", "rect", "oval", "roundrect"}
 
 #: Declared pad-coordinate origins. Only "body_center" says where the body is;
 #: for the others the body centre is estimated (see PackageGeometry.body_frame_offset).
@@ -109,14 +116,19 @@ class PackageGeometry:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract.
 
-        @throws ValueError When a field is out of contract, two pads overlap,
-            or pads sharing a number declare different pin names.
+        @throws ValueError When the name is not a plain file name
+            (`core.output_names`), a field is out of contract, two pads
+            overlap, or pads sharing a number declare different pin names.
         @note Several pads may share one number, as KiCad allows (a thermal
             pad split into several lands, several GND pads): they are the same
             electrical pin. What is refused is a shared number with
             CONFLICTING non-empty names, the structural sign of a misread
             number rather than of a multi-pad pin.
         """
+        # The package name is the default footprint name (`build_package`)
+        # and so a file stem: the shared rule refuses an empty name or a path
+        # such as "..\evil" (2026-10-27 review, H4).
+        validate_output_name(self.name)
         if self.family not in PACKAGE_FAMILIES:
             raise ValueError(tx("famiglia package non supportata: {family}", family=self.family))
         if self.source_view not in {"top", "bottom"}:

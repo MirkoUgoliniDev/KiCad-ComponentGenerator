@@ -48,6 +48,11 @@ class _Observable:
     """Hold change listeners; a failing listener never corrupts the value."""
 
     def __init__(self) -> None:
+        """@brief Start with no listeners; `on_change` registers them.
+
+        @note Subclasses call this before storing their first value, so a
+            listener can never be notified about the initial assignment.
+        """
         self._listeners: list[Callable] = []
 
     def on_change(self, callback: Callable) -> None:

@@ -243,6 +243,10 @@ FIX_HINTS = {
                       'simbolo.'),
     'pin_overlap': ('Nella scheda «Simbolo elettrico» separa i pin sovrapposti (o lascia visibile uno solo '
                     'dei pin con lo stesso nome), premi Applica e riesporta il simbolo.'),
+    'pin_number_spaces': ('Nella scheda «Simbolo elettrico» togli gli spazi dal numero del pin (deve essere '
+                          'uguale al numero del pad del footprint), premi Applica e riesporta il simbolo.'),
+    'pin_name_spaces': ('Facoltativo: nella scheda «Simbolo elettrico» sostituisci gli spazi del nome del pin '
+                        'con «_», come fa KiCad al caricamento; poi Applica e riesporta il simbolo.'),
     'footprint_unreadable': _HINT_FOOTPRINT_FILE,
     'footprint_format': _HINT_FOOTPRINT_FILE,
     'footprint_version': _HINT_FOOTPRINT_FILE,
@@ -637,6 +641,18 @@ def _check_symbol_text(text: str) -> list[Finding]:
             numbers[pin_number] = numbers.get(pin_number, 0) + 1
             name_form = _child(pin, 'name')
             pin_name = str(name_form[1]) if name_form and len(name_form) > 1 else ''
+            # KiCad rewrites a space of a pin number or name as «_» on load.
+            # In the number that breaks the pin/pad pairing silently (the
+            # footprint pad keeps its spelling): an error. In the name it
+            # only changes a label: advice (review 2026-10-27, G2).
+            if any(ch.isspace() for ch in pin_number):
+                findings.append(_error('pin_number_spaces', tx(
+                    'Simbolo «{name}»: il numero di pin «{pin}» contiene spazi; KiCad lo riscrive e non '
+                    'corrisponde più al pad del footprint.', name=name, pin=pin_number)))
+            if ' ' in pin_name:
+                findings.append(_warning('pin_name_spaces', tx(
+                    'Simbolo «{name}»: il nome del pin {pin} contiene spazi; KiCad li sostituisce con «_».',
+                    name=name, pin=pin_number)))
             key = (round(x, 4), round(y, 4))
             positions.setdefault(unit, {}).setdefault(key, []).append((pin_name, _pin_hidden(pin)))
         for pin_number, count in numbers.items():

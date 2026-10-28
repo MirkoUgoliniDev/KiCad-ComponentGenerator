@@ -296,7 +296,10 @@ _EXTRACTION_TOOL = {
                                          "description": "Dimensione del pad lungo Y, prima di rotation_deg."},
                         "side": {"type": "string", "enum": ["left", "right", "top", "bottom", "center"]},
                         "pad_type": {"type": "string", "enum": ["smd", "thru_hole", "np_thru_hole", "connect"]},
-                        "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect", "trapezoid"]},
+                        # Only shapes a PinSpec can describe (review 2026-10-27,
+                        # G7): a trapezoid needs KiCad's `rect_delta`, which a
+                        # pin does not carry, and was written as a rectangle.
+                        "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
                         "rotation_deg": {"type": "number",
                                          "description": "Angolo del pad in gradi ANTIORARI come appare sulla pagina."},
                         "drill_mm": {"type": "number", "exclusiveMinimum": 0},
@@ -1911,6 +1914,11 @@ class _UncleanableImage(Exception):
     """
 
     def __init__(self, reason: str):
+        """@brief Record why the image cannot be sent.
+
+        @param reason "metadata" (no cleaner understands the file) or
+            "orientation" (a rotation tag that no decoder can apply).
+        """
         super().__init__(reason)
         #: "metadata" (no cleaner understands the file) or "orientation"
         #: (a rotation tag that no decoder can apply).
@@ -2125,6 +2133,81 @@ def _image_without_metadata(data: bytes) -> bytes:
     raise _UncleanableImage("metadata")
 
 
+class _UncleanablePdf(Exception):
+    """A PDF that cannot be sent safely: the program cannot rebuild it without its metadata.
+
+    Private signal of the privacy boundary for PDFs, the counterpart of
+    `_UncleanableImage`; `_file_to_content_block` turns it into a translated
+    ExtractionError naming the file.
+    """
+
+
+def _pdf_without_metadata(data: bytes) -> bytes:
+    """The PDF rebuilt without its document metadata, pages and content unchanged.
+
+    Privacy boundary of every PDF upload (review 2026-10-27, E1), the same
+    one `_image_without_metadata` enforces for photos: a datasheet saved or
+    printed by the user carries, in its Information dictionary (/Author,
+    /Creator, /Producer, creation and modification dates) and in its XMP
+    /Metadata stream, the user's name, the software and the machine's clock,
+    none of which the model needs to read a drawing. Incremental updates may
+    also keep an earlier metadata dictionary alive in the file: the output
+    is written from scratch, so only the objects reachable from the new
+    catalogue survive.
+
+    Two passes are needed, not one: pypdf writes every object it cloned,
+    including an XMP stream whose reference was removed, so the first pass
+    drops the references and the second clones only what is still reachable.
+    The result is then READ BACK and checked, so the boundary never depends
+    on the library's internals: a PDF that still carries metadata after the
+    rebuild is refused.
+
+    @param data PDF bytes as read from the file.
+    @return Metadata-free PDF bytes.
+    @throws _UncleanablePdf When pypdf cannot read, decrypt or rewrite the
+        file, or when the rebuilt file still carries metadata: it FAILS
+        CLOSED, exactly like the image path, because the raw bytes may still
+        carry the metadata. The caller refuses the upload.
+    @note Attached files, page annotations and form fields are kept: they are
+        part of the document the user chose to send, not metadata about it.
+    """
+    from io import BytesIO
+    try:
+        from pypdf import PdfReader, PdfWriter
+        from pypdf.generic import NameObject
+
+        def rebuilt(source: bytes) -> bytes:
+            reader = PdfReader(BytesIO(source))
+            if reader.is_encrypted and not reader.decrypt(""):
+                raise _UncleanablePdf("encrypted")
+            writer = PdfWriter(clone_from=reader)
+            # Information dictionary: None removes /Info from the trailer
+            # (pypdf would otherwise add its own /Producer).
+            writer.metadata = None
+            metadata = NameObject("/Metadata")
+            if metadata in writer.root_object:
+                del writer.root_object[metadata]
+            for page in writer.pages:
+                if metadata in page:
+                    del page[metadata]
+            out = BytesIO()
+            writer.write(out)
+            return out.getvalue()
+
+        cleaned = rebuilt(rebuilt(data))
+        check = PdfReader(BytesIO(cleaned))
+        if (check.metadata or check.xmp_metadata is not None
+                or any("/Metadata" in page for page in check.pages)):
+            raise _UncleanablePdf("metadata")
+        if len(check.pages) == 0:
+            raise _UncleanablePdf("empty")
+    except _UncleanablePdf:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any failure of the rebuild fails closed
+        raise _UncleanablePdf("unreadable") from exc
+    return cleaned
+
+
 def _sniffed_extension(data: bytes) -> Optional[str]:
     """OpenCV file extension of the container, read from its magic bytes."""
     if data[:2] == b"\xff\xd8":
@@ -2335,11 +2418,17 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     @param path Document file (image or PDF).
     @param model Receiving model identifier, or None: an image is enlarged to
         that model's provider limits when the provider resolves more detail
-        from an enlarged image (`_enlarged_image_bytes`); a PDF is sent as is.
-    @return The content block; an image always upright and without metadata.
-    @throws ExtractionError For an unsupported or too large file, and for an
+        from an enlarged image (`_enlarged_image_bytes`); a PDF keeps its
+        pages and is rebuilt without its document metadata
+        (`_pdf_without_metadata`).
+    @return The content block; an image always upright and without metadata,
+        a PDF always without Information dictionary and XMP stream.
+    @throws ExtractionError For an unsupported or too large file, for an
         image whose metadata cannot be removed or whose rotation tag cannot
-        be applied: such an image is refused, never sent raw (fail closed).
+        be applied, and for a PDF the program cannot rebuild without its
+        metadata: such a file is refused, never sent raw (fail closed).
+    @note The 20 MB cap (MAX_FILE_BYTES) applies to the bytes that leave the
+        computer: a rebuilt PDF is measured again after cleaning.
     """
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         raise ExtractionError(
@@ -2378,6 +2467,25 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
                 "{name}: immagine che il programma non riesce a leggere; non viene inviata "
                 "all'AI perche' i suoi metadati (posizione GPS, dispositivo) non si possono "
                 "rimuovere. Salvala come JPEG o PNG e riprova.", name=path.name)) from exc
+    elif media_type == "application/pdf":
+        try:
+            payload = _pdf_without_metadata(payload)
+        except _UncleanablePdf as exc:
+            # Fail closed, as for an image: a PDF whose author, producer and
+            # dates cannot be removed never leaves the computer (review
+            # 2026-10-27, E1). The message tells the user the program could
+            # not read it as a PDF, which is what every failure of the
+            # rebuild amounts to; saving it again (e.g. «Print to PDF»)
+            # produces a file the program can rebuild.
+            raise ExtractionError(
+                f"{_log_name(path.name)}: " + tx("Il file non contiene un PDF riconoscibile.")
+            ) from exc
+        if len(payload) > MAX_FILE_BYTES:
+            # Rebuilding can inflate a file that was compressed with object
+            # streams: the cap guards what is sent, not what was on disk.
+            raise ExtractionError(tx("{name} troppo grande ({size:.1f} MB, max {limit} MB)",
+                                     name=path.name, size=len(payload) / 1_048_576,
+                                     limit=MAX_FILE_BYTES // 1_048_576))
     data_b64 = base64.b64encode(payload).decode("ascii")
     data_url = f"data:{media_type};base64,{data_b64}"
 
@@ -4513,6 +4621,54 @@ def _real_number(value) -> Optional[float]:
     return finite_number(value)
 
 
+#: Name given to an extracted package whose AI-proposed name is not a valid
+#: file name. Never kept: the window replaces every package name with the
+#: project folder's (the folder is the component's identity).
+EXTRACTED_PACKAGE_PLACEHOLDER_NAME = "Package"
+
+#: Pad shapes an older schema offered that PinSpec no longer accepts, mapped to
+#: what KiCad actually drew for them (review 2026-10-27, G7: a trapezoid needs
+#: `rect_delta`, which the AI never gave, so it was always written as a rectangle).
+LEGACY_EXTRACTED_PAD_SHAPES = {"trapezoid": "rect"}
+
+
+def _package_mapping_for_validation(package_geometry, notes: list):
+    """Copy of an extracted package mapping that cannot discard a paid answer for a label.
+
+    Two fields of an AI answer are not geometry and must not make
+    `package_from_mapping` reject the whole extraction: the package NAME
+    (validated as a file name since 2026-10-27, while the AI writes part
+    numbers such as «LM358/LM2904»; the window replaces it with the project
+    folder anyway) and a legacy pad SHAPE still present in cached answers.
+    The name is swapped for a placeholder silently (it was never shown); each
+    legacy shape is mapped and named in one note. Everything else is
+    validated as before; the caller's mapping is never modified.
+    """
+    from ..core.output_names import is_valid_output_name
+
+    if not isinstance(package_geometry, dict):
+        return package_geometry
+    mapping = dict(package_geometry)
+    name = mapping.get("name")
+    if not (isinstance(name, str) and is_valid_output_name(name)):
+        mapping["name"] = EXTRACTED_PACKAGE_PLACEHOLDER_NAME
+    pins = mapping.get("pins")
+    if isinstance(pins, list):
+        legacy = []
+        migrated = []
+        for pin in pins:
+            if isinstance(pin, dict) and pin.get("shape") in LEGACY_EXTRACTED_PAD_SHAPES:
+                legacy.append(str(pin.get("number", "?")))
+                pin = {**pin, "shape": LEGACY_EXTRACTED_PAD_SHAPES[pin["shape"]]}
+            migrated.append(pin)
+        if legacy:
+            mapping["pins"] = migrated
+            notes.append(tx("Pad {pads}: forma «trapezio» proposta senza la geometria che KiCad "
+                            "richiede; usati come rettangoli, come KiCad li avrebbe disegnati.",
+                            pads=", ".join(legacy)))
+    return mapping
+
+
 def _optional_number(value, *, positive=False, integer=False):
     """Discard malformed optional numerics; signed offsets remain valid.
 
@@ -4908,9 +5064,30 @@ def _components_3d(raw: Optional[Sequence[dict]],
             or (isinstance(entry.get("_yolo_proposal_id"), str)
                 and bool(entry["_yolo_proposal_id"].strip())
                 and entry.get("_yolo_origin") in ("operating_threshold", "low_confidence_review")))
-        if (entry.get("object_type") == "pcb_feature" or
-                (not physical_hypothesis and "object_type" not in entry and re.match(
-                    r"^(?:via|pad|piazzola|terminal pad|contatto|castellated|semiforo|serigrafia)\b", label))):
+        if entry.get("object_type") == "pcb_feature":
+            # The declared criterion: the schema asks for `object_type`, and
+            # a declared PCB feature is never a body.
+            continue
+        if (not physical_hypothesis and "object_type" not in entry and re.match(
+                r"^(?:via|pad|piazzola|terminal pad|contatto|castellated|semiforo|serigrafia)\b", label)):
+            # DECLARED HEURISTIC (review 2026-10-27, E8), not a rule: when
+            # `object_type` is absent -- which is always the case for a raw
+            # AI answer, since `_TRUSTED_ONLY_FIELDS` strips it so that a
+            # document cannot vouch for itself -- the only information left
+            # is the display name, and a name that opens with the word of a
+            # PCB feature is taken as one. It was tuned on the inventory
+            # labels the models actually produce («pad 3», «via», «contatto
+            # castellated»); a component the model chose to name «Pad di
+            # test IC» is lost by it. It would become superfluous if the
+            # answer carried a provenance the program could trust. It is
+            # never silent: every time it fires a line is written, so the
+            # user can bring the body back from the review.
+            if notes is not None:
+                notes.append(tx("{name}: scartato dai corpi 3D perche' il nome descrive un "
+                                "elemento del PCB (via, pad, contatto, serigrafia) e il tipo "
+                                "di oggetto non e' dichiarato; se e' un componente, "
+                                "rinominalo o rimettilo nella revisione.",
+                                name=component["name"]))
             continue
         if not all(math.isfinite(component[k]) for k in
                    ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")):
@@ -5345,6 +5522,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         package_geometry = None
     geometry_doubts = None
     if package_geometry is not None:
+        package_geometry = _package_mapping_for_validation(package_geometry, notes)
         try:
             # Validate now, while the source response and its warnings are still
             # available; the GUI must never receive malformed pad coordinates.

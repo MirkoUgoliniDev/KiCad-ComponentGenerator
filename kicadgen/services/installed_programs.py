@@ -89,15 +89,40 @@ def install_dir_from_entry(entry: Mapping[str, str | None]) -> Path | None:
         the icon and the uninstaller still name files inside the installation.
         The returned folder may be a subfolder such as ``bin``; callers look
         for their executable both in it and in its ``bin`` child.
+    @note Safety invariant (review 2026-10-27, E2): only an ABSOLUTE folder
+        with a drive anchor is returned. A relative value (``.`` from an
+        ``UninstallString`` such as ``MsiExec.exe /X{GUID}``, a bare ``C:``,
+        a ``\\folder`` without drive) would make `executables_in` probe the
+        current working directory, and the executable found there would
+        later be RUN: such entries are treated as declaring no path.
     """
     location = (entry.get("InstallLocation") or "").strip().strip('"')
     if location:
-        return Path(location)
+        return _absolute_folder(location)
     for name in ("DisplayIcon", "UninstallString"):
         executable = _executable_of(entry.get(name))
         if executable:
-            return Path(executable).parent
+            folder = _absolute_folder(str(Path(executable).parent))
+            if folder is not None:
+                return folder
     return None
+
+
+def _absolute_folder(text: str) -> Path | None:
+    """The folder named by ``text`` when it is absolute with a drive, else None.
+
+    ``Path.is_absolute`` is not enough on Windows: ``C:`` (drive-relative) and
+    ``\\folder`` (root-relative) both resolve against the current directory
+    of the process. Both a drive and a root are required, so the folder is
+    the same whatever the working directory. A UNC path (``\\\\server\\share``)
+    has both and is accepted. Off Windows the drive is empty for every path,
+    so the check is deliberately performed with the Windows flavour.
+    """
+    from pathlib import PureWindowsPath
+    folder = PureWindowsPath(text.strip())
+    if not folder.drive or not folder.root:
+        return None
+    return Path(text.strip())
 
 
 def _uninstall_entries() -> list[dict[str, str | None]]:

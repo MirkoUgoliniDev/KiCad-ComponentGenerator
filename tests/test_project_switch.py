@@ -266,7 +266,8 @@ def test_a_rename_that_changes_only_the_case_really_renames(window, monkeypatch)
     assert (root / "SCHEDA" / "docs" / "foto.jpg").read_bytes() == b"x"
     assert read_project_config(root / "SCHEDA") is not None
 
-    assert window._migrate_docs_to_new_name("SCHEDA") == "SCHEDA"
+    # Renaming to the name already applied touches nothing.
+    assert window._rename_project_folder("SCHEDA") == "SCHEDA"
     assert _named_like(root, "scheda") == ["SCHEDA"]
 
 
@@ -756,16 +757,17 @@ def test_a_rename_waits_for_the_running_work(window, monkeypatch):  # noqa: F811
     window._rename_project()
     assert window._component_name() == "Proposto"
 
-# ── ramo «documenti in conflitto» di `_migrate_docs_to_new_name` ─────────
+# ── destination that appears between the dialog and the move ─────────────
 
-def test_a_rename_onto_documents_with_the_same_names_moves_nothing(window, monkeypatch):  # noqa: F811
-    """@brief Ramo difensivo: la cartella di destinazione ha gia' documenti omonimi.
+def test_a_rename_onto_an_existing_project_moves_nothing(window, monkeypatch):  # noqa: F811
+    """@brief Defensive branch: the destination project folder already exists.
 
-    Il dialogo rifiuta i nomi di progetti esistenti (`name_problem`), quindi
-    qui si arriva solo se la cartella nasce fra il dialogo e lo spostamento:
-    si chiama il metodo direttamente (revisore 4, difetto 14). Positivo: resta
-    il nome vecchio, nessun file toccato, il motivo nel log. Negativo: senza
-    omonimi gli stessi documenti si spostano.
+    The dialog refuses the names of existing projects (`name_problem`), so
+    this happens only when the folder appears between the dialog and the
+    move: the method is called directly (reviewer 4, defect 14). Positive:
+    the old name stays, no file is touched, the reason is in the log.
+    Negative: with a free name the same documents move. The file-by-file
+    migration helper this used to exercise is gone (review 2026-10-27, A6).
     """
     from kicadgen.services.document_roles import MANIFEST
     monkeypatch.setattr(gui, "save_config", lambda config: None)
@@ -778,11 +780,11 @@ def test_a_rename_onto_documents_with_the_same_names_moves_nothing(window, monke
     (root / "Occupata" / "docs").mkdir(parents=True)
     (root / "Occupata" / "docs" / "foto.jpg").write_bytes(b"altrui")
 
-    assert window._migrate_docs_to_new_name("Occupata") == "Origine"
+    assert window._rename_project_folder("Occupata") == "Origine"
     assert (source / "foto.jpg").read_bytes() == b"mia"
     assert (root / "Occupata" / "docs" / "foto.jpg").read_bytes() == b"altrui"
-    assert "Occupata" in window.ai_progress_text.toPlainText()
+    assert "Rinomina annullata: esiste gia' Occupata." in window.ai_progress_text.toPlainText()
 
-    assert window._migrate_docs_to_new_name("Libera") == "Libera"
+    assert window._rename_project_folder("Libera") == "Libera"
     assert (root / "Libera" / "docs" / "foto.jpg").read_bytes() == b"mia"
     assert not (source / "foto.jpg").exists()

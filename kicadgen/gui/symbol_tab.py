@@ -17,7 +17,8 @@ from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbs
 
 from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
                                  PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
-                                 property_texts, symbol_inputs, layout_symbol, symbol_property_positions)
+                                 normalize_pins, property_texts, symbol_inputs, layout_symbol,
+                                 symbol_property_positions)
 from ..core.kicad_text import KICAD_PIN_NUMBER_ANCHOR_MM, SCHEMATIC_DEFAULT_PEN_MM, kicad_unescape
 from .kicad_text_item import REFERENCE_PX, cap_height_px, kicad_text_item, reference_font, text_baseline_px
 from . import canvas_menus
@@ -588,8 +589,17 @@ class _SymbolView(QGraphicsView):
     #: A click while placing a glyph (scene point), or None when placing is cancelled.
     place_requested = pyqtSignal(object)
     graphic_context_requested = pyqtSignal(int, object)
+    #: Right click on a property text (Reference/Value) or its anchor square:
+    #: the key and the screen position of the menu (review 2026-10-27, D3).
+    property_context_requested = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
+        """@brief Build the symbol canvas with its shared camera, grid region and scene.
+
+        @param parent Optional Qt parent widget.
+        @note The camera and the exposed-region helper are the same components
+            the footprint preview uses, so zoom, pan and grid behave alike.
+        """
         super().__init__(parent)
         #: Zoom, wheel, pan and fit, shared with the footprint preview (`canvas_camera`);
         #: `auto_fit` and `camera_changed` below are the view's public names for it.
@@ -773,6 +783,13 @@ class _SymbolView(QGraphicsView):
                 self.graphic_context_requested.emit(target[1], event.globalPos())
                 event.accept()
                 return
+            if target is not None and target[0] == 'property':
+                # The Reference/Value texts have a menu like the footprint's
+                # texts (plan docs/canvas-menus-plan.md C-M6): a moved
+                # property can be put back without the properties dialog.
+                self.property_context_requested.emit(target[1], event.globalPos())
+                event.accept()
+                return
         event.ignore()
 
     def leaveEvent(self, event):
@@ -889,6 +906,15 @@ class _SymbolView(QGraphicsView):
         self.camera.pan_cancel()
         if self.controller is not None:
             self.controller.cancel()
+        if self.placing:
+            # INVARIANT (review 2026-10-27, D4; plan docs/canvas-clicktools-plan.md
+            # C14): an armed glyph placement is an interaction like a drag or a
+            # band and ends with them (Hide, a project switch, a tool arming):
+            # the first click in the re-shown tab must select or pan, never
+            # drop the glyph chosen before the tab was left. Same cancel path
+            # as Escape and the right click, so the host resets its status.
+            self.placing = False
+            self.place_requested.emit(None)
 
     def hideEvent(self, event):
         """@brief Qt override: roll back an unfinished interaction before the view is hidden.
@@ -1024,6 +1050,14 @@ class SymbolTab(QWidget):
     theme_changed = pyqtSignal()
 
     def __init__(self, parent=None, tx=None):
+        """@brief Build the symbol tab: editor canvas, pin table and toolbar.
+
+        @param parent Optional Qt parent widget.
+        @param tx Translation function for user-visible texts; identity when
+            omitted (tests and stand-alone use).
+        @note The tab never writes files itself: it emits `edits_applied` and
+            `export_requested` and the owner persists and exports.
+        """
         super().__init__(parent)
         self.tx = tx or (lambda value: value)
         self._baseline = []
@@ -1189,6 +1223,7 @@ class SymbolTab(QWidget):
         self.view.pin_context_requested.connect(self._pin_context_menu)
         self.view.place_requested.connect(self._place_requested)
         self.view.graphic_context_requested.connect(self._graphic_context_menu)
+        self.view.property_context_requested.connect(self._property_context_menu)
         # The wire and the shape tools collect points through the shared click-tool
         # state machine (`canvas_clicktools`); this tab is its host (`tool_*`).
         self._collector = PointCollector(self, self)
@@ -1414,6 +1449,13 @@ class SymbolTab(QWidget):
         # that whatever it derived from `rows()` is to be recomputed.
         self._source_revision = getattr(self, '_source_revision', 0) + 1
         self.view.cancel_interaction()
+        # INVARIANT (review 2026-10-27, D1; plan docs/canvas-clicktools-plan.md
+        # C13): an armed click tool and its collected points belong to the
+        # draft they were started on. A wire anchored to a pin of the OLD
+        # project must never be committed into the NEW draft, so the tool is
+        # abandoned here, as the footprint preview abandons its draw tool on a
+        # project switch (`_cancel_footprint_drawing`).
+        self._router.disarm()
         pending = self._pending_draft()
         carry = self._carry
         if pending is None and carry is not None and carry['kept']:
@@ -1796,6 +1838,28 @@ class SymbolTab(QWidget):
         if self._draft_owner_id is None or self._read_project_id(path) != self._draft_owner_id:
             return False
         return self._read_project_id(owner) != self._draft_owner_id
+
+    def _normalization_notes(self, pins):
+        """@brief Notes of the silent pin normalisations, in the interface language.
+
+        @param pins SymbolPin list that already passed `layout_symbol`.
+        @return One translated line per note of `normalize_pins` (a pin name
+            whose spaces KiCad turns into «_»), without duplicates; [] when
+            nothing was rewritten.
+        @note `layout_symbol` normalises the pins but discards the notes;
+            asking `normalize_pins` again with a list is the only way to read
+            them, and on pins that already validated it cannot raise.
+        """
+        if not pins:
+            return []
+        notes = []
+        normalize_pins(pins, notes)
+        lines = []
+        for note in notes:
+            text = note.localized(self.tx)
+            if text not in lines:
+                lines.append(text)
+        return lines
 
     @staticmethod
     def _layout_fails(rows):
@@ -3626,6 +3690,51 @@ class SymbolTab(QWidget):
         if chosen is not None:
             self._run_graphic_menu_key(chosen, index, several)
 
+    def _property_context_menu(self, key, global_pos):
+        """@brief Right-click menu of a property text (Reference/Value): «Posizione predefinita».
+
+        Same entry, words and enabled rule as the footprint preview's text
+        menu (`_footprint_text_context_menu`, plan docs/canvas-menus-plan.md
+        C-M6): the entry is greyed out while the property already follows
+        its default; choosing it is one undo step (`reset_property`).
+        @param key One of `PROPERTY_KEYS`; anything else opens nothing.
+        @param global_pos Screen position (QPoint) of the menu.
+        @note Built and shown through `canvas_menus`, which schedules the
+            menu for deletion whatever happens (no QMenu kept alive).
+        """
+        if self._symbol is None or key not in PROPERTY_KEYS:
+            return
+        entries = [canvas_menus.MenuEntry(
+            'default_position', self.tx('Posizione predefinita'),
+            enabled=key in self._chosen_properties(self.draft_rows()))]
+        # No title line, as the footprint's text menu.
+        menu, keys = canvas_menus.build_element_menu(self, '', entries)
+        chosen = canvas_menus.exec_element_menu(menu, keys, global_pos)
+        if chosen == 'default_position':
+            self.reset_property(key)
+
+    def reset_property(self, key):
+        """@brief Put a property text (Reference or Value) back onto its default position.
+
+        @param key One of `PROPERTY_KEYS`.
+        @return True when the draft was updated; False when there is no symbol, a
+            drag is in progress, the key is unknown or the property already
+            follows its default.
+        @note The inverse of `move_property`: the key is removed from the rows'
+            `symbol_properties` mapping, so the property follows
+            `default_property_positions` again (e.g. it clears a top pin added
+            later); the other property keeps its own choice. One history entry.
+        """
+        if self._symbol is None or self._gesture_before is not None or key not in PROPERTY_KEYS:
+            return False
+        rows = self.draft_rows()
+        stored = self._chosen_properties(rows)
+        if key not in stored:
+            return False
+        anchors = self._property_positions(rows, self._symbol)
+        chosen = {name: anchors[name] for name in stored if name != key}
+        return self._accept_geometry(self._with_properties(rows, chosen))
+
     def _graphic_menu_entries(self, record, several):
         """@brief Entries of the element menu, in display order (title excluded).
 
@@ -3941,7 +4050,14 @@ class SymbolTab(QWidget):
             symbol = None
             self.status.setText(self.error_text(exc))
         else:
-            self.status.setText(self.tx('Nessun pin disponibile: carica o analizza un progetto.') if not rows else self.tx('Modifiche non applicate.') if dirty else self.tx('Simbolo pronto per la verifica e l’esportazione.'))
+            status = (self.tx('Nessun pin disponibile: carica o analizza un progetto.') if not rows else self.tx('Modifiche non applicate.') if dirty else self.tx('Simbolo pronto per la verifica e l’esportazione.'))
+            # Non-blocking notes of the pin normalisation (a pin name whose
+            # spaces become «_», as KiCad rewrites it on load): the exported
+            # symbol carries the rewritten name, so the user is told here,
+            # on the same status line as the other non-blocking messages,
+            # once per note (follow-up of review 2026-10-27, G2).
+            notes = self._normalization_notes(pins)
+            self.status.setText('\n'.join([status, *notes]) if notes else status)
         if self._error:
             self.status.setText(self._error)
         self.absent_pins_button.defaultAction().setEnabled(bool(self.absent_pins(rows)))
@@ -3972,8 +4088,16 @@ class SymbolTab(QWidget):
         self._history_index = len(self._history) - 1
 
     def _restore_history(self, index):
-        """Replace the draft with history snapshot `index` (undo/redo); the element selection is cleared."""
-        if self._gesture_before is not None or not 0 <= index < len(self._history):
+        """Replace the draft with history snapshot `index` (undo/redo); the element selection and any armed click tool are dropped."""
+        if self._gesture_before is not None:
+            return
+        # The points a click tool collected were snapped and anchored on the
+        # draft being replaced (a pin end, an element terminal): the tool is
+        # abandoned, as the footprint preview does on Ctrl+Z / Ctrl+Y, even
+        # when there is nothing to undo (review 2026-10-27, D1; plan
+        # docs/canvas-clicktools-plan.md C13).
+        self._router.disarm()
+        if not 0 <= index < len(self._history):
             return
         self._history_index = index
         # The element selection is made of indices into the replaced list:
@@ -3995,7 +4119,13 @@ class SymbolTab(QWidget):
         self._restore_history(self._history_index + 1)
 
     def reset_layout(self):
-        """@brief Restore two-column placement while preserving pin identities and roles."""
+        """@brief Restore two-column placement while preserving pin identities and roles.
+
+        @note A click tool armed on the old layout is abandoned first: its
+            points were anchored to pins that are about to move (review
+            2026-10-27, D1; plan docs/canvas-clicktools-plan.md C13).
+        """
+        self._router.disarm()
         rows = self.draft_rows()
         for index, row in enumerate(rows):
             row.pop('symbol_body', None)
@@ -4065,11 +4195,20 @@ class SymbolTab(QWidget):
             return
         # `elements` already holds the current selection when additive.
         self._element_selection.set_many(elements)
-        if elements:
-            # The pin selection is dropped, so a later band with Ctrl held
-            # adds elements instead of reselecting the pins.
+        if elements or not additive:
+            # INVARIANT (plan docs/canvas-selection-plan.md §2, review
+            # 2026-10-27 D5): a plain band is a new selection, so the pins
+            # are dropped whether the band chose elements (a later band with
+            # Ctrl held then adds elements instead of reselecting the pins)
+            # or nothing at all (an empty band clears, as the footprint
+            # preview and KiCad do). Only an additive band keeps them.
             self._selected_pins = set()
             self._selected_pin = None
+            self._syncing_selection = True
+            try:
+                self.table.clearSelection()
+            finally:
+                self._syncing_selection = False
         self._draw(self._symbol)
 
     def _table_selection(self):

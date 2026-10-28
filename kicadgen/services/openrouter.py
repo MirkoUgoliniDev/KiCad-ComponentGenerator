@@ -69,6 +69,36 @@ _APP_HEADERS = {
 _HTTP_TIMEOUT_MODELS_S = 30
 _HTTP_TIMEOUT_CHAT_S = 300
 _HTTP_TIMEOUT_CREDITS_S = 20
+#: Largest successful (2xx) body the program decodes, in bytes. Error bodies
+#: are already capped at 64 KiB and the update check at 1 MB; a successful
+#: answer (a chat completion with tool arguments, the /models list of a few
+#: MB, a credit status) has no reason to approach this size, so anything
+#: larger is treated as an undecodable answer instead of being read into
+#: memory without bound (review 2026-10-27, E6).
+_MAX_RESPONSE_BODY_BYTES = 16 * 1024 * 1024
+
+
+def _json_from_response(response: Any, limit: int = _MAX_RESPONSE_BODY_BYTES) -> Any:
+    """@brief Decode the JSON body of a successful HTTP response, bounded in size.
+
+    @param response The object returned by ``urllib.request.urlopen`` (or any
+        object with ``read(n)``).
+    @param limit Largest body accepted, in bytes.
+    @return The decoded JSON value.
+    @throws ValueError When the body is longer than ``limit`` or is not JSON:
+        the callers already treat a ValueError as «risposta non decodificabile»
+        (possibly billed for a chat call), which is also what an over-sized
+        body is -- the answer arrived but cannot be used.
+    @throws http.client.IncompleteRead, OSError As ``read`` raises them: the
+        callers classify them as before.
+    @note ``limit + 1`` bytes are requested so that a body of exactly
+        ``limit`` bytes is accepted and a longer one is recognised without
+        reading it to the end.
+    """
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"HTTP body longer than {limit} bytes")
+    return json.loads(data)
 
 #: Minimum credit (USD) below which an extraction is not even started.
 #: A single extraction with photo and crops typically costs a few cents, but
@@ -106,6 +136,15 @@ class OpenRouterError(Exception):
     def __init__(self, message: str, *, retryable: bool = False,
                  retry_after: Optional[float] = None, compatibility: bool = False,
                  http_status: Optional[int] = None, unreachable: bool = False):
+        """@brief Build the error with its retry and reachability flags.
+
+        @param message Privacy-safe diagnostic text.
+        @param retryable Transient failure: the same request may succeed later.
+        @param retry_after Provider-requested wait in seconds, or None.
+        @param compatibility The request FORM was refused (tool_choice 400).
+        @param http_status HTTP status of the refusal, or None.
+        @param unreachable No HTTP answer arrived at all.
+        """
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
@@ -143,6 +182,11 @@ class ToolArgumentsError(OpenRouterError):
     """
 
     def __init__(self, message: str, *, raw=None):
+        """@brief Build the error, keeping the unusable arguments for the log.
+
+        @param message Privacy-safe diagnostic text.
+        @param raw The raw arguments text of the tool call, or None when absent.
+        """
         super().__init__(message)
         self.raw = raw
 
@@ -690,7 +734,9 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.load(response)
+            # Bounded read (review 2026-10-27, E6): an over-sized body is a
+            # ValueError, hence «risposta non decodificabile» below.
+            payload = _json_from_response(response)
     except urllib.error.HTTPError as exc:
         status = exc.code if type(exc.code) is int else None
         raise OpenRouterError(_error_message(exc), http_status=status) from None
@@ -891,7 +937,8 @@ def _parse_price(value: Any) -> float:
         return 0.0
     if not math.isfinite(price):
         return math.nan
-    # I modelli "auto" espongono prezzi sentinella negativi: valgono 0.
+    # The "auto" router models publish negative sentinel prices (the real
+    # price depends on the model chosen at call time): they count as 0 here.
     return price * 1_000_000 if price > 0 else 0.0
 
 
@@ -1017,7 +1064,9 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
         request = urllib.request.Request(MODELS_URL, headers=_APP_HEADERS)
         try:
             with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_MODELS_S) as response:
-                payload = _models_list(json.load(response))
+                # Bounded read (review 2026-10-27, E6): an over-sized list is
+                # a ValueError, handled with the cache like a damaged one.
+                payload = _models_list(_json_from_response(response))
             if payload is None:
                 raise ValueError("unexpected /models payload shape")
         except (urllib.error.URLError, ValueError, OSError) as exc:
@@ -1285,7 +1334,9 @@ def _call_tool(
     _begin_request(model)
     try:
         with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_CHAT_S) as response:
-            payload = json.load(response)
+            # Bounded read (review 2026-10-27, E6): an over-sized answer is a
+            # ValueError, hence a possibly billed undecodable answer below.
+            payload = _json_from_response(response)
     except urllib.error.HTTPError as exc:
         status = exc.code if type(exc.code) is int else 0
         image_sizes = [len(block.get("image_url", {}).get("url", ""))

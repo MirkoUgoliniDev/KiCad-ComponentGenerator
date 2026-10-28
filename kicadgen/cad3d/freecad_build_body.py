@@ -82,6 +82,11 @@ class _StepHeartbeat:
     """
 
     def __init__(self, step, interval=None):
+        """@brief Prepare the heartbeat of one step.
+
+        @param step Name of the step, printed in every beat.
+        @param interval Seconds between beats; None = the job's interval.
+        """
         self._step = str(step)
         self._interval = float(interval or _HEARTBEAT_INTERVAL_S)
         self._stop = threading.Event()
@@ -931,7 +936,7 @@ def _staging_path(data, key, final):
     """@brief Path where one export is written before being published.
 
     @param data Job JSON; ``staging_paths[key]`` is set by step_generator.
-    @param key ``"step"``, ``"wrl"`` or ``"mesh"``.
+    @param key ``"step"``, ``"wrl"``, ``"mesh"`` or ``"fcstd"``.
     @param final Final path of that export.
     @return The parent's staging path, or a sibling with ``.kicadgen-partial``
         before the extension (kept: FreeCAD picks the STEP exporter from it).
@@ -995,6 +1000,38 @@ def _save_fcstd(doc, fcstd_path):
         staged = os.path.join(staging, "modello.FCStd")
         doc.saveAs(staged)
         shutil.copyfile(staged, _long_path(fcstd_path))
+
+
+def _export_fcstd(doc, fcstd_path, staged):
+    """@brief Save the FreeCAD source under its staging name and publish it.
+
+    @param doc FreeCAD document to save.
+    @param fcstd_path Final `.FCStd` path.
+    @param staged Staging path (same folder, so the rename is atomic).
+    @note Same contract as the STEP, WRL and preview (2026-10-27 review,
+        H8): the final name is reached only by a rename after the save
+        returned, so a kill during the save leaves at most a staging file
+        and a failed save leaves NO file -- the parent deleted the previous
+        source before the run and removes anything without the success
+        marker. Best effort: a failure is a warning, never a failed job,
+        because the STEP and the preview do not depend on it.
+    """
+    try:
+        with _StepHeartbeat("fcstd_save"):
+            _save_fcstd(doc, staged)
+            # Extended-length paths on both sides: saveAs may have needed
+            # them, and the rename must not fail where the save succeeded.
+            _publish(_long_path(staged), _long_path(fcstd_path))
+        print(f"KICADGEN_FCSTD_OK:{fcstd_path}")
+    except Exception as exc:  # noqa: BLE001 - FreeCAD source is best-effort
+        _discard(_long_path(staged))
+        print(f"KICADGEN_FCSTD_FAILED:{exc}")
+        # The marker above stays for whoever reads the output line by line,
+        # but only the KICADGEN_WARN: lines reach the user: without
+        # this one the FreeCAD source disappeared without anyone saying so.
+        _warn("sorgente FreeCAD non salvata ({exc}); STEP e anteprima non ne "
+              "risentono",
+              exc=exc)
 
 
 def main():
@@ -1270,7 +1307,7 @@ def main():
             box.get("color_hex", "#1a1a1a"))
 
     pin_radius = pin_diameter / 2.0
-    # Spenti su richiesta (Body3DParams.show_pins_3d): restano i fori.
+    # Switched off on request (Body3DParams.show_pins_3d): the holes remain.
     shown_pins = pins if data.get("show_pins_3d", True) else []
     if shown_pins and data.get("pin_style") == "male_header":
         # Male strip under a populated board: square pins and plastic
@@ -1324,18 +1361,7 @@ def main():
     print(f"KICADGEN_STEP_OK:{step_path}", flush=True)
 
     if fcstd_path:
-        try:
-            with _StepHeartbeat("fcstd_save"):
-                _save_fcstd(doc, fcstd_path)
-            print(f"KICADGEN_FCSTD_OK:{fcstd_path}")
-        except Exception as exc:  # noqa: BLE001 - FreeCAD source is best-effort
-            print(f"KICADGEN_FCSTD_FAILED:{exc}")
-            # The marker above stays for whoever reads the output line by line,
-            # but only the KICADGEN_WARN: lines reach the user: without
-            # this one the FreeCAD source disappeared without anyone saying so.
-            _warn("sorgente FreeCAD non salvata ({exc}); STEP e anteprima non ne "
-               "risentono",
-               exc=exc)
+        _export_fcstd(doc, fcstd_path, _staging_path(data, "fcstd", fcstd_path))
 
     tessellated = []
     with _StepHeartbeat("tessellation") as heartbeat:

@@ -560,6 +560,25 @@ class FootprintView(QGraphicsView):
         if self.gestures is not None:
             self.gestures.cancel()
 
+    def _press_gesture(self, target, point) -> bool:
+        """Offer a left press to the gesture controller with auto-fit switched off first.
+
+        INVARIANT (plan docs/canvas-gestures-plan.md §1c D13, review
+        2026-10-27 D2): auto-fit goes off BEFORE the host begins a drag, as
+        the symbol editor does, so the redraws of the drag and of the drop
+        never refit the camera under the user's hand (the scale changed at
+        the drop while the pointer was still over the drawing); it goes
+        back on when the host refuses the press, so a refused click changes
+        nothing. Without a controller the press is refused and nothing changes.
+        """
+        if self.gestures is None:
+            return False
+        auto_fit, self.camera.auto_fit = self.camera.auto_fit, False
+        if self.gestures.press(target, point):
+            return True
+        self.camera.auto_fit = auto_fit
+        return False
+
     def mousePressEvent(self, event):
         """@brief Begin a text drag on a text, else camera panning, on a left or middle press.
 
@@ -575,6 +594,9 @@ class FootprintView(QGraphicsView):
             background pans, and its release without a drag emits
             `background_clicked` (not for a Ctrl click, which is additive).
             Any press while the band is drawn is swallowed.
+        @note A press that begins a text or drawing drag switches auto-fit
+            off first (`_press_gesture`, plan docs/canvas-gestures-plan.md
+            D13), as the symbol editor does.
         """
         if self.click_router is not None and self.click_router.press(event):
             return
@@ -632,7 +654,7 @@ class FootprintView(QGraphicsView):
             handle = self._handle_at(event.pos())
             item, key = (None, None) if handle is not None else self._text_item_at(event.pos())
             point = self.mapToScene(event.pos())
-            if item is not None and self.gestures is not None and self.gestures.press(('text', key), point):
+            if item is not None and self._press_gesture(('text', key), point):
                 # The dragged text keeps its anchor square wherever the
                 # pointer goes, as a dragged property in the symbol editor.
                 self._report_text_hover(key)
@@ -643,8 +665,7 @@ class FootprintView(QGraphicsView):
                 # element of the symbol editor (user, 2026-10-13).
                 index = self._drawing_at(event.pos())
                 handle = (index, -1) if index >= 0 else None
-            if (handle is not None and self.gestures is not None
-                    and self.gestures.press(('handle', *handle), point)):
+            if handle is not None and self._press_gesture(('handle', *handle), point):
                 # The window moves the point (or the whole drawing) on the
                 # grid and redraws the shape at every step.
                 event.accept()

@@ -292,6 +292,12 @@ class _RemappedSession:
     """
 
     def __init__(self, session, mapping, np):
+        """@brief Wrap an onnxruntime session with a class-index remapping.
+
+        @param session The onnxruntime InferenceSession of the model.
+        @param mapping Model class index -> index in _CLASSES.
+        @param np The numpy module (passed in so the import stays lazy).
+        """
         self._session, self._mapping, self._np = session, list(mapping), np
 
     def run(self, output_names, feeds):
@@ -318,6 +324,17 @@ class _TorchSession:
     """
 
     def __init__(self, network, torch, np, input_name, end_to_end=False, mapping=None):
+        """@brief Wrap a loaded PyTorch detection network.
+
+        @param network The network in evaluation mode.
+        @param torch The torch module (passed in so the import stays lazy).
+        @param np The numpy module.
+        @param input_name Name of the single input feed, as onnxruntime names it.
+        @param end_to_end True when the network already returns NMS-filtered
+            rows (end-to-end export) instead of the raw score grid.
+        @param mapping Optional model class index -> index in _CLASSES;
+            identity when omitted.
+        """
         self._network, self._torch, self._np = network, torch, np
         self._input = input_name
         self._end_to_end = end_to_end
@@ -988,6 +1005,10 @@ def _on_body_surface(retained, others, container_confidence):
 #: and the .pt head's `stride` tensor [8, 16, 32] is not threaded into the
 #: per-view proposal step. A model family with a different finest stride
 #: would need this value read from its head.
+#: It is NOT the outline uncertainty of a measurement on the photo
+#: (cad3d.measurement_uncertainty.EDGE_UNCERTAINTY_PX, the single source for
+#: that quantity): this one is the regression cell of the DETECTOR, in pixels
+#: of the model input, and only the tile-seam test uses it (review 2026-10-27 F4).
 _BOX_UNCERTAINTY_INPUT_PX = 8
 
 

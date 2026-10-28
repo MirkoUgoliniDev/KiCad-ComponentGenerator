@@ -5,6 +5,8 @@ from unittest.mock import Mock
 import pytest
 
 from kicadgen.services import datasheet_extractor as de
+# A real one-page PDF: fake bytes are refused since review E1 (2026-10-27).
+from minimal_pdf import MINIMAL_PDF
 
 
 def observation(**changes):
@@ -77,7 +79,7 @@ def test_provider_error_preserves_manual_fallback():
 
 def test_extraction_adopts_style_and_skips_manual_dialog_contract(tmp_path, monkeypatch):
     source = tmp_path / "board.pdf"
-    source.write_bytes(b"%PDF-1.4 offline fixture")
+    source.write_bytes(MINIMAL_PDF)
     call = Mock(side_effect=[
         {"layout": "castellated", "castellated_sides": [
             {"edge": "left", "count": 2, "pitch_mm": 2.54}]},

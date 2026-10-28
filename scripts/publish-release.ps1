@@ -9,12 +9,29 @@ Modelled on employee-scheduling/scripts/publish-release.ps1. By the user's
 choice (2026-09-25) the release is made from the CURRENT branch, not only
 from main; the branch is printed and must be up to date with GitHub.
 
+A tag v* is permanent (repository ruleset): the script refuses to create it
+until the test suite is proven green for the commit being released (review
+2026-10-27, I4). By default the proof is the latest GitHub «Tests» workflow
+run of the current HEAD, read with the gh CLI; -RunTestsLocally runs the
+whole suite here instead (tools/run_test_halves.py both, several minutes);
+-SkipTests publishes without any proof and prints a red warning, for the
+one case where the user has decided so knowingly.
+
 .PARAMETER Version
 Three numbers, e.g. 1.0.0 (a leading v is accepted).
+
+.PARAMETER RunTestsLocally
+Run the full suite in this checkout before tagging, instead of asking GitHub
+for the result of the «Tests» workflow.
+
+.PARAMETER SkipTests
+Tag without any test proof. Must be typed explicitly; prints a red warning.
 #>
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [string]$Version,
+    [switch]$RunTestsLocally,
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +43,40 @@ $tag = "v$number"
 
 function Assert-LastCommand([string]$description) {
     if ($LASTEXITCODE -ne 0) { throw "$description failed with exit code $LASTEXITCODE." }
+}
+
+function Assert-TestsGreenOnGitHub([string]$sha) {
+    # The «Tests» workflow runs on every push: the latest run for this exact
+    # commit must have completed successfully. No run at all means the commit
+    # was never pushed (or the run has not started yet): refuse, never guess.
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw 'The gh CLI is not installed: install it, or run with -RunTestsLocally.'
+    }
+    $json = & gh run list --commit $sha --workflow Tests --json status,conclusion,url --limit 1
+    Assert-LastCommand 'Reading the Tests workflow runs from GitHub'
+    $runs = @($json | ConvertFrom-Json)
+    if ($runs.Count -eq 0) {
+        throw "No «Tests» run exists on GitHub for commit $sha. Push the branch, wait for the run, then publish."
+    }
+    $run = $runs[0]
+    if ($run.status -ne 'completed') {
+        throw "The «Tests» run for commit $sha is still $($run.status): wait for it ($($run.url))."
+    }
+    if ($run.conclusion -ne 'success') {
+        throw "The «Tests» run for commit $sha concluded '$($run.conclusion)': fix the suite before tagging ($($run.url))."
+    }
+    Write-Host "Tests green on GitHub for $sha ($($run.url))." -ForegroundColor Green
+}
+
+function Invoke-TestsLocally() {
+    # The same two-process run as CI (tools/run_test_halves.py both), with
+    # the project's own interpreter; a failing half stops the publication.
+    $python = Join-Path $Root '.venv\Scripts\python.exe'
+    if (-not (Test-Path $python)) { throw "Project interpreter not found: $python" }
+    Write-Host 'Running the full test suite locally (two halves)...' -ForegroundColor Cyan
+    & $python (Join-Path $Root 'tools\run_test_halves.py') both
+    Assert-LastCommand 'The local test suite'
+    Write-Host 'Tests green locally.' -ForegroundColor Green
 }
 
 Push-Location $Root
@@ -47,6 +98,20 @@ try {
     & git ls-remote --exit-code --tags origin "refs/tags/$tag" | Out-Null
     if ($LASTEXITCODE -eq 0) { throw "Tag $tag already exists on GitHub." }
     if ($LASTEXITCODE -ne 2) { throw 'Unable to check the tag on GitHub.' }
+
+    # Test gate, on the code as it is NOW: the version commit below changes
+    # only the version string, so the proof for the current HEAD covers it.
+    $head = (& git rev-parse HEAD).Trim()
+    Assert-LastCommand 'Reading HEAD'
+    if ($SkipTests) {
+        Write-Host "WARNING: -SkipTests given. Tagging $tag WITHOUT any proof that the test suite passes; the tag is permanent." -ForegroundColor Red
+    }
+    elseif ($RunTestsLocally) {
+        Invoke-TestsLocally
+    }
+    else {
+        Assert-TestsGreenOnGitHub $head
+    }
 
     $init = Join-Path $Root 'kicadgen\__init__.py'
     $text = [System.IO.File]::ReadAllText($init)

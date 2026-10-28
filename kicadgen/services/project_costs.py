@@ -438,6 +438,11 @@ class _exclusive_lock:
     """Exclusive lock file created with O_CREAT | O_EXCL (atomic on local disks)."""
 
     def __init__(self, folder: Path):
+        """@brief Prepare the lock for a project folder; nothing is created yet.
+
+        @param folder Project folder that holds the cost ledger; the lock file
+            is created there only on `__enter__`.
+        """
         self.path = folder / LOCK_FILE
         self.handle = None
 

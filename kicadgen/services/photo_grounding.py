@@ -13,8 +13,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX
 from .openrouter import OpenRouterError, DEFAULT_MODEL
-from .photo_inventory import copy_mechanical_metadata, mechanical_metadata_properties
+from .photo_inventory import (axes_contradict, copy_mechanical_metadata,
+                              mechanical_metadata_properties)
 from .photo_heights import estimate_body_height
 from .messages import tx, warning
 
@@ -86,7 +88,70 @@ def grounding_tool(kinds):
         }, "required": ["components"]}}}
 
 
-def decode_boxes(data, region, length, width, kinds, source, log):
+def _ordered_rectangle(value, order):
+    """Whether `value` is four finite numbers forming a non-empty rectangle.
+
+    @param order "tlbr" for [top, left, bottom, right] (box_2d) or "ltrb"
+        for [left, top, right, bottom].
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)) or len(value) != 4:
+        return False
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in value):
+        return False
+    if order == "tlbr":
+        top, left, bottom, right = value
+    else:
+        left, top, right, bottom = value
+    return left < right and top < bottom
+
+
+#: Resolution of a `box_2d` coordinate: the model answers integers 0..1000
+#: of the detail, so an edge is known to one thousandth of the detail.
+BOX_2D_QUANTUM = 1.0 / 1000.0
+
+
+def detail_border_band(photo_px, region, length, width):
+    """@brief Width of the band, in normalised units of the detail, inside which a box touches its border.
+
+    A package cut by the detail's edge is drawn against that edge, but the
+    model cannot place it exactly ON it: the coordinate is quantised to
+    BOX_2D_QUANTUM and the edge itself is located within EDGE_UNCERTAINTY_PX
+    of the detail's pixels. The band is the sum of the two, per axis; the
+    localisation term is never below one grid unit, because the model
+    cannot resolve less than its own coordinate grid (review 2026-10-27,
+    F7; replaces the undeclared 0.002, which is exactly this band on a
+    detail of 2000 px or more, and too narrow on a smaller one).
+
+    @param photo_px (width, height) in pixels of the detail the boxes were
+        drawn on, or None when unknown: then only the grid is known and the
+        band is two grid units (quantisation + one unit of localisation), a
+        DECLARED fallback that understates the band of a detail narrower
+        than 1000 px.
+    @param region Normalised (x0, y0, x1, y1) of the detail on the board
+        (kept in the signature for callers that log it; the band is in the
+        detail's own units).
+    @param length Board extent along X, in mm (idem).
+    @param width Board extent along Y, in mm (idem).
+    @return (band_x, band_y) in normalised units of the detail.
+    """
+    del region, length, width  # the band is expressed in the detail's own units
+    bands = []
+    for axis in (0, 1):
+        pixels = None
+        if photo_px is not None:
+            try:
+                pixels = float(photo_px[axis])
+            except (TypeError, ValueError, IndexError):
+                pixels = None
+        localisation = BOX_2D_QUANTUM
+        if pixels is not None and math.isfinite(pixels) and pixels > 0:
+            localisation = max(BOX_2D_QUANTUM, EDGE_UNCERTAINTY_PX / pixels)
+        bands.append(BOX_2D_QUANTUM + localisation)
+    return tuple(bands)
+
+
+def decode_boxes(data, region, length, width, kinds, source, log, photo_px=None):
     """@brief Convert a locate_components answer into low-confidence millimetre candidates.
 
     Invalid entries and packages cut at an interior detail border are logged and skipped.
@@ -97,6 +162,9 @@ def decode_boxes(data, region, length, width, kinds, source, log):
     @param kinds Allowed component kinds; others become generic.
     @param source View label stored in `_source` and used in log lines.
     @param log Callable receiving diagnostic lines.
+    @param photo_px (width, height) in pixels of the detail the boxes were
+        drawn on; it sizes the border band (`detail_border_band`). None keeps
+        the quantum alone.
     @return List of candidate dictionaries marked `_uncertain`, with a whole-crop `_box`.
     @throws ValueError When the components list is missing or not a list.
     """
@@ -105,6 +173,7 @@ def decode_boxes(data, region, length, width, kinds, source, log):
     if not isinstance(raw, list):
         raise ValueError(tx("elenco dei rettangoli mancante/non valido"))
     rx0, ry0, rx1, ry1 = region
+    band_x, band_y = detail_border_band(photo_px, region, length, width)
     for index, entry in enumerate(raw, 1):
         try:
             box = entry["box_2d"]
@@ -119,8 +188,8 @@ def decode_boxes(data, region, length, width, kinds, source, log):
             # complete package from the full-board view. Both axes: the
             # details are a grid, so a body can be cut at the top or bottom
             # of a detail exactly as at its sides.
-            if ((rx0 > 0 and left <= .002) or (rx1 < 1 and right >= .998)
-                    or (ry0 > 0 and top <= .002) or (ry1 < 1 and bottom >= .998)):
+            if ((rx0 > 0 and left <= band_x) or (rx1 < 1 and right >= 1 - band_x)
+                    or (ry0 > 0 and top <= band_y) or (ry1 < 1 and bottom >= 1 - band_y)):
                 raise ValueError(tx("package tagliato al bordo del dettaglio"))
             x0, x1 = rx0 + left*(rx1-rx0), rx0 + right*(rx1-rx0)
             y0, y1 = ry0 + top*(ry1-ry0), ry0 + bottom*(ry1-ry0)
@@ -477,15 +546,20 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
         if not isinstance(entries, list):
             return False
         for entry in entries:
-            if "refined_bbox" in entry:
-                left, top, right, bottom = entry["refined_bbox"]
-                if left >= right or top >= bottom:
-                    return False
-            if "box_2d" in entry:
-                top, left, bottom, right = entry["box_2d"]
-                if top >= bottom or left >= right:
-                    return False
-            if "color_hex" in entry and not re.fullmatch(r"#[0-9a-fA-F]{6}", entry["color_hex"]):
+            if not isinstance(entry, dict):
+                return False
+            # Rectangles are unpacked only after their shape is checked: a
+            # cached record is user-controlled data, and a malformed value
+            # (a string, three numbers, None) must mean «not reusable», not
+            # a crash of the cache read (review 2026-10-27, F10). The
+            # `refined_bbox` key has no producer any more; the guard keeps
+            # old records with it readable without trusting them.
+            if "refined_bbox" in entry and not _ordered_rectangle(entry["refined_bbox"], "ltrb"):
+                return False
+            if "box_2d" in entry and not _ordered_rectangle(entry["box_2d"], "tlbr"):
+                return False
+            if "color_hex" in entry and not (isinstance(entry["color_hex"], str) and
+                                             re.fullmatch(r"#[0-9a-fA-F]{6}", entry["color_hex"])):
                 return False
         if expected_ids is not None:
             ids = [entry.get("id") for entry in entries]
@@ -618,7 +692,7 @@ def contact_sheet(photo, components, *, cell_width=240, cell_height=180, columns
     return canvas
 
 
-def apply_classifications(components, response, kinds, length, width, log):
+def apply_classifications(components, response, kinds, length, width, log, photo_px=None):
     """@brief Apply per-ID verification answers to candidates without moving their boxes.
 
     Candidates with a missing, duplicate or invalid verdict are kept as uncertain;
@@ -629,6 +703,11 @@ def apply_classifications(components, response, kinds, length, width, log):
     @param length Board length in mm.
     @param width Board width in mm.
     @param log Callable receiving diagnostic lines.
+    @param photo_px (width, height) in pixels of the calibrated board the
+        `_box` values are normalised to; it gives the edge uncertainty that
+        decides when a box's shape contradicts the declared rotation
+        (`photo_inventory.axes_contradict`). None falls back to
+        UNKNOWN_SCALE_ELONGATION_HINGE.
     @return The kept components with verified attributes.
     @throws ValueError When the answer has no components list.
     """
@@ -682,7 +761,11 @@ def apply_classifications(components, response, kinds, length, width, log):
             x0,y0,x1,y1 = c["_box"]
             sx,sy = (x1-x0)*length,(y1-y0)*width
             long,short = (sx,sy) if angle%180==0 else (sy,sx)
-            inconsistent = short > long*1.2
+            # The box contradicts the declared axis only beyond the edge
+            # uncertainty of the board photo (same criterion as the
+            # decoders: axes_contradict / elongation_hinge, F7).
+            inconsistent = axes_contradict(long, short, (0.0, 0.0, 1.0, 1.0), photo_px,
+                                           length, width)
             if inconsistent:
                 angle = (angle+90)%360
                 long,short = short,long
@@ -1027,7 +1110,8 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
             data = cached_call(call, dict(model=model,system_prompt=(grounding_prompt or "").strip() or GROUNDING_PROMPT,
                 content_blocks=[image_block(crop)],tool=grounding_tool(kinds),max_tokens=8192,has_pdf=False),
                 cache_dir,label,log)
-            group = decode_boxes(data,region,length,width,kinds,label,log)
+            group = decode_boxes(data,region,length,width,kinds,label,log,
+                                 photo_px=(crop.shape[1], crop.shape[0]))
             # Ownership by centre in disjoint cells, on both axes.
             group = [c for c in group
                      if ownership[0] <= (c['_box'][0]+c['_box'][2])/2 < ownership[2]
@@ -1086,7 +1170,8 @@ def grounded_components(photo, model, length, width, kinds, call, log, cache_dir
                 content_blocks=[image_block(contact_sheet(photo,batch))],tool=classification_tool(kinds),
                 max_tokens=8192,has_pdf=False),cache_dir,label,log,
                 expected_ids=[c['_id'] for c in batch])
-            result.extend(apply_classifications(batch,data,kinds,length,width,log))
+            result.extend(apply_classifications(batch,data,kinds,length,width,log,
+                                                photo_px=(photo.shape[1], photo.shape[0])))
         except (OpenRouterError,ValueError) as exc:
             log(warning("{label}: fallita ({exc}); candidati conservati come dubbi.",
                    label=label,

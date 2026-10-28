@@ -40,6 +40,12 @@ class _Job(QRunnable):
     """Hash a checkpoint, or read what it declares, off the GUI thread."""
 
     def __init__(self, kind: str, path: str):
+        """@brief Prepare one job of kind "sha256" or "smd_check" on `path`.
+
+        @param kind "sha256" to hash the file, "smd_check" to read what the
+            checkpoint declares.
+        @param path Checkpoint file.
+        """
         super().__init__()
         self.kind, self.path = kind, path
         self.signals = _Signals()
@@ -136,15 +142,34 @@ class SmdModelDialog(QDialog):
     # ── list ──────────────────────────────────────────────────────────
 
     def _files(self):
-        """The .pt files of the folder plus the extra ones, without duplicates."""
+        """The (path, size in bytes) of the folder's .pt files plus the extra ones, without duplicates.
+
+        Invariant (review 2026-10-27, C1): a file that vanishes while the
+        window is open -- deleted, renamed, or on a drive that went away --
+        is skipped, never raised. `glob`, `is_file` and `stat` all touch the
+        file system, and an OSError escaping this Qt slot would abort the
+        process; the size is read here, once, so that `_fill` never stats a
+        path that may have disappeared between the two calls.
+        """
         seen, files = set(), []
-        folder = sorted(self._models_dir.glob("*.pt")) if self._models_dir.is_dir() else []
+        try:
+            folder = sorted(self._models_dir.glob("*.pt")) if self._models_dir.is_dir() else []
+        except OSError:
+            # The folder itself became unreadable: only the extra files remain.
+            folder = []
         for path in [*folder, *(Path(p) for p in self._extra)]:
             key = os.path.normcase(os.path.abspath(str(path)))
-            if key in seen or not path.is_file():
+            if key in seen:
+                continue
+            try:
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                # Vanished between the listing and the stat: leave it out.
                 continue
             seen.add(key)
-            files.append(path)
+            files.append((path, size))
         return files
 
     def _fill(self, select: str = "") -> None:
@@ -153,14 +178,14 @@ class SmdModelDialog(QDialog):
         self.model_list.blockSignals(True)
         self.model_list.clear()
         chosen = None
-        for path in self._files():
+        for path, size in self._files():
             marks = []
             if self._same(path, self._current):
                 marks.append(self._tr("in uso"))
             if self._default and self._same(path, self._default):
                 marks.append(self._tr("predefinito"))
             text = path.name + (f"  ({', '.join(marks)})" if marks else "")
-            text += f"\nPyTorch · {_size_text(path.stat().st_size)}"
+            text += f"\nPyTorch · {_size_text(size)}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(str(path))

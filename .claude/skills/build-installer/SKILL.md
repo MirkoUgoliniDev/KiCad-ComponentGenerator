@@ -84,6 +84,23 @@ read-only job, Release created by the `publish` job. Follow the run with
 `gh run watch` and report the Release URL; if the run fails, report the log,
 do not delete or move the tag without the user.
 
+### 4b. Manual release (when the GitHub suite is red)
+
+v1.0.0 (2026-10-27) was published this way: the locally built MSI attached
+by hand, because the release workflow would have failed at the test step
+(see the `ci-green` skill). Only on the user's explicit request:
+
+```powershell
+gh release create vX.Y.Z dist\KiCadGen-X.Y.Z.msi --target main --title "KiCadGen vX.Y.Z" --notes-file notes.md
+```
+
+Write the notes by hand (what it is, requirements, SmartScreen, what is not
+included, the SHA-256 of the MSI). The tag still triggers `release.yml`,
+whose run will be red: say so to the user. **Tags `v*` are permanent** (the
+repository ruleset forbids moving or deleting them): a wrong release means
+the next number, never a re-tag. `releases/latest` always points to the
+newest non-prerelease, so links in posts stay valid.
+
 ## 5. Before a first public release
 
 Run the `release-readiness-reviewer` agent and bring its findings to the

@@ -43,7 +43,11 @@ FOOTPRINT_TEXT_LANGUAGE = "it"
 Point = Tuple[float, float]
 
 PAD_TYPES = {"thru_hole", "smd", "np_thru_hole", "connect"}
-# This writer has no custom-pad anchor/primitives representation.
+# This writer has no custom-pad anchor/primitives representation. A
+# trapezoid is accepted only together with its `rect_delta` (the two side
+# lengths KiCad subtracts/adds to the rectangle); without it KiCad draws a
+# plain rectangle, which is what a silent writer produced before (review
+# 2026-10-27, G7), so `Pad` refuses the shape without the delta.
 PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
 
 
@@ -107,12 +111,16 @@ class Pad:
 
     - number: pin name/number (e.g. "1", "A2", "" for mechanical pads without a net)
     - pad_type: "thru_hole" | "smd" | "np_thru_hole"
-    - shape: "circle" | "rect" | "oval" | "roundrect"
+    - shape: "circle" | "rect" | "oval" | "roundrect" | "trapezoid"
     - at: (x, y) position in mm relative to the footprint origin
     - size: (width, height) in mm
     - layers: list of KiCad layers, e.g. ["*.Cu", "*.Mask"] for THT or ["F.Cu", "F.Paste", "F.Mask"] for SMD
     - drill: hole diameter in mm (required for thru_hole/np_thru_hole)
     - roundrect_rratio: rounding ratio for shape="roundrect" (0..0.5)
+    - rect_delta: (dx, dy) in mm, KiCad's `rect_delta` of a trapezoid pad:
+      exactly one of the two is non-zero and its magnitude is below the
+      corresponding pad size, as KiCad's pad editor requires. Required for
+      shape="trapezoid" and refused for every other shape.
     """
 
     number: str
@@ -124,6 +132,7 @@ class Pad:
     rotation: float = 0.0
     drill: Optional[float] = None
     roundrect_rratio: Optional[float] = None
+    rect_delta: Optional[Tuple[float, float]] = None
 
     def __post_init__(self) -> None:
         if self.pad_type not in PAD_TYPES:
@@ -138,6 +147,32 @@ class Pad:
             raise ValueError(tx("pad {number!r}: drill obbligatorio per pad_type={pad_type!r}",
                                 number=self.number,
                                 pad_type=self.pad_type))
+        self._validate_rect_delta()
+
+    def _validate_rect_delta(self) -> None:
+        """Refuse a trapezoid without its delta and a delta on another shape.
+
+        KiCad defines a trapezoid pad by `(rect_delta dx dy)`: one of the two
+        is zero, the other shortens one side and lengthens the opposite one
+        by half its value, so its magnitude must stay below the pad size on
+        that axis or the sides would cross. A trapezoid written without the
+        delta is loaded by KiCad as a plain rectangle, silently.
+        """
+        if self.shape == "trapezoid":
+            if self.rect_delta is None:
+                raise ValueError(tx("pad {number!r}: un pad trapezoidale richiede rect_delta",
+                                    number=self.number))
+            try:
+                dx, dy = (float(v) for v in self.rect_delta)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(tx("pad {number!r}: rect_delta non valido", number=self.number)) from exc
+            width, height = (float(v) for v in self.size)
+            if not (math.isfinite(dx) and math.isfinite(dy)) or (dx != 0.0) == (dy != 0.0)                     or abs(dx) >= width or abs(dy) >= height:
+                raise ValueError(tx("pad {number!r}: rect_delta non valido", number=self.number))
+            self.rect_delta = (dx, dy)
+        elif self.rect_delta is not None:
+            raise ValueError(tx("pad {number!r}: rect_delta ammesso solo per la forma trapezoid",
+                                number=self.number))
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this pad to a KiCad `(pad ...)` S-expression.
@@ -153,6 +188,10 @@ class Pad:
         node.add(sx("layers", *self.layers))
         if self.shape == "roundrect" and self.roundrect_rratio is not None:
             node.add(sx("roundrect_rratio", self.roundrect_rratio))
+        if self.shape == "trapezoid":
+            # Always present for a trapezoid (`_validate_rect_delta`): it is
+            # the geometry of the shape, not an option.
+            node.add(sx("rect_delta", *self.rect_delta))
         node.add(sx("uuid", _uuid()))
         return node
 

@@ -3,7 +3,7 @@ from html import escape
 from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QLabel, QTableWidget,
+from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QDialogButtonBox, QPushButton, QHeaderView,
     QHBoxLayout, QProgressBar)
 from ..services.pin_type_ai import suggest_pin_types
@@ -12,15 +12,38 @@ from .symbol_tab import _TYPE_LABELS
 
 
 class _Worker(QThread):
+    """Ask the AI for pin types off the GUI thread, cancellable between calls.
+
+    @note Ownership (review 2026-10-27, C7): the thread belongs to
+        QApplication, as `model_dialog._ModelsWorker` does. A QThread
+        destroyed while running aborts the process, and the dialog can be
+        destroyed without `closeEvent` (parent window deleted, application
+        quit); owned by QApplication the worker outlives the dialog, deletes
+        itself when finished and the application exit waits for it.
+    """
+
     done = pyqtSignal(object)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, args, parent):
-        super().__init__(parent)
+    def __init__(self, args, parent=None):
+        """@brief Prepare one AI pin-type request owned by QApplication.
+
+        @param args Keyword arguments of `suggest_pin_types`.
+        @param parent Ignored for ownership when a QApplication exists (see
+            the class note); kept for signature compatibility.
+        """
+        application = QApplication.instance()
+        super().__init__(application if application is not None else parent)
         self.args = args
+        if application is not None:
+            # Quitting with the request in flight would destroy the running
+            # thread: wait for it instead, bounded by the HTTP timeout.
+            application.aboutToQuit.connect(self.wait)
+        self.finished.connect(self._release)
 
     def run(self):
+        """@brief QThread override: emit `done` with the proposals, `error` with a message, nothing when cancelled."""
         try:
             result = suggest_pin_types(**self.args, progress=self.progress.emit,
                                        cancelled=self._check_cancel)
@@ -35,6 +58,21 @@ class _Worker(QThread):
         if self.isInterruptionRequested():
             raise CallCancelled()
 
+    def _release(self):
+        """Drop the exit-time wait and delete the thread once finished.
+
+        Left connected, at exit Qt would call `wait` on an object already
+        removed by `deleteLater` (same sequence as `model_dialog._ModelsWorker`).
+        """
+        application = QApplication.instance()
+        if application is not None:
+            try:
+                application.aboutToQuit.disconnect(self.wait)
+            except TypeError:
+                # Never connected or already disconnected: nothing to undo.
+                pass
+        self.deleteLater()
+
 
 class PinTypeDialog(QDialog):
     """@brief Present document-backed AI proposals for explicit user review."""
@@ -42,6 +80,13 @@ class PinTypeDialog(QDialog):
     analysis_finished = pyqtSignal()
 
     def __init__(self, args, parent=None, tx=lambda s: s):
+        """@brief Build the proposal table; the AI request starts only on «Analizza con AI».
+
+        @param args Keyword arguments of `suggest_pin_types`: name, rows,
+            documents and model; the file names are listed in the window.
+        @param parent Owner window.
+        @param tx Translation function (Italian source -> shown text).
+        """
         super().__init__(parent)
         self.args, self.tx = args, tx
         self.proposals = []
@@ -108,7 +153,8 @@ class PinTypeDialog(QDialog):
         self.start.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'wf-loading.svg')))
         self.loading.show()
         self.status.setText(self.tx('Analisi in corso…'))
-        self.worker = _Worker(self.args, self)
+        # Owned by QApplication, not by this window: see _Worker.
+        self.worker = _Worker(self.args)
         self.worker.progress.connect(self.status.setText)
         self.worker.error.connect(self.status.setText)
         self.worker.done.connect(self._done)
@@ -125,6 +171,10 @@ class PinTypeDialog(QDialog):
         self.start.setIcon(QIcon(str(Path(__file__).parent / 'assets' / 'pin-type-analyze.svg')))
         self.loading.hide()
         self._update_use()
+        # The finished worker deletes itself on the next event-loop turn
+        # (see _Worker._release): a reference kept past that point would be a
+        # deleted C++ object, so it is dropped here, after the last use.
+        self.worker = None
 
     def _update_use(self):
         running = self.worker is not None and self.worker.isRunning()

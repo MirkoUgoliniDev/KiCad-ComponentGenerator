@@ -112,6 +112,34 @@ def _public_definitions(body, prefix=''):
             yield from _public_definitions(_compound_bodies(node), prefix)
 
 
+#: Base classes whose ``run`` is the body of a worker thread (review
+#: 2026-10-27, C4): the override is public API in all but name, so it needs
+#: a ``@brief`` docstring even inside a private class.
+_THREAD_BASES = frozenset({'QThread', 'QRunnable'})
+
+
+def _mandatory_special_methods(body, prefix=''):
+    """Yield (qualified name, node) for the methods documented regardless of privacy.
+
+    Every ``__init__`` (its parameters are the class's constructor contract,
+    public or not) and every ``run`` of a class deriving from QThread or
+    QRunnable (see ``_THREAD_BASES``). Classes nested in classes and classes
+    under compound statements are covered; function bodies are not.
+    """
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            name = prefix + node.name
+            bases = {_terminal_name(base) for base in node.bases}
+            for inner in node.body:
+                if not isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if inner.name == '__init__' or (inner.name == 'run' and bases & _THREAD_BASES):
+                    yield f'{name}.{inner.name}', inner
+            yield from _mandatory_special_methods(node.body, name + '.')
+        elif not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield from _mandatory_special_methods(_compound_bodies(node), prefix)
+
+
 def undocumented_items(source, label):
     """@brief List the ``@brief`` violations of one source text.
 
@@ -119,15 +147,24 @@ def undocumented_items(source, label):
     @param label File label used in the reported entries.
     @return Entries formatted as ``label:line:name``; ``<module>`` names the
             module docstring. An empty list means the source complies.
+    @note Besides the public definitions, every ``__init__`` and every
+          ``run`` of a QThread/QRunnable subclass must carry a ``@brief``
+          (see ``_mandatory_special_methods``); private helpers other than
+          these keep their exemption.
     """
     tree = ast.parse(source)
     failures = []
     if not _starts_with_brief(tree):
         failures.append(f'{label}:1:<module>')
+    checked = set()
     for name, node in _public_definitions(tree.body):
+        checked.add(id(node))
         if not _starts_with_brief(node):
             failures.append(f'{label}:{node.lineno}:{name}')
-    return failures
+    for name, node in _mandatory_special_methods(tree.body):
+        if id(node) not in checked and not _starts_with_brief(node):
+            failures.append(f'{label}:{node.lineno}:{name}')
+    return sorted(failures, key=lambda entry: int(entry.split(':')[1]))
 
 
 #: Italian function words that do not occur as English words («per», «non»,
@@ -142,13 +179,43 @@ def undocumented_items(source, label):
 #: case (not ``Arduino Uno``, not ``ECC`` memory), and «del» only as
 #: ``del``/``Del`` and not as the Python statement, i.e. not followed by a
 #: dotted or subscripted operand (``del self._cache``, ``del table[key]``).
+#: 2026-10-27 (review of the GUI scope): the reviewers found Italian comments
+#: made only of content words, which the function-word list could not see
+#: («I testi lunghi vanno a capo», «Etichette leggibili», «Spenti su
+#: richiesta: restano i fori», «Nessun dato: ripiego dichiarato», «valgono
+#: 0»). A second alternation lists Italian verbs, adjectives and nouns that
+#: are not English words (checked one by one against English vocabulary:
+#: «vanno», «restano», «valgono», «espongono», «spenti», «leggibili»,
+#: «ripiego», «richiesta», «nessun/nessuna/nessuno», «dichiarato/a»,
+#: «ogni», «ancora», «sempre», «invece», «mentre», «altrimenti», «tutti»,
+#: «tutte», «stesso/a/i/e», «valore/i», «misura/e», «letto/a», «scritto/a»,
+#: «riga/righe», «corpo/i», «altezza», «larghezza», «lunghezza»,
+#: «scheda», «testo/i», «lunghi», «capo», «fori», «dato/i», «errore/i»,
+#: «messaggio/i», «servono», «usato/a/i/e», «fatto/a»; «foto» and «serve»
+#: were measured and rejected: a sample file name «foto.png» in a usage
+#: line and the English verb "serve");
+#: and a third one matches an articulated preposition followed by an
+#: article («su richiesta» is caught by the word, «a meta'», «per lato»,
+#: «di un», «in una», «con le», «tra i» by the pair), a sequence that
+#: English never produces. Measured on the working tree of 2026-10-27: the
+#: additions flagged no English docstring or comment of the documented
+#: files (see test_comment_language_rule_catches_content_word_italian for
+#: the positive and negative samples).
 _ITALIAN_STOPWORDS = re.compile(
     r"(?<![\w'])(?:(?i:della|delle|degli|dello|nella|nelle|negli|sulla|sulle"
     r"|viene|vengono|anche|senza|oppure|quando|perch[eé]|perche'|questo|questa"
     r"|questi|queste|restituisce|ritorna|calcola|sono|essere|gli|dei|una"
     r"|che|nel|nei|sul|sui|dal|dalla|dalle|alla|alle|agli"
     r"|e'|è|piu'|più|gia'|già|puo'|può|cosi'|così|cioe'|cioè|quindi|ovvero"
-    r"|deve|devono|un|cui)"
+    r"|deve|devono|un|cui"
+    r"|vanno|restano|valgono|espongono|spenti|spente|leggibil[ie]|ripiego"
+    r"|richiest[ae]|nessun[aoi]?|dichiarat[aoie]|ogni|ancora|sempre|invece"
+    r"|mentre|altrimenti|tutt[ie]|stess[aoie]|valor[ei]|misur[ae]|lett[aoie]"
+    r"|scritt[aoie]|riga|righe|corp[oi]|altezz[ae]|larghezz[ae]|lunghezz[ae]"
+    r"|sched[ae]|test[oi]|lunghi|capo|fori|dat[oi]|error[ei]|messagg[io]"
+    r"|servono|usat[aoie]|fatt[aoie]"
+    r"|(?:[adi]|da|in|su|per|con|tra|fra)\s+(?-i:il|lo|la|gli|le|un|uno|una)"
+    r"|(?:a|da|di|in|su|per|con|tra|fra)\s+met[aà]'?)"
     r"|[iI]l|uno|ecc|[dD]el(?!\s+(?:key\b|\w+(?:\.\w|\[))))(?![\w'-])")
 
 #: Italian stopwords needed to flag a docstring, counted after quoted text is
@@ -1276,14 +1343,54 @@ def keyword_subscript():
 # contain no stopword of their own.
 
 
+#: A multi-line string literal counts as an embedded script when one of its
+#: lines is an import, a definition or an assignment: such strings are
+#: Python handed to another interpreter (kicad_models._MEASURE_SCRIPT runs
+#: in FreeCAD) and their ``#`` lines are comments like any other. Prose
+#: strings with Markdown headings («# Titolo») are left to the docstring
+#: and UI-text rules: a heading is not a comment.
+_SCRIPT_LINE = re.compile(
+    r'^\s*(?:import\s+\w|from\s+[\w.]+\s+import\s|def\s+\w+\s*\(|class\s+\w+|\w[\w.]*\s*=[^=])',
+    re.MULTILINE)
+
+#: A ``#`` comment line of an embedded script (the whole line, so that a
+#: ``#`` inside a string of the script is not taken for one).
+_SCRIPT_COMMENT = re.compile(r'^\s*#(.*)$')
+
+
+def _looks_like_script(text):
+    """Tell whether the body of a triple-quoted string is an embedded Python script."""
+    return bool(_SCRIPT_LINE.search(text))
+
+
+def _embedded_script_comments(token):
+    """Yield (line, text) for the ``#`` lines of a triple-quoted STRING token holding a script."""
+    text = token.string
+    quote = text.lstrip('rRbBuUfF')[:3]
+    if quote not in ('"""', "'''") or not _looks_like_script(text):
+        return
+    body = text[len(text) - len(text.lstrip('rRbBuUfF')) + 3:-3]
+    for offset, line in enumerate(body.split('\n')):
+        match = _SCRIPT_COMMENT.match(line)
+        if match:
+            yield token.start[0] + offset, match.group(1).lstrip(':').strip()
+
+
 def _comment_blocks(source):
-    """Yield (first line, joined text) for each run of comments on consecutive lines."""
+    """Yield (first line, joined text) for each run of comments on consecutive lines.
+
+    Since 2026-10-27 the ``#`` lines of an embedded script (see
+    ``_looks_like_script``) are comments too: they are judged in blocks of
+    their own, by their line in the host file.
+    """
     block_start, block_end, parts = None, None, []
+    comments = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type != tokenize.COMMENT:
-            continue
-        line = token.start[0]
-        text = token.string.lstrip('#').lstrip(':').strip()
+        if token.type == tokenize.COMMENT:
+            comments.append((token.start[0], token.string.lstrip('#').lstrip(':').strip()))
+        elif token.type == tokenize.STRING:
+            comments.extend(_embedded_script_comments(token))
+    for line, text in sorted(comments):
         if block_end is not None and line == block_end + 1:
             parts.append(text)
         else:
@@ -1337,3 +1444,138 @@ def test_comment_language_rule_judges_blocks_and_ignores_quotes_and_strings():
         '# An un-applied draft is never installed.',         # 13 negative: hyphenated prefix
     ]) + '\n'
     assert italian_comments(source, 's.py') == ['s.py:4:italian-comment', 's.py:7:italian-comment']
+
+
+def test_init_and_thread_run_need_a_brief_even_in_private_classes():
+    """@brief Prove every ``__init__`` and every QThread/QRunnable ``run`` need ``@brief`` (review 2026-10-27, C4).
+
+    Positive: an undocumented ``__init__`` of a public class, of a private
+    class and of a class nested under ``if``; an undocumented ``run`` of a
+    private QThread subclass and of a QRunnable subclass. Negative: the same
+    methods documented, a ``run`` of a class that is no thread, and the
+    other private helpers, which keep their exemption.
+    """
+    source = '''"""@brief Synthetic module."""
+
+
+class Public:
+    """@brief Public class."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def _helper(self):
+        pass
+
+
+class _Private:
+    def __init__(self, value):
+        self.value = value
+
+
+class _Worker(QThread):
+    def __init__(self):
+        """@brief Documented constructor."""
+
+    def run(self):
+        pass
+
+
+class _Task(QtCore.QRunnable):
+    def run(self):
+        pass
+
+
+class _Plain:
+    def run(self):
+        pass
+
+
+class _Documented(QThread):
+    def __init__(self):
+        """@brief Documented constructor."""
+
+    def run(self):
+        """@brief Documented thread body."""
+
+
+if True:
+    class Conditional:
+        """@brief Nested under a compound statement."""
+
+        def __init__(self):
+            pass
+'''
+    assert undocumented_items(source, 'sample.py') == [
+        'sample.py:7:Public.__init__',
+        'sample.py:15:_Private.__init__',
+        'sample.py:23:_Worker.run',
+        'sample.py:28:_Task.run',
+        'sample.py:49:Conditional.__init__',
+    ]
+
+
+def test_comment_language_rule_catches_content_word_italian():
+    """@brief Prove the comments the 2026-10-27 reviewers found are flagged, and English ones with Italian quotes are not.
+
+    Positive: the five comments quoted in the review, which carry no
+    function word of the first list, an articulated preposition pair («a
+    meta'», «di un») and a ``noqa`` tail in Italian. Negative: English
+    comments quoting Italian labels in «…», the English verb "serve", a
+    sample file name «foto.png» written unquoted, a proper name after
+    "in", and the translated form of the first positive.
+    """
+    lines = [
+        '# I testi lunghi vanno a capo (`_breakable`): nessuno scorrimento in orizzontale.',  # 1 +
+        '',
+        '#: Etichette leggibili (GUI, messaggi d\'errore).',                       # 3 +
+        '',
+        '# I modelli "auto" espongono prezzi sentinella negativi: valgono 0.',   # 5 +
+        '',
+        '# Spenti su richiesta (Body3DParams.show_pins_3d): restano i fori.',    # 7 +
+        '',
+        '#: Nessun dato: ripiego dichiarato (ASSUMED_SCALE_PX_PER_MM).',         # 9 +
+        '',
+        '# Sezione presa a meta\' altezza.',                                      # 11 +
+        '',
+        '# Letto da un file di un altro progetto.',                               # 13 +
+        '',
+        'x = 1  # noqa: BLE001 - errori rete/API riportati in UI',                # 15 +
+        '',
+        '# Long texts wrap (`_breakable`) instead of scrolling horizontally.',    # 17 -
+        '# The «Modello rete SMD» row and the «Nessun dato» hint stay in sync.', # 18 -
+        '# These rows serve as the fallback when the detector is silent.',       # 19 -
+        '# Usage: compare_vision_models.py foto.png --length 25.5',              # 20 -
+        '# Measured in La Jolla on a cloudy day.',                                # 21 -
+        '# The "ripiego" field (declared fallback) is read first.',              # 22 -
+    ]
+    source = '\n'.join(lines) + '\n'
+    assert italian_comments(source, 's.py') == [
+        f's.py:{line}:italian-comment' for line in (1, 3, 5, 7, 9, 11, 13, 15)]
+
+
+def test_comment_rule_scans_the_hash_lines_of_embedded_scripts():
+    """@brief Prove ``#`` lines inside a triple-quoted string that is a script are judged, by their host line.
+
+    Positive: an Italian comment block in a script stored in a constant
+    (like kicad_models._MEASURE_SCRIPT), reported at its line in the host
+    file. Negative: an English comment in the same script, a Markdown
+    heading in a prose string that is no script, and a ``#`` inside a
+    string of the script.
+    """
+    source = '\n'.join([
+        '"""@brief Module."""',                                   # 1
+        'SCRIPT = """',                                           # 2
+        'import FreeCAD',                                         # 3
+        '# Ogni misura finita viene scritta SUBITO, riga per riga.',  # 4 positive
+        '# Cio\' che era gia\' stato misurato sopravvive.',       # 5 same block
+        'shape = FreeCAD.open(path)',                             # 6
+        '# Body extent only: the section is taken high up.',      # 7 negative
+        'print("# not a comment: il valore")',                    # 8 negative: inside a string
+        '"""',                                                    # 9
+        'PROMPT = """',                                           # 10
+        '# Istruzioni per il modello',                            # 11 negative: a heading, no script
+        'Elenca i corpi della scheda.',                           # 12
+        '"""',                                                    # 13
+    ]) + '\n'
+    assert italian_comments(source, 's.py') == ['s.py:4:italian-comment']

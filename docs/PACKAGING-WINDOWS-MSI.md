@@ -142,8 +142,8 @@ fresh copy is made. A locked or busy database is never treated as damaged.
 
 API keys: the installed program reads them from the environment, from the
 Windows Credential Manager (set with «Configuration → AI account...») and
-from `%LOCALAPPDATA%\KiCadGen\.env`; the install folder's `.env.example` is
-only the template.
+from `%LOCALAPPDATA%\KiCadGen\.env`; the `.env.example` shipped in the
+install folder's `_internal\` subfolder is only the template.
 
 ## 5. Checks before publishing
 
@@ -168,6 +168,11 @@ only the template.
   program (see above). Use an `.onnx` export, or run from the sources.
 - ICE60 warnings from light (language of library files) are expected; ICE61
   is suppressed on purpose (same-version upgrades).
+- One ICE03 warning (LGHT1076) on the exit-dialog text is expected too: the
+  text of the «Launch KiCadGen» checkbox and of the final message is longer
+  than the length ICE03 assumes for a Control's Text column; the installer
+  shows it whole and nothing is truncated. Harmless; the build does not treat
+  it as an error.
 - The shortcut components use HKCU key paths (ICE38/ICE43). The marker values
   under `HKCU\Software\KiCadGen` may remain in the hive of the administrator
   who installed, when another account uninstalls; they are harmless.
