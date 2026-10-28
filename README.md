@@ -656,6 +656,16 @@ which may differ from the code's**. They are listed one by one in
   changes) **must be recorded** in `THIRD_PARTY_NOTICES.md` and is still
   pending. The dataset is not redistributed here, and its authors do not
   endorse this project.
+- **Where to get the models.** The Windows setup already contains them. From
+  the sources, the ONNX weights (the four detectors and the SMD network) are
+  assets of the permanent GitHub release
+  [models](https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/models):
+  run `python tools/fetch_model_weights.py` from the repository root and the
+  files land in `models/yolo/` and `models/smd/`, each verified against the
+  SHA-256 in `packaging/model-weights.json`; or download them by hand from
+  that page into the same folders. They are redistributed under AGPL-3.0,
+  the license declared in `THIRD_PARTY_NOTICES.md`. The `.pt` checkpoints
+  are not published.
 - FreeCAD and KiCad are separate programs with their own licenses and are not
   included.
 - The Windows installer also bundles the CPython runtime, the Qt 6 libraries,
