@@ -257,7 +257,8 @@ is 10253 passed,
 14 skipped and 19 subtests (2026-10-28 evening, branch `ADVANCED` merged into `main` as `8cec8ee`:
 model licenses reviewed, weights published as assets of the GitHub release «models», YOLO26
 end-to-end and SMD network exported to ONNX and read by the program, setup shipping every
-models/*/*.onnx fetched with SHA-256 verification — the MSI with the models not yet built;
+models/*/*.onnx fetched with SHA-256 verification; release v1.0.2 published by the workflow
+(first automatic release, MSI 462 MB with the five models; v1.0.1 is a tag without a Release);
 before that, 10207 passed, 2026-10-28 night: full adversarial review of the
 whole codebase by ten read-only agents and its fixes by eleven fixing agents on disjoint files —
 the GitHub suite failed only because tests assumed KiCad, FreeCAD and untracked weights (window

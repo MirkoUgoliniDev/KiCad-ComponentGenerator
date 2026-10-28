@@ -44,6 +44,18 @@ Rimedio immediato: `gh run rerun 40758868609` e ripubblicare da main a
 731a6c8. Rimedio di classe (su ADVANCED, non ancora in main): lo script
 legge fino a 10 run del commit e accetta se UNO e' verde; rifiuta solo con
 un fallimento, aspetta se uno e' in corso, altrimenti chiede il re-run.
+Il re-run e' stato cancellato di nuovo dal push su ADVANCED (stessa
+concurrency del commit): mai spingere su NESSUN ramo mentre si aspetta il
+run del commit da pubblicare. Rimedio di classe mergiato in main (6021285,
+run Tests verde), poi `publish-release.ps1 -Version 1.0.2`: commit
+`67ee49e` «release: v1.0.2», tag v1.0.2 pushato, main mergiato in ADVANCED.
+Workflow «Windows MSI release» run 40765092171: SUCCESSO (prima release
+automatica): suite in due meta' verde, «Fetch the model weights» ok, build
+ok, publish ok -> Release
+https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.2
+con KiCadGen-1.0.2.msi (484.988.518 byte, 462 MB, con i 5 modelli).
+APERTO: prova dell'MSI in VM (checklist della skill build-installer);
+v1.0.1 resta un tag senza Release.
 UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
 pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
 scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,
