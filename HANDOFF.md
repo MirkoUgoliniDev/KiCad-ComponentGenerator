@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 28/10 notte — CHIUSA la revisione avversariale completa: commit + merge in main + push, PC spento (utente: «committa tutto, mergia in main e fai push di main e spegni il pc»)
+## 28/10 notte — CHIUSA la revisione avversariale completa: commit `c33d012` su ADVANCED, merge `754e9b8` in main, pushati, PC spento (utente: «committa tutto, mergia in main e fai push di main e spegni il pc»)
 
 SUITE COMPLETA (due meta', .venv/run_full_1028.log): A 6094 passati/1 fallito/10
 saltati/19 sottotest, B 4111 passati/1 fallito/4 saltati. I 2 falliti, entrambi
