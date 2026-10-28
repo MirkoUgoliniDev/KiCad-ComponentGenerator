@@ -1,6 +1,14 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 28/10 giorno — IN CORSO: verifica licenze dataset/pesi con l'utente (nessuna modifica al codice)
+## 28/10 sera — COMMITTATO: pesi pubblicati, ONNX e setup: commit `e2c5c4f` su ADVANCED, merge `8cec8ee` in main, entrambi pushati. Suite 10253 passati, 14 saltati, 19 sottotest.
+
+APERTO: l'MSI con i modelli NON e' ancora stato costruito ne' provato
+(ne' in locale con `scripts/build-windows.ps1 -IncludeYoloModel`, ne' con la
+release automatica, che ora scarica i pesi): i cambiamenti a spec e build
+sono coperti solo dai test di packaging. Prossimo passo proposto all'utente:
+build locale dell'MSI con i modelli e prova in VM.
+
+## 28/10 giorno — verifica licenze dataset/pesi con l'utente, poi conversione ONNX e setup
 
 - YOLOv8m Colab: CHIUSO. Screenshot dell'utente di
   https://universe.roboflow.com/arshiasbn-4s0xh/detecting-the-pcb-object/dataset/3
