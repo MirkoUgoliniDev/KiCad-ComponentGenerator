@@ -12,8 +12,29 @@ modelli»): `scripts/build-windows.ps1 -Package msi -IncludeYoloModel`, log
 smd 1), «Runtime check OK» (onnxruntime OK), MSI dist\KiCadGen-1.0.0.msi
 460,1 MB (482.469.967 byte; prima 177 MB), solo i soliti avvisi ICE60.
 NON installato sulla macchina di sviluppo (regola). README committato
-(merge 6e6b4f2 in main). OK UTENTE alla release 1.0.1 da main: il publish
-richiede il run «Tests» verde su GitHub per il commit corrente -> in attesa.
+(merge 6e6b4f2 in main). OK UTENTE alla release 1.0.1 da main: run «Tests»
+verde per a0ed0e4, poi `publish-release.ps1 -Version 1.0.1` -> commit
+`297dea4` «release: v1.0.1» su main, tag v1.0.1 pushato (PERMANENTE), main
+mergiato in ADVANCED. PRIMA RELEASE AUTOMATICA: workflow «Windows MSI
+release» in corso (suite in due meta', fetch dei pesi, build, Release).
+Se fallisce: tag resta, prossima 1.0.2; riportare il log, non toccare il tag.
+ESITO: FALLITA al passo «Run the test suite (first half)» (run 40756175888):
+1 fallito su 6077, tests/test_kicad_model_footprints.py::
+test_footprint_cache_tracks_edits_additions_and_deletions — il footprint
+riscritto con «0.825»->«1.825» (STESSA dimensione in byte) entro lo stesso
+istante di mtime non invalida la cache di kicad_models.footprint_sizes:
+ottenuto 2.45 invece di 4.45. Lo stesso test era verde nel run «Tests» di
+a0ed0e4 e in locale: difetto di classe della cache (mtime+size) su scritture
+veloci, non della modifica di oggi. Fetch dei pesi, build e Release saltati.
+Tag v1.0.1 resta (permanente): la prossima release sara' 1.0.2.
+CORREZIONE: limite dichiarato nella docstring di _footprint_listing (una
+riscrittura della stessa dimensione entro un tick di mtime non si vede:
+prezzo di non leggere 15k file); il test usa _rewrite_observably, che
+sposta avanti l'mtime di un tick SOLO se il file system ha lasciato
+(size, mtime_ns) identici — il contratto verificato e' «una modifica
+osservabile viene vista», non «il rilevatore vede cio' che non puo'».
+test_kicad_model_footprints + documentation: 60 verdi. Committato e pushato;
+in attesa del run «Tests» verde, poi CHIEDERE OK per publish 1.0.2.
 UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
 pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
 scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,

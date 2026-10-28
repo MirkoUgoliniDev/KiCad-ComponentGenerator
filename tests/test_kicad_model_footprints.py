@@ -138,11 +138,30 @@ def test_assemblies_and_malformed_files_are_skipped(lib):
     assert km.footprint_sizes([model], lib)[str(model)] == []
 
 
+def _rewrite_observably(path, text):
+    """Rewrite `path` so that the stamp-based cache (size, mtime_ns) can see the edit.
+
+    The cache is a change detector on size and nanosecond mtime, not on
+    content (kicad_models._footprint_listing): a same-size rewrite within one
+    NTFS timestamp tick of the previous write is invisible to it by design.
+    This test checks that an observable edit is picked up, not that the
+    detector sees what it cannot: when the file system gave the rewrite the
+    same mtime (it happened on the GitHub runner, release v1.0.1, 2026-10-28),
+    the mtime is moved forward by one tick, exactly what a later save does.
+    """
+    import os
+    before = path.stat()
+    path.write_text(text)
+    after = path.stat()
+    if (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns):
+        os.utime(path, ns=(after.st_atime_ns, before.st_mtime_ns + 10_000_000))
+
+
 def test_footprint_cache_tracks_edits_additions_and_deletions(lib):
     model = solid(lib)
     path = footprint(lib, model, PADS)
     assert km.footprint_sizes([model], lib)[str(model)][0]["size"][0] == pytest.approx(2.45)
-    path.write_text(path.read_text().replace("0.825", "1.825"))
+    _rewrite_observably(path, path.read_text().replace("0.825", "1.825"))
     assert km.footprint_sizes([model], lib)[str(model)][0]["size"][0] == pytest.approx(4.45)
     extra = footprint(lib, model, PADS, name="HandSolder")
     assert len(km.footprint_sizes([model], lib)[str(model)]) == 2

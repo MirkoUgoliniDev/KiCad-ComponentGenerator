@@ -915,6 +915,14 @@ def _footprint_listing(root: Path) -> list:
     them at timer-tick granularity (two additions within ~15 ms keep the same
     value) and never when a file is edited in place.
     Symlinked directories are not descended, as `Path.rglob` does not.
+
+    Known limit of a stamp-based detector: a file rewritten with the SAME
+    byte size within one timestamp tick of its previous write keeps both
+    its size and its mtime, so the edit is not seen until the next write.
+    That is the price of not reading 15k files per scan; it showed up on
+    the GitHub runner (2026-10-28, release v1.0.1), where a test rewrote a
+    footprint milliseconds after creating it. Reading every file for a
+    content hash would make the cache pointless.
     """
     listing, pending = [], [str(root)]
     while pending:
