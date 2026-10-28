@@ -52,19 +52,29 @@ function Assert-TestsGreenOnGitHub([string]$sha) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw 'The gh CLI is not installed: install it, or run with -RunTestsLocally.'
     }
-    $json = & gh run list --commit $sha --workflow Tests --json status,conclusion,url --limit 1
+    # The same commit may have several runs: one per branch that carries it
+    # (main and the work branch), and a duplicate gets cancelled by the
+    # concurrency group when the branch moves on (2026-10-28, v1.0.2: the
+    # main run was green, the ADVANCED copy cancelled, and the newest run was
+    # the cancelled one). A green run of this exact commit is the evidence,
+    # whichever branch ran it; a cancelled duplicate is not a verdict.
+    $json = & gh run list --commit $sha --workflow Tests --json status,conclusion,url --limit 10
     Assert-LastCommand 'Reading the Tests workflow runs from GitHub'
     $runs = @($json | ConvertFrom-Json)
     if ($runs.Count -eq 0) {
         throw "No «Tests» run exists on GitHub for commit $sha. Push the branch, wait for the run, then publish."
     }
-    $run = $runs[0]
-    if ($run.status -ne 'completed') {
-        throw "The «Tests» run for commit $sha is still $($run.status): wait for it ($($run.url))."
+    $green = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+    if ($green.Count -gt 0) { return }
+    $failed = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'failure' })
+    if ($failed.Count -gt 0) {
+        throw "The «Tests» run for commit $sha failed: fix the suite before tagging ($($failed[0].url))."
     }
-    if ($run.conclusion -ne 'success') {
-        throw "The «Tests» run for commit $sha concluded '$($run.conclusion)': fix the suite before tagging ($($run.url))."
+    $pending = @($runs | Where-Object { $_.status -ne 'completed' })
+    if ($pending.Count -gt 0) {
+        throw "The «Tests» run for commit $sha is still $($pending[0].status): wait for it ($($pending[0].url))."
     }
+    throw "No successful «Tests» run for commit $sha (latest: '$($runs[0].conclusion)'): re-run it on GitHub, then publish ($($runs[0].url))."
     Write-Host "Tests green on GitHub for $sha ($($run.url))." -ForegroundColor Green
 }
 

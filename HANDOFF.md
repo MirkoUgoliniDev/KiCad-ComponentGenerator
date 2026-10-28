@@ -36,6 +36,14 @@ osservabile viene vista», non «il rilevatore vede cio' che non puo'».
 test_kicad_model_footprints + documentation: 60 verdi. Committato e pushato;
 in attesa del run «Tests» verde per 731a6c8; OK UTENTE («ok procedi!») al
 publish 1.0.2 da main appena verde.
+TRAPPOLA TROVATA: il run di main per 731a6c8 era VERDE, ma lo stesso commit
+aveva anche un run su ADVANCED CANCELLATO (concurrency, perche' ADVANCED e'
+poi avanzato con l'handoff); publish-release.ps1 guardava solo il run piu'
+recente del commit (--limit 1) -> «concluded 'cancelled'», publish rifiutato.
+Rimedio immediato: `gh run rerun 40758868609` e ripubblicare da main a
+731a6c8. Rimedio di classe (su ADVANCED, non ancora in main): lo script
+legge fino a 10 run del commit e accetta se UNO e' verde; rifiuta solo con
+un fallimento, aspetta se uno e' in corso, altrimenti chiede il re-run.
 UTENTE: «poi se ok la devi pubblicare» -> se la build locale e' buona,
 pubblicare la release 1.0.1 (i tag v* sono permanenti, 1.0.0 esiste) con
 scripts/publish-release.ps1 -Version 1.0.1 da main: il workflow rifa' test,

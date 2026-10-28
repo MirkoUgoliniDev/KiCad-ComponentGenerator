@@ -148,9 +148,15 @@ def test_i4_skipping_the_tests_is_explicit_and_loud(publish_script):
     """Negative: -SkipTests is a switch (off unless typed) and prints a red warning."""
     assert re.search(r"if \(\$SkipTests\)\s*\{\s*Write-Host .*-ForegroundColor Red", publish_script)
     assert "WITHOUT any proof" in publish_script
-    # A run that is not completed or not successful throws: no tag.
-    assert "status -ne 'completed'" in publish_script
-    assert "conclusion -ne 'success'" in publish_script
+    # Contract changed on 2026-10-28 (v1.0.2): the same commit may have a
+    # green run on one branch and a cancelled duplicate on another, so the
+    # gate looks at every run of the commit and tags only when ONE is green;
+    # a failure refuses, a pending run waits, anything else asks for a re-run.
+    assert "--limit 10" in publish_script
+    assert "conclusion -eq 'success'" in publish_script and "if ($green.Count -gt 0) { return }" in publish_script
+    assert "conclusion -eq 'failure'" in publish_script and "fix the suite before tagging" in publish_script
+    assert "status -ne 'completed'" in publish_script and "wait for it" in publish_script
+    assert "re-run it on GitHub" in publish_script
     assert "No «Tests» run exists" in publish_script
 
 
