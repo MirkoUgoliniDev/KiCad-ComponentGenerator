@@ -172,6 +172,10 @@ Stato dei correttori: (aggiornare man mano)
   viva dopo 15 s, chiusa. NON installato qui. Build di verifica: la
   versione e' ancora 1.0.2, NON va distribuita (stesso numero della
   release pubblicata). Prossimo: chiedere push/merge/release v1.0.3.
+- AUTORIZZAZIONE UTENTE 29/10 («Sì: v1.0.3 + main»): push ADVANCED, attesa
+  run Tests verde di af6bad6 (NON spingere altri rami nel frattempo),
+  publish-release.ps1 -Version 1.0.3, segui release.yml, poi main
+  fast-forward allo stesso commit e push. IN CORSO.
 - PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
   ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
   Ancora da chiedere all'utente (UNA domanda alla volta): override pad
