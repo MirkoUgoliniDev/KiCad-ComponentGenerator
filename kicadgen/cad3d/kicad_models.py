@@ -40,13 +40,15 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from functools import lru_cache
 from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
-from .process_log import CANCEL_POLL_INTERVAL_S, NO_WINDOW_FLAGS, ProcessCancelled, kill_process_tree
+from .process_log import (CANCEL_POLL_INTERVAL_S, KILL_REAP_GRACE_S, NO_WINDOW_FLAGS,
+                          ProcessCancelled, kill_process_tree)
 from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
@@ -235,11 +237,9 @@ STALL_FILENAME = ".kicadgen-model-stalls-v1.json"
 #: compares against this number to decide whether a retry is worth paying.
 MEASURE_SILENCE_TIMEOUT_S = 300
 
-#: Seconds a killed measuring child is waited for before giving up on it: a
-#: TerminateProcess that the system refuses (process in a kernel call) must
-#: not hang the matching forever (2026-10-27 review, H9). It is a bound on
-#: the reaping, not on the measurement.
-KILL_REAP_GRACE_S = 5.0
+#: Seconds a killed measuring child is waited for before giving up on it is
+#: `process_log.KILL_REAP_GRACE_S` (imported above): one bound for every
+#: FreeCAD child of the package (2026-10-27 review, H9; 2026-10-29, H2).
 
 # Resource budget, not a geometric threshold: never launch a library-wide CAD batch.
 MAX_CANDIDATE_MEASUREMENTS = 64
@@ -522,12 +522,63 @@ def _model_files(root: Path) -> list[Path]:
     return files
 
 
+def _scope_lookup(key, compute):
+    """Value of `key` in the current `_listing_scope`, computed once per scope.
+
+    Outside a scope `compute()` runs at every call, which is the behaviour
+    of every lookup before the scopes existed. Inside one the first result is
+    kept for the whole block (2026-10-29 review, H4): the footprint listing,
+    the parsed size index and the freecadcmd path do not change during one
+    matching call, and recomputing them per component cost 0.4 s each time.
+    """
+    scope = getattr(_MODEL_LISTINGS, "scope", None)
+    if scope is not None and key in scope:
+        return scope[key]
+    value = compute()
+    if scope is not None:
+        scope[key] = value
+    return value
+
+
+def _path_key(path) -> str:
+    """Case-normalised absolute spelling of a path, the key of every scoped cache."""
+    return os.path.normcase(str(Path(path).absolute()))
+
+
+def _scoped_index_key(path: Path) -> str:
+    """`index_key` of a model, statted once per `_listing_scope`.
+
+    A library model does not change while one matching call runs; outside a
+    scope this is exactly `index_key`.
+    """
+    return _scope_lookup(("index_key", _path_key(path)), lambda: index_key(path))
+
+
+def _find_freecadcmd():
+    """freecadcmd path, or None when FreeCAD is missing; searched once per scope.
+
+    The search walks the program folders and the registry: one search per
+    measuring batch repeated it for every component of a generation
+    (2026-10-29 review, H4). A missing FreeCAD is remembered for the scope as
+    well, so a machine without it does not search again per component.
+    """
+    def search():
+        try:
+            from .step_generator import find_freecadcmd
+            return find_freecadcmd()
+        except Exception:  # noqa: BLE001 - without FreeCAD there are no measures
+            return None
+    return _scope_lookup(("freecadcmd",), search)
+
+
 @contextmanager
 def _listing_scope():
     """Reuse one library listing for every lookup made inside the block.
 
     Nested scopes join the outer one. The scope is per thread, so two
     generations running in parallel never share a listing taken by the other.
+    Besides the model listings it holds the footprint listings, the parsed
+    size indexes, the model stamps and the freecadcmd path (`_scope_lookup`).
     """
     if getattr(_MODEL_LISTINGS, "scope", None) is not None:
         yield
@@ -537,6 +588,23 @@ def _listing_scope():
         yield
     finally:
         _MODEL_LISTINGS.scope = None
+
+
+@contextmanager
+def listing_scope():
+    """@brief Share one library listing among several `model_candidates` calls.
+
+    @return Context manager; inside it every lookup of this thread reuses the
+        first listing of each root, the parsed size index and the freecadcmd
+        path, exactly as one `attach_models` call does.
+    @note For callers that match many bodies in a loop (the local
+        classifier): each direct `model_candidates` call otherwise opens its
+        own scope and walks every root again (2026-10-29 review, H5). The
+        library must not change while the block runs -- a file added inside
+        it is seen only by the next scope.
+    """
+    with _listing_scope():
+        yield
 
 
 def _marked_model_paths(component: dict, root: Path) -> list[Path]:
@@ -640,7 +708,12 @@ def load_index(library: Optional[Path] = None) -> dict:
     library = library or find_library()
     if not library:
         return {}
-    return model_size_cache.load(_index_paths(Path(library)))
+    # Parsed once per `_listing_scope` (2026-10-29 review, H4). Inside a
+    # scope every caller receives the SAME dict: `model_sizes` adds its new
+    # measurements to it, so later lookups of the same call see them without
+    # reading the file again.
+    return _scope_lookup(("size_index", _path_key(library)),
+                         lambda: model_size_cache.load(_index_paths(Path(library))))
 
 
 def save_index(index: dict, library: Optional[Path] = None) -> None:
@@ -722,6 +795,72 @@ def stall_remembered(stalls: dict, path: Path, timeout: float) -> bool:
     except (TypeError, ValueError):
         return False
     return math.isfinite(spent) and spent >= float(timeout)
+
+
+#: Verdicts of FreeCAD on a model that are remembered besides the stalls
+#: (2026-10-29 review, H1): "crashed" -- the measuring child died while that
+#: model was the one in progress -- and "unreadable" -- the child answered
+#: `null` for it. Both are a property of the pair (file, FreeCAD build), so a
+#: record carries both identities and a change of either retries.
+UNMEASURABLE_STATUSES = ("crashed", "unreadable")
+
+
+def _reader_identity() -> Optional[str]:
+    """File identity of the freecadcmd that would measure now, or None without FreeCAD."""
+    freecad = _find_freecadcmd()
+    return model_size_cache.file_identity(freecad) if freecad else None
+
+
+def record_unmeasurable(verdicts: dict, reader: Optional[str]) -> None:
+    """@brief Remember models FreeCAD could not measure, so later runs do not retry them.
+
+    @param verdicts Mapping model path -> {"status": "crashed"|"unreadable",
+        optional "exit_code": int}.
+    @param reader File identity of the freecadcmd that gave the verdicts.
+    @note Written into the stall memo (`STALL_FILENAME`), keyed like the
+        index. Each record carries the model identity AND the reader
+        identity: a rewritten file or another FreeCAD build is a new
+        question. Without a reader identity, or a model identity, nothing is
+        written and the model stays retryable. A write failure is not a
+        fault: the model is simply measured again.
+    """
+    if not reader:
+        return
+    records = {}
+    for path, verdict in verdicts.items():
+        status = verdict.get("status") if isinstance(verdict, dict) else None
+        if status not in UNMEASURABLE_STATUSES:
+            continue
+        model = Path(path)
+        identity = model_size_cache.file_identity(model)
+        if identity is None:
+            continue
+        record = {"status": status, "model": identity, "reader": reader}
+        code = verdict.get("exit_code")
+        if type(code) is int:
+            record["exit_code"] = code
+        records[index_key(model)] = record
+    if records:
+        model_size_cache.save(records, _stall_paths())
+
+
+def unmeasurable_remembered(memo: dict, path: Path, reader: Optional[str]) -> bool:
+    """@brief Whether `path` already crashed FreeCAD or was unreadable for this very FreeCAD.
+
+    @param memo Memo from `load_stalls`.
+    @param path Model about to be measured.
+    @param reader File identity of the freecadcmd that would measure it.
+    @return True only when the record names the same file identity and the
+        same reader identity; anything unverifiable answers False, so the
+        model is measured again.
+    """
+    record = memo.get(index_key(path))
+    if not isinstance(record, dict) or record.get("status") not in UNMEASURABLE_STATUSES:
+        return False
+    if not reader or record.get("reader") != reader:
+        return False
+    identity = model_size_cache.file_identity(path)
+    return identity is not None and record.get("model") == identity
 
 
 def index_key(path: Path) -> str:
@@ -866,6 +1005,20 @@ def _model_link(model, footprint: Path, library: Path):
     return path.resolve() if path.suffix.lower() in (".step", ".stp") else None
 
 
+def _scan_link_hints(path: Path):
+    """Read the model-link basenames of one footprint (uncached, see `_link_hints`).
+
+    @throws OSError When the file cannot be read; the caller decides whether
+        that answer may be remembered (a sharing violation is transient).
+    @throws UnicodeError When the file is not UTF-8 text.
+    """
+    text = path.read_text(encoding="utf-8-sig")
+    links = re.findall(r'\(\s*model\s+("(?:\\.|[^"\\])*"|[^\s()]+)', text)
+    names = [re.sub(r'\\(["\\])', r'\1', link.strip('"')).replace("\\", "/").rsplit("/", 1)[-1].casefold()
+             for link in links]
+    return frozenset(names), any("$" in name for name in names)
+
+
 @lru_cache(maxsize=32768)
 def _link_hints(path: Path, stamp: str):
     """Cheap name prefilter only; the balanced parser still validates every match.
@@ -875,11 +1028,7 @@ def _link_hints(path: Path, stamp: str):
     Variable filenames cannot be filtered and therefore require full parsing.
     """
     try:
-        text = path.read_text(encoding="utf-8-sig")
-        links = re.findall(r'\(\s*model\s+("(?:\\.|[^"\\])*"|[^\s()]+)', text)
-        names = [re.sub(r'\\(["\\])', r'\1', link.strip('"')).replace("\\", "/").rsplit("/", 1)[-1].casefold()
-                 for link in links]
-        return frozenset(names), any("$" in name for name in names)
+        return _scan_link_hints(path)
     except (OSError, UnicodeError):
         return frozenset(), False
 
@@ -946,6 +1095,73 @@ def _footprint_listing(root: Path) -> list:
     return listing
 
 
+#: User-cache file of the footprint link hints (2026-10-29 review, H3x). The
+#: index below needs, for every one of the ~15k footprints of a KiCad
+#: installation, only the basenames of its model links; reading them all
+#: took 5 s with the files in the system cache and 106 s cold, in EVERY
+#: process. They are a pure function of the file content, so they are kept
+#: here keyed on (path, size, mtime_ns) and only new or changed files are
+#: read again. One record per footprint root; the record is rewritten whole,
+#: so footprints removed from the library are dropped from it.
+FOOTPRINT_HINTS_FILENAME = ".kicadgen-footprint-hints-v1.json"
+
+#: Seconds between two progress lines while footprints are being read. It is
+#: a promise to whoever watches the log -- a long silent scan looked like a
+#: hang -- not a threshold tuned on a library: a warm or unchanged library
+#: finishes before the first line is due and prints nothing.
+FOOTPRINT_INDEX_PROGRESS_S = 2.0
+
+#: Log callback and cancellation channel of the index being built in this
+#: thread (see `_footprint_index`).
+_FOOTPRINT_INDEX_LOG = threading.local()
+
+
+def _footprint_hint_paths() -> list:
+    """Footprint hint cache files, preferred first, in the user cache only."""
+    return [folder / FOOTPRINT_HINTS_FILENAME for folder in model_size_cache.user_cache_dirs()]
+
+
+def _persisted_hints(root_key: str) -> dict:
+    """Valid persisted hint records of one root: relative path -> [size, mtime_ns, names, variable].
+
+    A malformed record is ignored (the file is read again), never trusted.
+    """
+    try:
+        record = model_size_cache.load(_footprint_hint_paths()).get(root_key)
+    except Exception:  # noqa: BLE001 - an unreadable cache only costs a re-read
+        return {}
+    entries = record.get("entries") if isinstance(record, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    valid = {}
+    for name, item in entries.items():
+        if (isinstance(item, list) and len(item) == 4
+                and type(item[0]) is int and type(item[1]) is int
+                and isinstance(item[2], list) and all(isinstance(n, str) for n in item[2])
+                and type(item[3]) is bool):
+            valid[name] = item
+    return valid
+
+
+def _relative_name(path: str, prefix: str) -> str:
+    """Path of a footprint relative to its root when it lies under it (shorter cache keys)."""
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
+def _safe_log(log, message) -> None:
+    """Send one progress line; a failing callback never stops the indexing."""
+    try:
+        log(message)
+    except Exception:  # noqa: BLE001 - progress must not stop the work
+        pass
+
+
+def _index_progress_line(done: int, total: int) -> str:
+    """Progress line of a footprint index rebuild."""
+    return tx("Indicizzazione dei footprint KiCad: {done} di {total} file letti.",
+              done=done, total=total)
+
+
 class _FootprintIndex:
     """One scan of a footprint root: sorted footprints, their stamps and link basenames.
 
@@ -957,23 +1173,102 @@ class _FootprintIndex:
     __slots__ = ("listing", "entries", "by_name", "variable")
 
     def __init__(self, root: Path, listing: list):
-        """@brief Scan `root` once.
+        """@brief Index `root`, reading only the footprints the hint cache does not know.
 
         @param root Footprint library root.
         @param listing Detector snapshot taken BEFORE the scan (see `_footprint_listing`).
+        @note The footprints are the `*.kicad_mod` entries of @p listing, in
+            `Path` order (the order of `sorted(root.rglob(...))`). A footprint
+            whose size and mtime match its persisted record reuses the
+            recorded hints; any other is read, and the cache is rewritten
+            only when something was read or removed. Progress lines go to the
+            log callback set by `_footprint_index`, every
+            `FOOTPRINT_INDEX_PROGRESS_S` seconds.
+        @throws MatchingCancelled When the cancellation channel set by
+            `_footprint_index` is set during the reading: the hints read so
+            far are persisted first, so the next rebuild resumes from them.
         """
         self.listing = listing
         self.entries = []
         self.by_name = {}
         self.variable = []
-        for position, footprint in enumerate(sorted(root.rglob("*.kicad_mod"))):
-            stamp = index_key(footprint)
-            hints, variable = _link_hints(footprint, stamp)
+        prefix = str(root).rstrip("\\/") + os.sep
+        root_key = _path_key(root)
+        stamps = {path: (size, mtime) for path, size, mtime in listing
+                  if path.casefold().endswith(".kicad_mod")}
+        footprints = sorted(Path(path) for path in stamps)
+        known = _persisted_hints(root_key)
+        kept, pending = {}, []
+        for footprint in footprints:
+            text = str(footprint)
+            size, mtime = stamps[text]
+            name = _relative_name(text, prefix)
+            record = known.get(name)
+            if size >= 0 and record is not None and record[0] == size and record[1] == mtime:
+                kept[name] = record
+            else:
+                pending.append(footprint)
+        log = getattr(_FOOTPRINT_INDEX_LOG, "log", None)
+        cancel = getattr(_FOOTPRINT_INDEX_LOG, "cancel", None)
+        started = last = time.monotonic()
+        read_now = {}
+        for done, footprint in enumerate(pending, start=1):
+            if cancel is not None and cancel.is_set():
+                # A cold rebuild reads thousands of files: a give-up must not
+                # wait for the end of it. What was read is a property of the
+                # files, so it is kept for the next rebuild (2026-10-29 review).
+                self._persist(root_key, kept)
+                raise MatchingCancelled(measured={})
+            text = str(footprint)
+            size, mtime = stamps[text]
+            try:
+                hints, variable = _scan_link_hints(footprint)
+                remember = size >= 0
+            except UnicodeError:
+                # Deterministic for this content: remembered like any answer.
+                hints, variable, remember = frozenset(), False, size >= 0
+            except OSError:
+                # Possibly transient (sharing violation): answered as the
+                # per-call scan did, but never remembered.
+                hints, variable, remember = frozenset(), False, False
+            read_now[text] = (hints, variable)
+            if remember:
+                kept[_relative_name(text, prefix)] = [size, mtime, sorted(hints), variable]
+            now = time.monotonic()
+            if log is not None and now - last >= FOOTPRINT_INDEX_PROGRESS_S:
+                last = now
+                _safe_log(log, _index_progress_line(done, len(pending)))
+        if log is not None and last != started:
+            # Closing line, only after a scan long enough to have spoken.
+            _safe_log(log, _index_progress_line(len(pending), len(pending)))
+        for position, footprint in enumerate(footprints):
+            text = str(footprint)
+            size, mtime = stamps[text]
+            if text in read_now:
+                hints, variable = read_now[text]
+            else:
+                record = kept[_relative_name(text, prefix)]
+                hints, variable = frozenset(record[2]), record[3]
+            # Same string as `index_key`, from the listing's own stat; the
+            # lookup re-stamps every candidate anyway (`_linked_footprints`).
+            stamp = (f"{footprint.absolute()}:{size}:{mtime}" if size >= 0
+                     else index_key(footprint))
             self.entries.append((footprint, stamp))
             if variable:
                 self.variable.append(position)
             for name in hints:
                 self.by_name.setdefault(name, []).append(position)
+        if pending or set(known) - set(kept):
+            # Rewritten whole: entries of removed footprints are dropped.
+            self._persist(root_key, kept)
+
+    @staticmethod
+    def _persist(root_key: str, kept: dict) -> None:
+        """Rewrite the hint record of one root; a failure only costs a re-read."""
+        try:
+            model_size_cache.save({root_key: {"entries": kept}}, _footprint_hint_paths())
+        except Exception:  # noqa: BLE001 - an unwritten cache only costs a re-read
+            pass
 
 
 #: Footprint indexes of this session, keyed by the footprint root as given.
@@ -987,38 +1282,57 @@ def clear_footprint_index() -> None:
     @note Never needed for correctness: each lookup already re-indexes a root
         whose footprint files were added, removed, renamed or rewritten. It
         exists for tests and for callers that want to release the memory.
+        The persisted hint cache (`FOOTPRINT_HINTS_FILENAME`) is not touched:
+        it is validated file by file at every rebuild.
     """
     with _FOOTPRINT_INDEX_LOCK:
         _FOOTPRINT_INDEXES.clear()
 
 
-def _footprint_index(root: Path) -> _FootprintIndex:
+def _footprint_index(root: Path, log=None, cancel=None) -> _FootprintIndex:
     """Session index of `root`, rebuilt whenever any footprint's size/mtime changed.
 
+    @param log Optional callback receiving the progress lines of a rebuild.
+    @param cancel Optional channel (`is_set()`) that stops a rebuild.
     @throws OSError when the library cannot be listed, like the original rglob.
+    @throws MatchingCancelled When @p cancel is set during a rebuild; the
+        partial index is not kept in the session.
+    @note Inside a `_listing_scope` the listing is taken once per root
+        (2026-10-29 review, H4): a matching call does not rescan 15k
+        directory entries for every component.
     """
-    listing = _footprint_listing(root)
+    listing = _scope_lookup(("footprint_listing", _path_key(root)),
+                            lambda: _footprint_listing(root))
     key = str(root)
     with _FOOTPRINT_INDEX_LOCK:
         index = _FOOTPRINT_INDEXES.get(key)
         if index is not None and index.listing == listing:
             return index
-    index = _FootprintIndex(root, listing)
+    previous = (getattr(_FOOTPRINT_INDEX_LOG, "log", None),
+                getattr(_FOOTPRINT_INDEX_LOG, "cancel", None))
+    _FOOTPRINT_INDEX_LOG.log, _FOOTPRINT_INDEX_LOG.cancel = log, cancel
+    try:
+        index = _FootprintIndex(root, listing)
+    finally:
+        _FOOTPRINT_INDEX_LOG.log, _FOOTPRINT_INDEX_LOG.cancel = previous
     with _FOOTPRINT_INDEX_LOCK:
         _FOOTPRINT_INDEXES[key] = index
     return index
 
 
-def _linked_footprints(root: Path, names) -> list:
+def _linked_footprints(root: Path, names, log=None, cancel=None) -> list:
     """(footprint, stamp) whose link hints mention one of `names`, or are variable.
 
     Same selection and order as filtering `sorted(root.rglob("*.kicad_mod"))`
     with `_link_hints`, but through the session index. Each candidate is
     re-stamped here, so the stamp handed to the parsing caches is exactly the
     one the per-call scan would have computed.
+    @param log Optional callback for the progress lines of an index rebuild.
+    @param cancel Optional channel (`is_set()`) that stops an index rebuild.
     @throws OSError when the library cannot be listed.
+    @throws MatchingCancelled When @p cancel stops an index rebuild.
     """
-    index = _footprint_index(root)
+    index = _footprint_index(root, log, cancel)
     positions = set(index.variable)
     for name in names:
         positions.update(index.by_name.get(name, ()))
@@ -1034,13 +1348,17 @@ def _linked_footprints(root: Path, names) -> list:
     return selected
 
 
-def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
+def footprint_sizes(paths, library: Optional[Path] = None, log=None, *, cancel=None) -> dict:
     """@brief Read copper land-pattern envelopes linked to candidate solids.
 
     @param paths Candidate STEP paths (only explicit model links are accepted).
     @param library Model root; footprints are read from its sibling directory.
     @param log Optional diagnostic callback.
+    @param cancel Optional cancellation channel (`is_set()`), None = not
+        interruptible; it is checked between two footprint files of an
+        index rebuild, which on a cold library lasts minutes.
     @return Mapping of model paths to separate size/source footprint readings.
+    @throws MatchingCancelled When @p cancel is set during an index rebuild.
     @note Unsupported pad geometry or model transforms provide no evidence.
     """
     library = library or find_library()
@@ -1057,7 +1375,7 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None) -> dict:
     names = {p.name.casefold() for p in wanted}
     rejected = 0
     try:
-        for footprint, stamp in _linked_footprints(root, names):
+        for footprint, stamp in _linked_footprints(root, names, log, cancel):
             size, model, error = _footprint_record(footprint, stamp)
             if error:
                 rejected += 1
@@ -1200,22 +1518,30 @@ def _partial_measurements(progress_path: Path) -> dict:
 
 
 class _Measurements(dict):
-    """@brief Mapping path -> measurement that also remembers which models stalled.
+    """@brief Mapping path -> measurement that also remembers why models were not measured.
 
     @note A plain dict for every consumer (equality, `.get`, JSON): the
         public contract of `measure_models` -- `None` for a model that could
         not be measured -- does not change. `stalled` (path -> timeout in
-        seconds) is the side channel that lets `model_sizes` tell a stall,
-        which is worth remembering, from an unreadable file, which is not.
+        seconds) and `failures` (path -> {"status": "crashed", "exit_code"})
+        are the side channels that let `model_sizes` tell a stall, which is
+        remembered with its timeout, from a crash of the measuring child,
+        remembered with its exit code; a `None` in neither is an unreadable
+        file (FreeCAD answered `null`). `exit_code` is set on the reading of
+        one batch whose child exited by itself without finishing.
     """
 
-    def __init__(self, *args, stalled=None, **kwargs):
-        """@brief Build the mapping like a dict, with an optional stall memo.
+    def __init__(self, *args, stalled=None, failures=None, exit_code=None, **kwargs):
+        """@brief Build the mapping like a dict, with optional stall and crash memos.
 
         @param stalled Mapping path -> expired timeout (seconds), copied.
+        @param failures Mapping path -> crash verdict, copied.
+        @param exit_code Exit code of the batch child that produced this reading.
         """
         super().__init__(*args, **kwargs)
         self.stalled = dict(stalled or {})
+        self.failures = dict(failures or {})
+        self.exit_code = exit_code
 
 
 def measure_models(paths, timeout: int = MEASURE_SILENCE_TIMEOUT_S, *, cancel=None) -> dict:
@@ -1238,9 +1564,10 @@ def measure_models(paths, timeout: int = MEASURE_SILENCE_TIMEOUT_S, *, cancel=No
         **None means not interruptible**, and it is the default.
     @return Mapping path -> measurement. It also contains the measurements
         completed before a failed batch or a stuck model; a model stuck
-        beyond @p timeout is ``None`` (not measurable in this run) and the
-        batch restarts from the models that follow it. `{}` when nothing was
-        measured (FreeCAD missing, launch failed).
+        beyond @p timeout, or the one in progress when the measuring child
+        died, is ``None`` (not measurable in this run) and the batch restarts
+        from the models that follow it. `{}` when nothing was measured
+        (FreeCAD missing, launch failed).
     @throws MatchingCancelled When @p cancel is set: the `freecadcmd` child is
         KILLED -- not abandoned -- with the same logic as
         `process_log.run_logged`, and the measurements already completed
@@ -1260,10 +1587,8 @@ def measure_models(paths, timeout: int = MEASURE_SILENCE_TIMEOUT_S, *, cancel=No
         # Give-up already requested: do not start a child that would be killed at
         # its first breath (same rule as `_run_freecad`).
         raise MatchingCancelled(measured={})
-    try:
-        from .step_generator import find_freecadcmd
-        freecad = find_freecadcmd()
-    except Exception:  # noqa: BLE001 - without FreeCAD there are no measures
+    freecad = _find_freecadcmd()
+    if not freecad:
         return {}
     measured = _Measurements()
     remaining = list(readable)
@@ -1275,29 +1600,40 @@ def measure_models(paths, timeout: int = MEASURE_SILENCE_TIMEOUT_S, *, cancel=No
 
 
 def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
-    """Measure `remaining` in batches, skipping a model that stalls (see `measure_models`)."""
+    """Measure `remaining` in batches, skipping a model that stalls or kills the child.
+
+    See `measure_models`. A stalled batch and a batch whose child died by
+    itself after starting the protocol (2026-10-29 review, H1) are handled
+    alike: the first model not yet finished is the one that was in progress,
+    it is declared not measurable in THIS run, and a new child measures the
+    models that follow it, which are not to blame.
+    """
     stalled = getattr(measured, "stalled", {})
+    failures = getattr(measured, "failures", {})
     while remaining:
         outcome, batch, stopped = _measure_batch(freecad, remaining, timeout, cancel)
         measured.update(batch)
         if stopped is not None:
-            # The stalls seen before the stop travel with the haul: they were
-            # paid for too, and the memo must not forget them.
-            stopped.measured = _Measurements(measured, stalled=stalled)
+            # The stalls and crashes seen before the stop travel with the
+            # haul: they were paid for too, and the memo must not forget them.
+            stopped.measured = _Measurements(measured, stalled=stalled, failures=failures)
             raise stopped
-        if outcome != "stalled":
+        if outcome not in ("stalled", "crashed"):
             return measured
-        # The model in progress when the silence expired is the first one not
-        # yet finished: it is declared not measurable in THIS run and
-        # measuring restarts from the following ones, which are not to blame. Every
-        # round removes at least one file, so the loop terminates.
+        # Every round removes at least one file, so the loop terminates.
         pending = [path for path in remaining if path not in batch]
         if not pending:
             return measured
         measured[pending[0]] = None
-        # Remembered with the timeout that expired: the same file with a
-        # budget no larger is not worth paying the silence again.
-        stalled[pending[0]] = timeout
+        if outcome == "stalled":
+            # Remembered with the timeout that expired: the same file with a
+            # budget no larger is not worth paying the silence again.
+            stalled[pending[0]] = timeout
+        else:
+            # Remembered with the exit code: the same file read by the same
+            # FreeCAD would kill the child again at every generation.
+            failures[pending[0]] = {"status": "crashed",
+                                    "exit_code": getattr(batch, "exit_code", None)}
         remaining = pending[1:]
     return measured
 
@@ -1327,6 +1663,22 @@ def _reap_killed_child(process, grace_s: float = KILL_REAP_GRACE_S) -> bool:
         return False
 
 
+def _remove_exchange_folder(folder: str) -> None:
+    """Delete a measuring batch's exchange folder; a failure is logged, never raised.
+
+    A child left behind after a refused kill still holds its output file
+    open, so on Windows the folder cannot be deleted yet (2026-10-29 review,
+    H2): that must not turn the measured haul into an exception. The folder
+    lives in the system temporary directory, which the system cleans.
+    """
+    import shutil
+    try:
+        shutil.rmtree(folder)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "measuring exchange folder %s left behind: %s", folder, exc)
+
+
 def _measure_batch(freecad, paths, timeout, cancel):
     """@brief Run one measuring child with a per-model silence watchdog.
 
@@ -1335,92 +1687,122 @@ def _measure_batch(freecad, paths, timeout, cancel):
     @param timeout Seconds without a completed measurement before the child
         is considered stuck.
     @param cancel Optional cancellation channel (see `measure_models`).
-    @return (outcome, measured, stopped): outcome is "done", "stalled" or
-        "failed"; measured holds every measurement already written to
-        `progress.jsonl` (the whole `out.json` when done); stopped is a
-        MatchingCancelled to raise, or None.
+    @return (outcome, measured, stopped): outcome is "done", "stalled",
+        "crashed" (the child exited by itself after opening `progress.jsonl`
+        but before writing `out.json`) or "failed" (it never reached the
+        measuring loop, or could not be started); measured holds every
+        measurement already written to `progress.jsonl` (the whole
+        `out.json` when done), with the child's exit code in `exit_code`;
+        stopped is a MatchingCancelled to raise, or None.
+    @note SAFETY BOUNDARY (2026-10-29 review, H2): `Popen` is NOT used as a
+        context manager. Its `__exit__` waits for the child without a
+        timeout, so after a refused kill it hung the matching it was meant
+        to protect. The kill paths reap with a bound and then abandon the
+        process explicitly; the exchange folder is removed by
+        `_remove_exchange_folder`, which logs instead of raising.
     """
     import subprocess
     import tempfile
-    import time
 
-    with tempfile.TemporaryDirectory() as folder:
-        base = Path(folder)
-        progress_path = base / "progress.jsonl"
-        (base / "in.json").write_text(json.dumps(paths), encoding="utf-8")
-        script = base / "measure.py"
-        script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
-        # PYTHONDONTWRITEBYTECODE: the child must not leave __pycache__
-        # next to the modules, which in the installation are read-only.
-        environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base),
-                           PYTHONDONTWRITEBYTECODE="1")
-        command = [freecad, str(script)]
-        # The output goes to a file and not to a pipe because nobody reads it:
-        # a full pipe would block the child.
-        log_path = base / "freecad.out"
-        outcome, stopped = "failed", None
+    folder = tempfile.mkdtemp(prefix="kicadgen-measure-")
+    try:
+        return _measure_in(Path(folder), freecad, paths, timeout, cancel)
+    finally:
+        _remove_exchange_folder(folder)
+
+
+def _measure_in(base: Path, freecad, paths, timeout, cancel):
+    """Body of `_measure_batch`, inside its exchange folder `base`."""
+    import subprocess
+
+    progress_path = base / "progress.jsonl"
+    (base / "in.json").write_text(json.dumps(paths), encoding="utf-8")
+    script = base / "measure.py"
+    script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
+    # PYTHONDONTWRITEBYTECODE: the child must not leave __pycache__
+    # next to the modules, which in the installation are read-only.
+    environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base),
+                       PYTHONDONTWRITEBYTECODE="1")
+    command = [freecad, str(script)]
+    # The output goes to a file and not to a pipe because nobody reads it:
+    # a full pipe would block the child.
+    log_path = base / "freecad.out"
+    outcome, stopped = "failed", None
+    try:
+        # Same flags as the solid's child: no console window flashing
+        # for every measuring batch on Windows. The parent's handle of the
+        # output file is closed right after the launch: the child has its own.
+        with log_path.open("wb") as sink:
+            process = subprocess.Popen(command, stdout=sink, stderr=subprocess.STDOUT,
+                                       env=environment, creationflags=NO_WINDOW_FLAGS)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "failed", _partial_measurements(progress_path), None
+
+    def kill_child():
+        """The only place where the measurement child process is killed (with its own children)."""
+        kill_process_tree(process)
+        # Bounded: a refused TerminateProcess must not hang here. A child
+        # still alive afterwards is abandoned (logged by the reaper).
+        _reap_killed_child(process)
+
+    def progress_size():
         try:
-            # Same flags as the solid's child: no console window flashing
-            # for every measuring batch on Windows.
-            with log_path.open("wb") as sink, subprocess.Popen(
-                    command, stdout=sink, stderr=subprocess.STDOUT,
-                    env=environment, creationflags=NO_WINDOW_FLAGS) as process:
+            return progress_path.stat().st_size
+        except OSError:
+            return 0
 
-                def kill_child():
-                    """The only place where the measurement child process is killed (with its own children)."""
-                    kill_process_tree(process)
-                    # Bounded: a refused TerminateProcess must not hang here.
-                    _reap_killed_child(process)
-
-                def progress_size():
-                    try:
-                        return progress_path.stat().st_size
-                    except OSError:
-                        return 0
-
-                seen = progress_size()
-                deadline = time.monotonic() + timeout
-                while True:
-                    try:
-                        process.wait(timeout=CANCEL_POLL_INTERVAL_S)
-                        outcome = "done"
-                        break
-                    except subprocess.TimeoutExpired:
-                        pass
-                    if cancel is not None and cancel.is_set():
-                        kill_child()
-                        # Defensive reads: an error while collecting the
-                        # haul must not turn a give-up into a
-                        # «fallito» (failed) batch, which is the other verdict.
-                        try:
-                            tail = log_path.read_text(encoding="utf-8", errors="replace")
-                        except OSError:
-                            tail = ""
-                        stopped = MatchingCancelled(command, output=tail)
-                        break
-                    size = progress_size()
-                    if size != seen:
-                        # A finished measure: the child is alive, the silence
-                        # count restarts for the next model.
-                        seen, deadline = size, time.monotonic() + timeout
-                    elif time.monotonic() >= deadline:
-                        kill_child()
-                        outcome = "stalled"
-                        break
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return "failed", _partial_measurements(progress_path), None
-        partial = _partial_measurements(progress_path)
-        if outcome == "done":
+    try:
+        seen = progress_size()
+        deadline = time.monotonic() + timeout
+        while True:
             try:
-                complete = json.loads((base / "out.json").read_text(encoding="utf-8"))
-                if isinstance(complete, dict):
-                    return "done", dict(partial, **complete), None
-            except (OSError, ValueError):
+                process.wait(timeout=CANCEL_POLL_INTERVAL_S)
+                outcome = "done"
+                break
+            except subprocess.TimeoutExpired:
                 pass
-            # Exited without out.json (FreeCAD failed halfway): what remains is
-            # what was written line by line.
-            return "failed", partial, None
-        return outcome, partial, stopped
+            if cancel is not None and cancel.is_set():
+                kill_child()
+                # Defensive reads: an error while collecting the
+                # haul must not turn a give-up into a
+                # «fallito» (failed) batch, which is the other verdict.
+                try:
+                    tail = log_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    tail = ""
+                stopped = MatchingCancelled(command, output=tail)
+                break
+            size = progress_size()
+            if size != seen:
+                # A finished measure: the child is alive, the silence
+                # count restarts for the next model.
+                seen, deadline = size, time.monotonic() + timeout
+            elif time.monotonic() >= deadline:
+                kill_child()
+                outcome = "stalled"
+                break
+    except BaseException:
+        # Anything raised while watching (KeyboardInterrupt included) must not
+        # leave a live child behind: killed, reaped with the bound, re-raised.
+        kill_child()
+        raise
+    partial = _Measurements(_partial_measurements(progress_path),
+                            exit_code=process.returncode if outcome == "done" else None)
+    if outcome == "done":
+        try:
+            complete = json.loads((base / "out.json").read_text(encoding="utf-8"))
+            if isinstance(complete, dict):
+                return "done", _Measurements(dict(partial, **complete),
+                                             exit_code=process.returncode), None
+        except (OSError, ValueError):
+            pass
+        # Exited without out.json. When the child had opened progress.jsonl it
+        # was inside the measuring loop, so the first model without a line is
+        # the one that killed it (a native crash of the reader): "crashed".
+        # Without that file the child died before measuring anything -- a
+        # broken installation, not a broken model -- and nobody is blamed.
+        return ("crashed" if progress_path.exists() else "failed"), partial, None
+    return outcome, partial, stopped
 
 
 def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
@@ -1440,6 +1822,14 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
         would make the next run start again from zero. What is not returned
         is the partial result, which the caller would mistake for a complete
         one.
+    @note A model FreeCAD could not measure -- stalled, crashed the child, or
+        answered `null` -- is remembered in the stall memo (`record_stalls`,
+        `record_unmeasurable`) and not measured again while both the file and
+        the FreeCAD build are unchanged (2026-10-29 review, H1). A model
+        absent from the answer (FreeCAD missing, launch failed) stays
+        retryable.
+    @note The index is written only when a new measurement was added
+        (2026-10-29 review, H4): an unchanged index is not rewritten.
     """
     paths = [Path(p) for p in paths]
     library = library or find_library()
@@ -1447,17 +1837,24 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
     # Migrate the interpretation of legacy raw section measurements on every
     # read, without trusting a cache produced by the old body-section contract.
     for path in paths:
-        key = index_key(path)
+        key = _scoped_index_key(path)
         if key in index:
             index[key] = normalize_model_measurement(path, index[key])
-    missing = [p for p in paths if size_distance(index.get(index_key(p)), 1, 1) is None]
+    missing = [p for p in paths if size_distance(index.get(_scoped_index_key(p)), 1, 1) is None]
     if missing:
         # A model that already stalled with this very timeout is not measured
         # again (2026-10-27 review, H2): it stays None, exactly as it ended the
         # run that gave up on it, but without paying the silence once more.
         # A larger timeout or a rewritten file makes `stall_remembered` False.
+        # Crashes and unreadable answers of the same FreeCAD likewise.
         stalls = load_stalls()
-        missing = [p for p in missing if not stall_remembered(stalls, p, MEASURE_SILENCE_TIMEOUT_S)]
+        reader = (_reader_identity()
+                  if any(isinstance(stalls.get(index_key(p)), dict)
+                         and stalls[index_key(p)].get("status") in UNMEASURABLE_STATUSES
+                         for p in missing) else None)
+        missing = [p for p in missing
+                   if not stall_remembered(stalls, p, MEASURE_SILENCE_TIMEOUT_S)
+                   and not unmeasurable_remembered(stalls, p, reader)]
     if missing:
         stopped = None
         try:
@@ -1467,20 +1864,33 @@ def model_sizes(paths, library: Optional[Path] = None, *, cancel=None) -> dict:
             measured = measure_models(missing, **({"cancel": cancel} if cancel is not None else {}))
         except MatchingCancelled as exc:
             measured, stopped = exc.measured, exc
+        added = False
         for path in missing:
             value = measured.get(str(path))
             # A missing FreeCAD installation or failed batch must be retryable.
             if size_distance(value, 1, 1) is not None:
-                index[index_key(path)] = normalize_model_measurement(path, value)
-        save_index(index, library)
+                index[_scoped_index_key(path)] = normalize_model_measurement(path, value)
+                added = True
+        if added:
+            save_index(index, library)
         # Stalls are a separate memo, never an index entry: the index holds
         # measurements only, and a stall is the absence of one.
-        stalled = getattr(measured, "stalled", None)
+        stalled = getattr(measured, "stalled", None) or {}
         if stalled:
             record_stalls(stalled)
+        failures = getattr(measured, "failures", None) or {}
+        verdicts = {}
+        for path in missing:
+            key = str(path)
+            # Present and None: FreeCAD answered about this file. Absent: it
+            # was never asked (no FreeCAD, launch failed), so it stays retryable.
+            if key in measured and measured[key] is None and key not in stalled:
+                verdicts[key] = failures.get(key) or {"status": "unreadable"}
+        if verdicts:
+            record_unmeasurable(verdicts, _reader_identity())
         if stopped is not None:
             raise stopped
-    return {str(p): index.get(index_key(p)) for p in paths}
+    return {str(p): index.get(_scoped_index_key(p)) for p in paths}
 
 
 def _readings(size):
@@ -2209,7 +2619,7 @@ def _family_paths(component, root, basis):
     index = load_index(root)
     ranked, omitted = [], False
     for path in paths:
-        size = normalize_model_measurement(path, index.get(index_key(path)))
+        size = normalize_model_measurement(path, index.get(_scoped_index_key(path)))
         distances = [d for _, value in _basis_readings(size, basis)
                      if (d := size_distance(value, component["length_mm"], component["width_mm"])) is not None]
         cached = bool(distances)
@@ -3154,6 +3564,28 @@ def model_candidates(component: dict, *, limit=5, library=None, log=None,
                      cancel=None) -> dict:
     """@brief Propose bounded, JSON-safe model choices for explicit human review.
 
+    @param component Component evidence (see `_model_candidates`).
+    @param limit Maximum result count, clamped to zero through five.
+    @param library Optional KiCad model root.
+    @param log Optional diagnostic callback accepting a string.
+    @param cancel Cancellation channel (`is_set()`), None = not interruptible.
+    @return Mapping with status, candidates and selected_path.
+    @throws MatchingCancelled When the cancellation arrives (see `_model_candidates`).
+    @note Thin wrapper that opens one `_listing_scope` (2026-10-29 review,
+        H5): a direct caller -- the model picker, the local classifier --
+        no longer walks the library several times per call. Inside
+        `attach_models` the scope joins the outer one. The full contract is
+        documented on the wrapped function.
+    """
+    with _listing_scope():
+        return _model_candidates(component, limit=limit, library=library, log=log,
+                                 cancel=cancel)
+
+
+def _model_candidates(component: dict, *, limit=5, library=None, log=None,
+                      cancel=None) -> dict:
+    """@brief Propose bounded, JSON-safe model choices for explicit human review.
+
     @param component Component evidence, dimensions, bbox_basis and model_selection.
     @param limit Maximum result count, clamped to zero through five.
     @param library Optional KiCad model root; cached measurements are reused.
@@ -3376,7 +3808,11 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
     # keep working.
     sizes = model_sizes(paths, root, **({"cancel": cancel} if cancel is not None else {}))
     complete = not (result.get("search_truncated") or result.get("topology_incomplete"))
-    lands = footprint_sizes(paths, root, log=note) if basis in ("unknown", "pads") else {}
+    # The land patterns may rebuild the footprint index, minutes on a cold
+    # library: the same cancellation stops it.
+    lands = (footprint_sizes(paths, root, log=note,
+                             **({"cancel": cancel} if cancel is not None else {}))
+             if basis in ("unknown", "pads") else {})
     # Height excludes no candidate -- it is a visual estimate, not a
     # dimension -- but inside the band where the top-down measure does not tell
     # two solids apart it remains the only quantity that really separates them.

@@ -13,12 +13,19 @@ YOLO_SETTING_DEFAULTS): one overview plus magnified 640 and/or 1280 px tiles
 with a chosen overlap (tile_sizes may be empty: overview only), an operating
 confidence threshold, and class-agnostic IoU NMS. A tile whose bounds repeat
 the overview or another view is not inferred again. The view count depends
-on the image size; no components are silently capped.
+on the image size. A standard head returns every anchor of a view; an
+end-to-end head returns at most K rows per view, K fixed by its export
+(Ultralytics `max_det`): that cap is recorded as `per_view_row_cap` in the
+setup info and the audit, and a view whose lowest returned row still scores
+at or above the audit floor -- the sign that the cap cut rows off -- is
+reported with a warning (review 2026-10-29, P2). Nothing else limits the
+number of components.
 """
 from __future__ import annotations
 
 import ast
 from collections import Counter
+import copy
 import hashlib
 import json
 import math
@@ -26,17 +33,20 @@ import os
 from numbers import Real
 from pathlib import Path
 import re
+import sys
 import tempfile
 try:
     from ..core.validation import covered_fraction
-    from .messages import end_sentence, tx
+    from .messages import end_sentence, tx, warning
     from .photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from .photo_heights import estimate_body_height
+    from .yolo_models import LoadedModelCache
 except ImportError:  # loaded as a standalone file (import isolation test)
     from kicadgen.core.validation import covered_fraction
-    from kicadgen.services.messages import end_sentence, tx
+    from kicadgen.services.messages import end_sentence, tx, warning
     from kicadgen.services.photo_audit import AUDIT_RETENTION_PER_KIND, prune_audits
     from kicadgen.services.photo_heights import estimate_body_height
+    from kicadgen.services.yolo_models import LoadedModelCache
 
 
 _CLASSES = (
@@ -340,9 +350,56 @@ class _EndToEndSession:
         @return A one-element list holding [1, 4 + len(_CLASSES), K] float32
             rows, scores in _CLASSES order (see _one_to_one_rows).
         """
-        raw = self._session.run(output_names, feeds)[0]
-        return [_one_to_one_rows(self._np.asarray(raw, dtype=self._np.float32),
-                                 self._mapping, self._np)]
+        return self.run_with_lowest_score(output_names, feeds)[0]
+
+    def run_with_lowest_score(self, output_names, feeds):
+        """@brief Run the model; also report the lowest score among its K returned rows.
+
+        @param output_names Output names forwarded to the wrapped onnxruntime session.
+        @param feeds Input feeds forwarded to the wrapped session.
+        @return (outputs, lowest): outputs as `run` returns them; lowest as
+            _lowest_returned_score, read on the detections BEFORE the merge
+            of same-box rows, which empties columns and would hide it.
+        """
+        raw = self._np.asarray(self._session.run(output_names, feeds)[0], dtype=self._np.float32)
+        return ([_one_to_one_rows(raw, self._mapping, self._np)],
+                _lowest_returned_score(raw, self._np))
+
+
+def _lowest_returned_score(raw, np):
+    """@brief Lowest finite confidence among the rows an end-to-end head returned.
+
+    @param raw Detections [1, K, 6] (x0, y0, x1, y1, confidence, class).
+    @param np NumPy module.
+    @return The lowest finite confidence as a float, or None when no row has
+        a finite one.
+    @note The head returns its K best rows sorted by score and pads with
+        zero rows when it has fewer. If even the lowest of the K rows is at
+        or above the audit floor, the head had at least K proposals worth
+        recording, and any after the K-th were dropped by the export's cap,
+        not by a threshold of the detector. This is a structural sign, not a
+        tuned number: the floor is the audit's own.
+    """
+    scores = np.asarray(raw, np.float64).reshape(-1, raw.shape[-1])[:, 4]
+    finite = scores[np.isfinite(scores)]
+    return float(finite.min()) if finite.size else None
+
+
+def _declared_end_to_end(metadata) -> bool:
+    """@brief True when the ONNX metadata declare an end-to-end export (`end2end` True).
+
+    @param metadata The model's custom metadata map.
+    @return True only for a value that reads as the literal True; a missing
+        key, False or an unreadable value give False.
+    @note Ultralytics writes `end2end` from the head it exported
+        (tools/export_yolo_onnx.py relies on it); other exporters with a
+        [1, K, 6] output -- RT-DETR returns centre/size boxes, not corners --
+        do not write it as True.
+    """
+    try:
+        return ast.literal_eval(str(metadata.get("end2end"))) is True
+    except (ValueError, SyntaxError, TypeError):
+        return False
 
 
 def _end_to_end_output_shape(shape) -> bool:
@@ -405,13 +462,24 @@ class _TorchSession:
         @return A one-element list holding the raw [1, 4 + classes, rows]
             float32 array, scores remapped to _CLASSES order when needed.
         """
+        return self.run_with_lowest_score(output_names, feeds)[0]
+
+    def run_with_lowest_score(self, output_names, feeds):
+        """@brief Run the network; also report the lowest score of an end-to-end head's rows.
+
+        @param output_names Ignored; kept for the onnxruntime `run` signature.
+        @param feeds Mapping input name -> [1, 3, 640, 640] float32 letterboxed tensor.
+        @return (outputs, lowest): outputs as `run` returns them; lowest as
+            _lowest_returned_score for an end-to-end head, None for the
+            standard head, which returns every anchor and has no row cap.
+        """
         np = self._np
         raw = self.raw_output(feeds)
         if not self._end_to_end:
             if self._mapping == list(range(len(_CLASSES))):
-                return [raw]
-            return [_remap_scores(raw, self._mapping, np)]
-        return [_one_to_one_rows(raw, self._mapping, np)]
+                return [raw], None
+            return [_remap_scores(raw, self._mapping, np)], None
+        return [_one_to_one_rows(raw, self._mapping, np)], _lowest_returned_score(raw, np)
 
 
 def _one_to_one_rows(raw, mapping, np):
@@ -554,14 +622,46 @@ def _setup_torch(path):
                            if end_to_end else "standard"},
         "classes": list(_CLASSES), "input_shape": [1, 3, 640, 640],
         "output_shape": list(probe.shape), "providers": ["torch-cpu"],
+        # Rows per view an end-to-end head can return at most (its max_det);
+        # None for the standard head, which returns every anchor.
+        "per_view_row_cap": int(probe.shape[2]) if end_to_end else None,
         "runtime": f"torch {torch.__version__}; ultralytics {ultralytics.__version__}",
         **_mapping_info(names, mapping),
     }
     return session, "images", np, cv2, info
 
 
+#: Loaded models, reused while the file is unchanged (review 2026-10-29, P6):
+#: validate_yolo_setup before a paid analysis and detect_yolo_components
+#: right after used to read, hash and open the same weights twice.
+_LOADED = LoadedModelCache(capacity=2)
+
+
+def _runtime_modules(path):
+    """Runtime modules a loaded model of this format depends on (part of the cache key)."""
+    names = ("torch", "ultralytics") if path.suffix.lower() == ".pt" else ("onnxruntime",)
+    return tuple(sys.modules.get(name) for name in names)
+
+
 def _setup(model_path):
+    """Resolve, load and validate the weights; reuse a load of the unchanged file.
+
+    @return (session, input name, numpy, cv2, info); `info` is a private copy
+        on every call, so a caller editing it does not change the cached one.
+    """
     path = resolve_yolo_model(model_path)
+    try:
+        loaded = _LOADED.get_or_load(path, lambda: _load(path),
+                                     lambda: _runtime_modules(path))
+    except OSError as exc:  # the file vanished between resolve and stat
+        raise ValueError(
+            f"Cannot read local YOLO weights {str(path)!r}: {end_sentence(exc)}") from exc
+    session, input_name, np, cv2, info = loaded
+    return session, input_name, np, cv2, copy.deepcopy(info)
+
+
+def _load(path):
+    """Load and validate one resolved weights file, uncached (see _setup)."""
     if path.suffix.lower() == ".pt":
         return _setup_torch(path)
     np, cv2, ort = _dependencies()
@@ -582,11 +682,22 @@ def _setup(model_path):
         names = ast.literal_eval(metadata["names"])
         mapping = class_mapping(names)
         # Two exports are read: the standard score grid and the end-to-end
-        # detections [1, K, 6] of an NMS-free head. The shape decides, not
-        # the `end2end` metadata: Ultralytics writes that key from the
-        # export arguments, and a hand-edited file could say anything.
+        # detections [1, K, 6] of an NMS-free head. An end-to-end output
+        # needs BOTH the shape and the `end2end` metadata (review 2026-10-29,
+        # P1): the shape alone also fits an RT-DETR export, whose rows are
+        # centre/size boxes; read as corners they all became empty boxes and
+        # the run found 0 bodies without any error. The metadata alone do not
+        # suffice either: a grid output stays a grid.
         output_shape = list(outputs[0].shape) if len(outputs) == 1 else []
         end_to_end = _end_to_end_output_shape(output_shape)
+        if end_to_end and not _declared_end_to_end(metadata):
+            raise ValueError(tx(
+                "l'uscita {shape} ha la forma delle rilevazioni end-to-end ma i metadati "
+                "del modello non dichiarano end2end=True, quindi le sue righe potrebbero "
+                "non essere riquadri x0, y0, x1, y1 (un export RT-DETR, per esempio, dà "
+                "centro e dimensioni). Riesporta il modello con tools/export_yolo_onnx.py, "
+                "che scrive end2end, oppure usa un export con la griglia [1, 4 + classi, 8400].",
+                shape=output_shape))
         if (len(outputs) != 1 or outputs[0].type != "tensor(float)"
                 or (not end_to_end and output_shape != [1, 4 + len(names), 8400])):
             raise ValueError(f"expected one float32 output, raw [1, {4 + len(names)}, 8400] "
@@ -603,7 +714,8 @@ def _setup(model_path):
         raise ValueError(
             f"Cannot load compatible local YOLO model {path}: {end_sentence(exc)} Use a "
             "self-contained PCB YOLO ONNX export with fixed 640 input, raw "
-            "[1, 4 + classes, 8400] or end-to-end [1, K, 6] output and classes among: "
+            "[1, 4 + classes, 8400] or end-to-end [1, K, 6] output (with end2end True "
+            "in its metadata) and classes among: "
             + ", ".join(_CLASSES) + "; check the CPU onnxruntime installation."
         ) from exc
     # The detector reads the scores in the order of _CLASSES: a model with a
@@ -623,6 +735,9 @@ def _setup(model_path):
         "input_shape": list(inputs[0].shape),
         "output_shape": [1, 4 + len(_CLASSES), output_shape[1] if end_to_end else 8400],
         "model_output_shape": output_shape,
+        # Rows per view an end-to-end head can return at most (its export's
+        # max_det); None for the standard grid, which returns every anchor.
+        "per_view_row_cap": output_shape[1] if end_to_end else None,
         "providers": providers, "runtime": getattr(ort, "__version__", "unknown"),
         **_mapping_info(names, mapping),
     }
@@ -639,6 +754,10 @@ def validate_yolo_setup(model_path=None) -> dict:
         inference; a .pt checkpoint is loaded (which runs code from the file,
         see resolve_yolo_model) and runs one or two probe inferences on a
         blank 640 x 640 input to learn the real output shape of its head.
+    @note The loaded model is kept (last two files, see _LOADED) and reused by
+        the next validate_yolo_setup or detect_yolo_components on the same
+        unchanged file; a file whose size or modification time changed is
+        loaded and validated again.
     """
     return _setup(model_path)[-1]
 
@@ -1491,11 +1610,19 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
          f"audit floor {_AUDIT_CONFIDENCE}; class-agnostic NMS IoU {nms_iou:g}; CPU inference.")
     proposals, candidates, view_records, fragments, whole = [], [], [], [], []
     nms_trace = [] if audit_dir is not None else None
+    row_cap = info.get("per_view_row_cap")
+    capped_views = []
     for view, bounds in views:
         x, y, x1, y1 = bounds
         tensor, ratio, left, top = _letterbox(photo[y:y1, x:x1], np, cv2)
         try:
-            result = session.run(None, {input_name: tensor})
+            # End-to-end sessions also say how low their K-th row scored;
+            # any other session (standard grid, test fakes) has no row cap.
+            runner = getattr(session, "run_with_lowest_score", None)
+            if runner is not None:
+                result, lowest = runner(None, {input_name: tensor})
+            else:
+                result, lowest = session.run(None, {input_name: tensor}), None
             if (len(result) != 1 or not isinstance(result[0], np.ndarray)
                     or result[0].shape != expected_shape or result[0].dtype != np.float32):
                 # The shape measured at load time, for each model: 8400 rows
@@ -1505,6 +1632,10 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             raise ValueError(f"Local YOLO inference failed in {view}: {exc}") from exc
         rows, invalid = _proposals(result[0], bounds, (width, height),
                                    (ratio, left, top), view, np, threshold)
+        # The cap bit when even the last returned row is worth recording.
+        cap_reached = row_cap is not None and lowest is not None and lowest >= _AUDIT_CONFIDENCE
+        if cap_reached:
+            capped_views.append(view)
         eligible = [row for row in rows if row["rejection"] is None]
         selected = _nms(eligible, np, nms_trace, "eligible_per_view", nms_iou)
         candidates.extend(selected)
@@ -1525,8 +1656,17 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "filter_rejections": dict(Counter(
                                  row["rejection"] for row in rows if row["rejection"])),
                              "eligible_before_nms": len(eligible),
-                             "raw_proposals": len(rows), "retained_before_global_nms": len(selected)})
+                             "raw_proposals": len(rows), "retained_before_global_nms": len(selected),
+                             "lowest_returned_score": lowest, "row_cap_reached": cap_reached})
         emit(f"YOLO local {view}: {len(selected)} candidates; {invalid} invalid rows rejected.")
+    if capped_views:
+        emit(warning("YOLO locale: in {n_views} viste su {total} il modello ha restituito il "
+                     "massimo di {cap} righe e anche l'ultima supera la soglia di registrazione "
+                     "{floor}: le proposte oltre quel massimo sono state scartate dal modello, "
+                     "non dal rilevatore, e possono mancare dei corpi. Viste: {views}. Usa "
+                     "tessere più piccole o riesporta il modello con un max_det più alto.",
+                     n_views=len(capped_views), total=len(views), cap=row_cap,
+                     floor=_AUDIT_CONFIDENCE, views=", ".join(capped_views)))
     retained = _nms(candidates, np, nms_trace, "global", nms_iou)
     # What no view saw whole comes back into play: above threshold as a
     # candidate, below threshold as a hypothesis to review, like any other.
@@ -1680,7 +1820,12 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                              "excluded_classes": sorted(_EXCLUDED),
                              "excluded_class_policy": "retain uncertain competing body class "
                                                       "only at ordinary confidence threshold",
-                             "component_limit": None},
+                             # No limit on the total; an end-to-end head
+                             # returns at most this many rows PER VIEW (None:
+                             # standard grid). Views where it bit:
+                             # views[].row_cap_reached.
+                             "component_limit": None,
+                             "per_view_row_cap": row_cap},
                      views=view_records, raw_proposals=proposals,
                      nms_suppressions=nms_trace, review_nms_suppressions=review_trace,
                      recovered_clipped_fragments=recovered,

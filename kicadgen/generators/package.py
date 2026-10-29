@@ -58,7 +58,15 @@ def preview_grid_origin(geometry: PackageGeometry) -> tuple:
         (0, 0) without one. Used by the generator for the default text
         anchors and by the preview drawer for its grid: one definition.
     """
-    first = next((pin for pin in geometry.pins_seen_from_top() if str(pin.number).strip()), None)
+    return _first_pin_origin(geometry.pins_seen_from_top())
+
+
+def _first_pin_origin(pins) -> tuple:
+    """Position of the first numbered pin of `pins` (already seen from the top), or (0, 0).
+
+    Shared by `preview_grid_origin` and `build_package`, which already holds
+    the pins and must not validate and transform the geometry again."""
+    first = next((pin for pin in pins if str(pin.number).strip()), None)
     return (0.0, 0.0) if first is None else (float(first.x_mm), float(first.y_mm))
 
 
@@ -87,7 +95,10 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     @throws ValueError When the geometry does not validate or the pin-1
         marker cannot be placed off the copper.
     """
-    geometry.validate()
+    # pins_seen_from_top validates the geometry first: one validation per
+    # build, where there used to be three (an explicit validate, this call
+    # and preview_grid_origin), each with the O(n^2) pad-overlap scan
+    # (review 2026-10-29, G4).
     pins = geometry.pins_seen_from_top()
     footprint_name = name or geometry.name
     description = description.strip() or f"{geometry.family} package generico"
@@ -183,4 +194,4 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         ))
     # Decision D1 (user, 2026-10-14): Reference above and Value below the
     # envelope; a user-chosen position is applied afterwards (place_texts).
-    return fp.place_default_texts(preview_grid_origin(geometry))
+    return fp.place_default_texts(_first_pin_origin(pins))

@@ -72,20 +72,47 @@ def copy_rows(value):
         are plain JSON data, and `copy.deepcopy` spends most of its time on
         its memo and dispatch: this copy is about four times faster
         (2026-10-17: 80 rows with 5 drawn elements, 12.5 ms against 3.1 ms).
-        Any other type falls back to `deepcopy`. Unlike `deepcopy` it does not
-        keep two references to one object shared in the copy; the rows never
-        rely on that (each row holds its own `symbol_graphics` list).
+        Any other type falls back to `deepcopy`.
+    @note Like `deepcopy`, a list referenced twice inside `value` is copied
+        once and the copy is referenced twice (review 2026-10-29, C1): the
+        editor gives every row the SAME `symbol_graphics` list object
+        (`SymbolTab._with_graphics`), so a copy of the rows costs
+        O(pins + elements) instead of O(pins x elements) and keeps sharing.
+        Only lists are memoised (the shared container); dicts are copied
+        every time they are met.
     """
+    return _copy_rows(value, {})
+
+
+def _copy_rows(value, memo):
+    """The body of `copy_rows`; `memo` maps id() of an already copied list to its copy."""
     kind = type(value)
     if kind is dict:
-        return {key: item if type(item) in _ATOMIC else copy_rows(item) for key, item in value.items()}
+        return {key: item if type(item) in _ATOMIC else _copy_rows(item, memo) for key, item in value.items()}
     if kind is list:
-        return [item if type(item) in _ATOMIC else copy_rows(item) for item in value]
+        found = memo.get(id(value))
+        if found is not None:
+            return found
+        copied = [item if type(item) in _ATOMIC else _copy_rows(item, memo) for item in value]
+        # The source list stays alive (reachable from `value`) for the whole
+        # copy, so its id cannot be reused by another list meanwhile.
+        memo[id(value)] = copied
+        return copied
     if kind in _ATOMIC:
         return value
     if kind is tuple:
-        return tuple(copy_rows(item) for item in value)
+        return tuple(_copy_rows(item, memo) for item in value)
     return deepcopy(value)
+
+
+def _without_graphics(rows):
+    """Shallow copies of `rows` whose `symbol_graphics` value is None, keeping the key order.
+
+    For callers that copy the rows and then give every row a new graphics
+    list: the old lists are not deep-copied only to be thrown away.
+    """
+    return [{key: None if key == 'symbol_graphics' else item for key, item in row.items()}
+            if isinstance(row, dict) else row for row in rows]
 
 
 def _whole_pitches(value):
@@ -703,6 +730,13 @@ class _SymbolView(QGraphicsView):
         if self.clicktools is not None and self.clicktools.press(event):
             self._tool_took_right_press = event.button() == Qt.MouseButton.RightButton
             return
+        if self.camera.pan_active and event.button() != Qt.MouseButton.MiddleButton:
+            # A left or right press while a pan runs is swallowed: no drag,
+            # band, toggle, placement or menu starts under a moving camera
+            # (review 2026-10-29, C2/C9, the same rule in the footprint
+            # preview). A middle press restarts the pan, as before.
+            event.accept()
+            return
         if self.placing and event.button() == Qt.MouseButton.LeftButton:
             self.place_requested.emit(self.mapToScene(event.pos()))
             event.accept()
@@ -730,18 +764,21 @@ class _SymbolView(QGraphicsView):
                         self.setFocus()
                         event.accept()
                         return
-        if (event.button() == Qt.MouseButton.LeftButton and self.gesture is None
-                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier
-                and all(item.data(0) is None for item in self.items(event.pos()))):
+        # The background is every point with no item carrying a drag target
+        # (`data(0)`): the empty canvas and the inside of the body outline
+        # alike (review 2026-10-29, C6: the tooltip promises a pan on empty
+        # space, and the body covers most of the symbol).
+        background = (event.button() == Qt.MouseButton.LeftButton
+                      and all(item.data(0) is None for item in self.items(event.pos())))
+        if (background and self.gesture is None
+                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             # Candidate click-to-clear; a Ctrl (additive) click never clears.
             self._clear_press = QPoint(event.pos())
-        background_drag = event.button() == Qt.MouseButton.LeftButton and not self.items(event.pos())
-        if (event.button() == Qt.MouseButton.MiddleButton or background_drag) and self.gesture is None:
-            self.camera.pan_begin(event.button(), event.pos(), grab_mouse=True)
+        if (event.button() == Qt.MouseButton.MiddleButton or background) and self.gesture is None:
+            # A click without a move keeps auto-fit; the first real pan step
+            # turns it off (review 2026-10-29, C4, as the footprint preview).
+            self.camera.pan_begin(event.button(), event.pos(), grab_mouse=True, keep_auto_fit=True)
             self.setFocus()
-            event.accept()
-            return
-        if self.camera.pan_active:
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and self.controller is not None:
@@ -762,9 +799,11 @@ class _SymbolView(QGraphicsView):
     def contextMenuEvent(self, event):
         """@brief Qt override: ask for the context menu of the pin or element under the pointer.
 
-        @param event The context-menu event; ignored on the background or during a drag.
+        @param event The context-menu event; ignored on the background, during a
+            drag, a rubber band or a pan (review 2026-10-29, C9: a menu
+            opened with the pan armed left the camera following the pointer).
         """
-        if self.gesture is not None or self.band.active:
+        if self.gesture is not None or self.band.active or self.camera.pan_active:
             event.accept()
             return
         if self._tool_took_right_press and event.reason() == QContextMenuEvent.Reason.Mouse:
@@ -1084,6 +1123,14 @@ class SymbolTab(QWidget):
         self._gesture_target = None
         #: Hover group owner the running drag keeps revealed (`_update_handle_visibility`).
         self._gesture_owner = None
+        #: The draft object current at the press of the running drag: while
+        #: `_draft` is still this very object no step has committed anything
+        #: (`_gesture_committed`), None outside a drag.
+        self._gesture_press_draft = None
+        #: (path, file size and mtime, baseline, rows) of the last recovery
+        #: write, so an identical checkpoint is not written again
+        #: (`_checkpoint_draft`); None when unknown.
+        self._last_checkpoint = None
         #: Drawn Reference and Value texts with their anchor squares, kept
         #: between redraws for the live drag: key -> (text item, square).
         self._property_items = {}
@@ -1569,6 +1616,9 @@ class SymbolTab(QWidget):
             # same index, without any click (audit L3, 2026-10-15).
             self._selected_graphic = None
             self._selected_graphics = set()
+        # One graphics list for every row (review 2026-10-29, C1): the
+        # baseline and the draft copied from it then copy in O(pins + elements).
+        self._share_graphics(source)
         self._baseline = deepcopy(source)
         self._original = deepcopy(source)
         self.title.setText(f"{self.tx('Simbolo elettrico')} · {self._name}" if name else self.tx('Simbolo elettrico'))
@@ -1875,7 +1925,8 @@ class SymbolTab(QWidget):
     def _migrate_text_anchors(self, rows):
         """Give every legacy user text of `rows` its bottom-left anchor; return how many records changed.
 
-        Every row carries its own copy of the same list and every copy is
+        Every row carries the same list (often one shared object,
+        `_share_graphics`; the migration is idempotent) and every copy is
         migrated with the same measure, so the rows keep agreeing. A
         malformed record is left as it is (the layout reports it).
         """
@@ -1984,7 +2035,9 @@ class SymbolTab(QWidget):
 
     def _populate(self, rows):
         self._loading = True
-        self._draft = copy_rows(rows)
+        # Rows from a file or a recovered draft carry one graphics list per
+        # row: shared here, so every later copy of the draft is cheap (C1).
+        self._draft = self._share_graphics(copy_rows(rows))
         # Legacy records get their stable id here, in place, before the first
         # history entry is recorded: wire anchors name elements by id, and an
         # undo must never reach a draft whose ids differ.
@@ -2283,6 +2336,11 @@ class SymbolTab(QWidget):
         try:
             if dirty:
                 offered = self._recoverable is not None
+                if not offered and self._stale_recoverable is None and self._checkpoint_unchanged(rows):
+                    # The file already holds exactly these rows on this
+                    # baseline (a cancelled drag restored them, review
+                    # 2026-10-29, C5): no second write and fsync.
+                    return
                 if offered and self._recoverable_snapshot is None:
                     # Held by the recovery file (overwritten now) or only in
                     # memory: give it a file of its own first.
@@ -2296,6 +2354,7 @@ class SymbolTab(QWidget):
                     self._draft_folder_missing(self._recovery_path.parent)
                     return
                 self._draft_folder_written()
+                self._remember_checkpoint(rows)
                 self._claim_project_id()
                 self._stale_recoverable = None
                 if offered:
@@ -2304,6 +2363,37 @@ class SymbolTab(QWidget):
                 self._recovery_path.unlink(missing_ok=True)
         except OSError:
             self.set_status(self.tx('Bozza non salvata: verifica lo spazio e i permessi della cartella.'))
+
+    def _file_signature(self):
+        """(size, mtime in ns) of the recovery file, None when it cannot be read."""
+        try:
+            info = self._recovery_path.stat()
+        except (OSError, AttributeError):
+            return None
+        return info.st_size, info.st_mtime_ns
+
+    def _remember_checkpoint(self, rows):
+        """Record what the recovery file was just written with (`_checkpoint_unchanged`)."""
+        signature = self._file_signature()
+        self._last_checkpoint = None if signature is None else (
+            self._recovery_path, signature, self._baseline, rows)
+
+    def _checkpoint_unchanged(self, rows):
+        """True when the recovery file is still the one this tab last wrote, with these rows and baseline.
+
+        The file's size and modification time must be the ones recorded
+        right after the write: any other writer (a snapshot, another
+        project's write, a deletion by Applica or «Scarta») changes them, and
+        the checkpoint is then written again. A false negative only costs a
+        write; a false positive would lose a draft, hence every field is
+        compared.
+        """
+        memo = self._last_checkpoint
+        if memo is None:
+            return False
+        path, signature, baseline, written = memo
+        return (path == self._recovery_path and baseline == self._baseline and written == rows
+                and signature == self._file_signature())
 
     def _key_action(self, action):
         """@brief Run the handler of a key shortcut of the view; an auto-repeated key defers the draft write.
@@ -2483,10 +2573,36 @@ class SymbolTab(QWidget):
 
     @staticmethod
     def _with_graphics(rows, graphics):
-        """Rows with `symbol_graphics` set to the same list on every row (like `symbol_body`)."""
-        rows = copy_rows(rows)
+        """Rows with `symbol_graphics` set to the same list on every row (like `symbol_body`).
+
+        One copy of `graphics` is made and every row references that very
+        list object (review 2026-10-29, C1): the rows must agree anyway
+        (`symbol_glyphs.symbol_graphics`), and `copy_rows` keeps the sharing,
+        so later copies of the draft cost O(pins + elements). On disk each
+        row still carries the list (JSON writes it per row), as before.
+        """
+        rows = copy_rows(_without_graphics(rows))
+        shared = copy_rows(graphics)
         for row in rows:
-            row['symbol_graphics'] = copy_rows(graphics)
+            row['symbol_graphics'] = shared
+        return rows
+
+    @staticmethod
+    def _share_graphics(rows):
+        """Make every row of `rows` reference ONE `symbol_graphics` list when all rows hold equal lists.
+
+        Rows read from a file or a draft (one list per row, the on-disk
+        format) are normalised in place to the shared form `_with_graphics`
+        produces, so that copying them is O(pins + elements). Rows whose
+        lists differ (malformed: `symbol_graphics` reports them) are left
+        untouched. Returns `rows`.
+        """
+        lists = [row['symbol_graphics'] for row in rows
+                 if isinstance(row, dict) and isinstance(row.get('symbol_graphics'), list)]
+        if len(lists) > 1 and all(entry is lists[0] or entry == lists[0] for entry in lists[1:]):
+            for row in rows:
+                if isinstance(row, dict) and isinstance(row.get('symbol_graphics'), list):
+                    row['symbol_graphics'] = lists[0]
         return rows
 
     @property
@@ -3252,7 +3368,7 @@ class SymbolTab(QWidget):
             refused commit leaves every element as it was.
         """
         chosen = self.selected_graphics()
-        if not chosen or self._symbol is None or self._gesture_before is not None:
+        if not chosen or self._symbol is None or not self._end_drag_for_command():
             return False
         # One row set for the whole gesture, committed once: one undo step
         # and one checkpoint, however many elements are selected (audit M4,
@@ -3313,7 +3429,7 @@ class SymbolTab(QWidget):
         @return True when something was pasted; the pasted elements become the selection.
         @note A refused paste (invalid geometry) does not move the next one.
         """
-        if not self._clipboard or self._symbol is None or self._gesture_before is not None:
+        if not self._clipboard or self._symbol is None or not self._end_drag_for_command():
             return False
         step = (GRID_MM, -GRID_MM) if offset is None else (float(offset[0]), float(offset[1]))
         rows = self._free_rows(self.draft_rows(), self._symbol)
@@ -3334,6 +3450,8 @@ class SymbolTab(QWidget):
 
         @return True when the copies were placed, False when nothing was selected.
         """
+        if self.selected_graphics() and self._symbol is not None and not self._end_drag_for_command():
+            return False
         kept = self._clipboard.snapshot()
         if not self.copy_selected():
             return False
@@ -4087,9 +4205,32 @@ class SymbolTab(QWidget):
         self._history = self._history[-100:]
         self._history_index = len(self._history) - 1
 
-    def _restore_history(self, index):
-        """Replace the draft with history snapshot `index` (undo/redo); the element selection and any armed click tool are dropped."""
+    def _end_drag_for_command(self):
+        """@brief Cancel the drag in progress, once, before an edit command acts; tell whether the command may go on.
+
+        @return True when no drag runs any more (none was running, or the
+            controller cancelled it); False when a drag state is left that
+            the controller does not own, and the command must not act.
+        @note Decision C3 of the review of 2026-10-29, the same in both tabs:
+            an edit command (undo/redo, Delete, duplicate, paste, nudge,
+            rotate) pressed while the mouse drags cancels the drag through
+            the gesture controller (`gesture_end(commit=False)`: the drag's
+            initial rows come back) and then applies to those rows. Before,
+            the symbol ignored the command while the footprint preview
+            cancelled and applied it.
+        """
         if self._gesture_before is not None:
+            self._gestures.cancel()
+        return self._gesture_before is None
+
+    def _restore_history(self, index):
+        """Replace the draft with history snapshot `index` (undo/redo); the element selection and any armed click tool are dropped.
+
+        A drag in progress is cancelled first, once, when there is a snapshot
+        to go to (review 2026-10-29, C3, as the footprint preview does).
+        """
+        if self._gesture_before is not None and not (
+                0 <= index < len(self._history) and self._end_drag_for_command()):
             return
         # The points a click tool collected were snapped and anchored on the
         # draft being replaced (a pin end, an element terminal): the tool is
@@ -4349,6 +4490,7 @@ class SymbolTab(QWidget):
             return None
         target = tuple(target)
         self._gesture_before = self.draft_rows()
+        self._gesture_press_draft = self._draft
         self._gesture_target = target
         self._gesture_owner = self._hover_owner(target)
         self._gesture_layout = self._symbol
@@ -4428,7 +4570,13 @@ class SymbolTab(QWidget):
         @return True, like the geometry operations that call it.
         @note A repeated identical step of the same drag is skipped
             (`_gesture_step_repeats`): the draft and the picture already show it.
+        @note A step of a drag that has committed nothing yet is skipped too
+            (review 2026-10-29, C1): the draft is still the one the press
+            found, so a click, or a move that stays on the press node, neither
+            lays out nor redraws the symbol again.
         """
+        if self._gesture_before is not None and not self._gesture_committed():
+            return True
         if self._gesture_step_repeats('restore', source):
             return True
         key = copy_rows(source) if self._gesture_before is not None else None
@@ -4436,6 +4584,10 @@ class SymbolTab(QWidget):
         self._changed()
         self._remember_gesture_step('restore', key)
         return True
+
+    def _gesture_committed(self):
+        """True when a step of the running drag replaced the draft the press found."""
+        return self._draft is not self._gesture_press_draft
 
     def _accept_geometry(self, rows):
         if self._gesture_step_repeats('accept', rows):
@@ -4502,12 +4654,14 @@ class SymbolTab(QWidget):
         if graphics:
             from ..generators.symbol_glyphs import pin_inner_ends, refresh_wire_anchors
             refresh_wire_anchors(graphics, pin_inner_ends(symbol))
-        rows = copy_rows(rows)
+        rows = copy_rows(_without_graphics(rows))
+        # One list shared by every row, as `_with_graphics` (review 2026-10-29, C1).
+        shared = copy_rows(graphics)
         for row, placed in zip(rows, symbol.pins):
             row['symbol_position'] = [placed.x, placed.y]
             row['symbol_angle'] = placed.angle
             row['symbol_body'] = [symbol.width, symbol.height]
-            row['symbol_graphics'] = copy_rows(graphics)
+            row['symbol_graphics'] = shared
         return rows
 
     def place_pin(self, number, x, y):
@@ -4601,10 +4755,11 @@ class SymbolTab(QWidget):
 
         @param number Pin number; when it belongs to a multi-pin selection the whole group turns.
         @param degrees Rotation in degrees (multiples of 90), added modulo 360.
-        @return True when the draft was updated; False when there is no symbol, a
-            gesture is in progress, the pin is unknown, or the geometry was rejected.
+        @return True when the draft was updated; False when there is no symbol,
+            the pin is unknown, or the geometry was rejected.
+        @note A drag in progress is cancelled first (`_end_drag_for_command`).
         """
-        if self._symbol is None or self._gesture_before is not None:
+        if self._symbol is None or number is None or not self._end_drag_for_command():
             return False
         if number in self._selection_ids() and len(self._selection_ids()) > 1:
             return self._transform_selected('rotate', (degrees,))
@@ -4616,7 +4771,7 @@ class SymbolTab(QWidget):
         return self._accept_geometry(rows)
 
     def _nudge_selected(self, dx, dy):
-        if self._symbol is None or self._gesture_before is not None:
+        if self._symbol is None or self._selected_pin is None or not self._end_drag_for_command():
             return
         pin = next((p for p in self._symbol.pins if p.pin.number == self._selected_pin), None)
         if pin is not None and len(self._selection_ids()) > 1:
@@ -4903,6 +5058,7 @@ class SymbolTab(QWidget):
                 dx, dy = sx - rx, sy - ry
                 pin_delta = tuple(round(round(v / GRID_MM) * GRID_MM, 4) for v in (dx, dy))
                 shape_delta = tuple(round(round(v / step) * step, 4) for v in (dx, dy))
+            unmoved = True
             for index, (ox, oy) in origins.items():
                 if not 0 <= index < len(graphics):
                     continue
@@ -4916,6 +5072,14 @@ class SymbolTab(QWidget):
                 else:
                     x, y = snap_glyph_origin(record, ox + dx, oy + dy)
                 record['x'], record['y'] = round(x, 4), round(y, 4)
+                unmoved = unmoved and (record['x'], record['y']) == (ox, oy)
+            if unmoved:
+                # Every member lands where it started (a click, or a move
+                # back onto the press node): the drag's initial rows, as for
+                # a pin (review 2026-10-29, C1); nothing is laid out or
+                # redrawn while no step has committed anything.
+                self._restore_gesture_source(self._gesture_before)
+                return
             self._accept_geometry(self._with_graphics(rows, graphics))
             return
         if target[0] == 'vertex':
@@ -4961,25 +5125,62 @@ class SymbolTab(QWidget):
             the drag's initial rows: the drop point is committed here through
             `move_property`, outside the drag, which writes the draft, the
             history entry and the recovery checkpoint once, as a single step
-            to that point would have. A cancelled drag redraws the initial
-            rows, which puts the items back.
+            to that point would have. A cancelled drag restores the initial
+            rows through `_restore_gesture_source` (one redraw, no pin table
+            rebuild, review 2026-10-29 C5), which puts the items back.
+        @note A drag that committed nothing (a click, a move that never left
+            the press node) ends without `_changed`: no layout, no redraw,
+            no history entry, no recovery write (review 2026-10-29, C1).
         """
         before = self._gesture_before
         origin = getattr(self, '_gesture_property_origin', None)
+        committed = self._gesture_committed()
         self._gesture_before = None
         self._gesture_target = None
         self._gesture_owner = None
+        self._gesture_press_draft = None
         if before is None:
             return
-        if not commit:
-            self._populate(before)
-        elif target is not None and target[0] == 'property' and last is not None and origin is not None:
+        live = target is not None and target[0] == 'property'
+        # A live drag whose pointer came back exactly to the press moved nothing.
+        moved = last is not None and last != self._gesture_start
+        if commit and live and moved and origin is not None:
             delta = last - self._gesture_start
             if not self.move_property(target[1], origin[0] + delta.x() / SCENE_UNITS_PER_MM,
                                       origin[1] - delta.y() / SCENE_UNITS_PER_MM):
                 self._changed()
+        elif not committed:
+            # Nothing was committed (a click, a drag that never left its
+            # press node, a cancelled property drag): the draft and the
+            # history are what the press found, and the press already drew
+            # the selection (review 2026-10-29, C1 and C5). A live property
+            # drag that moved its text is redrawn once to put the text back;
+            # otherwise only what belongs to the drag is settled.
+            if live and moved:
+                self._draw(self._symbol)
+            else:
+                self._settle_after_gesture()
+        elif not commit:
+            # A cancel restores the drag's initial rows through the geometry
+            # path: no pin table rebuild (the drag never touched the names
+            # and types the table holds), one redraw, and no recovery write
+            # when the restored rows are the ones last written
+            # (review 2026-10-29, C5).
+            self._restore_gesture_source(before)
         else:
             self._changed()
+
+    def _settle_after_gesture(self):
+        """Reset what a drag that changed nothing leaves behind, without a redraw.
+
+        The redraw `_changed` would make is skipped, so the scene rect frozen
+        at the press (`_gesture_scene_rect`) is released and the handles the
+        drag kept revealed follow the pointer rule again, as that redraw would.
+        """
+        if self._symbol is not None:
+            scene = self.view.scene()
+            scene.setSceneRect(scene.itemsBoundingRect().adjusted(-35, -35, 35, 35))
+        self._update_handle_visibility(self._cursor_position)
 
     def _draw_graphics(self, scene, scale, rows=None):
         """Draw every placed glyph (primitives and terminals), tagged for selection and dragging.

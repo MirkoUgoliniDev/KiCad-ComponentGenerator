@@ -2423,8 +2423,8 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
         (`_pdf_without_metadata`).
     @return The content block; an image always upright and without metadata,
         a PDF always without Information dictionary and XMP stream.
-    @throws ExtractionError For an unsupported or too large file, for an
-        image whose metadata cannot be removed or whose rotation tag cannot
+    @throws ExtractionError For an unsupported, unreadable (vanished,
+        locked) or too large file, for an image whose metadata cannot be removed or whose rotation tag cannot
         be applied, and for a PDF the program cannot rebuild without its
         metadata: such a file is refused, never sent raw (fail closed).
     @note The 20 MB cap (MAX_FILE_BYTES) applies to the bytes that leave the
@@ -2436,14 +2436,21 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
                name=path.name,
                join=', '.join(sorted(_SUPPORTED_SUFFIXES)))
         )
-    size = path.stat().st_size
-    if size > MAX_FILE_BYTES:
-        raise ExtractionError(tx("{name} troppo grande ({size:.1f} MB, max {limit} MB)",
-                                 name=path.name, size=size / 1_048_576,
-                                 limit=MAX_FILE_BYTES // 1_048_576))
-
-    media_type = _guess_media_type(path)
-    payload = path.read_bytes()
+    try:
+        size = path.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise ExtractionError(tx("{name} troppo grande ({size:.1f} MB, max {limit} MB)",
+                                     name=path.name, size=size / 1_048_576,
+                                     limit=MAX_FILE_BYTES // 1_048_576))
+        media_type = _guess_media_type(path)
+        payload = path.read_bytes()
+    except OSError as exc:
+        # A document removed, locked or unreadable since it was chosen: an
+        # application error naming the file, not a raw OSError the caller
+        # would report as «Errore API» (review 2026-10-29, E8). The system
+        # reason only, without the absolute path (it names the user).
+        raise ExtractionError(tx("{label}: file non leggibile: {error}", label=path.name,
+                                 error=exc.strerror or type(exc).__name__)) from exc
     if media_type.startswith("image/"):
         try:
             payload = _upright_image_bytes(payload)
@@ -3253,8 +3260,11 @@ def extract_pin_header_params(
         raise ExtractionError(tx("Rilevatore fotografico non supportato."))
     if photo_detector in ("yolo", "yolo_smd"):
         if photo_detector == "yolo_smd" and yolo_model_path is None:
-            from ..app_paths import DEFAULT_YOLO_PT, yolo_model_path as _yolo_path
-            yolo_model_path = _yolo_path(DEFAULT_YOLO_PT)
+            # The shared rule (review 2026-10-29, P3): the checkpoint when it
+            # is there, else its ONNX export -- the installed program has
+            # only the export, and forcing the checkpoint refused the run.
+            from ..app_paths import default_yolo_smd_model
+            yolo_model_path = default_yolo_smd_model()
         from .photo_yolo import operating_confidence, validate_yolo_setup
         from .photo_yolo import yolo_settings as check_yolo_settings
         try:

@@ -26,6 +26,14 @@ Test: `tests/test_canvas_clicktools.py::test_a_drag_release_snapping_onto_the_la
 | Escape with nothing else to cancel (no tool, pan, band, drag, placement) | clears the selection (NEW in the symbol too) |
 | background drag | pans, as today |
 
+The background is every point with no item carrying a drag target
+(`data(0)`): in the symbol the inside of the body outline counts, so a
+click there clears and a drag from there pans (review 2026-10-29, C6; it
+used to clear on a click but not pan on a drag). A left or right press
+while a pan runs is swallowed in both tabs: no drag, band, toggle or menu
+starts under a moving camera (C2/C9). `cancel_interaction` drops the band,
+the pan and a pending background click in both tabs (C7).
+
 Commands on the selection (one undo step for the whole selection): Copia,
 Duplica, Canc, Ruota ±90°, Specchia; the right-click menu on a member shows
 «{count} elementi selezionati» (symbol C-M5 rule); the pasted elements become

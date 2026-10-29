@@ -20,7 +20,7 @@ are reduced to the fixed categories of `openrouter._safe_error_text`.
 from __future__ import annotations
 
 import json
-from http.client import IncompleteRead
+from http.client import HTTPException
 import math
 import os
 import urllib.error
@@ -30,8 +30,10 @@ from typing import Any, Optional
 
 from ..app_paths import env_files
 from .messages import tx
-from .openrouter import (TRANSIENT_HTTP_STATUSES, OpenRouterError, _diagnostic_context,
-                         _json_from_response, _retry_after, _safe_error_text)
+from .openrouter import (TRANSIENT_HTTP_STATUSES, OpenRouterError, _ClosableRequest,
+                         _cancelled_error, _closable_context, _diagnostic_context,
+                         _json_from_response, _refuse_unsendable_headers, _retry_after,
+                         _safe_error_text)
 
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_DEEPSEEK = "deepseek"
@@ -137,9 +139,15 @@ def deepseek_api_key() -> str:
     @return The key, stripped.
     @throws ProviderKeyMissing When no source sets it. The message names the
         variable and the «Account AI» window, never a value.
+    @throws ProviderKeyInvalid When the key found cannot be a key (line
+        break, blank, non-ASCII character): the user pastes it again.
     """
-    key, _source = _resolve_deepseek_key()
+    key, source = _resolve_deepseek_key()
     if key:
+        # A key that cannot be a header is refused where it is resolved,
+        # before any request exists (review 2026-10-29, E1).
+        from .openrouter import _refuse_unusable_key
+        _refuse_unusable_key(key, "DeepSeek", source.location, ProviderKeyInvalid)
         return key
     raise ProviderKeyMissing(tx("Chiave DeepSeek non configurata: inseriscila da "
                                 "Configurazione → «Account AI...», oppure imposta {name} nel "
@@ -156,6 +164,15 @@ class ProviderError(OpenRouterError):
 
 class ProviderKeyMissing(ProviderError):
     """@brief The provider's key is not configured."""
+
+
+class ProviderKeyInvalid(ProviderKeyMissing):
+    """@brief The configured key cannot be a key (line break, blank, non-ASCII character).
+
+    @note A ProviderKeyMissing subclass: the remedy is the same, paste the
+        key again in «Account AI...», and the callers that stop a run for a
+        missing key stop it for an unusable one (review 2026-10-29, E1).
+    """
 
 
 def _redact(text: str, key: Optional[str] = None) -> str:
@@ -229,9 +246,21 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         failure is `unreachable` and, as for OpenRouter, not retried; its
         text carries only a fixed category (`_network_reason`). A POST whose
         answer timed out or could not be decoded after it was sent is marked
-        `possibly_billed` (the caller records it as a call without cost).
+        `possibly_billed` (the caller records it as a call without cost):
+        any failure that is not urllib's URLError comes after sending
+        (review 2026-10-29, E5). A POST closed by `openrouter.abort_request`
+        (the user's Cancel) raises openrouter.RequestCancelled instead, never
+        retried. A pasted `key` that cannot be a header is refused before
+        any request exists (E1).
     """
-    key = key if key else deepseek_api_key()
+    if key:
+        # A key pasted in «Account AI» is checked like the configured one
+        # (deepseek_api_key): never sent when it cannot be a header (E1).
+        problem = key_text_problem(key)
+        if problem:
+            raise ProviderError(problem)
+    else:
+        key = deepseek_api_key()
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
     data = None
     if body is not None:
@@ -239,8 +268,41 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=headers,
                                      method="POST" if body is not None else "GET")
+    if body is None:
+        return _send(request, timeout, key, None)
+    # A POST is a paid chat call: its connection is registered so that the
+    # user's Cancel can close it while the answer is awaited (2026-10-29, E6).
+    with _ClosableRequest() as inflight:
+        try:
+            return _send(request, timeout, key, _closable_context())
+        except ProviderError as exc:
+            if inflight.aborted:
+                raise _cancelled_error(exc, "DeepSeek") from None
+            raise
+
+
+def _send(request: urllib.request.Request, timeout: int, key: str, context) -> Any:
+    """Send `request` to DeepSeek and decode its JSON answer; see deepseek_request.
+
+    `context` is the TLS context of a closable paid request, or None for a
+    free GET (urllib's default context). urllib wraps in URLError every
+    failure while SENDING (Python 3.13, `do_open`); any other OSError,
+    HTTPException or ValueError comes after the request left, so a POST is
+    then `possibly_billed` (audit 138 B10; review 2026-10-29, E5). A header
+    http.client would refuse is reported before ``urlopen``: never sent.
+    """
+    sent_body = request.data is not None
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        _refuse_unsendable_headers(request)
+    except OpenRouterError as exc:
+        # Same fixed text, as the provider's own error class.
+        raise ProviderError(str(exc)) from None
+    try:
+        if context is None:
+            opened = urllib.request.urlopen(request, timeout=timeout)
+        else:
+            opened = urllib.request.urlopen(request, timeout=timeout, context=context)
+        with opened as response:
             # Bounded read (review 2026-10-27, E6): a body over the limit is
             # an undecodable answer, handled by the branch below.
             return _json_from_response(response)
@@ -257,11 +319,12 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
                               retry_after=_retry_after(exc) if transient else None)
         error.status = exc.code
         raise error from None
-    except (urllib.error.URLError, OSError, ValueError, IncompleteRead) as exc:
+    except (urllib.error.URLError, OSError, ValueError, HTTPException) as exc:
         # URLError: nothing was sent (urllib wraps every failure while
-        # sending). A bare TimeoutError / OSError while waiting for or reading
-        # the answer, or an undecodable body, come AFTER the request was sent:
-        # a chat request may have been billed (audit 138, B10).
+        # sending). Any other OSError (TimeoutError, RemoteDisconnected,
+        # connection reset while waiting), a malformed status line or an
+        # undecodable body come AFTER the request was sent: a chat request
+        # may have been billed (audit 138, B10; 2026-10-29, E5).
         sent = not isinstance(exc, urllib.error.URLError)
         # `unreachable` means exactly «the request never left»: the URLError
         # case. A read timeout, a closed connection or an over-sized body
@@ -272,8 +335,7 @@ def deepseek_request(url: str, body: Optional[dict] = None, timeout: int = _HTTP
         error = ProviderError(_redact(tx("Connessione a DeepSeek fallita: {reason}",
                                          reason=_network_reason(exc)), key),
                               unreachable=isinstance(exc, urllib.error.URLError))
-        error.possibly_billed = sent and body is not None and (
-            isinstance(exc, (TimeoutError, ValueError, IncompleteRead)))
+        error.possibly_billed = sent and sent_body
         raise error from None
 
 

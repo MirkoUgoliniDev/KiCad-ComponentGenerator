@@ -1602,7 +1602,8 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         detector and the user's review (no paid call on the photograph: the
         kept boxes become the components, see yolo_only_components); vlm lets
         the vision model enumerate the bodies.
-    @param yolo_model_path Optional compatible .onnx or .pt weight file for the local detector.
+    @param yolo_model_path Optional compatible .onnx or .pt weight file for the local detector;
+        None with detector 'yolo_smd' uses app_paths.default_yolo_smd_model().
     @param yolo_confidence Operating confidence threshold of the local
         detector; None keeps its default. See photo_yolo.operating_confidence.
     @param yolo_settings Other local-detector settings (photo_yolo.yolo_settings);
@@ -1655,8 +1656,9 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
     if detector not in PHOTO_DETECTORS:
         raise ValueError(tx("Rilevatore fotografico non supportato."))
     if detector == 'yolo_smd' and yolo_model_path is None:
-        from ..app_paths import DEFAULT_YOLO_PT, yolo_model_path as _yolo_path
-        yolo_model_path = _yolo_path(DEFAULT_YOLO_PT)
+        # One rule for every caller: the checkpoint, else its ONNX export.
+        from ..app_paths import default_yolo_smd_model
+        yolo_model_path = default_yolo_smd_model()
     report = InventoryResult()
     def warn(message):
         report.warnings.append(message)

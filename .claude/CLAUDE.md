@@ -253,8 +253,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 10253 passed,
-14 skipped and 19 subtests (2026-10-28 evening, branch `ADVANCED` merged into `main` as `8cec8ee`:
+is 10639 passed,
+14 skipped and 19 subtests (2026-10-29 evening, branch `ADVANCED`, not yet committed: second full
+adversarial review — 10 read-only agents, 76 findings, 5 high reproduced — and its fixes by fixers on
+disjoint files; release gate message, crashing STEP models remembered, cancellable HTTP and model
+matching, shared YOLO SMD default, symbol click cost 1371 -> 64 ms, see HANDOFF.md 29/10; before
+that, 10253 passed, 2026-10-28 evening, branch `ADVANCED` merged into `main` as `8cec8ee`:
 model licenses reviewed, weights published as assets of the GitHub release «models», YOLO26
 end-to-end and SMD network exported to ONNX and read by the program, setup shipping every
 models/*/*.onnx fetched with SHA-256 verification; release v1.0.2 published by the workflow

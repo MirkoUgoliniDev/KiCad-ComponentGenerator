@@ -20,11 +20,14 @@ adding an external dependency for two calls would not be justified.
 from __future__ import annotations
 
 import json
+import http.client
 from http.client import IncompleteRead
 import math
 import numbers
 import os
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -35,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 from . import credentials
+from .ai_diagnostics import CallCancelled
 from .messages import tx
 from ..app_paths import env_files, is_frozen, user_data_dir
 from ..core.validation import finite_number
@@ -166,6 +170,31 @@ class MissingApiKeyError(OpenRouterError):
 
     @note A subclass, so every caller that catches OpenRouterError keeps
         working; the GUI can tell this case apart and offer «Account AI...».
+    """
+
+
+class InvalidApiKeyError(MissingApiKeyError):
+    """@brief The configured key cannot be a key (blank inside, line break, non-ASCII).
+
+    @note Raised before any request is built: sent as a header, such a key
+        makes http.client fail before the socket opens, which used to be
+        read as an undecodable, possibly billed answer (review 2026-10-29,
+        E1). A MissingApiKeyError subclass because the remedy is the same,
+        paste the key again in «Account AI...», and every caller that offers
+        that window for a missing key offers it for an unusable one too.
+    """
+
+
+class RequestCancelled(OpenRouterError, CallCancelled):
+    """@brief The in-flight request was closed because the user cancelled the run.
+
+    @note Raised when `abort_request` closed the connection of a request
+        while it was being sent or while its answer was awaited. It is never
+        retried (`retryable` stays False) and, when the request had already
+        been sent, it is `possibly_billed` and recorded as a call without
+        cost, like a lost answer (review 2026-10-29, E6). It is also a
+        CallCancelled, so the pipeline treats it as the user's decision,
+        never as a failure of the step.
     """
 
 
@@ -398,7 +427,63 @@ def api_key() -> str:
             message += " " + tx("Gestore credenziali di Windows non leggibile: {error}",
                                 error=source.credential_error)
         raise MissingApiKeyError(message)
+    _refuse_unusable_key(key, "OpenRouter", source.location)
     return key
+
+
+def _key_problem(key: str) -> Optional[str]:
+    """Why `key` cannot be sent as a key (see `providers.key_text_problem`), or None."""
+    from .providers import key_text_problem
+    return key_text_problem(key)
+
+
+def _refuse_unusable_key(key: str, provider: str, location: str,
+                         error_class: type = None) -> None:
+    """Raise `error_class` (default InvalidApiKeyError) when a configured key cannot be a key.
+
+    The check runs where the key is resolved, before any request exists: a
+    key with a line break or a non-Latin-1 character makes http.client fail
+    while it builds the headers, before the socket opens (review 2026-10-29,
+    E1). The message names the provider and the source (variable, credential
+    target or `.env` path), never the key, and tells the user to paste it
+    again.
+    """
+    problem = _key_problem(key)
+    if problem:
+        raise (error_class or InvalidApiKeyError)(tx(
+            "Chiave {provider} letta da {location} non utilizzabile: {problem} Inseriscila di "
+            "nuovo da Configurazione → «Account AI...».",
+            provider=provider, location=location, problem=problem))
+
+
+#: Same test http.client applies to a header value (`_is_illegal_header_value`):
+#: a line break not followed by a blank would split the header.
+_ILLEGAL_HEADER_VALUE = re.compile(r"\n(?![ \t])|\r(?![ \t\n])")
+
+
+def _refuse_unsendable_headers(request: urllib.request.Request) -> None:
+    """Raise OpenRouterError when http.client would refuse a header of `request`.
+
+    http.client encodes every header value in Latin-1 and rejects a bare
+    line break; both failures happen inside ``urlopen`` before anything is
+    sent, as a ValueError that the answer-decoding branch would read as a
+    possibly billed answer. Checked before ``urlopen``, such a request is
+    reported as never sent and never billed (review 2026-10-29, E1). The
+    keys are already validated where they are resolved: this is the last
+    guard for any other header. The message never carries a header value.
+    """
+    for _name, value in request.header_items():
+        text = str(value)
+        try:
+            text.encode("latin-1")
+        except UnicodeEncodeError:
+            bad = True
+        else:
+            bad = bool(_ILLEGAL_HEADER_VALUE.search(text))
+        if bad:
+            raise OpenRouterError(tx(
+                "Richiesta non inviata: un'intestazione HTTP contiene caratteri non ammessi. "
+                "Inserisci di nuovo la chiave da Configurazione → «Account AI...»."))
 
 
 def _key_for_redaction() -> str:
@@ -651,6 +736,164 @@ def _end_request() -> None:
     _request_context.model = ""
 
 
+class _InflightRequest:
+    """Connection of the paid request a thread has in flight, closable from another thread.
+
+    `sock` is the socket currently carrying the request (None before the
+    connection exists); `aborted` tells that `abort_request` closed it.
+    Both are read and written only under `_inflight_lock`.
+    """
+
+    __slots__ = ("sock", "aborted")
+
+    def __init__(self):
+        """@brief A record with no connection yet and not aborted."""
+        self.sock = None
+        self.aborted = False
+
+
+#: Paid requests in flight, by thread identifier (review 2026-10-29, E6).
+_inflight: dict = {}
+_inflight_lock = threading.Lock()
+_closable_context_cache: Optional[ssl.SSLContext] = None
+
+
+def _shutdown_socket(sock) -> None:
+    """Wake every thread blocked on `sock`: shut both directions down, then close the handle.
+
+    Shutdown alone wakes a blocked receive on POSIX but NOT on Windows
+    (checked on Windows 11 / Python 3.13: a recv blocked on a shut-down
+    socket stays blocked until its timeout); closing the handle wakes it on
+    Windows. Both are done, each at the level of the C socket object:
+
+    * the plain `socket.socket.shutdown`, because `ssl.SSLSocket.shutdown`
+      also drops the TLS object the reading thread is still using;
+    * the C-level close (`_socket.socket.close`), because the Python-level
+      close does nothing while http.client holds a file made with
+      ``makefile`` (io refs), and the TLS override would drop the TLS object.
+      The C close sets the descriptor to -1 BEFORE releasing the handle, so
+      a later close by http.client never closes a handle reused by another
+      connection.
+
+    A socket already closed raises OSError, ignored: nothing is left to wake.
+    """
+    try:
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except (OSError, ValueError):
+        pass
+    try:
+        socket._socket.socket.close(sock)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _track_socket(sock) -> None:
+    """Remember `sock` as the connection of this thread's in-flight request, if any.
+
+    Called by the TLS context of `_closable_context` with the raw socket
+    before the handshake and with the TLS socket after it. A request already
+    aborted gets its new socket shut down at once, so a cancellation that
+    arrived while connecting is not lost.
+    """
+    with _inflight_lock:
+        record = _inflight.get(threading.get_ident())
+        if record is None:
+            return
+        record.sock = sock
+        aborted = record.aborted
+    if aborted:
+        _shutdown_socket(sock)
+
+
+class _ClosableContext(ssl.SSLContext):
+    """TLS context that hands every connection it wraps to `_track_socket`."""
+
+    def wrap_socket(self, sock, *args, **kwargs):
+        """@brief Wrap `sock` as ssl.SSLContext does, registering it with the in-flight request.
+
+        @param sock Connected TCP socket.
+        @param args Positional arguments of ssl.SSLContext.wrap_socket.
+        @param kwargs Keyword arguments of ssl.SSLContext.wrap_socket.
+        @return The TLS socket.
+        """
+        # The handshake is run here, AFTER the TLS socket is tracked: done
+        # inside wrap_socket it would run on a socket nobody can close (the
+        # raw one is already detached), and a Cancel during a slow handshake
+        # would wait for the connection timeout.
+        handshake = kwargs.pop("do_handshake_on_connect", True)
+        _track_socket(sock)
+        wrapped = super().wrap_socket(sock, *args, do_handshake_on_connect=False, **kwargs)
+        _track_socket(wrapped)
+        if handshake:
+            wrapped.do_handshake()
+        return wrapped
+
+
+def _closable_context() -> ssl.SSLContext:
+    """The TLS context of the paid requests: http.client's default, plus socket tracking.
+
+    Built once from the context http.client itself would create for an
+    HTTP/1.1 connection (same certificates, verification flags and ALPN);
+    only its class changes, to `_ClosableContext`, so the configuration
+    cannot drift from the library's default.
+    """
+    global _closable_context_cache
+    with _inflight_lock:
+        if _closable_context_cache is None:
+            factory = getattr(http.client, "_create_https_context", None)
+            context = factory(11) if factory is not None else ssl.create_default_context()
+            context.__class__ = _ClosableContext
+            _closable_context_cache = context
+        return _closable_context_cache
+
+
+class _ClosableRequest:
+    """Context manager registering this thread's paid request in `_inflight`."""
+
+    def __enter__(self) -> _InflightRequest:
+        self.record = _InflightRequest()
+        with _inflight_lock:
+            _inflight[threading.get_ident()] = self.record
+        return self.record
+
+    def __exit__(self, *exc_info) -> bool:
+        with _inflight_lock:
+            if _inflight.get(threading.get_ident()) is self.record:
+                del _inflight[threading.get_ident()]
+            self.record.sock = None
+        return False
+
+
+def abort_request(thread_id: int) -> bool:
+    """@brief Close the connection of the paid request that thread `thread_id` has in flight.
+
+    @param thread_id `threading.get_ident()` of the thread running the request.
+    @return True when that thread had a request in flight (it is now
+        aborted), False when it had none.
+    @note Thread-safe; meant for the cancel path (`ai_diagnostics`), which
+        runs in another thread while the request blocks in ``urlopen``. The
+        blocked call then fails and raises RequestCancelled: never retried,
+        possibly billed when the request had been sent (review 2026-10-29, E6).
+    """
+    with _inflight_lock:
+        record = _inflight.get(thread_id)
+        if record is None:
+            return False
+        record.aborted = True
+        sock = record.sock
+    if sock is not None:
+        _shutdown_socket(sock)
+    return True
+
+
+def _cancelled_error(exc: OpenRouterError, provider: str) -> RequestCancelled:
+    """The RequestCancelled raised in place of `exc` for a request closed by `abort_request`."""
+    error = RequestCancelled(tx("Richiesta a {provider} interrotta dall'utente.",
+                                provider=provider))
+    error.possibly_billed = bool(getattr(exc, "possibly_billed", False))
+    return error
+
+
 def _record_usage(payload: Any, *, sent_at: Optional[datetime] = None,
                   model: str = "") -> None:
     """Add the usage declared by an API response to the run totals.
@@ -727,11 +970,18 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
     arrived (`http_status`) or whether OpenRouter was not reached
     (`unreachable`).
     """
+    if key is not None:
+        # A pasted key is checked here, as the configured one is in
+        # api_key: never sent when it cannot be a header (2026-10-29, E1).
+        problem = _key_problem(key)
+        if problem:
+            raise OpenRouterError(problem)
     request = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {key if key is not None else api_key()}",
                  **_APP_HEADERS},
     )
+    _refuse_unsendable_headers(request)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             # Bounded read (review 2026-10-27, E6): an over-sized body is a
@@ -744,11 +994,12 @@ def _get_json(url: str, timeout: int, key: Optional[str] = None) -> dict:
         raise OpenRouterError(tx("connessione fallita: {safe_error_text}",
                                  safe_error_text=_safe_error_text(exc.reason))
                               + _diagnostic_context(), unreachable=True) from None
-    except (ValueError, OSError) as exc:
-        # An OSError that is not a ValueError is a transport failure
-        # (read timeout, connection closed): the answer did not arrive.
+    except (ValueError, OSError, http.client.HTTPException) as exc:
+        # An OSError is a transport failure (read timeout, connection
+        # closed): the answer did not arrive. A ValueError or a malformed
+        # status line (HTTPException) is an answer that arrived broken.
         raise OpenRouterError(tx("risposta non decodificabile") + _diagnostic_context(),
-                              unreachable=not isinstance(exc, ValueError)) from None
+                              unreachable=isinstance(exc, OSError)) from None
     return payload if isinstance(payload, dict) else {}
 
 
@@ -865,6 +1116,11 @@ def verify_api_key(key: str) -> "CreditStatus":
     key = (key or "").strip()
     if not key:
         raise OpenRouterError(tx("La chiave è vuota."))
+    # A key that cannot be a header is refused here, never sent: http.client
+    # would fail before the socket opens (review 2026-10-29, E1).
+    problem = _key_problem(key)
+    if problem:
+        raise OpenRouterError(problem)
     limits = _key_limits(key)
     account_error = ""
     account = (None, None, None)
@@ -1212,6 +1468,71 @@ def _retry_after(exc: urllib.error.HTTPError) -> Optional[float]:
     return max(0.0, seconds) if math.isfinite(seconds) else None
 
 
+def _post_chat(request: urllib.request.Request, content_blocks: Sequence[dict]) -> Any:
+    """Send one chat request to OpenRouter and decode its JSON answer.
+
+    The request goes through `_closable_context`, so `abort_request` can
+    close it from the cancel path. Every failure becomes an OpenRouterError:
+
+    * HTTPError -> the provider's refusal, retryable for a transient status;
+    * URLError -> nothing was sent: urllib wraps every failure while SENDING
+      the request in URLError (checked on Python 3.13, `do_open`);
+    * any other OSError (read timeout, RemoteDisconnected, connection reset
+      while waiting) and any HTTPException or ValueError (malformed status
+      line, truncated or undecodable body) come AFTER the request was sent:
+      the provider may have billed it, so the call is recorded as a call
+      without cost and marked `possibly_billed` (audit 138 B10; review
+      2026-10-29, E5).
+    """
+    try:
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_CHAT_S,
+                                    context=_closable_context()) as response:
+            # Bounded read (review 2026-10-27, E6): an over-sized answer is a
+            # ValueError, hence a possibly billed undecodable answer below.
+            return _json_from_response(response)
+    except urllib.error.HTTPError as exc:
+        status = exc.code if type(exc.code) is int else 0
+        image_sizes = [len(block.get("image_url", {}).get("url", ""))
+                       for block in content_blocks if block.get("type") == "image_url"]
+        error_message = _error_message(exc)
+        raise OpenRouterError(
+            tx("OpenRouter ha risposto con un errore: {error_message} "
+               "[request_bytes={n_data}; images={n_image_sizes}; "
+               "largest_image_encoded_bytes={max}]",
+               error_message=error_message,
+               n_data=len(request.data),
+               n_image_sizes=len(image_sizes),
+               max=max(image_sizes, default=0)),
+            retryable=status in TRANSIENT_HTTP_STATUSES,
+            retry_after=_retry_after(exc) if status in TRANSIENT_HTTP_STATUSES else None,
+            # Only a 400 whose safe category names the tool_choice parameter is
+            # attributable to the request form that the compatibility retry
+            # changes; any other 400 would be refused again, and paid again.
+            compatibility=status == 400 and "tool_choice" in error_message,
+        ) from None
+    except urllib.error.URLError as exc:
+        raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
+                                 reason=_safe_error_text(exc.reason))
+                              + _diagnostic_context()) from None
+    except OSError as exc:
+        # Sent, then the connection failed while waiting for or reading the
+        # answer: possibly billed, never silently free (B10, E5).
+        _record_usage(None)
+        error = OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
+                                   reason=_safe_error_text(str(exc)))
+                                + _diagnostic_context())
+        error.possibly_billed = True
+        raise error from None
+    except (ValueError, http.client.HTTPException):
+        # The answer arrived but is incomplete or cannot be decoded: a
+        # potentially paid call without cost, never a silently free one.
+        _record_usage(None)
+        error = OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
+                                + _diagnostic_context())
+        error.possibly_billed = True
+        raise error from None
+
+
 def call_tool(*args, **kwargs) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
@@ -1296,7 +1617,7 @@ def _call_tool(
         sent_at = _begin_request(model)
         try:
             payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
-        except ProviderError as exc:
+        except (ProviderError, RequestCancelled) as exc:
             if exc.possibly_billed:
                 # Sent, answer lost: maybe billed, never silently free (B10).
                 _record_usage(None)
@@ -1331,56 +1652,19 @@ def _call_tool(
         },
         method="POST",
     )
+    # Outside the try: a header http.client would refuse is a request never
+    # sent, never billed, not an undecodable answer (review 2026-10-29, E1).
+    _refuse_unsendable_headers(request)
     _begin_request(model)
-    try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_CHAT_S) as response:
-            # Bounded read (review 2026-10-27, E6): an over-sized answer is a
-            # ValueError, hence a possibly billed undecodable answer below.
-            payload = _json_from_response(response)
-    except urllib.error.HTTPError as exc:
-        status = exc.code if type(exc.code) is int else 0
-        image_sizes = [len(block.get("image_url", {}).get("url", ""))
-                       for block in content_blocks if block.get("type") == "image_url"]
-        error_message = _error_message(exc)
-        raise OpenRouterError(
-            tx("OpenRouter ha risposto con un errore: {error_message} "
-               "[request_bytes={n_data}; images={n_image_sizes}; "
-               "largest_image_encoded_bytes={max}]",
-               error_message=error_message,
-               n_data=len(request.data),
-               n_image_sizes=len(image_sizes),
-               max=max(image_sizes, default=0)),
-            retryable=status in TRANSIENT_HTTP_STATUSES,
-            retry_after=_retry_after(exc) if status in TRANSIENT_HTTP_STATUSES else None,
-            # Only a 400 whose safe category names the tool_choice parameter is
-            # attributable to the request form that the compatibility retry
-            # changes; any other 400 would be refused again, and paid again.
-            compatibility=status == 400 and "tool_choice" in error_message,
-        ) from None
-    except urllib.error.URLError as exc:
-        raise OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
-                                 reason=_safe_error_text(exc.reason))
-                              + _diagnostic_context()) from None
-    except (ValueError, IncompleteRead):
-        # The answer arrived but is incomplete or cannot be decoded: a
-        # potentially paid call without cost, never a silently free one.
-        _record_usage(None)
-        error = OpenRouterError(tx("Risposta non decodificabile da OpenRouter.")
-                                + _diagnostic_context())
-        error.possibly_billed = True
-        raise error from None
-    except OSError as exc:
-        # urllib wraps every failure while SENDING in URLError (caught above);
-        # a bare TimeoutError comes from waiting for, or reading, the answer
-        # of a request already sent, which the provider may bill (B10).
-        billed = isinstance(exc, TimeoutError)
-        if billed:
-            _record_usage(None)
-        error = OpenRouterError(tx("Connessione a OpenRouter fallita: {reason}",
-                                   reason=_safe_error_text(str(exc) if billed else None))
-                                + _diagnostic_context())
-        error.possibly_billed = billed
-        raise error from None
+    with _ClosableRequest() as inflight:
+        try:
+            payload = _post_chat(request, content_blocks)
+        except OpenRouterError as exc:
+            if inflight.aborted:
+                # Closed by the user's Cancel (E6): its usage, when it had
+                # been sent, is already recorded by _post_chat.
+                raise _cancelled_error(exc, "OpenRouter") from None
+            raise
 
     # Before tool_arguments, which may raise: the call was paid anyway, and
     # a cost tally that ignores the failed attempts is false.

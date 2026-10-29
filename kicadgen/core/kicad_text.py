@@ -168,40 +168,90 @@ def kicad_unescape(text: str) -> str:
         numbers are NOT (a pin named «N{slash}A» shows the braces). The
         caller decides; `kicad_text_layout` and the width functions take
         the shown text.
+    @note Iterative, with an explicit stack of brace levels: the former
+        recursion per nested brace raised RecursionError at a few thousand
+        nested «{» (review 2026-10-29, G6). Each level is the substring
+        between a «{» and its closing brace (or the end of the enclosing
+        level when unterminated), processed exactly as the recursive call
+        on that substring was, so the output is unchanged; the closing
+        braces are paired once for the whole text instead of rescanned at
+        every level.
     """
     if len(text) <= 2:
         return text
-    out = []
-    previous = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char != "{":
-            out.append(char)
-            previous = char
-            index += 1
-            continue
-        depth, end = 1, index + 1
-        while end < len(text):
-            if text[end] == "{":
-                depth += 1
-            elif text[end] == "}":
-                depth -= 1
-                if depth == 0:
+    closing = _matching_braces(text)
+    # A frame is one level: [index, stop, previous, out, suffix, unterminated]
+    # where `suffix` is appended to the parent after this level's output
+    # ("}" for a closed token, "" for an unterminated one, which also ends
+    # the parent's scan).
+    root: list = []
+    stack = [[0, len(text), "", root, "", False]]
+    while stack:
+        frame = stack[-1]
+        index, stop, previous, out = frame[0], frame[1], frame[2], frame[3]
+        while index < stop:
+            char = text[index]
+            if char != "{":
+                out.append(char)
+                previous = char
+                index += 1
+                continue
+            match = closing.get(index)
+            unterminated = match is None or match >= stop
+            end = stop if unterminated else match
+            token_start = index + 1
+            if not unterminated and previous not in ("$", "~", "^", "_") \
+                    and text[token_start:end] in KICAD_ESCAPES:
+                out.append(KICAD_ESCAPES[text[token_start:end]])
+                # KiCad's `prev` is the last INPUT character: the closing brace.
+                previous = "}"
+                index = end + 1
+                continue
+            out.append("{")
+            if end - token_start <= 2:
+                # The early return of a short level: the token as written.
+                out.append(text[token_start:end])
+                if unterminated:
+                    index = stop
                     break
-            end += 1
-        token = text[index + 1:end]
-        if end >= len(text):
-            out.append("{" + kicad_unescape(token))
+                out.append("}")
+                previous = "}"
+                index = end + 1
+                continue
+            # Descend into the token; this level resumes after it.
+            frame[0], frame[2] = (stop if unterminated else end + 1), "}"
+            stack.append([token_start, end, "", [], "" if unterminated else "}", unterminated])
             break
-        if previous in ("$", "~", "^", "_") or token not in KICAD_ESCAPES:
-            out.append("{" + kicad_unescape(token) + "}")
         else:
-            out.append(KICAD_ESCAPES[token])
-        # KiCad's `prev` is the last INPUT character: the closing brace.
-        previous = "}"
-        index = end + 1
-    return "".join(out)
+            # Level finished: hand its text to the parent.
+            stack.pop()
+            if stack:
+                stack[-1][3].append("".join(out) + frame[4])
+            continue
+        if stack[-1] is frame:
+            # The scan stopped on an unterminated short token: level finished.
+            stack.pop()
+            if stack:
+                stack[-1][3].append("".join(out) + frame[4])
+    return "".join(root)
+
+
+def _matching_braces(text: str) -> dict:
+    """{index of a «{»: index of its closing «}»} for every brace closed in `text`.
+
+    A «{» is closed by the first «}» after it at which the count of braces
+    opened and closed since it returns to zero, the scan `kicad_unescape`
+    performs; that position does not depend on the text before the «{», so
+    one pass with a stack gives it for every level at once.
+    """
+    result = {}
+    opened = []
+    for index, char in enumerate(text):
+        if char == "{":
+            opened.append(index)
+        elif char == "}" and opened:
+            result[opened.pop()] = index
+    return result
 
 
 def _is_identifier_start(char: str) -> bool:
@@ -235,31 +285,52 @@ def _url_end(text: str, index: int) -> int:
     return -1
 
 
+def _opens_markup(text: str, index: int) -> bool:
+    """True when a «~{», «^{» or «_{» starts at `index`."""
+    return text[index:index + 1] in ("~", "^", "_") and text[index + 1:index + 2] == "{"
+
+
 def _parse_markup(text: str, index: int, memo: dict):
     """(node, end) of the markup starting at `index`, or None: KiCad's `braces<ControlChar>` rule.
 
     A node is (kind, children) with kind «~», «^» or «_»; a child is a
     literal string or a nested node. Memoised per start index, since a
     failed markup is retried at every enclosing level.
+
+    Iterative, with an explicit stack of open markups: the former recursion
+    per nested markup raised RecursionError at a few thousand nested «~{»
+    (review 2026-10-29, G6). A frame is [start, position, children,
+    literal]. When a nested markup fails (it reaches the end of the text
+    without its «}»), every enclosing one fails too and is memoised as
+    such: the enclosing level would rescan the same characters, from the
+    one after «~{», with the same steps and the same memo, and reach the
+    end without a «}» as well (its own «~» and «{» are not one). The
+    recursive version reached the same None after rescanning, so the
+    result is unchanged and a deep failure costs one pass.
     """
     if index in memo:
         return memo[index]
-    result = None
-    if text[index:index + 1] in ("~", "^", "_") and text[index + 1:index + 2] == "{":
-        children = []
-        literal = []
-        position = index + 2
+    if not _opens_markup(text, index):
+        memo[index] = None
+        return None
+    stack = [[index, index + 2, [], []]]
+    while stack:
+        frame = stack[-1]
+        start, position, children, literal = frame
         while position < len(text):
             if text[position] == "}":
-                if literal:
-                    children.append("".join(literal))
-                result = ((text[index], tuple(children)), position + 1)
                 break
-            nested = _parse_markup(text, position, memo)
+            if position in memo:
+                nested = memo[position]
+            elif _opens_markup(text, position):
+                break
+            else:
+                nested = memo[position] = None
             if nested is not None:
                 if literal:
                     children.append("".join(literal))
                     literal = []
+                    frame[3] = literal
                 children.append(nested[0])
                 position = nested[1]
                 continue
@@ -270,8 +341,21 @@ def _parse_markup(text: str, index: int, memo: dict):
                 continue
             literal.append(text[position])
             position += 1
-    memo[index] = result
-    return result
+        frame[1] = position
+        if position >= len(text):
+            # Unclosed: this markup and every enclosing one fail (see above).
+            for open_frame in stack:
+                memo[open_frame[0]] = None
+            return None
+        if text[position] == "}":
+            if literal:
+                children.append("".join(literal))
+            memo[start] = ((text[start], tuple(children)), position + 1)
+            stack.pop()
+            continue
+        # A nested markup opens at `position`: descend, resume here after it.
+        stack.append([position, position + 2, [], []])
+    return memo[index]
 
 
 def parse_kicad_markup(text: str) -> tuple:
@@ -393,6 +477,10 @@ def kicad_text_layout(text: str) -> KicadTextLayout:
     @note Walks `parse_kicad_markup` as KiCad's drawMarkup does: the cursor
         advances by each character's table advance (x 0.8 in a script);
         overbars span the cursor positions of their content.
+    @note The walk is iterative (an explicit stack of open markups, each
+        overbar appended when its markup closes, as the former recursive
+        walk did): a deeply nested markup no longer raises RecursionError
+        (review 2026-10-29, G6).
     """
     runs: list = []
     bars: list = []
@@ -402,38 +490,42 @@ def kicad_text_layout(text: str) -> KicadTextLayout:
     def cursor() -> float:
         return plain_units + KICAD_SUPER_SUB_SIZE * script_units if script_units else plain_units
 
-    def walk(children, script):
-        nonlocal plain_units, script_units
-        for child in children:
-            if isinstance(child, str):
-                units = _string_units(child)
-                scale = KICAD_SUPER_SUB_SIZE if script else 1.0
-                rise = {"^": KICAD_SUPERSCRIPT_RISE, "_": KICAD_SUBSCRIPT_RISE}.get(script, 0.0)
-                start = cursor()
-                if script:
-                    script_units += units
-                else:
-                    plain_units += units
-                previous = runs[-1] if runs else None
-                if previous is not None and previous.scale == scale and previous.rise == rise:
-                    runs[-1] = KicadTextRun(previous.text + child, previous.start, cursor() - previous.start,
-                                            scale, rise)
-                else:
-                    runs.append(KicadTextRun(child, start, cursor() - start, scale, rise))
-                continue
-            kind, nested = child
-            if not nested:
-                # KiCad's parse tree discards empty markups.
-                continue
-            # Subscript wins over superscript whatever the nesting order.
-            inner = "_" if "_" in (kind, script) else ("^" if "^" in (kind, script) else None)
-            start = cursor()
-            walk(nested, inner)
-            if kind == "~":
+    # A frame is one open markup: [children, next child, script, kind, cursor at its start].
+    stack = [[parse_kicad_markup(text), 0, None, None, 0.0]]
+    while stack:
+        frame = stack[-1]
+        children, script = frame[0], frame[2]
+        if frame[1] >= len(children):
+            stack.pop()
+            if frame[3] == "~":
                 trim = KICAD_OVERBAR_TRIM * 21
-                bars.append(KicadOverbar(start + trim, cursor() - trim, KICAD_OVERBAR_HEIGHT))
-
-    walk(parse_kicad_markup(text), None)
+                bars.append(KicadOverbar(frame[4] + trim, cursor() - trim, KICAD_OVERBAR_HEIGHT))
+            continue
+        child = children[frame[1]]
+        frame[1] += 1
+        if isinstance(child, str):
+            units = _string_units(child)
+            scale = KICAD_SUPER_SUB_SIZE if script else 1.0
+            rise = {"^": KICAD_SUPERSCRIPT_RISE, "_": KICAD_SUBSCRIPT_RISE}.get(script, 0.0)
+            start = cursor()
+            if script:
+                script_units += units
+            else:
+                plain_units += units
+            previous = runs[-1] if runs else None
+            if previous is not None and previous.scale == scale and previous.rise == rise:
+                runs[-1] = KicadTextRun(previous.text + child, previous.start, cursor() - previous.start,
+                                        scale, rise)
+            else:
+                runs.append(KicadTextRun(child, start, cursor() - start, scale, rise))
+            continue
+        kind, nested = child
+        if not nested:
+            # KiCad's parse tree discards empty markups.
+            continue
+        # Subscript wins over superscript whatever the nesting order.
+        inner = "_" if "_" in (kind, script) else ("^" if "^" in (kind, script) else None)
+        stack.append([nested, 0, inner, kind, cursor()])
     return KicadTextLayout(tuple(runs), tuple(bars), cursor())
 
 

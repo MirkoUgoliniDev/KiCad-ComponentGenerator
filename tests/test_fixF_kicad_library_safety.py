@@ -162,16 +162,35 @@ def test_explicit_replacement_repoints_only_type_and_uri(tmp_path):
 
 
 def test_same_uri_keeps_the_row_verbatim_with_flags(tmp_path):
-    """@brief Unchanged URI: the user's options and disabled flag survive."""
+    """@brief Unchanged URI: the user's options and hidden flag survive.
+
+    @note CONTRACT CHANGED 2026-10-29: this test used a ``(disabled)`` row and
+        asserted it was kept verbatim. KiCad does not load a disabled library,
+        so the install reported success for a footprint nobody could place
+        (review 2026-10-29, L2). A disabled row is now a conflict that needs
+        the explicit confirmation (``library_entry_disabled``): without it
+        nothing is written, which this test still checks; the verbatim rule
+        now applies to ``hidden``, a flag KiCad still loads.
+    """
     table = _table(
         tmp_path / "fp-lib-table",
         f'(lib (name "KiCadGen")(type "KiCad")(uri "{PROJECT_URI}")'
-        '(options "x")(descr "mine")(disabled))',
+        '(options "x")(descr "mine")(hidden))',
     )
     before = table.read_text(encoding="utf-8")
     assert not update_fp_lib_table(table, "KiCadGen", PROJECT_URI)
     assert table.read_text(encoding="utf-8") == before
-    assert find_library_entry(table, "KiCadGen").disabled
+    assert find_library_entry(table, "KiCadGen").hidden
+    disabled = _table(
+        tmp_path / "disabled" / "fp-lib-table",
+        f'(lib (name "KiCadGen")(type "KiCad")(uri "{PROJECT_URI}")'
+        '(options "x")(descr "mine")(disabled))',
+    )
+    disabled_before = disabled.read_text(encoding="utf-8")
+    with pytest.raises(KiCadLibraryError) as caught:
+        update_fp_lib_table(disabled, "KiCadGen", PROJECT_URI)
+    assert caught.value.code == "library_entry_disabled"
+    assert disabled.read_text(encoding="utf-8") == disabled_before
 
 
 def test_same_global_path_with_other_separators_is_not_a_conflict(tmp_path):

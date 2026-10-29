@@ -404,7 +404,10 @@ def primitives_of(unit_form, legacy_text_degrees: bool = False) -> list[Primitiv
         elif kind == "circle":
             centre = _child(item, "center")
             radius = _child(item, "radius")
-            if centre and radius:
+            # A circle of zero or negative radius draws nothing and would be
+            # refused by `validate_instances` once placed: skipped here, so a
+            # catalogue glyph can never yield a record its own project refuses.
+            if centre and radius and len(radius) > 1 and float(radius[1]) > 0:
                 result.append(Primitive("circle", (_xy(centre),), float(radius[1]),
                                         _fill_of(item), _width_of(item), _style_of(item)))
         elif kind == "arc":
@@ -842,13 +845,21 @@ def primitive_from_record(record: dict, points=None) -> Primitive:
 
     @param record Primitive dict of a placed record.
     @param points Points to use instead of the record's (already transformed).
-    @return The Primitive; an unknown style falls back to "default", missing
-        fields to their defaults (no text, TEXT_SIZE_MM, angle 0, centred).
+    @return The Primitive; an unknown style falls back to "default" and an
+        unknown fill to "none", missing fields to their defaults (no text,
+        TEXT_SIZE_MM, angle 0, centred).
+    @note Fill is normalised exactly like the stroke style, and like
+        `_fill_of` does when a KiCad library is read: both are closed KiCad
+        enumerations with a neutral value that leaves the geometry intact, so
+        a hand-edited or legacy value costs only the look of one primitive,
+        while writing it verbatim made KiCad refuse the whole library
+        (review 2026-10-29, G1).
     """
     kind = str(record.get("kind", "polyline"))
     points = tuple(_point_xy(pt) for pt in record.get("points", [])) if points is None else tuple(points)
     style = str(record.get("style", "default"))
-    return Primitive(kind, points, float(record.get("radius", 0.0)), str(record.get("fill", "none")),
+    fill = str(record.get("fill", "none"))
+    return Primitive(kind, points, float(record.get("radius", 0.0)), fill if fill in FILL_MODES else "none",
                      float(record.get("width", 0.0)), style if style in STROKE_STYLES else "default",
                      str(record.get("text", "")), float(record.get("size", TEXT_SIZE_MM)),
                      int(record.get("angle", 0)) % 360, str(record.get("justify", "center")),
@@ -1762,7 +1773,14 @@ def validate_instances(instances) -> list[dict]:
         `id` is not text, a polyline point is neither `[x, y]` nor
         `{"x", "y", "anchor"?}` with finite numbers, or an anchor is not
         `{"kind": "terminal", "element": str, "index": int, "end"?: "outer"|"inner"}` /
-        `{"kind": "pin", "number": str}`.
+        `{"kind": "pin", "number": str}`; when `rotation` is not an int
+        multiple of 90 (bool excluded), a terminal is not an object with
+        finite `x`/`y`, an int `angle` and a finite `length`; when a primitive
+        has an unknown `kind`, the wrong number of points for its kind, a
+        non-finite or negative `width`, a non-finite `radius` or a circle
+        whose radius is not positive.
+    @note An unknown `fill` or `style` is not refused: both are normalised
+        when the primitive is built (`primitive_from_record`).
     """
     if instances is None:
         return []
@@ -1776,16 +1794,25 @@ def validate_instances(instances) -> list[dict]:
             _finite_or_raise(record.get(key, 0.0))
         if "id" in record and not isinstance(record["id"], str):
             raise ValueError(tx("Elementi grafici del simbolo non validi."))
-        if int(record.get("rotation", 0)) % 90 != 0:
+        # The rotation is written by the editor as an int in [0, 360): a null,
+        # a text or a bool used to escape as TypeError from `int(...)` here or
+        # later from `placed_terminals` (review 2026-10-29, G2).
+        rotation = record.get("rotation", 0)
+        if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation % 90 != 0:
             raise ValueError(tx("Elementi grafici del simbolo non validi."))
+        _validate_terminals(record.get("terminals", []))
         primitives = record.get("primitives")
         if not isinstance(primitives, list) or not primitives:
             raise ValueError(tx("Elementi grafici del simbolo non validi."))
         for primitive in primitives:
             if not isinstance(primitive, dict):
                 raise ValueError(tx("Elementi grafici del simbolo non validi."))
-            for point in primitive.get("points", ()):
+            points = primitive.get("points", ())
+            if not isinstance(points, (list, tuple)):
+                raise ValueError(tx("Elementi grafici del simbolo non validi."))
+            for point in points:
                 _validate_point(point)
+            _validate_primitive_shape(primitive, len(points))
             if primitive.get("kind") == "text":
                 if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
                         or len(primitive.get("points", ())) != 1:
@@ -1804,6 +1831,53 @@ def validate_instances(instances) -> list[dict]:
                     raise ValueError(tx("Elementi grafici del simbolo non validi."))
         result.append(record)
     return result
+
+
+#: Number of points each fixed-arity primitive kind carries (`Primitive`);
+#: a polyline has any number of vertices.
+_POINT_COUNTS = {"circle": 1, "arc": 3, "rectangle": 2, "bezier": 4, "text": 1}
+
+#: Every primitive kind a placed record may carry.
+PRIMITIVE_KINDS = ("polyline",) + tuple(_POINT_COUNTS)
+
+
+def _validate_terminals(terminals) -> None:
+    """The `terminals` of a placed record: a list of objects with finite x/y,
+    an int angle and a finite length (angle and length may be absent: they
+    default to 0 and 2.54 mm in `placed_terminals`)."""
+    if not isinstance(terminals, (list, tuple)):
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    for terminal in terminals:
+        if not isinstance(terminal, dict) or "x" not in terminal or "y" not in terminal:
+            raise ValueError(tx("Elementi grafici del simbolo non validi."))
+        _finite_or_raise(terminal["x"])
+        _finite_or_raise(terminal["y"])
+        angle = terminal.get("angle", 0)
+        if isinstance(angle, bool) or not isinstance(angle, int):
+            raise ValueError(tx("Elementi grafici del simbolo non validi."))
+        _finite_or_raise(terminal.get("length", 2.54))
+
+
+def _validate_primitive_shape(primitive: dict, point_count: int) -> None:
+    """Kind, point count, stroke width and radius of one stored primitive.
+
+    A missing kind is a polyline, as `primitive_from_record` reads it. Fill
+    and style are normalised there instead of refused (see its note)."""
+    kind = primitive.get("kind", "polyline")
+    if kind not in PRIMITIVE_KINDS:
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    if kind in _POINT_COUNTS and point_count != _POINT_COUNTS[kind]:
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    width = primitive.get("width", 0.0)
+    _finite_or_raise(width)
+    if width < 0:
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    radius = primitive.get("radius", 0.0)
+    _finite_or_raise(radius)
+    if kind == "circle" and radius <= 0:
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    if "angle" in primitive:
+        _finite_or_raise(primitive["angle"])
 
 
 def _finite_or_raise(value) -> None:
@@ -1867,7 +1941,7 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
     for instance in instances:
         for p in placed_primitives(instance, graphics=instances, pin_ends=pin_ends):
             stroke = f"(stroke (width {_num(p.width)}) (type {p.style if p.style in STROKE_STYLES else 'default'}))"
-            fill = f"(fill (type {p.fill}))"
+            fill = f"(fill (type {p.fill if p.fill in FILL_MODES else 'none'}))"
             if p.kind == "text":
                 (tx_, ty_), = p.points
                 words = [w for w in (p.justify, p.vjustify) if w in TEXT_JUSTIFY + TEXT_VJUSTIFY and w != "center"]

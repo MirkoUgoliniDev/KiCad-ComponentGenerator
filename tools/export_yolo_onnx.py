@@ -36,9 +36,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+#: Rows per view an end-to-end export returns at most (Ultralytics
+#: `max_det`, baked into the graph as the TopK size K of [1, K, 6]). Passed
+#: explicitly so the cap is a declared property of the shipped file, not an
+#: Ultralytics default that could change between versions (review
+#: 2026-10-29, P2). 300 is that default, the value the shipped YOLO26 files
+#: were exported with. The detector reads K back from the graph, records it
+#: as `per_view_row_cap` and warns when a view fills it; the raw grid of a
+#: standard head ignores it.
+EXPORT_MAX_DET = 300
+
 #: Export arguments shared by both heads: the detector's fixed contract.
 _EXPORT_ARGUMENTS = {"format": "onnx", "imgsz": 640, "batch": 1, "dynamic": False,
-                     "simplify": True, "opset": 17, "verbose": False}
+                     "simplify": True, "opset": 17, "verbose": False,
+                     "max_det": EXPORT_MAX_DET}
 
 
 def has_end_to_end_head(head) -> bool:
@@ -57,7 +68,7 @@ def export_arguments(end_to_end: bool) -> dict:
     """@brief Ultralytics `export` keyword arguments for the chosen branch.
 
     @param end_to_end True to export the one-to-one detections [1, K, 6].
-    @return The arguments of `YOLO.export`.
+    @return The arguments of `YOLO.export`, `max_det` (EXPORT_MAX_DET) included.
     @note In Ultralytics 8.4 `nms=False` ENABLES the end-to-end branch
         (`model.end2end = args.nms is False`) and `nms=None` exports the raw
         grid; `nms=True` would bake an NMS operator in, which the detector
@@ -94,8 +105,9 @@ def export_checkpoint(source: Path, target: Path) -> dict:
     @return The detector's `info` of the exported file (photo_yolo._setup),
         with `end_to_end` and `sha256` added.
     @throws ValueError When the exported file does not satisfy the
-        detector's contract, or when the branch read back is not the one
-        exported (the result would not reproduce the checkpoint).
+        detector's contract, when the branch read back is not the one
+        exported (the result would not reproduce the checkpoint), or when an
+        end-to-end file does not return EXPORT_MAX_DET rows per view.
     """
     os.environ.setdefault("YOLO_OFFLINE", "1")
     import onnx
@@ -118,6 +130,12 @@ def export_checkpoint(source: Path, target: Path) -> dict:
     if read_back != end_to_end:
         raise ValueError(f"{target}: exported {'end-to-end' if end_to_end else 'raw'} output "
                          f"but the detector reads it as {info['raw_head']}")
+    cap = info.get("per_view_row_cap")
+    if end_to_end and cap is not None and cap != EXPORT_MAX_DET:
+        # Ultralytics clamps max_det to the anchors available; at 640 px
+        # there are 8400, so a different K means the argument was not used.
+        raise ValueError(f"{target}: end-to-end output returns {cap} rows per view, "
+                         f"expected max_det {EXPORT_MAX_DET}")
     return {**info, "end_to_end": end_to_end,
             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
 
@@ -150,6 +168,8 @@ def main(argv) -> int:
         return 1
     print(f"{target} ({target.stat().st_size / 1_000_000:.1f} MB)")
     print(f"  head: {info['raw_head']}; model output {info['model_output_shape']}")
+    if info.get("per_view_row_cap") is not None:
+        print(f"  rows per view at most: {info['per_view_row_cap']} (max_det)")
     print(f"  classes: {len(info['model_classes'])} ({info['class_order']})")
     print(f"  SHA-256: {info['sha256']}")
     return 0

@@ -308,7 +308,10 @@ def test_m2_a_click_inside_the_body_clears_the_selection(tab):
     pos = _body_point(view)
     tab._select_graphic(0)
     _mouse(view, QEvent.Type.MouseButtonPress, pos)
-    assert not view.camera.pan_active, 'a press on the body does not pan (as before)'
+    # CONTRACT CHANGED 2026-10-29: why — review C6, coordinator decision: the
+    # inside of the body is background, so the press arms a pan (as on the
+    # empty canvas and on a footprint pad); without a move it is still a click.
+    assert view.camera.pan_active, 'a press on the body arms a pan'
     _mouse(view, QEvent.Type.MouseButtonRelease, pos)
     assert tab.selected_graphics() == []
 

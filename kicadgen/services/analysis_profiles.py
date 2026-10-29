@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 
 from .component_types import COMPONENT_TYPES
@@ -43,6 +44,36 @@ _MISSING = object()
 #: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
 #: (model of that reading, blank = photo model, HANDOFF 150).
 SCHEMA_VERSION = 6
+#: Longest time (seconds) a store keeps trusting the last database file
+#: signature it read before reading it again (review 2026-10-29, E2). Every
+#: lookup used to stat, open and read the file header (~0.2 ms on Windows):
+#: a language switch asks ~1100 texts. Writes made in this process, by any
+#: store, are seen at once through `_local_writes`; this bound is only how
+#: late a write by ANOTHER process (or a raw sqlite3 connection) is noticed.
+#: It is a latency/cost trade-off, not a correctness threshold: any value
+#: well below a human reaction time keeps «a change made elsewhere is seen».
+_EXTERNAL_CHANGE_CHECK_S = 0.1
+#: Generation of the writes made in this process, by normalised database
+#: path: bumped after every write of any ProfileStore on that file.
+_local_writes: dict = {}
+_local_writes_lock = threading.Lock()
+
+
+def _path_key(path) -> str:
+    """Normalised absolute form of a database path, the key of `_local_writes`."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _local_write_generation(key: str) -> int:
+    """Generation of the in-process writes to the database `key`."""
+    with _local_writes_lock:
+        return _local_writes.get(key, 0)
+
+
+def _note_local_write(key: str) -> None:
+    """Record that a store of this process wrote the database `key`."""
+    with _local_writes_lock:
+        _local_writes[key] = _local_writes.get(key, 0) + 1
 
 
 def _default_translations():
@@ -187,13 +218,50 @@ class ProfileStore:
         self._cache = {}
         self._cache_signature = None
         self._cache_generation = 0
-        self._initialize(legacy_config,Path(legacy_path) if legacy_path else None)
+        # Last file signature read and when (time.monotonic): reused for
+        # _EXTERNAL_CHANGE_CHECK_S, see _change_signature.
+        self._path_key = _path_key(self.path)
+        self._file_signature = None
+        self._file_signature_at = 0.0
+        try:
+            self._initialize(legacy_config,Path(legacy_path) if legacy_path else None)
+        except sqlite3.DatabaseError as exc:
+            raise ProfileError(self._database_problem(exc)) from exc
+
+    def _database_problem(self, exc):
+        """Translated reason why the database file cannot be used, with its remedy.
+
+        A locked file (another program holds a write transaction) and a
+        damaged or foreign file need different actions; the message names
+        the file in both cases (review 2026-10-29, E4).
+        """
+        code = getattr(exc, 'sqlite_errorcode', None)
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or 'locked' in str(exc).lower():
+            return tx("Database profili {path} bloccato da un altro programma ({error}): chiudi "
+                      "le altre finestre di KiCadGen e riprova.", path=self.path, error=exc)
+        return tx("Database profili {path} non leggibile ({error}): ripristina un backup, "
+                  "oppure rinominalo per ripartire dai profili di fabbrica.",
+                  path=self.path, error=exc)
 
     @contextmanager
     def _connect(self):
-        connection = sqlite3.connect(self.path,timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute('PRAGMA foreign_keys=ON')
+        """A short-lived connection, committed on success.
+
+        Opening failures (file locked, damaged, not a database) become a
+        ProfileError naming the file and the remedy (review 2026-10-29, E4);
+        errors of the queries run inside keep their sqlite3 class, which
+        the callers already handle.
+        """
+        try:
+            connection = sqlite3.connect(self.path,timeout=5)
+        except sqlite3.DatabaseError as exc:
+            raise ProfileError(self._database_problem(exc)) from exc
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute('PRAGMA foreign_keys=ON')
+        except sqlite3.DatabaseError as exc:
+            connection.close()
+            raise ProfileError(self._database_problem(exc)) from exc
         try:
             with connection:
                 yield connection
@@ -210,16 +278,49 @@ class ProfileStore:
             self._invalidate_cache()
 
     def _invalidate_cache(self):
-        """Drop every cached read and fence off the reads already in flight."""
+        """Drop every cached read and fence off the reads already in flight.
+
+        Also tells the other stores of this process on the same file, through
+        `_local_writes`, so that they reload at their next lookup, and forces
+        this store to read the file signature again.
+        """
+        _note_local_write(self._path_key)
         with self._cache_lock:
             self._cache = {}
             self._cache_signature = None
             self._cache_generation += 1
+            self._file_signature = None
+
+    def _change_signature(self):
+        """Tag of the database contents for the read cache; None when the file cannot be read.
+
+        The in-process write generation (exact, a dict lookup) plus the file
+        signature of `_database_signature`, read again only when the last
+        reading is older than _EXTERNAL_CHANGE_CHECK_S or was dropped by a
+        write (review 2026-10-29, E2). Reusing an older file signature is
+        safe: it was taken before any read it now tags, so a change that
+        landed since makes the next fresh signature differ and the cache
+        reload.
+        """
+        generation = _local_write_generation(self._path_key)
+        now = time.monotonic()
+        with self._cache_lock:
+            signature = self._file_signature
+            fresh = (signature is not None
+                     and now - self._file_signature_at < _EXTERNAL_CHANGE_CHECK_S)
+        if not fresh:
+            signature = self._database_signature()
+            with self._cache_lock:
+                self._file_signature = signature
+                self._file_signature_at = now
+        if signature is None:
+            return None
+        return (signature, generation)
 
     def _cached(self, kind, argument, loader):
         """Value of `loader()` for (kind, argument), served from the read cache while the file is unchanged.
 
-        The file signature is taken BEFORE the read: a write landing during
+        The signature (`_change_signature`) is taken BEFORE the read: a write landing during
         the read changes the file, so the next read reloads instead of
         keeping a value older than its tag. A value is stored only if no
         invalidation happened since the read started (generation check), so
@@ -227,7 +328,7 @@ class ProfileStore:
         cached. Exceptions are not cached. The cached object is shared:
         callers that hand it out copy it.
         """
-        signature = self._database_signature()
+        signature = self._change_signature()
         with self._cache_lock:
             if signature is None or signature != self._cache_signature:
                 self._cache = {}

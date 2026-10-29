@@ -51,7 +51,7 @@ name, so the scripts are started through `powershell -ExecutionPolicy Bypass
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1                    # executable + MSI
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -Package app-image # executable only
-powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -IncludeYoloModel  # also ship models\yolo\pcb_yolov8s.onnx (see below)
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -IncludeYoloModel  # also ship the verified weights of packaging\model-weights.json (see below)
 ```
 
 The script:
@@ -85,12 +85,20 @@ The script:
 
 The script returns to the caller's folder when it ends, also on failure.
 
-### YOLO weights: every ONNX, only with the switch
+### YOLO weights: exactly the manifest, only with the switch
 
-`-IncludeYoloModel` ships **every** `models\yolo\*.onnx`: the base model and
-the ONNX exports of the development checkpoints made with
-`tools\export_yolo_onnx.py` (their licenses were reviewed on 2026-10-28, see
-`THIRD_PARTY_NOTICES.md`; the user chose to ship all of them, about 330 MB).
+`-IncludeYoloModel` ships **exactly** the files listed in
+`packaging\model-weights.json`: the base model and the ONNX exports of the
+development checkpoints made with `tools\export_yolo_onnx.py` in
+`models\yolo`, and the SMD network in `models\smd` (their licenses were
+reviewed on 2026-10-28, see `THIRD_PARTY_NOTICES.md`; the user chose to ship
+all of them, about 375 MB). Each file is verified by size and SHA-256 before
+PyInstaller starts (`tools\fetch_model_weights.py --check`) and again by the
+spec: a missing or different file stops the build, and any other file in
+those folders (an unreviewed export, a `.pt`) is left out (review
+2026-10-29, K1). Download them after a fresh clone with
+`python tools\fetch_model_weights.py` (from the permanent GitHub release
+«models»; size cap, timeout, SHA-256 check, no partial file left behind).
 The switch is off by default so that a checkout without the weights (Git
 ignores them) still builds; the official setup is built with it. A `.pt`
 never ships: the package has no PyTorch. Without the weights the program
@@ -109,13 +117,21 @@ reason in its tooltip and defaults to «Local YOLO + AI verification».
 powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -Version 1.0.1
 ```
 
-Sets `kicadgen.__version__`, commits, tags `v1.0.1` and pushes. The tag
+Sets `kicadgen.__version__`, commits, pushes the branch, then tags `v1.0.1`
+and pushes the tag (the branch first, so a refused branch push leaves no
+local tag behind). Before tagging it requires a green «Tests» run of the
+commit on GitHub; `tests.yml` runs on branch pushes only, never on tag
+pushes, because the release workflow tests the tag itself. The tag
 starts `.github\workflows\release.yml`. Its `build` job (`windows-latest`,
 read-only token, no persisted Git credentials) checks that the tag matches the
-version, runs the test suite in two halves (`tools\run_test_halves.py first`
-/ `second`, because a single process can die at random with a native Qt/VTK
-crash; a hang report is uploaded as an artifact when a half does not finish),
-builds the MSI and uploads it as an artifact; the `publish` job, the only one
+version, fetches the model weights into a folder outside the checkout (up to
+three attempts 30 s apart for a network error; a wrong size or SHA-256 is not
+retried), runs the test suite in two halves without them
+(`tools\run_test_halves.py first` / `second`, because a single process can
+die at random with a native Qt/VTK crash; a hang report is uploaded as an
+artifact when a half does not finish), places the weights in `models\`,
+builds the MSI and uploads it as an artifact; both workflows cache pip's
+downloads keyed on the requirement files. The `publish` job, the only one
 with write access, runs no project code: it downloads the artifact and
 creates the GitHub Release. The tag reaches the scripts only through the
 `TAG` environment variable. The actions are pinned to the commits resolved

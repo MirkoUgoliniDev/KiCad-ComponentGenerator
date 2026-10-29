@@ -93,6 +93,27 @@ def yolo_model_path(name: str = DEFAULT_YOLO_ONNX) -> Path:
     return resource_path(*YOLO_MODELS_DIR, name)
 
 
+def default_yolo_smd_model() -> Path:
+    """@brief Default YOLO weights of the «YOLO + rete SMD» (YOLO + SMD network) route.
+
+    @return The PyTorch checkpoint DEFAULT_YOLO_PT when it is there (the route
+        was built on it), else its ONNX export DEFAULT_YOLO_SMD_ONNX, which is
+        what the installed program has. With neither file the checkpoint's
+        path is returned, so the caller's «file not found» names the usual
+        file. Same rule as smd_model_path(None).
+    @note The ONE place where this choice is made (review 2026-10-29, P3):
+        the GUI, photo_inventory and datasheet_extractor used to decide it
+        each on their own, and two of them forced the checkpoint even where
+        only the export existed. KICADGEN_YOLO_MODEL is not read here: the
+        callers that honour it check it before calling this function.
+    """
+    checkpoint = yolo_model_path(DEFAULT_YOLO_PT)
+    if checkpoint.is_file():
+        return checkpoint
+    exported = yolo_model_path(DEFAULT_YOLO_SMD_ONNX)
+    return exported if exported.is_file() else checkpoint
+
+
 def smd_model_path(name: str | None = None) -> Path:
     """@brief Path of the SMD network's weights in its folder (it may not exist).
 

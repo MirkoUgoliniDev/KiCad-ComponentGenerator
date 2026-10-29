@@ -416,6 +416,11 @@ def test_double_clicking_an_outline_keeps_the_viewport_still(dialog, app, monkey
         def start(self):
             return None
 
+        def stop(self):
+            # CONTRACT CHANGED 2026-10-29: the dialog stops its own search on
+            # close (_MatchWorker.stop); a stand-in worker offers the same call.
+            return None
+
     monkeypatch.setattr(module, '_MatchWorker', _Idle)
     dialog.view.zoom(4)
     dialog.component_list.setCurrentRow(0)

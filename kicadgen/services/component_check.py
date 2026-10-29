@@ -9,8 +9,9 @@ import subprocess
 import tempfile
 
 from .system_dependencies import find_kicad_cli
-from .kicad_library import (ComponentArtifacts, create_preview_project,
-                            step_file_is_complete, _direct_child_ranges, _node_arguments)
+from .kicad_library import (ComponentArtifacts, UTF8_BOM, create_preview_project,
+                            step_file_is_complete, _decode_utf8, _direct_child_ranges,
+                            _node_arguments)
 from ..generators.symbol import symbol_inputs, serialize_symbol, symbol_property_positions
 
 
@@ -194,7 +195,17 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         pad_ids = None
         try:
-            text = fp.read_text(encoding='utf-8')
+            data = fp.read_bytes()
+            if data.startswith(UTF8_BOM):
+                # A BOM made the root check fail with a generic «File footprint
+                # non valido» («invalid footprint file») although the file is
+                # readable; kicad-cli refuses it, the install strips it
+                # (review 2026-10-29, L4). Named here, the checks go on.
+                add('WARN', tx('Footprint su disco'),
+                    tx('Il file {path} inizia con un BOM UTF-8 (byte EF BB BF): KiCad non legge questa copia nella cartella del componente. La copia installata nella libreria viene scritta senza BOM.', path=fp))
+            # Same decoding as the install (BOM dropped, universal newlines),
+            # so the check reads the footprint the library will receive.
+            text = _decode_utf8(data, fp)
             _single_footprint(text)
             pads = [_pad_geometry(pad) for pad in _children(text, 'pad')]
             pad_ids = {p[0] for p in pads if len(p) > 2 and p[1] != 'np_thru_hole' and p[0]}

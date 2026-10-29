@@ -968,6 +968,35 @@ def _publish(staged, final):
             pause *= 2
 
 
+#: Closing keyword of every ISO 10303-21 (STEP) file, and how many bytes of
+#: the tail are searched for it: the rule of
+#: `kicadgen.services.kicad_library.step_file_is_complete`, which this
+#: script cannot import inside FreeCAD's embedded interpreter.
+_STEP_TRAILER = b"END-ISO-10303-21;"
+_STEP_TAIL_BYTES = 4096
+
+
+def _step_export_complete(path):
+    """@brief Whether an exported STEP ends with the ISO 10303-21 trailer.
+
+    @param path Staged STEP just written by the exporter.
+    @return True when the last non-blank bytes are ``END-ISO-10303-21;``,
+        False when they are not or the file cannot be read.
+    @note 2026-10-29 review, H8: an export cut short (full disk) must never
+        be published under the final name; the parent applies the same rule
+        to the published file.
+    """
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _STEP_TAIL_BYTES))
+            tail = handle.read()
+    except OSError:
+        return False
+    return tail.rstrip(b" \t\r\n\x00").endswith(_STEP_TRAILER)
+
+
 def _discard(path):
     """Remove a staging file after a failed export; cleanup never raises."""
     try:
@@ -1040,6 +1069,9 @@ def main():
     @return None: the results are the exported files (STEP always, WRL and
         preview mesh best effort) named by the job, published from staging
         names only after each export completed.
+    @throws RuntimeError When the exported STEP lacks its ISO 10303-21
+        trailer: the truncated file is discarded and never published, and
+        the run ends without the KICADGEN_STEP_OK marker.
     """
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
@@ -1353,6 +1385,11 @@ def main():
             _warn("export colori STEP fallito ({exc}); solo geometria", exc=exc)
             _discard(step_staged)
             Part.export(objects, step_staged)
+    # A truncated export is not published (2026-10-29 review, H8): the run
+    # fails without the KICADGEN_STEP_OK marker, as any other failed export.
+    if not _step_export_complete(step_staged):
+        _discard(step_staged)
+        raise RuntimeError(f"STEP export incomplete (no END-ISO-10303-21; trailer): {step_path}")
     # Published only now that the export returned: a kill during the write
     # leaves the staging file, which the parent deletes.
     _publish(step_staged, step_path)

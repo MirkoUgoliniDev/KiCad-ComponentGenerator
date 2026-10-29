@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from collections.abc import Mapping
 from numbers import Real
 from pathlib import Path
@@ -42,6 +43,7 @@ from PIL import Image, ImageOps
 from ..app_paths import smd_model_path
 from ..cad3d.measurement_uncertainty import EDGE_UNCERTAINTY_PX, elongation_hinge
 from .messages import tx
+from .yolo_models import LoadedModelCache
 
 _FORMAT = "smdmap-classifier-2"
 _MEAN = (0.485, 0.456, 0.406)
@@ -61,6 +63,9 @@ CHECKPOINT_METADATA_KEYS = ("format", "arch", "img_size", "classes", "orientatio
                             "suggested_threshold", "preprocessing", "trained", "epoch",
                             "catalog_sha256", "metrics")
 #: Names of the ONNX graph's single input and two outputs (export contract).
+#: The outputs are checked and fetched BY NAME: with four classes both heads
+#: are [N, 4], and a graph listing them in the other order would swap class
+#: and rotation without any shape telling it (review 2026-10-29, P5).
 ONNX_INPUT, ONNX_OUTPUTS = "images", ("class_logits", "rotation_logits")
 
 #: The preprocessing recipe this module applies to every crop, in the form a
@@ -182,16 +187,15 @@ def _open_network(path, device="auto"):
     """
     import numpy as np
     if _is_onnx(path):
-        session, metadata = _load_onnx(path)
+        session, metadata = _validated_onnx(path)
         input_name = session.get_inputs()[0].name
 
         def run_onnx(batch):
-            class_logits, rotation_logits = session.run(None, {input_name: batch})
+            class_logits, rotation_logits = session.run(list(ONNX_OUTPUTS), {input_name: batch})
             return (np.asarray(class_logits, np.float32), np.asarray(rotation_logits, np.float32))
         return metadata, run_onnx
+    checkpoint = _validated_checkpoint(path)
     torch, _, PackageNet = _runtime()
-    checkpoint = _load_checkpoint(path, torch)
-    _validate_checkpoint(checkpoint, path, torch, PackageNet)
     net = PackageNet(len(checkpoint["classes"]))
     net.load_state_dict(checkpoint["state_dict"])
     selected_device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
@@ -232,12 +236,34 @@ def validate_smd_setup(model_path=None):
     if not path.is_file():
         raise FileNotFoundError(tx("Rete SMD non trovata: {path}", path=path))
     if _is_onnx(path):
-        _load_onnx(path)
+        _validated_onnx(path)
         return path
-    torch, _, PackageNet = _runtime()
-    checkpoint = _load_checkpoint(path, torch)
-    _validate_checkpoint(checkpoint, path, torch, PackageNet)
+    _validated_checkpoint(path)
     return path
+
+
+#: Validated networks, reused while the file is unchanged (review 2026-10-29,
+#: P6): validate_smd_setup before a paid analysis, then classify_photo_boxes
+#: or describe_smd_checkpoint, used to load and check the same file twice.
+_LOADED = LoadedModelCache(capacity=2)
+
+
+def _validated_onnx(path):
+    """(session, metadata) of an .onnx network, loaded and checked once per unchanged file."""
+    # The runtime loader is part of the key: a replaced loader (tests) or
+    # another onnxruntime never gets a session the previous one built.
+    return _LOADED.get_or_load(path, lambda: _load_onnx(path),
+                               lambda: (_onnx_runtime, sys.modules.get("onnxruntime")))
+
+
+def _validated_checkpoint(path):
+    """Checkpoint mapping of a .pt network, loaded and checked once per unchanged file."""
+    def load():
+        torch, _, PackageNet = _runtime()
+        checkpoint = _load_checkpoint(path, torch)
+        _validate_checkpoint(checkpoint, path, torch, PackageNet)
+        return checkpoint
+    return _LOADED.get_or_load(path, load, lambda: (_runtime, sys.modules.get("torch")))
 
 
 def _load_onnx(path):
@@ -245,9 +271,14 @@ def _load_onnx(path):
 
     The metadata are the checkpoint fields (CHECKPOINT_METADATA_KEYS) as
     JSON under ONNX_METADATA_KEY. The graph must take one float32 input
-    [N, 3, img_size, img_size] (N fixed or symbolic) and return exactly two
-    float32 outputs [N, classes] and [N, 4], in this order: the class head
-    and the rotation head of PackageNet.
+    [N, 3, img_size, img_size] and return exactly two float32 outputs named
+    ONNX_OUTPUTS, [N, classes] and [N, 4]: the class head and the rotation
+    head of PackageNet, matched by name, not by position.
+    @note N must be a SYMBOLIC (dynamic) batch axis on the input and both
+        outputs (review 2026-10-29, P4): classify_photo_boxes feeds batches of
+        up to `batch_size` crops, and a graph with a fixed N would fail inside
+        onnxruntime with a raw shape error on the first batch of another size.
+        tools/export_smd_onnx.py exports the axis as dynamic.
     """
     size = Path(path).stat().st_size
     if size <= 0 or size > _MAX_CHECKPOINT_BYTES:
@@ -273,19 +304,33 @@ def _load_onnx(path):
     inputs, outputs = session.get_inputs(), session.get_outputs()
 
     def batch_shape(shape, last):
-        # The batch axis may be symbolic (dynamic export) or a fixed count.
-        return (len(shape) == len(last) + 1 and (not isinstance(shape[0], int) or shape[0] >= 1)
-                and list(shape[1:]) == list(last))
+        # onnxruntime reports a dynamic axis as its name (or None), a fixed
+        # one as an int: only the dynamic one accepts every batch size.
+        return len(shape) == len(last) + 1 and list(shape[1:]) == list(last)
+
+    def fixed_batch(shape):
+        return bool(shape) and isinstance(shape[0], int)
     if (len(inputs) != 1 or inputs[0].type != "tensor(float)"
             or not batch_shape(list(inputs[0].shape), [3, _IMG_SIZE, _IMG_SIZE])):
         raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
                             path=path, reason="ONNX input"))
+    by_name = {output.name: output for output in outputs}
+    if len(outputs) != 2 or set(by_name) != set(ONNX_OUTPUTS):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="ONNX outputs: names "
+                            + ", ".join(str(output.name) for output in outputs)
+                            + " instead of " + ", ".join(ONNX_OUTPUTS)))
+    heads = [by_name[name] for name in ONNX_OUTPUTS]
     expected = ([len(metadata["classes"])], [4])
-    if (len(outputs) != 2 or any(output.type != "tensor(float)" for output in outputs)
-            or not all(batch_shape(list(output.shape), last)
-                       for output, last in zip(outputs, expected))):
+    if (any(head.type != "tensor(float)" for head in heads)
+            or not all(batch_shape(list(head.shape), last)
+                       for head, last in zip(heads, expected))):
         raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
                             path=path, reason="ONNX outputs"))
+    if any(fixed_batch(list(item.shape)) for item in [inputs[0], *heads]):
+        raise ValueError(tx("Checkpoint SMD non valido: {path} ({reason})",
+                            path=path, reason="ONNX batch axis fixed, a dynamic one "
+                            "is required (tools/export_smd_onnx.py)"))
     return session, metadata
 
 
@@ -310,11 +355,8 @@ def describe_smd_checkpoint(model_path=None) -> dict:
         call this on its own.
     """
     path = validate_smd_setup(model_path)
-    if _is_onnx(path):
-        checkpoint = _load_onnx(path)[1]
-    else:
-        torch, _, _ = _runtime()
-        checkpoint = _load_checkpoint(path, torch)
+    # The load validate_smd_setup just made is reused (_LOADED).
+    checkpoint = _validated_onnx(path)[1] if _is_onnx(path) else _validated_checkpoint(path)
     metrics = checkpoint.get("metrics") if isinstance(checkpoint.get("metrics"), Mapping) else {}
     val = metrics.get("val") if isinstance(metrics.get("val"), Mapping) else None
     validation = None
@@ -619,47 +661,51 @@ def _attach_kicad_results(rows, library, log, cancel):
     from ..cad3d import kicad_models
 
     library = Path(library) if library is not None else None
-    paths_by_root = {}
-    for row in pending:
-        length, width = sorted(row["size_mm"], reverse=True)
-        measured = row.get("measured_mm")
-        # A body measured on its own edges (photo_refine) carries its true
-        # sides and its angle: the matcher gets those, not the axis-aligned
-        # box that encloses an oblique body (a 5 x 5 QFN at 45 degrees
-        # encloses 7.1 x 7.1; review 2026-10-27, F5). The network's pose is
-        # a verse on top of the measured angle, it does not replace it.
-        rotation = measured["rotation_deg"] if measured else row["rotation_deg"]
-        component = {
-            "kind": row["kind"], "class": row["kind"],
-            "package": row["package"], "length_mm": length, "width_mm": width,
-            "rotation_deg": rotation,
-            "bbox_basis": "measured_edges" if measured else "unknown",
-            "_source": "SMD local", "_smd_class": row["class"],
-            "_smd_confidence": row["class_confidence"], "_smd_body": row.get("body"),
-        }
-        report = kicad_models.model_candidates(component, library=library, log=log, cancel=cancel)
-        row["model_match"] = report
-        row["model_status"] = report["status"]
-        row["step_candidates"] = [dict(item) for item in report.get("candidates", [])]
-        selected = report.get("selected_path")
-        if selected:
-            row["step_model"] = {"path": selected, "file": selected,
-                                 "exists": Path(selected).is_file()}
-        paths = [item["path"] for item in report.get("candidates", [])]
-        if selected:
-            paths.append(selected)
-        for value in paths:
-            path = Path(value)
-            root = path.parent.parent if path.parent.name.endswith(".3dshapes") else library
-            if root is not None:
-                paths_by_root.setdefault(root, set()).add(value)
+    # One listing of the KiCad library for the whole batch: each
+    # model_candidates call outside a shared scope walks it again (review
+    # 2026-10-29, H5); the footprint links are read inside the same scope.
+    with kicad_models.listing_scope():
+        paths_by_root = {}
+        for row in pending:
+            length, width = sorted(row["size_mm"], reverse=True)
+            measured = row.get("measured_mm")
+            # A body measured on its own edges (photo_refine) carries its true
+            # sides and its angle: the matcher gets those, not the axis-aligned
+            # box that encloses an oblique body (a 5 x 5 QFN at 45 degrees
+            # encloses 7.1 x 7.1; review 2026-10-27, F5). The network's pose is
+            # a verse on top of the measured angle, it does not replace it.
+            rotation = measured["rotation_deg"] if measured else row["rotation_deg"]
+            component = {
+                "kind": row["kind"], "class": row["kind"],
+                "package": row["package"], "length_mm": length, "width_mm": width,
+                "rotation_deg": rotation,
+                "bbox_basis": "measured_edges" if measured else "unknown",
+                "_source": "SMD local", "_smd_class": row["class"],
+                "_smd_confidence": row["class_confidence"], "_smd_body": row.get("body"),
+            }
+            report = kicad_models.model_candidates(component, library=library, log=log, cancel=cancel)
+            row["model_match"] = report
+            row["model_status"] = report["status"]
+            row["step_candidates"] = [dict(item) for item in report.get("candidates", [])]
+            selected = report.get("selected_path")
+            if selected:
+                row["step_model"] = {"path": selected, "file": selected,
+                                     "exists": Path(selected).is_file()}
+            paths = [item["path"] for item in report.get("candidates", [])]
+            if selected:
+                paths.append(selected)
+            for value in paths:
+                path = Path(value)
+                root = path.parent.parent if path.parent.name.endswith(".3dshapes") else library
+                if root is not None:
+                    paths_by_root.setdefault(root, set()).add(value)
 
-    # Read links once per library, even when many boxes use the same model.
-    links = {}
-    for root, paths in paths_by_root.items():
-        if cancel is not None and cancel.is_set():
-            raise kicad_models.MatchingCancelled(measured={})
-        links.update(kicad_models.footprint_sizes(sorted(paths), library=root, log=log))
+        # Read links once per library, even when many boxes use the same model.
+        links = {}
+        for root, paths in paths_by_root.items():
+            if cancel is not None and cancel.is_set():
+                raise kicad_models.MatchingCancelled(measured={})
+            links.update(kicad_models.footprint_sizes(sorted(paths), library=root, log=log, cancel=cancel))
     for row in pending:
         report = row["model_match"]
         selected = report.get("selected_path")

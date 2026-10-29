@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
-from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text
+from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text, require_kicad_reach
 from ..core.output_names import validate_output_name
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
@@ -184,17 +184,8 @@ class PinHeaderParams:
                     )
                 seen[position] = pin
         if self.pad_overrides:
-            positions = {pin_key(pin) for pin, _, _ in pin_positions(self)}
-            for number, override in self.pad_overrides.items():
-                if pin_key(number) not in positions or not isinstance(override, dict):
-                    raise ValueError(tx("Override pad header non valido: {number}.", number=number))
-                shape = override.get("shape")
-                size = override.get("size")
-                if shape not in {"circle", "rect"} or isinstance(size, bool) \
-                        or not isinstance(size, (int, float)) or not isfinite(size) \
-                        or size <= self.drill:
-                    raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
-                                        number=number))
+            validate_pad_overrides(self.pad_overrides,
+                                   {pin_key(pin) for pin, _, _ in pin_positions(self)}, self.drill)
         if self.populated_pins is not None:
             # Without a map the numbers are the automatic column-by-column ones,
             # so they lie in 1..rows*columns. With an explicit map the numbering is a
@@ -227,7 +218,32 @@ class PinHeaderParams:
                            "dei pin.",
                            pins=", ".join(str(pin) for pin in missing))
                     )
+        self._validate_kicad_reach()
         self._validate_pad_clearance()
+
+    def _validate_kicad_reach(self) -> None:
+        """Refuse a header whose courtyard would leave KiCad's coordinate range.
+
+        The envelope is the one build_pin_header draws: the body (or the
+        legacy silk rectangle around the grid), every emitted pad with its
+        override, plus the courtyard margin (review 2026-10-29, G3)."""
+        row_spacing = self.effective_row_spacing()
+        m = float(self.margin)
+        if self.body_length is not None:
+            reach = max(abs(self.body_offset_x), abs(self.body_offset_y),
+                        abs(self.body_offset_x + self.body_length), abs(self.body_offset_y + self.body_width))
+        else:
+            reach = max((self.cols - 1) * self.pitch, (self.rows - 1) * row_spacing) + m
+        overrides = self.pad_overrides or {}
+        for pin, x, y in pin_positions(self):
+            size = float(overrides.get(pin_key(pin), {}).get("size", self.pad_diameter))
+            reach = max(reach, abs(x) + size / 2, abs(y) + size / 2)
+        if not isfinite(reach + m):
+            # Finite inputs whose sum overflows (a 1e308 body offset plus its
+            # length): the bounds themselves are not numbers, which the
+            # existing message says precisely; «inf mm» would not.
+            raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
+        require_kicad_reach(reach + m)
 
     def _validate_pad_clearance(self) -> None:
         """Refuse populated pads closer than MIN_PAD_GAP_MM of free copper.
@@ -301,6 +317,35 @@ class PinHeaderParams:
                         "pad o controlla passo e distanza tra righe.",
                         a=pin_a, b=pin_b, pad=self.pad_diameter, distance=distance,
                         gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
+
+
+def validate_pad_overrides(overrides, numbers, drill: float) -> None:
+    """@brief Check per-pin host pad overrides: one rule for every header path.
+
+    @param overrides {pin number: {"shape": "circle"|"rect", "size": mm}}.
+    @param numbers The `pin_key` of every pin an override may name.
+    @param drill Drill of the lands, mm: an override must be larger.
+    @throws ValueError When `overrides` is not a mapping, an override names
+        a pin not in `numbers` or is not a mapping, or its shape is not
+        circle/rect or its size is not a finite number (bool excluded)
+        larger than `drill`.
+    @note Shared by PinHeaderParams.validate and
+        host_mounting.header_footprint_params, whose package and castellated
+        paths used to trust the overrides ({"size": None} escaped as a
+        TypeError; review 2026-10-29, G7).
+    """
+    if not isinstance(overrides, dict):
+        raise ValueError(tx("Override pad header non valido: {number}.", number=overrides))
+    for number, override in overrides.items():
+        if pin_key(number) not in numbers or not isinstance(override, dict):
+            raise ValueError(tx("Override pad header non valido: {number}.", number=number))
+        shape = override.get("shape")
+        size = override.get("size")
+        if shape not in {"circle", "rect"} or isinstance(size, bool) \
+                or not isinstance(size, (int, float)) or not isfinite(size) \
+                or size <= drill:
+            raise ValueError(tx("Forma o dimensione non valida per il pad {number}.",
+                                number=number))
 
 
 def pad_copper_gap(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b) -> float:

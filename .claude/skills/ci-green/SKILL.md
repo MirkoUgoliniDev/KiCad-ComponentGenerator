@@ -5,7 +5,7 @@ description: Make the GitHub Actions test suite of KiCadGen pass honestly — wh
 
 # Keeping the GitHub suite green
 
-The `Tests` workflow (`.github/workflows/tests.yml`) runs on every push and
+The `Tests` workflow (`.github/workflows/tests.yml`) runs on every branch push (not on tags) and
 the release workflow repeats it before building the MSI. Until 2026-10-27 it
 had **never** passed: about fifty tests assumed the developer's machine.
 

@@ -22,6 +22,7 @@ in the log (`MainWindow._plausibility_warnings`), never refused.
 """
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 #: Largest length the program handles, in mm: the edge of the largest board
@@ -213,12 +214,18 @@ def normalised_side(side: dict | None, default_style: str | None = None) -> dict
         0.01 mm. They only keep the numbers finite and storable: whether the
         contacts fit their edge is checked by the generator
         (`CastellatedModuleParams.validate`), from the declared board size.
+    @throws TypeError When count, pitch, offset or first pin is present but
+        is not a number or a numeric string (None included).
+    @throws ValueError When one of them is a string that is not a number,
+        or a number that is not finite (NaN, infinity): clamping a NaN would
+        store it unchanged, and a damaged side must be refused by the caller,
+        never silently turned into another side (review 2026-10-29, A1).
     """
     side = side or {}
-    count = BoundedValue(int(side.get("count", 2)), 1, 10000, decimals=0, integer=True)
-    pitch = BoundedValue(float(side.get("pitch_mm", 2.54)), 0.0, MAX_LENGTH_MM)
-    offset = BoundedValue(float(side.get("offset_mm", 0.0)), -MAX_LENGTH_MM, MAX_LENGTH_MM)
-    first = BoundedValue(int(side.get("first_pin", 1)), 1, 100000, decimals=0, integer=True)
+    count = BoundedValue(_side_number(side, "count", 2, int), 1, 10000, decimals=0, integer=True)
+    pitch = BoundedValue(_side_number(side, "pitch_mm", 2.54, float), 0.0, MAX_LENGTH_MM)
+    offset = BoundedValue(_side_number(side, "offset_mm", 0.0, float), -MAX_LENGTH_MM, MAX_LENGTH_MM)
+    first = BoundedValue(_side_number(side, "first_pin", 1, int), 1, 100000, decimals=0, integer=True)
     return dict(edge=side.get("edge", "left"), count=count.value(), pitch_mm=pitch.value(),
                 offset_mm=offset.value(), first_pin=first.value(),
                 reverse=bool(side.get("reverse")),
@@ -239,6 +246,27 @@ def normalised_side(side: dict | None, default_style: str | None = None) -> dict
                 pad_width_mm=_optional_size(side.get("pad_width_mm")),
                 pad_length_declared=side.get("pad_length_declared") is True,
                 pad_width_declared=side.get("pad_width_declared") is True)
+
+
+def _side_number(side: dict, key: str, default, convert):
+    """One numeric entry of a side: `default` when the key is absent, else `convert` of a finite value.
+
+    A present key is never replaced by the default: a None, a word or a NaN
+    written in a project file is damage, and the exception lets the caller
+    skip the side with a note instead of inventing its contacts.
+    """
+    if key not in side:
+        return default
+    value = side[key]
+    if isinstance(value, bool):
+        raise TypeError(f"{key}: {value!r} is not a number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{key}: {value!r} is not a finite number")
+    number = convert(value)
+    if isinstance(number, float) and not math.isfinite(number):
+        # A string such as "nan" or "inf" passes float() unchanged.
+        raise ValueError(f"{key}: {value!r} is not a finite number")
+    return number
 
 
 def _optional_size(value):

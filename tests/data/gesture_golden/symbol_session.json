@@ -127,11 +127,7 @@
    15.24,
    15.24
   ],
-  "counts": {
-   "_changed": 1,
-   "_draw": 1,
-   "layout_symbol": 1
-  },
+  "counts": {},
   "gesture": [
    "pin",
    "1"
@@ -2368,9 +2364,7 @@
   "counts": {
    "_changed": 1,
    "_draw": 1,
-   "_populate": 1,
-   "layout_symbol": 1,
-   "save_draft": 1
+   "layout_symbol": 1
   },
   "gesture": null,
   "history": 4,

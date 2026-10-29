@@ -421,6 +421,23 @@ def colorize_step(step_text: str, colors: list) -> str:
     return step_text.replace(marker, "\n".join(entities) + "\n" + marker, 1)
 
 
+def _step_is_complete(path: Path) -> bool:
+    """@brief Whether a STEP file ends with the ISO 10303-21 trailer.
+
+    @param path STEP file the child reported as exported.
+    @return True when the last non-blank bytes are ``END-ISO-10303-21;``;
+        False as well when the file cannot be read.
+    @note The rule is `kicad_library.step_file_is_complete`, the one the
+        packaging already applies before shipping a STEP: one rule, so a
+        model accepted here is never refused there.
+    """
+    from ..services.kicad_library import step_file_is_complete
+    try:
+        return step_file_is_complete(path)
+    except OSError:
+        return False
+
+
 class Cad3DError(Exception):
     """@brief Application error: freecadcmd missing or 3D generation failed or cancelled."""
 
@@ -1880,11 +1897,28 @@ def _run_freecad(
     # extra argument with an extension it recognises as an importable format
     # (including .json, because of the FEM YAML/JSON importer), causing
     # a noisy exception (harmless, but to be avoided) after the script runs.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".kicadgen_params", delete=False, encoding="utf-8"
-    ) as tmp:
-        json.dump(payload, tmp)
-        json_path = tmp.name
+    #
+    # Serialised BEFORE the file exists (2026-10-29 review, H7): a value that
+    # is not JSON used to surface as a bare TypeError and leave the temporary
+    # file behind. Now it is a Cad3DError, and a write failure removes the file.
+    try:
+        params_text = json.dumps(payload)
+    except (TypeError, ValueError) as exc:
+        raise Cad3DError(tx("Parametri del modello STEP non validi: {exc}", exc=exc)) from exc
+    json_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".kicadgen_params", delete=False, encoding="utf-8"
+        ) as tmp:
+            json_path = tmp.name
+            tmp.write(params_text)
+    except BaseException:
+        if json_path is not None:
+            try:
+                os.unlink(json_path)
+            except OSError:
+                pass
+        raise
 
     launched = False
     try:
@@ -1957,6 +1991,16 @@ def _run_freecad(
         if "KICADGEN_STEP_OK" not in output or not step_path.is_file():
             tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
             raise Cad3DError(tx("Generazione STEP fallita.\n\nOutput freecadcmd:\n{tail}", tail=tail))
+        # The marker and the file are not enough (2026-10-29 review, H8): a
+        # STEP cut short -- a full disk, a writer killed after the rename --
+        # still exists. The ISO 10303-21 trailer is the last thing a writer
+        # emits, so its absence is a structural proof of truncation; such a
+        # run fails like any other and the handler below discards its outputs.
+        if not _step_is_complete(step_path):
+            tail = "\n".join(output.strip().splitlines()[-15:]) or tx("(nessun output)")
+            raise Cad3DError(tx("Generazione STEP fallita: il file STEP e' incompleto (manca "
+                                "la chiusura END-ISO-10303-21;).\n\nOutput freecadcmd:\n{tail}",
+                                tail=tail))
 
         # Script warnings (fillet not applicable, face not found...): the
         # generation still succeeds, but without reporting them the user would see

@@ -116,7 +116,9 @@ def test_the_request_asks_the_api_for_the_cost(monkeypatch):
         def read(self, size=-1):
             return b'{"choices": [{"message": {"tool_calls": [{"function": {"name": "t", "arguments": "{}"}}]}}]}'
 
-    def fake_urlopen(request, timeout=None):
+    # CONTRACT CHANGED 2026-10-29 (review E6): a paid POST passes the closable
+    # TLS context to urlopen as `context=`, so the stand-in accepts it.
+    def fake_urlopen(request, timeout=None, **_kwargs):
         sent["body"] = __import__("json").loads(request.data.decode())
         return Response()
 

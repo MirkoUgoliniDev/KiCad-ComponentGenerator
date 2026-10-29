@@ -1416,14 +1416,121 @@ def italian_comments(source, label):
             for line, text in _comment_blocks(source) if _looks_italian(text)]
 
 
+def _comment_checked_files():
+    """Return the files whose comments must be English: the documented ones plus the PyInstaller specs.
+
+    A ``.spec`` is Python run by PyInstaller (review 2026-10-29, K8: Italian
+    comments had survived in ``packaging/KiCadGen.spec``); it is not part of
+    the ``@brief`` docstring contract, only of the comment rule.
+    """
+    return _documented_files() + sorted((ROOT / 'packaging').glob('*.spec'))
+
+
 def test_comments_are_written_in_english():
     """@brief Enforce English ``#`` and ``#:`` comments in the covered code."""
     failures = []
-    for path in _documented_files():
+    for path in _comment_checked_files():
         label = path.relative_to(ROOT).as_posix()
         failures += italian_comments(path.read_text(encoding='utf-8'), label)
     assert not failures, (
         f'{len(failures)} comment blocks are written in Italian:\n' + '\n'.join(failures))
+
+
+def test_the_comment_rule_covers_the_pyinstaller_spec():
+    """@brief Prove the spec is scanned (positive) and parsed as Python, so an Italian comment in it is caught.
+
+    Negative: the docstring contract does not take the spec in (it has no ``@brief`` module docstring by design).
+    """
+    spec = ROOT / 'packaging' / 'KiCadGen.spec'
+    assert spec in _comment_checked_files()
+    assert spec not in _documented_files()
+    source = spec.read_text(encoding='utf-8')
+    assert list(_comment_blocks(source)), 'the tokenizer must find the spec comments'
+    planted = source + '\n# Il file viene letto dalla build e poi copiato.\n'
+    assert italian_comments(planted, 'KiCadGen.spec') == [
+        f'KiCadGen.spec:{len(planted.splitlines())}:italian-comment']
+
+
+#: A Qt style-sheet comment inside a Python string (``/* … */``). Qt style
+#: sheets are CSS: these are comments of the code like ``#`` ones.
+_STYLESHEET_COMMENT = re.compile(r'/\*(.*?)\*/', re.DOTALL)
+
+
+def stylesheet_italian_comments(source, label):
+    """@brief List the ``/* … */`` style-sheet comments of a Python source's strings that read as Italian.
+
+    @param source Python source code whose string literals hold Qt style sheets.
+    @param label File label used in the reported entries.
+    @return Entries ``label:line:italian-stylesheet-comment``, by the line where the comment opens.
+    """
+    failures = []
+    for first_line, literal in _string_literals(source):
+        for match in _STYLESHEET_COMMENT.finditer(literal):
+            line = first_line + literal.count('\n', 0, match.start())
+            text = ' '.join(part.strip(' *') for part in match.group(1).splitlines())
+            if _looks_italian(text):
+                failures.append(f'{label}:{line}:italian-stylesheet-comment')
+    return failures
+
+
+def _string_literals(source):
+    """Yield (first line, source text) of every string literal, f-strings included.
+
+    Since Python 3.12 an f-string is no single STRING token but
+    FSTRING_START … FSTRING_END (the theme's style sheets are f-strings), so
+    its text is cut from the source between those two positions, outermost
+    f-string only.
+    """
+    lines = source.splitlines(keepends=True)
+    offsets = [0]
+    for text in lines:
+        offsets.append(offsets[-1] + len(text))
+    start_type = getattr(tokenize, 'FSTRING_START', None)
+    end_type = getattr(tokenize, 'FSTRING_END', None)
+    depth, opened = 0, None
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type == tokenize.STRING and depth == 0:
+            yield token.start[0], token.string
+        elif start_type is not None and token.type == start_type:
+            if depth == 0:
+                opened = token.start
+            depth += 1
+        elif end_type is not None and token.type == end_type:
+            depth -= 1
+            if depth == 0:
+                begin = offsets[opened[0] - 1] + opened[1]
+                end = offsets[token.end[0] - 1] + token.end[1]
+                yield opened[0], source[begin:end]
+
+
+def test_stylesheet_comments_in_the_theme_are_english():
+    """@brief Enforce English ``/* */`` comments in the Qt style sheets of ``kicadgen/gui/theme.py`` (review 2026-10-29, K8)."""
+    path = ROOT / 'kicadgen' / 'gui' / 'theme.py'
+    failures = stylesheet_italian_comments(path.read_text(encoding='utf-8'), 'kicadgen/gui/theme.py')
+    assert not failures, (
+        f'{len(failures)} style-sheet comments are written in Italian:\n' + '\n'.join(failures))
+
+
+def test_stylesheet_comment_rule_flags_italian_only():
+    """@brief Prove the style-sheet rule: an Italian comment is flagged at its line, English and quoted labels are not."""
+    source = '\n'.join([
+        'SHEET = """',
+        'QMenu { color: red; }',
+        '/* An English note about the menu',      # 3 negative
+        '   spanning two lines. */',
+        '/* Voce spenta: senza questa regola',    # 5 positive
+        '   il testo resta nero. */',
+        '/* The button «Rigenera il modello» */',  # 7 negative: quoted label
+        '"""',
+        'x = "/* il valore della cella */"',       # 9 positive: still a style-sheet string
+        'y = f"""QLabel {{ color: {c}; }}',        # 10 f-string, as the theme's sheets
+        '/* Barre di icone: il pulsante si vede */',  # 11 positive inside the f-string
+        '/* Toolbars: the button shows on hover */',  # 12 negative
+        '"""',
+    ]) + '\n'
+    assert stylesheet_italian_comments(source, 't.py') == [
+        't.py:5:italian-stylesheet-comment', 't.py:9:italian-stylesheet-comment',
+        't.py:11:italian-stylesheet-comment']
 
 
 def test_comment_language_rule_judges_blocks_and_ignores_quotes_and_strings():

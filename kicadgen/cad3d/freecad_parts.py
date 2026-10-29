@@ -1934,6 +1934,133 @@ def _cached_landmark_direction(shape, reference, path, heartbeat=None):
     return direction
 
 
+#: Height of the body section of a library model, as a fraction of its Z
+#: extent: above the standoff only the plastic body remains (see the same
+#: choice, and its verification, in `kicad_models._MEASURE_SCRIPT`).
+BODY_SECTION_FRACTION = 0.65
+
+#: Index of the body sections already computed, beside the landmark index
+#: (2026-10-29 review, H6). The planar slice of a large assembly costs from
+#: tenths of a second to minutes and its result is a pure function of the
+#: file, of the reader that produced the shapes and of the FreeCAD build, so
+#: it is paid once per such triple instead of at every solid build.
+SECTION_INDEX_FILENAME = "kicadgen-section-index-v1.json"
+
+
+def _section_cache_paths():
+    """Section index files: the landmark index folders, another file name."""
+    return [os.path.join(os.path.dirname(path), SECTION_INDEX_FILENAME)
+            for path in _landmark_cache_paths()]
+
+
+def _freecad_build():
+    """FreeCAD version and build of this interpreter as one string, or None."""
+    try:
+        return "-".join(str(part) for part in FreeCAD.Version()[:4])
+    except Exception:  # noqa: BLE001 - no build, no cache: the slice is computed
+        return None
+
+
+def _section_cache_entry(path, reader):
+    """(key, record fields) identifying the section of `path` read by `reader`, or None.
+
+    Not the matching's measure in `kicad_models._MEASURE_SCRIPT`, on purpose:
+    that one intersects a slab of 2 % of the height, a different reference
+    (on a SOIC-8 body with drafted sides its X side is 3.750 mm, the slice
+    gives 3.714 mm), so it cannot be replayed in place of this one.
+    """
+    store = _landmark_store()
+    build = _freecad_build()
+    if store is None or build is None:
+        return None
+    try:
+        identity = store.file_identity(path)
+    except Exception:  # noqa: BLE001 - without an identity nothing is replicated
+        return None
+    if not identity:
+        return None
+    fields = {"model": identity, "reader": str(reader),
+              "fraction": BODY_SECTION_FRACTION, "freecad": build}
+    key = "|".join((identity, fields["reader"], repr(BODY_SECTION_FRACTION), build))
+    return key, fields
+
+
+def _cached_section(entry):
+    """@brief Replay a body section already computed for THIS file, reader and build.
+
+    @param entry Pair from `_section_cache_entry`.
+    @return (BoundBox,) or (None,) for a section that was empty, or
+        `_LANDMARK_MISS` when the index has nothing valid to say.
+    @note The record carries its identity fields inside itself, not only in
+        the key, and the box must be six finite numbers with min <= max:
+        a corrupted or badly merged index is recomputed, never trusted.
+    """
+    store = _landmark_store()
+    if store is None or entry is None:
+        return _LANDMARK_MISS
+    key, fields = entry
+    try:
+        record = store.load(_section_cache_paths()).get(key)
+    except Exception:  # noqa: BLE001 - unreadable cache: compute again
+        return _LANDMARK_MISS
+    if not isinstance(record, dict) or any(record.get(k) != v for k, v in fields.items()):
+        return _LANDMARK_MISS
+    if record.get("status") == "empty":
+        return (None,)
+    values = record.get("box")
+    if (record.get("status") != "measured" or not isinstance(values, list) or len(values) != 6
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       and math.isfinite(v) for v in values)
+            or any(values[i] > values[i + 3] for i in range(3))):
+        return _LANDMARK_MISS
+    return (FreeCAD.BoundBox(*values),)
+
+
+def _store_section(entry, box):
+    """Record a computed section (or its absence) as a property of that file and reader."""
+    store = _landmark_store()
+    if store is None or entry is None:
+        return
+    key, fields = entry
+    record = dict(fields)
+    if box is None:
+        record["status"] = "empty"
+    else:
+        record["status"] = "measured"
+        record["box"] = [float(box.XMin), float(box.YMin), float(box.ZMin),
+                         float(box.XMax), float(box.YMax), float(box.ZMax)]
+    try:
+        store.save({key: record}, _section_cache_paths())
+    except Exception:  # noqa: BLE001 - an unwritten cache is not a fault
+        pass
+
+
+def _body_section_box(combined, box, path, reader):
+    """@brief Bounding box of the planar body section of a library model, computed once.
+
+    @param combined Compound of the model's shapes, as read by @p reader.
+    @param box `combined.BoundBox`.
+    @param path Library file the shapes were read from: it identifies the section.
+    @param reader Which reader produced @p combined ("import" or "part_read"):
+        the two may yield different shapes, so they are different questions.
+    @return The section's BoundBox, or None when the section is empty or
+        the slice failed.
+    @note The cache is consulted BEFORE the slice. A failed slice is not
+        remembered: it is retried at the next build.
+    """
+    entry = _section_cache_entry(path, reader)
+    cached = _cached_section(entry)
+    if cached is not _LANDMARK_MISS:
+        return cached[0]
+    try:
+        section = combined.slice(V(0, 0, 1), box.ZMin + box.ZLength * BODY_SECTION_FRACTION)
+        result = Part.makeCompound(section).BoundBox if section else None
+    except Exception:  # noqa: BLE001 - no section: the total envelope alone decides
+        return None
+    _store_section(entry, result)
+    return result
+
+
 def _cardinal_quarters(angle):
     """@brief Quarter turns of a cardinal angle, or None for any other angle.
 
@@ -2146,6 +2273,7 @@ def _library_model(component, cx, cy, z0, color):
         with _ImportHeartbeat(path) as heartbeat:
             try:
                 parts = _read_library_parts(path, color, heartbeat)
+                reader = "import"
             except Exception as exc:
                 code = getattr(exc, "code", None) if isinstance(exc, _CheckFailed) else None
                 if code == "face_colour_mismatch":
@@ -2169,6 +2297,7 @@ def _library_model(component, cx, cy, z0, color):
                 if shape.isNull() or not shape.Solids or not shape.isValid():
                     raise _CheckFailed("no_valid_solids", "library model has no valid solids")
                 parts = [(shape, _ModelColor(color, None, path))]
+                reader = "part_read"
             heartbeat.beat_if_due()
             combined = Part.makeCompound([shape for shape, _ in parts])
             box = combined.BoundBox
@@ -2176,21 +2305,20 @@ def _library_model(component, cx, cy, z0, color):
             # envelope can have a different long axis from the plastic body
             # (e.g. SOT-223).
             references = [box]
-            try:
-                # The slice sits on the same silent stretch and on a large assembly
-                # it is costly too: it does NOT however have a budget like the direction
-                # measure, and the difference is not an oversight. The direction has an
-                # «non lo so» (I don't know) outcome already provided for (the component
-                # stays oriented by the envelope, as it was before the measure
-                # existed), whereas the axis does not: giving it up would place the
-                # model rotated by 90 degrees, which is a real error and not a
-                # renunciation. Balancing them the same way would require a
-                # second honest outcome for the axis, which does not exist today.
-                section = combined.slice(V(0, 0, 1), box.ZMin + box.ZLength * 0.65)
-                if section:
-                    references.append(Part.makeCompound(section).BoundBox)
-            except Exception:
-                pass
+            # The slice sits on the same silent stretch and on a large assembly
+            # it is costly too: it does NOT however have a budget like the direction
+            # measure, and the difference is not an oversight. The direction has an
+            # «non lo so» (I don't know) outcome already provided for (the component
+            # stays oriented by the envelope, as it was before the measure
+            # existed), whereas the axis does not: giving it up would place the
+            # model rotated by 90 degrees, which is a real error and not a
+            # renunciation. Balancing them the same way would require a
+            # second honest outcome for the axis, which does not exist today.
+            # It is computed once per file, reader and FreeCAD build, and
+            # replayed afterwards (2026-10-29 review, H6).
+            section_box = _body_section_box(combined, box, path, reader)
+            if section_box is not None:
+                references.append(section_box)
             length, width = float(component["length_mm"]), float(component["width_mm"])
             inferred, reference = _native_axis_angle(references, length, width)
             # The direction is not derived from the envelope: the two ends of a

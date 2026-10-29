@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from ..services.messages import render_child_line, tx
@@ -212,6 +214,87 @@ HEARTBEAT_BEATS_PER_TIMEOUT = 5
 CANCEL_POLL_INTERVAL_S = 0.1
 
 
+#: Seconds a killed child is waited for before it is abandoned. A
+#: TerminateProcess the system refuses (process stuck in a kernel call) must
+#: not hang the caller -- and the cancel that asked for the kill -- forever
+#: (2026-10-27 review, H9; 2026-10-29 review, H2). A bound on the reaping,
+#: not on the work.
+KILL_REAP_GRACE_S = 5.0
+
+#: Size above which a run log is trimmed when a new run starts, and the tail
+#: kept (2026-10-29 review, H9). `<project>/freecad.log` is appended to by
+#: every 3D generation and was never trimmed. A run writes one line per
+#: child output line, heartbeats included (one every 60 s): tens of
+#: kilobytes even for a large module, so the kept 2 MiB still hold dozens of
+#: recent runs, which is what a diagnosis or an issue report needs. The
+#: numbers are a disk budget, not a measurement of any particular run.
+LOG_CAP_BYTES = 8 * 1024 * 1024
+LOG_KEEP_BYTES = 2 * 1024 * 1024
+
+
+def cap_log(log_path, limit: int = LOG_CAP_BYTES, keep: int = LOG_KEEP_BYTES) -> bool:
+    """@brief Trim a log that grew past @p limit, keeping its last @p keep bytes.
+
+    @param log_path Log file about to be appended to.
+    @param limit Size in bytes above which the file is trimmed.
+    @param keep Bytes of the tail to keep; the cut moves forward to the next
+        line start, so no half line survives.
+    @return True when the file was trimmed.
+    @note Atomic: the tail is written to a sibling temporary file that then
+        replaces the log with `os.replace`, so a failure (the file open in
+        another program, a full disk) leaves the whole log, never a truncated
+        one. A failure is logged and never raised: the run goes on appending.
+    """
+    path = Path(log_path)
+    temporary = None
+    try:
+        size = path.stat().st_size
+        if size <= limit:
+            return False
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - keep))
+            tail = handle.read()
+        cut = tail.find(b"\n")
+        tail = tail[cut + 1:] if cut >= 0 else tail
+        note = (f"[log trimmed: {size - len(tail)} bytes of older runs removed, "
+                f"limit {limit} bytes]\n").encode("utf-8")
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        with temporary.open("xb") as handle:
+            handle.write(note + tail)
+        os.replace(temporary, path)
+        temporary = None
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logging.getLogger(__name__).warning("log %s not trimmed: %s", path, exc)
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def reap_killed_child(process, grace_s: float = KILL_REAP_GRACE_S) -> bool:
+    """@brief Wait for a child that was just killed, with a bound.
+
+    @param process `subprocess.Popen` whose tree was just terminated.
+    @param grace_s Seconds to wait before abandoning it.
+    @return True when the child exited within the grace, False when it is
+        still alive and has been abandoned (logged).
+    """
+    try:
+        process.wait(timeout=grace_s)
+        return True
+    except subprocess.TimeoutExpired:
+        logging.getLogger(__name__).warning(
+            "child pid %s did not exit within %.1f s after the kill; left behind",
+            getattr(process, "pid", "?"), grace_s)
+        return False
+
+
 class ProcessCancelled(Exception):
     """@brief Raised when the child was killed because the caller asked to stop.
 
@@ -310,35 +393,43 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
     cancelled = threading.Event()
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    cap_log(log_path)
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(f"\n[{datetime.now().astimezone().isoformat(timespec='seconds')}] FreeCAD start\n")
         handle.flush()
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                              text=True, encoding="utf-8", errors="replace",
-                              creationflags=creationflags, bufsize=1,
-                              env=(dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-                                   if env is None else env)) as process:
-            def kill_child():
-                """The only place where the child process is killed: by the watchdog and on cancellation."""
-                kill_process_tree(process)
+        # NOT a context manager (2026-10-29 review, H2): Popen.__exit__ waits
+        # for the child without a timeout, which after a refused kill hung
+        # the caller for good. The pipe is closed and the child reaped in the
+        # `finally` below, with a bound on every kill path.
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace",
+                                   creationflags=creationflags, bufsize=1,
+                                   env=(dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+                                        if env is None else env))
 
-            def expire():
-                timed_out.set()
-                kill_child()
+        def kill_child():
+            """The only place where the child process is killed: by the watchdog and on cancellation."""
+            kill_process_tree(process)
 
-            # The watcher thread exists only if someone can really
-            # ask to stop, and it dies with the reading: it is tied to the
-            # lifetime of this call, not of the program.
-            reading_over = threading.Event()
+        def expire():
+            timed_out.set()
+            kill_child()
 
-            def watch_cancel():
-                while not reading_over.is_set():
-                    if cancel.wait(CANCEL_POLL_INTERVAL_S):
-                        cancelled.set()
-                        kill_child()
-                        return
+        # The watcher thread exists only if someone can really
+        # ask to stop, and it dies with the reading: it is tied to the
+        # lifetime of this call, not of the program.
+        reading_over = threading.Event()
 
-            watcher = None
+        def watch_cancel():
+            while not reading_over.is_set():
+                if cancel.wait(CANCEL_POLL_INTERVAL_S):
+                    cancelled.set()
+                    kill_child()
+                    return
+
+        watcher = None
+        timer = None
+        try:
             if cancel is not None:
                 if cancel.is_set():
                     # Give-up arrived BEFORE reading the first line (the
@@ -352,59 +443,68 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
             timer = threading.Timer(timeout, expire)
             timer.daemon = True
             timer.start()
-            try:
-                for line in process.stdout:
-                    # Every line is proof that the process is working: the
-                    # silence count restarts from zero.
-                    timer.cancel()
-                    lines.append(line)
-                    handle.write(line)
-                    handle.flush()
-                    if progress and line.strip():
-                        # The child's warnings arrive as template + values:
-                        # they are translated here (see messages.render_child_line).
-                        progress("FreeCAD: " + render_child_line(line.rstrip()))
-                    if timed_out.is_set() or cancelled.is_set():
-                        break
-                    timer = threading.Timer(timeout, expire)
-                    timer.daemon = True
-                    timer.start()
-                process.wait()
-            except BaseException:
-                # Anything raised while reading -- a failing progress
-                # callback, a log write error, KeyboardInterrupt -- leaves
-                # through Popen.__exit__, which waits for the child: a child
-                # still running would make that wait endless. Kill it first.
-                kill_child()
-                raise
-            finally:
+            for line in process.stdout:
+                # Every line is proof that the process is working: the
+                # silence count restarts from zero.
                 timer.cancel()
-                # Wake the watcher even when the reading ends on its
-                # own: otherwise it would stay asleep on an already dead process.
-                reading_over.set()
-                if watcher is not None:
-                    watcher.join(timeout=2 * CANCEL_POLL_INTERVAL_S)
-            output = "".join(lines)
-            handle.write(f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
-                         f"FreeCAD exit={process.returncode}, timeout={timed_out.is_set()}"
-                         f", cancelled={cancelled.is_set()}"
-                         # The watchdog diagnosis is written only if IT was the one
-                         # that killed the child. When the give-up has already
-                         # arrived, the silence that follows is the effect
-                         # of the kill, not its cause: announcing it
-                         # would accuse healthy work of a hang.
-                         + (tx(" (nessun output per {timeout} s)", timeout=timeout)
-                            if timed_out.is_set() and not cancelled.is_set() else "")
-                         + (tx(" (interrotto su richiesta dell'utente)")
-                            if cancelled.is_set() else "")
-                         + "\n")
-            handle.flush()
-            # The give-up comes BEFORE the watchdog: if the silence fired
-            # right after the request, what really happened is that
-            # someone pressed the button, and the log must not tell of a
-            # hang that never happened.
-            if cancelled.is_set():
-                raise ProcessCancelled(command, output=output)
-            if timed_out.is_set():
-                raise subprocess.TimeoutExpired(command, timeout, output=output)
-            return subprocess.CompletedProcess(command, process.returncode, output, "")
+                lines.append(line)
+                handle.write(line)
+                handle.flush()
+                if progress and line.strip():
+                    # The child's warnings arrive as template + values:
+                    # they are translated here (see messages.render_child_line).
+                    progress("FreeCAD: " + render_child_line(line.rstrip()))
+                if timed_out.is_set() or cancelled.is_set():
+                    break
+                timer = threading.Timer(timeout, expire)
+                timer.daemon = True
+                timer.start()
+            if timed_out.is_set() or cancelled.is_set():
+                # Killed: reaped with a bound and abandoned if the kill was
+                # refused (logged by the reaper), never waited for forever.
+                reap_killed_child(process)
+            else:
+                process.wait()
+        except BaseException:
+            # Anything raised while reading -- a failing progress callback, a
+            # log write error, KeyboardInterrupt -- must not leave a live
+            # child behind: kill it first, then reap it with the bound.
+            kill_child()
+            reap_killed_child(process)
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+            # Wake the watcher even when the reading ends on its
+            # own: otherwise it would stay asleep on an already dead process.
+            reading_over.set()
+            if watcher is not None:
+                watcher.join(timeout=2 * CANCEL_POLL_INTERVAL_S)
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+        output = "".join(lines)
+        handle.write(f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
+                     f"FreeCAD exit={process.returncode}, timeout={timed_out.is_set()}"
+                     f", cancelled={cancelled.is_set()}"
+                     # The watchdog diagnosis is written only if IT was the one
+                     # that killed the child. When the give-up has already
+                     # arrived, the silence that follows is the effect
+                     # of the kill, not its cause: announcing it
+                     # would accuse healthy work of a hang.
+                     + (tx(" (nessun output per {timeout} s)", timeout=timeout)
+                        if timed_out.is_set() and not cancelled.is_set() else "")
+                     + (tx(" (interrotto su richiesta dell'utente)")
+                        if cancelled.is_set() else "")
+                     + "\n")
+        handle.flush()
+        # The give-up comes BEFORE the watchdog: if the silence fired
+        # right after the request, what really happened is that
+        # someone pressed the button, and the log must not tell of a
+        # hang that never happened.
+        if cancelled.is_set():
+            raise ProcessCancelled(command, output=output)
+        if timed_out.is_set():
+            raise subprocess.TimeoutExpired(command, timeout, output=output)
+        return subprocess.CompletedProcess(command, process.returncode, output, "")

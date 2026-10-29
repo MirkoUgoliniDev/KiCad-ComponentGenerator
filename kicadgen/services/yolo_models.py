@@ -217,3 +217,82 @@ def provenance_of(sha256: str) -> Provenance | None:
     @return The Provenance, or None for a file the project does not know.
     """
     return KNOWN_MODELS.get(str(sha256).lower())
+
+
+class LoadedModelCache:
+    """@brief Keep the last few loaded model files, reused while the file is unchanged.
+
+    @details Validating a model before a paid analysis and then running it
+    used to read, hash and open the same weights twice (review 2026-10-29,
+    P6). The loaded object (an onnxruntime session, a PyTorch network) is
+    kept here under the file's identity and reused by the next caller.
+    @note The key is (resolved path, size, st_mtime_ns) plus the identity of
+        the runtime modules the caller names: a file rewritten in place gets
+        a new size or modification time and is loaded again, and a different
+        runtime (another onnxruntime, a test's fake) never receives an
+        object built by the previous one. A file replaced with the same size
+        AND the same nanosecond modification time is not detected; that is
+        the accepted limit of a stat-based key.
+    @note Failed loads are never stored. The loader runs outside the lock,
+        so two threads asking for the same new file may both load it once;
+        the cache itself stays consistent. This module still never loads a
+        model on its own: it only remembers what the caller's loader built.
+    """
+
+    def __init__(self, capacity=2):
+        """@brief Create an empty cache.
+
+        @param capacity Number of loaded files kept, least recently used
+            evicted first; at least 1.
+        @throws ValueError For a capacity that is not a positive integer.
+        """
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError("cache capacity must be a positive integer")
+        import threading
+        self._capacity = capacity
+        self._entries = []          # [(key, runtime objects kept alive, value)], newest last
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(path, runtime):
+        # The ids are safe only because the entry keeps the runtime objects
+        # alive: an id cannot be reused while its object exists.
+        resolved = Path(path).resolve()
+        stat = resolved.stat()
+        return (str(resolved), stat.st_size, stat.st_mtime_ns,
+                tuple(id(item) for item in runtime))
+
+    def get_or_load(self, path, loader, runtime=tuple):
+        """@brief Return the cached object for `path`, or load it and remember it.
+
+        @param path Weights file.
+        @param loader Callable without arguments that loads and validates
+            the file; its exceptions propagate and nothing is stored.
+        @param runtime Callable without arguments returning the runtime
+            objects (modules) the loaded object depends on; read before the
+            lookup and again after a load, so a module the loader imports
+            for the first time is part of the stored key. Default: none.
+        @return The loader's result, fresh or cached.
+        @throws OSError When the file cannot be examined.
+        """
+        key = self._key(path, runtime())
+        with self._lock:
+            for index, (stored, _alive, value) in enumerate(self._entries):
+                if stored == key:
+                    self._entries.append(self._entries.pop(index))
+                    return value
+        value = loader()
+        alive = tuple(runtime())
+        # Stat of the file BEFORE the load: a file changed while it was being
+        # loaded gets a newer key at the next call and is loaded again.
+        key = key[:3] + (tuple(id(item) for item in alive),)
+        with self._lock:
+            self._entries = [entry for entry in self._entries if entry[0] != key]
+            self._entries.append((key, alive, value))
+            del self._entries[:-self._capacity]
+        return value
+
+    def clear(self):
+        """@brief Forget every loaded file (tests, or to free memory)."""
+        with self._lock:
+            self._entries.clear()

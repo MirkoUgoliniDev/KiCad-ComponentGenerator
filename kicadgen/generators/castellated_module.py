@@ -61,7 +61,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import Footprint, FpRect, FpText, Pad, fab_reference_text
+from ..core.footprint import Footprint, FpRect, FpText, Pad, fab_reference_text, require_kicad_reach
 from ..core.output_names import validate_output_name
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
@@ -842,16 +842,38 @@ class CastellatedModuleParams:
             else the first side on that edge, else None.
         @note Matched by edge AND pin number, which validate() keeps unique,
             so two sides declared on the same edge are still told apart.
+        @note Looked up in an index cached on a snapshot of the numbering
+            (`_side_index`): the former scan rebuilt every side's numbers()
+            for each placement, O(n^2) over a module (review 2026-10-29, G5).
         """
-        fallback = None
+        by_number, first_on_edge = self._side_index()
+        side = by_number.get((placement.edge, placement.number))
+        return side if side is not None else first_on_edge.get(placement.edge)
+
+    def _side_index(self) -> tuple:
+        """({(edge, number): first side listing it}, {edge: first side}), cached.
+
+        Built in the order of self.sides with first-match semantics, exactly
+        the answer of the former linear scan of side_of. The cache key holds
+        every input of numbers() plus the identity of each side, so a side
+        replaced or edited in place (count, first pin, reverse, explicit
+        numbers) rebuilds the index. The cached index keeps the side objects
+        alive, so an id in the key cannot be reused by another side while
+        the entry exists."""
+        key = tuple((id(side), side.edge, side.count, side.first_pin, side.reverse,
+                     None if side.pin_numbers is None else tuple(side.pin_numbers))
+                    for side in self.sides)
+        cached = self.__dict__.get("_side_index_cache")
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        by_number: dict = {}
+        first_on_edge: dict = {}
         for side in self.sides:
-            if side.edge != placement.edge:
-                continue
-            if fallback is None:
-                fallback = side
-            if placement.number in side.numbers():
-                return side
-        return fallback
+            first_on_edge.setdefault(side.edge, side)
+            for number in side.numbers():
+                by_number.setdefault((side.edge, number), side)
+        self.__dict__["_side_index_cache"] = (key, (by_number, first_on_edge))
+        return by_number, first_on_edge
 
     def contact_geometry(self, placement: "PadPlacement") -> SideGeometry:
         """@brief Resolved hole geometry of the side of a placed contact.
@@ -1472,8 +1494,14 @@ class CastellatedModuleParams:
         self.__dict__["_pad_sizes_cache"] = (key, tuple(sizes))
         return list(sizes)
 
-    def _resolve_pad_sizes(self) -> List[PadSize]:
-        """Compute pad_sizes() (uncached)."""
+    def _resolve_pad_sizes(self, shorten: bool = True) -> List[PadSize]:
+        """Compute pad_sizes() (uncached).
+
+        With `shorten` False the pairwise length reduction between sides
+        (_shorten_assumed_lengths, quadratic in the contacts) is skipped:
+        widths and every other step are the same. validate() uses that cheap
+        form for its per-side checks, which a shortened length cannot change
+        (see the comment in validate)."""
         entries = []
         for side in self.sides:
             length, length_declared = self._raw_pad(side, "pad_length")
@@ -1511,7 +1539,7 @@ class CastellatedModuleParams:
         overhang = self.pad_overhang
         overhang_ok = (not isinstance(overhang, bool) and isinstance(overhang, (int, float))
                        and math.isfinite(overhang) and overhang >= 0)
-        if any(adjustable) and len(self.sides) > 1 and overhang_ok:
+        if shorten and any(adjustable) and len(self.sides) > 1 and overhang_ok:
             try:
                 self._shorten_assumed_lengths(entries, adjustable)
             except (ArithmeticError, KeyError, TypeError, ValueError):
@@ -1653,8 +1681,37 @@ class CastellatedModuleParams:
                 tx("Lo sbalzo dei pad oltre il bordo ({pad_overhang}mm) non puo' essere negativo.",
                    pad_overhang=self.pad_overhang)
             )
+        # A negative courtyard margin would draw the courtyard inside the
+        # copper, and a negative half-hole inset puts the hole centre outside
+        # the board, where the edge cannot cut it: both refused, as
+        # PinHeaderParams refuses its margin (review 2026-10-29, G8).
+        if self.margin < 0:
+            raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
+        if self.hole_inset is not None and self.hole_inset < 0:
+            raise ValueError(tx("La distanza del centro del semi-foro dal bordo ({hole_inset}mm) non puo' "
+                                "essere negativa.", hole_inset=self.hole_inset))
         self._validate_through_hole_sides()
         self._validate_double_contacts()
+
+        # The per-side checks below read the pad sizes WITHOUT the pairwise
+        # shortening of assumed lengths, which is quadratic in the contacts
+        # and used to run before the cheap span check (2 x 2000 contacts on
+        # a 20 mm body were refused only after seconds; review 2026-10-29,
+        # G5). Outcome and messages are unchanged: widths do not depend on
+        # the shortening, and a shortened length never drops below
+        # pad_overhang + 0.01 mm (pad_overhang >= 0 is checked above), so
+        # "length <= 0" and "pad_overhang >= length" hold for the shortened
+        # length exactly when they hold for the unshortened one, and when
+        # they hold nothing was shortened, so the length printed is the
+        # same. The full pad_sizes() runs afterwards, in the copper checks.
+        unshortened: Optional[List[PadSize]] = None
+
+        def side_pad(side) -> PadSize:
+            """The unshortened PadSize of `side`, by identity like _pad_size_of."""
+            nonlocal unshortened
+            if unshortened is None:
+                unshortened = self._resolve_pad_sizes(shorten=False)
+            return next(unshortened[i] for i, candidate in enumerate(self.sides) if candidate is side)
 
         seen_numbers: dict[str, str] = {}
         for side in self.sides:
@@ -1670,8 +1727,8 @@ class CastellatedModuleParams:
             if side.pitch <= 0 and side.count > 1:
                 raise ValueError(tx("Lato {label}: il passo deve essere > 0.", label=label))
 
-            pad_length = self.side_pad_length(side)
-            pad_width = self.side_pad_width(side)
+            pad_length = side_pad(side).length
+            pad_width = side_pad(side).width
             if pad_length <= 0 or pad_width <= 0:
                 raise ValueError(tx("Lato {label}: le dimensioni dei pad devono essere > 0.", label=label))
             # A land entirely outside the edge does not lie under the module: there
@@ -1772,6 +1829,15 @@ class CastellatedModuleParams:
                            label=label)
                     )
                 seen_numbers[number] = label
+
+        # Envelope of the footprint as build_castellated_module draws its
+        # courtyard: the body, the edge lands protruding by pad_overhang
+        # (their along-edge extent lies within the body, checked above) and
+        # the courtyard margin. KiCad cannot represent coordinates beyond its
+        # range and would move the copper silently (review 2026-10-29, G3).
+        protrudes = any(side.contact_style != CONTACT_THROUGH_HOLE for side in self.sides)
+        require_kicad_reach(max(self.body_length, self.body_width) / 2
+                            + (self.pad_overhang if protrudes else 0.0) + self.margin)
 
         self._validate_copper_clearance()
         self._validate_half_hole_insets()

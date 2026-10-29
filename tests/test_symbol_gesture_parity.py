@@ -260,8 +260,9 @@ def test_s1_pin_drag_to_a_new_node_commits_each_node_and_the_drop_once(tab7, twi
     """@brief S1 positive: a stepped drag commits every new node without a file; the drop writes once.
 
     Pinned contract (plan §1a S1, D12): the press selects (one redraw, no
-    edit); the FIRST step of a drag commits even on the start node (the
-    step memo is empty, `_restore_gesture_source`); a step to another node
+    edit); a step that stays on the start node while nothing has been
+    committed yet does nothing (CONTRACT CHANGED 2026-10-29, review C1); a
+    step to another node
     lays out, commits and redraws; a repeated node commits nothing; the
     release re-sends the drop point (skipped as a repeat) and ends the
     drag with one `_changed`, one redraw and the only recovery write.
@@ -275,7 +276,10 @@ def test_s1_pin_drag_to_a_new_node_commits_each_node_and_the_drop_once(tab7, twi
     assert tab7._gesture_before == before and tab7._selected_pin == '1'
     assert counter.take() == {'_draw': 1}, 'the press selects the pin; nothing is edited'
     _move(tab7, qapp, start + QPoint(0, -1))
-    assert counter.take() == STEP, 'the first step commits the start node (restore path)'
+    # CONTRACT CHANGED 2026-10-29: why — review C1: the first step on the
+    # start node used to re-commit the press rows (a layout and a redraw for
+    # nothing); while no step has committed anything it is skipped.
+    assert counter.take() == {}, 'a first step on the start node commits nothing'
     assert tab7.has_pending_edits() is False, 'the start node equals the baseline'
     target = _vp(tab7, _pin(tab7, '1').x + 1.0, _pin(tab7, '1').y + 2 * GRID_MM)
     _move(tab7, qapp, target)
@@ -325,7 +329,9 @@ def test_s1_a_press_and_release_on_the_same_point_is_a_click(tab7, qapp, monkeyp
     """@brief S1: no move between press and release: the pin is selected, nothing is edited or written.
 
     Pinned contract: the release still passes through a move (plan §4 item
-    3), so the drop runs the restore step AND the end: two `_changed`.
+    3), but a drag that committed nothing ends with no layout, no redraw
+    and no `_changed` (CONTRACT CHANGED 2026-10-29, review C1: it used to
+    run the restore step AND the end, two `_changed`).
     """
     before = tab7.draft_rows()
     start = _pin_press_point(tab7, '2')
@@ -333,7 +339,9 @@ def test_s1_a_press_and_release_on_the_same_point_is_a_click(tab7, qapp, monkeyp
     _press(tab7, qapp, start)
     counter.take()
     _release(tab7, qapp, start)
-    assert counter.take() == {'_changed': 2, '_draw': 2, 'layout_symbol': 2}
+    # CONTRACT CHANGED 2026-10-29: why — review C1: a click lays out and
+    # redraws nothing beyond the press's selection redraw.
+    assert counter.take() == {}
     _idle(tab7)
     assert tab7._selected_pin == '2'
     assert tab7.draft_rows() == before and not tab7.has_pending_edits()
@@ -717,8 +725,12 @@ def test_s10_left_drag_on_the_background_pans_the_camera_and_edits_nothing(tab7,
     h0, v0 = view.horizontalScrollBar().value(), view.verticalScrollBar().value()
     counter = _Counter(tab7, monkeypatch)
     _press(tab7, qapp, start)
-    assert view.gesture is None and view.camera.pan_active and not view.auto_fit
+    # CONTRACT CHANGED 2026-10-29: why — review C4: the press keeps auto-fit
+    # (a click must not stop it, as in the footprint preview); the first
+    # step that moves the view turns it off.
+    assert view.gesture is None and view.camera.pan_active and view.auto_fit
     _move(tab7, qapp, start + QPoint(30, 20))
+    assert not view.auto_fit
     _release(tab7, qapp, start + QPoint(30, 20))
     assert counter.take() == {}, 'a pan touches neither the draft nor the scene'
     assert not view.camera.pan_active
@@ -769,7 +781,7 @@ def test_s11_wheel_zooms_at_rest_and_is_refused_during_a_drag_or_a_pan(tab7, twi
 # ── Negatives: cancel paths ─────────────────────────────────────────────────
 
 def test_escape_cancels_a_stepped_drag_and_restores_the_rows(tab7, qapp, monkeypatch):
-    """@brief D1 today: Escape mid pin drag puts the initial rows back through `_populate`; no history, no file."""
+    """@brief D1: Escape mid pin drag puts the initial rows back through the geometry path (no `_populate`); no history, no file."""
     before = tab7.draft_rows()
     start = _pin_press_point(tab7, '1')
     target = _vp(tab7, _pin(tab7, '1').x + 1.0, _pin(tab7, '1').y + 2 * GRID_MM)
@@ -779,7 +791,10 @@ def test_escape_cancels_a_stepped_drag_and_restores_the_rows(tab7, qapp, monkeyp
     counter = _Counter(tab7, monkeypatch)
     QTest.keyClick(tab7.view, Qt.Key.Key_Escape)
     qapp.processEvents()
-    assert counter.take() == {'_populate': 1, '_changed': 1, '_draw': 1, 'layout_symbol': 1}
+    # CONTRACT CHANGED 2026-10-29: why — review C5: the cancel restores the
+    # drag's initial rows through `_restore_gesture_source` (one layout and
+    # redraw) instead of `_populate`, which rebuilt the whole pin table.
+    assert counter.take() == {'_changed': 1, '_draw': 1, 'layout_symbol': 1}
     _idle(tab7)
     assert tab7.draft_rows() == before and not tab7.has_pending_edits()
     assert len(tab7._history) == 1 and _recovery(tab7) is None
@@ -830,7 +845,10 @@ def test_hiding_the_tab_cancels_the_drag_before_the_view_goes_away(tab7, qapp, m
     tab7.hide()
     qapp.processEvents()
     assert order == ['repeat_ended', ('finished', False), 'repeat_ended']
-    assert counter.take() == {'_populate': 1, '_changed': 1, '_draw': 1, 'layout_symbol': 1}
+    # CONTRACT CHANGED 2026-10-29: why — review C5: the cancel restores the
+    # drag's initial rows through `_restore_gesture_source` (one layout and
+    # redraw) instead of `_populate`, which rebuilt the whole pin table.
+    assert counter.take() == {'_changed': 1, '_draw': 1, 'layout_symbol': 1}
     _idle(tab7)
     assert tab7.draft_rows() == before and len(tab7._history) == 1 and _recovery(tab7) is None
     tab7.show()

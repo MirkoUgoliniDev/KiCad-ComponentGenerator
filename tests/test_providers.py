@@ -451,7 +451,9 @@ def _deepseek_http_failures(monkeypatch, status, headers=None):
     from kicadgen.services import ai_diagnostics
     attempts = []
 
-    def fake_urlopen(request, timeout=None):
+    # CONTRACT CHANGED 2026-10-29 (review E6): a paid POST passes the closable
+    # TLS context to urlopen as `context=`, so the stand-in accepts it.
+    def fake_urlopen(request, timeout=None, **_kwargs):
         attempts.append(request.full_url)
         message = email.message.Message()
         for name, value in (headers or {}).items():
@@ -532,7 +534,9 @@ def _http_error(body: bytes, status=400):
 
 
 def _deepseek_failing_with(monkeypatch, error):
-    def fake_urlopen(request, timeout=None):
+    # CONTRACT CHANGED 2026-10-29 (review E6): a paid POST passes the closable
+    # TLS context to urlopen as `context=`, so the stand-in accepts it.
+    def fake_urlopen(request, timeout=None, **_kwargs):
         raise error
     monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(providers.ProviderError) as info:

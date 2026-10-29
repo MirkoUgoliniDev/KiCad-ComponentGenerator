@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from typing import Optional, Sequence
+from .footprint import require_kicad_reach
 from .output_names import validate_output_name
 from ..services.messages import tx
 
@@ -65,24 +66,33 @@ class PinSpec:
     def validate(self) -> None:
         """@brief Validate the object against its supported contract.
 
-        @throws ValueError When a value is out of contract.
+        @throws ValueError When a value is out of contract, or the pad's copper
+            reaches beyond KICAD_COORD_LIMIT_MM (`core.footprint.require_kicad_reach`).
+        @note The bound applies in the pin's own frame too (a source view
+            or a pin-1 origin): a drawing whose pads lie more than two metres
+            from its own origin describes no component, and the final frame
+            is checked again by `PackageGeometry.pins_seen_from_top`.
         @note An empty number is accepted only for a non-plated hole: KiCad
             writes mechanical holes with number "" (no net), while every
             electrical pad needs a number to be connected.
         """
         if not str(self.number).strip() and self.pad_type != "np_thru_hole":
             raise ValueError(tx("il numero del pin non puo' essere vuoto"))
-        _finite(self.x_mm, "x_mm")
-        _finite(self.y_mm, "y_mm")
-        _finite(self.pad_length_mm, "pad_length_mm", True)
-        _finite(self.pad_width_mm, "pad_width_mm", True)
+        x = _finite(self.x_mm, "x_mm")
+        y = _finite(self.y_mm, "y_mm")
+        length = _finite(self.pad_length_mm, "pad_length_mm", True)
+        width = _finite(self.pad_width_mm, "pad_width_mm", True)
         if self.pad_type not in PAD_TYPES:
             raise ValueError(tx("pad_type non valido: {pad_type}", pad_type=self.pad_type))
         if self.shape not in PAD_SHAPES:
             raise ValueError(tx("shape non valida: {shape}", shape=self.shape))
         if self.side is not None and self.side not in {"left", "right", "top", "bottom", "center"}:
             raise ValueError(tx("lato non valido: {side}", side=self.side))
-        _finite(self.rotation_deg, "rotation_deg")
+        rotation = _finite(self.rotation_deg, "rotation_deg")
+        # The copper, not only the centre, must stay within KiCad's range
+        # (review 2026-10-29, G3): checked on the rotated outline, so a pad
+        # turned by any angle is bounded by its real corners.
+        require_kicad_reach(pad_reach(x, y, length, width, rotation), str(self.number))
         if self.pad_type in {"thru_hole", "np_thru_hole"}:
             if self.drill_mm is None:
                 raise ValueError(tx("il pin {number} richiede drill_mm", number=self.number))
@@ -257,6 +267,11 @@ class PackageGeometry:
             if flips % 2:
                 x, pad_angle = -x, -pad_angle
             rx, ry = _rotate_kicad(x, y, cos_a, sin_a)
+            # The package orientation and the frame shift move the pads:
+            # the coordinates KiCad receives are bounded here, where they are
+            # final (review 2026-10-29, G3).
+            require_kicad_reach(pad_reach(rx, ry, float(pin.pad_length_mm), float(pin.pad_width_mm),
+                                          float(pad_angle) + float(self.orientation_deg)), str(pin.number))
             result.append(PinSpec(
                 number=pin.number, x_mm=rx + 0.0, y_mm=ry + 0.0,
                 pad_length_mm=pin.pad_length_mm, pad_width_mm=pin.pad_width_mm,
@@ -297,6 +312,19 @@ def pad_outline(x: float, y: float, size_x: float, size_y: float,
         rx, ry = _rotate_kicad(dx * size_x / 2, dy * size_y / 2, cos_a, sin_a)
         corners.append((x + rx, y + ry))
     return corners
+
+
+def pad_reach(x: float, y: float, size_x: float, size_y: float, rotation_deg: float = 0.0) -> float:
+    """@brief Largest |x| or |y| reached by the corners of a rotated pad, mm.
+
+    @param x Pad centre X, mm.
+    @param y Pad centre Y, mm.
+    @param size_x Pad size along its local X, mm.
+    @param size_y Pad size along its local Y, mm.
+    @param rotation_deg KiCad pad angle, degrees.
+    @return max over the `pad_outline` corners of max(|x|, |y|).
+    """
+    return max(max(abs(cx), abs(cy)) for cx, cy in pad_outline(x, y, size_x, size_y, rotation_deg))
 
 
 def polygon_separation(first: Sequence, second: Sequence) -> float:

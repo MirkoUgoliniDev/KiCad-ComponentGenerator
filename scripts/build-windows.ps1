@@ -29,16 +29,18 @@ use a virtual machine or Windows Sandbox.
 app-image: only the executable folder. msi: executable and installer.
 
 .PARAMETER IncludeYoloModel
-Ship every models\yolo\*.onnx (the official setup does); off by default so that a
-checkout without weights still builds.
+Ship exactly the ONNX weights of packaging\model-weights.json (the official
+setup does), each verified by size and SHA-256; a missing or different file
+stops the build. Off by default so that a checkout without weights still
+builds.
 #>
 param(
     [ValidateSet('app-image', 'msi')]
     [string]$Package = 'msi',
-    # Include every models\yolo\*.onnx (never a .pt: the package has no PyTorch).
-    # OFF by default so that a checkout without the weights still builds; the
-    # official setup is built with it (user, 2026-10-28, after the license
-    # review of THIRD_PARTY_NOTICES.md).
+    # Include the weights of packaging\model-weights.json (never a .pt: the
+    # package has no PyTorch). OFF by default so that a checkout without the
+    # weights still builds; the official setup is built with it (user,
+    # 2026-10-28, after the license review of THIRD_PARTY_NOTICES.md).
     [switch]$IncludeYoloModel
 )
 
@@ -122,12 +124,14 @@ Assert-LastCommand 'Rendering the application icon'
 
 # -- 5. PyInstaller ---------------------------------------------------------------
 if ($IncludeYoloModel) {
-    # The detectors (models\yolo) and the SMD network (models\smd), ONNX only.
-    $weights = @(Get-ChildItem -Path (Join-Path $Root 'models\yolo'), (Join-Path $Root 'models\smd') -Filter '*.onnx' -File -ErrorAction SilentlyContinue)
-    if ($weights.Count -eq 0) { throw 'No models\yolo\*.onnx found; export the checkpoints with tools\export_yolo_onnx.py (and tools\export_smd_onnx.py) or drop the switch.' }
-    foreach ($file in $weights) {
-        Write-Host ("Including the weights {0}\{1} ({2:N1} MB)." -f $file.Directory.Name, $file.Name, ($file.Length / 1MB)) -ForegroundColor Yellow
-    }
+    # Exactly the files of packaging\model-weights.json (the detectors in
+    # models\yolo, the SMD network in models\smd), each verified by size and
+    # SHA-256 before PyInstaller starts; the spec verifies them again and ships
+    # nothing else (review 2026-10-29, K1: a glob shipped whatever .onnx was
+    # on disk). Download them with tools\fetch_model_weights.py.
+    Write-Host 'Verifying the model weights against packaging\model-weights.json...' -ForegroundColor Yellow
+    & $python (Join-Path $Root 'tools\fetch_model_weights.py') --check
+    Assert-LastCommand 'Verifying the model weights (download them with tools\fetch_model_weights.py, or drop -IncludeYoloModel)'
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '1'
 } else {
     $env:KICADGEN_BUNDLE_YOLO_MODEL = '0'

@@ -81,13 +81,15 @@ with a text editor, copy the lines you need into your
 
 ## 4. Local detectors in the installed program
 
-The installed program ships ONNX Runtime: the local YOLO detector works with
-`.onnx` weights, chosen in the «YOLO model» field (the weights are not
-included, see `PACKAGING-WINDOWS-MSI.md`). PyTorch is not shipped, so `.pt`
-weights and the «YOLO + local SMD network (v3)» route are unavailable there:
-the entry is disabled with the reason in its tooltip, and the default
-detector is «Local YOLO + AI verification». To use them, run the program from
-the sources (see `README.md`).
+The installed program ships ONNX Runtime and the official setup ships the
+ONNX weights listed in `packaging\model-weights.json`, each verified by
+SHA-256 at build time: the four YOLO detectors and the SMD network, so «YOLO +
+local SMD network (v3)» is the default detector there too (see
+`PACKAGING-WINDOWS-MSI.md`). Other `.onnx` weights can be chosen in the «YOLO
+model» field. PyTorch is not shipped, so `.pt` weights give a clear error; to
+use them, run the program from the sources (see `README.md`). A setup built
+without the weights disables the SMD route with the reason in its tooltip
+and defaults to «Local YOLO + AI verification».
 
 ## 5. Where your files are
 

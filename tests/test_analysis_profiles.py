@@ -146,8 +146,13 @@ def test_missing_override_table_fails_at_open_without_recreating_it(tmp_path):
     store = ProfileStore(tmp_path / 'ai.sqlite3')
     with sqlite3.connect(store.path) as db:
         db.execute('DROP TABLE ai_overrides')
-    with pytest.raises(sqlite3.DatabaseError):
+    # CONTRACT CHANGED 2026-10-29: a damaged schema raises ProfileError (naming
+    # the file and the remedy, review E4) instead of the raw sqlite3 error;
+    # the cause is kept, and the database is still never recreated.
+    with pytest.raises(ProfileError) as info:
         ProfileStore(store.path)
+    assert isinstance(info.value.__cause__, sqlite3.DatabaseError)
+    assert str(store.path) in str(info.value)
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT name FROM sqlite_master WHERE name='ai_overrides'").fetchone() is None
 

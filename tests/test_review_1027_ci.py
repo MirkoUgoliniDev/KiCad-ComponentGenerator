@@ -153,7 +153,13 @@ def test_i4_skipping_the_tests_is_explicit_and_loud(publish_script):
     # gate looks at every run of the commit and tags only when ONE is green;
     # a failure refuses, a pending run waits, anything else asks for a re-run.
     assert "--limit 10" in publish_script
-    assert "conclusion -eq 'success'" in publish_script and "if ($green.Count -gt 0) { return }" in publish_script
+    # CONTRACT CHANGED 2026-10-29 (review K6): the green branch prints the run
+    # URL BEFORE returning; the old message after the final throw was
+    # unreachable and named an undefined $run, so it must be gone.
+    assert "conclusion -eq 'success'" in publish_script
+    assert re.search(r"if \(\$green\.Count -gt 0\) \{\s*(?:#[^\n]*\s*)*Write-Host \"Tests green on GitHub for \$sha "
+                     r"\(\$\(\$green\[0\]\.url\)\)\.\" -ForegroundColor Green\s*return\s*\}", publish_script)
+    assert "$run.url" not in publish_script
     assert "conclusion -eq 'failure'" in publish_script and "fix the suite before tagging" in publish_script
     assert "status -ne 'completed'" in publish_script and "wait for it" in publish_script
     assert "re-run it on GitHub" in publish_script

@@ -27,11 +27,11 @@ NUMBERS = tuple(int(part) for part in VERSION.split(".")) + (0,)
 
 datas = [
     (str(ROOT / "kicadgen" / "gui" / "assets"), "kicadgen/gui/assets"),
-    # Eseguiti da freecadcmd come file veri: devono esistere su disco.
+    # Run by freecadcmd as real files: they must exist on disk.
     (str(ROOT / "kicadgen" / "cad3d" / "*.py"), "kicadgen/cad3d"),
     (str(SEED / "data" / "analysis_profiles.sqlite3"), "data"),
     (str(ROOT / ".env.example"), "."),
-    # Licenza e avvisi di terze parti: li mostra il menu «?» > «Licenze».
+    # License and third-party notices: shown by the menu «?» > «Licenze» (Licenses).
     (str(ROOT / "LICENSE"), "."),
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
     # License files of the bundled components (CPython, Qt, PyQt6, OpenCV's
@@ -41,17 +41,24 @@ datas = [
 ]
 # YOLO weights: they have licenses of their own (THIRD_PARTY_NOTICES.md), so
 # they enter the package only with scripts/build-windows.ps1 -IncludeYoloModel.
-# Since 2026-10-28 every .onnx of models/yolo ships (the base model and the
-# ONNX exports of tools/export_yolo_onnx.py; the user chose all of them), never
-# a .pt: the package has no PyTorch. Without weights the program works and the
-# local detector asks for an .onnx file.
+# Then EXACTLY the files of packaging/model-weights.json ship (the four
+# detectors in models/yolo, app_paths.YOLO_MODELS_DIR, and the SMD network in
+# models/smd, so «YOLO + rete SMD» (YOLO + SMD network) works installed), each
+# verified by size and SHA-256 with tools/fetch_model_weights.py (standard
+# library only, loaded by path). A missing or different file stops the build;
+# any other file in those folders (an unreviewed export, a .pt: the package
+# has no PyTorch) is left out. Review 2026-10-29, K1: a glob shipped whatever
+# was on disk. Without the switch the program works and the local detector
+# asks for an .onnx file.
 if os.environ.get("KICADGEN_BUNDLE_YOLO_MODEL") == "1":
-    # Since 2026-10-02 the detectors live in models/yolo (app_paths.YOLO_MODELS_DIR)
-    # and the SMD network in models/smd; its ONNX export ships too (2026-10-28),
-    # so «YOLO + rete SMD» works in the installed program.
-    for folder in ("yolo", "smd"):
-        for weights in sorted((ROOT / "models" / folder).glob("*.onnx")):
-            datas.append((str(weights), f"models/{folder}"))
+    import importlib.util
+    _weights_loader = importlib.util.spec_from_file_location(
+        "kicadgen_fetch_model_weights", ROOT / "tools" / "fetch_model_weights.py")
+    weights_tool = importlib.util.module_from_spec(_weights_loader)
+    _weights_loader.loader.exec_module(weights_tool)
+    for folder, weights in weights_tool.verified_weights(
+            weights_tool.load_manifest(ROOT / "packaging" / "model-weights.json"), ROOT / "models"):
+        datas.append((str(weights), f"models/{folder}"))
 binaries = []
 hiddenimports = []
 for package in ("pyvista", "pyvistaqt", "vtkmodules", "onnxruntime"):
@@ -82,8 +89,8 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    # PyTorch/Ultralytics (modelli .pt) restano fuori: dimensione e licenza da
-    # decidere; nell eseguibile un .pt da un errore chiaro (photo_yolo).
+    # PyTorch/Ultralytics (.pt models) stay out: size and license still to be
+    # decided; in the executable a .pt gives a clear error (photo_yolo).
     excludes=["tkinter", "pytest", "_pytest", "tests", "torch", "torchvision", "ultralytics"],
     noarchive=False,
 )

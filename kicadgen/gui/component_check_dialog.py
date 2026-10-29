@@ -1,5 +1,6 @@
 """@brief Background component verification with a concise verdict and details."""
 import re
+import threading
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt, QSize
 from PyQt6.QtGui import QIcon
@@ -7,6 +8,15 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
                              QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
                              QToolButton, QHBoxLayout, QGroupBox)
 from ..services.component_check import verify_component, Check
+
+
+class _CheckAborted(BaseException):
+    """Raised from the emit hook to leave `verify_component` after an «Interrompi».
+
+    A BaseException on purpose: the verification catches `Exception` around
+    single checks to report them, and a stop request must not be reported as
+    a failed check and then ignored.
+    """
 
 
 class _CheckWorker(QThread):
@@ -36,21 +46,53 @@ class _CheckWorker(QThread):
         application = QApplication.instance()
         super().__init__(application if application is not None else parent)
         self.args = args
+        #: Set by «Interrompi» (and at application exit): no further KiCad
+        #: command is started once the running one has returned.
+        self.cancel = threading.Event()
+        #: True when the run ended because of `cancel`, not by completion.
+        self.aborted = False
         if application is not None:
             # Quitting while a KiCad command is in flight would destroy the
-            # running thread: wait for it instead. The wait is bounded by
-            # the 60 s limit of each KiCad command.
-            application.aboutToQuit.connect(self.wait)
+            # running thread: stop it after the current command and wait.
+            # The wait is bounded by the 60 s limit of that ONE command.
+            application.aboutToQuit.connect(self._stop_for_quit)
         self.finished.connect(self._release)
+
+    def stop(self):
+        """@brief Ask the verification to end after the KiCad command in flight.
+
+        @note `verify_component` offers no cancellation channel, so the stop
+            is checked each time a check result is emitted, i.e. between two
+            commands; the command already running is not killed (it still
+            ends within its 60 s limit).
+        """
+        self.cancel.set()
+
+    def _stop_for_quit(self):
+        """Stop after the current command, then wait for the thread to leave."""
+        self.stop()
+        self.wait()
+
+    def _emit(self, result):
+        """Forward one check, then leave the verification if a stop was asked."""
+        self.result.emit(result)
+        if self.cancel.is_set():
+            raise _CheckAborted()
 
     def run(self):
         """@brief QThread override: run every check, emitting each result as it completes.
 
         @note Any failure of the verification itself is reported as one ERROR
-            check so that the dialog always reaches its verdict.
+            check so that the dialog always reaches its verdict. A stop asked
+            with `stop()` ends the run at the next emitted check and sets
+            `aborted`; the checks already emitted stay.
         """
         try:
-            verify_component(**self.args, emit=self.result.emit)
+            if self.cancel.is_set():
+                raise _CheckAborted()
+            verify_component(**self.args, emit=self._emit)
+        except _CheckAborted:
+            self.aborted = True
         except Exception as exc:
             self.result.emit(Check('ERROR', 'Verifica interrotta', str(exc)))
 
@@ -63,7 +105,7 @@ class _CheckWorker(QThread):
         application = QApplication.instance()
         if application is not None:
             try:
-                application.aboutToQuit.disconnect(self.wait)
+                application.aboutToQuit.disconnect(self._stop_for_quit)
             except TypeError:
                 # Never connected or already disconnected: nothing to undo.
                 pass
@@ -142,6 +184,10 @@ class ComponentCheckDialog(QDialog):
         copy = QPushButton(tx('Copia rapporto'))
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self.report.toPlainText()))
         buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
+        # «Interrompi» (Stop): no further KiCad command after the running one.
+        self.stop_button = QPushButton(tx('Interrompi'))
+        self.stop_button.clicked.connect(self._stop_requested)
+        buttons.addButton(self.stop_button, QDialogButtonBox.ButtonRole.ActionRole)
         layout.addWidget(buttons)
         # Owned by QApplication, not by this window: see _CheckWorker.
         self.worker = _CheckWorker(args)
@@ -306,6 +352,21 @@ class ComponentCheckDialog(QDialog):
         self.ai_review_button.setVisible(bool(electrical_pins))
         self.actions_group.setVisible(bool(actions))
 
+    def _set_aborted_verdict(self):
+        """Verdict of a run stopped by «Interrompi»: never a readiness claim.
+
+        The checks emitted before the stop stay in the report and the
+        counts; what was not run is said, and nothing is called ready.
+        """
+        self.verdict.setText(self.tx('VERIFICA INTERROTTA'))
+        self.verdict.setStyleSheet('font-size: 16px; font-weight: bold; color: #f9e2af;')
+        self.verdict_icon.setPixmap(
+            QIcon(str(Path(__file__).parent / 'assets' / 'check-status-yellow.svg'))
+            .pixmap(QSize(44, 44)))
+        self.recommendation.setText(self.tx(
+            'Verifica interrotta su richiesta: i controlli restanti non sono stati eseguiti. '
+            'Ripeti la verifica prima di usare il componente.'))
+
     def _request_ai_pin_review(self):
         """Close the finished report and hand off pin review to the parent window."""
         if self._running:
@@ -313,10 +374,23 @@ class ComponentCheckDialog(QDialog):
         self.ai_review_requested = True
         self.accept()
 
+    def _stop_requested(self):
+        """Ask the worker to stop after the KiCad command in flight and say so."""
+        if not self._running:
+            return
+        self.worker.stop()
+        self.stop_button.setEnabled(False)
+        self.status.setText(self.tx(
+            'Interruzione richiesta: termina il comando KiCad in corso (al massimo 60 '
+            'secondi), poi la verifica si ferma.'))
+
     def _finished(self):
         self._running = False
+        self.stop_button.setEnabled(False)
         self.progress.hide()
         self._set_verdict()
+        if self.worker.aborted:
+            self._set_aborted_verdict()
         self.report.setPlainText(self._format_report())
         self.status.hide()
         if not self.details_toggle.isChecked():

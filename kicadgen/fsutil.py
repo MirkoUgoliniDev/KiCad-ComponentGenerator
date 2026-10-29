@@ -12,11 +12,44 @@ from __future__ import annotations
 import os
 import time
 
-#: Attempts and first pause of `replace_file`. The pauses double each time
+#: Attempts and first pause of `retry_transient` (`replace_file` and the
+#: in-place table overwrite of kicad_library). The pauses double each time
 #: (0.05 + 0.1 + 0.2 + 0.4 s): under a second in total, long enough for a
 #: scanner to release the file, short enough not to freeze the interface.
 REPLACE_ATTEMPTS = 5
 REPLACE_FIRST_PAUSE_S = 0.05
+
+
+def retry_transient(action, *, attempts: int = REPLACE_ATTEMPTS,
+                    first_pause: float = REPLACE_FIRST_PAUSE_S, sleep=time.sleep):
+    """@brief Run `action`, retrying it while Windows refuses access for an instant.
+
+    @param action Callable without arguments performing ONE file-system
+        operation that either succeeds or changes nothing (a rename, an open).
+    @param attempts Total attempts, at least 1.
+    @param first_pause Seconds before the second attempt; doubled afterwards.
+    @param sleep Pause function, replaceable in tests.
+    @return Whatever `action` returns.
+    @throws PermissionError When access is still refused after `attempts`.
+    @throws OSError Any other error immediately: only PermissionError is
+        transient (a missing file or a full disk does not heal by waiting).
+    @note The one bounded retry policy of the application: `replace_file`
+        and the in-place overwrite of a hard-linked KiCad table use it, so a
+        scanner holding the file is waited for in the same way everywhere.
+        `action` must not have partly changed anything when it raises, or a
+        retry would act on a half-changed file.
+    """
+    pause = first_pause
+    total = max(1, int(attempts))
+    for attempt in range(total):
+        try:
+            return action()
+        except PermissionError:
+            if attempt >= total - 1:
+                raise
+            sleep(pause)
+            pause *= 2
+    return None  # pragma: no cover - the loop always returns or raises
 
 
 def replace_file(source, target, *, attempts: int = REPLACE_ATTEMPTS,
@@ -32,16 +65,8 @@ def replace_file(source, target, *, attempts: int = REPLACE_ATTEMPTS,
     @throws OSError Any other error immediately: only PermissionError is
         transient (a missing file or a full disk does not heal by waiting).
     """
-    pause = first_pause
-    for attempt in range(max(1, int(attempts))):
-        try:
-            os.replace(source, target)
-            return
-        except PermissionError:
-            if attempt >= max(1, int(attempts)) - 1:
-                raise
-            sleep(pause)
-            pause *= 2
+    retry_transient(lambda: os.replace(source, target), attempts=attempts,
+                    first_pause=first_pause, sleep=sleep)
 
 
 def atomic_write_bytes(target, payload: bytes, *, prefix: str | None = None) -> None:

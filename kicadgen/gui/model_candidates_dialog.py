@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 
 from PyQt6.QtCore import (
@@ -19,7 +20,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QVBoxLayout,
+    QApplication, QHBoxLayout, QLabel, QLineEdit, QListWidget, QVBoxLayout,
     QWidget,
 )
 
@@ -370,6 +371,16 @@ def _triangle_colors(runs, count):
 #: cached. Bounded, because a module mesh can hold up to 100 000 triangles.
 _MESH_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _MESH_CACHE_SIZE = 8
+#: Bound of the mesh cache by size, in triangles summed over the entries.
+#:
+#: An engineering cap, not tuned on a board: a parsed mesh costs about 260
+#: bytes per triangle in Python (measured on a synthetic mesh at the 100 000
+#: triangle guard of `_thumbnail`: 26 MB), so eight entries at the guard held
+#: about 210 MB for the life of the program. Two meshes at the guard (about
+#: 52 MB) are what the cache is for -- the model on screen and the one just
+#: left, re-viewed or turned without starting FreeCAD again -- while small
+#: packages, a few hundred triangles each, still fill the eight entries.
+_MESH_CACHE_TRIANGLES = 200_000
 _MESH_CACHE_LOCK = threading.Lock()
 #: Finished pictures of a cached mesh, keyed by the mesh key plus everything
 #: that changes the drawing (view, angle, board rotation, body colour): going
@@ -377,6 +388,57 @@ _MESH_CACHE_LOCK = threading.Lock()
 #: 1.4 s in Python (measured 2026-09-26), the rest of a toggle.
 _IMAGE_CACHE: "OrderedDict[tuple, QImage]" = OrderedDict()
 _IMAGE_CACHE_SIZE = 32
+
+
+#: Whole-run limit of one preview `freecadcmd`, in seconds (unchanged).
+PREVIEW_TIMEOUT_S = 25
+
+
+class PreviewCancelled(Exception):
+    """@brief The preview child was killed because its dialog closed."""
+
+
+def _run_preview_child(command, cancel=None):
+    """Run the tessellation child; with a cancellation channel it can be stopped.
+
+    @param command Child command line (freecadcmd plus script).
+    @param cancel None: the historical blocking `subprocess.run` (not
+        interruptible). An object with `is_set()` (the dialog's
+        `threading.Event`): the child is polled every
+        `process_log.CANCEL_POLL_INTERVAL_S` and, once the channel is set,
+        killed with its whole process tree (`process_log.kill_process_tree`).
+    @return CompletedProcess with the child's stdout.
+    @throws PreviewCancelled When @p cancel was set.
+    @throws subprocess.TimeoutExpired After PREVIEW_TIMEOUT_S; the tree is killed.
+    @throws subprocess.CalledProcessError On a non-zero exit, as `check=True`.
+    """
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    if cancel is None:
+        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=PREVIEW_TIMEOUT_S, check=True, text=True,
+                              errors='replace', creationflags=flags)
+    from ..cad3d.process_log import CANCEL_POLL_INTERVAL_S, kill_process_tree
+    if cancel.is_set():
+        raise PreviewCancelled(command)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               text=True, errors='replace', creationflags=flags)
+    deadline = time.monotonic() + PREVIEW_TIMEOUT_S
+    while True:
+        try:
+            stdout, _ = process.communicate(timeout=CANCEL_POLL_INTERVAL_S)
+            break
+        except subprocess.TimeoutExpired:
+            stopped, expired = cancel.is_set(), time.monotonic() >= deadline
+            if not (stopped or expired):
+                continue
+            kill_process_tree(process)
+            process.communicate()
+            if stopped:
+                raise PreviewCancelled(command) from None
+            raise subprocess.TimeoutExpired(command, PREVIEW_TIMEOUT_S) from None
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command, stdout)
+    return subprocess.CompletedProcess(command, process.returncode, stdout)
 
 
 def _mesh_cache_key(path, automatic, component, colors):
@@ -432,8 +494,21 @@ def _store_mesh(key, mesh, auto_angle):
     with _MESH_CACHE_LOCK:
         _MESH_CACHE[key] = (mesh, auto_angle)
         _MESH_CACHE.move_to_end(key)
-        while len(_MESH_CACHE) > _MESH_CACHE_SIZE:
+        # Least recently used first, never the entry just stored: a single
+        # mesh is already capped at the guard, below the total bound.
+        while len(_MESH_CACHE) > 1 and (
+                len(_MESH_CACHE) > _MESH_CACHE_SIZE
+                or sum(_mesh_triangles(entry[0]) for entry in _MESH_CACHE.values())
+                > _MESH_CACHE_TRIANGLES):
             _MESH_CACHE.popitem(last=False)
+
+
+def _mesh_triangles(mesh):
+    """Triangle count of a cached mesh (0 for anything unreadable)."""
+    try:
+        return len(mesh['triangles'])
+    except (KeyError, TypeError):
+        return 0
 
 
 PREVIEW_COLORS_KEY = "step_preview_colors"
@@ -630,10 +705,7 @@ def _thumbnail(path, rotation, dimensions=None, color=None, view=VIEW_ISOMETRIC,
                 f'with open({str(output)!r}, "w") as stream:\n'
                 '    json.dump({"vertices": vertices, "triangles": triangles, '
                 '"color_runs": runs}, stream)\n', encoding='utf-8')
-            completed = subprocess.run([executable, str(script)], stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, timeout=25, check=True,
-                                       text=True, errors='replace',
-                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            completed = _run_preview_child([executable, str(script)], _PREVIEW_CANCEL.get())
             auto_angle = (_reported_auto_angle(getattr(completed, 'stdout', '') or '')
                           if automatic else None)
             if output.stat().st_size > 20_000_000:
@@ -780,6 +852,9 @@ PREVIEW_PLACEMENT_KEYS = ('landmark_side', 'landmark_feature', 'model_rotation_d
 #: Placement keys of the preview running in THIS thread (a worker sets it for
 #: its own run): `_thumbnail` keeps its signature, which tests replace.
 _PREVIEW_PLACEMENT = contextvars.ContextVar('preview_placement', default=None)
+#: Cancellation channel of the preview running in THIS thread, same reason:
+#: None (direct callers, tests) keeps the blocking, non-interruptible run.
+_PREVIEW_CANCEL = contextvars.ContextVar('preview_cancel', default=None)
 
 
 class _Preview(QRunnable):
@@ -787,7 +862,7 @@ class _Preview(QRunnable):
 
     def __init__(self, token, path, rotation, dimensions=None, color=None,
                  view=DEFAULT_PREVIEW_VIEW, placement=None, board_rotation=0.0,
-                 colors=True):
+                 colors=True, cancel=None):
         """@brief Prepare one thumbnail render identified by a dialog token.
 
         @param token Value the dialog compares against its current preview
@@ -802,8 +877,11 @@ class _Preview(QRunnable):
             published to the renderer through a context variable.
         @param board_rotation Rotation of the board in the preview, degrees.
         @param colors False to render without the model's own colours.
+        @param cancel Optional `threading.Event` of the owning dialog: once
+            set, the running `freecadcmd` is killed and no picture comes back.
         """
         super().__init__()
+        self.cancel = cancel
         self.signals = _Signals()
         self.token, self.path, self.rotation = token, path, rotation
         self.dimensions = dimensions
@@ -816,6 +894,7 @@ class _Preview(QRunnable):
     def run(self):
         """@brief Generate an optional thumbnail without blocking the Qt event loop."""
         _PREVIEW_PLACEMENT.set(self.placement)
+        _PREVIEW_CANCEL.set(self.cancel)
         try:
             # Only when needed: without rotation the call stays the same as
             # before (and its substitutes in the tests do not see it arrive).
@@ -905,6 +984,13 @@ class ModelCandidatesDialog(QDialog):
         self._token = 0
         self._closed = False
         self._workers = {}
+        # Stops this dialog's preview child (see _run_preview_child): set when
+        # the dialog closes and when the application quits with it open.
+        self._preview_cancel = threading.Event()
+        application = QApplication.instance()
+        if application is not None:
+            # A bound method: PyQt drops the connection with the dialog.
+            application.aboutToQuit.connect(self._stop_previews)
         self._dimensions = (component.get('length_mm'), component.get('width_mm'))
         # Rotation of the rectangle on the photo, in the CAD sense: the generator
         # flips Y and with it the sign of the angle (freecad_build_body._flip_y),
@@ -1582,7 +1668,8 @@ class ModelCandidatesDialog(QDialog):
                           else self.rotation.value() + delta,
                           self._dimensions, self._body_color, self._view,
                           placement=self._placement, board_rotation=self._board_rotation,
-                          colors=self.colors_checkbox.isChecked())
+                          colors=self.colors_checkbox.isChecked(),
+                          cancel=self._preview_cancel)
         self._workers[self._token] = worker
         worker.signals.ready.connect(self._preview_ready)
         QThreadPool.globalInstance().start(worker)
@@ -1625,12 +1712,20 @@ class ModelCandidatesDialog(QDialog):
                                    rotation_deg=None if self.auto_rotation.isChecked() else float(self.rotation.value()))
             super().accept()
 
+    def _stop_previews(self):
+        """Kill the running preview child: the program is quitting."""
+        self._preview_cancel.set()
+
     def done(self, result):
         """@brief Close without waiting for CAD; discard late previews and cancelled choices.
 
         @param result Qt Accepted or Rejected dialog result.
         """
         self._closed = True
+        # The preview child nobody will look at is killed now, not after its
+        # 25 s limit: the global thread pool would otherwise keep it, and the
+        # program exit waits for that pool.
+        self._preview_cancel.set()
         self._set_loading(False)
         self._token += 1
         self._index_token += 1

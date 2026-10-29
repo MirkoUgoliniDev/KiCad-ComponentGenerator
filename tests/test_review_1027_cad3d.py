@@ -166,15 +166,36 @@ def test_h2_model_sizes_skips_a_remembered_stall_until_the_file_changes(user_cac
 
 
 def test_h2_a_plain_failure_is_not_remembered_as_a_stall(user_cache, tmp_path, monkeypatch):
-    """@brief Negative: an unreadable file (None without a stall) stays retryable every time."""
+    """@brief Negative: an unreadable file (None without a stall) is never a stall.
+
+    CONTRACT CHANGED 2026-10-29: review H1 remembers an unreadable answer as
+    its own verdict ("unreadable"), bound to the FreeCAD build that gave it,
+    so the same FreeCAD does not re-read it at every generation. What this
+    test still guards: it is not recorded as a STALL, and without a FreeCAD
+    identity (no installation found) it stays retryable every time.
+    """
     model = _model(tmp_path)
     calls = []
     monkeypatch.setattr(km, "measure_models",
                         lambda paths, **kw: calls.append(1) or {str(p): None for p in paths})
+
+    def no_freecad():
+        raise step_generator.Cad3DError("freecadcmd not found")
+    monkeypatch.setattr(step_generator, "find_freecadcmd", no_freecad)
     km.model_sizes([model], tmp_path / "lib")
     km.model_sizes([model], tmp_path / "lib")
     assert len(calls) == 2
     assert not (user_cache / km.STALL_FILENAME).exists()
+
+    reader = tmp_path / "freecadcmd.exe"
+    reader.write_text("reader", encoding="utf-8")
+    monkeypatch.setattr(step_generator, "find_freecadcmd", lambda: str(reader))
+    km.model_sizes([model], tmp_path / "lib")
+    km.model_sizes([model], tmp_path / "lib")
+    assert len(calls) == 3, "the same FreeCAD does not re-read an unreadable file"
+    stalls = km.load_stalls()
+    assert not km.stall_remembered(stalls, model, km.MEASURE_SILENCE_TIMEOUT_S)
+    assert stalls[km.index_key(model)]["status"] == "unreadable"
 
 
 # ── H4: the output name is a plain file name ──────────────────────────────

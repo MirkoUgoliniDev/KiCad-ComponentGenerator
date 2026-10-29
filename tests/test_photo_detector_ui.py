@@ -139,6 +139,11 @@ def test_new_window_defaults_to_smd_network_without_restoring_custom_session_pat
     # Since 2026-10-02 the detectors live in models/yolo (app_paths.yolo_model_path).
     monkeypatch.setattr(gui, "yolo_weights_path",
                         lambda name: tmp_path.joinpath("models", "yolo", name))
+    # CONTRACT CHANGED 2026-10-29 (review P3): the 'yolo_smd' default comes
+    # from app_paths.default_yolo_smd_model(), so its folder is redirected too.
+    from kicadgen import app_paths
+    monkeypatch.setattr(app_paths, "yolo_model_path",
+                        lambda name: tmp_path.joinpath("models", "yolo", name))
     window.combo_photo_detector.setCurrentIndex(0)
     window.field_yolo_model.setText("session.onnx")
 
@@ -655,7 +660,17 @@ def test_the_smd_route_falls_back_to_the_onnx_export_of_its_detector(monkeypatch
     """
     monkeypatch.delenv("KICADGEN_YOLO_MODEL", raising=False)
     monkeypatch.setattr(gui, "yolo_weights_path", lambda name: tmp_path / "yolo" / name)
+    # CONTRACT CHANGED 2026-10-29 (review P3): the 'yolo_smd' choice now lives
+    # in app_paths.default_yolo_smd_model(), shared with the analysis, so the
+    # folder is redirected where that function looks.
+    from kicadgen import app_paths
+    monkeypatch.setattr(app_paths, "yolo_model_path", lambda name: tmp_path / "yolo" / name)
     (tmp_path / "yolo").mkdir()
+    # With neither file the shared rule names the checkpoint, the file the
+    # analysis checks and reports as missing (before, the field named the
+    # export while the run looked for the checkpoint).
+    assert gui.MainWindow._default_yolo_weights("yolo_smd").name == gui.DEFAULT_YOLO_PT
+    (tmp_path / "yolo" / gui.DEFAULT_YOLO_SMD_ONNX).write_bytes(b"export")
     assert gui.MainWindow._default_yolo_weights("yolo_smd").name == gui.DEFAULT_YOLO_SMD_ONNX
     assert gui.MainWindow._default_yolo_weights("yolo").name == gui.DEFAULT_YOLO_ONNX
     (tmp_path / "yolo" / gui.DEFAULT_YOLO_PT).write_bytes(b"checkpoint")

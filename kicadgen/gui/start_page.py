@@ -33,11 +33,6 @@ from .theme import BLUE, SUBTEXT, SURFACE0, SURFACE1, SURFACE2, TEXT
 NO_PROJECTS_TOOLTIP = ("Nessun progetto nell'area di lavoro: crea prima un progetto con «Nuovo "
                        "progetto…» oppure scegli un'altra cartella.")
 
-#: Tooltip of «Apri progetto…» while the working folder holds no project
-#: (HANDOFF 170): the command is disabled and this says why.
-NO_PROJECTS_TOOLTIP = ("Nessun progetto nell'area di lavoro: crea prima un progetto con «Nuovo "
-                       "progetto…» oppure scegli un'altra cartella.")
-
 #: Item data role that holds the `recent_projects.RecentProject` of a row.
 SUMMARY_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -344,8 +339,6 @@ class StartPage(QWidget):
             "project-open.svg", "Apri progetto...",
             "Apre un componente esistente della cartella di lavoro (Ctrl+O)")
         self.btn_open.clicked.connect(self.open_requested)
-        #: Tooltip of «Apri» while there is something to open (catalogue source).
-        self._open_tooltip = "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
         #: Tooltip of «Apri» while there is something to open (catalogue source).
         self._open_tooltip = "Apre un componente esistente della cartella di lavoro (Ctrl+O)"
 

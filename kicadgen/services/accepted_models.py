@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Iterable, Optional
 from .messages import tx
 from ..core.validation import finite_number, positive_number
@@ -328,6 +329,48 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+#: Rows read by `_find_visual`, by normalised archive path: (signature,
+#: entries, images). One body after another asks for the same rows, each
+#: through a fresh store (cad3d.kicad_models); without this every body read
+#: every crop PNG of the archive again (review 2026-10-29, E7).
+_visual_rows_cache: dict = {}
+_visual_rows_lock = threading.Lock()
+
+
+def _archive_key(path: Path) -> str:
+    """Normalised absolute form of an archive path, the key of `_visual_rows_cache`."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
+
+
+def _archive_signature(path: Path):
+    """Identity of the archive contents now; None when the file cannot be read.
+
+    Modification time and size, SQLite's file change counter (4 bytes at
+    offset 24 of the header, incremented by every commit in rollback-journal
+    mode) and the stamp of a `-wal` file: the same signature as the profile
+    store, so a write by another process in the same clock tick is seen.
+    """
+    try:
+        stat = path.stat()
+        with open(path, "rb") as handle:
+            handle.seek(24)
+            counter = handle.read(4)
+    except OSError:
+        return None
+    try:
+        wal = path.with_name(path.name + "-wal").stat()
+        wal_stamp = (wal.st_mtime_ns, wal.st_size)
+    except OSError:
+        wal_stamp = None
+    return (stat.st_mtime_ns, stat.st_size, counter, wal_stamp)
+
+
+def _forget_visual_rows(path: Path) -> None:
+    """Drop the cached visual rows of `path` (after a write through this process)."""
+    with _visual_rows_lock:
+        _visual_rows_cache.pop(_archive_key(path), None)
+
+
 class AcceptedModelStore:
     """@brief SQLite archive of the model matches accepted by the user.
 
@@ -365,9 +408,23 @@ class AcceptedModelStore:
             raise AcceptedModelsError(tx("Archivio abbinamenti non leggibile: {exc}", exc=exc)) from exc
         finally:
             connection.close()
+            if create:
+                # A write of this process: the visual rows are read again,
+                # even if the file signature happened not to change.
+                _forget_visual_rows(self.path)
 
     @staticmethod
     def _ensure_schema(db, create: bool) -> None:
+        """Bring the archive to SCHEMA_VERSION on a write; never touch it on a read.
+
+        A read of an older archive (versions 1-4) reads it as it is; a file
+        without a recognised schema is refused. A write migrates it inside
+        ONE ``BEGIN IMMEDIATE`` transaction, re-reading the version once the
+        write lock is held, and every column or table is added only when
+        PRAGMA table_info says it is missing (review 2026-10-29, E3): DDL in
+        autocommit mode used to commit the ALTER TABLE without the version,
+        and every later write then failed with «duplicate column».
+        """
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise AcceptedModelsError(
@@ -375,19 +432,68 @@ class AcceptedModelStore:
                    "toccato."))
         if version == SCHEMA_VERSION:
             return
+        if not create:
+            if 1 <= version < SCHEMA_VERSION:
+                # Read as it is: missing columns mean «non nota» (not known).
+                return
+            # An empty or foreign file in read-only mode: no entries, no write.
+            raise AcceptedModelsError(tx("Archivio abbinamenti senza schema riconosciuto."))
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            AcceptedModelStore._migrate(db)
+        except BaseException:
+            db.rollback()
+            raise
+        db.commit()
+
+    @staticmethod
+    def _columns(db, table: str) -> set:
+        """Column names of `table` (empty when the table does not exist)."""
+        return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+
+    @staticmethod
+    def _migrate(db) -> None:
+        """Every migration step up to SCHEMA_VERSION, inside the caller's transaction.
+
+        Each step is idempotent (guarded by PRAGMA table_info or IF NOT
+        EXISTS), so an archive whose column was added without its version
+        number by an older program is completed instead of refused.
+        """
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise AcceptedModelsError(
+                tx("Archivio abbinamenti creato da una versione piu' recente: non viene "
+                   "toccato."))
+        if version == 0:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS accepted_models ("
+                " id INTEGER PRIMARY KEY,"
+                " category TEXT NOT NULL,"
+                " basis TEXT NOT NULL,"
+                " long_mm REAL NOT NULL,"
+                " short_mm REAL NOT NULL,"
+                " height_mm REAL,"
+                " terminal_count INTEGER,"
+                " model_ref TEXT NOT NULL,"
+                " model_name TEXT NOT NULL,"
+                " rotation_deg REAL,"
+                " samples INTEGER NOT NULL DEFAULT 1,"
+                " first_accepted TEXT NOT NULL,"
+                " last_accepted TEXT NOT NULL,"
+                " source TEXT NOT NULL DEFAULT '',"
+                " example_name TEXT NOT NULL DEFAULT '',"
+                " side_uncertainty_mm REAL)")
+            db.execute("CREATE INDEX IF NOT EXISTS accepted_models_key "
+                       "ON accepted_models(category, basis)")
+            version = 2
         if version == 1:
             # Version 1: same table without the uncertainty. On read the
             # missing column means «non nota» (not known); on the first write
             # it is added, without touching the existing entries.
-            if create:
+            if "side_uncertainty_mm" not in AcceptedModelStore._columns(db, "accepted_models"):
                 db.execute("ALTER TABLE accepted_models ADD COLUMN side_uncertainty_mm REAL")
-                db.execute("PRAGMA user_version=2")
-                version = 2
-            else:
-                return
+            version = 2
         if version == 2:
-            if not create:
-                return
             db.execute(
                 "CREATE TABLE IF NOT EXISTS accepted_model_images ("
                 " id INTEGER PRIMARY KEY,"
@@ -399,51 +505,17 @@ class AcceptedModelStore:
                 " component_name TEXT NOT NULL DEFAULT '')")
             db.execute("CREATE INDEX IF NOT EXISTS accepted_model_images_parent "
                        "ON accepted_model_images(accepted_model_id)")
-            db.execute("PRAGMA user_version=4")
-            AcceptedModelStore._ensure_schema(db, create)
-            return
+            version = 3
         if version == 3:
-            if not create:
-                return
-            db.execute("ALTER TABLE accepted_model_images ADD COLUMN component_name "
-                       "TEXT NOT NULL DEFAULT ''")
-            db.execute("PRAGMA user_version=4")
-            AcceptedModelStore._ensure_schema(db, create)
-            return
+            if "component_name" not in AcceptedModelStore._columns(db, "accepted_model_images"):
+                db.execute("ALTER TABLE accepted_model_images ADD COLUMN component_name "
+                           "TEXT NOT NULL DEFAULT ''")
+            version = 4
         if version == 4:
-            if not create:
-                return
-            columns = {row[1] for row in db.execute("PRAGMA table_info(accepted_model_images)")}
-            if "model_rotation_deg" not in columns:
+            if "model_rotation_deg" not in AcceptedModelStore._columns(db, "accepted_model_images"):
                 db.execute("ALTER TABLE accepted_model_images ADD COLUMN model_rotation_deg REAL")
-            db.execute("PRAGMA user_version=5")
-            return
-        if not create:
-            # An empty or foreign file in read-only mode: no entries, no write.
-            raise AcceptedModelsError(tx("Archivio abbinamenti senza schema riconosciuto."))
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS accepted_models ("
-            " id INTEGER PRIMARY KEY,"
-            " category TEXT NOT NULL,"
-            " basis TEXT NOT NULL,"
-            " long_mm REAL NOT NULL,"
-            " short_mm REAL NOT NULL,"
-            " height_mm REAL,"
-            " terminal_count INTEGER,"
-            " model_ref TEXT NOT NULL,"
-            " model_name TEXT NOT NULL,"
-            " rotation_deg REAL,"
-            " samples INTEGER NOT NULL DEFAULT 1,"
-            " first_accepted TEXT NOT NULL,"
-            " last_accepted TEXT NOT NULL,"
-            " source TEXT NOT NULL DEFAULT '',"
-            " example_name TEXT NOT NULL DEFAULT '',"
-            " side_uncertainty_mm REAL)")
-        db.execute("CREATE INDEX IF NOT EXISTS accepted_models_key "
-                   "ON accepted_models(category, basis)")
-        db.execute("PRAGMA user_version=2")
-        # Continue through the same migration used for existing schema v2.
-        AcceptedModelStore._ensure_schema(db, create)
+            version = 5
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     # ── Lettura ─────────────────────────────────────────────────────
 
@@ -521,16 +593,13 @@ class AcceptedModelStore:
             query = descriptor_from_bytes(payload)
         except (TypeError, ValueError):
             return None
-        with self._connect(create=False) as db:
-            if db is None or not db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone():
-                return None
-            entries = {r['id']: dict(r) for r in db.execute('SELECT * FROM accepted_models')}
-            columns = {r[1] for r in db.execute('PRAGMA table_info(accepted_model_images)')}
-            angle = 'model_rotation_deg' if 'model_rotation_deg' in columns else 'NULL AS model_rotation_deg'
-            images = [dict(r) for r in db.execute(
-                f'SELECT id, accepted_model_id, descriptor, image_png, {angle} FROM accepted_model_images WHERE crop_version=?',
-                (IMAGE_CROP_VERSION,))]
+        rows = self._visual_rows()
+        if rows is None:
+            return None
+        # Copies: the chosen entry is returned (and annotated) to the caller,
+        # the cached rows must stay as read.
+        entries = {key: dict(row) for key, row in rows[0].items()}
+        images = [dict(row) for row in rows[1]]
         scores, examples = {}, {}
         for image in images:
             key = image['accepted_model_id']
@@ -609,6 +678,40 @@ class AcceptedModelStore:
                     orientation=match_orientation(query, examples[key]),
                     review_required=bool(conflicts), visual_conflicts=conflicts,
                     visual_first=True)
+
+    def _visual_rows(self):
+        """(entries by id, current-version crop rows) of the archive, or None without crops.
+
+        Served from `_visual_rows_cache` while the archive signature is
+        unchanged (review 2026-10-29, E7): the rows, PNG bytes included, are
+        read once per change of the archive instead of once per body. The
+        signature is taken BEFORE the read, so a write landing during it
+        makes the next call read again. The cached rows are shared: callers
+        copy them.
+        """
+        key = _archive_key(self.path)
+        signature = _archive_signature(self.path)
+        if signature is not None:
+            with _visual_rows_lock:
+                cached = _visual_rows_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+        with self._connect(create=False) as db:
+            if db is None or not db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='accepted_model_images'").fetchone():
+                rows = None
+            else:
+                entries = {r['id']: dict(r) for r in db.execute('SELECT * FROM accepted_models')}
+                columns = {r[1] for r in db.execute('PRAGMA table_info(accepted_model_images)')}
+                angle = 'model_rotation_deg' if 'model_rotation_deg' in columns else 'NULL AS model_rotation_deg'
+                images = tuple(dict(r) for r in db.execute(
+                    f'SELECT id, accepted_model_id, descriptor, image_png, {angle} FROM accepted_model_images WHERE crop_version=?',
+                    (IMAGE_CROP_VERSION,)))
+                rows = (entries, images)
+        if signature is not None:
+            with _visual_rows_lock:
+                _visual_rows_cache[key] = (signature, rows)
+        return rows
 
     def _find_mechanical(self, component: dict, roots: Iterable[Path], diagnostic=None) -> Optional[dict]:
         """@brief Accepted entry compatible with the body, or None.

@@ -90,6 +90,7 @@ the goal says «identical to today»; D1–D5 and D9 are defects or defect-adjac
 - **D6 Press without a prior move**: the symbol reveals the handles on the press (676); footprint handles exist only after a hover, so such a press pans.
 - **D7 Mouse capture**: symbol `grabMouse` (739); footprint relies on Qt's implicit grab. No visible difference; per-view flag.
 - **D8 Keyboard**: the symbol defers the recovery write during auto-repeat; the footprint writes on every repeat of Ctrl+Z. No nudge/rotate in the footprint (no selection model).
+  *Update 2026-10-29 (review C3/C8)*: the footprint now defers the write like the symbol (`DeferredCheckpoint`), has the arrow nudge (one drawing-grid step, Y down, through the drag-drop translate path) and R / Shift+R (clockwise / counter-clockwise quarter turn) on its selection (`IndexSelection`, else the hovered drawing), one undo step per press or repeat; every edit command pressed during a drag cancels the drag once through the gesture controller, then applies.
 - **D9 Hide mid handle drag** (footprint): the view forgets the drag (663) but the window keeps `_fp_handle_active = True`, so the next list change sets `_fp_handle_cancelled` and one future drop is ignored (15318-15319, 15804-15806). Latent defect.
 - **D10 Draw tools**: footprint press-move-release adds the release point (591-597); symbol wire/shape tools add points on press only.
 - **D11 Zoom**: refuse outside [0.15, 20] (symbol) vs clamp to [0.02, 40] (footprint); scene scales differ; parameters.

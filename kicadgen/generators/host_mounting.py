@@ -6,7 +6,7 @@ from math import isfinite
 from ..core.package_geometry import PackageGeometry, PinSpec, pad_outline, polygon_separation
 from ..services.messages import tx
 from .castellated_module import CastellatedModuleParams, pad_positions, MIN_COPPER_GAP_MM
-from .pin_header import PinHeaderParams, pad_copper_gap
+from .pin_header import PinHeaderParams, pad_copper_gap, pin_key, validate_pad_overrides
 
 
 def _land_gap(pin, other) -> float:
@@ -45,6 +45,14 @@ def _validate_header_clearance(pins):
                 raise ValueError(tx("Le piazzole degli header sono troppo grandi per la distanza fra i contatti."))
 
 
+def _checked_overrides(pad_overrides, numbers, drill) -> dict:
+    """The validated overrides keyed by `pin_key`, {} for None or an empty mapping."""
+    if not pad_overrides:
+        return {}
+    validate_pad_overrides(pad_overrides, {pin_key(number) for number in numbers}, drill)
+    return {pin_key(number): override for number, override in pad_overrides.items()}
+
+
 def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
                            pad_overrides=None):
     """@brief Build independent host lands at the module's closed-hole centres.
@@ -56,7 +64,9 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
     @param pad_overrides Optional {pin number: {"size": mm, "shape": str}}
         applied to single lands instead of the shared diameter and shape.
     @return Independent parameters used only by footprint export and 2D preview.
-    @throws ValueError For missing closed holes, invalid sizes or overlapping lands.
+    @throws ValueError For missing closed holes, invalid sizes or overlapping lands,
+        or an override that `pin_header.validate_pad_overrides` refuses (the
+        same rule on every path: package and castellated modules included).
     """
     if any(isinstance(v, bool) or not isinstance(v, (int, float))
            or not isfinite(v) or v <= 0 for v in (pad_diameter, drill)):
@@ -79,6 +89,9 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
             if pin.pad_type != "thru_hole":
                 raise ValueError(tx("Il contatto {number} non ha un foro passante per gli header.",
                                     number=pin.number))
+        # Same override rule as PinHeaderParams (review 2026-10-29, G7),
+        # looked up by the shared text identity of a pin number.
+        overrides = _checked_overrides(pad_overrides, (pin.number for pin in electrical), drill)
         # Preserve the declared source frame, numbering and mechanical holes.
         # Only already-drilled electrical lands receive the host dimensions.
         result_pins = []
@@ -86,7 +99,7 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
             if pin.pad_type == "np_thru_hole":
                 result_pins.append(pin)
                 continue
-            override = (pad_overrides or {}).get(str(pin.number), {})
+            override = overrides.get(pin_key(pin.number), {})
             size = float(override.get("size", pad_diameter))
             result_pins.append(replace(
                 pin, pad_length_mm=size, pad_width_mm=size,
@@ -98,14 +111,16 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
     if not isinstance(params, CastellatedModuleParams):
         raise ValueError(tx("Il montaggio con header richiede una scheda con fori passanti."))
     params.validate()
+    placements = list(pad_positions(params))
+    overrides = _checked_overrides(pad_overrides, (placement.number for placement in placements), drill)
     pins = []
-    for placement in pad_positions(params):
+    for placement in placements:
         geometry = params.contact_geometry(placement)
         if not geometry.has_thru_holes:
             raise ValueError(tx("Il contatto {number} non ha un foro passante per gli header.",
                                 number=placement.number))
         x, y = params.thru_hole_centre(placement)
-        override = (pad_overrides or {}).get(str(placement.number), {})
+        override = overrides.get(pin_key(placement.number), {})
         size = float(override.get("size", pad_diameter))
         pins.append(PinSpec(number=placement.number, x_mm=x, y_mm=y,
                             pad_length_mm=size, pad_width_mm=size,

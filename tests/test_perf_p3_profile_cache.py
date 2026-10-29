@@ -159,6 +159,12 @@ def test_an_outside_write_in_the_same_tick_with_the_same_size_is_seen(tmp_path):
     outside.close()
     os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     assert path.stat().st_size == stamp.st_size and path.stat().st_mtime_ns == stamp.st_mtime_ns
+    # CONTRACT CHANGED 2026-10-29 (review E2): a write by a connection that is
+    # not a ProfileStore of this process is noticed by the first lookup after
+    # the bound _EXTERNAL_CHANGE_CHECK_S, no longer by every lookup (each one
+    # used to stat and open the file). The counter still decides, as before.
+    import time
+    time.sleep(analysis_profiles._EXTERNAL_CHANGE_CHECK_S * 1.5)
     assert store.get_type(key)["label"] == replacement
 
 

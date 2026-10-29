@@ -1,5 +1,356 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 29/10 — RIPRESA (utente: «ok riprendi da hand off ok ?»)
+
+ESITO: correzioni della revisione n.2 COMPLETE e COMMITTATE su ADVANCED
+(hash nel commit di documentazione successivo); suite 10639 passati,
+14 saltati, 19 sottotest. Il blocco «IN PAUSA PER CREDITO» qui sotto e'
+STORICO: non va piu' seguito.
+
+Passo 1 verificato: `git status --short` IDENTICO a `.venv/review-1029/status.txt`,
+HEAD `84e0f81`. Piano in corso, nell'ordine di «COME RIPRENDERE» qui sotto:
+- 6 correttori in parallelo (MW, CANVAS, GUIO, SRV, GEN, CAD) su file disgiunti,
+  ciascuno con FIXER_RULES.md + il suo rapporto; voci i18n nei file ESISTENTI
+  `.venv/review-1029/i18n_<ambito>.py` (lo scratchpad della sessione vecchia
+  non vale piu'); basetemp dei test nello scratchpad della nuova sessione.
+- poi coordinatore: P3 gemelli (datasheet_extractor, main_window), unione i18n,
+  rilettura diff, suite in due meta', sonde dei 5 ALTI, handoff, richiesta OK.
+Stato dei correttori: (aggiornare man mano)
+- 6 correttori LANCIATI in parallelo (MW con L2-GUI/C3-footprint/C8/C10/A3
+  PhotoReviewDialog; CANVAS; GUIO; SRV; GEN; CAD con cancel= di
+  model_candidates per U1 e @throws di freecad_build_body.main). Rapporti
+  attesi; se la sessione si interrompe, i loro rapporti NON sono arrivati.
+- GUIO CHIUSO: U1-U8 erano gia' tutti fatti dal correttore precedente;
+  contratti dei doppi `_Idle` (stop()) in test_photo_review_dialog/list
+  completati. 581+352 verdi; unico rosso test_documentation per
+  `__init__` senza @brief in ai_diagnostics/_CancelWatch e
+  openrouter/_InflightRequest (ambito SRV, segnalato). Limiti noti: U7 non
+  uccide il comando kicad-cli in corso (verify_component senza cancel=,
+  max 60 s; opzionale); _stop_for_quit del check dialog senza limite; attesa
+  all'uscita del _MatchWorker limitata a 5 s. Voci i18n in i18n_guio.py.
+- SRV CHIUSO: E1-E8 fatti (E6 completato ora: close a livello C del socket
+  perche' su Windows shutdown non sveglia recv; handshake TLS differito per
+  poter annullare durante l'handshake). @brief aggiunti ai due __init__.
+  36 test propri + 722 verdi; 1 rosso atteso (test_message_localization:
+  voci i18n non ancora unite). Rischi: E6 usa interni privati della stdlib
+  (_create_https_context, socket._socket.socket.close, __class__ del
+  contesto SSL) -> ricontrollare a ogni aggiornamento di Python; il
+  controllo di annullamento gira su un thread (deve restare thread-safe);
+  E2 vede cambi esterni del DB profili con 0,1 s di ritardo.
+- GEN CHIUSO: G1-G8 fatti (correttore precedente); ora corretta una
+  regressione G3 in pin_header (inviluppo non finito -> messaggio «finiti»
+  esistente, non «inf mm»). 210 verdi nel suo ambito. Rossi FUORI ambito
+  visti nel suo giro largo: 13 test cad3d per il nuovo controllo H8
+  END-ISO contro il finto FreeCAD (girato al correttore CAD),
+  test_review_1027_cad3d::test_h2, test_review_1027_ci::test_i4
+  (publish-release.ps1, ambito PKG chiuso: DA CONTROLLARE dal coordinatore),
+  test_review_1027_sweep::test_s4 (DA CONTROLLARE). [Coordinatore: i4 era
+  il contratto della correzione K6, aggiornato in test_review_1027_ci
+  («CONTRACT CHANGED 2026-10-29»: il ramo verde stampa l'URL prima di
+  tornare, nessun $run.url), 44 verdi; s4 = controllo END-ISO contro il
+  finto FreeCAD, girato a CAD.] Rischio G7 ora anche su
+  host_mounting: override di pin non piu' esistenti o <= foro -> ValueError;
+  girato a MW per i chiamanti in main_window.
+- MW CHIUSO: A1-A7, B1-B5, C3 lato footprint, C8, C10, L2-GUI fatti dal
+  correttore precedente; A8 PARZIALE di proposito (tolto solo il doppio
+  _refresh_symbol_tab; le coppie _refresh_type_effect e
+  _refresh_model_combo/_refresh_ai_tools_summary restano per l'ordine di
+  ripristino, risparmio mai misurato). NUOVO per G7:
+  `_applicable_pad_overrides` in _host_footprint_params: gli override
+  scaduti (pin sparito / pad <= foro) restano nella bozza ma non entrano in
+  disegno e file, una riga di log quando cambia l'insieme (voce in
+  i18n_mw.py). 1876+136 verdi (l'unico rosso era il @brief SRV, ora
+  corretto). Aperto, NON deciso: per un pin header in modo diretto un
+  override scaduto fa ancora tornare None all'anteprima (nessun crash) —
+  filtrarlo uguale e' una decisione da chiedere all'utente. Da ricontrollare:
+  C3+C7 i comandi da tastiera annullano anche banda e pan (confermare parita'
+  col simbolo, lo fa CANVAS); il memo B2 vale solo se nulla dentro
+  _refresh_output_actions cambia stato/tipo. Le sonde probe_mw5 asseriscono
+  ancora il vecchio difetto (5 trattenuti): ora 0.
+- COORDINATORE, P3 gemelli FATTI: datasheet_extractor e
+  main_window._default_yolo_weights usano app_paths.default_yolo_smd_model()
+  (dopo l'override KICADGEN_YOLO_MODEL). Test nuovi
+  tests/test_review_1029_coord.py (positivo: solo export -> export;
+  negativo: checkpoint presente -> checkpoint). Contratto cambiato in
+  tests/test_photo_detector_ui.py (due test): senza nessun file il campo
+  nomina ora il checkpoint, cioe' lo stesso file che l'analisi controlla.
+  67 verdi.
+- CAD CHIUSO: H1-H9 fatti (H6 verificato con FreeCAD 1.1.4 vero: box
+  identico, fetta 0,14-2,3 s -> ~0,01 s); nuovo kicad_models.listing_scope()
+  pubblico; cancel anche durante la ricostruzione dell'indice footprint.
+  Contratti cambiati: finti FreeCAD di test_review_1027_sweep scrivono un
+  STEP con END-ISO (H8 non allentato), spia json.dumps in
+  test_single_tht_face_texts (H7), test_review_1027_cad3d::test_h2 (file
+  illeggibile ricordato come «unreadable», mai come stallo). 215 + 2917
+  verdi; 2 rossi AMBIENTALI con FreeCAD vero (percorso di staging 275
+  caratteri > MAX_PATH sotto il basetemp lungo dello scratchpad: con
+  .venv/claude-test-run devono passare — CONFERMARE nella suite).
+  Rischio: un crash transitorio (memoria) resta ricordato finche' non
+  cambiano modello o FreeCAD.
+- COORDINATORE: smd_component_classifier._attach_kicad_results dentro un
+  solo listing_scope + cancel passato a footprint_sizes (richiesta CAD,
+  H5); 2 test in test_review_1029_coord.py; 163 verdi.
+- CANVAS CHIUSO: C1, C2, C3 lato simbolo, C4-C7, C9 fatti dal precedente;
+  C1 misurato 1371 ms -> 64 ms (120 pin + 40 forme). Contratti aggiornati
+  nei test di parita' del simbolo + golden symbol_session.json rigenerato
+  (diff letto dal coordinatore: solo i due blocchi di conteggi attesi).
+- COORDINATORE, PARITA' C3 decisa (carta bianca, regola del simbolo): un
+  comando senza nulla su cui agire (niente da annullare/ripetere, nessun
+  bersaglio, appunti vuoti) NON annulla il trascinamento in nessuna delle
+  due schede: _footprint_edit_command(handler, applies). Trovato e corretto
+  un difetto PREESISTENTE: _step_footprint_history azzerava il
+  trascinamento anche senza nulla da annullare (Ctrl+Z a vuoto lo perdeva
+  in silenzio): ora esce prima. Test MW divisi (agisce -> annulla una volta;
+  a vuoto -> il rilascio applica). docs/canvas-camera-grid-plan.md riga API
+  di pan_begin aggiornata (keep_auto_fit, C4).
+- TRAPPOLA: tests/test_footprint_gesture_parity.py (f2/f3) dipende dalla
+  posizione REALE del cursore lasciata dal test precedente (QTest muove il
+  cursore di piattaforma; un move nello stesso punto non genera evento).
+  Fallisce se lo si esegue DOPO test_review_1029_mw.py; nell'ordine
+  alfabetico della suite gira prima ed e' verde (805 verdi con
+  test_canvas_* + test_footprint_*). Un movimento neutro nella fixture
+  cambia i golden: non fatto. Fragilita' preesistente, non risolta.
+- COORDINATORE: 22 voci i18n unite in DEFAULT_TRANSLATIONS (blocco
+  «Review of 2026-10-29»); test i18n/untranslated/qt/message_localization/
+  documentation: 80 verdi.
+- SUITE COMPLETA n.1: meta' A 6145 passati, 10 saltati, 19 sottotest;
+  meta' B 11 FALLITI, 4481 passati, 4 saltati. Causa unica trovata: in
+  tests/test_review_1029_canvas.py quattro test (c2_footprint_negative,
+  c7_footprint, c9_footprint, c9_footprint_negative) premevano con
+  QTest.mousePress senza rilasciare; QTest tiene i pulsanti premuti per
+  processo, quindi ogni mouseMove dopo era un trascinamento (hover persi in
+  test_review_window_coverage, test_review_windows_fixes,
+  test_symbol_clicktool_parity, test_symbol_gesture_parity, verdi da
+  soli). Aggiunti i rilasci: 127 verdi in sequenza. Sonda H1 (coord_h1)
+  rieseguita dal coordinatore: a e c misurati, b ricordato «crashed».
+  Meta' B rieseguita: processo MORTO al 70% senza riepilogo e senza
+  nessun rosso fino li' (log scratchpad coord/second_run.log). Sospetto il
+  crash nativo Qt/VTK del punto 113, da confermare: rilanciata con -v
+  (coord/second_run_v.log, riga «EXIT n» in fondo) per vedere l'ultimo test.
+  Esito: meta' B 4492 passati, 4 saltati, EXIT 0, superato il 70% senza
+  crash -> la morte precedente era il crash nativo casuale del punto 113.
+- SUITE COMPLETA VERDE (29/10 sera): A 6145/10/19, B 4492/4, 0 falliti =
+  10637 passati, 14 saltati, 19 sottotest. NIENTE COMMITTATO: serve l'OK.
+- DECISIONE UTENTE 29/10 («Sì, stessa regola»): nel pin header DIRETTO gli
+  override di pad scaduti (pin sparito / pad <= foro) si saltano come
+  nell'header di montaggio (riga di log, restano nella bozza). FATTO:
+  _current_params filtra con _applicable_pad_overrides(params,
+  params.drill) (vale per anteprima E generazione); tolto da
+  _preview_params il blocco che rimetteva header_pad_overrides interi
+  (dopo B1 inutile, avrebbe annullato il filtro). Test
+  test_direct_header_* in test_review_1029_mw.py (positivo + negativo).
+  Test dei file che toccano override/params: 541 verdi.
+- CONTROLLO CHIAVI API (richiesta utente 29/10, «verifica assolutamente»):
+  PULITO. .env/config.json mai tracciati (nessun commit, anche origin/main)
+  e ignorati; file attuali tracciati+nuovi e DB profili: solo il valore
+  finto di test sk-or-v1-abcdef0123456789... (29 car.) in
+  test_review_1027_services.py; storia: 417 commit, 3982 blob (binari e
+  tutte le versioni del DB inclusi) senza corrispondenze; pacchetto: la
+  spec include solo .env.example e il seed generato dal codice;
+  dist/KiCadGen (1899 file, base dell'MSI locale) e build/ (seed) senza
+  corrispondenze; i workflow non usano segreti (l'MSI 1.0.2 di GitHub e'
+  costruito dal checkout del tag, senza .env). Scanner riusabile:
+  scratchpad coord/scan_keys.py (stampa solo percorso e 8 car. oscurati).
+- SUITE COMPLETA n.2 VERDE (dopo la regola del pin header): A 6145/10/19,
+  B 4494/4, 0 falliti = 10639 passati, 14 saltati, 19 sottotest.
+- AUTORIZZAZIONE UTENTE 29/10 («ok fai tutto in modo preciso», dopo il
+  piano suite -> commit -> build locale -> release): commit su ADVANCED e
+  build locale con la skill build-installer. Push, merge su main e release
+  v1.0.3 NON ancora autorizzati in modo esplicito: chiederli (una domanda).
+- PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
+  ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
+  Ancora da chiedere all'utente (UNA domanda alla volta): override pad
+  scaduto in un pin header diretto (anteprima None) -> filtrarlo come per
+  l'header di montaggio?
+
+## 29/10 — IN PAUSA PER CREDITO (utente: «preferisco che migliori handoff e lo facciamo dopo quando si rinnova il credito» + «non implementare ora che altrimenti rimaniamo a meta'»)
+
+BRANCH ADVANCED, ultimo commit `84e0f81` (= main), NIENTE COMMITTATO.
+ALBERO DI LAVORO SPORCO E NON VERDE: 68 file modificati + 9 nuovi (8 test
+tests/test_review_1029_*.py + tests/data/yolo_export_parity_golden.json).
+Suite NON eseguita dopo le correzioni. NON committare, NON fare `git checkout`
+/ `git restore` / `git stash` senza aver letto qui.
+
+BACKUP (dentro il repo, cartella ignorata da git): `.venv/review-1029/`
+- `a1..a10_*.md`: i 10 rapporti della revisione (76 finding, righe e scenari);
+- `FIXER_RULES.md`: regole date ai correttori (riusabili tali e quali);
+- `i18n_cad|gen|guio|kl|photo|srv.py`: voci di traduzione NON ancora unite
+  in kicadgen/services/i18n.py;
+- `probes/a1..a9, coord_h1`: sonde di riproduzione (coord_h1 = crash di
+  FreeCAD riprodotto dal coordinatore; la sonda a8 NON riproduce piu');
+- `wip-tracked.patch` (git diff, 8672 righe) e `wip-untracked.tar` (file
+  nuovi) = stato esatto al momento della pausa; `status.txt`.
+Lo scratchpad originale (AppData/Local/Temp/claude/.../scratchpad/review2) puo'
+sparire: fa fede la copia in .venv/review-1029.
+
+STATO PER AMBITO (correttori su file disgiunti):
+| Ambito | Stato | Note |
+|---|---|---|
+| KL kicad_library, component_check, fsutil | FATTO, 225 verdi | L1-L5 |
+| PKG packaging, scripts, workflow, fetch pesi | FATTO, 114 verdi | K1-K8 + job release 180 min (coordinatore) |
+| PHOTO photo_yolo, smd, yolo_models, photo_inventory, app_paths, export_yolo | FATTO, 590 verdi | P1-P7; 2 rossi di documentazione su freecad_build_body (file di CAD) |
+| MW main_window, component_state | INTERROTTO | fermo mentre eseguiva i test finali; ricevuto anche L2-GUI |
+| CANVAS symbol_tab, footprint_view, canvas_* | INTERROTTO | fermo mentre rieseguiva i test |
+| GUIO photo_review_dialog, model_candidates_dialog, component_check_dialog, theme, start_page | INTERROTTO | fermo mentre aggiornava i doppi di test (contratto della promessa di uscita) |
+| SRV openrouter, providers, analysis_profiles, accepted_models, datasheet_extractor, ai_diagnostics | INTERROTTO | fermo mentre SCRIVEVA il file di test: codice forse senza test |
+| GEN generators/, core/ | INTERROTTO | fermo mentre sistemava due test e aggiungeva un test oracolo |
+| CAD cad3d/ | INTERROTTO | fermo su una sonda di tempi A/B; freecad_build_body.main senza @throws |
+Per i 6 interrotti NON si sa quali finding siano completi: i loro rapporti
+finali non sono arrivati.
+
+COME RIPRENDERE (ordine):
+1. `git status` deve coincidere con `.venv/review-1029/status.txt`; se no,
+   capire perche' prima di tutto.
+2. Per ognuno dei 6 ambiti interrotti lanciare UN correttore (file disgiunti
+   come prima, tabella sopra) con: le regole `.venv/review-1029/FIXER_RULES.md`,
+   il rapporto del suo ambito, e l'istruzione «le modifiche gia' fatte sono
+   nell'albero: leggi `git diff -- <tuoi file>`, verifica ogni finding (fatto
+   / parziale / mancante), completa, scrivi i test mancanti (positivo e
+   negativo), esegui i test del tuo ambito, rapporto finale». Le decisioni del
+   coordinatore (C3, C4, C6, C8, L2, E6, H6, P7) sono qui sotto e valgono.
+   MW deve includere L2-GUI: in main_window, ciclo d'installazione ~13319-13335,
+   ramo `except KiCadLibraryError`: i codici `library_entry_conflict` E
+   `library_entry_disabled` chiedono conferma; testo
+   `kicad.confirm_enable_library_entry` per il secondo (voce in i18n_kl.py).
+3. Coordinatore, dopo i correttori: datasheet_extractor 3255-3257 ->
+   `app_paths.default_yolo_smd_model()`; main_window._default_yolo_weights
+   (~2702) idem dopo l'override KICADGEN_YOLO_MODEL (tests/
+   test_photo_detector_ui.py:651 patcha gui.yolo_weights_path); unire i
+   file i18n_*.py in DEFAULT_TRANSLATIONS (skill add-ui-text); test i18n.
+4. Rileggere i diff (commenti in inglese, @brief, nessun residuo), suite
+   completa in due meta' (skill run-test-suite), revisione rapida dei 5 ALTI
+   con le sonde in probes/ (devono ora passare), handoff e CLAUDE.md con i
+   conteggi, poi CHIEDERE L'OK per il commit (skill pre-commit-check: DB
+   profili incluso, fixture golden inclusa).
+5. Prima della prossima release: build locale vera (la spec nuova che legge
+   il manifest non e' mai stata eseguita sotto PyInstaller).
+
+
+## 29/10 — IN CORSO: revisione avversariale COMPLETA n.2 (utente: «rifare un super controllo con agenti esperti ... mi serve un software robusto ed efficiente ... fai prima un piano» -> piano presentato -> «ok hai carta bianca! mi raccomando la precisione!!»)
+
+Base: ADVANCED `84e0f81` = main, albero pulito. Post LinkedIn aggiornato con i
+link alla release v1.0.2 e all'MSI (SHA-256 92e2a34c...5742 dal digest GitHub;
+le note della release NON riportano lo SHA-256: eventuale aggiunta da chiedere).
+
+INTERPRETAZIONE DELLA CARTA BIANCA: fase 1 (rapporto) + fase 2 (correzioni di
+TUTTO il confermato e del sospetto verificabile) senza chiedere l'OK
+sull'elenco; NESSUN commit/merge/push senza OK esplicito dell'utente
+(memoria commit-only-on-explicit-ok). Esclusi dalle correzioni: decisioni
+utente in sospeso (H3 datum Z con connettori mostrati), dataset YOLO26 medium
+«to be verified» (serve l'utente), prova MSI in VM (spetta all'utente).
+
+Lenti richieste: ROBUSTEZZA (stati incoerenti, errori ingoiati, risorse non
+liberate, segnali tardivi, scritture non atomiche, rete/timeout/retry, stalli
+dei processi) ed EFFICIENZA (lavoro ripetuto, thread GUI bloccato, cache
+inefficaci, redraw inutili). Attenzione particolare ai 36 file cambiati dopo
+la revisione del 27/10 (ONNX YOLO/SMD, fetch pesi, release.yml, spec
+PyInstaller, publish-release.ps1): mai revisionati.
+
+FASE 1 = SOLO RAPPORTO. 10 agenti in sola lettura, in parallelo, file disgiunti,
+max 15 finding ciascuno, confermati (con riproduzione) separati dai sospetti:
+ 1 main_window 1-10400 (adversarial-reviewer gui)
+ 2 main_window 10400-fine (adversarial-reviewer gui)
+ 3 resto gui/ senza canvas/symbol_tab/footprint_view (adversarial-reviewer gui)
+ 4 canvas_*.py, drawing_transform, symbol_tab, footprint_view, test di parita' (canvas-parity-reviewer)
+ 5 services/ non foto, non kicad_library/component_check (adversarial-reviewer services)
+ 6 photo_*.py, smd_component_classifier, photo_yolo, yolo_models, edge_*, contact_zones (generality-auditor)
+ 7 generators/ + core/ (adversarial-reviewer generators, kicad-cli sola lettura)
+ 8 cad3d/ (adversarial-reviewer cad3d)
+ 9 kicad_library.py, component_check.py + test (kicad-workflow-reviewer)
+10 main.py, app_paths, crash_report, packaging/, scripts/, tools/, .github/, conftest, qt_fixtures, requirements, notices, README (adversarial-reviewer packaging)
+Rapporti archiviati nello scratchpad review2/*.md. Il coordinatore riproduce
+ogni ALTO/CRITICO prima di dichiararlo confermato.
+
+FASE 2 (dopo il consolidamento): correttori su file disgiunti, test positivo e
+negativo per ogni correzione, commenti in inglese, suite completa in due meta'.
+FASE 1 CHIUSA: 10/10 rapporti, 76 finding, archiviati in scratchpad
+review2/a1..a10_*.md (sintesi con righe e riproduzioni). ALTI (5), TUTTI
+riprodotti dal coordinatore:
+ A1 main_window 8025-8029 + component_state.normalised_side 218-221: sides
+    con NaN/null/"quattro" nel project_config -> TypeError/ValueError fuori da
+    _apply_project_state -> crash all'apertura (probe a1/probe_mw4: 3 falliti).
+ B1 main_window 19671-19705 _preview_params preferisce _last_params congelato:
+    dopo una generazione le modifiche ai campi (foro, pad, passo, lati) non si
+    vedono nell'anteprima e il controllo pad>foro usa il foro vecchio (probe
+    a2/probe_preview_stale2: 2 falliti). Stessa classe del difetto «A» del
+    14/10, corretto allora solo per i pad dell'header; decisione del 14/10:
+    in memoria i campi SONO la bozza.
+ C1 symbol_tab: un clic su una forma = 3 ridisegni, 2 layout, copie
+    O(pin x elementi) (symbol_graphics replicato in ogni riga); 143 ms con 20
+    pin/40 forme, 1185 ms con 120/40 (riprodotto).
+ U1 photo_review_dialog _MatchWorker: model_candidates senza cancel=,
+    Annulla non lo ferma, aboutToQuit->wait() senza limite: uscita bloccata
+    finche' FreeCAD misura (riprodotto, 4.00 s su 4.0).
+ H1 (medio-alto) kicad_models 1277-1302/1410-1423: un crash nativo di
+    freecadcmd su un modello -> i modelli successivi mai misurati, nulla
+    ricordato, crash ripetuto a ogni generazione. La sonda dell'agente era
+    stata sovrascritta e NON riproduceva; rifatta dal coordinatore
+    (review2/coord_h1): run 1-3 a misurato, b e c mai.
+MEDI ~30, BASSI ~40: elenco completo nei file review2/*.md (sigle A1-A8,
+B1-B5, U1-U8, C1-C10, E1-E8, P1-P7, G1-G8, H1-H9, L1-L5, K1-K8).
+
+DECISIONI DEL COORDINATORE (carta bianca + memoria «stessa UX in tutte le
+schede»): C3 un comando di modifica durante un trascinamento annulla il
+trascinamento e si applica, in ENTRAMBE le schede (regola del footprint, come
+KiCad); C4 il clic sullo sfondo NON spegne l'auto-adattamento in nessuna
+scheda, lo spegne il primo passo di pan reale; C6 nel simbolo l'interno del
+corpo conta come sfondo (pan), come i pad nel footprint; C8 il footprint
+riceve frecce (passo griglia disegno) e R/Shift+R sulla selezione; L2 una riga
+KiCadGen (disabled) con lo stesso URI e' un conflitto con la stessa conferma
+del riaggancio, e la conferma la riabilita; E6 Annulla chiude la connessione
+HTTP in corso; H6 si corregge solo se verificato con FreeCAD vero (1.1
+installato) su file dello scratchpad; P7 test con righe d'oro solo se
+fattibile senza pesi nel repository.
+
+FASE 2 (in corso): 9 correttori su file disgiunti:
+ MW main_window.py + component_state.py: A1-A8, B1-B5, C3 lato footprint,
+    C8, C10 (+ nota U: PhotoReviewDialog deleteLater = A3)
+ CANVAS symbol_tab, footprint_view, canvas_*.py: C1, C2, C3 lato simbolo,
+    C4, C5, C6, C7, C9
+ GUIO photo_review_dialog, model_candidates_dialog, component_check_dialog,
+    theme, start_page: U1-U8
+ SRV openrouter, providers, analysis_profiles, accepted_models,
+    datasheet_extractor (NON le righe P3), ai_diagnostics: E1-E8
+ PHOTO photo_yolo, smd_component_classifier, yolo_models, photo_inventory,
+    app_paths, tools/export_*_onnx.py: P1-P7 (P3: nuova funzione unica in
+    app_paths; la riga gemella in datasheet_extractor la fa il coordinatore)
+ GEN generators/ + core/ (no drawing_transform): G1-G8
+ CAD cad3d/: H1-H9
+ KL kicad_library, component_check: L1-L5
+ PKG packaging/, scripts/, .github/, tools/fetch_model_weights.py,
+    tests/test_documentation.py: K1-K8
+Regole: i18n.py NON lo tocca nessuno (voci nuove in scratchpad
+review2/i18n_<ambito>.py, le unisce il coordinatore); test nuovi in
+tests/test_review_1029_<ambito>.py; test esistenti modificati solo se
+riguardano solo i propri file, altrimenti segnalare; test positivo e negativo
+per ogni correzione; commenti in inglese; niente commit.
+
+ESITI DEI CORRETTORI (man mano):
+ KL FATTO L1-L5 (225 verdi, 3 saltati); contratto cambiato in
+    test_fixF_kicad_library_safety (riga disabled); nuovo codice
+    library_entry_disabled -> la domanda in main_window passata a MW (L2-GUI);
+    fsutil.retry_transient usato da replace_file (tutte le scritture atomiche).
+ PKG FATTO K1-K8 (114 verdi); tests.yml solo branches '**' (tags-ignore da
+    solo bloccherebbe anche i rami); pesi in release.yml scaricati PRIMA dei
+    test in runner.temp e copiati in models/ dopo; size nel manifest;
+    fetch_model_weights exit 2 = permanente, 1 = rete. Coordinatore: job
+    release 150 -> 180 min (passi limitati 145 + build ~6.5), skill
+    installer-change e ci-green aggiornate. La spec NON e' stata provata sotto
+    PyInstaller vero: farlo con una build locale prima della prossima release.
+ PHOTO FATTO P1-P7 (590 verdi; 2 rossi in test_documentation su
+    freecad_build_body.main senza @throws: file di CAD, ricontrollare alla
+    fine); fixture nuova tests/data/yolo_export_parity_golden.json (da
+    committare); cache LoadedModelCache in yolo_models.
+DA FARE AL COORDINATORE: (1) datasheet_extractor 3255-3257 -> 
+    app_paths.default_yolo_smd_model() quando SRV ha finito; (2)
+    main_window._default_yolo_weights (~2702) usa default_yolo_smd_model()
+    dopo l'override KICADGEN_YOLO_MODEL, quando MW ha finito (attenzione a
+    tests/test_photo_detector_ui.py:651 che patcha gui.yolo_weights_path);
+    (3) unire review2/i18n_*.py in i18n.py; (4) suite completa in due meta'. Se chi riprende trova questa riga,
+i rapporti sono nello scratchpad o vanno rilanciati; NIENTE e' stato
+modificato nel codice.
+
+
 ## 28/10 notte — HANDOFF PER DOMANI (utente: «fai un handoff per domani, poi spegni pc»). main = ADVANCED = `7de9475`, pushati, albero pulito, PC spento.
 
 RELEASE v1.0.2 PUBBLICATA dal workflow (prima release automatica):

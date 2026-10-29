@@ -46,9 +46,11 @@ function Assert-LastCommand([string]$description) {
 }
 
 function Assert-TestsGreenOnGitHub([string]$sha) {
-    # The «Tests» workflow runs on every push: the latest run for this exact
-    # commit must have completed successfully. No run at all means the commit
-    # was never pushed (or the run has not started yet): refuse, never guess.
+    # The «Tests» workflow runs on every branch push (not on tag pushes:
+    # review 2026-10-29, K2, the release workflow tests the tag itself), so
+    # the commit must have been pushed on a branch and a run for it must have
+    # completed successfully. No run at all means the commit was never pushed
+    # (or the run has not started yet): refuse, never guess.
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw 'The gh CLI is not installed: install it, or run with -RunTestsLocally.'
     }
@@ -65,7 +67,12 @@ function Assert-TestsGreenOnGitHub([string]$sha) {
         throw "No «Tests» run exists on GitHub for commit $sha. Push the branch, wait for the run, then publish."
     }
     $green = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
-    if ($green.Count -gt 0) { return }
+    if ($green.Count -gt 0) {
+        # Printed before the return: after the final throw it was unreachable
+        # and named an undefined variable (review 2026-10-29, K6).
+        Write-Host "Tests green on GitHub for $sha ($($green[0].url))." -ForegroundColor Green
+        return
+    }
     $failed = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'failure' })
     if ($failed.Count -gt 0) {
         throw "The «Tests» run for commit $sha failed: fix the suite before tagging ($($failed[0].url))."
@@ -75,7 +82,6 @@ function Assert-TestsGreenOnGitHub([string]$sha) {
         throw "The «Tests» run for commit $sha is still $($pending[0].status): wait for it ($($pending[0].url))."
     }
     throw "No successful «Tests» run for commit $sha (latest: '$($runs[0].conclusion)'): re-run it on GitHub, then publish ($($runs[0].url))."
-    Write-Host "Tests green on GitHub for $sha ($($run.url))." -ForegroundColor Green
 }
 
 function Invoke-TestsLocally() {
@@ -137,10 +143,13 @@ try {
     }
 
     Write-Host "Publishing KiCadGen $tag from branch $branch..." -ForegroundColor Cyan
-    & git tag -a $tag -m "KiCadGen $tag"
-    Assert-LastCommand 'Creating the tag'
+    # The branch goes first: when its push is refused (branch moved on
+    # GitHub, no rights) no local tag is left behind to block the next
+    # attempt (review 2026-10-29, K7). The tag is created only afterwards.
     & git push origin $branch
     Assert-LastCommand 'Pushing the branch'
+    & git tag -a $tag -m "KiCadGen $tag"
+    Assert-LastCommand 'Creating the tag'
     & git push origin $tag
     Assert-LastCommand 'Pushing the tag'
     Write-Host "Done. GitHub Actions is building the MSI: see the Actions tab, then the $tag Release." -ForegroundColor Green

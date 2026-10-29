@@ -116,13 +116,17 @@ def test_anchor_travels_in_the_freecad_payload(tmp_path, monkeypatch):
         raise RuntimeError("stop before FreeCAD")
 
     monkeypatch.setattr(step_generator, "find_freecadcmd", lambda: "freecadcmd")
-    original_dump = json.dump
+    # CONTRACT CHANGED 2026-10-29 (review H7): the payload is serialised with
+    # `json.dumps` BEFORE the parameter file is created, so a value that is
+    # not JSON leaves no file behind; the spy moved from `dump` to `dumps`.
+    original_dumps = json.dumps
 
-    def capture_dump(obj, fp, *args, **kwargs):
-        payloads.append(obj)
-        return original_dump(obj, fp, *args, **kwargs)
+    def capture_dumps(obj, *args, **kwargs):
+        if isinstance(obj, dict) and "face_texts" in obj:
+            payloads.append(obj)
+        return original_dumps(obj, *args, **kwargs)
 
-    monkeypatch.setattr(step_generator.json, "dump", capture_dump)
+    monkeypatch.setattr(step_generator.json, "dumps", capture_dumps)
     # CONTRACT CHANGED 2026-10-27 (review sweep, S4): `_run_freecad` starts
     # the child through `process_log.run_logged` on every path, which opens
     # it with `subprocess.Popen`; the stop moved there from `subprocess.run`.

@@ -547,7 +547,7 @@ class FootprintView(QGraphicsView):
         self._hover_bounds = None
 
     def cancel_interaction(self):
-        """@brief Cancel a handle or text drag in progress, without reporting a drop.
+        """@brief Cancel the rubber band, the pan and a handle or text drag in progress, without reporting a drop.
 
         @note For the window, when the drawings list changes while the mouse
             button is still down (Delete, Ctrl+Z, Ctrl+Y, Ctrl+D): the drag
@@ -555,8 +555,16 @@ class FootprintView(QGraphicsView):
             different drawing. The controller tells the host once
             (`gesture_end(commit=False)`: a dragged text goes back where it
             was, decision D5) and the release that follows does nothing.
-            Panning and draw mode are untouched: they hold no index.
+        @note CONTRACT CHANGED (review 2026-10-29, C7, as the symbol editor's
+            `cancel_interaction`): the rubber band, the camera pan and a
+            pending background click are dropped too, so arming a draw tool
+            (`_on_click_tool_arm`) or any other cancel leaves no band growing
+            and no pan following the pointer. The armed draw tool itself is
+            untouched (the router owns it).
         """
+        self.band.cancel()
+        self.camera.pan_cancel()
+        self._background_press = None
         if self.gestures is not None:
             self.gestures.cancel()
 
@@ -587,6 +595,8 @@ class FootprintView(QGraphicsView):
             press is a drawing point and a right press closes the shape; a
             press during a camera pan is swallowed; the middle button falls
             through to the camera.
+        @note A left or right press while a pan runs is swallowed (review
+            2026-10-29, C2/C9): no drag and no context menu with the pan armed.
         @note Selection (shared `canvas_selection`): Shift+left press starts
             the rubber band, Ctrl+left press on a drawing emits
             `drawing_toggled`; a plain press on a drawing is selected by the
@@ -603,6 +613,13 @@ class FootprintView(QGraphicsView):
         if self.band.active:
             # Another button pressed while the rubber band is drawn: no menu,
             # no pan, no selection change until the band is released.
+            event.accept()
+            return
+        if self.camera.pan_active and event.button() != Qt.MouseButton.MiddleButton:
+            # A left or right press while a pan runs is swallowed: no drag,
+            # band, toggle or menu starts under a moving camera (review
+            # 2026-10-29, C2/C9, the symbol editor's rule). A middle press
+            # restarts the pan, as before.
             event.accept()
             return
         if event.button() == Qt.MouseButton.RightButton:

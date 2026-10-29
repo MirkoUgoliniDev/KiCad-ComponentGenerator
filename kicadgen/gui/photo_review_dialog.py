@@ -77,6 +77,7 @@ from dataclasses import dataclass
 from html import escape
 import math
 from pathlib import Path
+import threading
 
 from PyQt6.QtCore import (
     QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
@@ -109,8 +110,28 @@ from .review_tools import (ZOOM_STEP, AnchoredPopup, InfoPopup, asset_icon,
                            toolbar_divider)
 
 
+#: Upper bound, in milliseconds, of the wait for a candidate search at exit.
+#:
+#: Not tuned on an observed search: it is the promise made to whoever closes
+#: the program. The search is cancelled first (`_MatchWorker.stop`), and the
+#: matching honours the cancellation before any work and every
+#: `process_log.CANCEL_POLL_INTERVAL_S` (0.1 s) while a `freecadcmd` child
+#: measures, killing the child's whole process tree; what is left between two
+#: checks is in-memory library filtering. Five seconds covers that stretch with
+#: a wide margin and stays short enough that a quit is never perceived as a
+#: hang (before, the wait was unbounded and lasted as long as the
+#: measurements: minutes).
+MATCH_QUIT_WAIT_MS = 5000
+
+
 class _MatchWorker(QThread):
-    """@brief Compute CAD candidates off the UI thread from a detached snapshot."""
+    """@brief Compute CAD candidates off the UI thread from a detached snapshot.
+
+    @note Interruptible: `cancel` is the `threading.Event` handed to
+        `kicad_models.model_candidates(cancel=...)`, which kills the running
+        `freecadcmd` tree when it is set. A cancelled search emits neither
+        `done` nor `failed`: nobody is waiting for its verdict any more.
+    """
     done = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
@@ -121,22 +142,63 @@ class _MatchWorker(QThread):
             so that the dialog may keep editing its own row meanwhile.
         @note Owned by QApplication, not by the dialog: a thread destroyed
             while running aborts the process (same rule as
-            `model_dialog._ModelsWorker`).
+            `model_dialog._ModelsWorker`). At application exit the search is
+            cancelled and waited for at most MATCH_QUIT_WAIT_MS
+            (`_stop_for_quit`), never for the whole measurement.
         """
         super().__init__(QApplication.instance())
         self.component = deepcopy(component)
+        self.cancel = threading.Event()
+        application = QApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(self._stop_for_quit)
+        # Released before deleteLater: handlers fire in connection order, and
+        # Qt must not call a slot of an object already deleted at exit.
+        self.finished.connect(self._release)
+        self.finished.connect(self.deleteLater)
+
+    def stop(self):
+        """@brief Ask the search to end; the running `freecadcmd` tree is killed.
+
+        @note Idempotent and non-blocking; a late result is not emitted.
+        """
+        self.cancel.set()
+
+    def _stop_for_quit(self):
+        """Cancel, then wait a BOUNDED time for the thread to leave the matching."""
+        self.stop()
+        self.wait(MATCH_QUIT_WAIT_MS)
+
+    def _release(self):
+        """Drop the exit-time hook once the thread has finished."""
+        application = QApplication.instance()
+        if application is not None:
+            try:
+                application.aboutToQuit.disconnect(self._stop_for_quit)
+            except TypeError:
+                pass  # never connected, or already released
 
     def run(self):
         """@brief Find candidates locally; no AI requests are made."""
+        from ..cad3d.process_log import ProcessCancelled
         try:
             from ..cad3d.kicad_models import model_candidates
             # A previous rejection/selection controls generation, not whether
             # the user may reopen this dialog to explore alternatives.
             proposal = deepcopy(self.component)
             proposal.pop('model_selection', None)
-            self.done.emit(model_candidates(proposal, limit=5))
+            report = model_candidates(proposal, limit=5, cancel=self.cancel)
+        except ProcessCancelled:
+            # MatchingCancelled: stopped on request, nothing to report.
+            return
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self.cancel.is_set():
+                self.failed.emit(str(exc))
+            return
+        # A search that finished just as it was cancelled is still dropped:
+        # the dialog that asked for it has gone.
+        if not self.cancel.is_set():
+            self.done.emit(report)
 
 
 @dataclass(frozen=True)
@@ -313,6 +375,13 @@ class _PhotoView(QGraphicsView):
         self._fit_rect = QRectF(rect)
         self._auto_fit = True
         self._apply_fit()
+
+    def auto_fit(self) -> bool:
+        """@brief Whether the view still follows the fitted photo (no user zoom or pan since).
+
+        @return True until a zoom or a pan ends auto-fit; `fit_photo` turns it back on.
+        """
+        return self._auto_fit
 
     def _apply_fit(self):
         if not self._auto_fit or self._fit_rect is None:
@@ -1833,6 +1902,9 @@ class PhotoReviewDialog(QDialog):
         self._applied = False
         self._closing = False
         self._match_worker = None
+        self._match_reported = True
+        # STEP path -> exists (see _step_available).
+        self._step_file_cache = {}
         # One window, and the title says which stage it is in (HANDOFF 162).
         self.setWindowTitle(self._tr(self.stage_title(stage)))
         self.resize(1120, 740)
@@ -2542,12 +2614,18 @@ class PhotoReviewDialog(QDialog):
         self.ai_only_label.setText(text)
 
     def showEvent(self, event):
-        """@brief Fit the whole photo the first time the editor is shown.
+        """@brief Fit the whole photo when the editor is shown by the program.
 
         @param event Qt show event, forwarded to the base class.
+        @note Same rule as `zoom_image.ZoomImageView.showEvent`: a spontaneous
+              show (the window system restoring a minimised editor) keeps the
+              user's zoom and scroll, and so does any show once the user has
+              zoomed or panned (auto-fit off). Before, every show re-fitted and
+              a minimise/restore threw the zoom away.
         """
         super().showEvent(event)
-        self.fit_photo()
+        if not event.spontaneous() and self.view.auto_fit():
+            self.fit_photo()
 
     def hideEvent(self, event):
         """@brief Take the parameter modal down when the editor itself is dismissed.
@@ -2579,6 +2657,11 @@ class PhotoReviewDialog(QDialog):
         self.view.cancel_draw()
         self._close_parameters()
         super().closeEvent(event)
+        if event.isAccepted():
+            # Normally reached through reject() -> done(); kept explicit so a
+            # close that bypasses them still stops the search.
+            self._closing = True
+            self._cancel_matching()
 
     def _close_parameters(self):
         """Hide the child windows after moving focus out of the parameter editors.
@@ -3126,9 +3209,41 @@ class PhotoReviewDialog(QDialog):
             self._selected_has_warnings = False
             self._update_details_button()
         self._refresh_parameters_title()
-        for item in self._items:
-            self._refresh_item(item)
+        self._refresh_selection_looks()
         self._refresh_detector_ghost()
+
+    def _selection_look(self, item, index, lasso_ids, target_ids):
+        """The inputs of `_refresh_item` that a selection, lasso or renumbering can change.
+
+        Row number, selected, chosen (selected or in the lasso group) and
+        «Copia formato» role: the same four values `_refresh_item` reads from
+        the selection state, computed the same way. Everything else it draws
+        comes from the component's own data, the photo and the stage, which a
+        selection does not touch.
+        """
+        selected = item.isSelected()
+        role = (FORMAT_SOURCE_COLOR if item is self._format_source_item
+                else FORMAT_TARGET_COLOR if id(item) in target_ids else None)
+        return (index, selected, selected or id(item) in lasso_ids, role)
+
+    def _refresh_selection_looks(self):
+        """Redraw only the outlines whose selection look differs from what they show.
+
+        A selection click used to redraw every outline and list row (200
+        bodies: about 80 ms per click). Each `_refresh_item` records the look
+        it drew (`_drawn_look`); here an outline is redrawn when that record
+        disagrees with the current state -- the previously and the newly
+        chosen ones, every row renumbered by a deletion, the lasso members
+        that joined or left -- and the selected one always, because it also
+        feeds the warning line and the attribute panel. Data edits are not
+        this method's business: every edit refreshes its own outline.
+        """
+        lasso_ids = {id(item) for item in self._lasso_items}
+        target_ids = {id(item) for item in self._format_target_items}
+        for index, item in enumerate(self._items):
+            if (item.isSelected() or getattr(item, "_drawn_look", None)
+                    != self._selection_look(item, index, lasso_ids, target_ids)):
+                self._refresh_item(item)
 
     def _refresh_detector_ghost(self):
         """Draw the detector's original box under the selected body when it differs.
@@ -3364,10 +3479,8 @@ class PhotoReviewDialog(QDialog):
         elif selection.get('status') != 'confirmed':
             warnings.append(self._tr("Modello KiCad non confermato: doppio clic per scegliere."))
         else:
-            try:
-                available = Path(selection.get('path', '')).is_file()
-            except (OSError, TypeError, ValueError):
-                available = False
+            available = self._step_available(selection.get('path', ''),
+                                             fresh=item.isSelected())
             if not available:
                 warnings.append(self._tr("Il file STEP scelto non è disponibile: scegliere nuovamente."))
         if component.get("_uncertain") or str(component.get("confidence", "")).lower() == "low":
@@ -3375,6 +3488,23 @@ class PhotoReviewDialog(QDialog):
         if component.get("warnings"):
             warnings.append(str(component["warnings"]))
         return warnings
+
+    def _step_available(self, path, fresh=False):
+        """Whether the chosen STEP file exists, probed once per path.
+
+        A filesystem probe per outline on every redraw was the costly part of
+        `_warnings`. The answer is keyed by the path itself, so choosing
+        another model invalidates it by construction; ``fresh`` re-probes
+        (the selected outline, the one being looked at, always is), so a
+        file removed while the editor is open shows up on the body selected.
+        """
+        key = str(path)
+        if fresh or key not in self._step_file_cache:
+            try:
+                self._step_file_cache[key] = Path(path).is_file()
+            except (OSError, TypeError, ValueError):
+                self._step_file_cache[key] = False
+        return self._step_file_cache[key]
 
     def _refresh_item(self, item):
         index = self._items.index(item)
@@ -3410,6 +3540,9 @@ class PhotoReviewDialog(QDialog):
         # The status pen keeps its colour when selected: the selection is
         # shown by the wide halo behind it, the thicker line and the fill.
         chosen = item.isSelected() or item in self._lasso_items
+        # What this drawing assumed about the selection: compared by
+        # `_refresh_selection_looks` to skip outlines a selection left alone.
+        item._drawn_look = (index, item.isSelected(), chosen, format_role)
         pen = QPen(color, SELECTED_PEN_WIDTH_PX if chosen or format_role is not None
                    else UNSELECTED_PEN_WIDTH_PX)
         pen.setCosmetic(True)
@@ -3688,33 +3821,53 @@ class PhotoReviewDialog(QDialog):
         self.modal_model_button.setEnabled(False)
         # Set after the one-time retranslation of the dialog: translated here.
         self.model_status.setText(tx("Ricerca candidati KiCad e misure STEP…"))
+        # Whether the status line has said how this search ended (shown,
+        # dropped or failed); _match_finished covers the remaining case.
+        self._match_reported = False
         worker.done.connect(lambda report: self._show_model_candidates(item, snapshot, report))
         worker.failed.connect(self._match_failed)
         worker.finished.connect(self._match_finished)
-        # A dismissed editor must not destroy a running measurement thread.
-        application = QApplication.instance()
-        application.aboutToQuit.connect(worker.wait)
-        # ...but the promise holds as long as the thread exists. Without
-        # releasing it, on closing Qt would call wait on an object already
-        # deleted by deleteLater and the exit would end with RuntimeError:
-        # wrapped C/C++ object of type _MatchWorker has been deleted. Released
-        # before destruction, because the handlers fire in connection order.
-        worker.finished.connect(lambda: application.aboutToQuit.disconnect(worker.wait))
-        worker.finished.connect(worker.deleteLater)
+        # A dialog destroyed without passing through done() (its parent went
+        # away) still stops its own search: the slot belongs to the worker,
+        # which outlives the dialog.
+        self.destroyed.connect(worker.stop)
+        # The worker itself cancels and waits (bounded) at application exit
+        # and releases that hook and itself once finished (_MatchWorker).
         worker.start()
 
+    def _cancel_matching(self):
+        """Stop this dialog's candidate search, if one is running; its result is dropped."""
+        if self._match_worker is not None:
+            self._match_worker.stop()
+
     def _match_failed(self, message):
+        self._match_reported = True
         if not self._closing:
             self.model_status.setText(tx("Ricerca KiCad fallita: {message}", message=message))
 
     def _match_finished(self):
         self._match_worker = None
         if not self._closing:
+            if not self._match_reported:
+                # Ended without a verdict reaching the line (cancelled): the
+                # line must not keep announcing a search in progress.
+                self.model_status.setText(tx("Ricerca candidati interrotta senza risultato."))
             self.model_button.setEnabled(self._selected_item() is not None)
             self.modal_model_button.setEnabled(self.model_button.isEnabled())
 
     def _show_model_candidates(self, item, snapshot, report):
-        if self._closing or item not in self._items or item.component != snapshot:
+        # Flagged before the candidates dialog runs its own event loop, in
+        # which the worker's `finished` is delivered.
+        self._match_reported = True
+        if self._closing:
+            return
+        if item not in self._items or item.component != snapshot:
+            # The body was edited or deleted while the search ran: the
+            # candidates describe a row that no longer exists. Dropped, but
+            # said, or the line would keep announcing a search in progress.
+            self.model_status.setText(tx(
+                "Ricerca candidati scartata: il componente è cambiato durante la ricerca. "
+                "Doppio clic per ripeterla."))
             return
         from .model_candidates_dialog import ModelCandidatesDialog
         bounds = item.photo_bounds()
@@ -3738,7 +3891,20 @@ class PhotoReviewDialog(QDialog):
     def reject(self):
         """@brief Discard the editing transaction without applying pending worker results."""
         self._closing = True
+        self._cancel_matching()
         super().reject()
+
+    def done(self, result):
+        """@brief Close the dialog and stop its candidate search, whatever the path.
+
+        @param result Dialog result code, forwarded to QDialog.done.
+        @note accept(), reject() and closing the window all pass through here:
+            a search nobody will read must not keep a `freecadcmd` measuring
+            (each dialog stops only its own search).
+        """
+        self._closing = True
+        self._cancel_matching()
+        super().done(result)
 
     def set_draw_mode(self, enabled):
         """@brief Arm or disarm "add a component by drawing its rectangle".
@@ -3814,8 +3980,11 @@ class PhotoReviewDialog(QDialog):
             for item in self._items:
                 item.setSelected(False)
         self._lasso_items = chosen
+        # _selection_changed redraws the group (and drops what the filters
+        # hide); _sync_lasso_ui then sets the hint and buttons, and finds no
+        # look left to redraw. Before, the group was reassigned in between and
+        # every outline was redrawn twice.
         self._selection_changed()
-        self._lasso_items = chosen
         self._sync_lasso_ui()
 
     def _sync_lasso_ui(self):
@@ -3836,8 +4005,8 @@ class PhotoReviewDialog(QDialog):
             self.draw_hint.setVisible(self.format_button.isChecked())
         self.delete_button.setEnabled(self._selected_item() is not None or count > 0)
         self._sync_keep_button()
-        for item in self._items:
-            self._refresh_item(item)
+        # The group changed (or rows were renumbered): only those looks moved.
+        self._refresh_selection_looks()
 
     def keyPressEvent(self, event):
         """@brief Let Escape disarm the drawing mode, and make Return apply.

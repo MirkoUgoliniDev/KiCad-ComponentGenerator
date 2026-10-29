@@ -464,6 +464,33 @@ TEXT_POSITIONS_ANCHOR_FIELD = "anchor"
 KICAD_COORD_LIMIT_MM = 2147.483647
 
 
+def require_kicad_reach(reach_mm: float, number: Optional[str] = None) -> None:
+    """@brief Refuse geometry that reaches beyond the coordinates KiCad can represent.
+
+    @param reach_mm Largest |x| or |y|, mm, the geometry reaches: a pad's
+        centre plus its half extent, or a whole footprint's envelope
+        (courtyard included).
+    @param number Pad number when `reach_mm` is one pad's reach; None when it
+        is the footprint's envelope.
+    @throws ValueError When `reach_mm` is not finite or exceeds
+        KICAD_COORD_LIMIT_MM: KiCad would not refuse the file, it would
+        silently saturate the coordinate and move the copper (review
+        2026-10-29, G3).
+    @note Shared by the explicit-pad model (`PinSpec.validate`) and the
+        parametric generators (pin header, castellated module), so every
+        path refuses with the same bound and the same wording.
+    """
+    reach = float(reach_mm)
+    if math.isfinite(reach) and reach <= KICAD_COORD_LIMIT_MM:
+        return
+    if number is not None:
+        raise ValueError(tx("Il pad {number} arriva a {reach:.1f} mm dall'origine, oltre i ±{limit:.0f} mm "
+                            "che KiCad sa rappresentare.",
+                            number=number, reach=reach, limit=KICAD_COORD_LIMIT_MM))
+    raise ValueError(tx("Il footprint arriva a {reach:.1f} mm dall'origine, oltre i ±{limit:.0f} mm "
+                        "che KiCad sa rappresentare.", reach=reach, limit=KICAD_COORD_LIMIT_MM))
+
+
 def _arc_centre(start: Point, mid: Point, end: Point) -> Optional[Point]:
     """@brief Centre, mm, of the circle through three points, or None when they are collinear.
 

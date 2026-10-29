@@ -107,9 +107,9 @@ APP_QSS = f"""
     QMenu::item:selected {{
         background: {SURFACE0};
     }}
-    /* Voce spenta (per esempio i comandi KiCad senza footprint): senza questa
-       regola sembrava uguale a una voce attiva. Stesso grigio delle schede
-       spente. */
+    /* Disabled item (for example the KiCad commands without a footprint):
+       without this rule it looked the same as an enabled item. Same grey as
+       the disabled tabs. */
     QMenu::item:disabled {{
         color: #626477;
     }}
@@ -318,8 +318,8 @@ APP_QSS = f"""
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0;
     }}
-    /* Barre di icone: il pulsante si vede al passaggio del mouse, e un
-       interruttore acceso (es. numeri pin) resta evidenziato. */
+    /* Icon bars: the button shows on mouse hover, and a switched-on toggle
+       (e.g. pin numbers) stays highlighted. */
     QToolButton {{
         background: transparent;
         border: 1px solid transparent;

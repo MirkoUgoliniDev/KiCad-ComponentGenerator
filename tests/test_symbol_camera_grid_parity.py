@@ -238,9 +238,13 @@ def test_pan_moves_the_scrollbars_by_the_pointer_delta_and_the_centre_with_them(
     before = _state(view)
     view.auto_fit = True
     QTest.mousePress(view.viewport(), button, NOMOD, start)
-    assert not view.auto_fit and view.gesture is None
+    # CONTRACT CHANGED 2026-10-29: why — review C4, coordinator decision: the
+    # press alone keeps auto-fit (as the footprint preview); the first pan
+    # step that moves the view turns it off.
+    assert view.auto_fit and view.gesture is None
     QTest.mouseMove(view.viewport(), start + QPoint(30, 20))
     QApplication.processEvents()
+    assert not view.auto_fit
     mid = _state(view)
     assert (mid["h"] - before["h"], mid["v"] - before["v"]) == (-30, -20)
     QTest.mouseMove(view.viewport(), start + QPoint(10, 50))
@@ -381,7 +385,7 @@ def test_resize_and_show_refit_only_while_auto_fit_is_on(tab):
 
 
 def test_auto_fit_transitions(tab):
-    """@brief zoom, a wheel step and a pan press turn auto-fit off; `fit()` turns it on; a zoom that changes nothing leaves it."""
+    """@brief zoom, a wheel step and a pan that moves turn auto-fit off; `fit()` turns it on; a zoom that changes nothing leaves it."""
     view = tab.view
     view.fit()
     assert view.auto_fit
@@ -394,8 +398,13 @@ def test_auto_fit_transitions(tab):
     view.fit()
     start = _empty(view)
     QTest.mousePress(view.viewport(), LEFT, NOMOD, start)
+    # CONTRACT CHANGED 2026-10-29: why — review C4, coordinator decision: a
+    # background click never turns auto-fit off (as the footprint preview);
+    # the first real pan step does. The press used to switch it off at once.
+    assert view.auto_fit
+    QTest.mouseMove(view.viewport(), start + QPoint(20, 10))
     assert not view.auto_fit
-    QTest.mouseRelease(view.viewport(), LEFT, NOMOD, start)
+    QTest.mouseRelease(view.viewport(), LEFT, NOMOD, start + QPoint(20, 10))
     view.fit()
     scale = view.transform().m11()
     view.zoom(1000.0)

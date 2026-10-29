@@ -100,6 +100,14 @@ class FakeFreecadProcess:
         return False
 
 
+#: Stand-in of an exported STEP, well formed down to its ISO 10303-21 trailer.
+#: CONTRACT CHANGED 2026-10-29 (review H8): `_run_freecad` refuses a STEP
+#: without the closing ``END-ISO-10303-21;``, the structural proof that the
+#: writer finished, so the fake child writes a complete file, as FreeCAD does.
+COMPLETE_STEP_TEXT = ("ISO-10303-21;\nHEADER;\nENDSEC;\nDATA;\nENDSEC;\n"
+                      "END-ISO-10303-21;\n")
+
+
 def fake_freecad_writing_the_step(monkeypatch, seen):
     """@brief Replace the freecadcmd child with one that reads its JSON and "writes" the STEP.
 
@@ -112,7 +120,7 @@ def fake_freecad_writing_the_step(monkeypatch, seen):
     def popen(command, **kwargs):
         payload = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
         seen.append(payload)
-        Path(payload["step_path"]).write_text("ISO-10303-21;", encoding="utf-8")
+        Path(payload["step_path"]).write_text(COMPLETE_STEP_TEXT, encoding="utf-8")
         return FakeFreecadProcess(command, ["KICADGEN_STEP_OK\n"], **kwargs)
 
     monkeypatch.setattr(process_log.subprocess, "Popen", popen)
@@ -201,7 +209,7 @@ def test_s4_a_child_that_keeps_talking_is_not_capped_by_overall_duration(monkeyp
 
     def popen(command, **kwargs):
         payload = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
-        Path(payload["step_path"]).write_text("ISO-10303-21;", encoding="utf-8")
+        Path(payload["step_path"]).write_text(COMPLETE_STEP_TEXT, encoding="utf-8")
         return Talking(command, **kwargs)
 
     monkeypatch.setattr(process_log.subprocess, "Popen", popen)

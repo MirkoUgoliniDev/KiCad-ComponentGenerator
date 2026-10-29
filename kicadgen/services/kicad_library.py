@@ -16,10 +16,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 from ..core.footprint import GENERATOR_VERSION, KICAD_VERSION
-from ..fsutil import replace_file
+from ..fsutil import replace_file, retry_transient
 
 
 class KiCadLibraryError(RuntimeError):
@@ -954,6 +955,13 @@ def _write_in_place(source: Path, target: Path) -> None:
         attribute, held open) or the write fails: the same PermissionError
         class a refused replace raises, mapped by the callers to
         ``install_write_refused`` naming `target`.
+    @note Opening `target` is retried with the bounded policy of
+        `kicadgen.fsutil.retry_transient` (the one `replace_file` uses): a
+        scanner or KiCad's file watcher holding the table for an instant
+        refused the atomic rename and the in-place write alike, but only the
+        rename was waited for (review 2026-10-29, L3). Only the open is
+        retried: once the file is truncated a retry would start from a
+        half-written file.
     @note SAFETY BOUNDARY (review 2026-10-27, A1): unlike the atomic rename,
         this write is not crash-atomic, so it is used ONLY where a copy of
         the previous content already exists on disk before it starts: the
@@ -965,11 +973,17 @@ def _write_in_place(source: Path, target: Path) -> None:
         updated at all; the in-place write keeps BOTH names of the file in
         agreement, which is what the link is for.
     """
-    with open(source, "rb") as stream, open(target, "r+b") as out:
+    with open(source, "rb") as stream, retry_transient(
+            lambda: open(target, "r+b"), sleep=_retry_pause) as out:
         out.truncate(0)
         shutil.copyfileobj(stream, out)
         out.flush()
         os.fsync(out.fileno())
+
+
+def _retry_pause(seconds: float) -> None:
+    """Pause between two attempts of `retry_transient` (looked up at call time so tests can replace it)."""
+    time.sleep(seconds)
 
 
 def _publish_scratch(scratch: Path, target: Path) -> None:
@@ -1383,7 +1397,8 @@ def update_fp_lib_table(
     @param library_name Nickname of the library row.
     @param uri Library location written in the row.
     @param replace_entry Allow repointing an existing row with the same
-        nickname to a different URI/type (explicit user confirmation).
+        nickname to a different URI/type, and enabling a disabled one
+        (explicit user confirmation).
     @param create_missing Create a new table when the file does not exist;
         pass False for KiCad's global table, which KiCad must create itself.
     @return True when the table contents changed.
@@ -1393,6 +1408,9 @@ def update_fp_lib_table(
         `_updated_fp_lib_table_text` for the conflict codes.
     @throws OSError When the table or its backup cannot be written; the table
         is then left (or put back) as it was, and the backup history unchanged.
+        If even putting it back fails (a hard-linked table truncated by a full
+        disk), the pre-change copy is kept as ``<table>.kicadgen-backup``
+        instead of being deleted (review 2026-10-29, L1).
     @note Every changing write refreshes ``<table>.kicadgen-backup`` (bounded
         history, see `TABLE_BACKUP_RETENTION`) and replaces the table
         atomically and durably (fsync before the rename); the temporary file
@@ -1430,8 +1448,18 @@ def update_fp_lib_table(
     # byte except the added or repointed row.
     bom = (UTF8_BOM if original_bytes is not None
            and original_bytes.startswith(UTF8_BOM) else b"")
+    updated_bytes = bom + updated.encode("utf-8")
     try:
-        _atomic_write_bytes(table, bom + updated.encode("utf-8"))
+        try:
+            _atomic_write_bytes(table, updated_bytes)
+        except BaseException:
+            # A hard-linked table is overwritten in place, which is not
+            # crash-atomic: a failure midway leaves it truncated under every
+            # name. Put the staged copy back before anything removes it
+            # (review 2026-10-29, L1).
+            if fresh is not None:
+                _put_table_back(table, fresh, original_bytes)
+            raise
         if fresh is not None:
             try:
                 _publish_table_backup(table, fresh)
@@ -1439,15 +1467,69 @@ def update_fp_lib_table(
                 # The new table has no backup of its predecessor: undo it. A
                 # failed undo must not mask the rotation error; the install
                 # rollback compares the table with its own copy and retries.
-                try:
-                    _atomic_write_bytes(table, original_bytes)
-                except OSError:
-                    pass
+                _put_table_back(table, fresh, original_bytes)
                 raise
     finally:
-        if fresh is not None:
-            _unlink_quietly(fresh)
+        if fresh is not None and fresh.exists():
+            _settle_staged_backup(table, fresh, (updated_bytes, original_bytes))
     return True
+
+
+def _file_holds(path: Path, payload: bytes) -> bool:
+    """Whether `path` can be read and holds exactly `payload` (unreadable -> False)."""
+    try:
+        return path.read_bytes() == payload
+    except OSError:
+        return False
+
+
+def _put_table_back(table: Path, fresh: Path, original: bytes) -> None:
+    """@brief Best effort: make `table` hold its pre-change bytes again after a failed update.
+
+    @param table Real table file (links resolved).
+    @param fresh Staged pre-change copy (`_stage_table_backup`); never consumed here.
+    @param original The same bytes, for the comparison and the atomic rewrite.
+    @note A table that already holds `original` is left alone (a failed
+        atomic replace never touched it). A hard-linked table is rewritten in
+        place from `fresh`, so both names get the content back and no extra
+        scratch file is needed on a disk that may be full. A failure is
+        swallowed: the caller re-raises the original error and
+        `_settle_staged_backup` keeps `fresh` because the table matches
+        neither state.
+    """
+    if _file_holds(table, original):
+        return
+    try:
+        if _hard_linked(table):
+            _write_in_place(fresh, table)
+        else:
+            _atomic_write_bytes(table, original)
+    except OSError:
+        pass
+
+
+def _settle_staged_backup(table: Path, fresh: Path, states: tuple[bytes, ...]) -> None:
+    """@brief Dispose of the staged pre-change copy left after `update_fp_lib_table`.
+
+    @param table Real table file.
+    @param fresh Staged pre-change copy that still exists.
+    @param states Contents for which `fresh` is no longer needed: the new
+        table and the original one.
+    @note SAFETY BOUNDARY (review 2026-10-29, L1): `fresh` is removed ONLY
+        when the table verifiably holds one of `states`. Otherwise it is the
+        only complete copy of the user's table: it is published as
+        ``<table>.kicadgen-backup`` (the history shifts as after any
+        change), and when even that fails it stays under its scratch name.
+        Errors are swallowed: this runs in a ``finally`` and must not hide
+        the error being raised.
+    """
+    if any(_file_holds(table, state) for state in states):
+        _unlink_quietly(fresh)
+        return
+    try:
+        _publish_table_backup(table, fresh)
+    except (OSError, KiCadLibraryError):
+        pass
 
 
 def _updated_fp_lib_table_text(
@@ -1457,14 +1539,25 @@ def _updated_fp_lib_table_text(
 
     @details A row already registered under ``library_name`` with the same
     URI and the ``KiCad`` type is kept verbatim (options, description and
-    ``disabled``/``hidden`` flags included). A row pointing elsewhere is a
-    conflict: it is repointed only with ``replace_entry``, and even then only
-    its ``type`` and ``uri`` children change.
+    ``hidden`` flag included). A row pointing elsewhere is a conflict: it is
+    repointed only with ``replace_entry``, and even then only its ``type``
+    and ``uri`` children change. A DISABLED row is a conflict whatever it
+    points to (review 2026-10-29, L2): with ``replace_entry`` it is repointed
+    when needed and its ``(disabled)`` child is removed, every other child
+    kept.
     @throws KiCadLibraryError ``invalid_table`` for a non-table file,
         ``duplicate_library_entry`` when the nickname already appears more than
-        once, ``library_entry_conflict`` (context ``library``, ``old_uri``,
+        once, ``library_entry_disabled`` (same context as the next code) when
+        the existing row is disabled and ``replace_entry`` is False,
+        ``library_entry_conflict`` (context ``library``, ``old_uri``,
         ``new_uri``, ``old_type``, ``path``) when the existing row points to a
         different location and ``replace_entry`` is False.
+    @note Why a disabled row is not kept: KiCad ignores it, so the installed
+        footprint could not be placed («library not enabled») while the
+        install reported success. Re-enabling a row the user switched off is
+        a change of their table, so it needs the same explicit confirmation
+        as a repoint. A ``hidden`` row is still loaded by KiCad (only left
+        out of the chooser) and stays as it is.
     """
     location = table_path or "<memory>"
     if not original.lstrip().startswith("(fp_lib_table"):
@@ -1483,7 +1576,25 @@ def _updated_fp_lib_table_text(
     if matches:
         start, end, entry = matches[0]
         same_type = (entry.library_type or "").casefold() == "kicad"
-        if same_type and _same_uri(entry.uri, uri):
+        same_place = same_type and _same_uri(entry.uri, uri)
+        if entry.disabled:
+            if not replace_entry:
+                raise KiCadLibraryError(
+                    f"The library table {location} maps '{library_name}' to "
+                    f"{entry.uri!r} (type {entry.library_type!r}) but the row is "
+                    "disabled, so KiCad would not load the installed footprint; "
+                    f"installing would enable it pointing to {uri!r}.",
+                    code="library_entry_disabled", library=library_name,
+                    old_uri=entry.uri or "", new_uri=uri,
+                    old_type=entry.library_type or "", path=location,
+                )
+            block = original[start:end]
+            if not same_place:
+                block = _replace_entry_child(block, "type", "KiCad")
+                block = _replace_entry_child(block, "uri", uri)
+            block = _remove_direct_children(block, "disabled")
+            return original[:start] + block + original[end:]
+        if same_place:
             return original
         if not replace_entry:
             raise KiCadLibraryError(
@@ -1740,10 +1851,12 @@ def install_component_library(
     @param table_path Table to update; defaults to the project table.
     @param overwrite Replace files for an existing component when True.
     @param replace_library_entry Repoint an existing table row with the same
-        nickname but a different URI/type when True (explicit confirmation).
+        nickname but a different URI/type, and enable a disabled one, when
+        True (explicit confirmation).
     @return Installed paths and the ``library:footprint`` identifier.
     @throws KiCadLibraryError ``files_exist``, ``global_table_missing``,
-        ``library_entry_conflict``, ``duplicate_library_entry`` and footprint
+        ``library_entry_conflict``, ``library_entry_disabled``,
+        ``duplicate_library_entry`` and footprint
         parsing errors are raised before anything is written.
         ``rollback_incomplete`` (context ``rollback_dir``, ``error``,
         ``failures``) means the install failed AND some files could not be
@@ -1793,6 +1906,11 @@ def install_component_library(
 
     destination_table = plan.table_path
     table_existed = plan.table_exists
+    # The table link is resolved BEFORE the missing-table check: a dangling
+    # link is not a file either, and was reported as «start KiCad once»
+    # (global_table_missing) instead of target_link_unresolved naming the
+    # broken link (review 2026-10-29, L5).
+    _write_target(destination_table)
     if not table_existed and not project_library:
         # A global table holding only KiCadGen would make KiCad skip its
         # first-run setup of the standard libraries.
@@ -1801,7 +1919,6 @@ def install_component_library(
     # dangling link is refused here, and the scratch files, rollback copies
     # and renames below all work on the real files (review 2026-10-27, A1).
     real = {target: _write_target(target) for target in plan.targets}
-    _write_target(destination_table)
     real_footprint, real_step, real_wrl = (real[t] for t in plan.targets)
     # A non-UTF-8 table is refused here, before the first write.
     table_original = (_decode_utf8(destination_table.read_bytes(),

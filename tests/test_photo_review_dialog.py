@@ -403,6 +403,11 @@ def _idle_match_worker(monkeypatch):
         def start(self):
             started.append(self)
 
+        def stop(self):
+            # CONTRACT CHANGED 2026-10-29: the dialog stops its own search on
+            # close (_MatchWorker.stop); a stand-in worker offers the same call.
+            return None
+
     monkeypatch.setattr(module, "_MatchWorker", _Idle)
     return started
 
@@ -815,7 +820,7 @@ def test_invalid_image_rejected(app):
         PhotoReviewDialog(b"not a PNG", [], 40, 20)
 
 
-def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, app, monkeypatch):
+def test_the_quit_promise_is_released_when_the_measurement_thread_ends(app):
     """@brief La promessa di aspettare vale finche' il thread esiste.
 
     `aboutToQuit` teneva un riferimento a `worker.wait` che sopravviveva a
@@ -824,42 +829,25 @@ def test_the_quit_promise_is_released_when_the_measurement_thread_ends(dialog, a
     «RuntimeError: wrapped C/C++ object of type _MatchWorker has been deleted».
     Il thread vero non serve a dimostrarlo: serve che la connessione presa
     all'avvio venga sciolta alla fine.
+
+    CONTRACT CHANGED 2026-10-29: the exit hook belongs to `_MatchWorker`
+    itself and is `_stop_for_quit` (cancel, then a BOUNDED wait), no longer
+    an unbounded `worker.wait` connected by the dialog; what this test
+    guards -- the hook is released once the thread has finished -- is the
+    same.
     """
     from kicadgen.gui import photo_review_dialog as module
 
-    started = []
-
-    class _Idle(module.QThread):
-        """@brief Thread che non fa nulla: qui conta solo il ciclo di vita."""
-
-        done = module.pyqtSignal(object)
-        failed = module.pyqtSignal(str)
-
-        def __init__(self, snapshot):
-            super().__init__()
-            self.snapshot = snapshot
-
-        def start(self):
-            started.append(self)
-
-        def run(self):
-            return None
-
-    monkeypatch.setattr(module, '_MatchWorker', _Idle)
-    dialog._select_row(0)
-    dialog.choose_model()
-    assert len(started) == 1
-    worker = started[0]
-
-    # Finche' il thread e' in corso la promessa c'e': disconnetterla riesce.
-    app.aboutToQuit.disconnect(worker.wait)
-    app.aboutToQuit.connect(worker.wait)
+    worker = module._MatchWorker({"name": "U1"})
+    # Finche' il thread esiste la promessa c'e': disconnetterla riesce.
+    app.aboutToQuit.disconnect(worker._stop_for_quit)
+    app.aboutToQuit.connect(worker._stop_for_quit)
 
     worker.finished.emit()
     app.processEvents()
     # Sciolta: una seconda disconnessione non ha piu' nulla da sciogliere.
     with pytest.raises(TypeError):
-        app.aboutToQuit.disconnect(worker.wait)
+        app.aboutToQuit.disconnect(worker._stop_for_quit)
 
 
 _TEARDOWN_SCRIPT = """

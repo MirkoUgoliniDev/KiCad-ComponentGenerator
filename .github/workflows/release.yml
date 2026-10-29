@@ -8,9 +8,11 @@ name: Windows MSI release
 #   publish - write access, runs no project code: downloads the artifact and
 #             creates the GitHub Release of the tag.
 # The YOLO weights are not in Git: tools/fetch_model_weights.py downloads them
-# from the permanent GitHub release «models» and verifies their SHA-256
-# against packaging/model-weights.json before the build ships them all
-# (-IncludeYoloModel; licenses in THIRD_PARTY_NOTICES.md). The tag reaches
+# from the permanent GitHub release «models» (before the tests, into a folder
+# outside the checkout) and verifies their size and SHA-256 against
+# packaging/model-weights.json; after the tests they are placed in models/ and
+# the build ships exactly those files (-IncludeYoloModel; licenses in
+# THIRD_PARTY_NOTICES.md). The tag reaches
 # the scripts only through the TAG environment variable, never interpolated
 # into a script.
 #
@@ -25,7 +27,10 @@ permissions: {}
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 150
+    # The bounded steps add up to 145 min (fetch 30, install 20, two test halves
+    # 45 + 45, place 5); the build step has no limit of its own and took 6.5 min
+    # on 2026-10-28. 180 keeps 35 min for it in the worst case.
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
@@ -35,9 +40,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # pip's download cache (review 2026-10-29, K5), keyed on every file a
+      # pip install of this job reads, build-windows.ps1's build.txt included.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements/yolo.txt
+            requirements/build.txt
+            requirements/release-constraints.txt
 
       - name: Check that the tag matches the program version
         shell: pwsh
@@ -46,6 +59,31 @@ jobs:
           $version = [regex]::Match($text, '__version__\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
           if ("v$version" -ne $env:TAG) {
             throw "Tag $env:TAG does not match kicadgen.__version__ $version."
+          }
+
+      # Before the 22-minute test run, so an unreachable asset fails the job
+      # in minutes (review 2026-10-29, K4), and with a bounded retry for a
+      # transient network error (exit 1). Exit 2 (wrong size or SHA-256, bad
+      # manifest) is permanent and not retried. The weights wait OUTSIDE the
+      # checkout: the tests must run without them, exactly as in tests.yml.
+      - name: Fetch the model weights
+        shell: pwsh
+        timeout-minutes: 30
+        env:
+          WEIGHTS_STAGING: ${{ runner.temp }}/model-weights
+        run: |
+          # Standard library only; a file whose size or SHA-256 differs from
+          # the manifest fails the build, so a replaced asset never ships.
+          $attempts = 3
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            python tools/fetch_model_weights.py --target $env:WEIGHTS_STAGING
+            $status = $LASTEXITCODE
+            if ($status -eq 0) { break }
+            if ($status -ne 1 -or $attempt -eq $attempts) {
+              throw "Model weights not fetched (exit $status, attempt $attempt of $attempts)."
+            }
+            Write-Host "Attempt $attempt of $attempts failed (exit $status); retrying in 30 s."
+            Start-Sleep -Seconds 30
           }
 
       - name: Install the test dependencies
@@ -100,14 +138,16 @@ jobs:
           path: ${{ runner.temp }}/kicadgen-test-hang-*.txt
           if-no-files-found: ignore
 
-      - name: Fetch the model weights
+      # build-windows.ps1 -IncludeYoloModel verifies them again (size and
+      # SHA-256) and ships exactly the manifest's files.
+      - name: Place the model weights
         shell: pwsh
-        timeout-minutes: 20
+        timeout-minutes: 5
+        env:
+          WEIGHTS_STAGING: ${{ runner.temp }}/model-weights
         run: |
-          # Standard library only; a file whose SHA-256 differs from the
-          # manifest fails the build, so a replaced asset never ships.
-          python tools/fetch_model_weights.py
-          if ($LASTEXITCODE -ne 0) { throw "Model weights not fetched ($LASTEXITCODE)." }
+          python -c "import shutil, sys; shutil.copytree(sys.argv[1], 'models', dirs_exist_ok=True)" $env:WEIGHTS_STAGING
+          if ($LASTEXITCODE -ne 0) { throw "Model weights not placed ($LASTEXITCODE)." }
 
       - name: Build the executable and the MSI
         shell: pwsh

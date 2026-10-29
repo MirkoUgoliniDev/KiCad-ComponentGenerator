@@ -143,9 +143,9 @@ class Camera(QObject):
         @param grab_mouse True to `grabMouse()` the viewport until the pan ends (the symbol
             editor); False to rely on Qt's implicit grab (the footprint preview).
         @note A pan already running is finished first (same cleanup as `pan_cancel`).
-        @param keep_auto_fit False clears `auto_fit` at once (symbol editor); True leaves it
-            until a step really moves the view (footprint preview: a click without a move
-            must not stop the auto-fit).
+        @param keep_auto_fit False clears `auto_fit` at once; True leaves it until a step
+            really moves the view. Both views pass True (review 2026-10-29, C4: a click
+            without a move must not stop the auto-fit, in the symbol editor too).
         """
         view = self._view
         if self._pan_last is not None:

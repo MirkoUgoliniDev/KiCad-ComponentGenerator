@@ -81,7 +81,7 @@ from .app_config import config_path, load_config, save_config
 from .accepted_models_dialog import AcceptedModelsDialog, ConsolidateDialog
 from ..app_paths import default_projects_dir, install_dir, is_frozen, logs_dir, resource_path, user_data_dir
 from ..app_paths import (DEFAULT_YOLO_ONNX, DEFAULT_YOLO_PT, DEFAULT_YOLO_SMD_ONNX, SMD_MODELS_DIR,
-                         YOLO_MODELS_DIR,
+                         YOLO_MODELS_DIR, default_yolo_smd_model,
                          smd_model_path as smd_weights_path,
                          yolo_model_path as yolo_weights_path)
 # Only the parameter validation (standard library): onnxruntime and PyTorch
@@ -2410,8 +2410,18 @@ class MainWindow(QMainWindow):
         return self.profile_store.resolve(self._profile_key())
 
     def _selected_family(self):
-        row = self.profile_store.get_type(self._profile_key())
-        return row['family'] if row else ''
+        """@brief Family of the selected component type, '' when none.
+
+        @return The `family` column of the type row.
+        @note Memoised per profile key during one output refresh only
+            (`_refresh_output_actions`, review 2026-10-29, B2).
+        """
+        key = self._profile_key()
+
+        def read():
+            row = self.profile_store.get_type(key)
+            return row['family'] if row else ''
+        return self._refresh_memo(("family", key), read)
 
     @staticmethod
     def _project_kind_for_family(family: str) -> str | None:
@@ -2440,7 +2450,15 @@ class MainWindow(QMainWindow):
         return self._session_model or self._default_model()
 
     def _vision_model(self) -> str:
-        """@brief Return the single AI model also used for photo analysis."""
+        """@brief Return the extraction model, used by the side calls that run outside a full analysis.
+
+        @return `_effective_model()`.
+        @note It is NOT the model of the photo inventory: that is
+            `_photo_detector_model()`, which follows the session vision model.
+            The key check of a full analysis (`_run_models`) names the photo
+            model directly; the pin-type suggestion and the terminal detail
+            keep this one, as before.
+        """
         return self._effective_model()
 
     def _photo_detector_model(self) -> str:
@@ -2694,14 +2712,16 @@ class MainWindow(QMainWindow):
         @note Before, the picker always proposed the ONNX file as «in uso»,
             also in 'yolo_smd', and OK replaced the weights actually used
             (adversarial review B2, 2026-10-02); 'yolo_smd' also ignored the
-            environment variable (C-L3).
+            environment variable (C-L3). The 'yolo_smd' choice is delegated
+            to app_paths.default_yolo_smd_model(), shared with the analysis,
+            so the field shows the weights the run really uses (review
+            2026-10-29, P3).
         """
         override = os.environ.get("KICADGEN_YOLO_MODEL", "").strip()
         if override:
             return Path(override)
         if detector == "yolo_smd":
-            checkpoint = yolo_weights_path(DEFAULT_YOLO_PT)
-            return checkpoint if checkpoint.is_file() else yolo_weights_path(DEFAULT_YOLO_SMD_ONNX)
+            return default_yolo_smd_model()
         return yolo_weights_path(DEFAULT_YOLO_ONNX)
 
     def _pick_session_vlm_model(self) -> None:
@@ -3089,7 +3109,9 @@ class MainWindow(QMainWindow):
         try:
             return dialog.exec()
         finally:
-            dialog.deleteLater()
+            # A stand-in that is not a QObject owns no Qt resource to release.
+            if isinstance(dialog, QObject):
+                dialog.deleteLater()
 
     def _show_licenses(self) -> None:
         """@brief Show the program license and the third-party notices, read-only.
@@ -3247,12 +3269,9 @@ class MainWindow(QMainWindow):
         self.start_page.remove_recent_requested.connect(self._forget_recent_project)
         self.start_page.choose_root_requested.connect(self._browse_library_root)
         self.start_page.set_library_root(self._library_root())
-        self.field_library_root.textChanged.connect(
-            lambda _text: self.start_page.set_library_root(self._library_root()))
-        # «Apri progetto…» (open project) only if there is something to open
-        # (HANDOFF 170): the working folder decides, and it is re-read on every change.
-        self.field_library_root.textChanged.connect(
-            lambda _text: self._refresh_open_project_commands())
+        # The start page's working folder and «Apri progetto…» (open project,
+        # only if there is something to open, HANDOFF 170) follow the field
+        # through `_refresh_library_root_views`.
         self._refresh_open_project_commands()
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.start_page)
@@ -3545,7 +3564,9 @@ class MainWindow(QMainWindow):
         # analysis stays written in the AI log (`_log_proposed_name`).
 
         self.field_library_root = QLineEdit(str(DEFAULT_LIBRARY_ROOT))
-        self.field_library_root.textChanged.connect(self._update_project_path_label)
+        # One guarded slot for every view of the working folder (review
+        # 2026-10-29, A4): a keystroke is not a decision.
+        self.field_library_root.textChanged.connect(self._on_library_root_text_shown)
         btn_browse_root = QPushButton()
         btn_browse_root.setObjectName("browseRootButton")
         btn_browse_root.setIcon(QIcon(str(Path(__file__).resolve().parent / "assets" / "docs-open.svg")))
@@ -4049,7 +4070,6 @@ class MainWindow(QMainWindow):
         # The status bar follows every write of the cost file, not only
         # project changes: before it lagged behind during an analysis (B4).
         self.ai_account.costs_changed.connect(self._on_costs_changed)
-        self.field_library_root.textChanged.connect(self.ai_account.refresh)
         self.component_prompt_dialog = QDialog(self)
         self.component_prompt_dialog.setWindowTitle("Prompt specifico del componente")
         self.component_prompt_dialog.setModal(True)
@@ -4211,9 +4231,60 @@ class MainWindow(QMainWindow):
                 or self._photo_inventory_family() is not True):
             return params
         shape = "rect" if mode == "headers_square" else "circle"
-        return header_footprint_params(params, self.spin_header_pad.value(),
-                                      self.spin_header_drill.value(), shape=shape,
-                                      pad_overrides=self.header_pad_overrides)
+        drill = self.spin_header_drill.value()
+        return header_footprint_params(params, self.spin_header_pad.value(), drill, shape=shape,
+                                      pad_overrides=self._applicable_pad_overrides(params, drill))
+
+    def _applicable_pad_overrides(self, params, drill: float) -> dict:
+        """@brief The per-pin host pad overrides that still apply to `params`, the others left out with a log line.
+
+        @param params Physical module parameters the host lands are built on.
+        @param drill Host drill, mm: an override must be larger.
+        @return The entries of `header_pad_overrides` that
+            `pin_header.validate_pad_overrides` accepts one by one for the
+            pins `params` has now; all of them when those pins cannot be
+            listed (the generator then reports the real problem).
+        @note Since review 2026-10-29 (G7) the generator refuses an override
+            naming a pin the board no longer has or not larger than the host
+            drill. Such an override is not a user error to block on: it was
+            valid when set, and became stale after a re-analysis (fewer
+            contacts) or a larger host drill. It is left out of the drawing
+            and of the files, reported once per change in the log, and KEPT
+            in the draft, so it applies again if the pin or a smaller drill
+            comes back.
+        """
+        from ..generators.pin_header import pin_key, validate_pad_overrides
+        overrides = self.header_pad_overrides or {}
+        if not overrides:
+            return {}
+        try:
+            if isinstance(params, PinHeaderParams):
+                numbers = {pin_key(pin) for pin, _, _ in pin_positions(params)}
+            elif isinstance(params, PackageGeometry):
+                numbers = {pin_key(pin.number) for pin in params.pins if pin.pad_type != "np_thru_hole"}
+            elif isinstance(params, CastellatedModuleParams):
+                params.validate()
+                numbers = {pin_key(placement.number)
+                           for placement in pad_positions(params)}
+            else:
+                return dict(overrides)
+        except (ValueError, TypeError, ArithmeticError):
+            return dict(overrides)
+        kept, left_out = {}, []
+        for number, override in overrides.items():
+            try:
+                validate_pad_overrides({number: override}, numbers, drill)
+            except ValueError:
+                left_out.append(str(number))
+                continue
+            kept[number] = override
+        report = tuple(sorted(left_out))
+        if report and report != getattr(self, "_stale_pad_overrides_reported", ()):
+            self._append_log(tx("Modifiche dei pad {numbers} non applicate: il pin non esiste più "
+                                "o il pad non supera il foro degli header.",
+                                numbers=", ".join(report)))
+        self._stale_pad_overrides_reported = report
+        return kept
 
     def _on_mounting_changed(self, *_args) -> None:
         """@brief Refresh the footprint preview without invalidating the board mesh."""
@@ -4584,12 +4655,40 @@ class MainWindow(QMainWindow):
         return str(self._project_dir()) if self._named() else "—"
 
     def _refresh_output_actions(self) -> bool:
-        footprint_available = self._refresh_output_actions_inner()
-        self._refresh_mounting_actions()
-        self._refresh_regen_3d_availability()
-        self._refresh_kicad_remedies()
-        self._refresh_workflow_state()
+        """@brief Recompute every output command, path label and gate of the open project.
+
+        @return True when the footprint file exists.
+        @note One memo per refresh (review 2026-10-29, B2): the KiCad gate
+            (`_kicad_block`) and the component family (`_selected_family`,
+            one SQLite read each) were evaluated 4 and about 90 times by a
+            single refresh, which nothing in it can change: buttons,
+            placeholders, tooltips and labels are written, never the files,
+            the running work or the component type. A nested refresh shares
+            the outer memo; it is dropped when the outermost one ends, so the
+            next refresh reads everything again.
+        """
+        outermost = getattr(self, "_output_refresh_memo", None) is None
+        if outermost:
+            self._output_refresh_memo = {}
+        try:
+            footprint_available = self._refresh_output_actions_inner()
+            self._refresh_mounting_actions()
+            self._refresh_regen_3d_availability()
+            self._refresh_kicad_remedies()
+            self._refresh_workflow_state()
+        finally:
+            if outermost:
+                self._output_refresh_memo = None
         return footprint_available
+
+    def _refresh_memo(self, key, compute):
+        """Value of `compute()` memoised for the running output refresh, computed afresh outside one."""
+        memo = getattr(self, "_output_refresh_memo", None)
+        if memo is None:
+            return compute()
+        if key not in memo:
+            memo[key] = compute()
+        return memo[key]
 
     def _workflow_facts(self) -> dict:
         """@brief Facts of the open project that decide the workflow steps.
@@ -5216,8 +5315,8 @@ class MainWindow(QMainWindow):
                 # The guided box reads the same folder for its status line:
                 # the same system refusal must not escape this slot either.
                 say_unreadable(exc)
-            if hasattr(self, 'i18n'):
-                self.i18n.retranslate_widgets(self.guided_docs)
+            # No retranslation here (review 2026-10-29, A4): `refresh` already
+            # translates the box it rebuilt, and a language change refreshes it.
         # The «Documenti» (documents) step follows the list just re-read.
         self._refresh_workflow_state()
 
@@ -5382,16 +5481,22 @@ class MainWindow(QMainWindow):
     def _run_models(self) -> tuple[str, ...]:
         """@brief Every model identifier the next paid run may call.
 
-        @return The extraction model, the photo model and, when the profile
-            names one, the per-body crop reading model (`crop_model`; blank
-            means «the photo model», see `analysis_profiles.resolve`).
+        @return The extraction model, the photo model (`_photo_detector_model`:
+            the session vision model when one was chosen) and, when the
+            profile names one, the per-body crop reading model (`crop_model`;
+            blank means «the photo model», see `analysis_profiles.resolve`).
         @note The key check must look at the same set the worker receives
             (review 2026-10-27, A8): a DeepSeek main and photo model with an
             OpenRouter crop model still needs the OpenRouter key, and before
             the crop model was not consulted. A profile that cannot be read
             adds nothing here; the caller reports that problem itself.
+        @note The photo model is the one the worker receives as
+            `verification_model` (review 2026-10-29, A2): before, the set
+            named `_vision_model()`, which is the extraction model, so a
+            DeepSeek vision model chosen for the session without a DeepSeek
+            key passed this check and failed late, inside the review.
         """
-        models = [self._effective_model(), self._vision_model()]
+        models = [self._effective_model(), self._photo_detector_model()]
         try:
             crop_model = self._profile_values().get('crop_model')
         except (ProfileError, sqlite3.Error, OSError):
@@ -5681,6 +5786,11 @@ class MainWindow(QMainWindow):
             return
         length, width = (float(value) for value in size)
         self.btn_extract_ai.setEnabled(False)
+        # A running text, as the paid analysis shows «Analisi in corso...»;
+        # before, the button kept «Preparazione…» for the whole pretest
+        # (review 2026-10-29, A6). Before the flag: from here on the button
+        # text is no longer touched until `_end_extraction_busy`.
+        self._set_extract_button_text("Pretest YOLO in corso")
         self._extraction_busy = True
         try:
             self._start_log_session("Pretest YOLO")
@@ -5772,6 +5882,7 @@ class MainWindow(QMainWindow):
             self._release_orphan_overlay()
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
+            self._retry_pending_regen_3d()
             return
         self._hide_analysis_overlay()
         self._refresh_extract_enabled()
@@ -6497,7 +6608,9 @@ class MainWindow(QMainWindow):
                 bundle.body_length_mm, bundle.body_width_mm, self,
                 stage=review_module.STAGE_DETECTOR)
             self.i18n.retranslate_widgets(dialog)
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            # Released after the answer (review 2026-10-29, A3); deleteLater
+            # is deferred, so the kept bodies are still read here.
+            accepted = self._run_modal(dialog) == QDialog.DialogCode.Accepted
             kept = list(dialog.kept_components()) if accepted else None
         except Exception as exc:  # noqa: BLE001 - the view must not bring the window down
             self._append_log(tx("ATTENZIONE revisione dei corpi non disponibile: {exc}", exc=exc))
@@ -7074,6 +7187,7 @@ class MainWindow(QMainWindow):
             self._apply_component_name_gate()
             self._refresh_reopen_review_button()
             self._refresh_ai_log_button()
+            self._retry_pending_regen_3d()
             return
         # Modal rename/validation dialogs run a nested Qt event loop. The worker
         # may finish there, before _on_extracted has populated all fields.
@@ -7386,7 +7500,8 @@ class MainWindow(QMainWindow):
                 dialog.buttons.button(QDialogButtonBox.StandardButton.Apply).setToolTip(
                     tx("I riquadri tenuti vengono classificati dalla rete SMD locale."))
                 dialog.model_status.setText(tx("Footprint e STEP si cercano dopo la classificazione locale."))
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            # Released after the answer (review 2026-10-29, A3).
+            accepted = self._run_modal(dialog) == QDialog.DialogCode.Accepted
             kept = dialog.kept_components() if accepted else None
             self._append_log(
                 tx("Revisione dei corpi rilevati: {n_kept} tenute su {n_proposals}.",
@@ -7627,7 +7742,9 @@ class MainWindow(QMainWindow):
             if component_row is not None and 0 <= component_row < len(dialog._items):
                 dialog._select_row(component_row)
                 QTimer.singleShot(0, dialog.choose_model)
-            dialog.exec()
+            # Released after closing (review 2026-10-29, A3): «Applica» has
+            # already delivered its corrections during the modal loop.
+            self._run_modal(dialog)
             return
         if not self._photo_overlay_png:
             return
@@ -7652,7 +7769,7 @@ class MainWindow(QMainWindow):
         area.setWidget(label)
         layout.addWidget(area)
         self.i18n.retranslate_widgets(dialog)
-        dialog.exec()
+        self._run_modal(dialog)
 
     def _body_sizes(self) -> dict:
         """Current body size (mm) of each set of body fields."""
@@ -7762,6 +7879,20 @@ class MainWindow(QMainWindow):
         self._append_log(tx("Revisione fotografica applicata: {n_components} componenti; "
                             "modello STEP da rigenerare.",
                             n_components=len(components)))
+
+    def _retry_pending_regen_3d(self) -> None:
+        """@brief Schedule a 3D regeneration left pending while an abandoned run was still working.
+
+        @note The late end of a run abandoned with «Interrompi» does not pass
+            through `_hide_analysis_overlay` (the abort already closed the
+            modal), which is where a pending request is normally retried: a
+            request made in between stayed pending forever (review
+            2026-10-29, A5). Deferred by one event-loop turn, so the thread
+            that just ended is no longer counted as running work; the retry
+            itself rechecks every condition.
+        """
+        if self._regen_3d_pending:
+            QTimer.singleShot(0, self._run_pending_regen_3d)
 
     def _run_pending_regen_3d(self) -> None:
         """@brief Start the 3D regeneration an «Apply» asked for, when possible.
@@ -8022,8 +8153,18 @@ class MainWindow(QMainWindow):
         self._vlm_model = vlm if isinstance(vlm, str) and vlm else None
         self.field_vlm_model.setText(self._photo_detector_model())
         self._sides.clear()
-        for side in _project_list(state, "sides", skipped):
+        for index, side in enumerate(_project_list(state, "sides", skipped)):
             if isinstance(side, dict):
+                # A side whose count, pitch, offset or first pin is damaged
+                # (null, a word, NaN dropped to null by `read_project_config`)
+                # is skipped with a note, like a damaged component: opening a
+                # project must never raise, and inventing its contacts would
+                # be a guess (review 2026-10-29, A1).
+                try:
+                    normalised_side(side)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    skipped.append(f"sides[{index}] ({exc})")
+                    continue
                 # A project saved before the key was generated with the style of
                 # that time: it is kept, it is not a deduction.
                 self._add_side_row(side, missing_style=default_contact_style())
@@ -8251,11 +8392,12 @@ class MainWindow(QMainWindow):
         # Another project, another footprint: the camera follows it again.
         if hasattr(self, "preview_view"):
             self.preview_view.auto_fit = True
+        # The symbol tab needs no second refresh here: it was refreshed with
+        # force=True above, and nothing in between touches its inputs (review
+        # 2026-10-29, A8).
         index = self.tabs.currentIndex()
         if index == TAB_PREVIEW:
             self._draw_preview()
-        elif index == TAB_SYMBOL:
-            self._refresh_symbol_tab(force=True)
         elif index == TAB_MODEL_3D:
             self._enter_3d_tab()
         # The state just applied is the saved one: it must not be rewritten.
@@ -8536,10 +8678,46 @@ class MainWindow(QMainWindow):
         self._library_root_committed = self.field_library_root.text()
 
     def _on_library_root_edit_finished(self) -> None:
-        """@brief The user confirmed the typed «Area di lavoro» with Enter."""
+        """@brief The user confirmed the typed «Area di lavoro» with Enter.
+
+        @note Enter emits no text change, so the views of the working folder
+            are refreshed here, once, after the folder is committed: while
+            the user typed they were skipped (`_on_library_root_text_shown`).
+        """
         self.field_library_root.setModified(False)
         self._on_library_root_changed()
         self._library_root_committed = self.field_library_root.text()
+        self._refresh_library_root_views()
+
+    def _on_library_root_text_shown(self, _text: str = "") -> None:
+        """@brief A change of the «Area di lavoro» text: refresh its views unless the user is typing.
+
+        @note While the text is modified (typed, not confirmed)
+            `_library_root()` still answers the committed folder, so every
+            view would be recomputed from the same folder at each keystroke:
+            project path, output actions, document list, start page, open
+            commands and AI costs read the disk for nothing (review
+            2026-10-29, A4). They are refreshed when the text is confirmed
+            (`_on_library_root_edit_finished`) or put back by the program.
+        """
+        if self.field_library_root.isModified():
+            return
+        self._refresh_library_root_views()
+
+    def _refresh_library_root_views(self) -> None:
+        """@brief Recompute everything that shows or depends on the working folder.
+
+        @note Guarded with `getattr`: the field exists before the start page
+            and the AI account panel are built.
+        """
+        self._update_project_path_label()
+        start_page = getattr(self, "start_page", None)
+        if start_page is not None:
+            start_page.set_library_root(self._library_root())
+            self._refresh_open_project_commands()
+        account = getattr(self, "ai_account", None)
+        if account is not None:
+            account.refresh()
 
     def _set_library_root_quietly(self, text: str) -> None:
         """@brief Show `text` in «Area di lavoro» as a program decision, without the change slots.
@@ -9306,82 +9484,6 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 self._append_log(tx("Anteprima KiCad con il nome vecchio non rimossa: {path} "
                                     "({exc}).", path=stale, exc=exc))
-
-    def _move_analysis_folders_to(self, old_project: Path, new_project: Path) -> None:
-        """@brief Bring into the renamed folder everything the analysis produced.
-
-        @param old_project Project folder before the rename.
-        @param new_project Project folder with the new name.
-        @note The project is its folder (user decision of 2026-09-24): with
-            `docs/` and the diary, the AI answer cache and the evidence
-            (`photo-cache/`) and the reviewed proposals (`photo-review/`) are
-            moved too. Before, only documents and diary were moved, and the
-            review stayed in the old folder: «Rivedi corpi» no longer found it
-            under the new name.
-        @note Never overwrite: a file that already exists at the destination
-            stays as it is and the old one stays where it was, with a log
-            line. The cached answers are named after their content and the
-            evidence carries a timestamp, so a real conflict is rare.
-        """
-        import shutil
-        from ..services.photo_inventory import PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR
-        from .project_state import PROJECT_CONFIG_NAME
-        # A file rejected on opening stays rejected even after the
-        # rename: the block follows the folder (reviewer 2, defect 6).
-        # Before it stayed on the old folder and the autosave
-        # rewrote the moved file in version 1.
-        if self._project_config_refused is not None and self._project_config_refused == old_project:
-            self._project_config_refused = new_project
-        # The project settings and its AI cost follow the name like
-        # the rest (the cost stayed in the old folder: audit 25/09).
-        from ..services.project_costs import COSTS_FILE
-        for file_name in (PROJECT_CONFIG_NAME, COSTS_FILE):
-            settings = old_project / file_name
-            if not settings.is_file():
-                continue
-            if (new_project / file_name).exists():
-                self._append_log(tx("Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).",
-                                    PROJECT_CONFIG_NAME=file_name,
-                                    exc=tx("esiste già nella cartella nuova")))
-                continue
-            try:
-                new_project.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(settings), str(new_project / file_name))
-            except OSError as exc:
-                self._append_log(tx("Rinomina: {PROJECT_CONFIG_NAME} non spostato ({exc}).",
-                                    PROJECT_CONFIG_NAME=file_name,
-                                    exc=exc))
-        for name in (PHOTO_CACHE_SUBDIR, REVIEW_BUNDLE_SUBDIR):
-            source = old_project / name
-            if not source.is_dir():
-                continue
-            target = new_project / name
-            kept = 0
-            try:
-                for path in sorted(source.rglob("*")):
-                    if not path.is_file():
-                        continue
-                    destination = target / path.relative_to(source)
-                    if destination.exists():
-                        kept += 1
-                        continue
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(destination))
-                for folder in sorted(source.rglob("*"), reverse=True):
-                    if folder.is_dir() and not any(folder.iterdir()):
-                        folder.rmdir()
-                if not any(source.iterdir()):
-                    source.rmdir()
-            except OSError as exc:
-                self._append_log(tx("Rinomina: {name}/ non spostata del tutto ({exc}).", name=name, exc=exc))
-                continue
-            if kept:
-                self._append_log(
-                    tx("Rinomina: {kept} file di {name}/ esistevano gia' nella nuova cartella "
-                       "e sono rimasti in {source}.",
-                       kept=kept,
-                       name=name,
-                       source=source))
 
     def _on_extracted(self, params: ExtractedParams) -> None:
         """@brief Apply the extracted parameters, if they are still the expected ones.
@@ -12591,7 +12693,13 @@ class MainWindow(QMainWindow):
             a file not matching the parameters (`_kicad_files_alignment_block`).
         @note The required-metadata block applies to the installations only
             and is added by `_refresh_install_gate`/`_install_block_reason`.
+        @note Evaluated once per output refresh (`_refresh_memo`, review
+            2026-10-29, B2); outside a refresh every call reads it again.
         """
+        return self._refresh_memo("kicad_block", self._kicad_block_now)
+
+    def _kicad_block_now(self):
+        """The gate of `_kicad_block`, always evaluated (no per-refresh memo)."""
         if self._kicad_work_busy():
             return ("busy", self.i18n.text(
                 "Comando non disponibile mentre è in corso un lavoro (generazione, modello STEP, "
@@ -13319,13 +13427,19 @@ class MainWindow(QMainWindow):
                 # The «KiCadGen» entry of the table already points to another
                 # folder: re-pointing it would take away from every project the components
                 # installed there. Nothing has been written; the user is asked, naming
-                # the old folder and the new one (check of 25/09, F2).
-                if (getattr(exc, "code", None) == "library_entry_conflict"
-                        and not replace_entry):
+                # the old folder and the new one (check of 25/09, F2). An entry
+                # switched off in the table, «(disabled)», is the same kind of
+                # confirmable conflict (review 2026-10-29, L2): the question says
+                # that confirming re-enables it, and the retry with
+                # `replace_library_entry=True` does so.
+                code = getattr(exc, "code", None)
+                if code in ("library_entry_conflict", "library_entry_disabled") and not replace_entry:
+                    question = ("kicad.confirm_enable_library_entry"
+                                if code == "library_entry_disabled"
+                                else "kicad.confirm_replace_library_entry")
                     answer = QMessageBox.question(
                         self, self.i18n.text("Libreria KiCadGen già registrata"),
-                        self.i18n.tr("kicad.confirm_replace_library_entry",
-                                     **dict(getattr(exc, "context", {}) or {})),
+                        self.i18n.tr(question, **dict(getattr(exc, "context", {}) or {})),
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No,
                     )
@@ -13557,13 +13671,25 @@ class MainWindow(QMainWindow):
             if target.resolve() == source.resolve():
                 return True
             if target.exists():
-                target.write_text(target.read_text(encoding="utf-8")
-                                  + source.read_text(encoding="utf-8"), encoding="utf-8")
-                source.unlink()
+                # Merged through a temporary file and an atomic replace
+                # (review 2026-10-29, B4): a write cut half way left the
+                # destination diary truncated. If the old diary then cannot
+                # be removed, the destination gets its own text back, so a
+                # failure leaves both files as they were and a retry does not
+                # append the same account twice.
+                from ..fsutil import atomic_write_bytes
+                original = target.read_bytes()
+                merged = (original.decode("utf-8") + source.read_text(encoding="utf-8")).encode("utf-8")
+                atomic_write_bytes(target, merged)
+                try:
+                    source.unlink()
+                except OSError:
+                    atomic_write_bytes(target, original)
+                    raise
             else:
                 shutil.move(str(source), str(target))
             return True
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             self._append_log(tx("Rinomina annullata: impossibile trasferire il log ({exc}).", exc=exc))
             return False
 
@@ -13626,7 +13752,18 @@ class MainWindow(QMainWindow):
         return pins or None
 
     def _current_params(self) -> PinHeaderParams:
-        return PinHeaderParams(
+        """@brief The pin header parameters from the fields and the footprint draft.
+
+        @return PinHeaderParams whose `pad_overrides` keep only the pad edits
+            that still apply (`_applicable_pad_overrides` against the
+            header's own drill).
+        @note User decision 2026-10-29: a pad edit that became stale (pin
+            gone after a re-analysis, or not larger than a drill raised
+            afterwards) is left out with a log line, as for the host
+            headers, and kept in the draft; before, it made the whole
+            parameter set invalid and the preview disappeared.
+        """
+        params = PinHeaderParams(
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
             tags=self.field_tags.text().strip(),
@@ -13637,7 +13774,7 @@ class MainWindow(QMainWindow):
             row_spacing=self.field_row_spacing.value(),
             pad_diameter=self.field_pad.value(),
             drill=self.field_drill.value(),
-            pad_overrides=deepcopy(self.header_pad_overrides),
+            pad_overrides={},
             populated_pins=self._parse_populated_pins(),
             pin_map=self.pin_map,
             # Only a DECLARED body draws its outline (F.Fab, silkscreen): the
@@ -13650,6 +13787,8 @@ class MainWindow(QMainWindow):
             body_offset_x=self.field_body_offset_x.value(),
             body_offset_y=self.field_body_offset_y.value(),
         )
+        return replace(params, pad_overrides=deepcopy(
+            self._applicable_pad_overrides(params, params.drill)))
 
     def _current_body_params(self, photo_components: bool = True) -> Body3DParams | None:
         """@brief The parameters of the solid to build, or None if none must be built.
@@ -14844,19 +14983,31 @@ class MainWindow(QMainWindow):
         self.preview_view.text_hovered.connect(self._on_footprint_text_hovered)
         from .canvas_gestures import DeferredCheckpoint, bind_shortcuts
         # Decision D8 (2026-10-17, as the symbol editor): a held Ctrl+Z /
-        # Ctrl+Y / Delete / Ctrl+D runs its handler on every repeat but
-        # writes the recovery file once, when the key is released.
+        # Ctrl+Y / Delete / Ctrl+D / arrow / R runs its handler on every
+        # repeat but writes the recovery file once, when the key is released.
         self._fp_checkpoint = DeferredCheckpoint(self.preview_view.key_repeat,
                                                  self._checkpoint_footprint_draft)
+        command = self._footprint_edit_command
+        # What each command needs to act: a drag is cancelled only then (C3).
+        can_undo = lambda: bool(self._fp_drawings_undo)
+        can_redo = lambda: bool(self._fp_drawings_redo)
+        has_target = lambda: bool(self._fp_targets())
+        can_paste = lambda: bool(self._fp_clipboard)
+        bindings = [('Ctrl+Z', command(self._undo_footprint_drawing, can_undo)),
+                    ('Ctrl+Y', command(self._redo_footprint_drawing, can_redo)),
+                    ('Ctrl+Shift+Z', command(self._redo_footprint_drawing, can_redo)),
+                    ('Ctrl+D', command(self._duplicate_hovered_drawing, has_target)),
+                    ('Ctrl+C', self._copy_hovered_drawing),
+                    ('Ctrl+V', command(self._paste_footprint_drawings, can_paste)),
+                    ('Delete', command(self._delete_hovered_drawing, has_target))]
+        # Arrow nudge and R / Shift+R turn (review 2026-10-29, C8, as the
+        # symbol editor): one drawing-grid step, Y down on the footprint.
+        bindings += [(key, command(lambda x=dx, y=dy: self._nudge_footprint_drawings(x, y), has_target))
+                     for key, dx, dy in [('Left', -1, 0), ('Right', 1, 0), ('Up', 0, -1), ('Down', 0, 1)]]
+        bindings += [(key, command(lambda ccw=ccw: self._turn_footprint_targets(ccw), has_target))
+                     for key, ccw in [('R', False), ('Shift+R', True)]]
         self._fp_shortcuts = bind_shortcuts(
-            self.preview_view,
-            [('Ctrl+Z', self._undo_footprint_drawing),
-             ('Ctrl+Y', self._redo_footprint_drawing),
-             ('Ctrl+Shift+Z', self._redo_footprint_drawing),
-             ('Ctrl+D', self._duplicate_hovered_drawing),
-             ('Ctrl+C', self._copy_hovered_drawing),
-             ('Ctrl+V', self._paste_footprint_drawings),
-             ('Delete', self._delete_hovered_drawing)],
+            self.preview_view, bindings,
             runner=self._fp_checkpoint.run,
             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
@@ -15338,11 +15489,15 @@ class MainWindow(QMainWindow):
         @return True when a step was taken.
         @note A step changes the draft only; the applied state is captured
             first when there was no draft (undo right after an apply).
+            With nothing to step to it returns before resetting the draw
+            state: that reset forgot a handle drag in progress, so a Ctrl+Z
+            with nothing to undo silently dropped the drag (review
+            2026-10-29, C3 parity with the symbol editor).
         """
-        self._cancel_footprint_drawing()
-        self._sync_footprint_draft_package()
         if not source:
             return False
+        self._cancel_footprint_drawing()
+        self._sync_footprint_draft_package()
         current = deepcopy(self._footprint_edit_state())
         if self._fp_applied is None:
             self._fp_applied = deepcopy(current)
@@ -15545,8 +15700,9 @@ class MainWindow(QMainWindow):
             (self._footprint_drawings, self.footprint_text_positions,
              self.header_pad_overrides, self.package_geometry) = saved
             self._fp_draft_package = draft_package
-            # The 2D preview draws `_last_params` first: it must keep showing
-            # the draft package, not the applied copy the worker received.
+            # `_last_params` must keep naming the draft package, not the
+            # applied copy the worker received (the preview draws the
+            # draft package itself since review 2026-10-29, B1).
             if swapped is not saved[3] and getattr(self, "_last_params", None) is swapped:
                 self._last_params = saved[3]
 
@@ -15916,7 +16072,9 @@ class MainWindow(QMainWindow):
             cannot start) is logged once by `_generate` and is not re-armed
             by the finished handler it triggers, which would loop once per
             event-loop turn. The edit stays saved in the project; the next
-            generation carries it.
+            generation carries it. A refused start of an existing footprint
+            marks the file stale (`_fp_file_stale`), so the KiCad commands do
+            not copy a .kicad_mod without the applied edit.
         @note Drawings and text positions rewrite only an existing .kicad_mod
             (no file yet: the first generation will carry them); a pad edit
             goes to `_generate`, which decides as it always did.
@@ -15940,9 +16098,16 @@ class MainWindow(QMainWindow):
         # about, and not written (`_generate` works on the applied state).
         self._fp_rewrite_flushing = True
         try:
-            self._generate(footprint_only=True)
+            started = self._generate(footprint_only=True)
         finally:
             self._fp_rewrite_flushing = False
+        if started is False and self._project_has_footprint():
+            # The dirty flag was consumed above, so a refused start must leave
+            # a trace: the .kicad_mod on disk does not hold the applied edit,
+            # and the gate says so (`footprint_pending_write`) until a
+            # generation rewrites it (review 2026-10-29, B5).
+            self._fp_file_stale = True
+            self._refresh_output_actions()
 
     def _refresh_footprint_undo_buttons(self) -> None:
         """@brief Enable undo/redo, Applica/Annulla and «Recupera bozza» from the draft state."""
@@ -16048,11 +16213,19 @@ class MainWindow(QMainWindow):
 
         @param index Index of a drawing; an unknown one does nothing.
         @param additive True keeps the rest of the selection.
+        @note A press that leaves the selection as it was (the same primary
+            and members, on the same drawings revision) restyles nothing
+            (review 2026-10-29, C10): every press on a drawing comes here,
+            and the restyle walks every item of the scene.
         """
         if not 0 <= index < len(self.footprint_drawings):
             return
+        revision = self._fp_selection_revision
         self._fp_selected_indices()
+        before = self._fp_selection.snapshot()
         self._fp_selection.select(index, additive)
+        if revision == self._fp_selection_revision and self._fp_selection.snapshot() == before:
+            return
         self._refresh_drawing_selection()
 
     def _toggle_footprint_drawing_selection(self, index: int) -> None:
@@ -16207,6 +16380,86 @@ class MainWindow(QMainWindow):
             updated[index] = valid[0]
         if updated == self.footprint_drawings:
             return False
+        return self._commit_drawings(updated)
+
+    def _footprint_edit_command(self, handler, applies):
+        """@brief Wrap a keyboard edit command so it first cancels a drag in progress when it will act.
+
+        @param handler The command (undo, redo, Delete, Ctrl+D, Ctrl+V, nudge, turn).
+        @param applies Predicate telling, before the command runs, whether it
+            has something to act on (a snapshot to go to, a target, a
+            non-empty clipboard).
+        @return A callable that cancels the drag when `applies()` is true,
+            then runs `handler`.
+        @note Decision of the 2026-10-29 review (C3, the same rule as the
+            symbol editor's `_end_drag_for_command`): an edit command pressed
+            while the mouse button still drags a drawing, a handle or a text
+            cancels the drag through the gesture controller exactly once
+            (`gesture_end` with commit=False: the text goes back, the ghost
+            is dropped), and then applies. A command with nothing to act on
+            (nothing to undo, no target, an empty clipboard) leaves the drag
+            alone in both tabs. The redraw of the command finds the
+            controller idle and cancels nothing again.
+        """
+        def run():
+            if applies():
+                self._end_footprint_drawing_interaction()
+            return handler()
+        return run
+
+    def _nudge_footprint_drawings(self, dx: int, dy: int) -> bool:
+        """@brief Arrow key: move the selected drawings (else the hovered one) by one drawing-grid step.
+
+        @param dx Steps along X (-1, 0 or 1), right positive.
+        @param dy Steps along Y (-1, 0 or 1), down positive (footprint axes).
+        @return True when the draft changed (one undo step per key press or
+            repeat, as the symbol editor's nudge).
+        @note The step is the paste/duplicate step (`_footprint_paste_step`,
+            the view's drawing grid); the move goes through
+            `_translate_drawings`, the path of a whole-drawing drag drop.
+        """
+        targets = self._fp_targets()
+        if not targets:
+            return False
+        step_x, step_y = self._footprint_paste_step()
+        return self._translate_drawings(targets, round(dx * step_x, 4), round(dy * step_y, 4))
+
+    def _turn_footprint_targets(self, counter_clockwise: bool) -> bool:
+        """@brief R / Shift+R: turn the selected drawings (else the hovered one) by a quarter turn.
+
+        @param counter_clockwise True for Shift+R (counter-clockwise on
+            screen), False for R (clockwise), the symbol editor's mapping.
+        @return True when the draft changed (one undo step).
+        """
+        from ..core.footprint import turn_drawing
+        targets = self._fp_targets()
+        if not targets:
+            return False
+        return self._transform_drawings(targets, lambda r: turn_drawing(r, counter_clockwise))
+
+    def _translate_drawings(self, indices, dx: float, dy: float) -> bool:
+        """@brief Move the drawings at `indices` by (dx, dy) mm as ONE undo step.
+
+        @param indices Indices into `footprint_drawings`; unknown ones are skipped.
+        @param dx X displacement, mm.
+        @param dy Y displacement, mm (down positive).
+        @return True when the draft changed. One member the validation
+            refuses refuses the whole move: nothing changes and the
+            «Spostamento scartato.» toast says why.
+        @note Shared by the drop of a whole-drawing drag and the arrow nudge.
+        """
+        from ..core.footprint import translate_drawing, validate_footprint_drawings
+        chosen = [i for i in indices if 0 <= i < len(self.footprint_drawings)]
+        if not chosen or (dx, dy) == (0.0, 0.0):
+            return False
+        updated = deepcopy(self.footprint_drawings)
+        for member in chosen:
+            moved = translate_drawing(self.footprint_drawings[member], dx, dy)
+            if not validate_footprint_drawings([moved]):
+                self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
+                                          self._degenerate_drawing_text(moved))
+                return False
+            updated[member] = moved
         return self._commit_drawings(updated)
 
     def _delete_hovered_drawing(self) -> None:
@@ -17139,7 +17392,7 @@ class MainWindow(QMainWindow):
             undo step, as the symbol editor's group drag; a handle drop
             reshapes one drawing only.
         """
-        from ..core.footprint import translate_drawing, validate_footprint_drawings
+        from ..core.footprint import validate_footprint_drawings
         self._fp_handle_drag = None
         if not 0 <= index < len(self.footprint_drawings):
             return
@@ -17152,16 +17405,7 @@ class MainWindow(QMainWindow):
                 return
             # Every member of the dragged group moves by the same snapped
             # delta, as one commit; one refused member refuses the whole drop.
-            updated = deepcopy(self.footprint_drawings)
-            for member in self._fp_drag_members(index, point_index):
-                moved = translate_drawing(self.footprint_drawings[member], dx, dy)
-                if not validate_footprint_drawings([moved]):
-                    self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
-                                              self._degenerate_drawing_text(moved))
-                    self._refresh_drawing_handles()
-                    return
-                updated[member] = moved
-            self._commit_drawings(updated)
+            self._translate_drawings(self._fp_drag_members(index, point_index), dx, dy)
             self._refresh_drawing_handles()
             return
         else:
@@ -19112,7 +19356,12 @@ class MainWindow(QMainWindow):
         change = menu.addAction(self.i18n.text("Cambia modello KiCad..."))
         change.triggered.connect(
             lambda: QTimer.singleShot(0, lambda: self._show_photo_comparison(component_row=row)))
-        menu.exec(position)
+        try:
+            menu.exec(position)
+        finally:
+            # Each right click built a new child menu kept until the window
+            # closed (review 2026-10-29, B3); the entries only schedule work.
+            menu.deleteLater()
 
     def _set_component_visibility(self, row: int, visible: bool) -> None:
         """@brief Include or exclude a component from the solid, without losing it.
@@ -19671,28 +19920,29 @@ class MainWindow(QMainWindow):
     def _preview_params(self):
         """@brief Parameters the 2D preview draws, or None when there are none.
 
-        @return The parameters of this session's last generation; otherwise
-            the ones of the open project, chosen and validated like the
-            footprint part of «Generate» (package, castellated module or pin
-            header); None when the fields do not make a valid footprint.
+        @return The parameters of the current fields and footprint draft,
+            chosen and validated like the footprint part of «Generate»
+            (package, castellated module or pin header); None when the fields
+            do not make a valid footprint.
         @note User, 2026-09-25: reopening a generated project showed an empty
             preview, because only a generation of THIS session set
             `_last_params`. The fields restored with the project are the ones
-            its footprint was generated from.
+            its footprint was generated from, so the preview draws them.
+        @note The frozen `_last_params` of the last generation is no longer
+            drawn (review 2026-10-29, B1; user decision 2026-10-14: in memory
+            the fields ARE the draft and the preview draws the draft): after
+            a generation, a drill, pad, pitch or castellated side typed in
+            the fields, or a new extraction whose regeneration was declined,
+            was not drawn, and the pad editor checked pad > drill against the
+            stale drill (`_edited_pad_reference`).
         """
         try:
             params = (
-                self._last_params if self._last_params is not None else
                 self.package_geometry if self.package_geometry is not None else
                 # The 2D preview draws pads and outline: never the photo bodies.
                 self._current_castellated_params(photo_components=False)
                 if self._is_castellated() else self._current_params()
             )
-            if (isinstance(params, PinHeaderParams)
-                    and (params.pad_overrides or {}) != self.header_pad_overrides):
-                # The last generation froze the APPLIED pad overrides; the
-                # preview draws the footprint draft (review A, 2026-10-14).
-                params = replace(params, pad_overrides=deepcopy(self.header_pad_overrides))
             params.validate()
             params = self._host_footprint_params(params)
             self._set_mounting_error("")
@@ -19997,6 +20247,8 @@ class MainWindow(QMainWindow):
 
         @return (pad_mm, drill_mm) of the component's own pin grid when the
             preview draws it (direct mode of a THT part), else of the host header.
+        @note Read from the current fields through `_preview_params`, never
+            from the last generation (review 2026-10-29, B1).
         """
         try:
             drawn = self._preview_params()

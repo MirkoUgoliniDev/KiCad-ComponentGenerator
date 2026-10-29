@@ -13,6 +13,7 @@ from itertools import count
 import json
 import math
 import re
+import threading
 import time
 from time import perf_counter
 from typing import Callable, Optional
@@ -171,6 +172,56 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+class _CancelWatch:
+    """Poll `cancel` while a paid attempt runs and close its connection when it fires.
+
+    The checker of make_logged_call is otherwise asked only between
+    attempts: a request already waiting for its answer (up to the 300 s
+    HTTP timeout) ignored «Interrompi» (review 2026-10-29, E6). The watch
+    runs in its own daemon thread, calls `cancel` every _CANCEL_POLL_S and,
+    the first time it raises, keeps that exception and closes the in-flight
+    request of the calling thread with `openrouter.abort_request`. The
+    attempt then fails and the wrapper raises the kept exception instead,
+    without any retry. `cancel` must therefore be callable from another
+    thread (the application passes checks of a threading.Event or of
+    QThread.isInterruptionRequested).
+    """
+
+    def __init__(self, cancel: Callable[[], None]):
+        """@brief Prepare the watch of the calling thread's next attempt (not started yet).
+
+        @param cancel Thread-safe checker that raises to cancel.
+        """
+        self._cancel = cancel
+        self._thread_id = threading.get_ident()
+        self._stop = threading.Event()
+        #: The exception raised by `cancel`, or None while it has not fired.
+        self.cancelled: Optional[BaseException] = None
+        self._thread = threading.Thread(target=self._run, name="ai-cancel-watch", daemon=True)
+
+    def __enter__(self) -> "_CancelWatch":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        self._stop.set()
+        self._thread.join()
+        return False
+
+    def _run(self) -> None:
+        while not self._stop.wait(_CANCEL_POLL_S):
+            try:
+                self._cancel()
+            except BaseException as exc:  # noqa: BLE001 - any raise of the checker is a cancel
+                self.cancelled = exc
+                try:
+                    from .openrouter import abort_request
+                    abort_request(self._thread_id)
+                except Exception:  # noqa: BLE001 - the kept exception still stops the chain
+                    pass
+                return
+
+
 def retry_delay(attempt: int, retry_after=None) -> float:
     """@brief Seconds to wait before retry number `attempt` (1 = first retry).
 
@@ -196,8 +247,13 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         hash/size summary for binary blocks.  Disabled by default for callers
         that do not explicitly opt into an audit trail.
     @param cancel Optional checker called before EVERY paid attempt (retries
-        included) and during backoff waits; it aborts the chain by raising,
-        preferably a CallCancelled subclass. None = no cancellation channel.
+        included), during backoff waits and, from a watcher thread, every
+        _CANCEL_POLL_S while an attempt is in flight; it aborts the chain by
+        raising, preferably a CallCancelled subclass. Raised during an
+        attempt, it closes that attempt's connection
+        (`openrouter.abort_request`) and its exception is raised in place of
+        the attempt's failure. It must be thread-safe. None = no
+        cancellation channel.
     @return Callable preserving argument objects, result identity and original exceptions;
         the original callable itself when both progress and cancel are None.
     @throws BaseException The original callable's exception, re-raised unchanged,
@@ -292,10 +348,21 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         attempt = 1
         compatibility_used = False
         while True:
+            watch = _CancelWatch(cancel) if cancel is not None else None
             try:
-                result = call_tool(*args, **attempt_kwargs)
+                if watch is None:
+                    result = call_tool(*args, **attempt_kwargs)
+                else:
+                    with watch:
+                        result = call_tool(*args, **attempt_kwargs)
                 break
             except BaseException as exc:
+                if watch is not None and watch.cancelled is not None:
+                    # Cancel pressed while the attempt was in flight: its
+                    # connection was closed; the user's own cancellation is
+                    # raised, never a retry (review 2026-10-29, E6).
+                    emit(f"AI_CALL_CANCELLED {context} attempts={attempt}")
+                    raise watch.cancelled from exc
                 if isinstance(exc, CallCancelled):
                     raise
                 compatibility = (getattr(exc, "compatibility", False) is True
