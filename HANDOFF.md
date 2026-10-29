@@ -159,6 +159,19 @@ Stato dei correttori: (aggiornare man mano)
   v1.0.3 NON ancora autorizzati in modo esplicito: chiederli (una domanda).
 - COMMIT `1ca297d` fatto. PROSSIMO: build locale (skill build-installer)
   dalla versione committata, per provare la spec che legge il manifest.
+  IN CORSO da `b650d20`: build-windows.ps1 -IncludeYoloModel (versione
+  ancora 1.0.2: build di VERIFICA, non una release), log scratchpad
+  coord/build.log con «EXIT n» in fondo.
+  ESITO BUILD LOCALE (29/10): EXIT 0; dist/KiCadGen-1.0.2.msi 460,2 MB;
+  --check-runtime OK (PyQt6, cv2, pyvista, onnxruntime, GUI, licenze, seed,
+  icona, guida, plugin svg); spec col manifest PROVATA sotto PyInstaller:
+  nel pacchetto esattamente i 5 modelli del manifest, SHA-256 tutti OK
+  (piu' 3 esempi minuscoli di onnxruntime/datasets, non nostri); avvisi
+  solo ICE60 (attesi) e ICE03 (noto e documentato, testo non troncato);
+  exe avviato con KICADGEN_DATA_DIR temporanea: finestra «KiCadGen 1.0.2»
+  viva dopo 15 s, chiusa. NON installato qui. Build di verifica: la
+  versione e' ancora 1.0.2, NON va distribuita (stesso numero della
+  release pubblicata). Prossimo: chiedere push/merge/release v1.0.3.
 - PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
   ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
   Ancora da chiedere all'utente (UNA domanda alla volta): override pad
