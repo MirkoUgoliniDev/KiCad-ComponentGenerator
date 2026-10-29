@@ -184,6 +184,16 @@ Stato dei correttori: (aggiornare man mano)
   modelli vuota (plugin scratchpad coord/runner_sim) e su questo PC.
   TRAPPOLA: dopo una modifica che dipende dai pesi, provarla anche con
   models/yolo vuota prima di spingere.
+  Run Tests 40949074138 su 55e9ce3 VERDE. publish-release.ps1 -Version
+  1.0.3: commit `5702d2d` «release: v1.0.3», ADVANCED e tag v1.0.3 spinti.
+  Workflow release 40952066285 VERDE (build + publish).
+- RELEASE v1.0.3 PUBBLICATA (29/10):
+  https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.3
+  KiCadGen-1.0.3.msi 485078630 byte (462,6 MB), SHA-256 (digest GitHub)
+  bd6f711f9884184f7072c82d8386e2977a4a29a8e30eaaa973a8040975726540.
+  main portato in fast-forward allo stesso commit di ADVANCED.
+  DA FARE (utente): prova dell'MSI 1.0.3 in VM con la checklist della skill
+  build-installer (sostituisce la prova della 1.0.2, mai fatta).
 - PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
   ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
   Ancora da chiedere all'utente (UNA domanda alla volta): override pad
