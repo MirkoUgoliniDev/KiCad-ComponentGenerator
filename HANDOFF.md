@@ -3,7 +3,7 @@
 ## 29/10 — RIPRESA (utente: «ok riprendi da hand off ok ?»)
 
 ESITO: correzioni della revisione n.2 COMPLETE e COMMITTATE su ADVANCED
-(hash nel commit di documentazione successivo); suite 10639 passati,
+in `1ca297d` (NON pushato, NON unito a main); suite 10639 passati,
 14 saltati, 19 sottotest. Il blocco «IN PAUSA PER CREDITO» qui sotto e'
 STORICO: non va piu' seguito.
 
@@ -157,6 +157,8 @@ Stato dei correttori: (aggiornare man mano)
   piano suite -> commit -> build locale -> release): commit su ADVANCED e
   build locale con la skill build-installer. Push, merge su main e release
   v1.0.3 NON ancora autorizzati in modo esplicito: chiederli (una domanda).
+- COMMIT `1ca297d` fatto. PROSSIMO: build locale (skill build-installer)
+  dalla versione committata, per provare la spec che legge il manifest.
 - PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
   ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
   Ancora da chiedere all'utente (UNA domanda alla volta): override pad
