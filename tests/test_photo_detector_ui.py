@@ -198,8 +198,8 @@ def test_smd_mode_selects_the_verified_yolo_and_preserves_manual_override(window
     detector, path = window._photo_detector_options()
     assert detector == 'yolo_smd'
     # The checkpoint when it is there (developer's machine), else its ONNX
-    # export (runner, installed program); test_the_smd_route_falls_back_...
-    # checks the rule itself.
+    # export (installed program), with neither the checkpoint's name (GitHub
+    # runner); test_the_smd_route_falls_back_... checks the rule itself.
     assert path.name == _smd_route_default_name()
     assert path.name in window.field_yolo_model.placeholderText()
     assert window.btn_pick_yolo_model.isEnabled()
@@ -647,9 +647,17 @@ def test_the_smd_button_opens_the_model_window_on_the_smd_folder(window, monkeyp
 
 
 def _smd_route_default_name() -> str:
-    """The YOLO weights the SMD route uses on this machine: the checkpoint, else its ONNX export."""
-    return (gui.DEFAULT_YOLO_PT if gui.yolo_weights_path(gui.DEFAULT_YOLO_PT).is_file()
-            else gui.DEFAULT_YOLO_SMD_ONNX)
+    """The YOLO weights the SMD route uses on this machine: the checkpoint, else its ONNX export.
+
+    CONTRACT CHANGED 2026-10-29 (review P3): with neither file (the GitHub
+    runner) the shared rule app_paths.default_yolo_smd_model() names the
+    checkpoint, the file the analysis checks and reports as missing.
+    """
+    if gui.yolo_weights_path(gui.DEFAULT_YOLO_PT).is_file():
+        return gui.DEFAULT_YOLO_PT
+    if gui.yolo_weights_path(gui.DEFAULT_YOLO_SMD_ONNX).is_file():
+        return gui.DEFAULT_YOLO_SMD_ONNX
+    return gui.DEFAULT_YOLO_PT
 
 
 def test_the_smd_route_falls_back_to_the_onnx_export_of_its_detector(monkeypatch, tmp_path):

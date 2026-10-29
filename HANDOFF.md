@@ -176,6 +176,14 @@ Stato dei correttori: (aggiornare man mano)
   run Tests verde di af6bad6 (NON spingere altri rami nel frattempo),
   publish-release.ps1 -Version 1.0.3, segui release.yml, poi main
   fast-forward allo stesso commit e push. IN CORSO.
+  Run Tests 40945827483 su d0adbfa ROSSO: 3 test di test_photo_detector_ui
+  (l'helper _smd_route_default_name usava la regola vecchia: senza .pt ->
+  .onnx; sul runner non c'e' nessun file e la regola condivisa P3 nomina il
+  .pt; sul PC del developer il .pt c'e', quindi verde in locale). Helper
+  allineato alla regola (contratto cambiato), verificato con una cartella
+  modelli vuota (plugin scratchpad coord/runner_sim) e su questo PC.
+  TRAPPOLA: dopo una modifica che dipende dai pesi, provarla anche con
+  models/yolo vuota prima di spingere.
 - PROSSIMO: suite completa in due meta', rilettura dei diff, sonde dei 5
   ALTI, conteggi in handoff e CLAUDE.md, poi richiesta dell'OK al commit.
   Ancora da chiedere all'utente (UNA domanda alla volta): override pad
