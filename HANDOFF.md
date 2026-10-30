@@ -207,8 +207,16 @@ del commit per ricevere le chiavi nuove del catalogo. Test mirati 208
 verdi. SUITE COMPLETA VERDE (30/10 sera, dopo l'ultima modifica al
 codice): A 6229/9/19, B 4494/4, 0 falliti = 10723 passati, 13 saltati,
 19 sottotest. Pre-commit: nessun commento italiano nel diff, DB profili
-aperto e seminato con le chiavi nuove, nessun segreto. IN CORSO: commit
-su ADVANCED -> push -> merge main -> push -> build MSI (autorizzati).
+aperto e seminato con le chiavi nuove, nessun segreto. COMMIT `08190fa`
+su ADVANCED, spinto; main fast-forward a 08190fa e spinto. CLAUDE.md
+riallineato a 10723/13/19. BUILD MSI locale da 08190fa (30/10 20:38):
+EXIT 0, dist/KiCadGen-1.0.4.msi 484633341 byte (462,2 MB), «Runtime
+check OK», solo ICE60/ICE03 noti, exe vivo dopo 15 s con dati isolati
+(«KiCadGen 1.0.4»). ATTENZIONE: stesso nome della release v1.0.4
+pubblicata ma contenuto diverso -> NON distribuire questo file. Una
+release (sarebbe la 1.0.5) NON e' stata chiesta: proposta all'utente.
+Prova in VM: spetta all'utente (rianalizzare RS485 e VE12H-K con il nuovo
+codice: costo AI < 0,01 USD).
 AUTORIZZAZIONE UTENTE 30/10 sera («al termine se tutto ok commita pusha
 mergia in main e poi pusha e ricrea il pacchetto di installazione»):
 SE suite verde E audit n.4 senza difetti confermati -> pre-commit-check,
