@@ -32,7 +32,11 @@ RICHIESTA UTENTE 30/10 («poi alla fine rifare il pacchetto e mergiare in
 main e pushare»): suite completa -> commit su ADVANCED -> build locale ->
 merge in main -> push. Release v1.0.4 NON chiesta esplicitamente: chiederla.
 SUITE COMPLETA VERDE (30/10): A 6184/10/19, B 4494/4, 0 falliti = 10678
-passati, 14 saltati, 19 sottotest. Commit in corso.
+passati, 14 saltati, 19 sottotest. Commit `2236929`.
+Build locale da 2236929: EXIT 0, dist/KiCadGen-1.0.3.msi 460,3 MB (numero
+uguale alla release pubblicata: NON distribuire), --check-runtime OK con le
+quattro guide, solo ICE60/ICE03 noti, exe vivo dopo 15 s («KiCadGen 1.0.3»).
+main portato a ADVANCED e spinti entrambi. Da chiedere: release v1.0.4.
 
 ## 29/10 — RIPRESA (utente: «ok riprendi da hand off ok ?»)
 
