@@ -36,7 +36,23 @@ passati, 14 saltati, 19 sottotest. Commit `2236929`.
 Build locale da 2236929: EXIT 0, dist/KiCadGen-1.0.3.msi 460,3 MB (numero
 uguale alla release pubblicata: NON distribuire), --check-runtime OK con le
 quattro guide, solo ICE60/ICE03 noti, exe vivo dopo 15 s («KiCadGen 1.0.3»).
-main portato a ADVANCED e spinti entrambi. Da chiedere: release v1.0.4.
+main portato a ADVANCED e spinti entrambi.
+AUTORIZZAZIONE UTENTE 30/10 («Sì, pubblica v1.0.4»): attesa run Tests verde
+su 909ae3a (41020991287 ADVANCED, 41020995425 main), poi
+publish-release.ps1 -Version 1.0.4, segui release.yml, poi main
+fast-forward. Run Tests 41020991287 e 41020995425 VERDI.
+publish-release.ps1 -Version 1.0.4 (handoff messo da parte con git stash
+e ripristinato): commit `cc2790b` «release: v1.0.4», tag v1.0.4 spinto;
+workflow release 41022938613 VERDE (build + publish).
+RELEASE v1.0.4 PUBBLICATA (30/10):
+https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.4
+KiCadGen-1.0.4.msi 485136376 byte (462,7 MB), SHA-256 (digest GitHub)
+b1c38e2defe82a2ada6323fb83b004e352bec45a4a2005806e1bcb252b4e8fa0.
+main portato in fast-forward a ADVANCED. Prova in VM: ora sull'MSI 1.0.4
+(utente), compresa la guida in EN/FR/DE. Difetto estetico visto: con due run verdi il
+messaggio «Tests green on GitHub for ...» stampa entrambi gli URL
+($green[0].url restituisce un array: $runs probabilmente annidato); non
+bloccante, da sistemare in publish-release.ps1 con un test.
 
 ## 29/10 — RIPRESA (utente: «ok riprendi da hand off ok ?»)
 
