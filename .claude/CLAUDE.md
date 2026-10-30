@@ -253,8 +253,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 10678 passed,
-14 skipped and 19 subtests (2026-10-30, user guide in four languages: guida.en/fr/de.html opened by
+is 10723 passed,
+13 skipped and 19 subtests (2026-10-30 evening, branch `ADVANCED`: a side declared «through_hole»
+whose edge the photo shows cut by notches as deep as a half-hole is corrected to half_hole, shallower
+pad dents only warn; single-part pad positions summed by the program from the dimension chains the
+model transcribes, compared by signed offsets, never adopted without an independent agreeing reading,
+five generality audits; before that, 10678 passed, 2026-10-30, user guide in four languages: guida.en/fr/de.html opened by
 the interface language with an Italian fallback, two stale «modello 3D» labels fixed; before that,
 10639 passed, 2026-10-29 evening, branch `ADVANCED`, released as v1.0.3: second full
 adversarial review — 10 read-only agents, 76 findings, 5 high reproduced — and its fixes by fixers on

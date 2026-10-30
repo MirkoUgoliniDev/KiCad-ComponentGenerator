@@ -140,10 +140,25 @@ def test_two_notches_on_an_undeclared_side_are_not_a_contact_row(tmp_path):
     assert not [line for line in lines if "sinistro" in line[1]]
 
 
-def test_full_hole_sides_are_not_counted(tmp_path):
+def test_half_holes_on_a_full_hole_side_warn(tmp_path):
+    """Full holes leave the outline straight: notches there contradict the style.
+
+    Until 2026-10-30 this side was only logged as «not countable», and a
+    model answering «through_hole» for real half-holes went unnoticed.
+    """
     profiles, shape = profiles_of(board_photo(right=ROW_4), tmp_path)
     [(kind, message)] = check_declared_contacts(
         profiles, shape, LENGTH, WIDTH, [side("right", 7, 2.54, style="through_hole")])
+    assert kind == "warning" and "foro intero" in message and "4 semi-fori" in message
+
+
+def test_full_hole_sides_on_a_straight_edge_are_not_counted(tmp_path):
+    """Negative: a straight outline says nothing about full holes: a log line only."""
+    profiles, shape = profiles_of(board_photo(right=ROW_4), tmp_path)
+    lines = check_declared_contacts(
+        profiles, shape, LENGTH, WIDTH, [side("left", 4, 2.54, style="through_hole")])
+    # (The notched right edge, declared nowhere, has its own warning.)
+    [(kind, message)] = [line for line in lines if "sinistro" in line[1]]
     assert kind == "log" and "foro intero" in message
 
 

@@ -7,6 +7,7 @@ settings dialog. Every paid call is a Mock.
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import json
+import math
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -283,21 +284,27 @@ def test_a_subset_or_a_different_view_is_said():
     assert "chiamata non riuscita: boom" in data["_numbering_note"]
 
 
-def test_the_reader_converts_the_declared_unit_and_drops_unusable_entries(tmp_path):
-    answer = {"drawing_unit": "inch", "contacts_view": "bottom",
-              "pads": [{"number": "1", "x_mm": 0.1, "y_mm": 0.0}, {"number": "", "x_mm": 1, "y_mm": 1},
-                       {"number": "2", "x_mm": "x", "y_mm": 0.0}, {"number": "1", "x_mm": 9, "y_mm": 9}]}
+def test_the_reader_converts_the_declared_unit_and_drops_unusable_chains(tmp_path):
+    """The program adds the transcribed chains up; a malformed chain is reported, not used."""
+    answer = {"drawing_unit": "inch", "contacts_view": "bottom", "chains": [
+        {"axis": "x", "stops": ["1", "2"], "values": [0.1]},
+        {"axis": "y", "stops": ["1,2", "3"], "values": [0.2]},
+        {"axis": "x", "stops": ["2", "3"], "values": ["x"]}]}
     reading = read_pad_positions([_drawing(tmp_path)], model="m", call=Mock(return_value=answer))
-    assert reading["view"] == "bottom" and reading["pads"] == {"1": (pytest.approx(2.54), 0.0)}
+    assert reading["view"] == "bottom"
+    distance = math.dist(reading["pads"]["1"], reading["pads"]["2"])
+    assert distance == pytest.approx(2.54) and set(reading["pads"]) == {"1", "2"}
+    assert reading["unplaced"] == ["3"] and len(reading["malformed"]) == 1 and not reading["problems"]
     assert read_pad_positions([], model="m", call=Mock()) is None
 
 
 def test_end_to_end_a_single_part_with_pads_gets_the_second_reading(offline, monkeypatch, tmp_path):
     """Two calls: the dedicated tool, then the pad positions; a disagreement blocks."""
     wrong = [dict(p, x_mm=x, y_mm=y) for p, (x, y) in zip(PADS, [(0.0, 0.0), (2.54, 0.0), (5.08, 0.0)])]
-    second = {"drawing_unit": "mm", "contacts_view": "bottom",
-              "pads": [{"number": "1", "x_mm": 2.54, "y_mm": 0.0}, {"number": "2", "x_mm": 17.78, "y_mm": 0.0},
-                       {"number": "5", "x_mm": 5.08, "y_mm": 5.08}]}
+    # Chains with no outline stop: no closure to check, so no reason to prefer either reading.
+    second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
+        {"axis": "x", "stops": ["1", "5", "2"], "values": [2.54, 12.7]},
+        {"axis": "y", "stops": ["1,2", "5"], "values": [5.08]}]}
     call = Mock(side_effect=[_single(pads=wrong), second])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",

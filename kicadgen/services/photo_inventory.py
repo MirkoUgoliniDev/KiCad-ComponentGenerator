@@ -1730,7 +1730,28 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # A contact count different from the declared one must be verified:
         # here it is flagged; the recheck, if any, is done by whoever has the
         # documents.
-        from .edge_notches import check_declared_contacts, count_disagreements
+        from .edge_notches import (_edge_name, check_declared_contacts, count_disagreements,
+                                   notched_full_hole_sides)
+        # Full holes declared on an edge the photo shows cut, notch by notch,
+        # where the declared contacts are: they are half-holes (user,
+        # 2026-10-30). Corrected before the half-hole checks below, so the
+        # side is counted, confirmed and its lands measured like any other.
+        for item in notched_full_hole_sides(edge_profiles, photo.shape, length, width,
+                                            declared.get("castellated_sides")):
+            evidence = tx("{found} semi-fori contati sulla foto, sui contatti dichiarati",
+                          found=item.found)
+            for side in declared.get("castellated_sides") or ():
+                if (isinstance(side, dict)
+                        and str(side.get("edge") or "").strip().lower() == item.edge):
+                    side["contact_style"] = "half_hole"
+                    side["_contact_style_evidence"] = evidence
+            # «half_hole» is the least the outline proves (an open notch as
+            # deep as a half-hole); a closed hole behind it is read later by
+            # edge_lands.measure_edge_holes, which may refine the style.
+            note = tx("Lato {edge}: dichiarato a foro intero, corretto in semi-foro ({evidence}).",
+                      edge=_edge_name(item.edge), evidence=evidence)
+            declared["notes"] = (str(declared.get("notes") or "") + "\n" + note).strip()
+            warn(note)
         disagreements = count_disagreements(edge_profiles, photo.shape, length, width,
                                             declared.get("castellated_sides"))
         # A SMOOTH edge contradicts the half-hole style, not the row: the

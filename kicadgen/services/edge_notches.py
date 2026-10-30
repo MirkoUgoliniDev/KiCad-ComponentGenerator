@@ -171,6 +171,11 @@ class EdgeCount:
     copper_found: Optional[int] = None
     copper_centres_mm: list = field(default_factory=list)
     copper_reason: str = ""
+    #: Depth of each counted notch below the outline, mm across the edge, in
+    #: the order of `centres_mm`; filled only with a valid `found`.
+    depths_mm: list = field(default_factory=list)
+    #: Uncertainty of each depth in `depths_mm`, mm across the edge.
+    depth_tolerance_mm: Optional[float] = None
 
 
 def _per_edge(value, edge, default):
@@ -542,7 +547,9 @@ def count_notches(profile: Sequence, px_per_mm: float, pitch_mm: Optional[float]
                              "la fila puo' continuare in un tratto del bordo non misurabile "
                              "(un angolo, il contorno non visto): sulla foto se ne contano "
                              "almeno {found}", found=len(centres)))
-    return EdgeCount("", len(centres), centres_mm=centres, tolerance_mm=tolerance_mm)
+    depths = [round(float(residual[start:stop].max()) / across, 3) for start, stop in notches]
+    return EdgeCount("", len(centres), centres_mm=centres, tolerance_mm=tolerance_mm,
+                     depths_mm=depths, depth_tolerance_mm=round(EDGE_UNCERTAINTY_PX / across, 3))
 
 
 def _row_may_continue(notches, centres_px, multiples, unit_px, clean) -> bool:
@@ -885,6 +892,94 @@ def confirmed_rows(profiles, crop_shape, length_mm: float, width_mm: float, side
     return rows
 
 
+def _declared_centres_mm(raw_side: dict, edge: str, length_mm: float, width_mm: float) -> list:
+    """Declared contact centres of one side, in mm from the start of its edge (as EdgeCount)."""
+    try:
+        from .contact_zones import contact_positions
+    except ImportError:  # loaded as a stand-alone file
+        from kicadgen.services.contact_zones import contact_positions
+    along = "y_mm" if edge in ("left", "right") else "x_mm"
+    start = (width_mm if edge in ("left", "right") else length_mm) / 2
+    return sorted(row[along] + start
+                  for row in contact_positions({"castellated_sides": [raw_side]}, length_mm, width_mm)
+                  if row.get("edge") == edge)
+
+
+def _deep_as_half_holes(counted: EdgeCount) -> bool:
+    """True when EVERY counted notch is surely deeper than the smallest half-hole's radius.
+
+    Assumption, not a measure (user decision 2026-10-30, option A): a
+    castellation is a plated hole of at least MIN_HALF_HOLE_DIAMETER_MM cut
+    across its centre, so its notch is at least that radius deep (the same
+    assumption check_declared_contacts' straight-edge rule already makes).
+    The pads of full holes reaching the edge dent the outline by about a tenth
+    of a millimetre (0.11-0.16 mm on the ESP32 sample), at the declared
+    contacts and at their pitch, so count and positions cannot tell them
+    apart: depth can. Each depth must clear the floor by its own uncertainty.
+    A half-hole whose centre sits inside the board can be shallower (point
+    140): it is then left to the warning, never corrected.
+    """
+    floor = MIN_HALF_HOLE_DIAMETER_MM / 2 + (counted.depth_tolerance_mm or 0.0)
+    return bool(counted.depths_mm) and min(counted.depths_mm) >= floor
+
+
+def notched_full_hole_sides(profiles, crop_shape, length_mm: float, width_mm: float,
+                            sides) -> list[EdgeCount]:
+    """@brief Sides declared with full holes whose edge the photo shows cut by the declared row.
+
+    @param profiles depth_profiles of the calibrated crop, or None.
+    @param crop_shape Shape of the calibrated crop, in px.
+    @param length_mm Board length along X, in mm.
+    @param width_mm Board width along Y, in mm.
+    @param sides Declared castellated sides (raw: normalized here).
+    @return One EdgeCount per side declared "through_hole" on which the photo
+        counts exactly the declared number of notches AND the declared
+        contact centres fall on the notch centres (one common shift up to
+        row_shift_bound_mm, then each centre within the photo's tolerance, as
+        the recount check of the extraction).
+    @note A full hole does not touch the outline (the generator draws it set
+        back, with a straight edge), so notches sitting on the declared
+        contacts are half-holes the declaration got wrong (user decision
+        2026-10-30: the model answered «through_hole» while describing a
+        half-moon open on the edge). Number and positions alone do NOT tell
+        half-holes from the pad dents of real full holes, which sit on the
+        same contacts at the same pitch: every notch must also be as deep as
+        a half-hole (_deep_as_half_holes). Fewer, more, misplaced or shallow
+        notches only warn (check_declared_contacts).
+    @note The positions are checked against the declared offset (an omitted
+        one means a centred row): a real row off-centre by more than the
+        calibration bound is not corrected, only warned about.
+    @note Pure function: the caller changes the style.
+    """
+    if not profiles or not isinstance(sides, (list, tuple)):
+        return []
+    scales = _scales(crop_shape, length_mm, width_mm)
+    lengths = _edge_lengths(length_mm, width_mm)
+    raw = {}
+    for entry in sides:
+        if isinstance(entry, dict):
+            raw.setdefault(str(entry.get("edge") or "").strip().lower(), entry)
+    result = []
+    for edge, side in normalized_sides(sides).items():
+        if side["contact_style"] != "through_hole" or edge not in profiles:
+            continue
+        if side["count"] is None:
+            continue
+        bound = row_shift_bound_mm(crop_shape, scales[edge][0])
+        counted = _count_side(profiles[edge], scales[edge], side, lengths[edge], bound)
+        if counted.found is None or counted.found != side["count"] or bound is None:
+            continue
+        if not _deep_as_half_holes(counted):
+            continue
+        declared = _declared_centres_mm(raw[edge], edge, length_mm, width_mm)
+        measured = sorted(float(c) for c in counted.centres_mm)
+        if row_offset_from(declared, measured, counted.tolerance_mm or 0.0, bound) is None:
+            continue
+        result.append(EdgeCount(edge, counted.found, side["count"], measured,
+                                tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))
+    return result
+
+
 def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: float,
                             sides) -> list[tuple[str, str]]:
     """@brief Compare the declared contacts per edge with the notches on the photo.
@@ -937,9 +1032,21 @@ def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: fl
             continue
         count = side["count"]
         if side["contact_style"] == "through_hole":
-            lines.append(("log", tx(
-                "Lato {edge}: contatti a foro intero, non contabili dalla sagoma della foto.",
-                edge=_edge_name(edge))))
+            # Full holes leave the outline straight: notches on this edge
+            # contradict the declared style (user, 2026-10-30). A row matching
+            # the declared contacts is corrected upstream
+            # (notched_full_hole_sides); any other count only warns.
+            counted = _count_side(profile, scales[edge], side)
+            notches = counted.found if counted.found is not None else counted.at_least
+            if notches:
+                lines.append(("warning", tx(
+                    "Lato {edge}: l'analisi dichiara contatti a foro intero, ma sulla foto il "
+                    "bordo ha {found} semi-fori: tipo di contatto da verificare.",
+                    edge=_edge_name(edge), found=notches)))
+            else:
+                lines.append(("log", tx(
+                    "Lato {edge}: contatti a foro intero, non contabili dalla sagoma della foto.",
+                    edge=_edge_name(edge))))
             continue
         result = _count_side(profile, scales[edge], side, _edge_lengths(length_mm, width_mm)[edge],
                              row_shift_bound_mm(crop_shape, scales[edge][0]))

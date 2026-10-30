@@ -1,5 +1,229 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 30/10 sera — IN CORSO: semifori dichiarati «through_hole» dall'AI (utente: STEP RS485 con fori interi e bordo dritto, «qualche giorno fa li generava in modo corretto»)
+
+Diagnosi (log generated/RS485/analisi-ai.log, nessuna chiamata nuova):
+- NON regressione del generatore STEP: disegna cio' che riceve.
+- deepseek-flash l'8/10 aveva risposto half_hole; oggi through_hole su
+  entrambi i lati, pur scrivendo nella nota «mezzaluna metallizzata aperta
+  verso il bordo E un foro intero» (autocontraddizione).
+- edge_notches.check_declared_contacts / count_disagreements SALTANO i lati
+  through_hole («contatti a foro intero, non contabili»): controllo a senso
+  unico (half dichiarato + bordo dritto -> avviso; full dichiarato + tacche ->
+  silenzio).
+- edge_lands.measure_edge_holes (lettura dello stile dall'8/10) sulla foto
+  RS485 NON da' verdetto («nessuna fila di piazzole al passo dichiarato»),
+  quindi nessuno ha corretto. Non toccato in questo giro.
+- Prova locale: _count_side su docs/RS485 conta 3 e 4 tacche (= dichiarati);
+  su docs/ESP32/AltaRisoluzione.jpg (fori interi) nessun numero.
+Decisione utente 30/10 («ok» alla proposta):
+- lato dichiarato through_hole con tacche contate = contatti dichiarati E
+  centri sulle tacche (stesso controllo relativo di _recount_refusal) ->
+  stile corretto in half_hole automaticamente, con nota e avviso nel log;
+- tacche presenti ma numero/posizione diversi -> solo avviso;
+- bordo dritto / non contabile -> come prima (riga di log).
+Piano: edge_notches.notched_full_hole_sides (puro) + ramo through_hole di
+check_declared_contacts; applicazione in photo_inventory prima di
+count_disagreements; voci i18n x4; test sintetici (positivo, numero diverso,
+bordo dritto) + reali RS485/ESP32; test ESP32 puntava a AltaRisoluzione2.jpg
+inesistente (sempre SALTATO): corretto il nome. Commit solo con OK.
+Stato: FATTI edge_notches.notched_full_hole_sides (+ _declared_centres_mm
+via contact_zones.contact_positions), ramo through_hole di
+check_declared_contacts (avviso con tacche contate o «almeno N»),
+correzione in photo_inventory (stile half_hole, _contact_style_evidence,
+nota in declared["notes"], warn), 3 voci i18n x4, test nuovi in
+tests/test_full_holes_declared_on_notched_edges.py (7), contratto
+aggiornato in test_edge_notches.py (avviso al posto del log + negativo su
+bordo dritto). Test mirati: 366 verdi. Suite completa IN CORSO.
+AUDIT generality-auditor (30/10, confermato dal coordinatore con
+probe3): la protezione dei fori interi e' FRAGILE. Le piazzole di fori
+interi fino al bordo fanno rientranze di 0,11-0,16 mm nel profilo (ESP32),
+al passo e sui contatti dichiarati: numero+posizione NON sono prove
+indipendenti; l'ESP32 si salva solo perche' alcune rientranze cadono nel
+rumore. Rientranze sintetiche di 0,10/0,13/0,16 mm x19 dichiarate
+through_hole -> «corrette» in half_hole (SBAGLIATO). Minori: fila non
+centrata senza offset -> solo avviso (RS485 destro margine ~0,1 mm); nota
+con «Lato right» non tradotto (usare _edge_name). DOMANDA ALL'UTENTE
+CHIUSA: l'utente ha scelto «A» (30/10): correzione automatica SOLO se le
+tacche sono profonde come un semiforo vero (soglia fisica dichiarata come
+ipotesi + incertezza della foto); tacche poco profonde -> solo avviso.
+FATTO: EdgeCount.depths_mm/depth_tolerance_mm (count_notches), soglia
+_deep_as_half_holes = MIN_HALF_HOLE_DIAMETER_MM/2 + incertezza (stessa
+ipotesi della regola del bordo dritto); RS485 tacche 0,45-0,58 mm contro
+soglia 0,29 mm, ammaccature ESP32 0,11-0,16 mm. Test: ammaccature
+0,10/0,13/0,16 x19 -> nessuna correzione, avviso; stessa fila profonda
+-> corretta. Nota con _edge_name («destro»). Test mirati 371 verdi.
+Suite precedente (prima della soglia): exit 0, B 4494/4 (numeri di A
+persi per un tail). SUITE COMPLETA CON LA SOGLIA VERDE (30/10 sera):
+A 6197/9/19, B 4494/4, 0 falliti = 10691 passati, 13 saltati, 19
+sottotest (+13 test nuovi, -1 saltato: il test reale ESP32 ora gira).
+NON committato: serve l'OK dell'utente.
+
+## 30/10 sera — SEGNALATO: relè VE12H-K, «Automatic generation not started» (utente: «correggi anche questo!!»)
+
+generated/VE12H-K/analisi-ai.log 17:54: le due letture delle posizioni
+(report_single_component e report_pad_positions, entrambe deepseek-flash)
+discordano sul pin 5 e il programma non ne sceglie nessuna: CORRETTO.
+Disegno (docs/quote-pinout.jpeg, vista dal basso): con il foro in basso a
+sinistra in (0,0): (2.54,7.62), (5.08,2.54), (17.78,0), (17.78,7.62);
+verifica 1.36+17.78+1.36=20.5 e 1.44+7.62+1.44=10.5. ENTRAMBE le letture
+sono sbagliate allo stesso modo: destra a 15.24 (perso un 2.54 della
+catena 2.54/2.54/12.7) e pin 1/4 sulla stessa verticale x=0.
+AUTORIZZATA (utente 30/10: «ok ma ... generalizzabili»): il modello
+riporta le CATENE DI QUOTE come stampate (asse, valori in ordine, fra
+quali fori/bordi), il PROGRAMMA somma e ricava le coordinate; controllo di
+chiusura della catena sul corpo quando le quote al bordo ci sono; messaggio
+che dice quale quota non torna. Nessun numero/nome del relè nel codice;
+test su disegni diversi, positivo e negativo. Piano dettagliato:
+- datasheet_extractor: report_pad_positions chiede `chains` (asse x/y,
+  `stops` in ordine crescente sulla pagina: gruppi di numeri di pad alla
+  stessa coordinata o "edge" agli estremi, `values` = quote stampate fra
+  fermate consecutive) invece delle coordinate; funzione pura
+  `pads_from_chains` somma per asse (grafo, gruppi = stessa coordinata),
+  segnala contraddizioni fra catene e pad fuori dalla catena principale;
+  chiusura bordo-bordo confrontata con body_length/width di
+  package_geometry entro PAD_READING_TOLERANCE_MM (arrotondamento delle
+  quote, non tolleranza del pezzo).
+- apply_dedicated_pads: (1) catene incoerenti o chiusura sbagliata ->
+  blocco con la quota che non torna, ANCHE se le due letture coincidono
+  (il buco «sbagliate nello stesso modo»); (2) letture diverse e lettura
+  per catene chiusa sul corpo su ENTRAMBI gli assi -> adottata (motivo
+  strutturale: somme del programma + chiusura verificata), nota; (3)
+  diverse senza chiusura verificata -> blocco come oggi; (4) uguali e
+  valide -> confermate.
+- prompt/schema senza dati del campione (test _sample_tokens_in); i18n x4;
+  test con disegni inventati (positivo, catena con quota persa, catene in
+  contraddizione, pad scollegati, unita' inch).
+FATTO (30/10 sera): pads_from_chains/_axis_from_chains, prompt e schema a
+catene, apply_dedicated_pads regole (d)/(e) + _adopt_chain_pads (origine
+body_center dai bordi), catene rotte -> la nota dice quale; 7 voci i18n;
+tests/test_pad_dimension_chains.py (13, disegno inventato 15x9) + 2 test
+di test_single_component_prompt.py aggiornati al formato a catene. Replay
+offline del relè (risposta principale dal log): trascrizione corretta ->
+posizioni adottate e corpo centrato; quota in meno -> nota con la catena.
+Test mirati 141+33 verdi.
+AUDIT generality-auditor (30/10) -> CORRETTO: la regola (e) di ADOZIONE
+era PERICOLOSA (verificato: etichette 1<->4 scambiate o due quote
+trasposte mantengono le somme e la chiusura -> pinout sbagliato adottato,
+prima bloccato). TOLTA (_adopt_chain_pads rimossa): se le letture
+differiscono si blocca SEMPRE. Inoltre: catene malformate in `malformed`
+(nota, non blocco), contraddizioni in `problems` (blocco); pad con lo
+stesso numero -> controlli a catena saltati con nota; tolleranza
+_sum_tolerance = max(0,1; 0,05 x quote sommate) (CHAIN_QUOTE_ROUNDING_MM);
+lunghezza/larghezza del corpo scambiate riconosciute; limiti dichiarati
+nel docstring di pads_from_chains (somme invarianti a etichette/ordine,
+quote ai bordi dei pad SMD, datum non-pad, quote ordinate); coordinate
+della lettura riportate all'angolo del contorno nei messaggi.
+CONSEGUENZA per il relè: con la risposta principale sbagliata e le catene
+giuste resta BLOCCATO (ora con le posizioni giuste visibili nel
+messaggio). Per farlo passare da solo servirebbe che ANCHE la risposta
+principale trascriva catene (due trascrizioni indipendenti sommate dal
+programma): AUTORIZZATA dall'utente (30/10, «ok»). Piano:
+- report_single_component: nuovo campo `pad_chains` (stessa struttura di
+  `chains`), descrizione senza dati del campione;
+- conversione della risposta: se pad_chains piazza TUTTI i pad senza
+  contraddizioni, le coordinate dei pin vengono dalle somme del programma
+  (origine all'angolo del contorno se noto), con nota quando differiscono
+  da x_mm/y_mm del modello; altrimenti restano x_mm/y_mm con nota;
+- il confronto con la lettura dedicata resta quello (distanze, blocco se
+  diverse; chiusura sul corpo); nessuna adozione unilaterale;
+- test con disegni inventati: somma del modello sbagliata ma catene giuste
+  in entrambe -> confermato; etichette scambiate in una delle due ->
+  bloccato; catene incomplete -> coordinate del modello con nota.
+FATTO: prompt single con pad_chains (impronta vecchia 05ee7fa7... in
+SUPERSEDED_SINGLE_PROMPT_DIGESTS, il DB la conteneva identica), schema
+pad_chains, _place_pins_from_chains in single_answer_to_data (usa le
+somme solo se piazzano TUTTI i pin, nessuna contraddizione/chiusura
+sbagliata, numeri unici; origine body_center con entrambi i bordi), 4 voci
+i18n, 5 test nuovi in test_pad_dimension_chains.py. Test mirati 197
+verdi.
+AUDIT n.3 (30/10, VERIFICATO): (1) catena principale scritta da destra a
+sinistra -> footprint SPECCHIATO e la lettura dedicata giusta lo
+«conferma» (confronto per distanze, invarianti allo specchio); (2) le
+somme del modello vengono sostituite in silenzio dalle sue catene; (3)
+senza lettura dedicata la sostituzione non e' controllata; (5) tolleranza
+tarata sui mm; (6) corpo scambiato + centratura. IN CORSO la correzione:
+- confronto per SCOSTAMENTI CON SEGNO (dx, dy) fra coppie di pad, sia fra
+  le due letture sia fra coordinate del modello e sue catene;
+- coordinate del modello diverse dalle sue catene -> _pin_map_conflict
+  subito (anche senza lettura dedicata) + candidato `_chain_candidate`;
+  risolto SOLO se la lettura dedicata concorda con il candidato per
+  scostamenti con segno su tutti i pad e senza contraddizioni;
+- arrotondamento per unita' (mm 0,05; inch 0,127; mil 0,0127 mm);
+- centratura body_center solo se le campate coincidono col corpo NON
+  scambiato; x_mm dichiarato «verso destra» nello schema single.
+Limite da dichiarare: due chiamate dello stesso modello con lo stesso
+errore di trascrizione concordano comunque (errori correlati).
+FATTO (30/10 sera): _offset_disagreements (dx,dy con segno) usato in
+apply_dedicated_pads e in _place_pins_from_chains; coordinate del modello
+≠ sue catene -> `_chain_candidate` + _pin_map_conflict SUBITO (resta anche
+senza lettura dedicata); _resolve_chain_candidate adotta le catene se la
+lettura dedicata concorda con esse su TUTTI i pin, tiene le coordinate se
+concorda con quelle (catene scartate), altrimenti blocco esteso;
+CHAIN_QUOTE_ROUNDING_MM per fattore unita' {mm 0,05; inch 0,127; mil
+0,0127}; _chain_contradictions -> (problems, exchanged), centratura
+body_center solo se non scambiato; x_mm «verso DESTRA» nello schema
+single; voci i18n: 3 rimosse, 1 modificata («Scostamenti diversi»), 6
+nuove. Test: specchio, etichette scambiate su quadrato simmetrico, senza
+lettura dedicata, lettura che non concorda con nessuno. Prova dello
+specchio (verify_mirror.py): coordinate giuste conservate, catene
+scartate. Test mirati 203 verdi. Suite completa e audit n.4 IN CORSO.
+Limite dichiarato nel docstring di _resolve_chain_candidate: errori
+correlati fra le due chiamate; needs_review resta True.
+AUDIT n.4 (30/10 sera): (1) CRASH KeyError in _resolve_chain_candidate se
+un pin del modello e' senza coordinate (candidato memorizzato dal guard
+len(before)!=len(numbers)); (2) via laterale dell'errore correlato: coord.
+del modello sbagliate + lettura dedicata sbagliata uguale e SENZA bordi
+battono le catene principali chiuse sul corpo; (3) corpo scambiato
+rilevato e taciuto; (4) messaggi fuorvianti (lettura incompleta detta
+«non concorda»; conflitto principale sovrascritto quando la dedicata si
+contraddice); (5) tolleranza piatta negli scostamenti (basso, non fatto).
+IN CORSO le correzioni 1-4: pin senza coordinate = motivo per tenere le
+coord. del modello; «la dedicata sta con le coordinate» accettato SOLO se
+la dedicata e' chiusa sul corpo su X e Y; scambio corpo riportato in nota;
+messaggi distinti per incompleta/contraddizione. Suite FERMATA (codice in
+modifica).
+FATTE (30/10 sera): `unplaced` in _place_pins_from_chains (pin senza
+coordinate -> motivo, nessun candidato); _resolve_chain_candidate con
+`complete` che richiede anche set(numbers) <= set(main), ramo «sta con le
+coordinate» solo se la dedicata ha entrambe le campate sui bordi,
+_extend_chain_conflict per i tre esiti negativi (non chiusa / incompleta /
+non concorda), conflitto principale conservato anche quando la dedicata si
+contraddice; _exchanged_body_remark in nota (apply_dedicated_pads) e in
+data["notes"] (_place_pins_from_chains); 4 voci i18n; test: pin senza
+coordinate (niente crash), dedicata aperta non batte le catene chiuse +
+gemello positivo chiuso, dedicata incompleta detta tale, scambio corpo
+riportato. Non fatto (basso, conservativo): tolleranza piatta 0,1 negli
+scostamenti e fattore unita' della risposta principale usato sulle
+campate della dedicata (stesso documento). Test mirati 206 verdi.
+AUDIT n.5 (30/10 sera): 1-4 CHIUSI con prove. Nuovo A (medio): la
+«chiusura» della dedicata era vuota se la risposta principale NON ha le
+misure del corpo (campate presenti ma confrontate con niente) -> il caso
+correlato rientrava. CORRETTO: dedicated_closed richiede campata E misura
+del corpo su entrambi gli assi; test con body_length/width tolti (2
+casi). B: asimmetria della chiusura dichiarata nel docstring di
+_resolve_chain_candidate. D: il DB dei profili va aperto una volta prima
+del commit per ricevere le chiavi nuove del catalogo. Test mirati 208
+verdi. SUITE COMPLETA VERDE (30/10 sera, dopo l'ultima modifica al
+codice): A 6229/9/19, B 4494/4, 0 falliti = 10723 passati, 13 saltati,
+19 sottotest. Pre-commit: nessun commento italiano nel diff, DB profili
+aperto e seminato con le chiavi nuove, nessun segreto. IN CORSO: commit
+su ADVANCED -> push -> merge main -> push -> build MSI (autorizzati).
+AUTORIZZAZIONE UTENTE 30/10 sera («al termine se tutto ok commita pusha
+mergia in main e poi pusha e ricrea il pacchetto di installazione»):
+SE suite verde E audit n.4 senza difetti confermati -> pre-commit-check,
+commit su ADVANCED (handoff e CLAUDE.md riallineati, DB profili incluso),
+push, merge in main, push, build locale dell'MSI (build-installer, SOLO
+build: la pubblicazione di una release NON e' stata chiesta). Se l'audit
+trova qualcosa: correggere prima, poi richiedere l'OK.
+Test mirati 147 verdi. Suite completa IN CORSO.
+NON verificato con una chiamata vera: se deepseek-flash trascrive bene le
+catene si vede solo rianalizzando il relè nell'app (costo ~0,0005 USD).
+
+Non fatto (segnalato, non autorizzato): measure_edge_holes non legge la
+fila RS485 («nessuna fila di piazzole al passo dichiarato»); il progetto
+generated/RS485 va rianalizzato o corretto a mano per avere il nuovo STEP.
+
 ## 30/10 — IN CORSO: guida d'uso in quattro lingue (utente: screenshot con lingua EN e guida in italiano -> «Sì, tutte e tre»)
 
 Causa: esiste solo kicadgen/gui/assets/help/guida.html; _open_user_guide

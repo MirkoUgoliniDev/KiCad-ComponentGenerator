@@ -356,7 +356,7 @@ def test_rs485_sample_row_is_recounted_within_the_calibration_bound(tmp_path):
 
 def test_esp32_sample_full_holes_give_no_number(tmp_path):
     """63.3 x 25.4 mm dev kit: full holes, pads to the edge, straight outline."""
-    profiles, shape = _real("ESP32/AltaRisoluzione2.jpg", 63.3, 25.4, tmp_path)
+    profiles, shape = _real("ESP32/AltaRisoluzione.jpg", 63.3, 25.4, tmp_path)
     for edge in edge_notches.EDGES:
         for pitch in (2.54, None):
             assert _count(profiles, shape, 63.3, 25.4, edge, pitch).found is None, (edge, pitch)
