@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KiCadGen user guide</title>
+<!--
+  KiCadGen user guide, opened from the «Help» menu in the default browser.
+  Self-contained page: no external resources (fonts, scripts, images); the only
+  external link is the project's GitHub repository. Every sentence
+  describes a command that exists in the code: when a command is renamed or
+  disappears, the guide must be updated together with the code.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2330; --muted: #5b6070; --accent: #1d5fd1;
+    --panel: #f3f5f9; --border: #d6dae3; --note: #fff7e0; --note-border: #e0b44c;
+    --code: #eef1f6;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e2e; --fg: #cdd6f4; --muted: #a6adc8; --accent: #89b4fa;
+      --panel: #262637; --border: #45475a; --note: #3a3322; --note-border: #b8923c;
+      --code: #313244;
+    }
+  }
+  html { background: var(--bg); }
+  body {
+    margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; padding-bottom: .3rem;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+  a { color: var(--accent); }
+  p.lead { color: var(--muted); margin-top: 0; }
+  nav { background: var(--panel); border: 1px solid var(--border);
+        border-radius: 8px; padding: .75rem 1.25rem; }
+  nav ol { margin: .25rem 0; padding-left: 1.25rem; }
+  code, kbd { background: var(--code); border-radius: 4px; padding: 0 .3em;
+              font-family: Consolas, "Cascadia Mono", monospace; font-size: .92em; }
+  kbd { border: 1px solid var(--border); }
+  .note { background: var(--note); border-left: 4px solid var(--note-border);
+          border-radius: 4px; padding: .6rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); }
+  .ui { font-weight: 600; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>KiCadGen user guide</h1>
+<p class="lead">From the idea to the component in a KiCad library: a complete example,
+step by step.</p>
+
+<nav>
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#cosa-fa">What KiCadGen does</a></li>
+    <li><a href="#prima">Before you start</a></li>
+    <li><a href="#progetto">Creating the project</a></li>
+    <li><a href="#documenti">Loading the documents</a></li>
+    <li><a href="#tipologia">Choosing the component type</a></li>
+    <li><a href="#analisi">Starting the analysis and checking the costs</a></li>
+    <li><a href="#revisione">Reviewing the bodies found on the photo</a></li>
+    <li><a href="#generazione">Generation: footprint and STEP model</a></li>
+    <li><a href="#simbolo">The «Electrical symbol» tab</a></li>
+    <li><a href="#modello3d">The «STEP model» tab</a></li>
+    <li><a href="#step">Choosing the STEP model of a component</a></li>
+    <li><a href="#pin">Male pins under the board</a></li>
+    <li><a href="#kicad">The «KiCad» tab: testing and installation</a></li>
+    <li><a href="#log">Where the logs are</a></li>
+    <li><a href="#aiuto">Reporting a problem and updates</a></li>
+    <li><a href="#limiti">Limits to be aware of</a></li>
+  </ol>
+</nav>
+
+<h2 id="cosa-fa">1. What KiCadGen does</h2>
+<p>KiCadGen creates a component for KiCad from technical documents and
+photographs: the <strong>footprint</strong> (<code>.kicad_mod</code>), the
+<strong>electrical symbol</strong> (<code>.kicad_sym</code>) and the
+<strong>STEP model</strong> (<code>.step</code>). The documents are read by
+an artificial intelligence model (through OpenRouter or the direct
+DeepSeek API); the program then turns what the model has read into
+geometry, with deterministic rules.</p>
+<p>For a board with components mounted on it (a module, a development
+board) KiCadGen reconstructs the <strong>mechanical envelopes</strong>: position,
+size and orientation of the bodies visible in the photo. It does not do reverse
+engineering: the bodies are generic volumes, or STEP models from the KiCad
+library chosen because their dimensions are similar.</p>
+
+<h2 id="prima">2. Before you start</h2>
+<ul>
+  <li><strong>FreeCAD</strong> (freecad.org) builds the STEP models. Without FreeCAD
+  you still get the footprint; the progress window says which steps
+  cannot be run and why.</li>
+  <li><strong>KiCad</strong> (kicad.org) is needed to test the result and to
+  install the libraries.</li>
+  <li><strong>API key</strong>: the document analysis is paid and
+  requires a key from one of the two supported providers, <strong>OpenRouter</strong>
+  (one key for many vendors; the default model of the installed program,
+  <code>anthropic/claude-opus-5</code>, goes through it) or
+  <strong>DeepSeek (direct API)</strong> (models <code>deepseek-api/...</code>;
+  when running from source the default is <code>deepseek-api/deepseek-flash</code>).
+  The model is chosen from the interface: <span class="ui">Configuration</span> →
+  <span class="ui">General AI defaults...</span>, <span class="ui">Model</span> tab,
+  or the <span class="ui">AI model</span> panel for the session.
+  The key is entered from <span class="ui">Configuration</span> →
+  <span class="ui">AI account...</span>: the window lists every provider with
+  the source of the key in use (environment variable, Credential Manager,
+  <code>.env</code> file or none) and the current balance; choose the provider, paste
+  the key, press <span class="ui">Verify</span> (no call to a model,
+  no cost) and then <span class="ui">Save</span>; it is kept in the Windows
+  Credential Manager (<code>KiCadGen/OpenRouter</code>,
+  <code>KiCadGen/DeepSeek</code>). <span class="ui">Remove key</span> deletes
+  only that entry. The <code>.env</code> file in the folder
+  <code>%LOCALAPPDATA%\KiCadGen</code> (lines <code>OPENROUTER_API_KEY=sk-or-...</code>
+  and/or <code>DEEPSEEK_API_KEY=...</code>) remains valid; a key saved with
+  «AI account...» takes precedence over the one in the file. If the key is missing,
+  the program says so before starting an analysis and offers to open the window.
+  When the key works, the <span class="ui">AI credit</span> line of the
+  <span class="ui">Project</span> tab shows the balance of the provider of the chosen
+  model.</li>
+</ul>
+<p>The interface language (Italian, English, French, German) is chosen
+from the list above the tabs.</p>
+
+<h2 id="progetto">3. Creating the project</h2>
+<p>A project is a folder: its name is also the name of the footprint and of the
+STEP model.</p>
+<ol>
+  <li>Menu <span class="ui">File → New project...</span> (<kbd>Ctrl</kbd>+<kbd>N</kbd>).
+  Type the name, for example <code>RS485_TTL</code>, and confirm.</li>
+  <li>The folder is created in the <span class="ui">Workspace</span> shown
+  in the <span class="ui">Project</span> tab (in the installed program,
+  <code>Documents\KiCadGen</code> by default). The folder button next
+  to the field lets you choose another one.</li>
+  <li>To resume a job: <span class="ui">File → Open project...</span>
+  (<kbd>Ctrl</kbd>+<kbd>O</kbd>) lists the projects of the workspace, most recent first.
+  <span class="ui">File → Rename project...</span> (<kbd>F2</kbd>) changes the name
+  of the folder and, together with it, that of the footprint, symbol and STEP model. Without an
+  open project the window shows the start page, with the two commands and the
+  recent projects, which reopen with one click.</li>
+</ol>
+
+<h2 id="documenti">4. Loading the documents</h2>
+<p>The <span class="ui">Project</span> tab guides the preparation in two steps:
+<span class="ui">Documents</span> and <span class="ui">Mounting and analysis</span>.
+Use <span class="ui">Continue</span> and <span class="ui">Back</span> to move between them:
+these buttons do not start the analysis. In the first step,
+<span class="ui">Back to projects</span> saves the project and returns to the screen
+with New, Open and recent projects. Name and workspace are in the collapsible
+<span class="ui">Project details</span> panel, above the documents.</p>
+<p>In the <span class="ui">Project</span> tab, the documentation panel has
+a card for every loaded file. For each file you tick <strong>all</strong> the roles it
+contains: a PDF datasheet, for example, is often pinout, dimensions and recommended lands at once: this is why a PDF is always a
+«Datasheet», receives that role alone and the other boxes cannot be ticked.
+Declaring the roles tells the model how to use each file:</p>
+<table>
+  <tr><th>Role</th><th>What it contains</th></tr>
+  <tr><td class="ui">Pinout</td>
+      <td>The numbering and position of the contacts. The program does not assume
+      it is seen from above: the model says from which side the drawing is seen and the
+      mirroring is done by the code.</td></tr>
+  <tr><td class="ui">Dimensions</td>
+      <td>The dimensioned drawing seen from above: length and width of the body,
+      position of the holes, distances between the rows of contacts.</td></tr>
+  <tr><td class="ui">High resolution</td>
+      <td>A real photograph of the part, from above: it is used to locate the mounted
+      components. Only the files ticked as photos go to component recognition
+      and calibration; they must be images, not PDFs.</td></tr>
+  <tr><td class="ui">Land pattern</td>
+      <td>The lands recommended by the manufacturer (in datasheets, the «land pattern»):
+      shape and position of the lands and holes.</td></tr>
+  <tr><td class="ui">Side view</td>
+      <td>The heights: of the body, of the components, the thickness of the board.</td></tr>
+  <tr><td class="ui">Datasheet</td>
+      <td>The manufacturer's complete datasheet, PDF or images: the AI looks in it for pinout,
+      dimensions, lands and side view and reports the sections that are missing. It is not a photo:
+      it is not used to recognise the mounted components.</td></tr>
+</table>
+<ul>
+  <li><span class="ui">Add…</span>, in the <span class="ui">New document</span> card,
+  copies the file into the project's <code>docs</code> folder (the original is not
+  touched). Formats: PDF, PNG, JPG, WEBP, GIF. Then tick its roles: a file without
+  roles blocks the analysis until you choose one or remove it.</li>
+  <li>On the card of each file: the folder replaces the file keeping its roles,
+  the eye opens the preview with zoom, the bin removes the local copy, which stays
+  recoverable in <code>docs/.history</code>.</li>
+  <li>A role that no file has is simply «not provided»: the model knows it and
+  does not replace it with other files.</li>
+</ul>
+<div class="note">Photos from above are calibrated on the board dimensions.
+You need a photo taken from above, nearly aligned, with the length of the board
+horizontal and the board outline distinguishable from the background (of any colour). The program does not correct
+perspective: a tilted photo is rejected, and the role card
+reports it.</div>
+
+<h2 id="tipologia">5. Choosing the component type</h2>
+<p>In the <span class="ui">Mounting and analysis</span> step of the
+<span class="ui">Project</span> tab, <span class="ui">Component
+type</span> tells the model what it is reading, and therefore which dimensions
+to look for.</p>
+<table>
+  <tr><th>Type</th><th>What happens</th></tr>
+  <tr><td class="ui">Single through-hole component (THT)</td>
+      <td>Pads with a hole, dimensions from the datasheet's recommended layout.</td></tr>
+  <tr><td class="ui">Single SMD component</td>
+      <td>No hole, sizes from the recommended lands.</td></tr>
+  <tr><td class="ui">Board with components · through-hole connectors</td>
+      <td rowspan="2">Besides the footprint, the <strong>photo
+      inventory</strong> starts: the bodies mounted on the board are searched for on the photo,
+      measured and turned into 3D volumes, which are then reviewed and corrected.</td></tr>
+  <tr><td class="ui">Board with components · castellated connectors (half-holes)</td></tr>
+</table>
+<p>For <strong>single components</strong> the photo inventory is not
+run: no body detector, no body review, no pause
+after the inventory.</p>
+<p>The <span class="ui">AI tools</span> panel is closed at first:
+the summary shows the active detector and model. Open it with the arrow to
+see or change the other choices:</p>
+<ul>
+  <li><span class="ui">Photo detection</span> (only matters for boards):
+    <span class="ui">YOLO + local SMD network (v3)</span> (the default when running the
+    program from source: the detector proposes the boxes, a local network
+    classifies the kept bodies and only those it cannot resolve go to the AI; in the
+    installed Windows program the entry is disabled because PyTorch is not
+    included, and the default is the next entry),
+    <span class="ui">Local YOLO + AI verification</span> (the detector on your
+    computer proposes the boxes, the AI model verifies them),
+    <span class="ui">AI (current)</span>,
+    <span class="ui">Vision model only (no local detector)</span>, or
+    <span class="ui">Local YOLO only (pretest, no AI)</span>, which shows
+    only the boxes found by the detector without any paid call.
+    The local detector requires a YOLO model file, chosen in the
+    <span class="ui">YOLO model</span> row: <code>.onnx</code> (<code>.pt</code> files
+    only work when running the program from source). The button next to it opens
+    <span class="ui">Choose the YOLO model</span>: for every model in the folder
+    it shows format, size, origin, licence, training data, recognised
+    classes and compatibility. A <code>.pt</code> file runs code when
+    it is loaded, so it is checked only when you press
+    <span class="ui">Check compatibility</span>. If the file is missing or not
+    compatible, the analysis stops before spending anything.</li>
+  <li><span class="ui">AI model</span>: the single model used for documents,
+  photos and verification. The button next to it chooses a different model (filterable by
+  cost, OpenRouter or DeepSeek source) <em>for this session only</em>;
+  the default and its source are set from <span class="ui">Configuration →
+  General AI defaults...</span>, the prompts per type from <span class="ui">Configuration →
+  Manage AI types and profiles...</span>.</li>
+</ul>
+
+<h2 id="analisi">6. Starting the analysis and checking the costs</h2>
+<ol>
+  <li>Press <span class="ui">Extract parameters with AI</span>. It is a
+  <strong>paid</strong> analysis: it uses credit of the provider of the chosen model.
+  Before starting, the log writes which models will be used.</li>
+  <li>A window shows the progress: the list of phases and who works in
+  each one (<span class="ui">AI model</span>, <span class="ui">Crop reading</span>
+  and <span class="ui">Marking reading</span> are the paid remote phases;
+  <span class="ui">YOLO</span>, <span class="ui">Local SMD network</span>,
+  <span class="ui">OpenCV</span>, KiCadGen, the KiCad library and FreeCAD work on
+  your computer). <span class="ui">Stop</span> stops the work: a request
+  already sent must finish, but no further ones start.</li>
+  <li>At the end, the cost of the last analysis appears in the window and in the
+  <span class="ui">AI log</span> (icon at the top of the
+  <span class="ui">Project</span> tab). If the answer was taken from the local
+  cache, there was no paid call and the log says so.</li>
+  <li>The <span class="ui">AI credit</span> line shows the balance of the
+  provider's account and the <strong>total project cost</strong>, the sum of all the
+  paid calls made for that project, split by provider and saved in
+  <code>ai-costs.json</code> in the project folder (OpenRouter reports the
+  cost of every call; DeepSeek does not, so it is computed as tokens × official
+  price).</li>
+</ol>
+<div class="note">Every command that spends money says so in its tooltip (the text that
+appears when you hold the mouse over the button). The review and
+3D regeneration commands are free.</div>
+
+<h2 id="revisione">7. Reviewing the bodies found on the photo</h2>
+<p>Only for the two <span class="ui">Board with components</span> types.</p>
+<p>The review takes place in <strong>a single window, in two stages</strong>: first
+on the local detector's proposals, then on the bodies reconciled with the AI.
+Both stages are free.</p>
+<h3>Stage 1: the local detector's proposals</h3>
+<p>With a YOLO detector, before any paid call the review
+window opens with the boxes found on your computer. Remove those that fall
+on lettering, holes or empty lands, draw the missing ones, then
+<span class="ui">OK</span> passes the kept boxes on. If you cancel, the analysis
+stops without paying anything. The kept proposals are saved in the project's
+<code>photo-review</code> folder. With <span class="ui">Local YOLO only
+(pretest, no AI)</span> the work ends here.</p>
+<h3>Stage 2: pause after the inventory</h3>
+<p>When the AI inventory is finished, the same window reopens with the reconciled
+bodies, <strong>before</strong> the choice of models and the 3D generation.
+Beside the AI's reading, the detector's reading stays (class, confidence,
+box), never overwritten: if the detector's original box differs
+from the current one, it appears as a dashed ghost under the chosen body. The
+bodies proposed by the AI alone (dashed yellow) start excluded: you keep them
+with <span class="ui">Keep or leave</span> (<kbd>T</kbd>). The pause is turned on or
+off from <span class="ui">Configuration → Generation options...</span>
+(<span class="ui">Stop after the AI inventory to review the bodies (free)</span>);
+when it is off, the work continues with the bodies as the AI proposed them.</p>
+<h3>The window's commands</h3>
+<p>The window shows the photo with a rectangle for each body:</p>
+<ul>
+  <li><span class="ui">Add component</span> (<kbd>R</kbd>): draw a
+  rectangle on the photo, then assign the type.
+  <span class="ui">Delete selected</span> (<kbd>Del</kbd>) removes the chosen
+  body; <span class="ui">Lasso</span> (<kbd>L</kbd>) selects together the boxes
+  enclosed in a rectangle.</li>
+  <li><span class="ui">Copy format</span>: click the component to copy, then
+  click the others to paste size, height, type, package and KiCad
+  model (position and rotation stay).</li>
+  <li>Zoom with <kbd>+</kbd>, <kbd>-</kbd> or the mouse wheel;
+  <span class="ui">Fit photo</span> (<kbd>F</kbd>) shows the whole photo; the
+  photo button (<kbd>P</kbd>) shows it whole, dimmed or hidden to
+  read the outlines alone.</li>
+  <li>With a body chosen in the list or on the photo, <span class="ui">Parameters…</span>
+  opens <span class="ui">Component parameters</span>: three read-only sections
+  (what the local detector read, what the AI read with type, package
+  and marking and their confidences, the outcome of the two crop readings and the
+  <span class="ui">SMD network outcome</span> row; the state of the KiCad model with
+  <span class="ui">Choose KiCad model…</span>, see <a href="#step">chapter
+  11</a>, also by double-clicking in the list) and below them the editable corrections:
+  name, type, marking, dimensions, rotation, height. Centre and sides can also be corrected
+  by dragging the rectangle and its handles on the photo; the rotation is
+  changed only with the numeric <span class="ui">Rotation</span> field. No
+  AI request.</li>
+  <li>The list markers: <code>[!]</code> means the row has at least one
+  warning (usually «KiCad model not confirmed»), <code>[?]</code> that the type
+  has not been established; another marker reports that the detector's class
+  contradicts the AI's. The doubts button shows the uncertainties declared
+  by the model, as text.</li>
+  <li><span class="ui">Apply corrections</span> saves; <span class="ui">Cancel</span>
+  leaves everything as it was. After applying them, <span class="ui">Regenerate STEP
+  model with these annotations</span> in the <span class="ui">STEP model</span> tab rebuilds the STEP.</li>
+</ul>
+<p>Later, from the <span class="ui">Project</span> tab:</p>
+<ul>
+  <li><span class="ui">Component review…</span> reopens the stage saved in the
+  project: the detector's proposals before the AI inventory, the reconciled
+  bodies with dimensions and choice of KiCad models after it. Free.</li>
+  <li><span class="ui">Rerun AI inventory (paid)…</span> redoes only
+  the AI inventory on the saved proposals. It is the only one of the two that spends.</li>
+</ul>
+
+<h2 id="generazione">8. Generation: footprint and STEP model</h2>
+<p>When the analysis is valid, the generation starts by itself. In the same progress
+window of <a href="#analisi">chapter 6</a>, after the analysis phases, the
+generation takes four steps, and for each one the heading says who
+runs it:</p>
+<ol>
+  <li><span class="ui">2D footprint (KiCadGen)</span>: the
+  <code>.kicad_mod</code> file, written by the program.</li>
+  <li><span class="ui">Compare with accepted matches</span>: for boards, the bodies
+  are compared with the body/model matches already accepted
+  (<span class="ui">Accepted matches archive…</span>).</li>
+  <li><strong>Models from the KiCad library</strong>: for every body the
+  models of the KiCad 3D library with compatible dimensions are searched for.</li>
+  <li><span class="ui">3D solid with FreeCAD</span>: the <code>.step</code> file.</li>
+</ol>
+<p>When a step cannot be run (for example FreeCAD not installed) the
+window says why. A 3D error does not cancel the footprint already
+written.</p>
+<p>When the generation succeeds the window stays open with all the steps ticked and the
+state «Completed»: close it with <span class="ui">Close</span>. In case of error
+or interruption it closes by itself and the error is shown.</p>
+<p>The <span class="ui">Footprint preview</span> tab shows the 2D drawing to
+scale with the dimensions, the pin numbers and the <span class="ui">Grid</span> (step
+1 mm or 0.1 in, with a dotted sub-grid for drawings); the table
+icon opens the pinout. The preview is a <strong>draft</strong>, like the symbol:
+the Reference and Value texts can be dragged, drawings are added from the palette,
+the host lands can be edited, with <span class="ui">Undo edit</span> /
+<span class="ui">Redo edit</span>. <span class="ui">Apply</span> writes the
+<code>.kicad_mod</code> file, <span class="ui">Cancel</span> discards the changes
+not applied, <span class="ui">Recover draft</span> restores a draft not
+applied after an unexpected shutdown. The commands of the
+<span class="ui">KiCad</span> tab use the applied file: a draft not applied is not
+installed and is reported by <span class="ui">Check component for
+KiCad</span>.</p>
+<p>For boards, the <span class="ui">Host-board footprint</span> panel
+lets you choose the mounting directly from the preview, without going back
+to the beginning or repeating the analysis:</p>
+<ul>
+  <li><span class="ui">Direct soldering / module lands</span> keeps
+  the geometry of the module's lands, including the castellated contacts.</li>
+  <li><span class="ui">Pin headers / circular through-hole pads</span> uses through
+  holes for the connectors. Set <span class="ui">Pad Ø:</span> and
+  <span class="ui">Drill Ø:</span> in millimetres. The hole must be smaller
+  than the pad; diameters incompatible with the distance between contacts are reported.
+  In matrix footprints pad 1 stays square so that it can be recognised.</li>
+</ul>
+<p>The preview changes immediately. To write the file, press the refresh icon
+with the tooltip <span class="ui">Update footprint only</span>: it needs
+data already acquired or an existing footprint. This action does not call the AI
+and does not regenerate the STEP model. The choices are kept in sync with those of the
+<span class="ui">Mounting and analysis</span> step.</p>
+<p>The mounting concerns the footprint on the host board: the physical geometry
+of the 3D module, derived from the photo, stays unchanged. A castellated contact
+that has only a half-hole is not turned into a through hole.</p>
+
+<h2 id="simbolo">9. The «Electrical symbol» tab</h2>
+<p>Between «Footprint preview» and «STEP model» you find the symbol to use in the
+schematic. The numbers are those of the footprint's electrical pads and cannot be changed
+in this table. You can correct the function, choose the electrical type and
+move the pins freely in the editor.</p>
+<p>Drag the terminal, the number or the name of a pin to move it
+  freely, even far from the rectangle. The connection point stays
+  snapped to the 0.1 in (2.54 mm) grid, even when hidden. The move
+  keeps the orientation. On an occupied position, the two pins swap
+  places keeping number, name, type and orientation.</p>
+<p>With a <strong>right click on the pin</strong> you can rotate it by 90 degrees
+  clockwise or anticlockwise, or by 180 degrees. The connection point
+  stays still. The eight green handles resize the rectangle around
+  its centre without moving the pins.</p>
+<p>The single bar above the editor uses icons with tooltips. In narrow windows,
+  the commands that do not fit are available in the bar's overflow menu.
+  Select a pin:
+  the arrows move it by one grid step, R rotates it clockwise and
+  Shift+R anticlockwise, with the focus on the view. The
+  <strong>Pin position and orientation</strong> command, in the bar, lets you enter X, Y and angle. The coordinates snap
+  to the grid; a connection point that is already occupied is refused.</p>
+<p><strong>Multiple selection:</strong> Ctrl+click adds or removes a pin;
+  Shift+drag selects the terminals enclosed in the rectangle.
+  Ctrl+Shift adds the area to the current selection. The selection icon
+  lets you use the rectangle without holding Shift; turn it off
+  to go back to dragging pins. Drag a selected pin to move
+  the group. Group rotations take place around the active pin.
+  A collision with other terminals cancels the whole operation.</p>
+<p><strong>Align and distribute</strong> aligns X or Y to the active pin.
+  Distribution requires at least three pins, keeps the first one and uses a regular
+  step that is a multiple of the grid: the last one may move to respect it.
+  The padlock locks the rectangle's handles without locking the pins.
+  Below the view you can see the cursor coordinates, the zoom and the active pin.</p>
+<p><strong>Check symbol</strong> reports missing names, overlapping texts
+  in the preview and passive/unspecified types still to be verified. The same
+  check precedes the export; you can cancel or choose Export anyway.
+  Changing a type in the table records it as verified.</p>
+<p><strong>Recover draft:</strong> finished edits are saved in a separate
+  recovery file in the project folder. After an unexpected
+  shutdown, reopening the same project shows that a draft is
+  available: press the Recover draft icon. The recovery does not replace the
+  saved project until you press Apply. A draft from another revision
+  of the project is not restored automatically. Cancel discards the recovered
+  draft; a successful Apply deletes the recovery file.</p>
+<p><strong>Undo edit / Redo edit</strong> manage the history
+  of the edits. With the focus on the editor, Ctrl+Z,
+  Ctrl+Shift+Z and Ctrl+Y also work. Esc cancels the drag in progress.
+  <strong>Reset layout</strong> goes back to the two initial columns
+  keeping names and electrical types. Hold the left button down on empty space and drag to move the view without changing
+  the symbol. The wheel zooms around the cursor; use <strong>Fit</strong> to see everything.</p>
+<p><strong>Apply</strong> saves names, types, positions and sizes in the project. The names also update
+the 2D and 3D labels. <strong>Cancel</strong> discards the changes not
+applied. The Undo/Redo history stays available after Apply.
+If saving fails, the draft stays available to try again.
+Before closing or changing project, apply or cancel the changes
+to the symbol. No new AI analysis or FreeCAD generation is needed.</p>
+<p>The initial types are <strong>passive</strong>: they do not attest the electrical
+behaviour of the circuit. Check on the datasheet whether input, output,
+bidirectional, power_in or other types are needed before using KiCad's electrical
+checks. Equal names such as GND can belong to different numbers; numbers
+that are duplicated or absent from the footprint prevent the export.</p>
+<p><strong>Export KiCad symbol</strong> saves a <code>.kicad_sym</code> library.
+Add it in KiCad to the symbol libraries. The reference to the footprint is
+<code>KiCadGen:nome_componente</code>: use the same library name when
+you install the footprint, or change the association in KiCad. The installation
+from the «KiCad» tab still handles footprint and STEP model; the symbol
+library is exported separately.</p>
+<p>Shortcuts: Ctrl+3 opens the symbol, Ctrl+4 the STEP model, Ctrl+5 KiCad.</p>
+<h3>Electrical types suggested by the AI</h3>
+<p>In the <span class="ui">Electrical symbol</span> tab, <span class="ui">Suggest pin types with AI</span>
+uses the documents declared as pinout or datasheet and the configured AI model. Before the call
+the model and the documents are shown; the analysis may incur costs. The proposals include source
+and reasoning: check them and select the ones to use. Uncertain cases stay to be verified;
+types already confirmed are not preselected. The changes enter the draft as a single
+undoable operation and are saved with <span class="ui">Apply</span>.</p>
+<p>The AI analysis can be cancelled: a request already sent must finish,
+but no further attempts are made and the answer is discarded.
+Renaming a pin revokes the confirmation of its previous type. To confirm
+a type already shown, select it again in the table's menu.</p>
+
+<h2 id="modello3d">10. The «STEP model» tab</h2>
+<p>The model is rotated with the mouse; the navigation cube goes to the standard
+views. In the bar at the top:</p>
+<ul>
+  <li><strong>Pin numbers</strong>: they appear only when looking at the part from the
+  pin side (bottom view). Looking from below you find the datasheet's bottom view
+  again: it is a practical check of the mirroring.</li>
+  <li><strong>Pinout table</strong>, <strong>Fit</strong>, and opening the
+  <code>3dshapes</code> folder with the STEP files.</li>
+  <li><span class="ui">Edit components…</span> (with <kbd>Ctrl+E</kbd>, or
+  right click on the body in the 3D view and <span class="ui">Edit component...</span>;
+  it no longer has an icon in the bar): name, type, position, dimensions,
+  rotation, colour and marking of every body, by hand. It also works without the photo.
+  After <span class="ui">Apply</span> the STEP model is regenerated with FreeCAD.
+  No AI request.</li>
+  <li><span class="ui">Regenerate STEP model with these annotations</span>: rebuilds the STEP from the current
+  bodies, including the corrections just applied. Free.</li>
+  <li><span class="ui">I like it — remember these models…</span>: saves the
+  matches between bodies and KiCad models, which will be proposed straight away on a future board
+  (to be confirmed). The archive is reviewed with
+  <span class="ui">Accepted matches archive…</span>.</li>
+  <li><span class="ui">Copy format</span>: as in the review, copies size,
+  type, package and KiCad model from one body to the others.</li>
+  <li>For castellated modules, a drop-down list corrects the <strong>contact
+  type</strong> of all the sides.</li>
+</ul>
+<p>The 3D viewer is loaded the first time the tab is opened: until
+it is ready, the tab shows a placeholder and nothing is lost.</p>
+<p>With a right click on a body of the model: <span class="ui">Remove from the STEP model
+(false positive)</span> (and <span class="ui">Put back into the STEP model</span>),
+<span class="ui">Rotate the solid</span>, <span class="ui">Edit
+component...</span> and <span class="ui">Change KiCad model...</span>.</p>
+
+<h2 id="step">11. Choosing the STEP model of a component</h2>
+<p>The <span class="ui">STEP model choice</span> window opens from
+<span class="ui">Choose KiCad model…</span> in the review or from
+<span class="ui">Change KiCad model...</span> in the 3D view. It shows up to five
+candidates from the KiCad library, with their dimensions, beside the crop of the photo
+of the component.</p>
+<ul>
+  <li>The candidate's preview is oriented as it will be mounted on the board. The
+  rotation is set by hand, or with <span class="ui">Automatic: infer the
+  CAD axes from the outline</span>.</li>
+  <li>The <span class="ui">Colours</span> tick box shows the preview with the colours of the
+  STEP file; when off, the preview is a single colour and is faster. The choice is
+  remembered.</li>
+</ul>
+
+<h2 id="pin">12. Male pins under the board</h2>
+<p>For the two <span class="ui">Board with components</span> types, the
+<span class="ui">Show headers in the STEP model</span> tick box in the
+<span class="ui">Mounting and analysis</span> step of the <span class="ui">Project</span> tab
+or in the bar of the <span class="ui">STEP model</span> tab
+adds under the board the
+male strips with square pins, like a board with the strips already soldered. On
+castellated boards they are placed only on the contacts with a through hole.</p>
+<p>It is a choice separate from the mounting of the footprint on the host board.
+It changes neither the analysis nor the footprint: after changing it you just regenerate
+the STEP model with the icon next to the tick box. The two tick boxes stay in sync.
+The module body, with copper and holes derived from the photo,
+does not change with the chosen mounting type.</p>
+<p>When you change only this tick box, the regeneration reuses the models
+of the components chosen in the last successful generation: it skips the comparison
+with the accepted matches and the search in the KiCad library. What remains is building
+and saving the solid with FreeCAD. The reuse is prepared by the first
+complete generation with this version; if dimensions, components,
+annotations or model files also change, the complete procedure is run again.</p>
+
+<h2 id="kicad">13. The «KiCad» tab: testing and installation</h2>
+<p>The <span class="ui">Files ready for KiCad</span> panel lists footprint,
+electrical symbol and STEP model with their state. The isolated test and the two
+installations are <strong>blocked until the files on disk match the
+parameters</strong> of the project, and each block names its remedy, enabled right
+beside it: <span class="ui">Apply to files</span> (metadata or footprint not yet
+written), <span class="ui">Update the symbol file</span> (the exported
+<code>.kicad_sym</code> does not match the applied symbol),
+<span class="ui">Remove the obsolete STEP model</span> (an old STEP that cannot
+be rebuilt). When the STEP was built on different lands, or only colours or
+annotations have changed, the remedy is the regeneration button
+in the bar of the <a href="#modello3d">«STEP model»</a> tab (tooltip
+<span class="ui">Regenerate STEP model with these annotations</span>). A
+project saved by an earlier version may require an
+<span class="ui">Apply to files</span>. The commands are also blocked while
+a background job is running. They use the <strong>applied</strong> files: a draft of the
+footprint or symbol that has not been applied does not block the commands, is not installed and
+is reported by <span class="ui">Check component for KiCad</span>.</p>
+<p>The collapsible <span class="ui">Component metadata</span> panel contains
+reference designator (letters only: KiCad adds the number; the proposal
+in grey counts as filled), description, keywords, datasheet (URL or
+file) and footprint filters. Designator, description, keywords and datasheet
+are <strong>required</strong>: without them, installation is blocked and the
+commands' tooltip says which fields are missing. The
+<span class="ui">KiCad checks (KLC)</span> list updates while you type (⛔ error,
+⚠ warning) and <span class="ui">Apply to files</span> writes the values into the footprint and
+the symbol; a ⛔ error makes the application be refused.</p>
+<p>In <span class="ui">Review before installation</span> there are three icons:
+<span class="ui">Quick guide to using the component in KiCad</span> (a five-page
+procedure: install, place the footprint, export and register the
+symbol, link them, update the PCB), <span class="ui">Check component for
+KiCad</span> (see below) and <span class="ui">Test in KiCad...</span>. In
+<span class="ui">Library installation</span> the two installations.</p>
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td class="ui">Test in KiCad...</td>
+      <td>Creates a small temporary project with the footprint and the STEP model, in the
+      component's <code>.kicad-preview</code> subfolder, and opens it in the PCB
+      Editor. In KiCad press <kbd>Alt</kbd>+<kbd>3</kbd> for the 3D view. It does not install
+      and does not change any KiCad library.</td></tr>
+  <tr><td class="ui">Install in KiCad project...</td>
+      <td>The recommended choice. Choose the folder of a KiCad project:
+      <code>KiCadGen.pretty</code> and <code>KiCadGen.3dshapes</code> are created and the
+      library is registered in the project's table with relative paths
+      (<code>${KIPRJMOD}</code>), so the project stays portable.</td></tr>
+  <tr><td class="ui">Install as global library...</td>
+      <td>Makes the footprint available in all the projects of this computer.
+      It requires KiCad to be installed (the user's global table is
+      found with <code>kicad-cli</code>); choose the libraries folder and the
+      library is registered in KiCad's global <code>fp-lib-table</code>
+      with absolute paths. The other libraries of the table stay as they are.
+      If KiCad has never been started that table does not exist yet and
+      the installation is refused: start KiCad once, complete the initial
+      library setup and try again.</td></tr>
+</table>
+<p>Before overwriting a component already installed, or moving a
+<code>KiCadGen</code> library already registered elsewhere, the program asks for confirmation. Before
+changing a table it keeps a <code>.kicadgen-backup</code> copy of it and, if a
+step fails, it puts back everything it had touched. The symbol is not
+registered in any table: it is exported with <span class="ui">Export KiCad
+symbol…</span> (also from the symbol row of this tab) and added in
+KiCad with <em>Manage Symbol Libraries</em>.
+<span class="ui">Open component folder</span> opens the folder with footprint,
+STEP model and documents. The <span class="ui">Exports</span> tab
+(<kbd>Ctrl</kbd>+<kbd>6</kbd>) keeps the history of the installations and
+symbol exports made from this computer.</p>
+<h3>Checking the component</h3>
+<p>In the <span class="ui">KiCad</span> tab, the <span class="ui">Check component for KiCad</span> icon
+checks the generated files, the match of the pin-pad numbers and, if <code>kicad-cli</code> is
+available, tries reading footprint, symbol and STEP with KiCad CLI, using a temporary
+folder (without it, that test is reported as not run). The copyable report distinguishes
+passed checks, errors, warnings and checks not run. The applied symbol is tested
+even if not yet exported; drafts not applied are excluded and reported.
+This check does not certify pinout, dimensions, visual 3D alignment or installed libraries;
+ERC and DRC must be run on the final schematic and board.</p>
+<p>The check stays available when the footprint exists but the STEP is missing;
+installation stays disabled until the required files are present.
+The original 3D references and transformations are checked separately from the
+normalised temporary copy. Relative paths or KiCad variables that are not resolved
+need checking in the destination project.</p>
+
+<h2 id="log">14. Where the logs are</h2>
+<table>
+  <tr><th>File</th><th>Where</th><th>Content</th></tr>
+  <tr><td><code>analisi-ai.log</code></td><td>In the project folder</td>
+      <td>The analysis diary, written line by line as the work proceeds:
+      steps, models used, costs, warnings. It can also be read from the program with
+      the <span class="ui">AI log</span> icon.</td></tr>
+  <tr><td><code>freecad.log</code></td><td>In the project folder</td>
+      <td>FreeCAD's output during the construction of the STEP model.</td></tr>
+  <tr><td><code>crash-reports</code></td><td><code>logs</code> folder of the
+      program data (installed: <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
+      <td>One file for every unexpected error of the program, with version, system and
+      error trace. Only the 20 most recent are kept.</td></tr>
+</table>
+<p>The <span class="ui">Help → Open log folder</span> menu opens the folder of the
+open project, where <code>analisi-ai.log</code> and <code>freecad.log</code> are;
+without an open project it opens the <code>logs</code> folder of the
+program data.</p>
+
+<h2 id="aiuto">15. Reporting a problem and updates</h2>
+<ul>
+  <li><span class="ui">Help → Report a problem</span> opens in the browser a new
+  issue on the project's GitHub repository, already filled in with the version of
+  KiCadGen, the operating system and whether FreeCAD and KiCad are present. The program also opens
+  the log folder: attach the useful files yourself, after looking at them, because
+  they may contain the names of your folders and projects. The issue
+  on GitHub is public and is not sent until you submit it.</li>
+  <li><span class="ui">Help → Check for updates...</span> compares this version
+  with the latest one published on GitHub. The check takes place only when you ask for it.</li>
+</ul>
+<p>The project: <a href="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator">github.com/MirkoUgoliniDev/KiCad-ComponentGenerator</a>.</p>
+
+<h2 id="limiti">16. Limits to be aware of</h2>
+<ul>
+  <li>The AI analysis can make mistakes: always check footprint and STEP model in the
+  previews before using them.</li>
+  <li>The body heights derived from a single photo from above are
+  <strong>estimates</strong>, not measurements. Verify heights and critical distances with
+  dimensioned drawings or with a measurement.</li>
+  <li>The photo inventory does not guarantee that all the bodies have been found: this
+  is why the review and <span class="ui">Edit components…</span> exist.</li>
+</ul>
+
+<footer>KiCadGen — user guide. The program is distributed under the GNU AGPL-3.0 licence;
+the licences of third-party components are in the
+<span class="ui">Help → Licenses</span> menu.</footer>
+</body>
+</html>

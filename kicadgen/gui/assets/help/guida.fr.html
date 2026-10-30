@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guide d’utilisation de KiCadGen</title>
+<!--
+  Guide d’utilisation de KiCadGen, ouvert depuis le menu « Aide » dans le navigateur par défaut.
+  Page autonome : aucune ressource externe (polices, scripts, images) ; le seul
+  lien externe est le dépôt GitHub du projet. Chaque phrase
+  décrit une commande qui existe dans le code : quand une commande change de nom ou
+  disparaît, le guide doit être mis à jour en même temps que le code.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2330; --muted: #5b6070; --accent: #1d5fd1;
+    --panel: #f3f5f9; --border: #d6dae3; --note: #fff7e0; --note-border: #e0b44c;
+    --code: #eef1f6;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e2e; --fg: #cdd6f4; --muted: #a6adc8; --accent: #89b4fa;
+      --panel: #262637; --border: #45475a; --note: #3a3322; --note-border: #b8923c;
+      --code: #313244;
+    }
+  }
+  html { background: var(--bg); }
+  body {
+    margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; padding-bottom: .3rem;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+  a { color: var(--accent); }
+  p.lead { color: var(--muted); margin-top: 0; }
+  nav { background: var(--panel); border: 1px solid var(--border);
+        border-radius: 8px; padding: .75rem 1.25rem; }
+  nav ol { margin: .25rem 0; padding-left: 1.25rem; }
+  code, kbd { background: var(--code); border-radius: 4px; padding: 0 .3em;
+              font-family: Consolas, "Cascadia Mono", monospace; font-size: .92em; }
+  kbd { border: 1px solid var(--border); }
+  .note { background: var(--note); border-left: 4px solid var(--note-border);
+          border-radius: 4px; padding: .6rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); }
+  .ui { font-weight: 600; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>Guide d’utilisation de KiCadGen</h1>
+<p class="lead">De l’idée au composant dans une bibliothèque KiCad : un exemple complet,
+pas à pas.</p>
+
+<nav>
+  <strong>Sommaire</strong>
+  <ol>
+    <li><a href="#cosa-fa">Ce que fait KiCadGen</a></li>
+    <li><a href="#prima">Avant de commencer</a></li>
+    <li><a href="#progetto">Créer le projet</a></li>
+    <li><a href="#documenti">Charger les documents</a></li>
+    <li><a href="#tipologia">Choisir le type de composant</a></li>
+    <li><a href="#analisi">Lancer l’analyse et contrôler les coûts</a></li>
+    <li><a href="#revisione">Revoir les corps trouvés sur la photo</a></li>
+    <li><a href="#generazione">Génération : empreinte et modèle STEP</a></li>
+    <li><a href="#simbolo">L’onglet « Symbole électrique »</a></li>
+    <li><a href="#modello3d">L’onglet « Modèle STEP »</a></li>
+    <li><a href="#step">Choisir le modèle STEP d’un composant</a></li>
+    <li><a href="#pin">Broches mâles sous la carte</a></li>
+    <li><a href="#kicad">L’onglet « KiCad » : test et installation</a></li>
+    <li><a href="#log">Où se trouvent les journaux</a></li>
+    <li><a href="#aiuto">Signaler un problème et mises à jour</a></li>
+    <li><a href="#limiti">Limites à connaître</a></li>
+  </ol>
+</nav>
+
+<h2 id="cosa-fa">1. Ce que fait KiCadGen</h2>
+<p>KiCadGen crée un composant pour KiCad à partir de documents techniques et de
+photographies : l’<strong>empreinte</strong> (<code>.kicad_mod</code>), le
+<strong>symbole électrique</strong> (<code>.kicad_sym</code>) et le
+<strong>modèle STEP</strong> (<code>.step</code>). Les documents sont lus par
+un modèle d’intelligence artificielle (via OpenRouter ou l’API directe de
+DeepSeek) ; le programme transforme ensuite ce que le modèle a lu en
+géométrie, avec des règles déterministes.</p>
+<p>Pour une carte portant des composants montés (un module, une carte de
+développement), KiCadGen reconstruit les <strong>encombrements mécaniques</strong> : position,
+dimensions et orientation des corps visibles sur la photo. Il ne fait pas de rétro-ingénierie
+(reverse engineering) : les corps sont des volumes génériques, ou des modèles STEP de la bibliothèque de
+KiCad choisis par similitude de dimensions.</p>
+
+<h2 id="prima">2. Avant de commencer</h2>
+<ul>
+  <li><strong>FreeCAD</strong> (freecad.org) construit les modèles STEP. Sans FreeCAD,
+  on obtient tout de même l’empreinte ; la fenêtre de progression indique quelles étapes
+  ne peuvent pas être exécutées et pourquoi.</li>
+  <li><strong>KiCad</strong> (kicad.org) sert à tester le résultat et à
+  installer les bibliothèques.</li>
+  <li><strong>Clé API</strong> : l’analyse des documents est payante et
+  nécessite une clé de l’un des deux fournisseurs pris en charge, <strong>OpenRouter</strong>
+  (une seule clé pour de nombreux éditeurs ; le modèle par défaut du programme installé,
+  <code>anthropic/claude-opus-5</code>, passe par là) ou
+  <strong>DeepSeek (API directe)</strong> (modèles <code>deepseek-api/...</code> ;
+  en lançant depuis les sources, le modèle par défaut est <code>deepseek-api/deepseek-flash</code>).
+  Le modèle se choisit depuis l’interface : <span class="ui">Configuration</span> →
+  <span class="ui">Paramètres IA généraux…</span>, onglet <span class="ui">Modèle</span>,
+  ou le panneau <span class="ui">Modèle IA</span> pour la session.
+  La clé se saisit depuis <span class="ui">Configuration</span> →
+  <span class="ui">Compte IA...</span> : la fenêtre liste chaque fournisseur avec
+  l’origine de la clé utilisée (variable d’environnement, Gestionnaire d’identification, fichier
+  <code>.env</code> ou aucune) et le solde actuel ; choisissez le fournisseur, collez
+  la clé, appuyez sur <span class="ui">Vérifier</span> (aucun appel à un modèle,
+  aucun coût) puis sur <span class="ui">Enregistrer</span> ; elle est conservée dans le Gestionnaire
+  d’identification de Windows (<code>KiCadGen/OpenRouter</code>,
+  <code>KiCadGen/DeepSeek</code>). <span class="ui">Supprimer la clé</span> efface
+  seulement cette entrée. Le fichier <code>.env</code> du dossier
+  <code>%LOCALAPPDATA%\KiCadGen</code> (lignes <code>OPENROUTER_API_KEY=sk-or-...</code>
+  et/ou <code>DEEPSEEK_API_KEY=...</code>) reste valable ; une clé enregistrée avec
+  « Compte IA... » a priorité sur celle du fichier. Si la clé manque,
+  le programme le signale avant de lancer une analyse et propose d’ouvrir la fenêtre.
+  Quand la clé fonctionne, la ligne <span class="ui">Crédit IA</span> de
+  l’onglet <span class="ui">Projet</span> affiche le solde du fournisseur du modèle
+  choisi.</li>
+</ul>
+<p>La langue de l’interface (italien, anglais, français, allemand) se choisit
+dans la liste au-dessus des onglets.</p>
+
+<h2 id="progetto">3. Créer le projet</h2>
+<p>Un projet est un dossier : son nom est aussi celui de l’empreinte et du
+modèle STEP.</p>
+<ol>
+  <li>Menu <span class="ui">Fichier → Nouveau projet...</span> (<kbd>Ctrl</kbd>+<kbd>N</kbd>).
+  Saisissez le nom, par exemple <code>RS485_TTL</code>, et confirmez.</li>
+  <li>Le dossier est créé dans l’<span class="ui">Espace de travail</span> indiqué
+  dans l’onglet <span class="ui">Projet</span> (dans le programme installé,
+  par défaut <code>Documents\KiCadGen</code>). Le bouton avec le dossier, à côté
+  du champ, permet d’en choisir un autre.</li>
+  <li>Pour reprendre un travail : <span class="ui">Fichier → Ouvrir un projet...</span>
+  (<kbd>Ctrl</kbd>+<kbd>O</kbd>) liste les projets de l’espace de travail, du plus récent au plus ancien.
+  <span class="ui">Fichier → Renommer le projet...</span> (<kbd>F2</kbd>) change le nom
+  du dossier et, en même temps, celui de l’empreinte, du symbole et du modèle STEP. Sans
+  projet ouvert, la fenêtre affiche la page d’accueil, avec les deux commandes et les
+  projets récents, que l’on rouvre d’un clic.</li>
+</ol>
+
+<h2 id="documenti">4. Charger les documents</h2>
+<p>L’onglet <span class="ui">Projet</span> guide la préparation en deux étapes :
+<span class="ui">Documents</span> et <span class="ui">Montage et analyse</span>.
+Utilisez <span class="ui">Continuer</span> et <span class="ui">Retour</span> pour passer de l’une à l’autre :
+ces boutons ne lancent pas l’analyse. À la première étape,
+<span class="ui">Retour aux projets</span> enregistre le projet et revient à l’écran
+avec Nouveau, Ouvrir et les projets récents. Le nom et l’espace de travail se trouvent dans le panneau
+repliable <span class="ui">Détails du projet</span>, au-dessus des documents.</p>
+<p>Dans l’onglet <span class="ui">Projet</span>, le panneau de la documentation comporte
+une fiche pour chaque fichier chargé. Pour chaque fichier, cochez <strong>tous</strong> les rôles qu’il
+contient : une fiche technique PDF, par exemple, est souvent à la fois brochage, cotes et pastilles recommandées ; c’est pourquoi un PDF est toujours une
+« Fiche technique », reçoit ce rôle seul et les autres cases ne peuvent pas être cochées.
+Déclarer les rôles indique au modèle comment utiliser chaque fichier :</p>
+<table>
+  <tr><th>Rôle</th><th>Ce qu’il contient</th></tr>
+  <tr><td class="ui">Brochage</td>
+      <td>La numérotation et la position des contacts. Le programme ne suppose pas qu’il
+      soit vu de dessus : le modèle indique de quel côté le dessin est vu et
+      le code se charge de la mise en miroir.</td></tr>
+  <tr><td class="ui">Cotes</td>
+      <td>Le dessin coté vu de dessus : longueur et largeur du corps,
+      position des trous, distances entre les rangées de contacts.</td></tr>
+  <tr><td class="ui">Haute résolution</td>
+      <td>Une vraie photographie de la pièce, vue de dessus : elle sert à repérer les composants
+      montés. Seuls les fichiers cochés comme photo vont à la reconnaissance des composants
+      et à l’étalonnage ; ce doivent être des images, pas des PDF.</td></tr>
+  <tr><td class="ui">Empreinte</td>
+      <td>Les pastilles recommandées par le fabricant (le « land pattern » des fiches techniques) :
+      forme et position des pastilles et des trous.</td></tr>
+  <tr><td class="ui">Vue latérale</td>
+      <td>Les hauteurs : du corps, des composants, l’épaisseur de la carte.</td></tr>
+  <tr><td class="ui">Fiche technique</td>
+      <td>La fiche technique complète du fabricant, en PDF ou en images : l’IA y cherche le brochage,
+      les cotes, les pastilles et la vue latérale, et signale les sections manquantes. Ce n’est pas une photo :
+      elle ne sert pas à reconnaître les composants montés.</td></tr>
+</table>
+<ul>
+  <li><span class="ui">Ajouter…</span>, dans la fiche <span class="ui">Nouveau document</span>,
+  copie le fichier dans le dossier <code>docs</code> du projet (l’original n’est pas
+  modifié). Formats : PDF, PNG, JPG, WEBP, GIF. Cochez ensuite ses rôles : un fichier sans
+  rôle bloque l’analyse tant que vous ne lui en attribuez pas un ou ne le retirez pas.</li>
+  <li>Sur la fiche de chaque fichier : le dossier remplace le fichier en conservant les rôles,
+  l’œil ouvre l’aperçu avec zoom, la corbeille retire la copie locale, qui reste
+  récupérable dans <code>docs/.history</code>.</li>
+  <li>Un rôle qu’aucun fichier ne porte est simplement « non fourni » : le modèle le sait et
+  ne le remplace pas par d’autres fichiers.</li>
+</ul>
+<div class="note">Les photos de dessus sont étalonnées sur les cotes de la carte.
+Il faut une photo prise de dessus, presque alignée, avec la longueur de la carte à
+l’horizontale et le contour de la carte bien distinct du fond (de n’importe quelle couleur). Le programme ne corrige pas la
+perspective : une photo inclinée est refusée, et la fiche du rôle le
+signale.</div>
+
+<h2 id="tipologia">5. Choisir le type de composant</h2>
+<p>À l’étape <span class="ui">Montage et analyse</span> de l’onglet
+<span class="ui">Projet</span>, <span class="ui">Type de
+composant</span> indique au modèle ce qu’il est en train de lire, et donc quelles cotes
+chercher.</p>
+<table>
+  <tr><th>Type</th><th>Ce qui se passe</th></tr>
+  <tr><td class="ui">Composant traversant individuel (THT)</td>
+      <td>Pastilles avec trou, cotes tirées du layout recommandé de la fiche technique.</td></tr>
+  <tr><td class="ui">Composant CMS individuel</td>
+      <td>Aucun trou, dimensions tirées des pastilles recommandées.</td></tr>
+  <tr><td class="ui">Carte avec composants · connecteurs traversants</td>
+      <td rowspan="2">En plus de l’empreinte, l’<strong>inventaire
+      photographique</strong> démarre : les corps montés sur la carte sont recherchés sur la photo,
+      mesurés et transformés en volumes 3D, que l’on revoit et corrige ensuite.</td></tr>
+  <tr><td class="ui">Carte avec composants · connecteurs castellés (demi-trous)</td></tr>
+</table>
+<p>Pour les <strong>composants individuels</strong>, l’inventaire photographique n’est pas
+exécuté : pas de détecteur de corps, pas de révision des corps, pas de pause
+après l’inventaire.</p>
+<p>Le panneau <span class="ui">Outils IA</span> est fermé au départ :
+le résumé affiche le détecteur et le modèle actifs. Ouvrez-le avec la flèche pour
+voir ou modifier les autres choix :</p>
+<ul>
+  <li><span class="ui">Détection photo</span> (ne compte que pour les cartes) :
+    <span class="ui">YOLO + réseau SMD local (v3)</span> (par défaut en lançant le
+    programme depuis les sources : le détecteur propose les rectangles, un réseau local
+    classe les corps conservés et seuls ceux qu’il ne résout pas vont à l’IA ; dans le
+    programme Windows installé, l’option est désactivée parce que PyTorch n’est pas
+    inclus, et l’option par défaut est la suivante),
+    <span class="ui">YOLO local + vérification IA</span> (le détecteur sur votre
+    ordinateur propose les rectangles, le modèle IA les vérifie),
+    <span class="ui">IA (actuelle)</span>,
+    <span class="ui">Modèle de vision seul (aucun détecteur local)</span>, ou
+    <span class="ui">YOLO local seul (prétest, aucune IA)</span>, qui affiche
+    uniquement les rectangles trouvés par le détecteur, sans aucun appel payant.
+    Le détecteur local nécessite un fichier de modèle YOLO, qui se choisit à la ligne
+    <span class="ui">Modèle YOLO</span> : <code>.onnx</code> (les fichiers <code>.pt</code>
+    ne fonctionnent qu’en lançant le programme depuis les sources). Le bouton voisin ouvre
+    <span class="ui">Choisir le modèle YOLO</span> : pour chaque modèle du dossier, il
+    affiche le format, la taille, l’origine, la licence, les données d’entraînement, les classes
+    reconnues et la compatibilité. Un fichier <code>.pt</code> exécute du code quand
+    il est chargé ; il n’est donc vérifié qu’en appuyant sur
+    <span class="ui">Vérifier la compatibilité</span>. Si le fichier manque ou n’est pas
+    compatible, l’analyse s’arrête avant toute dépense.</li>
+  <li><span class="ui">Modèle IA</span> : le modèle unique utilisé pour les documents, la
+  photo et la vérification. Le bouton voisin choisit un autre modèle (filtrable par
+  coût, source OpenRouter ou DeepSeek) <em>pour cette session uniquement</em> ;
+  le modèle par défaut et sa source se règlent dans <span class="ui">Configuration →
+  Paramètres IA généraux…</span>, les prompts par type dans <span class="ui">Configuration →
+  Gérer les types et profils IA…</span>.</li>
+</ul>
+
+<h2 id="analisi">6. Lancer l’analyse et contrôler les coûts</h2>
+<ol>
+  <li>Appuyez sur <span class="ui">Extraire les paramètres avec l’IA</span>. C’est une analyse
+  <strong>payante</strong> : elle consomme du crédit chez le fournisseur du modèle choisi.
+  Avant de démarrer, le journal indique quels modèles seront utilisés.</li>
+  <li>Une fenêtre affiche la progression : la liste des phases et qui travaille dans
+  chacune (<span class="ui">Modèle IA</span>, <span class="ui">Lecture des découpes</span>
+  et <span class="ui">Lecture des marquages</span> sont les phases distantes payantes ;
+  <span class="ui">YOLO</span>, <span class="ui">Réseau SMD local</span>,
+  <span class="ui">OpenCV</span>, KiCadGen, la bibliothèque KiCad et FreeCAD travaillent sur
+  votre ordinateur). <span class="ui">Interrompre</span> arrête le travail : une requête
+  déjà envoyée doit se terminer, mais aucune autre n’est lancée.</li>
+  <li>À la fin, le coût de la dernière analyse apparaît dans la fenêtre et dans le
+  <span class="ui">Journal IA</span> (icône en haut de l’onglet
+  <span class="ui">Projet</span>). Si la réponse a été prise dans le cache
+  local, il n’y a eu aucun appel payant et le journal le dit.</li>
+  <li>La ligne <span class="ui">Crédit IA</span> affiche le solde du compte du
+  fournisseur et le <strong>coût total du projet</strong>, somme de tous les
+  appels payants effectués pour ce projet, ventilée par fournisseur et enregistrée dans
+  <code>ai-costs.json</code> dans le dossier du projet (OpenRouter indique le
+  coût de chaque appel ; DeepSeek non, on le calcule donc en jetons × prix
+  officiel).</li>
+</ol>
+<div class="note">Chaque commande qui engage une dépense l’indique dans son infobulle (le texte qui
+apparaît quand on laisse la souris sur le bouton). Les commandes de révision et de régénération
+de la 3D sont gratuites.</div>
+
+<h2 id="revisione">7. Revoir les corps trouvés sur la photo</h2>
+<p>Uniquement pour les deux types <span class="ui">Carte avec composants</span>.</p>
+<p>La révision se déroule dans <strong>une seule fenêtre, en deux phases</strong> : d’abord
+sur les propositions du détecteur local, puis sur les corps réconciliés avec l’IA.
+Les deux phases sont gratuites.</p>
+<h3>Phase 1 : les propositions du détecteur local</h3>
+<p>Avec un détecteur YOLO, avant tout appel payant, la fenêtre de
+révision s’ouvre avec les rectangles trouvés sur votre ordinateur. Retirez ceux qui tombent
+sur des inscriptions, des trous ou des pastilles vides, tracez ceux qui manquent, puis
+<span class="ui">OK</span> transmet les rectangles conservés. En annulant, l’analyse
+s’arrête sans rien payer. Les propositions conservées sont enregistrées dans le dossier
+<code>photo-review</code> du projet. Avec <span class="ui">YOLO local seul
+(prétest, aucune IA)</span>, le travail s’arrête là.</p>
+<h3>Phase 2 : pause après l’inventaire</h3>
+<p>Quand l’inventaire IA est terminé, la même fenêtre se rouvre avec les corps
+réconciliés, <strong>avant</strong> le choix des modèles et la génération 3D.
+À côté de la lecture de l’IA reste celle du détecteur (classe, confiance,
+rectangle), jamais écrasée : si le rectangle d’origine du détecteur diffère
+du rectangle actuel, il apparaît en fantôme pointillé sous le corps choisi. Les
+corps proposés par l’IA seule (jaunes pointillés) sont exclus au départ : on les garde
+avec <span class="ui">Garder ou laisser</span> (<kbd>T</kbd>). La pause s’active ou se
+désactive dans <span class="ui">Configuration → Options de génération…</span>
+(<span class="ui">S’arrêter après l’inventaire IA pour revoir les corps (gratuit)</span>) ;
+désactivée, on continue avec les corps tels que l’IA les a proposés.</p>
+<h3>Les commandes de la fenêtre</h3>
+<p>La fenêtre affiche la photo avec un rectangle pour chaque corps :</p>
+<ul>
+  <li><span class="ui">Ajouter un composant</span> (<kbd>R</kbd>) : tracez un
+  rectangle sur la photo, puis attribuez le type.
+  <span class="ui">Supprimer la sélection</span> (<kbd>Suppr</kbd>) retire le corps
+  choisi ; <span class="ui">Lasso</span> (<kbd>L</kbd>) sélectionne ensemble les rectangles
+  contenus dans un rectangle.</li>
+  <li><span class="ui">Reproduire le format</span> : clic sur le composant à copier, puis
+  clic sur les autres pour coller dimensions, hauteur, type, boîtier et modèle
+  KiCad (la position et la rotation sont conservées).</li>
+  <li>Zoom avec <kbd>+</kbd>, <kbd>-</kbd> ou la molette de la souris ;
+  <span class="ui">Ajuster la photo</span> (<kbd>F</kbd>) affiche la photo entière ; le
+  bouton de la photo (<kbd>P</kbd>) l’affiche entière, atténuée ou masquée pour
+  ne lire que les contours.</li>
+  <li>Une fois un corps choisi dans la liste ou sur la photo, <span class="ui">Paramètres…</span>
+  ouvre <span class="ui">Paramètres du composant</span> : trois sections en lecture seule
+  (ce qu’a lu le détecteur local ; ce qu’a lu l’IA, avec type, boîtier
+  et marquage et leurs confiances, le résultat des deux lectures de la découpe et la ligne
+  <span class="ui">Résultat du réseau SMD</span> ; l’état du modèle KiCad avec
+  <span class="ui">Choisir un modèle KiCad…</span>, voir le <a href="#step">chapitre
+  11</a>, également par double clic dans la liste) et, en dessous, les corrections modifiables :
+  nom, type, marquage, cotes, rotation, hauteur. Le centre et les côtés se corrigent
+  aussi en faisant glisser le rectangle et ses poignées sur la photo ; la rotation ne se
+  change qu’avec le champ numérique <span class="ui">Rotation</span>. Aucune
+  requête IA.</li>
+  <li>Les marqueurs de la liste : <code>[!]</code> indique que la ligne a au moins un
+  avertissement (généralement « Modèle KiCad non confirmé »), <code>[?]</code> que le type
+  n’a pas été établi ; un autre marqueur signale que la classe du détecteur
+  contredit celle de l’IA. Le bouton des doutes affiche les incertitudes déclarées
+  par le modèle, sous forme de texte.</li>
+  <li><span class="ui">Appliquer les corrections</span> enregistre ; <span class="ui">Annuler</span>
+  laisse tout en l’état. Après les avoir appliquées, <span class="ui">Régénérer le modèle
+  STEP avec ces annotations</span> dans l’onglet <span class="ui">Modèle STEP</span> reconstruit le STEP.</li>
+</ul>
+<p>Plus tard, depuis l’onglet <span class="ui">Projet</span> :</p>
+<ul>
+  <li><span class="ui">Révision des composants…</span> rouvre la phase enregistrée dans le
+  projet : les propositions du détecteur avant l’inventaire IA, les corps
+  réconciliés avec cotes et choix des modèles KiCad après. Gratuit.</li>
+  <li><span class="ui">Relancer l’inventaire IA (payant)…</span> refait uniquement
+  l’inventaire IA sur les propositions enregistrées. C’est la seule des deux qui engage une dépense.</li>
+</ul>
+
+<h2 id="generazione">8. Génération : empreinte et modèle STEP</h2>
+<p>Quand l’analyse est valide, la génération démarre d’elle-même. Dans la même fenêtre
+de progression que celle du <a href="#analisi">chapitre 6</a>, après les phases de l’analyse, la
+génération occupe quatre étapes, et pour chacune l’en-tête indique qui
+l’exécute :</p>
+<ol>
+  <li><span class="ui">Empreinte 2D (KiCadGen)</span> : le fichier
+  <code>.kicad_mod</code>, écrit par le programme.</li>
+  <li><span class="ui">Comparaison avec les associations acceptées</span> : pour les cartes, les corps
+  sont comparés aux associations corps/modèle déjà acceptées
+  (<span class="ui">Archive des associations acceptées…</span>).</li>
+  <li><strong>Modèles de la bibliothèque KiCad</strong> : pour chaque corps, on
+  cherche les modèles de la bibliothèque 3D de KiCad aux dimensions compatibles.</li>
+  <li><span class="ui">Solide 3D avec FreeCAD</span> : le fichier <code>.step</code>.</li>
+</ol>
+<p>Quand une étape ne peut pas être exécutée (par exemple FreeCAD non installé), la
+fenêtre en indique la raison. Une erreur de la 3D n’annule pas l’empreinte déjà
+écrite.</p>
+<p>Quand la génération réussit, la fenêtre reste ouverte avec toutes les étapes cochées et
+l’état « Terminé » : on la ferme avec <span class="ui">Fermer</span>. En cas d’erreur
+ou d’interruption, elle se ferme d’elle-même et l’erreur est affichée.</p>
+<p>L’onglet <span class="ui">Aperçu empreinte</span> affiche le dessin 2D à l’échelle
+avec les cotes, les numéros des broches et la <span class="ui">Grille</span> (pas de
+1 mm ou de 0.1 in, avec une sous-grille pointillée pour les dessins) ; l’icône du
+tableau ouvre le brochage. L’aperçu est un <strong>brouillon</strong>, comme le symbole :
+les textes Reference et Value se déplacent par glisser, les dessins s’ajoutent depuis la palette,
+les pastilles de la carte principale se modifient, avec <span class="ui">Annuler la modification</span> /
+<span class="ui">Rétablir la modification</span>. <span class="ui">Appliquer</span> écrit le
+fichier <code>.kicad_mod</code>, <span class="ui">Annuler</span> abandonne les modifications
+non appliquées, <span class="ui">Récupérer le brouillon</span> restaure un brouillon non
+appliqué après une fermeture inattendue. Les commandes de l’onglet
+<span class="ui">KiCad</span> utilisent le fichier appliqué : un brouillon non appliqué n’est
+pas installé et <span class="ui">Vérifier le composant pour
+KiCad</span> le signale.</p>
+<p>Pour les cartes, le panneau <span class="ui">Empreinte sur la carte principale</span>
+permet de choisir le montage directement depuis l’aperçu, sans revenir
+au début ni répéter l’analyse :</p>
+<ul>
+  <li><span class="ui">Soudure directe / pastilles du module</span> conserve
+  la géométrie des pastilles du module, y compris les contacts castellés.</li>
+  <li><span class="ui">Connecteurs à broches / pastilles circulaires percées</span> utilise des trous
+  traversants pour les connecteurs. Réglez <span class="ui">Pastille Ø :</span> et
+  <span class="ui">Trou Ø :</span> en millimètres. Le trou doit être plus petit
+  que la pastille ; les diamètres incompatibles avec la distance entre contacts sont signalés.
+  Dans les empreintes en matrice, la pastille 1 reste carrée pour être reconnaissable.</li>
+</ul>
+<p>L’aperçu change aussitôt. Pour écrire le fichier, appuyez sur l’icône de mise à jour
+dont l’infobulle est <span class="ui">Mettre à jour uniquement l’empreinte</span> : il faut des
+données déjà acquises ou une empreinte existante. Cette action ne rappelle pas l’IA
+et ne régénère pas le modèle STEP. Les choix sont synchronisés avec ceux de l’étape
+<span class="ui">Montage et analyse</span>.</p>
+<p>Le montage concerne l’empreinte sur la carte principale : la géométrie physique
+du module 3D, tirée de la photo, reste inchangée. Un contact castellé
+qui ne possède qu’un demi-trou n’est pas transformé en trou traversant.</p>
+
+<h2 id="simbolo">9. L’onglet « Symbole électrique »</h2>
+<p>Entre « Aperçu empreinte » et « Modèle STEP » se trouve le symbole à utiliser dans le
+schéma. Les numéros sont ceux des pastilles électriques de l’empreinte et ne se modifient pas
+dans ce tableau. Vous pouvez corriger la fonction, choisir le type électrique et
+déplacer librement les broches dans l’éditeur.</p>
+<p>Faites glisser l’extrémité, le numéro ou le nom d’une broche pour la déplacer
+  librement, même loin du rectangle. Le point de connexion reste
+  accroché à la grille de 0.1 in (2.54 mm), même masquée. Le déplacement
+  conserve l’orientation. Sur une position occupée, les deux broches échangent
+  leur place en conservant numéro, nom, type et orientation.</p>
+<p>Avec un <strong>clic droit sur la broche</strong>, vous pouvez la faire pivoter de 90 degrés
+  dans le sens horaire ou antihoraire, ou de 180 degrés. Le point de connexion
+  reste fixe. Les huit poignées vertes redimensionnent le rectangle par rapport
+  au centre sans déplacer les broches.</p>
+<p>La barre unique au-dessus de l’éditeur utilise des icônes avec infobulle. Dans les fenêtres étroites,
+  les commandes qui ne tiennent pas sont disponibles dans le menu de dépliage de la barre.
+  Sélectionnez une broche :
+  les flèches la déplacent d’un pas de grille, R la fait pivoter dans le sens horaire et
+  Maj+R dans le sens antihoraire, avec le focus sur la vue. La commande
+  <strong>Position et orientation de la broche</strong>, dans la barre, permet de saisir X, Y et l’angle. Les coordonnées s’accrochent
+  à la grille ; un point de connexion déjà occupé est refusé.</p>
+<p><strong>Sélection multiple :</strong> Ctrl+clic ajoute ou retire une broche ;
+  Maj+glisser sélectionne les extrémités contenues dans le rectangle.
+  Ctrl+Maj ajoute la zone à la sélection courante. L’icône de sélection
+  permet d’utiliser le rectangle sans maintenir Maj enfoncée ; désactivez-la
+  pour revenir au déplacement des broches. Faites glisser une broche sélectionnée pour déplacer
+  le groupe. Les rotations de groupe se font autour de la broche active.
+  Une collision avec d’autres extrémités annule toute l’opération.</p>
+<p><strong>Aligner et répartir</strong> aligne X ou Y sur la broche active.
+  La répartition nécessite au moins trois broches, conserve la première et utilise un pas
+  régulier multiple de la grille : la dernière peut se déplacer pour le respecter.
+  Le cadenas verrouille les poignées du rectangle sans verrouiller les broches.
+  Sous la vue s’affichent les coordonnées du curseur, le zoom et la broche active.</p>
+<p><strong>Vérifier le symbole</strong> signale les noms manquants, les textes qui se chevauchent
+  dans l’aperçu et les types passifs/non spécifiés encore à vérifier. Le même
+  contrôle précède l’exportation ; vous pouvez annuler ou choisir Exporter quand même.
+  Changer un type dans le tableau l’enregistre comme vérifié.</p>
+<p><strong>Récupérer le brouillon :</strong> les modifications terminées sont enregistrées dans un
+  fichier de récupération séparé, dans le dossier du projet. Après une fermeture
+  inattendue, en rouvrant le même projet, une indication de brouillon
+  disponible apparaît : appuyez sur l’icône Récupérer le brouillon. La récupération ne remplace pas le
+  projet enregistré tant que vous n’appuyez pas sur Appliquer. Un brouillon d’une autre révision
+  du projet n’est pas restauré automatiquement. Annuler abandonne le brouillon
+  récupéré ; un Appliquer réussi supprime le fichier de récupération.</p>
+<p><strong>Annuler la modification / Rétablir la modification</strong> gèrent l’historique
+  des modifications. Avec le focus sur l’éditeur, Ctrl+Z,
+  Ctrl+Maj+Z et Ctrl+Y fonctionnent aussi. Échap annule le déplacement en cours.
+  <strong>Réinitialiser la disposition</strong> revient aux deux colonnes initiales
+  en conservant les noms et les types électriques. Maintenez le bouton gauche enfoncé sur un espace vide et faites glisser pour déplacer la vue sans modifier
+  le symbole. La molette zoome autour du curseur ; utilisez <strong>Ajuster</strong> pour tout voir.</p>
+<p><strong>Appliquer</strong> enregistre noms, types, positions et dimensions dans le projet. Les noms mettent aussi à jour
+les étiquettes 2D et 3D. <strong>Annuler</strong> abandonne les modifications non
+appliquées. L’historique Annuler/Rétablir reste disponible après Appliquer.
+Si l’enregistrement échoue, le brouillon reste disponible pour réessayer.
+Avant de fermer ou de changer de projet, appliquez ou annulez les modifications
+du symbole. Aucune nouvelle analyse IA ni génération FreeCAD n’est nécessaire.</p>
+<p>Les types initiaux sont <strong>passive</strong> : ils n’attestent pas le comportement
+électrique du circuit. Vérifiez sur la fiche technique s’il faut input, output,
+bidirectional, power_in ou d’autres types avant d’utiliser les contrôles électriques de
+KiCad. Des noms identiques comme GND peuvent appartenir à des numéros différents ; des numéros
+en double ou absents de l’empreinte empêchent l’exportation.</p>
+<p><strong>Exporter le symbole KiCad</strong> enregistre une bibliothèque <code>.kicad_sym</code>.
+Ajoutez-la dans KiCad aux bibliothèques de symboles. La référence à l’empreinte est
+<code>KiCadGen:nome_componente</code> : utilisez le même nom de bibliothèque quand
+vous installez l’empreinte, ou modifiez l’association dans KiCad. L’installation
+de l’onglet « KiCad » continue de gérer l’empreinte et le modèle STEP ; la bibliothèque de
+symboles s’exporte séparément.</p>
+<p>Raccourcis : Ctrl+3 ouvre le symbole, Ctrl+4 le modèle STEP, Ctrl+5 KiCad.</p>
+<h3>Types électriques suggérés par l’IA</h3>
+<p>Dans l’onglet <span class="ui">Symbole électrique</span>, <span class="ui">Suggérer les types de broches avec l’IA</span>
+utilise les documents déclarés comme brochage ou fiche technique et le modèle IA configuré. Avant l’appel,
+le modèle et les documents sont affichés ; l’analyse peut entraîner des coûts. Les propositions indiquent la source
+et la justification : contrôlez-les et sélectionnez celles à utiliser. Les cas incertains restent à vérifier ;
+les types déjà confirmés ne sont pas présélectionnés. Les modifications entrent dans le brouillon comme une seule
+opération annulable et sont enregistrées avec <span class="ui">Appliquer</span>.</p>
+<p>Il est possible d’annuler l’analyse IA : une requête déjà envoyée doit se terminer,
+mais aucune nouvelle tentative n’est effectuée et la réponse est abandonnée.
+Renommer une broche révoque la confirmation de son type précédent. Pour confirmer
+un type déjà affiché, sélectionnez-le de nouveau dans le menu du tableau.</p>
+
+<h2 id="modello3d">10. L’onglet « Modèle STEP »</h2>
+<p>Le modèle se fait pivoter avec la souris ; le cube de navigation amène aux vues
+standard. Dans la barre du haut :</p>
+<ul>
+  <li><strong>Numéros des broches</strong> : ils n’apparaissent qu’en regardant la pièce du côté
+  des broches (vue de dessous). En regardant de dessous, on retrouve la bottom view de la
+  fiche technique : c’est un contrôle pratique de la mise en miroir.</li>
+  <li><strong>Tableau de brochage</strong>, <strong>Cadrer</strong>, et l’ouverture du
+  dossier <code>3dshapes</code> contenant les fichiers STEP.</li>
+  <li><span class="ui">Modifier les composants…</span> (avec <kbd>Ctrl+E</kbd>, ou
+  clic droit sur le corps dans la vue 3D puis <span class="ui">Modifier le composant...</span> ;
+  il n’a plus d’icône dans la barre) : nom, type, position, cotes,
+  rotation, couleur et marquage de chaque corps, à la main. Fonctionne aussi sans photo.
+  Après <span class="ui">Appliquer</span>, le modèle STEP est régénéré avec FreeCAD.
+  Aucune requête IA.</li>
+  <li><span class="ui">Régénérer le modèle STEP avec ces annotations</span> : reconstruit le STEP à partir des corps
+  actuels, y compris les corrections qui viennent d’être appliquées. Gratuit.</li>
+  <li><span class="ui">J’approuve — mémoriser ces modèles…</span> : enregistre les
+  associations entre corps et modèles KiCad, qui seront proposées d’emblée sur une future carte
+  (à confirmer). L’archive se consulte avec
+  <span class="ui">Archive des associations acceptées…</span>.</li>
+  <li><span class="ui">Reproduire le format</span> : comme dans la révision, copie dimensions,
+  type, boîtier et modèle KiCad d’un corps vers les autres.</li>
+  <li>Pour les modules castellés, une liste déroulante corrige le <strong>type de
+  contact</strong> de tous les côtés.</li>
+</ul>
+<p>La visionneuse 3D est chargée à la première ouverture de l’onglet : tant qu’elle
+n’est pas prête, l’onglet affiche un espace réservé et rien n’est perdu.</p>
+<p>Avec un clic droit sur un corps du modèle : <span class="ui">Retirer du modèle
+STEP (faux positif)</span> (et <span class="ui">Remettre dans le modèle STEP</span>),
+<span class="ui">Faire pivoter le solide</span>, <span class="ui">Modifier le
+composant...</span> et <span class="ui">Changer de modèle KiCad…</span>.</p>
+
+<h2 id="step">11. Choisir le modèle STEP d’un composant</h2>
+<p>La fenêtre <span class="ui">Choix du modèle STEP</span> s’ouvre depuis
+<span class="ui">Choisir un modèle KiCad…</span> dans la révision ou depuis
+<span class="ui">Changer de modèle KiCad…</span> dans la 3D. Elle affiche jusqu’à cinq
+candidats de la bibliothèque KiCad, avec leurs dimensions, à côté de la découpe de la photo
+du composant.</p>
+<ul>
+  <li>L’aperçu du candidat est orienté comme il sera monté sur la carte. La
+  rotation se règle à la main, ou avec <span class="ui">Automatique : déduire les
+  axes CAO de l’encombrement</span>.</li>
+  <li>La case <span class="ui">Couleurs</span> affiche l’aperçu avec les couleurs du
+  fichier STEP ; décochée, l’aperçu est d’une seule teinte et plus rapide. Le choix est
+  mémorisé.</li>
+</ul>
+
+<h2 id="pin">12. Broches mâles sous la carte</h2>
+<p>Pour les deux types <span class="ui">Carte avec composants</span>, la case
+<span class="ui">Afficher les connecteurs dans le modèle STEP</span> à l’étape
+<span class="ui">Montage et analyse</span> de l’onglet <span class="ui">Projet</span>
+ou dans la barre de l’onglet <span class="ui">Modèle STEP</span>
+ajoute sous la carte des
+barrettes mâles à broches carrées, comme une carte dont les barrettes sont déjà soudées. Sur les
+cartes castellées, elles ne sont placées que sur les contacts avec trou traversant.</p>
+<p>C’est un choix distinct du montage de l’empreinte sur la carte principale.
+Il ne change ni l’analyse ni l’empreinte : après l’avoir modifié, il suffit de régénérer
+le modèle STEP avec l’icône à côté de la case. Les deux cases restent synchronisées.
+Le corps du module, avec le cuivre et les trous tirés de la photo,
+ne change pas selon le type de montage choisi.</p>
+<p>Quand vous ne changez que cette case, la régénération réutilise les modèles
+des composants choisis lors de la dernière génération réussie : elle saute la comparaison
+avec les associations acceptées et la recherche dans la bibliothèque KiCad. Restent la construction
+et l’enregistrement du solide avec FreeCAD. La réutilisation est préparée par la première
+génération complète avec cette version ; si les cotes, les composants,
+les annotations ou les fichiers des modèles changent aussi, la procédure complète est exécutée à nouveau.</p>
+
+<h2 id="kicad">13. L’onglet « KiCad » : test et installation</h2>
+<p>Le panneau <span class="ui">Fichiers prêts pour KiCad</span> liste l’empreinte, le
+symbole électrique et le modèle STEP avec leur état. Le test isolé et les deux
+installations sont <strong>bloqués tant que les fichiers sur disque ne correspondent pas aux
+paramètres</strong> du projet, et chaque blocage nomme son remède, activé juste
+à côté : <span class="ui">Appliquer aux fichiers</span> (métadonnées ou empreinte pas encore
+écrites), <span class="ui">Mettre à jour le fichier du symbole</span> (le
+<code>.kicad_sym</code> exporté ne correspond pas au symbole appliqué),
+<span class="ui">Supprimer le modèle STEP obsolète</span> (un ancien STEP qui ne peut
+pas être reconstruit). Quand le STEP a été construit sur des pastilles différentes, ou que seules
+les couleurs ou les annotations ont changé, le remède est le bouton de régénération
+dans la barre de l’onglet <a href="#modello3d">« Modèle STEP »</a> (infobulle
+<span class="ui">Régénérer le modèle STEP avec ces annotations</span>). Un
+projet enregistré par une version précédente peut nécessiter un
+<span class="ui">Appliquer aux fichiers</span>. Les commandes sont aussi bloquées pendant qu’un
+travail tourne en arrière-plan. Elles utilisent les fichiers <strong>appliqués</strong> : un brouillon de
+l’empreinte ou du symbole non appliqué ne bloque pas les commandes, n’est pas installé et
+<span class="ui">Vérifier le composant pour KiCad</span> le signale.</p>
+<p>Le panneau repliable <span class="ui">Métadonnées du composant</span> contient
+le désignateur de référence (lettres uniquement : KiCad ajoute le numéro ; la proposition
+en gris compte comme remplie), la description, les mots-clés, la fiche technique (URL ou
+fichier) et les filtres d’empreinte. Le désignateur, la description, les mots-clés et la fiche technique
+sont <strong>obligatoires</strong> : sans eux, l’installation est bloquée et
+l’infobulle des commandes indique quels champs manquent. La liste
+<span class="ui">Contrôles KiCad (KLC)</span> se met à jour pendant la saisie (⛔ erreur,
+⚠ avertissement) et <span class="ui">Appliquer aux fichiers</span> écrit les valeurs dans l’empreinte et
+dans le symbole ; une erreur ⛔ fait refuser l’application.</p>
+<p>Dans <span class="ui">Vérification avant l’installation</span>, il y a trois icônes :
+<span class="ui">Guide rapide pour utiliser le composant dans KiCad</span> (une procédure
+en cinq pages : installer, placer l’empreinte, exporter et enregistrer le
+symbole, les relier, mettre à jour le PCB), <span class="ui">Vérifier le composant pour
+KiCad</span> (voir ci-dessous) et <span class="ui">Tester dans KiCad…</span>. Dans
+<span class="ui">Installation dans la bibliothèque</span>, les deux installations.</p>
+<table>
+  <tr><th>Commande</th><th>Ce qu’elle fait</th></tr>
+  <tr><td class="ui">Tester dans KiCad…</td>
+      <td>Crée un petit projet temporaire avec l’empreinte et le modèle STEP, dans le
+      sous-dossier <code>.kicad-preview</code> du composant, et l’ouvre dans le PCB
+      Editor. Dans KiCad, appuyez sur <kbd>Alt</kbd>+<kbd>3</kbd> pour la vue 3D. N’installe
+      et ne modifie aucune bibliothèque de KiCad.</td></tr>
+  <tr><td class="ui">Installer dans le projet KiCad…</td>
+      <td>Le choix recommandé. Choisissez le dossier d’un projet KiCad : sont
+      créés <code>KiCadGen.pretty</code> et <code>KiCadGen.3dshapes</code>, et la
+      bibliothèque est enregistrée dans la table du projet avec des chemins relatifs
+      (<code>${KIPRJMOD}</code>) ; le projet reste donc portable.</td></tr>
+  <tr><td class="ui">Installer comme bibliothèque globale…</td>
+      <td>Rend l’empreinte disponible dans tous les projets de cet ordinateur.
+      Nécessite que KiCad soit installé (la table globale de l’utilisateur est
+      trouvée avec <code>kicad-cli</code>) ; choisissez le dossier des bibliothèques et la
+      bibliothèque est enregistrée dans la <code>fp-lib-table</code> globale de KiCad
+      avec des chemins absolus. Les autres bibliothèques de la table restent telles quelles.
+      Si KiCad n’a jamais été lancé, cette table n’existe pas encore et
+      l’installation est refusée : lancez KiCad une fois, terminez la
+      configuration initiale des bibliothèques et réessayez.</td></tr>
+</table>
+<p>Avant d’écraser un composant déjà installé, ou de déplacer une bibliothèque
+<code>KiCadGen</code> déjà enregistrée ailleurs, le programme demande confirmation. Avant
+de modifier une table, il en conserve une copie <code>.kicadgen-backup</code> et, si une
+étape échoue, il remet en place tout ce qu’il avait touché. Le symbole n’est
+enregistré dans aucune table : il s’exporte avec <span class="ui">Exporter le symbole
+KiCad…</span> (aussi depuis la ligne du symbole de cet onglet) et s’ajoute dans
+KiCad avec <em>Gérer les bibliothèques de symboles</em>.
+<span class="ui">Ouvrir le dossier du composant</span> ouvre le dossier contenant l’empreinte,
+le modèle STEP et les documents. L’onglet <span class="ui">Exportations</span>
+(<kbd>Ctrl</kbd>+<kbd>6</kbd>) conserve l’historique des installations et des
+exportations du symbole faites depuis cet ordinateur.</p>
+<h3>Vérification du composant</h3>
+<p>Dans l’onglet <span class="ui">KiCad</span>, l’icône <span class="ui">Vérifier le composant pour KiCad</span>
+contrôle les fichiers générés, la correspondance des numéros broche-pastille et, si <code>kicad-cli</code> est
+disponible, teste la lecture de l’empreinte, du symbole et du STEP avec KiCad CLI, en utilisant un dossier
+temporaire (sans lui, ce test est indiqué comme non exécuté). Le rapport copiable distingue
+les contrôles réussis, les erreurs, les avertissements et les contrôles non exécutés. Le symbole appliqué est testé
+même s’il n’est pas encore exporté ; les brouillons non appliqués sont exclus et signalés.
+Cette vérification ne certifie ni le brochage, ni les dimensions, ni l’alignement visuel 3D, ni les bibliothèques installées ;
+l’ERC et le DRC doivent être exécutés sur le schéma et la carte définitifs.</p>
+<p>La vérification reste disponible quand l’empreinte existe mais que le STEP manque ;
+l’installation reste désactivée tant que les fichiers requis ne sont pas présents.
+Les références et les transformations 3D d’origine sont contrôlées séparément de la
+copie temporaire normalisée. Les chemins relatifs ou les variables KiCad non résolus
+doivent être vérifiés dans le projet de destination.</p>
+
+<h2 id="log">14. Où se trouvent les journaux</h2>
+<table>
+  <tr><th>Fichier</th><th>Emplacement</th><th>Contenu</th></tr>
+  <tr><td><code>analisi-ai.log</code></td><td>Dans le dossier du projet</td>
+      <td>Le journal de l’analyse, écrit ligne par ligne au fil du travail :
+      étapes, modèles utilisés, coûts, avertissements. Il se lit aussi depuis le programme avec
+      l’icône <span class="ui">Journal IA</span>.</td></tr>
+  <tr><td><code>freecad.log</code></td><td>Dans le dossier du projet</td>
+      <td>La sortie de FreeCAD pendant la construction du modèle STEP.</td></tr>
+  <tr><td><code>crash-reports</code></td><td>Dossier <code>logs</code> des données du
+      programme (installé : <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
+      <td>Un fichier pour chaque erreur inattendue du programme, avec la version, le système et la
+      trace de l’erreur. Seuls les 20 plus récents sont conservés.</td></tr>
+</table>
+<p>Le menu <span class="ui">Aide → Ouvrir le dossier des journaux</span> ouvre le dossier du
+projet ouvert, où se trouvent <code>analisi-ai.log</code> et <code>freecad.log</code> ;
+sans projet ouvert, il ouvre le dossier <code>logs</code> des données du
+programme.</p>
+
+<h2 id="aiuto">15. Signaler un problème et mises à jour</h2>
+<ul>
+  <li><span class="ui">Aide → Signaler un problème</span> ouvre dans le navigateur un nouveau
+  signalement sur le dépôt GitHub du projet, déjà rempli avec la version de
+  KiCadGen, le système d’exploitation et la présence de FreeCAD et de KiCad. Le programme ouvre
+  aussi le dossier des journaux : joignez vous-même les fichiers utiles, après les avoir examinés, car
+  ils peuvent contenir les noms de vos dossiers et de vos projets. Le signalement
+  sur GitHub est public et n’est pas envoyé tant que vous ne l’envoyez pas.</li>
+  <li><span class="ui">Aide → Rechercher des mises à jour...</span> compare cette version
+  à la dernière publiée sur GitHub. La vérification n’a lieu que lorsque vous la demandez.</li>
+</ul>
+<p>Le projet : <a href="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator">github.com/MirkoUgoliniDev/KiCad-ComponentGenerator</a>.</p>
+
+<h2 id="limiti">16. Limites à connaître</h2>
+<ul>
+  <li>L’analyse IA peut se tromper : contrôlez toujours l’empreinte et le modèle STEP dans les
+  aperçus avant de les utiliser.</li>
+  <li>Les hauteurs des corps tirées d’une seule photo de dessus sont des
+  <strong>estimations</strong>, pas des mesures. Vérifiez les hauteurs et les distances critiques avec
+  des dessins cotés ou par une mesure.</li>
+  <li>L’inventaire photographique ne garantit pas d’avoir trouvé tous les corps : c’est
+  pour cela qu’existent la révision et <span class="ui">Modifier les composants…</span>.</li>
+</ul>
+
+<footer>KiCadGen — guide d’utilisation. Le programme est distribué sous licence GNU AGPL-3.0 ;
+les licences des composants tiers se trouvent dans le menu
+<span class="ui">Aide → Licences</span>.</footer>
+</body>
+</html>

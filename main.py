@@ -46,6 +46,9 @@ RUNTIME_RESOURCES = (
     ("kicadgen", "cad3d", "model_size_cache.py"),
     ("kicadgen", "gui", "assets", "app-icon.svg"),
     ("kicadgen", "gui", "assets", "help", "guida.html"),
+    ("kicadgen", "gui", "assets", "help", "guida.en.html"),
+    ("kicadgen", "gui", "assets", "help", "guida.fr.html"),
+    ("kicadgen", "gui", "assets", "help", "guida.de.html"),
 )
 #: Present only in the package: collected by tools/collect_licenses.py.
 PACKAGE_RESOURCES = (("licenses", "MANIFEST.txt"),)

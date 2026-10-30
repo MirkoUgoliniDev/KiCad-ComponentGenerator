@@ -1,5 +1,39 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 30/10 — IN CORSO: guida d'uso in quattro lingue (utente: screenshot con lingua EN e guida in italiano -> «Sì, tutte e tre»)
+
+Causa: esiste solo kicadgen/gui/assets/help/guida.html; _open_user_guide
+(main_window) la apre in ogni lingua. Non e' una regressione della 1.0.3.
+Piano approvato:
+- guida.en.html, guida.fr.html, guida.de.html accanto a guida.html
+  (italiano, invariato): traduzione COMPLETA, stessi capitoli/ancore, le
+  etichette dell'interfaccia citate prese dal catalogo DEFAULT_TRANSLATIONS
+  della lingua (tre agenti in parallelo, un file ciascuno);
+- _open_user_guide apre la guida della lingua corrente, ripiego su
+  guida.html se manca;
+- test: scelta per lingua (positivo), ripiego (negativo), quattro guide con
+  gli stessi id/ancore e lo stesso numero di capitoli;
+- --check-runtime controlla le quattro guide;
+- commit su ADVANCED solo con OK; uscira' con la 1.0.4 solo su richiesta.
+Stato: FATTI MainWindow.USER_GUIDE_FILES + _user_guide_path (ripiego),
+main.py RUNTIME_RESOURCES con le tre guide nuove, test in
+tests/test_help_menu.py (lingua, ripiego) e tests/test_help_guide.py
+(struttura identica, etichette dal catalogo, negativo). Tre agenti
+traduttori AL LAVORO (en, fr, de); finche' mancano i file i test di lingua
+sono rossi di proposito.
+Traduzioni arrivate (en 42,6 KB, fr 48,4 KB, de 47,9 KB), struttura identica.
+Coordinatore: corretti nella guida italiana due nomi vecchi («Rigenera
+modello 3D» -> «Rigenera modello STEP con queste annotazioni», il nome vero
+del pulsante; «Elimina dal modello 3D (falso positivo)» -> «... STEP ...»),
+allineati en/fr; percorso Documents\KiCadGen nella guida inglese; test
+nuovi: nessun «modello 3D» nella guida, etichette dei due comandi nelle
+quattro lingue. Guide+menu+documentazione: 130 verdi.
+RICHIESTA UTENTE 30/10 («poi alla fine rifare il pacchetto e mergiare in
+main e pushare»): suite completa -> commit su ADVANCED -> build locale ->
+merge in main -> push. Release v1.0.4 NON chiesta esplicitamente: chiederla.
+SUITE COMPLETA VERDE (30/10): A 6184/10/19, B 4494/4, 0 falliti = 10678
+passati, 14 saltati, 19 sottotest. Commit in corso.
+
 ## 29/10 — RIPRESA (utente: «ok riprendi da hand off ok ?»)
 
 ESITO: correzioni della revisione n.2 COMPLETE e COMMITTATE su ADVANCED

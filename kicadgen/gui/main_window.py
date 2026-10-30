@@ -2970,9 +2970,29 @@ class MainWindow(QMainWindow):
         self._shortcuts_box = box
         self._run_modal(box)
 
+    #: User guide file per interface language; Italian is the source text.
+    USER_GUIDE_FILES = {"it": "guida.html", "en": "guida.en.html",
+                        "fr": "guida.fr.html", "de": "guida.de.html"}
+
+    def _user_guide_path(self) -> Path:
+        """@brief The user guide in the interface language, else the Italian one.
+
+        @return Path of the guide to open (it may not exist when even the
+            Italian file is missing; the caller reports it).
+        @note Before 2026-10-30 only the Italian guide existed and it opened
+            in every language (user report with the interface in English).
+            A missing translation falls back to Italian rather than failing.
+        """
+        folder = ("kicadgen", "gui", "assets", "help")
+        name = self.USER_GUIDE_FILES.get(self.i18n.language, self.USER_GUIDE_FILES["it"])
+        guide = resource_path(*folder, name)
+        if guide.is_file() or name == self.USER_GUIDE_FILES["it"]:
+            return guide
+        return resource_path(*folder, self.USER_GUIDE_FILES["it"])
+
     def _open_user_guide(self) -> None:
-        """@brief «Guida d'uso»: open the HTML guide shipped with the program."""
-        guide = resource_path("kicadgen", "gui", "assets", "help", "guida.html")
+        """@brief «Guida d'uso»: open the HTML guide shipped with the program, in the interface language."""
+        guide = self._user_guide_path()
         if not guide.is_file():
             QMessageBox.warning(self, self.i18n.text("Guida d'uso"),
                                 tx("Guida d'uso non trovata: {path}", path=guide))

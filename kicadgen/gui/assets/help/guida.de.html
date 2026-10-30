@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benutzerhandbuch für KiCadGen</title>
+<!--
+  Benutzerhandbuch für KiCadGen, geöffnet über das Menü „Hilfe“ im Standardbrowser.
+  Eigenständige Seite: keine externen Ressourcen (Schriften, Skripte, Bilder), der
+  einzige externe Link ist das GitHub-Repository des Projekts. Jeder Satz
+  beschreibt einen Befehl, der im Code existiert: Wenn ein Befehl umbenannt wird
+  oder verschwindet, muss das Handbuch zusammen mit dem Code aktualisiert werden.
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2330; --muted: #5b6070; --accent: #1d5fd1;
+    --panel: #f3f5f9; --border: #d6dae3; --note: #fff7e0; --note-border: #e0b44c;
+    --code: #eef1f6;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e2e; --fg: #cdd6f4; --muted: #a6adc8; --accent: #89b4fa;
+      --panel: #262637; --border: #45475a; --note: #3a3322; --note-border: #b8923c;
+      --code: #313244;
+    }
+  }
+  html { background: var(--bg); }
+  body {
+    margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.35rem; margin-top: 2.5rem; padding-bottom: .3rem;
+       border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; margin-top: 1.6rem; }
+  a { color: var(--accent); }
+  p.lead { color: var(--muted); margin-top: 0; }
+  nav { background: var(--panel); border: 1px solid var(--border);
+        border-radius: 8px; padding: .75rem 1.25rem; }
+  nav ol { margin: .25rem 0; padding-left: 1.25rem; }
+  code, kbd { background: var(--code); border-radius: 4px; padding: 0 .3em;
+              font-family: Consolas, "Cascadia Mono", monospace; font-size: .92em; }
+  kbd { border: 1px solid var(--border); }
+  .note { background: var(--note); border-left: 4px solid var(--note-border);
+          border-radius: 4px; padding: .6rem 1rem; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: .4rem .6rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--panel); }
+  .ui { font-weight: 600; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<h1>Benutzerhandbuch für KiCadGen</h1>
+<p class="lead">Von der Idee zum Bauteil in einer KiCad-Bibliothek: ein vollständiges
+Beispiel, Schritt für Schritt.</p>
+
+<nav>
+  <strong>Inhalt</strong>
+  <ol>
+    <li><a href="#cosa-fa">Was KiCadGen macht</a></li>
+    <li><a href="#prima">Bevor Sie beginnen</a></li>
+    <li><a href="#progetto">Das Projekt anlegen</a></li>
+    <li><a href="#documenti">Die Dokumente laden</a></li>
+    <li><a href="#tipologia">Den Bauteiltyp wählen</a></li>
+    <li><a href="#analisi">Die Analyse starten und die Kosten prüfen</a></li>
+    <li><a href="#revisione">Die im Foto gefundenen Körper prüfen</a></li>
+    <li><a href="#generazione">Erzeugung: Footprint und STEP-Modell</a></li>
+    <li><a href="#simbolo">Die Registerkarte „Schaltplansymbol“</a></li>
+    <li><a href="#modello3d">Die Registerkarte „STEP-Modell“</a></li>
+    <li><a href="#step">Das STEP-Modell eines Bauteils wählen</a></li>
+    <li><a href="#pin">Stiftleisten unter der Platine</a></li>
+    <li><a href="#kicad">Die Registerkarte „KiCad“: Test und Installation</a></li>
+    <li><a href="#log">Wo die Protokolle liegen</a></li>
+    <li><a href="#aiuto">Ein Problem melden und Updates</a></li>
+    <li><a href="#limiti">Bekannte Grenzen</a></li>
+  </ol>
+</nav>
+
+<h2 id="cosa-fa">1. Was KiCadGen macht</h2>
+<p>KiCadGen erstellt aus technischen Dokumenten und Fotos ein Bauteil für KiCad:
+den <strong>Footprint</strong> (<code>.kicad_mod</code>), das
+<strong>Schaltplansymbol</strong> (<code>.kicad_sym</code>) und das
+<strong>STEP-Modell</strong> (<code>.step</code>). Die Dokumente werden von
+einem KI-Modell gelesen (über OpenRouter oder die direkte API von
+DeepSeek); das Programm wandelt das vom Modell Gelesene anschließend mit
+deterministischen Regeln in Geometrie um.</p>
+<p>Bei einer Platine mit darauf bestückten Bauteilen (einem Modul, einem
+Entwicklungsboard) rekonstruiert KiCadGen die <strong>mechanischen Umrisse</strong>:
+Position, Abmessungen und Ausrichtung der im Foto sichtbaren Körper. Es betreibt kein
+Reverse Engineering: Die Körper sind generische Volumen oder STEP-Modelle aus der
+KiCad-Bibliothek, die nach ähnlichen Maßen ausgewählt werden.</p>
+
+<h2 id="prima">2. Bevor Sie beginnen</h2>
+<ul>
+  <li><strong>FreeCAD</strong> (freecad.org) erzeugt die STEP-Modelle. Ohne FreeCAD
+  erhalten Sie trotzdem den Footprint; das Fortschrittsfenster zeigt an, welche
+  Schritte nicht ausgeführt werden können und warum.</li>
+  <li><strong>KiCad</strong> (kicad.org) wird benötigt, um das Ergebnis zu testen und
+  die Bibliotheken zu installieren.</li>
+  <li><strong>API-Schlüssel</strong>: Die Analyse der Dokumente ist kostenpflichtig und
+  erfordert einen Schlüssel eines der beiden unterstützten Anbieter: <strong>OpenRouter</strong>
+  (ein Schlüssel für viele Anbieter; das Standardmodell des installierten Programms,
+  <code>anthropic/claude-opus-5</code>, läuft darüber) oder
+  <strong>DeepSeek (direkte API)</strong> (Modelle <code>deepseek-api/...</code>;
+  beim Start aus den Quellen ist der Standard <code>deepseek-api/deepseek-flash</code>).
+  Das Modell wählen Sie in der Oberfläche: <span class="ui">Konfiguration</span> →
+  <span class="ui">Allgemeine KI-Standards …</span>, Registerkarte <span class="ui">Modell</span>,
+  oder für die Sitzung im Bereich <span class="ui">KI-Modell</span>.
+  Den Schlüssel geben Sie unter <span class="ui">Konfiguration</span> →
+  <span class="ui">KI-Konto...</span> ein: Das Fenster listet jeden Anbieter mit
+  der Herkunft des verwendeten Schlüssels (Umgebungsvariable, Anmeldeinformationsverwaltung,
+  Datei <code>.env</code> oder keiner) und dem aktuellen Guthaben auf; wählen Sie den
+  Anbieter, fügen Sie den Schlüssel ein, klicken Sie auf <span class="ui">Prüfen</span>
+  (kein Aufruf eines Modells, keine Kosten) und dann auf <span class="ui">Speichern</span>;
+  er wird in der Windows-Anmeldeinformationsverwaltung abgelegt (<code>KiCadGen/OpenRouter</code>,
+  <code>KiCadGen/DeepSeek</code>). <span class="ui">Schlüssel entfernen</span> löscht
+  nur diesen Eintrag. Die Datei <code>.env</code> im Ordner
+  <code>%LOCALAPPDATA%\KiCadGen</code> (Zeilen <code>OPENROUTER_API_KEY=sk-or-...</code>
+  und/oder <code>DEEPSEEK_API_KEY=...</code>) bleibt gültig; ein mit
+  „KI-Konto...“ gespeicherter Schlüssel hat Vorrang vor dem aus der Datei. Fehlt der
+  Schlüssel, meldet das Programm dies vor dem Start einer Analyse und bietet an, das
+  Fenster zu öffnen. Sobald der Schlüssel funktioniert, zeigt die Zeile
+  <span class="ui">KI-Guthaben</span> der Registerkarte <span class="ui">Projekt</span>
+  das Guthaben des Anbieters des gewählten Modells an.</li>
+</ul>
+<p>Die Sprache der Oberfläche (Italienisch, Englisch, Französisch, Deutsch) wählen Sie
+in der Liste über den Registerkarten.</p>
+
+<h2 id="progetto">3. Das Projekt anlegen</h2>
+<p>Ein Projekt ist ein Ordner: Sein Name ist zugleich der Name des Footprints und des
+STEP-Modells.</p>
+<ol>
+  <li>Menü <span class="ui">Datei → Neues Projekt...</span> (<kbd>Strg</kbd>+<kbd>N</kbd>).
+  Geben Sie den Namen ein, zum Beispiel <code>RS485_TTL</code>, und bestätigen Sie.</li>
+  <li>Der Ordner wird im <span class="ui">Arbeitsbereich</span> angelegt, der
+  in der Registerkarte <span class="ui">Projekt</span> angegeben ist (im installierten
+  Programm standardmäßig <code>Dokumente\KiCadGen</code>). Mit der Ordner-Schaltfläche
+  neben dem Feld können Sie einen anderen wählen.</li>
+  <li>Um eine Arbeit fortzusetzen: <span class="ui">Datei → Projekt öffnen...</span>
+  (<kbd>Strg</kbd>+<kbd>O</kbd>) listet die Projekte des Arbeitsbereichs auf, das neueste zuerst.
+  <span class="ui">Datei → Projekt umbenennen...</span> (<kbd>F2</kbd>) ändert den Namen
+  des Ordners und zugleich den von Footprint, Symbol und STEP-Modell. Ohne
+  geöffnetes Projekt zeigt das Fenster die Startseite mit den beiden Befehlen und den
+  zuletzt verwendeten Projekten, die sich mit einem Klick wieder öffnen lassen.</li>
+</ol>
+
+<h2 id="documenti">4. Die Dokumente laden</h2>
+<p>Die Registerkarte <span class="ui">Projekt</span> führt in zwei Schritten durch die Vorbereitung:
+<span class="ui">Dokumente</span> und <span class="ui">Montage und Analyse</span>.
+Mit <span class="ui">Fortfahren</span> und <span class="ui">Zurück</span> wechseln Sie zwischen ihnen:
+Diese Schaltflächen starten die Analyse nicht. Im ersten Schritt speichert
+<span class="ui">Zurück zu den Projekten</span> das Projekt und kehrt zum Bildschirm
+mit Neu, Öffnen und den zuletzt verwendeten Projekten zurück. Name und Arbeitsbereich stehen im
+einklappbaren Bereich <span class="ui">Projektdaten</span> über den Dokumenten.</p>
+<p>In der Registerkarte <span class="ui">Projekt</span> hat der Dokumentationsbereich
+für jede geladene Datei eine Karte. Haken Sie für jede Datei <strong>alle</strong> Rollen an, die sie
+enthält: Ein PDF-Datenblatt etwa enthält oft Pinbelegung, Maße und empfohlene Pads zugleich; deshalb ist ein PDF immer ein
+„Datenblatt“, erhält diese Rolle allein, und die anderen Kästchen lassen sich nicht anhaken.
+Die Angabe der Rollen sagt dem Modell, wie es jede Datei verwenden soll:</p>
+<table>
+  <tr><th>Rolle</th><th>Was sie enthält</th></tr>
+  <tr><td class="ui">Pinbelegung</td>
+      <td>Die Nummerierung und die Lage der Kontakte. Das Programm geht nicht davon aus,
+      dass sie von oben gesehen ist: Das Modell gibt an, von welcher Seite die Zeichnung
+      gesehen ist, und die Spiegelung übernimmt der Code.</td></tr>
+  <tr><td class="ui">Maße</td>
+      <td>Die bemaßte Zeichnung von oben: Länge und Breite des Körpers,
+      Lage der Bohrungen, Abstände zwischen den Kontaktreihen.</td></tr>
+  <tr><td class="ui">Hohe Auflösung</td>
+      <td>Ein echtes Foto des Teils von oben: Es dient dazu, die bestückten Bauteile
+      zu finden. Nur die als Foto angehakten Dateien gehen an die Bauteilerkennung
+      und die Kalibrierung; sie müssen Bilder sein, keine PDFs.</td></tr>
+  <tr><td class="ui">Land Pattern</td>
+      <td>Die vom Hersteller empfohlenen Pads (in Datenblättern „Land Pattern“):
+      Form und Lage der Pads und der Bohrungen.</td></tr>
+  <tr><td class="ui">Seitenansicht</td>
+      <td>Die Höhen: des Körpers, der Bauteile, die Dicke der Platine.</td></tr>
+  <tr><td class="ui">Datenblatt</td>
+      <td>Das vollständige Datenblatt des Herstellers, PDF oder Bilder: Die KI sucht darin Pinbelegung,
+      Maße, Pads und Seitenansicht und meldet fehlende Abschnitte. Es ist kein Foto:
+      Es dient nicht dazu, die bestückten Bauteile zu erkennen.</td></tr>
+</table>
+<ul>
+  <li><span class="ui">Hinzufügen…</span> in der Karte <span class="ui">Neues Dokument</span>
+  kopiert die Datei in den Ordner <code>docs</code> des Projekts (das Original bleibt
+  unberührt). Formate: PDF, PNG, JPG, WEBP, GIF. Haken Sie dann ihre Rollen an: Eine Datei ohne
+  Rolle blockiert die Analyse, bis Sie eine wählen oder die Datei entfernen.</li>
+  <li>Auf der Karte jeder Datei: Der Ordner ersetzt die Datei unter Beibehaltung der Rollen,
+  das Auge öffnet die Vorschau mit Zoom, der Papierkorb entfernt die lokale Kopie, die
+  in <code>docs/.history</code> wiederherstellbar bleibt.</li>
+  <li>Eine Rolle, die keine Datei hat, ist einfach „nicht geliefert“: Das Modell weiß das und
+  ersetzt sie nicht durch andere Dateien.</li>
+</ul>
+<div class="note">Die Fotos von oben werden anhand der Maße der Platine kalibriert.
+Nötig ist ein von oben aufgenommenes, nahezu ausgerichtetes Foto, mit der Länge der Platine
+waagerecht und einem vom Hintergrund (beliebiger Farbe) unterscheidbaren Platinenumriss. Das Programm korrigiert die
+Perspektive nicht: Ein schräges Foto wird abgelehnt, und die Karte der Rolle
+meldet dies.</div>
+
+<h2 id="tipologia">5. Den Bauteiltyp wählen</h2>
+<p>Im Schritt <span class="ui">Montage und Analyse</span> der Registerkarte
+<span class="ui">Projekt</span> teilt <span class="ui">Bauteiltyp</span>
+dem Modell mit, was es liest, und damit, nach welchen Maßen es suchen
+soll.</p>
+<table>
+  <tr><th>Typ</th><th>Was passiert</th></tr>
+  <tr><td class="ui">Einzelnes Durchsteckbauteil (THT)</td>
+      <td>Pads mit Bohrung, Maße aus dem empfohlenen Layout des Datenblatts.</td></tr>
+  <tr><td class="ui">Einzelnes SMD-Bauteil</td>
+      <td>Keine Bohrung, Abmessungen aus den empfohlenen Pads.</td></tr>
+  <tr><td class="ui">Platine mit Bauteilen · Durchsteckanschlüsse</td>
+      <td rowspan="2">Zusätzlich zum Footprint startet das <strong>Foto-Inventar</strong>:
+      Die auf der Platine bestückten Körper werden im Foto gesucht,
+      vermessen und in 3D-Volumen umgewandelt, die Sie anschließend prüfen und korrigieren.</td></tr>
+  <tr><td class="ui">Platine mit Bauteilen · castellated Anschlüsse (Halblöcher)</td></tr>
+</table>
+<p>Bei <strong>Einzelbauteilen</strong> wird das Foto-Inventar nicht
+ausgeführt: kein Körperdetektor, keine Körperprüfung, keine Pause
+nach dem Inventar.</p>
+<p>Der Bereich <span class="ui">KI-Werkzeuge</span> ist anfangs eingeklappt:
+Die Zusammenfassung zeigt den aktiven Detektor und das aktive Modell. Klappen Sie ihn mit dem Pfeil auf,
+um die übrigen Einstellungen zu sehen oder zu ändern:</p>
+<ul>
+  <li><span class="ui">Fotoerkennung</span> (nur für Platinen relevant):
+    <span class="ui">YOLO + lokales SMD-Netz (v3)</span> (Standard beim Start des
+    Programms aus den Quellen: Der Detektor schlägt die Rahmen vor, ein lokales Netz
+    klassifiziert die behaltenen Körper, und nur die, die es nicht auflöst, gehen an die KI; im
+    installierten Windows-Programm ist der Eintrag deaktiviert, weil PyTorch nicht
+    enthalten ist, und der Standard ist der folgende Eintrag),
+    <span class="ui">Lokales YOLO + KI-Prüfung</span> (der Detektor auf Ihrem
+    Computer schlägt die Rahmen vor, das KI-Modell prüft sie),
+    <span class="ui">KI (bisherig)</span>,
+    <span class="ui">Nur Sehmodell (kein lokaler Detektor)</span> oder
+    <span class="ui">Nur lokales YOLO (Vortest, keine KI)</span>, das
+    nur die vom Detektor gefundenen Rahmen zeigt, ohne einen kostenpflichtigen Aufruf.
+    Der lokale Detektor benötigt eine YOLO-Modelldatei, die Sie in der Zeile
+    <span class="ui">YOLO-Modell</span> wählen: <code>.onnx</code> (<code>.pt</code>-Dateien
+    funktionieren nur beim Start des Programms aus den Quellen). Die Schaltfläche daneben öffnet
+    <span class="ui">YOLO-Modell wählen</span>: Für jedes Modell des Ordners
+    zeigt es Format, Größe, Herkunft, Lizenz, Trainingsdaten, erkannte
+    Klassen und Kompatibilität. Eine <code>.pt</code>-Datei führt beim Laden Code aus,
+    daher wird sie nur geprüft, wenn Sie
+    <span class="ui">Kompatibilität prüfen</span> klicken. Fehlt die Datei oder ist sie nicht
+    kompatibel, hält die Analyse an, bevor Kosten entstehen.</li>
+  <li><span class="ui">KI-Modell</span>: das eine Modell, das für Dokumente,
+  Fotos und Prüfung verwendet wird. Die Schaltfläche daneben wählt ein anderes Modell (filterbar nach
+  Kosten, Quelle OpenRouter oder DeepSeek) <em>nur für diese Sitzung</em>;
+  den Standard und seine Quelle legen Sie unter <span class="ui">Konfiguration →
+  Allgemeine KI-Standards …</span> fest, die Prompts je Typ unter <span class="ui">Konfiguration →
+  KI-Typen und -Profile verwalten …</span>.</li>
+</ul>
+
+<h2 id="analisi">6. Die Analyse starten und die Kosten prüfen</h2>
+<ol>
+  <li>Klicken Sie auf <span class="ui">Parameter mit KI extrahieren</span>. Diese Analyse ist
+  <strong>kostenpflichtig</strong>: Sie verbraucht Guthaben beim Anbieter des gewählten Modells.
+  Vor dem Start schreibt das Protokoll, welche Modelle verwendet werden.</li>
+  <li>Ein Fenster zeigt den Fortschritt: die Liste der Phasen und wer in
+  jeder arbeitet (<span class="ui">KI-Modell</span>, <span class="ui">Ausschnitt-Lesung</span>
+  und <span class="ui">Beschriftungs-Lesung</span> sind die kostenpflichtigen entfernten Phasen;
+  <span class="ui">YOLO</span>, <span class="ui">Lokales SMD-Netz</span>,
+  <span class="ui">OpenCV</span>, KiCadGen, die KiCad-Bibliothek und FreeCAD arbeiten auf
+  Ihrem Computer). <span class="ui">Abbrechen</span> stoppt die Arbeit: Eine bereits
+  gesendete Anfrage muss abgeschlossen werden, aber es werden keine weiteren gestartet.</li>
+  <li>Am Ende erscheinen die Kosten der letzten Analyse im Fenster und im
+  <span class="ui">KI-Protokoll</span> (Symbol oben in der Registerkarte
+  <span class="ui">Projekt</span>). Wurde die Antwort aus dem lokalen Cache
+  genommen, gab es keinen kostenpflichtigen Aufruf, und das Protokoll vermerkt dies.</li>
+  <li>Die Zeile <span class="ui">KI-Guthaben</span> zeigt das Kontoguthaben des
+  Anbieters und die <strong>Gesamtkosten des Projekts</strong>, die Summe aller
+  kostenpflichtigen Aufrufe für dieses Projekt, aufgeteilt nach Anbieter und gespeichert in
+  <code>ai-costs.json</code> im Projektordner (OpenRouter meldet die
+  Kosten jedes Aufrufs; DeepSeek nicht, daher werden sie als Token × offizieller
+  Preis berechnet).</li>
+</ol>
+<div class="note">Jeder Befehl, der Kosten verursacht, sagt dies in seinem Tooltip (dem Text, der
+erscheint, wenn die Maus auf der Schaltfläche verweilt). Die Befehle zur Prüfung und zur Neuerzeugung
+des 3D-Modells sind kostenlos.</div>
+
+<h2 id="revisione">7. Die im Foto gefundenen Körper prüfen</h2>
+<p>Nur für die beiden Typen <span class="ui">Platine mit Bauteilen</span>.</p>
+<p>Die Prüfung erfolgt in <strong>einem einzigen Fenster, in zwei Phasen</strong>: zuerst
+an den Vorschlägen des lokalen Detektors, dann an den mit der KI abgeglichenen Körpern.
+Beide Phasen sind kostenlos.</p>
+<h3>Phase 1: die Vorschläge des lokalen Detektors</h3>
+<p>Mit einem YOLO-Detektor öffnet sich das Prüffenster vor jedem kostenpflichtigen Aufruf
+mit den auf Ihrem Computer gefundenen Rahmen. Entfernen Sie diejenigen, die auf
+Beschriftungen, Bohrungen oder leere Pads fallen, zeichnen Sie fehlende ein, dann gibt
+<span class="ui">OK</span> die behaltenen Rahmen weiter. Beim Abbrechen hält die Analyse
+an, ohne dass etwas bezahlt wird. Die behaltenen Vorschläge werden im Ordner
+<code>photo-review</code> des Projekts gespeichert. Mit <span class="ui">Nur lokales YOLO
+(Vortest, keine KI)</span> endet die Arbeit hier.</p>
+<h3>Phase 2: Pause nach dem Inventar</h3>
+<p>Wenn das KI-Inventar fertig ist, öffnet sich dasselbe Fenster erneut mit den
+abgeglichenen Körpern, <strong>vor</strong> der Wahl der Modelle und der 3D-Erzeugung.
+Neben der Lesung der KI bleibt die des Detektors erhalten (Klasse, Konfidenz,
+Rahmen) und wird nie überschrieben: Weicht der ursprüngliche Rahmen des Detektors
+vom aktuellen ab, erscheint er als gestrichelter Schatten unter dem gewählten Körper. Die
+nur von der KI vorgeschlagenen Körper (gelb gestrichelt) sind zunächst ausgeschlossen: Sie werden
+mit <span class="ui">Behalten oder weglassen</span> (<kbd>T</kbd>) behalten. Die Pause wird unter
+<span class="ui">Konfiguration → Generierungsoptionen …</span>
+(<span class="ui">Nach dem KI-Inventar anhalten, um die Körper zu prüfen (kostenlos)</span>) ein-
+oder ausgeschaltet; ausgeschaltet geht es mit den Körpern weiter, wie die KI sie vorgeschlagen hat.</p>
+<h3>Die Befehle des Fensters</h3>
+<p>Das Fenster zeigt das Foto mit einem Rechteck für jeden Körper:</p>
+<ul>
+  <li><span class="ui">Komponente hinzufügen</span> (<kbd>R</kbd>): Zeichnen Sie ein
+  Rechteck auf das Foto und weisen Sie dann den Typ zu.
+  <span class="ui">Auswahl löschen</span> (<kbd>Entf</kbd>) entfernt den gewählten
+  Körper; <span class="ui">Lasso</span> (<kbd>L</kbd>) wählt gemeinsam die Rahmen,
+  die in einem Rechteck eingeschlossen sind.</li>
+  <li><span class="ui">Format übertragen</span>: Klicken Sie auf das zu kopierende Bauteil, dann
+  auf die anderen, um Maße, Höhe, Typ, Gehäuse und KiCad-Modell einzufügen
+  (Position und Drehung bleiben erhalten).</li>
+  <li>Zoom mit <kbd>+</kbd>, <kbd>-</kbd> oder dem Mausrad;
+  <span class="ui">Foto einpassen</span> (<kbd>F</kbd>) zeigt das ganze Foto; die
+  Foto-Schaltfläche (<kbd>P</kbd>) zeigt es vollständig, abgeschwächt oder verborgen, um
+  nur die Umrisse zu sehen.</li>
+  <li>Nach Auswahl eines Körpers in der Liste oder im Foto öffnet <span class="ui">Parameter …</span>
+  das Fenster <span class="ui">Bauteilparameter</span>: drei schreibgeschützte Abschnitte
+  (was der lokale Detektor gelesen hat; was die KI gelesen hat, mit Typ, Gehäuse
+  und Beschriftung und deren Konfidenzen, dem Ergebnis der beiden Lesungen des Ausschnitts und der Zeile
+  <span class="ui">Ergebnis des SMD-Netzes</span>; der Status des KiCad-Modells mit
+  <span class="ui">KiCad-Modell wählen …</span>, siehe <a href="#step">Kapitel
+  11</a>, auch per Doppelklick in der Liste) und darunter die bearbeitbaren Korrekturen:
+  Name, Typ, Beschriftung, Maße, Drehung, Höhe. Mittelpunkt und Seiten lassen sich
+  auch durch Ziehen des Rechtecks und seiner Griffe im Foto korrigieren; die Drehung
+  wird nur über das Zahlenfeld <span class="ui">Drehung</span> geändert. Keine
+  KI-Anfrage.</li>
+  <li>Die Markierungen der Liste: <code>[!]</code> bedeutet, dass die Zeile mindestens einen
+  Hinweis hat (meist „KiCad-Modell nicht bestätigt“), <code>[?]</code>, dass der Typ
+  nicht bestimmt wurde; eine weitere Markierung zeigt an, dass die Klasse des Detektors
+  der der KI widerspricht. Die Zweifel-Schaltfläche zeigt die vom Modell angegebenen
+  Unsicherheiten als Text.</li>
+  <li><span class="ui">Korrekturen anwenden</span> speichert; <span class="ui">Abbrechen</span>
+  lässt alles, wie es war. Nach dem Anwenden erzeugt <span class="ui">STEP-Modell mit diesen
+  Annotationen neu erzeugen</span> in der Registerkarte <span class="ui">STEP-Modell</span> das STEP neu.</li>
+</ul>
+<p>Später, aus der Registerkarte <span class="ui">Projekt</span>:</p>
+<ul>
+  <li><span class="ui">Bauteilprüfung…</span> öffnet erneut die im Projekt gespeicherte
+  Phase: vor dem KI-Inventar die Vorschläge des Detektors, danach die abgeglichenen
+  Körper mit Maßen und Wahl der KiCad-Modelle. Kostenlos.</li>
+  <li><span class="ui">KI-Inventar neu starten (kostenpflichtig) …</span> wiederholt nur
+  das KI-Inventar an den gespeicherten Vorschlägen. Es ist der einzige der beiden Befehle, der Kosten verursacht.</li>
+</ul>
+
+<h2 id="generazione">8. Erzeugung: Footprint und STEP-Modell</h2>
+<p>Ist die Analyse gültig, startet die Erzeugung von selbst. Im selben
+Fortschrittsfenster aus <a href="#analisi">Kapitel 6</a> umfasst die Erzeugung nach den
+Analysephasen vier Schritte, und bei jedem sagt die Überschrift, wer ihn
+ausführt:</p>
+<ol>
+  <li><span class="ui">2D-Footprint (KiCadGen)</span>: die Datei
+  <code>.kicad_mod</code>, vom Programm geschrieben.</li>
+  <li><span class="ui">Abgleich mit bestätigten Zuordnungen</span>: Bei Platinen werden die Körper
+  mit den bereits akzeptierten Zuordnungen Körper/Modell verglichen
+  (<span class="ui">Archiv der akzeptierten Zuordnungen…</span>).</li>
+  <li><strong>Modelle aus der KiCad-Bibliothek</strong>: Für jeden Körper werden
+  die Modelle der KiCad-3D-Bibliothek mit kompatiblen Maßen gesucht.</li>
+  <li><span class="ui">3D-Körper mit FreeCAD</span>: die Datei <code>.step</code>.</li>
+</ol>
+<p>Kann ein Schritt nicht ausgeführt werden (zum Beispiel weil FreeCAD nicht installiert ist), nennt
+das Fenster den Grund. Ein Fehler beim 3D-Modell macht den bereits geschriebenen Footprint
+nicht rückgängig.</p>
+<p>Nach erfolgreicher Erzeugung bleibt das Fenster mit allen abgehakten Schritten und dem
+Status „Abgeschlossen“ geöffnet: Es wird mit <span class="ui">Schließen</span> geschlossen. Bei einem Fehler
+oder Abbruch schließt es sich von selbst, und der Fehler wird angezeigt.</p>
+<p>Die Registerkarte <span class="ui">Footprint-Vorschau</span> zeigt die 2D-Zeichnung
+maßstäblich mit den Maßen, den Pin-Nummern und dem <span class="ui">Raster</span> (Abstand
+1 mm oder 0.1 in, mit einem gepunkteten Unterraster für Zeichnungen); das Tabellensymbol
+öffnet die Pinbelegung. Die Vorschau ist ein <strong>Entwurf</strong>, wie das Symbol:
+Die Texte Reference und Value lassen sich ziehen, Zeichnungen werden aus der Palette hinzugefügt,
+die Pads auf der Trägerplatine lassen sich bearbeiten, mit <span class="ui">Bearbeitung rückgängig</span> /
+<span class="ui">Bearbeitung wiederholen</span>. <span class="ui">Übernehmen</span> schreibt die
+Datei <code>.kicad_mod</code>, <span class="ui">Abbrechen</span> verwirft die nicht
+übernommenen Änderungen, <span class="ui">Entwurf wiederherstellen</span> stellt einen nicht
+übernommenen Entwurf nach einem unerwarteten Schließen wieder her. Die Befehle der Registerkarte
+<span class="ui">KiCad</span> verwenden die übernommene Datei: Ein nicht übernommener Entwurf wird nicht
+installiert, und <span class="ui">Bauteil für KiCad prüfen</span> meldet
+ihn.</p>
+<p>Bei Platinen können Sie im Bereich <span class="ui">Footprint auf der Trägerplatine</span>
+die Montage direkt in der Vorschau wählen, ohne zum Anfang
+zurückzukehren oder die Analyse zu wiederholen:</p>
+<ul>
+  <li><span class="ui">Direkt verlöten / Modul-Landeflächen</span> behält
+  die Geometrie der Pads des Moduls bei, einschließlich der castellated Kontakte.</li>
+  <li><span class="ui">Stiftleisten / runde durchkontaktierte Pads</span> verwendet Durchgangsbohrungen
+  für die Anschlüsse. Stellen Sie <span class="ui">Pad Ø:</span> und
+  <span class="ui">Bohrung Ø:</span> in Millimetern ein. Die Bohrung muss kleiner sein
+  als das Pad; mit dem Kontaktabstand unvereinbare Durchmesser werden gemeldet.
+  Bei Matrix-Footprints bleibt Pad 1 quadratisch, damit es erkennbar ist.</li>
+</ul>
+<p>Die Vorschau ändert sich sofort. Um die Datei zu schreiben, klicken Sie auf das Aktualisierungssymbol
+mit dem Tooltip <span class="ui">Nur Footprint aktualisieren</span>: Dazu sind
+bereits erfasste Daten oder ein vorhandener Footprint nötig. Diese Aktion ruft die KI nicht auf
+und erzeugt das STEP-Modell nicht neu. Die Einstellungen sind mit denen des Schritts
+<span class="ui">Montage und Analyse</span> synchronisiert.</p>
+<p>Die Montage betrifft den Footprint auf der Trägerplatine: Die physische Geometrie
+des 3D-Moduls, aus dem Foto gewonnen, bleibt unverändert. Ein castellated Kontakt,
+der nur ein Halbloch besitzt, wird nicht in eine Durchgangsbohrung umgewandelt.</p>
+
+<h2 id="simbolo">9. Die Registerkarte „Schaltplansymbol“</h2>
+<p>Zwischen „Footprint-Vorschau“ und „STEP-Modell“ finden Sie das Symbol für den
+Schaltplan. Die Nummern sind die der elektrischen Pads des Footprints und lassen sich
+in dieser Tabelle nicht ändern. Sie können die Funktion korrigieren, den elektrischen Typ wählen und
+die Pins im Editor frei verschieben.</p>
+<p>Ziehen Sie den Anschluss, die Nummer oder den Namen eines Pins, um ihn
+  frei zu verschieben, auch weit vom Rechteck entfernt. Der Verbindungspunkt bleibt
+  am 0.1-in-Raster (2.54 mm) eingerastet, auch wenn es ausgeblendet ist. Beim Verschieben
+  bleibt die Ausrichtung erhalten. Auf einer belegten Position tauschen die beiden Pins
+  die Plätze und behalten Nummer, Name, Typ und Ausrichtung.</p>
+<p>Mit der <strong>rechten Maustaste auf dem Pin</strong> können Sie ihn um 90 Grad
+  im oder gegen den Uhrzeigersinn oder um 180 Grad drehen. Der Verbindungspunkt
+  bleibt fest. Die acht grünen Griffe ändern die Größe des Rechtecks bezogen auf
+  die Mitte, ohne die Pins zu verschieben.</p>
+<p>Die einzige Leiste über dem Editor verwendet Symbole mit Tooltips. In schmalen Fenstern
+  sind die Befehle, die nicht hineinpassen, im Erweiterungsmenü der Leiste verfügbar.
+  Wählen Sie einen Pin:
+  Die Pfeiltasten verschieben ihn um einen Rasterschritt, R dreht im Uhrzeigersinn und
+  Umschalt+R gegen den Uhrzeigersinn, wenn die Ansicht den Fokus hat. Mit dem Befehl
+  <strong>Pinposition und Ausrichtung</strong> in der Leiste geben Sie X, Y und Winkel ein. Die Koordinaten rasten
+  am Raster ein; ein bereits belegter Verbindungspunkt wird abgelehnt.</p>
+<p><strong>Mehrfachauswahl:</strong> Strg+Klick fügt einen Pin hinzu oder entfernt ihn;
+  Umschalt+Ziehen wählt die im Rechteck eingeschlossenen Anschlüsse.
+  Strg+Umschalt fügt den Bereich der aktuellen Auswahl hinzu. Mit dem Auswahlsymbol
+  können Sie das Rechteck verwenden, ohne Umschalt gedrückt zu halten; schalten Sie es aus,
+  um wieder Pins zu ziehen. Ziehen Sie einen ausgewählten Pin, um
+  die Gruppe zu bewegen. Gruppendrehungen erfolgen um den aktiven Pin.
+  Eine Kollision mit anderen Anschlüssen macht den gesamten Vorgang rückgängig.</p>
+<p><strong>Ausrichten und verteilen</strong> richtet X oder Y am aktiven Pin aus.
+  Das Verteilen erfordert mindestens drei Pins, behält den ersten bei und verwendet einen
+  regelmäßigen Abstand, der ein Vielfaches des Rasters ist: Der letzte kann sich verschieben, um ihn einzuhalten.
+  Das Schloss sperrt die Griffe des Rechtecks, ohne die Pins zu sperren.
+  Unter der Ansicht sind Cursorkoordinaten, Zoom und aktiver Pin sichtbar.</p>
+<p><strong>Symbol prüfen</strong> meldet fehlende Namen, überlappende Texte
+  in der Vorschau sowie passive/nicht spezifizierte Typen, die noch zu prüfen sind. Dieselbe
+  Prüfung geht dem Export voraus; Sie können abbrechen oder Trotzdem exportieren wählen.
+  Das Ändern eines Typs in der Tabelle vermerkt ihn als geprüft.</p>
+<p><strong>Entwurf wiederherstellen:</strong> Abgeschlossene Änderungen werden in einer
+  separaten Wiederherstellungsdatei im Projektordner gespeichert. Nach einem unerwarteten
+  Schließen erscheint beim erneuten Öffnen desselben Projekts der Hinweis auf einen
+  verfügbaren Entwurf: Klicken Sie auf das Symbol Entwurf wiederherstellen. Die Wiederherstellung ersetzt das
+  gespeicherte Projekt erst, wenn Sie Übernehmen klicken. Ein Entwurf aus einer anderen Revision
+  des Projekts wird nicht automatisch wiederhergestellt. Abbrechen verwirft den
+  wiederhergestellten Entwurf; ein erfolgreiches Übernehmen löscht die Wiederherstellungsdatei.</p>
+<p><strong>Bearbeitung rückgängig / Bearbeitung wiederholen</strong> verwalten den Verlauf
+  der Änderungen. Wenn der Editor den Fokus hat, funktionieren auch Strg+Z,
+  Strg+Umschalt+Z und Strg+Y. Esc bricht das laufende Ziehen ab.
+  <strong>Anordnung zurücksetzen</strong> kehrt zu den beiden ursprünglichen Spalten zurück
+  und behält Namen und elektrische Typen bei. Halten Sie die linke Maustaste auf einer leeren Fläche gedrückt und ziehen Sie, um die Ansicht zu verschieben, ohne
+  das Symbol zu ändern. Das Mausrad zoomt um den Cursor; mit <strong>Einpassen</strong> sehen Sie alles.</p>
+<p><strong>Übernehmen</strong> speichert Namen, Typen, Positionen und Abmessungen im Projekt. Die Namen aktualisieren
+auch die 2D- und 3D-Beschriftungen. <strong>Abbrechen</strong> verwirft die nicht
+übernommenen Änderungen. Der Verlauf Rückgängig/Wiederholen bleibt nach Übernehmen verfügbar.
+Schlägt das Speichern fehl, bleibt der Entwurf für einen neuen Versuch verfügbar.
+Bevor Sie das Projekt schließen oder wechseln, übernehmen oder verwerfen Sie die Änderungen
+am Symbol. Keine neue KI-Analyse und keine FreeCAD-Erzeugung ist nötig.</p>
+<p>Die Anfangstypen sind <strong>passive</strong>: Sie belegen nicht das elektrische
+Verhalten der Schaltung. Prüfen Sie im Datenblatt, ob input, output,
+bidirectional, power_in oder andere Typen nötig sind, bevor Sie die elektrischen Prüfungen von
+KiCad verwenden. Gleiche Namen wie GND können zu verschiedenen Nummern gehören; doppelte
+oder im Footprint fehlende Nummern verhindern den Export.</p>
+<p><strong>KiCad-Symbol exportieren</strong> speichert eine Bibliothek <code>.kicad_sym</code>.
+Fügen Sie sie in KiCad den Symbolbibliotheken hinzu. Der Verweis auf den Footprint ist
+<code>KiCadGen:nome_componente</code>: Verwenden Sie denselben Bibliotheksnamen, wenn Sie
+den Footprint installieren, oder ändern Sie die Zuordnung in KiCad. Die Installation
+in der Registerkarte „KiCad“ verwaltet weiterhin Footprint und STEP-Modell; die
+Symbolbibliothek wird separat exportiert.</p>
+<p>Tastenkürzel: Strg+3 öffnet das Symbol, Strg+4 das STEP-Modell, Strg+5 KiCad.</p>
+<h3>Von der KI vorgeschlagene elektrische Typen</h3>
+<p>In der Registerkarte <span class="ui">Schaltplansymbol</span> verwendet <span class="ui">Pin-Typen mit KI vorschlagen</span>
+die als Pinbelegung oder Datenblatt deklarierten Dokumente und das konfigurierte KI-Modell. Vor dem Aufruf
+werden Modell und Dokumente angezeigt; die Analyse kann Kosten verursachen. Die Vorschläge enthalten Quelle
+und Begründung: Prüfen Sie sie und wählen Sie diejenigen aus, die Sie verwenden möchten. Unsichere Fälle bleiben zu prüfen;
+bereits bestätigte Typen sind nicht vorausgewählt. Die Änderungen gehen als ein einziger
+rückgängig machbarer Vorgang in den Entwurf ein und werden mit <span class="ui">Übernehmen</span> gespeichert.</p>
+<p>Die KI-Analyse lässt sich abbrechen: Eine bereits gesendete Anfrage muss abgeschlossen werden,
+aber es werden keine weiteren Versuche unternommen, und die Antwort wird verworfen.
+Das Umbenennen eines Pins widerruft die Bestätigung seines bisherigen Typs. Um
+einen bereits angezeigten Typ zu bestätigen, wählen Sie ihn im Menü der Tabelle erneut aus.</p>
+
+<h2 id="modello3d">10. Die Registerkarte „STEP-Modell“</h2>
+<p>Das Modell drehen Sie mit der Maus; der Navigationswürfel führt zu den
+Standardansichten. In der Leiste oben:</p>
+<ul>
+  <li><strong>Pin-Nummern</strong>: erscheinen nur, wenn Sie das Teil von der Seite
+  der Anschlüsse betrachten (Ansicht von unten). Von unten gesehen finden Sie die Bottom View des
+  Datenblatts wieder: eine praktische Kontrolle der Spiegelung.</li>
+  <li><strong>Pinout-Tabelle</strong>, <strong>Einpassen</strong> und das Öffnen des
+  Ordners <code>3dshapes</code> mit den STEP-Dateien.</li>
+  <li><span class="ui">Bauteile bearbeiten…</span> (mit <kbd>Strg+E</kbd> oder
+  rechte Maustaste auf den Körper in der 3D-Ansicht und <span class="ui">Bauteil bearbeiten...</span>;
+  es hat kein Symbol mehr in der Leiste): Name, Typ, Position, Maße,
+  Drehung, Farbe und Beschriftung jedes Körpers, von Hand. Funktioniert auch ohne Foto.
+  Nach <span class="ui">Übernehmen</span> wird das STEP-Modell mit FreeCAD neu erzeugt.
+  Keine KI-Anfrage.</li>
+  <li><span class="ui">STEP-Modell mit diesen Annotationen neu erzeugen</span>: erzeugt das STEP aus den aktuellen
+  Körpern neu, einschließlich der soeben angewendeten Korrekturen. Kostenlos.</li>
+  <li><span class="ui">Gefällt mir — diese Modelle merken …</span>: speichert die
+  Zuordnungen zwischen Körpern und KiCad-Modellen, die auf einer künftigen Platine
+  sofort vorgeschlagen werden (zu bestätigen). Das Archiv prüfen Sie mit
+  <span class="ui">Archiv der akzeptierten Zuordnungen…</span>.</li>
+  <li><span class="ui">Format übertragen</span>: wie in der Prüfung, kopiert Maße,
+  Typ, Gehäuse und KiCad-Modell von einem Körper auf die anderen.</li>
+  <li>Bei castellated Modulen korrigiert eine Auswahlliste den <strong>Kontakttyp</strong>
+  aller Seiten.</li>
+</ul>
+<p>Der 3D-Betrachter wird beim ersten Öffnen der Registerkarte geladen: Solange er
+nicht bereit ist, zeigt die Registerkarte einen Platzhalter, und nichts geht verloren.</p>
+<p>Mit der rechten Maustaste auf einen Körper des Modells: <span class="ui">Aus dem STEP-Modell
+entfernen (Fehlerkennung)</span> (und <span class="ui">Wieder ins STEP-Modell aufnehmen</span>),
+<span class="ui">Körper drehen</span>, <span class="ui">Bauteil
+bearbeiten...</span> und <span class="ui">KiCad-Modell wechseln …</span>.</p>
+
+<h2 id="step">11. Das STEP-Modell eines Bauteils wählen</h2>
+<p>Das Fenster <span class="ui">Auswahl des STEP-Modells</span> öffnet sich über
+<span class="ui">KiCad-Modell wählen …</span> in der Prüfung oder über
+<span class="ui">KiCad-Modell wechseln …</span> im 3D-Modell. Es zeigt bis zu fünf
+Kandidaten aus der KiCad-Bibliothek mit ihren Maßen neben dem Fotoausschnitt
+des Bauteils.</p>
+<ul>
+  <li>Die Vorschau des Kandidaten ist so ausgerichtet, wie er auf der Platine montiert wird. Die
+  Drehung stellen Sie von Hand ein oder mit <span class="ui">Automatisch: CAD-Achsen aus
+  dem Umriss ableiten</span>.</li>
+  <li>Das Kästchen <span class="ui">Farben</span> zeigt die Vorschau mit den Farben der
+  STEP-Datei; ausgeschaltet ist die Vorschau einfarbig und schneller. Die Wahl wird
+  gespeichert.</li>
+</ul>
+
+<h2 id="pin">12. Stiftleisten unter der Platine</h2>
+<p>Bei den beiden Typen <span class="ui">Platine mit Bauteilen</span> fügt das Kästchen
+<span class="ui">Stiftleisten im STEP-Modell anzeigen</span> im Schritt
+<span class="ui">Montage und Analyse</span> der Registerkarte <span class="ui">Projekt</span>
+oder in der Leiste der Registerkarte <span class="ui">STEP-Modell</span>
+unter der Platine
+Stiftleisten mit quadratischen Pins hinzu, wie bei einer Platine mit bereits eingelöteten Leisten. Auf
+castellated Platinen werden sie nur an den Kontakten mit Durchgangsbohrung angebracht.</p>
+<p>Diese Wahl ist unabhängig von der Montage des Footprints auf der Trägerplatine.
+Sie ändert weder die Analyse noch den Footprint: Nach einer Änderung genügt es, das
+STEP-Modell mit dem Symbol neben dem Kästchen neu zu erzeugen. Die beiden Kästchen bleiben synchronisiert.
+Der Körper des Moduls, mit Kupfer und Bohrungen aus dem Foto,
+ändert sich nicht mit der gewählten Montageart.</p>
+<p>Wenn Sie nur dieses Kästchen ändern, verwendet die Neuerzeugung die Modelle
+der in der letzten erfolgreichen Erzeugung gewählten Bauteile wieder: Sie überspringt den Abgleich
+mit den bestätigten Zuordnungen und die Suche in der KiCad-Bibliothek. Es bleiben der Aufbau
+und das Speichern des Körpers mit FreeCAD. Die Wiederverwendung wird durch die erste
+vollständige Erzeugung mit dieser Version vorbereitet; ändern sich auch Maße, Bauteile,
+Annotationen oder Modelldateien, wird der vollständige Ablauf erneut ausgeführt.</p>
+
+<h2 id="kicad">13. Die Registerkarte „KiCad“: Test und Installation</h2>
+<p>Der Bereich <span class="ui">Für KiCad bereite Dateien</span> listet Footprint,
+Schaltplansymbol und STEP-Modell mit ihrem Status auf. Der isolierte Test und die beiden
+Installationen sind <strong>gesperrt, solange die Dateien auf der Festplatte nicht den
+Parametern</strong> des Projekts entsprechen, und jede Sperre nennt ihre Abhilfe, die direkt
+daneben aktiviert ist: <span class="ui">Auf Dateien anwenden</span> (Metadaten oder Footprint noch nicht
+geschrieben), <span class="ui">Symboldatei aktualisieren</span> (die
+exportierte <code>.kicad_sym</code> entspricht nicht dem übernommenen Symbol),
+<span class="ui">Veraltetes STEP-Modell entfernen</span> (ein altes STEP, das sich nicht
+neu erzeugen lässt). Wurde das STEP auf anderen Pads erzeugt oder haben sich
+nur Farben oder Annotationen geändert, ist die Abhilfe die Schaltfläche zur Neuerzeugung
+in der Leiste der Registerkarte <a href="#modello3d">„STEP-Modell“</a> (Tooltip
+<span class="ui">STEP-Modell mit diesen Annotationen neu erzeugen</span>). Ein
+mit einer früheren Version gespeichertes Projekt kann ein
+<span class="ui">Auf Dateien anwenden</span> erfordern. Die Befehle sind auch gesperrt, während
+eine Hintergrundarbeit läuft. Sie verwenden die <strong>übernommenen</strong> Dateien: Ein nicht übernommener Entwurf des
+Footprints oder des Symbols sperrt die Befehle nicht, wird nicht installiert, und
+<span class="ui">Bauteil für KiCad prüfen</span> meldet ihn.</p>
+<p>Der einklappbare Bereich <span class="ui">Bauteil-Metadaten</span> enthält
+Referenzbezeichner (nur Buchstaben: die Nummer fügt KiCad hinzu; der Vorschlag
+in Grau gilt als ausgefüllt), Beschreibung, Schlüsselwörter, Datenblatt (URL oder
+Datei) und Footprint-Filter. Bezeichner, Beschreibung, Schlüsselwörter und Datenblatt
+sind <strong>Pflichtfelder</strong>: Ohne sie ist die Installation gesperrt, und der
+Tooltip der Befehle nennt die fehlenden Felder. Die Liste
+<span class="ui">KiCad-Prüfungen (KLC)</span> aktualisiert sich während der Eingabe (⛔ Fehler,
+⚠ Warnung), und <span class="ui">Auf Dateien anwenden</span> schreibt die Werte in den Footprint und
+in das Symbol; ein Fehler ⛔ führt zur Ablehnung des Anwendens.</p>
+<p>Unter <span class="ui">Prüfung vor der Installation</span> gibt es drei Symbole:
+<span class="ui">Kurzanleitung zur Verwendung des Bauteils in KiCad</span> (eine Anleitung
+auf fünf Seiten: installieren, Footprint platzieren, Symbol exportieren und registrieren,
+beide verknüpfen, PCB aktualisieren), <span class="ui">Bauteil für
+KiCad prüfen</span> (siehe unten) und <span class="ui">In KiCad testen …</span>. Unter
+<span class="ui">Bibliotheksinstallation</span> die beiden Installationen.</p>
+<table>
+  <tr><th>Befehl</th><th>Was er macht</th></tr>
+  <tr><td class="ui">In KiCad testen …</td>
+      <td>Erstellt ein kleines temporäres Projekt mit Footprint und STEP-Modell im
+      Unterordner <code>.kicad-preview</code> des Bauteils und öffnet es im PCB
+      Editor. Drücken Sie in KiCad <kbd>Alt</kbd>+<kbd>3</kbd> für die 3D-Ansicht. Installiert
+      nichts und ändert keine KiCad-Bibliothek.</td></tr>
+  <tr><td class="ui">Im KiCad-Projekt installieren …</td>
+      <td>Die empfohlene Wahl. Wählen Sie den Ordner eines KiCad-Projekts: Es werden
+      <code>KiCadGen.pretty</code> und <code>KiCadGen.3dshapes</code> angelegt, und die
+      Bibliothek wird in der Tabelle des Projekts mit relativen Pfaden registriert
+      (<code>${KIPRJMOD}</code>), sodass das Projekt portabel bleibt.</td></tr>
+  <tr><td class="ui">Als globale Bibliothek installieren …</td>
+      <td>Macht den Footprint in allen Projekten dieses Computers verfügbar.
+      Erfordert, dass KiCad installiert ist (die globale Tabelle des Benutzers wird
+      mit <code>kicad-cli</code> gefunden); wählen Sie den Bibliotheksordner, und die
+      Bibliothek wird in der globalen <code>fp-lib-table</code> von KiCad
+      mit absoluten Pfaden registriert. Die übrigen Bibliotheken der Tabelle bleiben unverändert.
+      Wurde KiCad noch nie gestartet, existiert diese Tabelle noch nicht, und
+      die Installation wird abgelehnt: Starten Sie KiCad einmal, schließen Sie die
+      Ersteinrichtung der Bibliotheken ab und versuchen Sie es erneut.</td></tr>
+</table>
+<p>Bevor ein bereits installiertes Bauteil überschrieben oder eine bereits an anderer Stelle registrierte
+Bibliothek <code>KiCadGen</code> verschoben wird, fragt das Programm nach einer Bestätigung. Bevor
+es eine Tabelle ändert, legt es eine Kopie <code>.kicadgen-backup</code> an, und wenn ein
+Schritt fehlschlägt, stellt es alles wieder her, was es verändert hatte. Das Symbol wird
+in keiner Tabelle registriert: Es wird mit <span class="ui">KiCad-Symbol
+exportieren…</span> exportiert (auch aus der Symbolzeile dieser Registerkarte) und in
+KiCad mit <em>Symbolbibliotheken verwalten</em> hinzugefügt.
+<span class="ui">Komponentenordner öffnen</span> öffnet den Ordner mit Footprint,
+STEP-Modell und Dokumenten. Die Registerkarte <span class="ui">Exporte</span>
+(<kbd>Strg</kbd>+<kbd>6</kbd>) bewahrt den Verlauf der Installationen und der
+Symbolexporte auf, die von diesem Computer aus vorgenommen wurden.</p>
+<h3>Prüfung des Bauteils</h3>
+<p>In der Registerkarte <span class="ui">KiCad</span> prüft das Symbol <span class="ui">Bauteil für KiCad prüfen</span>
+die erzeugten Dateien und die Übereinstimmung der Pin-Pad-Nummern und testet, falls <code>kicad-cli</code>
+verfügbar ist, das Lesen von Footprint, Symbol und STEP mit KiCad CLI in einem temporären
+Ordner (ohne es gilt dieser Test als nicht ausgeführt). Der kopierbare Bericht unterscheidet
+bestandene Prüfungen, Fehler, Warnungen und nicht ausgeführte Prüfungen. Das übernommene Symbol wird
+auch getestet, wenn es noch nicht exportiert ist; nicht übernommene Entwürfe sind ausgeschlossen und werden gemeldet.
+Diese Prüfung bestätigt weder Pinbelegung, Maße, visuelle 3D-Ausrichtung noch installierte Bibliotheken;
+ERC und DRC sind am endgültigen Schaltplan und an der endgültigen Platine auszuführen.</p>
+<p>Die Prüfung bleibt verfügbar, wenn der Footprint vorhanden ist, das STEP aber fehlt;
+die Installation bleibt deaktiviert, bis die erforderlichen Dateien vorhanden sind.
+Die ursprünglichen 3D-Verweise und -Transformationen werden getrennt von der
+normalisierten temporären Kopie geprüft. Nicht aufgelöste relative Pfade oder KiCad-Variablen
+müssen im Zielprojekt geprüft werden.</p>
+
+<h2 id="log">14. Wo die Protokolle liegen</h2>
+<table>
+  <tr><th>Datei</th><th>Wo</th><th>Inhalt</th></tr>
+  <tr><td><code>analisi-ai.log</code></td><td>Im Projektordner</td>
+      <td>Das Tagebuch der Analyse, Zeile für Zeile geschrieben, während die Arbeit fortschreitet:
+      Schritte, verwendete Modelle, Kosten, Warnungen. Es lässt sich auch im Programm über
+      das Symbol <span class="ui">KI-Protokoll</span> lesen.</td></tr>
+  <tr><td><code>freecad.log</code></td><td>Im Projektordner</td>
+      <td>Die Ausgabe von FreeCAD während des Aufbaus des STEP-Modells.</td></tr>
+  <tr><td><code>crash-reports</code></td><td>Ordner <code>logs</code> der
+      Programmdaten (installiert: <code>%LOCALAPPDATA%\KiCadGen\logs</code>)</td>
+      <td>Eine Datei für jeden unerwarteten Fehler des Programms, mit Version, System und
+      Fehlerverlauf. Nur die 20 neuesten werden aufbewahrt.</td></tr>
+</table>
+<p>Das Menü <span class="ui">Hilfe → Protokollordner öffnen</span> öffnet den Ordner des
+geöffneten Projekts, in dem <code>analisi-ai.log</code> und <code>freecad.log</code> liegen;
+ohne geöffnetes Projekt öffnet es den Ordner <code>logs</code> der
+Programmdaten.</p>
+
+<h2 id="aiuto">15. Ein Problem melden und Updates</h2>
+<ul>
+  <li><span class="ui">Hilfe → Problem melden</span> öffnet im Browser eine neue
+  Meldung im GitHub-Repository des Projekts, bereits ausgefüllt mit der Version von
+  KiCadGen, dem Betriebssystem und dem Vorhandensein von FreeCAD und KiCad. Das Programm öffnet
+  auch den Protokollordner: Hängen Sie die nützlichen Dateien selbst an, nachdem Sie sie angesehen haben, denn sie
+  können die Namen Ihrer Ordner und Projekte enthalten. Die Meldung
+  auf GitHub ist öffentlich und wird erst gesendet, wenn Sie sie abschicken.</li>
+  <li><span class="ui">Hilfe → Nach Updates suchen...</span> vergleicht diese Version
+  mit der zuletzt auf GitHub veröffentlichten. Die Prüfung erfolgt nur, wenn Sie sie anfordern.</li>
+</ul>
+<p>Das Projekt: <a href="https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator">github.com/MirkoUgoliniDev/KiCad-ComponentGenerator</a>.</p>
+
+<h2 id="limiti">16. Bekannte Grenzen</h2>
+<ul>
+  <li>Die KI-Analyse kann sich irren: Prüfen Sie Footprint und STEP-Modell immer in den
+  Vorschauen, bevor Sie sie verwenden.</li>
+  <li>Die aus einem einzigen Foto von oben gewonnenen Höhen der Körper sind
+  <strong>Schätzungen</strong>, keine Messungen. Prüfen Sie Höhen und kritische Abstände mit
+  bemaßten Zeichnungen oder einer Messung.</li>
+  <li>Das Foto-Inventar garantiert nicht, dass alle Körper gefunden wurden: Dafür
+  gibt es die Prüfung und <span class="ui">Bauteile bearbeiten…</span>.</li>
+</ul>
+
+<footer>KiCadGen — Benutzerhandbuch. Das Programm wird unter der Lizenz GNU AGPL-3.0 vertrieben;
+die Lizenzen der Komponenten von Drittanbietern finden Sie im Menü
+<span class="ui">Hilfe → Lizenzen</span>.</footer>
+</body>
+</html>

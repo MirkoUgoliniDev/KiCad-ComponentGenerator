@@ -116,6 +116,8 @@ def test_guide_follows_light_and_dark_theme(guide_text):
     "Saldatura diretta / piazzole del modulo", "Strip header / pad circolari con foro",
     "Prova in KiCad...", "Installa nel progetto KiCad...",
     "Installa come libreria globale...", "analisi-ai.log", "freecad.log",
+    # 2026-10-30: the guide still said «modello 3D» for these two commands.
+    "Rigenera modello STEP con queste annotazioni", "Elimina dal modello STEP (falso positivo)",
 ])
 def test_guide_names_the_real_commands(guide_text, label):
     """@brief The guide uses the Italian labels the program actually shows.
@@ -151,3 +153,60 @@ def test_guide_ships_in_the_package():
     """@brief The PyInstaller spec copies the whole assets folder, help/ included."""
     spec = (ROOT / "packaging" / "KiCadGen.spec").read_text(encoding="utf-8")
     assert '(str(ROOT / "kicadgen" / "gui" / "assets"), "kicadgen/gui/assets")' in spec
+
+
+# ── Translated guides (2026-10-30: the guide opened in Italian in every language) ──
+
+TRANSLATIONS = {"en": "guida.en.html", "fr": "guida.fr.html", "de": "guida.de.html"}
+
+
+def _structure(text):
+    """Tag sequence, ids and link targets: what a translation must keep."""
+    checker = _parse(text)
+    return checker.tags, sorted(checker.ids), [url for _tag, _name, url in checker.urls]
+
+
+@pytest.mark.parametrize("language", sorted(TRANSLATIONS))
+def test_each_translated_guide_keeps_the_italian_structure(guide_text, language):
+    """@brief Same elements, ids and links as guida.html, its own lang, well-formed.
+
+    @note A chapter added to one guide only breaks this test, so the four
+        guides cannot drift apart unnoticed.
+    """
+    path = GUIDE.with_name(TRANSLATIONS[language])
+    assert path.is_file(), f"{path.name} is missing"
+    text = path.read_text(encoding="utf-8")
+    checker = _parse(text)
+    assert not checker.errors and not checker.stack
+    assert f'<html lang="{language}">' in text and '<meta charset="utf-8">' in text
+    assert _structure(text) == _structure(guide_text)
+
+
+def test_the_structure_check_sees_a_missing_chapter(guide_text):
+    """@brief Negative: removing one section changes the structure."""
+    trimmed = re.sub(r"<h2[^>]*>.*?</h2>", "", guide_text, count=1, flags=re.S)
+    assert _structure(trimmed) != _structure(guide_text)
+
+
+@pytest.mark.parametrize("language", sorted(TRANSLATIONS))
+@pytest.mark.parametrize("label", [
+    "Nuovo progetto...", "Estrai parametri con AI", "Prova in KiCad...",
+    "Installa nel progetto KiCad...", "Installa come libreria globale...",
+    "Aggiorna solo il footprint", "Scelta del modello STEP",
+    "Rigenera modello STEP con queste annotazioni", "Elimina dal modello STEP (falso positivo)",
+])
+def test_translated_guides_name_the_labels_of_their_interface(language, label):
+    """@brief A quoted command appears as that language's interface shows it.
+
+    @note The label comes from the bundled catalog, so a renamed translation
+        fails here instead of leaving the guide wrong.
+    """
+    from kicadgen.services.i18n import DEFAULT_TRANSLATIONS
+    expected = DEFAULT_TRANSLATIONS["ui:" + label][language]
+    text = GUIDE.with_name(TRANSLATIONS[language]).read_text(encoding="utf-8")
+    assert expected in re.sub(r"\s+", " ", text)
+
+
+def test_guide_never_calls_the_step_file_a_3d_model(guide_text):
+    """@brief The visible name is «modello STEP» (project rule), never «modello 3D»."""
+    assert not re.search(r"modell[oi]\s+3D", guide_text, re.IGNORECASE)

@@ -203,3 +203,23 @@ def test_an_update_answer_before_the_close_is_still_shown(
     _check(window, monkeypatch, UpdateCheckResult(current_version="1.0.0",
                                                   latest_version="1.0.0"))
     assert boxes and boxes[0][0] == "information"
+
+
+@pytest.mark.parametrize("language, name", [("en", "guida.en.html"), ("fr", "guida.fr.html"),
+                                            ("de", "guida.de.html"), ("it", "guida.html")])
+def test_the_user_guide_opens_in_the_interface_language(window, opened, boxes, monkeypatch,
+                                                        language, name):  # noqa: F811
+    """@brief Positive (2026-10-30): the guide of the chosen language, not always the Italian one."""
+    monkeypatch.setattr(window.i18n, "language", language)
+    window._open_user_guide()
+    assert len(opened) == 1 and opened[0].endswith(f"/help/{name}") and boxes == []
+
+
+def test_a_missing_translation_falls_back_to_the_italian_guide(window, opened, boxes, monkeypatch,
+                                                               tmp_path):  # noqa: F811
+    """@brief Negative: without guida.en.html the Italian guide opens, no warning."""
+    (tmp_path / "guida.html").write_text("<!doctype html>", encoding="utf-8")
+    monkeypatch.setattr(gui, "resource_path", lambda *parts: tmp_path / parts[-1])
+    monkeypatch.setattr(window.i18n, "language", "en")
+    window._open_user_guide()
+    assert opened == [(tmp_path / "guida.html").as_uri()] and boxes == []
