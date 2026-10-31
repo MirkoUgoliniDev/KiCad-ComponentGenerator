@@ -253,8 +253,8 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 10723 passed,
-13 skipped and 19 subtests (2026-10-30 evening, branch `ADVANCED`: a side declared «through_hole»
+is 10812 passed,
+13 skipped and 19 subtests (2026-10-31, branch `ADVANCED`: single-part pad positions read by a dedicated model (profile field `pad_model`, default openai/gpt-5.6-sol, schema v7), readings checked against the holes found in the drawing image by `kicadgen/services/drawing_holes.py` (geometry only, never numbering), unconfirmed or disagreeing readings block generation, tool_choice compatibility levels for Claude 5.5; before that, 10723 passed, 2026-10-30 evening, branch `ADVANCED`: a side declared «through_hole»
 whose edge the photo shows cut by notches as deep as a half-hole is corrected to half_hole, shallower
 pad dents only warn; single-part pad positions summed by the program from the dimension chains the
 model transcribes, compared by signed offsets, never adopted without an independent agreeing reading,

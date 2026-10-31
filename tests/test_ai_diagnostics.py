@@ -214,6 +214,56 @@ def test_compatibility_failure_gets_one_logged_compatibility_retry(waits):
     assert events[-1].startswith("AI_CALL_END ")
 
 
+def test_a_refused_required_form_gets_the_auto_form(waits):
+    """A model refusing every forced tool (Claude 5.5, 2026-10-30) is reached by the last form."""
+    events, modes = [], []
+
+    def call(*, model, tool, compatibility_retry=False):
+        modes.append(compatibility_retry)
+        if len(modes) < 3:
+            raise OpenRouterError("safe HTTP 400 tool_choice", compatibility=True)
+        return {"components": []}
+
+    result = diagnostics.make_logged_call(call, events.append)(
+        model="provider/model", tool={"function": {"name": "report"}})
+    assert result == {"components": []}
+    assert modes == [False, 1, 2] and waits == []
+
+
+def test_compatibility_retries_stop_after_the_last_form(waits):
+    """Negative: past the last form the same refusal is not paid again."""
+    events, modes = [], []
+
+    def call(*, model, tool, compatibility_retry=False):
+        modes.append(compatibility_retry)
+        raise OpenRouterError("safe HTTP 400 tool_choice", compatibility=True)
+
+    with pytest.raises(OpenRouterError):
+        diagnostics.make_logged_call(call, events.append)(
+            model="provider/model", tool={"function": {"name": "report"}})
+    assert modes == [False, 1, 2]
+
+
+def test_openrouter_tool_choice_forms(monkeypatch):
+    """Form 0 names the tool, 1 is «required», 2 is «auto» (body actually sent)."""
+    from kicadgen.services import openrouter
+    bodies = []
+
+    def post(request, blocks):
+        import json
+        bodies.append(json.loads(request.data))
+        return {"choices": [{"message": {"tool_calls": [{"function": {
+            "name": "report", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]}
+
+    monkeypatch.setattr(openrouter, "api_key", lambda: "test-key")
+    monkeypatch.setattr(openrouter, "_post_chat", post)
+    tool = {"type": "function", "function": {"name": "report", "parameters": {"type": "object"}}}
+    for level in (0, 1, 2, True):
+        openrouter.call_tool("vendor/model", "s", [], tool, compatibility_retry=level)
+    assert [body["tool_choice"] for body in bodies] == [
+        {"type": "function", "function": {"name": "report"}}, "required", "auto", "required"]
+
+
 def test_transient_failure_is_retried_unchanged_with_exponential_backoff(waits):
     events, modes = [], []
 

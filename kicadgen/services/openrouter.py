@@ -1533,6 +1533,13 @@ def _post_chat(request: urllib.request.Request, content_blocks: Sequence[dict]) 
         raise error from None
 
 
+#: The `tool_choice` forms of the compatibility retries, in order (see
+#: `_call_tool`, @param compatibility_retry).
+_COMPATIBLE_TOOL_CHOICES = ("required", "auto")
+#: Number of compatibility retries `_call_tool` has a form for.
+COMPATIBILITY_LEVELS = len(_COMPATIBLE_TOOL_CHOICES)
+
+
 def call_tool(*args, **kwargs) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
@@ -1563,7 +1570,7 @@ def _call_tool(
     max_tokens: int = 2048,
     has_pdf: bool = False,
     pdf_engine: str = "native",
-    compatibility_retry: bool = False,
+    compatibility_retry: int = 0,
 ) -> dict:
     """@brief Call the model once and decode explicit structured tool arguments.
 
@@ -1574,7 +1581,13 @@ def _call_tool(
     @param max_tokens Maximum completion tokens.
     @param has_pdf Whether PDF parsing is required.
     @param pdf_engine PDF parser selection.
-    @param compatibility_retry Use the less provider-specific required-tool form.
+    @param compatibility_retry Form of `tool_choice` (True counts as 1): 0
+        names the tool; 1 is the portable «required»; 2 is «auto», for models
+        that refuse any forced tool (Claude 5.5 through OpenRouter answers
+        HTTP 400 «tool_choice: type "tool" and "any" are not supported» to
+        both other forms and cannot turn its reasoning off, real calls of
+        2026-10-30). With «auto» the system prompt still asks for the tool,
+        and an answer without the call is the usual missing-tool error.
     @return Explicit argument object; an explicitly supplied empty object is valid.
     @throws OpenRouterError Safe network/provider diagnostics or invalid/missing arguments.
     @throws ProviderError When the direct DeepSeek API is asked to read a PDF,
@@ -1600,8 +1613,9 @@ def _call_tool(
             {"role": "user", "content": list(content_blocks)},
         ],
         "tools": [tool],
-        "tool_choice": "required" if compatibility_retry else {
-            "type": "function", "function": {"name": tool["function"]["name"]}},
+        "tool_choice": (_COMPATIBLE_TOOL_CHOICES[min(int(compatibility_retry), 2) - 1]
+                        if compatibility_retry else
+                        {"type": "function", "function": {"name": tool["function"]["name"]}}),
     }
     if provider_of(model) == PROVIDER_DEEPSEEK:
         # DeepSeek direct API (OpenAI compatible): no PDF plugin and no cost

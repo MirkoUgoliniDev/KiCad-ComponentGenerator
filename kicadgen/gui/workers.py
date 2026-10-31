@@ -747,6 +747,7 @@ class ExtractWorker(QThread):
         crop_model: str | None = None,
         smd_model_path: Path | None = None,
         numbering_prompt: str | None = None,
+        pad_model: str | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -777,6 +778,9 @@ class ExtractWorker(QThread):
             the «Modello rete SMD» row; None uses the default in models/smd.
         @param numbering_prompt Prompt of the dedicated pin-numbering call;
             None uses the factory default.
+        @param pad_model Model of the dedicated pad-position reading of a
+            single part (profile field 'pad_model'); None or blank uses
+            `model`. Forwarded like `crop_prompt`.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -784,6 +788,8 @@ class ExtractWorker(QThread):
         self.system_prompt = system_prompt
         #: Prompt of the dedicated pin-numbering call; None = factory default.
         self.numbering_prompt = numbering_prompt
+        #: Model of the dedicated pad-position reading; None = `model`.
+        self.pad_model = pad_model
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
         self.model = model
@@ -902,6 +908,7 @@ class ExtractWorker(QThread):
                                   crop_prompt=self.crop_prompt,
                                   crop_model=self.crop_model,
                                   numbering_prompt=self.numbering_prompt,
+                                  pad_model=self.pad_model,
                                   cancel=self.cancel_event),
                 **phase_kwargs(extract, self._forward_phase),
             )

@@ -1,5 +1,200 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 31/10 — COMPLETATO e committato (OK utente «ok procedi»)
+Lettura dedicata dei pad con modello a parte (pad_model, gpt-5.6-sol), controllo dei fori
+disegnati (drawing_holes.py), blocco quando nulla conferma, tool_choice compatibile con Claude 5.5.
+Suite 31/10: 10812 passati, 13 saltati, 19 sottotest, 0 falliti. Commit: vedi git log su ADVANCED
+(merge in main e MSI ricostruito nello stesso giro). Dettagli nella sezione «30/10 notte» sotto.
+
+## 30/10 notte — IN CORSO: quote «in parallelo» nelle catene (utente: relè VE12H-K ancora bloccato, «qualche giorno fa funzionava», «correggi tu»)
+
+Diagnosi (log generated/VE12H-K 20:43, nessuna chiamata nuova):
+- 10-11/10 il footprint veniva GENERATO ma era SBAGLIATO
+  (VE12H-K.pretty dell'11/10: 1-2 = 12,70 invece di 15,24; 1 e 4 sulla
+  stessa verticale; 5 a 2,54 invece di 5,08 da 4). Non e' una regressione:
+  allora il controllo non c'era.
+- Oggi deepseek-flash ha trascritto le catene Y come consecutive mentre
+  nel disegno sono quote DA LINEA DI RIFERIMENTO (2,54 e 5,08 dal bordo
+  basso a sinistra; 7,62 a destra): Y somma 16,68 su un corpo di 10,50.
+  Il formato `chains` sapeva esprimere solo quote in serie.
+Piano (autorizzato: «correggi tu»):
+- campo opzionale `kind` per catena: "series" (default, come oggi) o
+  "parallel" (ogni valore e' la distanza dalla PRIMA fermata);
+  _axis_from_chains collega la prima fermata a ciascuna delle altre;
+- prompt dedicato e prompt single (pad_chains) spiegano i due casi;
+  impronta del prompt single attuale in SUPERSEDED_SINGLE_PROMPT_DIGESTS;
+- test su un disegno inventato quotato in parallelo (positivo), lo stesso
+  trascritto come serie (negativo: non chiude), misto serie+parallelo.
+Commit solo con OK.
+SOSPESO prima di toccare il codice: alle 20:45 l'utente ha rianalizzato e
+il footprint e' stato GENERATO, ma e' SBAGLIATO (top view, centro corpo):
+1 (-6.575,-2.54), 4 (-6.575,2.54), 5 (-4.035,0), 2 (6.575,-2.54),
+3 (6.575,2.54) -> 1-4 = 5,08 in verticale (disegno 7,62 e sfalsati di
+2,54), 1-2 = 13,15 (disegno 15,24). Causa: la lettura dedicata era
+malformata («x chain no. 1: 6 stops and 4 dimensions») -> regola (a)
+invariata dal 10/10: lettura non riuscita = SOLO NOTA, la generazione
+parte con le coordinate del modello. La nota del modello dice «verticale
+5.08 - 2.54 - 2.54»: lettura sbagliata del disegno, non solo un problema
+di formato serie/parallelo. Il log NON salva le risposte del modello
+(solo i prompt): impossibile vedere le catene trascritte.
+DOMANDA ALL'UTENTE: per i componenti singoli con pad espliciti, se la
+lettura dedicata non conferma le posizioni, bloccare la generazione come
+per il disaccordo?
+UTENTE 30/10 notte: «perche' viene fuori cosi' se le misure le passo in
+modo chiaro? correggi!» -> autorizzata la correzione. Primo passo:
+chiamate REALI di prova (pochi decimi di centesimo) della lettura
+dedicata su docs/quote-pinout.jpeg per vedere le catene che il modello
+trascrive (il log non salva le risposte), pagina intera contro ritaglio
+ingrandito della vista dei fori.
+ESITO prove reali (scratchpad/real_chains.py, deepseek-flash, 6 chiamate,
+< 0,005 USD): 3 su pagina intera e 3 su ritaglio ingrandito x3, TUTTE
+sbagliate e TUTTE diverse (fori scambiati, il primo 2,54 messo fra bordo
+e foro, quote inventate). Il ritaglio NON aiuta. Conclusione: il modello
+non sa leggere questo disegno; il formato non e' la causa.
+UTENTE 30/10 notte: «scatena agenti esperti, risolviamo, prenditi il
+tempo». Lanciati 3 agenti in parallelo, SOLO scratchpad, nessuna modifica
+al repo:
+- A «modelli»: banco di prova con modelli piu' capaci via OpenRouter
+  (chiave presente; DEFAULT_MODEL anthropic/claude-opus-5) su questo
+  disegno e altri del repo, ripetuti, con costo (tetto 2 USD);
+- B «formato»: elenco di quote (asse, da, a, valore) al posto delle
+  catene, provato con deepseek-flash (tetto 0,20 USD);
+- C «geometria locale»: fori trovati con OpenCV nel disegno, pixel ->
+  mm agganciati alle quote lette; il modello assegna solo i numeri.
+Poi: sintesi, proposta all'utente, implementazione con OK.
+ESITO B (formato, 0,075 USD, ~110 chiamate, scratchpad\agentB\, risposte
+grezze in answers\): NESSUN formato rende deepseek-flash affidabile sul
+relè (0 su ~30). Il formato «lines2c» (linee di richiamo ordinate +
+quote fra linee, ritaglio ingrandito + pagina per i numeri) passa TEL8
+4/4 (catene attuali 2/4) e un disegno sintetico 4/4 (catene 0/4). Con i
+suoi structure_checks nessuna lettura sbagliata passa in silenzio (il
+formato attuale ne lascia passare 2 su 8). Errori tipici sul relè: il
+primo 2,54 (scritto fuori) attaccato a un bordo inesistente; 5,08 preso
+come quota totale in Y. 4 chiamate di controllo (Sonnet 5, Gemini 2.5
+Flash) sbagliano anche loro la Y del relè: forse il limite e' il disegno
+(vista di ~310x160 px). Ritaglio automatico della vista non provato end
+to end.
+ESITO A (modelli, 1,48 USD, scratchpad\agentA\, results.jsonl con ogni
+risposta, bench.py --replay offline): SOLO openai/gpt-5.6-sol legge
+tutto giusto, 11/11 (relè VE 4/4, relè VE-M dal PDF 4/4, TEL8 3/3),
+~0,029 USD a chiamata; gpt-5.6-terra 13/18; deepseek-flash 1/9;
+claude-opus-5 3/9 (solo TEL8); claude-sonnet-5 1/9; gemini troncati.
+Campione piccolo (limite inferiore 95% ~76%), due disegni della stessa
+famiglia. Difetti DELL'APP trovati: (1) claude-sonnet-5.5 e opus-5.5
+rispondono HTTP 400 su tool_choice (forzato e «required»): inutilizzabili
+per questa chiamata; (2) max_tokens=4096 in read_pad_positions tronca i
+modelli Gemini con ragionamento (pagati lo stesso); terra arriva a 3319.
+Errore non visibile ai controlli: 2,54 e 5,08 scambiati in Y (la somma
+resta 7,62) -> limite gia' dichiarato.
+ESITO C (geometria locale, nessuna chiamata AI, scratchpad\agentC\
+drawing_holes.py): i cerchi dei fori nel disegno si trovano bene sui
+disegni a linee (VE 5/5, TEL8 6/6); la scala va presa dal campo dei fori
+adattato alla lettura, NON dal contorno (contorno disegnato 1-3% piu'
+grande). Come CONTROLLO di una lettura: TEL8 0 letture sbagliate
+accettate su 106; VE 3 su 80 (tutte spostamenti di 0,635 mm, sotto la
+soglia di ~5 px = 0,6 mm a 7,4 px/mm). Gli scambi di quote (2,54<->5,08),
+le quote perse e gli assi scambiati vengono TUTTI respinti. Non sa
+distinguere Ø1,0 da Ø1,2. Foto (ESP32, RS485): da rifiutare con un
+controllo carta/inchiostro, non misurare. Mai sostituire le quote con i
+mm da pixel: solo verificare. Euristica dichiarata fragile: rifiuto dei
+glifi (O, B, 8).
+SINTESI (proposta all'utente):
+1. lettura dedicata delle posizioni con un modello scelto a parte
+   (campo nel profilo, come «Modello lettura ritagli»), predefinito
+   openai/gpt-5.6-sol (~0,03 USD);
+2. controllo geometrico dei fori sul disegno (agentC, come modulo
+   kicadgen/services/drawing_holes.py) come lettura INDIPENDENTE: una
+   lettura confermata dai cerchi disegnati puo' prevalere sulla risposta
+   principale; chiude anche il limite «quote scambiate con stessa somma»;
+3. lettura non confermata (non riuscita / non verificabile) -> BLOCCO;
+4. difetti app: max_tokens 4096 troppo basso per i modelli con
+   ragionamento; Claude 5.5 HTTP 400 su tool_choice.
+UTENTE 30/10 notte: «sì, tutto» -> autorizzati tutti e quattro i punti.
+Interpretazioni prese (da correggere se l'utente le smentisce):
+- (1) nuovo campo profilo «Modello lettura posizioni pad», vuoto = usa il
+  predefinito openai/gpt-5.6-sol; migrazione schema come per «Modello
+  lettura ritagli»; costo registrato col provider giusto;
+- (2) drawing_holes come modulo di produzione, SOLO verifica (mai mm da
+  pixel al posto delle quote), immagini non a linee (foto) rifiutate;
+  conta come lettura indipendente: lettura dedicata confermata dai cerchi
+  -> adottata anche contro la risposta principale;
+- (3) componente singolo con pad espliciti e posizioni non confermate da
+  nessuna lettura indipendente -> generazione BLOCCATA con messaggio che
+  indica il rimedio (pad a mano in «Piazzole componente THT»);
+- (4) max_tokens della lettura dedicata alzato; tool_choice per i modelli
+  anthropic/* via OpenRouter: da capire se basta «auto» + istruzione.
+Test: positivo/negativo per ogni regola su disegni INVENTATI (non il relè),
+il relè solo come replay reale aggiuntivo. Audit di generalita' prima del
+commit. Commit solo con OK.
+STATO 31/10 notte (non committato):
+- FATTO (4) Claude 5.5: prova reale (3 chiamate, ~0,002 USD): rifiuta
+  tool_choice «tool» e «any» e il ragionamento non si spegne; accetta
+  «auto». openrouter._call_tool: compatibility_retry a livelli 0/1/2
+  (nome, «required», «auto»); ai_diagnostics fa fino a 2 tentativi di
+  compatibilita' (COMPATIBILITY_LEVELS). Test in test_ai_diagnostics.py.
+- FATTO (4) PAD_POSITIONS_MAX_TOKENS = 16384 nella lettura dedicata.
+- FATTO (1) campo 'pad_model' (schema 7, MODEL_FIELDS, BLANK_ALLOWED,
+  globale: override per tipologia ignorato), predefinito
+  DEFAULT_PAD_POSITIONS_MODEL = openai/gpt-5.6-sol; riga «Posizioni pad»
+  nel tab «Modello» (Scegli modello... / Usa il modello unico);
+  main_window -> ExtractWorker(pad_model) -> extract_pin_header_params;
+  _pad_reading_model: solo componenti singoli, sorgente diversa senza
+  chiave/credito -> legge il modello principale con riga di log (non
+  blocca l'analisi). help.settings.model aggiornato (4 lingue,
+  SUPERSEDED_DEFAULTS).
+- FATTO (3)+(2 lato extractor) apply_dedicated_pads riscritto: confermato
+  solo se le due letture concordano su TUTTI i pin; altrimenti BLOCCO con
+  rimedio, salvo che i fori disegnati confermino UNA sola delle letture
+  (main / catene della main / dedicata) -> quella viene scritta (centrata
+  se chiusa sui due assi). I fori vedono la geometria, non i numeri: due
+  letture che differiscono solo per numeri non vengono mai scelte.
+  Concordi ma fori discordi -> restano, con «Attenzione». Test nuovi:
+  tests/test_pad_positions_by_drawn_holes.py (16), contratti aggiornati in
+  test_pad_dimension_chains.py e test_single_component_prompt.py (nota ->
+  blocco per lettura parziale/fallita).
+- IN CORSO (2) agente: kicadgen/services/drawing_holes.py +
+  tests/test_drawing_holes.py dal prototipo agentC (API check_pad_layout ->
+  LayoutCheck status confirmed/not_confirmed/unverifiable). Finche' manca,
+  _layout_checker da' ImportError -> «non verificabile» -> blocco.
+- UTENTE 31/10: «risolvi, agenti esperti, piena autonomia».
+- PROVA REALE end-to-end relè (scratchpad/real_relay_e2e.py, 0,038 USD):
+  deepseek-flash sbaglia, gpt-5.6-sol letto giusto, i fori confermano solo
+  la dedicata (scarto 0,09 mm) -> adottata, nessun blocco, pad = disegno.
+- AUDIT di generalita' (agente): D1 vista adottata non arrivava a
+  source_view (footprint specchiato) -> _adopt_view scrive source_view;
+  D2 viste diverse risolte dai fori -> mai (views_differ in _HoleVerdicts);
+  D3 fori senza scala -> _scale_ratio: stessa forma in altra scala = blocco;
+  D4 numeri ripetuti -> nessun controllo fori/adozione; G1 disegno solo PDF
+  o senza ruolo -> ora BLOCCO («skipped»); B1 rimedio SMD diverso (nessun
+  editor manuale SMD); S3 eccezioni del controllo tutte assorbite; S4
+  ripiego del modello pad annotato nelle note. FakeHoles dei test ora
+  senza scala come il vero. Residuo dichiarato S1: scelta per i fori senza
+  margine fra «confermata» e «non confermata» (danno limitato dalla
+  tolleranza). Residuo: con la sola lettura principale confermata dai fori
+  e nessun'altra lettura, un errore di scala uniforme (passo 2,5 per 2,54)
+  non si vede.
+- drawing_holes.py consegnato dall'agente (38 test). AUDIT 2 (generalita'
+  di drawing_holes): limiti di distorsione come rapporti (asse intero
+  sbagliato confermato), disegni non in scala, pagina con due viste
+  (specchiata confermata), tolleranza senza tetto, tempi senza limite sul
+  percorso «non confermato». Lato extractor FATTO: _pick_by_holes adotta
+  solo se tutte le altre letture falliscono con «no_match» e lo specchio
+  della scelta (se insieme di punti diverso) NON combacia. Lato modulo: lo
+  stesso agente sta correggendo (spostamenti al posto dei rapporti, tetto
+  «low_resolution», cache dei cerchi per immagine, limiti di tempo).
+  Relè dopo le modifiche: main deepseek «no_match», specchio «no_match» ->
+  la dedicata resta adottata.
+- Modulo corretto dall'agente (52 test): verdetto a spostamenti (residuo
+  leave-one-out + stiramento affine sull'estensione minore), tetto
+  «low_resolution» (tolleranza > 1/4 della distanza minima), «search_limit»,
+  cache dei cerchi per file, tempi limitati. Sweep reale relè+TEL8: 0/196
+  letture sbagliate confermate (prima 3). Residui dichiarati: zigzag
+  ±0,127 a 12 px/mm confermati entrambi (nessuna scelta); passo 2,50 per
+  2,54 su 2x20 confermato se e' l'unica lettura.
+- Database data/analysis_profiles.sqlite3 migrato a schema 7.
+- SUITE COMPLETA 31/10: 10812 passati, 13 saltati, 19 sottotest, 0 falliti.
+- NON committato: in attesa dell'OK dell'utente (commit/push/merge/MSI).
+
 ## 30/10 sera — IN CORSO: semifori dichiarati «through_hole» dall'AI (utente: STEP RS485 con fori interi e bordo dritto, «qualche giorno fa li generava in modo corretto»)
 
 Diagnosi (log generated/RS485/analisi-ai.log, nessuna chiamata nuova):

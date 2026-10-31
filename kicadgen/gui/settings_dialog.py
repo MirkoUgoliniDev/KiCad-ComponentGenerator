@@ -16,7 +16,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..services.datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
-                                            DEFAULT_PIN_NUMBERING_PROMPT, SINGLE_COMPONENT_FAMILIES)
+                                            DEFAULT_PIN_NUMBERING_PROMPT, DEFAULT_PAD_POSITIONS_MODEL,
+                                            SINGLE_COMPONENT_FAMILIES)
 from ..services.messages import tx
 from ..services.openrouter import DEFAULT_MODEL
 from ..services.photo_grounding import GROUNDING_PROMPT, VERIFICATION_PROMPT
@@ -58,7 +59,8 @@ class LlmSettingsDialog(QDialog):
                  current_vision_model: str | None = None,
                  current_grounding_prompt=None, current_verification_prompt=None,
                  current_verification_model=None, current_single_prompt=None,
-                 current_numbering_prompt=None, current_family: str | None = None):
+                 current_numbering_prompt=None, current_family: str | None = None,
+                 current_pad_model: str | None = None):
         """@brief Build the LLM settings dialog.
 
         @param current_prompt Datasheet prompt of boards and modules.
@@ -68,6 +70,9 @@ class LlmSettingsDialog(QDialog):
             call (None: factory default).
         @param current_family Family of the open project's component type, to
             say which datasheet prompt that project uses; None/'' says nothing.
+        @param current_pad_model Model of the dedicated pad-position reading
+            (profile field 'pad_model'); None shows the factory default, ''
+            means «the single model».
         """
         super().__init__(parent)
         self.i18n = getattr(parent, 'i18n', None)
@@ -109,6 +114,22 @@ class LlmSettingsDialog(QDialog):
         model_row.addWidget(self.field_model, 1)
         model_row.addWidget(btn_pick)
         form.addRow("Modello:", model_row)
+        # The one model chosen apart (user, 2026-10-30): the pad positions of
+        # a single part read from its dimensioned drawing.
+        self._pad_model = (DEFAULT_PAD_POSITIONS_MODEL if current_pad_model is None
+                           else current_pad_model.strip())
+        self.field_pad_model = QLineEdit(self._pad_model)
+        self.field_pad_model.setReadOnly(True)
+        self.field_pad_model.setObjectName("pad_model")
+        btn_pick_pad = QPushButton("Scegli modello...")
+        btn_pick_pad.clicked.connect(self._pick_pad_model)
+        btn_same = QPushButton("Usa il modello unico")
+        btn_same.clicked.connect(self._pad_model_follows_main)
+        pad_row = QHBoxLayout()
+        pad_row.addWidget(self.field_pad_model, 1)
+        pad_row.addWidget(btn_pick_pad)
+        pad_row.addWidget(btn_same)
+        form.addRow("Posizioni pad:", pad_row)
         self.label_key = QLabel()
         self.label_key.setObjectName("model_key_state")
         self.label_key.setWordWrap(True)
@@ -119,7 +140,11 @@ class LlmSettingsDialog(QDialog):
 
         model_note = (
             "Un solo modello per tutte le interrogazioni: lettura dei documenti, "
-            "fotografia, ritagli dei componenti e sigle. La sorgente e' il servizio a "
+            "fotografia, ritagli dei componenti e sigle. Unica eccezione, le posizioni dei "
+            "pad di un componente singolo lette dal disegno quotato: le legge il modello di "
+            "«Posizioni pad» (vuoto = il modello unico), perche' sui disegni quotati i "
+            "modelli economici sbagliano spesso; se la sua sorgente non ha chiave o credito "
+            "le legge il modello unico. La sorgente e' il servizio a "
             "cui vengono inviate le richieste: DeepSeek (API diretta, chiave DeepSeek) "
             "oppure OpenRouter (chiave OpenRouter). Le chiavi si inseriscono da "
             "Configurazione → «Account AI...»; il saldo della sorgente in uso compare "
@@ -319,6 +344,8 @@ class LlmSettingsDialog(QDialog):
                 max(0, self.combo_source.findData(provider_of(DEFAULT_MODEL))))
             self.combo_source.blockSignals(blocked)
             self._refresh_key_state()
+            self._pad_model = DEFAULT_PAD_POSITIONS_MODEL
+            self.field_pad_model.setText(DEFAULT_PAD_POSITIONS_MODEL)
         elif index == 1:
             # Only the prompt the selector shows (the three are independent).
             default = dict((field, factory) for field, _label, factory in self.PROMPT_KINDS)
@@ -327,6 +354,25 @@ class LlmSettingsDialog(QDialog):
             self.grounding_editor.setPlainText(GROUNDING_PROMPT)
         else:
             self.verification_editor.setPlainText(VERIFICATION_PROMPT)
+
+    def _pick_pad_model(self) -> None:
+        """Choose the pad-position model among every source's models."""
+        chosen = pick_model(self._pad_model or self._model, self, title="Posizioni pad")
+        if chosen:
+            self._pad_model = chosen
+            self.field_pad_model.setText(chosen)
+
+    def _pad_model_follows_main(self) -> None:
+        """Blank pad-position model: the single model reads the pad positions too."""
+        self._pad_model = ""
+        self.field_pad_model.setText("")
+
+    def pad_model(self) -> str:
+        """@brief The model of the dedicated pad-position reading.
+
+        @return The stripped identifier, or "" when it follows the single model.
+        """
+        return self._pad_model.strip()
 
     def verification_model(self):
         """@brief The single model (kept for callers that save the default per stage).

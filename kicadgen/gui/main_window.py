@@ -2133,6 +2133,7 @@ class MainWindow(QMainWindow):
             current_single_prompt=defaults.get("system_prompt_single"),
             current_numbering_prompt=defaults.get("numbering_prompt"),
             current_family=self._selected_family(),
+            current_pad_model=defaults.get("pad_model"),
         )
         self.i18n.retranslate_widgets(dialog)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
@@ -2144,7 +2145,7 @@ class MainWindow(QMainWindow):
                 vision_model=dialog.vision_model(), verification_model=dialog.verification_model(),
                 grounding_prompt=dialog.grounding_prompt(), verification_prompt=dialog.verification_prompt(),
                 system_prompt_single=dialog.single_prompt(),
-                numbering_prompt=dialog.numbering_prompt()))
+                numbering_prompt=dialog.numbering_prompt(), pad_model=dialog.pad_model()))
         except (ProfileError, sqlite3.Error, OSError) as exc:
             QMessageBox.warning(
                 self, self.i18n.text("Impostazioni non salvate"), str(exc))
@@ -5699,6 +5700,8 @@ class MainWindow(QMainWindow):
                            if self._selected_family() in _SINGLE_COMPONENT_FAMILIES
                            else profile['system_prompt']),
             numbering_prompt=profile.get('numbering_prompt') or None,
+            # Global, never per type (analysis_profiles.resolve); blank = `model`.
+            pad_model=profile.get('pad_model') or None,
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
         )

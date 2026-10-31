@@ -81,11 +81,15 @@ def test_an_outline_stop_inside_a_chain_or_a_short_value_list_is_refused():
 
 
 def test_chains_too_broken_to_place_a_pad_say_why():
-    """A quote missing from the only x chain leaves no pad: the note names the chain."""
+    """A quote missing from the only x chain leaves no pad: blocked, and the block names the chain.
+
+    Contract changed on 2026-10-30 (user): an unconfirmed reading blocks
+    instead of leaving a note; the reason is still named.
+    """
     broken = [dict(CHAINS[0], values=[2.0, 3.5, 2.0]), CHAINS[1]]
     data = _main(TRUE)
     apply_dedicated_pads(data, _reading(broken))
-    assert "catena x n. 1" in data["_numbering_note"] and "_pin_map_conflict" not in data
+    assert "catena x n. 1" in data["_pin_map_conflict"]
 
 
 # ── The comparison with the main answer ──────────────────────────────────
@@ -163,7 +167,11 @@ def test_pads_sharing_a_number_skip_the_chain_checks():
     chains = CHAINS + [{"axis": "x", "stops": ["edge", "S", "1"], "values": [0.5, 1.5]},
                        {"axis": "x", "stops": ["4", "S", "edge"], "values": [1.5, 0.5]}]
     apply_dedicated_pads(data, _reading(chains))
-    assert "_pin_map_conflict" not in data and "stesso numero (S)" in data["_numbering_note"]
+    # No false contradiction from the merged stop; the tabs have no y chain,
+    # so the reading confirms 4 pads of 5 and, since 2026-10-30, blocks.
+    assert "stesso numero (S)" in data["_pin_map_conflict"]
+    assert "non tornano" not in data["_pin_map_conflict"]
+    assert "solo 4 pad su 5" in data["_pin_map_conflict"]
 
 
 def test_a_malformed_redundant_chain_is_a_remark_not_a_block():

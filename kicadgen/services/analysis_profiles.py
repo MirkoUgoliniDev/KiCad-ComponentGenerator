@@ -18,7 +18,8 @@ from .messages import tx
 
 PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','grounding_prompt',
                   'verification_prompt','terminal_prompt','lead_prompt','crop_prompt',
-                  'crop_model','image_instructions','system_prompt_single','numbering_prompt')
+                  'crop_model','image_instructions','system_prompt_single','numbering_prompt',
+                  'pad_model')
 #: 'system_prompt_single' is the datasheet prompt of a single component
 #: (families single_tht/single_smd), 'numbering_prompt' the prompt of the
 #: dedicated pin-numbering call (both 2026-10-10, schema 6).
@@ -26,10 +27,15 @@ PROFILE_FIELDS = ('model','vision_model','verification_model','system_prompt','g
 #: 'crop_model' (HANDOFF 150) is the model of the per-body crop reading; its
 #: factory value is EMPTY and means «the model of the paid call on the
 #: photograph», so it is the one model field a blank value is valid for.
-MODEL_FIELDS = ('model', 'vision_model', 'verification_model', 'crop_model')
-#: Fields whose value may legitimately be blank: no type notes, or a crop
-#: reading that follows the photo model. Every prompt must carry a text.
-BLANK_ALLOWED_FIELDS = ('image_instructions', 'crop_model')
+#: 'pad_model' (2026-10-30, schema 7) is the model of the dedicated reading of
+#: the pad positions of a single component: the one exception to «one model
+#: for every analysis», authorised by the user after a bench where only a
+#: more capable model read dimensioned drawings right. Blank = the main model.
+MODEL_FIELDS = ('model', 'vision_model', 'verification_model', 'crop_model', 'pad_model')
+#: Fields whose value may legitimately be blank: no type notes, a crop
+#: reading that follows the photo model, or a pad reading that follows the
+#: main model. Every prompt must carry a text.
+BLANK_ALLOWED_FIELDS = ('image_instructions', 'crop_model', 'pad_model')
 #: Prompt fields sent with a photograph of the whole board: the type's image
 #: instructions are appended to each of them by ProfileStore.snapshot.
 #: 'crop_prompt' is deliberately absent (user decision 2026-09-28, HANDOFF 146
@@ -42,8 +48,10 @@ FAMILIES = {t.key:t.label for t in COMPONENT_TYPES}
 _MISSING = object()
 #: Database schema version. 2: verification_model; 3: translations table;
 #: 4: crop_prompt (per-body crop reading prompt, HANDOFF 146); 5: crop_model
-#: (model of that reading, blank = photo model, HANDOFF 150).
-SCHEMA_VERSION = 6
+#: (model of that reading, blank = photo model, HANDOFF 150); 6:
+#: system_prompt_single and numbering_prompt; 7: pad_model (model of the
+#: dedicated pad-position reading, 2026-10-30).
+SCHEMA_VERSION = 7
 #: Longest time (seconds) a store keeps trusting the last database file
 #: signature it read before reading it again (review 2026-10-29, E2). Every
 #: lookup used to stat, open and read the file header (~0.2 ms on Windows):
@@ -146,7 +154,7 @@ def factory_defaults():
     @return Mapping of default name to its factory value (a fresh dict).
     """
     from .datasheet_extractor import (DEFAULT_SYSTEM_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT,
-                                      DEFAULT_PIN_NUMBERING_PROMPT)
+                                      DEFAULT_PIN_NUMBERING_PROMPT, DEFAULT_PAD_POSITIONS_MODEL)
     from .openrouter import DEFAULT_MODEL
     from .photo_grounding import DEFAULT_VISION_MODEL, GROUNDING_PROMPT, VERIFICATION_PROMPT
     from .photo_terminals import PROMPT as TERMINAL_PROMPT
@@ -157,7 +165,7 @@ def factory_defaults():
         verification_prompt=VERIFICATION_PROMPT,terminal_prompt=TERMINAL_PROMPT,
         lead_prompt=LEAD_PROMPT,crop_prompt=CROP_PROMPT,crop_model='',image_instructions='',
         system_prompt_single=DEFAULT_SINGLE_SYSTEM_PROMPT,
-        numbering_prompt=DEFAULT_PIN_NUMBERING_PROMPT)
+        numbering_prompt=DEFAULT_PIN_NUMBERING_PROMPT, pad_model=DEFAULT_PAD_POSITIONS_MODEL)
 
 
 def bare_backup_name(value):
@@ -389,6 +397,14 @@ class ProfileStore:
                                (name, factory_defaults()[name]))
                 db.execute('PRAGMA user_version=6')
                 version = 6
+            if version == 6:
+                # Model of the dedicated pad-position reading (2026-10-30):
+                # the factory value becomes the global default, a row already
+                # there is never replaced, no per-type override is created.
+                db.execute('INSERT OR IGNORE INTO ai_defaults VALUES (?,?)',
+                           ('pad_model', factory_defaults()['pad_model']))
+                db.execute('PRAGMA user_version=7')
+                version = 7
             if version == SCHEMA_VERSION:
                 # Fail explicitly on a damaged schema; never silently reset user profiles.
                 db.execute('SELECT key,label,family,instructions,active,builtin,position FROM component_types LIMIT 1')
@@ -694,6 +710,9 @@ class ProfileStore:
             override of a MODEL_FIELDS entry is ignored (see
             ignored_model_overrides), every model field resolves to the global
             'model', and 'crop_model' to blank (= that same model).
+            'pad_model' keeps its GLOBAL value (user, 2026-10-30): the one
+            model chosen apart, for the dedicated pad-position reading; a
+            type's override of it is ignored like the other models.
             Served from the read cache (see _cached) while the database file
             is unchanged; a missing type is not cached and raises every time.
         """

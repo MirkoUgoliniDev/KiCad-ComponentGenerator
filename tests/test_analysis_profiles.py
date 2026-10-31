@@ -471,7 +471,38 @@ def test_v4_database_receives_a_blank_crop_model_and_keeps_every_user_text(tmp_p
     assert upgraded.overrides(key) == {'crop_prompt': 'type crop', 'vision_model': 'type/photo'}
     assert upgraded.resolve(key)['crop_model'] == ''
     with sqlite3.connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 6
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION == 7
+
+
+def test_v6_database_receives_the_pad_model_and_keeps_every_user_text(tmp_path):
+    """Schema 7 (2026-10-30): the pad-reading model arrives with its factory value."""
+    from kicadgen.services.datasheet_extractor import DEFAULT_PAD_POSITIONS_MODEL
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'system_prompt': 'my datasheet prompt', 'model': 'vendor/mine'})
+    before = {k: v for k, v in store.defaults().items() if k != 'pad_model'}
+    with sqlite3.connect(store.path) as db:
+        db.execute("DELETE FROM ai_defaults WHERE name='pad_model'")
+        db.execute('PRAGMA user_version=6')
+    upgraded = ProfileStore(store.path)
+    defaults = upgraded.defaults()
+    assert defaults['pad_model'] == DEFAULT_PAD_POSITIONS_MODEL
+    assert {k: v for k, v in defaults.items() if k != 'pad_model'} == before
+    # A global model, not forced to the main model like the photo models.
+    assert upgraded.resolve()['pad_model'] == DEFAULT_PAD_POSITIONS_MODEL
+
+
+def test_a_pad_model_the_user_set_survives_and_blank_is_allowed(tmp_path):
+    """Negative of the migration: an existing row is never replaced; blank means the main model."""
+    store = ProfileStore(tmp_path / 'ai.sqlite3')
+    store.save_defaults({'pad_model': ' vendor/reader '})
+    with sqlite3.connect(store.path) as db:
+        db.execute('PRAGMA user_version=6')
+    assert ProfileStore(store.path).defaults()['pad_model'] == 'vendor/reader'
+    store.save_defaults({'pad_model': ''})
+    assert store.defaults()['pad_model'] == ''
+    key = store.save_type(None, label='custom', family='single_tht',
+                          overrides={'pad_model': 'type/ignored'})
+    assert store.resolve(key)['pad_model'] == ''
 
 
 def test_a_crop_model_the_user_already_set_is_never_replaced(tmp_path):

@@ -210,7 +210,8 @@ def test_the_window_sends_the_single_prompt_for_a_single_part(window, monkeypatc
     monkeypatch.setattr(window, "_selected_documents", lambda: ([Path("quote.png")], None))
     monkeypatch.setattr(gui.ExtractWorker, "start", lambda self: None)
     window.profile_store.save_defaults(dict(system_prompt="BOARD", system_prompt_single="SINGLE",
-                                            numbering_prompt="NUMBERING"))
+                                            numbering_prompt="NUMBERING",
+                                            pad_model="vendor/reader"))
     # This test is about which prompt the window sends, not about the photo
     # detector. The default detector (yolo_smd) validates its weights before
     # the extraction starts and, where the git-ignored model files are absent
@@ -223,6 +224,7 @@ def test_the_window_sends_the_single_prompt_for_a_single_part(window, monkeypatc
     window._extract_with_ai()
     assert window._extract_worker.system_prompt == "SINGLE"
     assert window._extract_worker.numbering_prompt == "NUMBERING"
+    assert window._extract_worker.pad_model == "vendor/reader"
     window._extract_worker = None
     combo.setCurrentIndex(combo.findData("aggregate_tht"))
     window._extract_with_ai()
@@ -272,16 +274,17 @@ def test_units_are_reconciled_before_comparing():
 def test_a_subset_or_a_different_view_is_said():
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"], "4": RELAY["4"], "2": RELAY["2"]}))
-    assert "solo per 3 pad su 5" in data["_numbering_note"] and "_pin_map_conflict" not in data
+    # Since 2026-10-30 (user) a partial confirmation blocks: two pads unchecked.
+    assert "solo 3 pad su 5" in data["_pin_map_conflict"]
     data = _main_with_pads(RELAY, view="top")
     apply_dedicated_pads(data, _pad_reading(RELAY, view="bottom"))
     assert "viste diverse" in data["_pin_map_conflict"]
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"]}))
-    assert "meno di due" in data["_numbering_note"]
+    assert "meno di due" in data["_pin_map_conflict"]
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, {"view": "unknown", "pads": {}, "notes": "", "failed": "boom"})
-    assert "chiamata non riuscita: boom" in data["_numbering_note"]
+    assert "chiamata non riuscita: boom" in data["_pin_map_conflict"]
 
 
 def test_the_reader_converts_the_declared_unit_and_drops_unusable_chains(tmp_path):
@@ -316,7 +319,97 @@ def test_end_to_end_a_single_part_with_pads_gets_the_second_reading(offline, mon
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["hires"]})
-    assert call.call_count == 1 and params.pin_map_conflict is None, "no drawing role: no check"
+    # No drawing role: no second reading is possible, and since 2026-10-31
+    # (adversarial review G1) positions nothing confirms block anyway.
+    assert call.call_count == 1, "no drawing role: no dedicated call"
+    assert params.pin_map_conflict and "nessun disegno in immagine" in params.pin_map_conflict
+
+
+_CHAINS_ANSWER = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
+    {"axis": "x", "stops": ["1", "5", "2"], "values": [5.08, 12.7]},
+    {"axis": "y", "stops": ["1,2", "5"], "values": [2.54]}]}
+
+
+def test_the_pad_positions_are_read_by_the_pad_model(offline, monkeypatch, tmp_path):
+    """Profile field 'pad_model' (user, 2026-10-30): only the dedicated reading changes model."""
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    monkeypatch.setattr(ext, "call_tool", call)
+    logs = []
+    ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
+                                  component_family="single_tht", pad_model="vendor/reader",
+                                  document_roles={"quote.png": ["top"]}, progress=logs.append)
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/reader"]
+    assert call.call_args_list[1].kwargs["max_tokens"] == ext.PAD_POSITIONS_MAX_TOKENS
+    assert any("con vendor/reader" in line for line in logs)
+
+
+@pytest.mark.parametrize("pad_model", [None, "", "   "])
+def test_a_blank_pad_model_follows_the_main_model(offline, monkeypatch, tmp_path, pad_model):
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    monkeypatch.setattr(ext, "call_tool", call)
+    ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
+                                  component_family="single_tht", pad_model=pad_model,
+                                  document_roles={"quote.png": ["top"]})
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/main"]
+
+
+def test_a_pad_model_whose_source_is_not_ready_falls_back_to_the_main_model(
+        offline, monkeypatch, tmp_path):
+    """Another provider without a key never refuses the run: the main model reads, the log says why."""
+    from kicadgen.services import providers
+    real = providers.ensure_providers_ready
+
+    def ready(models, progress=None, **kwargs):
+        if list(models) == ["deepseek-api/reader"]:
+            raise providers.ProviderError("no key")
+        return real(models, progress, **kwargs)
+
+    monkeypatch.setattr(providers, "ensure_providers_ready", ready)
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    monkeypatch.setattr(ext, "call_tool", call)
+    logs = []
+    ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
+                                  component_family="single_tht", pad_model="deepseek-api/reader",
+                                  document_roles={"quote.png": ["top"]}, progress=logs.append)
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/main"]
+    assert any("deepseek-api/reader" in line and "no key" in line for line in logs)
+
+
+def test_a_board_never_checks_the_pad_model(offline, monkeypatch):
+    """Negative: no dedicated pad reading outside single parts, so no provider check either."""
+    from kicadgen.services import providers
+    checked = []
+    monkeypatch.setattr(providers, "ensure_providers_ready",
+                        lambda models, progress=None, **kwargs: checked.append(list(models)))
+    assert ext._pad_reading_model("deepseek-api/reader", "vendor/main", "aggregate_tht",
+                                  None, None) == "vendor/main"
+    assert checked == []
+    assert ext._pad_reading_model("deepseek-api/reader", "vendor/main", "single_smd",
+                                  None, None) == "deepseek-api/reader"
+    assert checked == [["deepseek-api/reader"]]
+
+
+def test_the_settings_dialog_edits_the_pad_model(qapp, monkeypatch):
+    from kicadgen.gui import settings_dialog
+    from kicadgen.gui.settings_dialog import LlmSettingsDialog
+    d = LlmSettingsDialog("b", "deepseek-api/deepseek-flash")
+    try:
+        assert d.pad_model() == ext.DEFAULT_PAD_POSITIONS_MODEL, "factory default when unset"
+        monkeypatch.setattr(settings_dialog, "pick_model", lambda *a, **k: "vendor/reader")
+        d._pick_pad_model()
+        assert d.pad_model() == "vendor/reader" and d.model() == "deepseek-api/deepseek-flash"
+        d._pad_model_follows_main()
+        assert d.pad_model() == ""
+        d.tabs.setCurrentIndex(0)
+        d._restore_defaults()
+        assert d.pad_model() == ext.DEFAULT_PAD_POSITIONS_MODEL
+    finally:
+        d.deleteLater()
+    d = LlmSettingsDialog("b", "vendor/m", current_pad_model="")
+    try:
+        assert d.pad_model() == "", "a blank saved value stays blank"
+    finally:
+        d.deleteLater()
 
 
 def test_the_pad_prompt_and_tool_carry_no_sample_data():

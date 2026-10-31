@@ -163,6 +163,10 @@ BACKOFF_BASE_S = 2.0
 #: Upper bound of any single wait, including a provider Retry-After: a longer
 #: pause would look like a hang in the GUI, and failing is then clearer.
 BACKOFF_CAP_S = 30.0
+#: Compatibility retries of one call, each in a less specific `tool_choice`
+#: form (openrouter._call_tool: «required», then «auto»). They share the
+#: MAX_ATTEMPTS budget with the transient retries.
+COMPATIBILITY_LEVELS = 2
 #: Granularity with which a cancellation is noticed during a backoff wait.
 _CANCEL_POLL_S = 0.25
 
@@ -265,9 +269,9 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         here: an error marked `retryable` (transient: 408/409/429/5xx) is
         retried with the SAME request up to MAX_ATTEMPTS attempts, after a
         bounded exponential backoff that honours the provider Retry-After; an
-        error marked `compatibility` (a 400 about the tool_choice form) gets one
-        immediate retry in the portable required-tool form when the callable
-        supports it. Any other error, a plain 400 included, is not retried:
+        error marked `compatibility` (a 400 about the tool_choice form) gets up
+        to COMPATIBILITY_LEVELS immediate retries, each in a less specific
+        form (`compatibility_retry` 1, then 2), when the callable supports it. Any other error, a plain 400 included, is not retried:
         repeating an invalid request only pays for the same refusal.
     """
     if progress is None and cancel is None:
@@ -346,7 +350,7 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         before = _usage_snapshot()
         attempt_kwargs = kwargs
         attempt = 1
-        compatibility_used = False
+        compatibility_level = 0
         while True:
             watch = _CancelWatch(cancel) if cancel is not None else None
             try:
@@ -366,7 +370,8 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                 if isinstance(exc, CallCancelled):
                     raise
                 compatibility = (getattr(exc, "compatibility", False) is True
-                                 and not compatibility_used and signature is not None
+                                 and compatibility_level < COMPATIBILITY_LEVELS
+                                 and signature is not None
                                  and "compatibility_retry" in signature.parameters)
                 transient = getattr(exc, "retryable", False) is True
                 if attempt >= MAX_ATTEMPTS or not (compatibility or transient):
@@ -376,8 +381,9 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
                     raise
                 attempt += 1
                 if compatibility:
-                    compatibility_used = True
-                    attempt_kwargs = dict(attempt_kwargs, compatibility_retry=True)
+                    compatibility_level += 1
+                    # 1 is True for the callables that only know one form.
+                    attempt_kwargs = dict(attempt_kwargs, compatibility_retry=compatibility_level)
                     emit(f"AI_CALL_RETRY {context} attempt={attempt} reason=compatibility")
                     check_cancel()
                 else:
