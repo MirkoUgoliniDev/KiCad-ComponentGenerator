@@ -1603,8 +1603,8 @@ def _call_tool(
         drawings, which are images inside the PDF), whereas the other
         OpenRouter engines would extract only its text.
     """
-    from .providers import (DEEPSEEK_CHAT_URL, PROVIDER_DEEPSEEK, ProviderError,
-                            deepseek_request, provider_model_name, provider_of)
+    from .providers import (DEEPSEEK_BETA_CHAT_URL, DEEPSEEK_CHAT_URL, PROVIDER_DEEPSEEK,
+                            ProviderError, deepseek_request, provider_model_name, provider_of)
     body: dict[str, Any] = {
         "model": provider_model_name(model),
         "max_tokens": max_tokens,
@@ -1628,9 +1628,28 @@ def _call_tool(
         # Always off (user, 2026-10-02: the «Ragionamento DeepSeek» (DeepSeek
         # reasoning) checkbox of point 161 was removed).
         body["thinking"] = {"type": "disabled"}
+        # Without a schema-enforcing decoder deepseek-flash broke the SHAPE of
+        # 25-45 % of the single-part answers (pads dropped, or one pad's
+        # fields flattened to the top level; real calls of 2026-10-31); in
+        # strict mode 1 of 16. Used whenever the schema converts losslessly.
+        strict = strict_tool(tool)
+        if strict is not None:
+            body["tools"] = [strict]
         sent_at = _begin_request(model)
         try:
-            payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
+            try:
+                payload = deepseek_request(DEEPSEEK_BETA_CHAT_URL if strict is not None
+                                           else DEEPSEEK_CHAT_URL, body,
+                                           timeout=_HTTP_TIMEOUT_CHAT_S)
+            except ProviderError as exc:
+                if strict is None or exc.http_status not in _STRICT_REFUSED_STATUSES:
+                    raise
+                # The beta endpoint refused the strict request (schema it does
+                # not take, endpoint changed or withdrawn): refused, not
+                # billed. The same request once more in normal mode.
+                strict = None
+                body["tools"] = [tool]
+                payload = deepseek_request(DEEPSEEK_CHAT_URL, body, timeout=_HTTP_TIMEOUT_CHAT_S)
         except (ProviderError, RequestCancelled) as exc:
             if exc.possibly_billed:
                 # Sent, answer lost: maybe billed, never silently free (B10).
@@ -1649,7 +1668,8 @@ def _call_tool(
             if isinstance(usage, dict) and cost is not None:
                 usage["cost"], usage["cost_source"] = cost, "token_price"
         _record_usage(payload)
-        return tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
+        arguments = tool_arguments(payload, tool["function"]["name"], provider="DeepSeek")
+        return _drop_nulls(arguments) if strict is not None else arguments
     if has_pdf:
         body["plugins"] = [{"id": "file-parser", "pdf": {"engine": pdf_engine}}]
     # Without this flag the answer carries the tokens but not the cost, and
@@ -1684,6 +1704,99 @@ def _call_tool(
     # a cost tally that ignores the failed attempts is false.
     _record_usage(payload)
     return tool_arguments(payload, tool["function"]["name"])
+
+
+#: JSON-schema keywords a schema node may use to be converted to DeepSeek
+#: strict mode (its documented support: types, properties/required, items,
+#: enum, numeric bounds, pattern, format, const, default). Anything else --
+#: lengths, combinators, references, nullable, free-key maps -- would be
+#: dropped or refused, so such a schema is sent in normal mode, as before.
+_STRICT_KEYWORDS = frozenset({
+    "type", "description", "properties", "required", "additionalProperties", "items",
+    "enum", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "pattern", "format", "const", "default", "title"})
+
+#: HTTP statuses of a refused strict request worth one normal-mode resend
+#: (bad request, endpoint not found, unprocessable schema). Key, balance and
+#: rate errors (401, 402, 429) would fail the same way on the normal endpoint.
+_STRICT_REFUSED_STATUSES = frozenset({400, 404, 422})
+
+
+def strict_tool(tool: dict) -> Optional[dict]:
+    """@brief Convert an OpenAI function tool to DeepSeek strict mode, when it is lossless.
+
+    @param tool OpenAI-format tool (``{"type": "function", "function": {...}}``).
+    @return A new tool with ``strict: true`` whose parameters list every
+        property as required but nullable (``anyOf[schema, null]``) and set
+        ``additionalProperties: false`` on every object; None when the schema
+        cannot be expressed that way without losing a declared constraint.
+    @note DeepSeek strict mode (beta endpoint) enforces the schema while the
+        answer is generated, so its SHAPE is guaranteed (no field outside the
+        schema, no pad flattened to the top level); its rules: every property
+        required, additionalProperties false. Every property is nullable,
+        the originally required ones too: a value the model cannot read stays
+        expressible as «left out» instead of a number forced by the decoder,
+        and the caller's validators keep judging required fields as before.
+        A schema that already uses null (type, enum), a list of types, a
+        free-key object or a keyword outside _STRICT_KEYWORDS is left alone:
+        a null in the answer then always means «field left out», which
+        `_drop_nulls` restores.
+    """
+    function = tool.get("function") if isinstance(tool, dict) else None
+    if not isinstance(function, dict) or not isinstance(function.get("parameters"), dict):
+        return None
+    try:
+        parameters = _strict_schema(function["parameters"], optional=False)
+    except _NotStrict:
+        return None
+    return {**tool, "function": {**function, "parameters": parameters, "strict": True}}
+
+
+class _NotStrict(Exception):
+    """The schema cannot be converted to strict mode without loss."""
+
+
+def _strict_schema(schema, optional: bool):
+    """Strict-mode copy of one schema node; raises _NotStrict when not lossless."""
+    if not isinstance(schema, dict) or set(schema) - _STRICT_KEYWORDS:
+        raise _NotStrict()
+    kind = schema.get("type")
+    if not isinstance(kind, str) or kind == "null" or None in (schema.get("enum") or ()):
+        raise _NotStrict()
+    node = dict(schema)
+    if kind == "object":
+        properties = schema.get("properties")
+        if not isinstance(properties, dict) or not properties or schema.get(
+                "additionalProperties", False) is not False:
+            # A free-key map cannot list its keys as required.
+            raise _NotStrict()
+        # Every property nullable: see strict_tool, a forced value would look read.
+        node["properties"] = {name: _strict_schema(child, optional=True)
+                              for name, child in properties.items()}
+        node["required"] = list(properties)
+        node["additionalProperties"] = False
+    elif kind == "array":
+        node["items"] = _strict_schema(schema.get("items"), optional=False)
+    if not optional:
+        return node
+    description = node.pop("description", None)
+    wrapped = {"anyOf": [node, {"type": "null"}]}
+    if description is not None:
+        wrapped["description"] = description
+    return wrapped
+
+
+def _drop_nulls(value):
+    """Remove the nulls strict mode puts in place of omitted optional fields.
+
+    Only used on answers to a schema `strict_tool` converted, which had no
+    null of its own: every null there is an optional field left out.
+    """
+    if isinstance(value, dict):
+        return {key: _drop_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(item) for item in value]
+    return value
 
 
 # inspect.signature(call_tool) shows the real parameters (ai_diagnostics

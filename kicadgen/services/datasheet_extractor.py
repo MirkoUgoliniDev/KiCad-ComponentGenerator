@@ -2288,13 +2288,14 @@ def single_answer_to_data(answer: dict) -> dict:
         `package_geometry` (family unknown, origin from pads_origin, the
         declared view as source_view), `grid` is flattened into the matrix
         fields with layout «matrix».
-    @throws ExtractionError When the answer has neither pads nor grid, or
-        both, or is not an object: nothing to build a footprint from.
+    @throws AnswerShapeError When the answer has neither pads nor grid, or
+        both, or is not an object: nothing to build a footprint from, and
+        the same request may come back well formed.
     @note Through-hole pads with one size are circular: pad_length = pad_width
         = the diameter the model gave, shape circle unless it said otherwise.
     """
     if not isinstance(answer, dict):
-        raise ExtractionError(tx("Risposta AI non strutturata."))
+        raise AnswerShapeError(tx("Risposta AI non strutturata."), raw=answer)
     pads = answer.get("pads")
     grid = answer.get("grid")
     has_pads = isinstance(pads, (list, tuple)) and len(pads) > 0
@@ -2305,9 +2306,9 @@ def single_answer_to_data(answer: dict) -> dict:
         # the schema (extra properties are not refused): taken as it is.
         return dict(answer)
     if has_pads == has_grid:
-        raise ExtractionError(tx(
+        raise AnswerShapeError(tx(
             "La risposta deve descrivere i terminali in pads OPPURE una griglia in grid "
-            "(trovati: pads={pads}, grid={grid}).", pads=has_pads, grid=has_grid))
+            "(trovati: pads={pads}, grid={grid}).", pads=has_pads, grid=has_grid), raw=answer)
     data = {"layout": "matrix"}
     for key in ("name", "description", "tags", "drawing_unit", "contacts_view", "body_length_mm",
                 "body_width_mm", "body_height_mm", "pin_length_3d_mm", "lead_diameter_mm",
@@ -2690,6 +2691,44 @@ class ExtractionCancelled(ExtractionError, CallCancelled):
     """
 
 
+class AnswerShapeError(ExtractionError):
+    """@brief The model's tool arguments parsed, but their shape contradicts the tool schema.
+
+    @param message Translated diagnostic text.
+    @param raw The arguments as the model sent them, for the AI log.
+    @note Kept apart from a wrong VALUE: the shape of one answer can come back
+        broken at random (deepseek-flash once flattened one pad to the top
+        level, pads="1" beside x_mm/y_mm, on a request answered well twice
+        out of three; 2026-10-31), so the same request earns the one paid
+        retry given to unreadable arguments. A well-formed answer with wrong
+        numbers is not this error and is never retried blindly.
+    """
+
+    def __init__(self, message: str, *, raw=None):
+        """@brief Build the error, keeping the unusable arguments for the log.
+
+        @param message Translated diagnostic text.
+        @param raw The arguments as the model sent them (any JSON value).
+        """
+        super().__init__(message)
+        import json
+        try:
+            self.raw = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=repr)
+        except (TypeError, ValueError):
+            self.raw = repr(raw)
+
+
+#: Text appended to the retried request after an AnswerShapeError: it restates
+#: the structural rule of `report_single_component` the answer broke, never a
+#: value, so it holds for any component.
+_SHAPE_CORRECTION = (
+    "CORREZIONE: la risposta precedente non rispettava lo schema dello strumento. Richiama "
+    "lo strumento con TUTTI i campi: pads e' una LISTA con un oggetto per ciascun terminale "
+    "(number, x_mm, y_mm, pad_type, pad_length_mm, pad_width_mm, drill_mm se passante), mai i "
+    "campi di un singolo pad al primo livello; grid solo se i terminali stanno su una griglia "
+    "a passo costante, e mai insieme a pads.")
+
+
 #: Bound of the rejected main answer written to the log, in characters: the
 #: tool arguments of one component are a few kB, so this keeps every real
 #: answer whole while a runaway one cannot flood the log.
@@ -2722,8 +2761,10 @@ def _log_rejected_response(data, exc: ExtractionError, progress) -> None:
         pass
 
 
-def _log_unreadable_arguments(exc: ToolArgumentsError, progress, attempt: int) -> None:
-    """Write what the model sent when its tool arguments did not parse.
+def _log_unreadable_arguments(exc, progress, attempt: int) -> None:
+    """Write what the model sent when its tool arguments did not parse or broke the schema shape.
+
+    `exc` is a ToolArgumentsError or an AnswerShapeError; both carry `raw`.
 
     One machine line in the AI log of the project (AI_RESPONSE_UNREADABLE
     attempt=N ...), next to AI_RESPONSE_REJECTED: before, the text was lost
@@ -4283,18 +4324,22 @@ def extract_pin_header_params(
 
     single_part = component_family in SINGLE_COMPONENT_FAMILIES
 
-    def main_call():
+    def main_call(correction=None):
         """The paid reading of the documents (same request on a retry).
 
         A single part gets its own prompt and tool (pads one by one); the
         answer is brought to the main shape right here, so a retry and
-        every later step see one shape only.
+        every later step see one shape only. `correction`, when given, is
+        one more text block at the end of the request telling the model
+        which part of the schema its previous answer broke.
         """
+        blocks = content_blocks if correction is None else [
+            *content_blocks, {"type": "text", "text": correction}]
         answer = diagnostic_call(
             model=model or DEFAULT_MODEL,
             system_prompt=system_prompt or (DEFAULT_SINGLE_SYSTEM_PROMPT if single_part
                                             else _SYSTEM_PROMPT),
-            content_blocks=content_blocks,
+            content_blocks=blocks,
             tool=_single_component_tool() if single_part else _openai_tool(),
             max_tokens=16384,
             has_pdf=has_pdf,
@@ -4303,26 +4348,41 @@ def extract_pin_header_params(
     try:
         try:
             data = main_call()
-        except ToolArgumentsError as exc:
+        except (ToolArgumentsError, AnswerShapeError) as exc:
             # The model answered with the right tool, a complete answer (a
-            # truncated one does not get here), but unreadable arguments: the
-            # SAME request may come back readable. A single new paid attempt,
-            # like the global inventory (HANDOFF 137; user, 2026-10-02:
-            # «ok procedi» (ok, go ahead)). Refusals, network and credit do not pass here.
+            # truncated one does not get here), but unreadable arguments or
+            # arguments whose shape contradicts the schema: the SAME request
+            # may come back well formed. A single new paid attempt, like the
+            # global inventory (HANDOFF 137; user, 2026-10-02: «ok procedi»
+            # (ok, go ahead)). Refusals, network and credit do not pass here.
             _log_unreadable_arguments(exc, progress, 1)
             check_cancel()
             if progress:
                 progress(tx("Analisi dei documenti: la risposta del modello non era un JSON "
                             "leggibile (testo nel log AI, riga AI_RESPONSE_UNREADABLE); un solo "
-                            "nuovo tentativo a pagamento con la stessa richiesta."))
+                            "nuovo tentativo a pagamento con la stessa richiesta.")
+                         if isinstance(exc, ToolArgumentsError) else
+                         tx("Analisi dei documenti: la risposta del modello non aveva la forma "
+                            "richiesta ({exc}; testo nel log AI, riga AI_RESPONSE_UNREADABLE); un "
+                            "solo nuovo tentativo a pagamento, con la richiesta e l'indicazione "
+                            "dell'errore.", exc=exc))
             try:
-                data = main_call()
+                # A broken shape is repeated as often as not when the SAME
+                # request is sent again (deepseek-flash, real calls of
+                # 2026-10-31): the retry names the schema rule it broke.
+                data = main_call(_SHAPE_CORRECTION if isinstance(exc, AnswerShapeError) else None)
             except ToolArgumentsError as second:
                 _log_unreadable_arguments(second, progress, 2)
                 raise ExtractionError(
                     tx("Anche il nuovo tentativo ha restituito argomenti illeggibili; il testo "
                        "delle due risposte e' nel log AI (righe AI_RESPONSE_UNREADABLE). {exc}",
                        exc=second)) from second
+            except AnswerShapeError as second:
+                _log_unreadable_arguments(second, progress, 2)
+                raise ExtractionError(
+                    tx("Anche il nuovo tentativo ha restituito una risposta senza la forma "
+                       "richiesta; il testo delle due risposte e' nel log AI (righe "
+                       "AI_RESPONSE_UNREADABLE). {exc}", exc=second)) from second
             if progress:
                 progress(tx("Analisi dei documenti: il nuovo tentativo e' leggibile; si usa quello."))
     except OpenRouterError as exc:

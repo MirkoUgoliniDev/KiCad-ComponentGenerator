@@ -1,4 +1,6 @@
 """@brief DeepSeek's own API as a second provider (user, 2026-09-27), offline."""
+import copy
+import json
 import math
 import os
 
@@ -669,3 +671,150 @@ def test_thinking_is_always_off_and_the_named_tool_choice_stays(monkeypatch):
     assert sent["body"]["thinking"] == {"type": "disabled"}
     assert sent["body"]["tool_choice"]["function"]["name"] == "report"
     assert "reasoning_effort" not in sent["body"]
+
+
+# ── DeepSeek strict mode (2026-10-31) ─────────────────────────────────────
+
+_SHAPED = {"type": "function", "function": {"name": "report", "parameters": {
+    "type": "object", "required": ["unit"],
+    "properties": {"unit": {"type": "string", "enum": ["mm", "inch"]},
+                   "pads": {"type": "array", "description": "one per terminal", "items": {
+                       "type": "object", "required": ["number"],
+                       "properties": {"number": {"type": "string"},
+                                      "drill_mm": {"type": "number", "exclusiveMinimum": 0}}}}}}}}
+
+
+def test_a_lossless_schema_becomes_strict_with_every_field_nullable():
+    """Required fields too: the decoder must never force a value the model could not read."""
+    strict = openrouter.strict_tool(_SHAPED)
+    params = strict["function"]["parameters"]
+    assert strict["function"]["strict"] is True
+    assert params["required"] == ["unit", "pads"] and params["additionalProperties"] is False
+    assert params["properties"]["unit"] == {"anyOf": [
+        {"type": "string", "enum": ["mm", "inch"]}, {"type": "null"}]}
+    pads = params["properties"]["pads"]
+    assert pads["description"] == "one per terminal" and pads["anyOf"][1] == {"type": "null"}
+    item = pads["anyOf"][0]["items"]
+    assert item["required"] == ["number", "drill_mm"] and item["additionalProperties"] is False
+    assert item["properties"]["number"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert item["properties"]["drill_mm"]["anyOf"][0] == {"type": "number", "exclusiveMinimum": 0}
+    assert "strict" not in _SHAPED["function"], "the caller's tool is not modified"
+
+
+@pytest.mark.parametrize("change", [
+    {"bbox": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}},
+    {"flag": {"type": ["boolean", "null"]}},
+    {"map": {"type": "object", "additionalProperties": {"type": "string"}}},
+    {"free": {"type": "object"}},
+    {"either": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+    {"choice": {"type": "string", "enum": ["a", None]}},
+    {"maybe": {"type": "number", "nullable": True}},
+    {"sized": {"type": "object", "properties": {"a": {"type": "string"}}, "minProperties": 1}},
+])
+def test_a_schema_that_would_lose_a_constraint_or_has_its_own_null_stays_normal(change):
+    """Negative: a declared length, an explicit null or a free-key map is never rewritten."""
+    tool = copy.deepcopy(_SHAPED)
+    tool["function"]["parameters"]["properties"].update(change)
+    assert openrouter.strict_tool(tool) is None
+
+
+def _deepseek_answer(arguments):
+    return {"choices": [{"message": {"tool_calls": [{"function": {
+        "name": "report", "arguments": arguments}}]}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2}}
+
+
+def test_a_strict_call_goes_to_the_beta_endpoint_and_its_nulls_mean_omitted(monkeypatch):
+    sent = {}
+
+    def fake(url, body=None, timeout=None):
+        sent.update(url=url, body=body)
+        return _deepseek_answer('{"unit": "mm", "pads": [{"number": "1", "drill_mm": null}]}')
+    monkeypatch.setattr(providers, "deepseek_request", fake)
+    result = openrouter.call_tool("deepseek-api/deepseek-flash", "sys",
+                                  [{"type": "text", "text": "hi"}], _SHAPED)
+    assert sent["url"] == providers.DEEPSEEK_BETA_CHAT_URL
+    assert sent["body"]["tools"][0]["function"]["strict"] is True
+    assert sent["body"]["tool_choice"]["function"]["name"] == "report"
+    assert result == {"unit": "mm", "pads": [{"number": "1"}]}
+
+
+def test_a_non_strict_call_keeps_the_answer_nulls_and_the_normal_endpoint(monkeypatch):
+    """Negative: a schema with its own null keeps null as an answer value."""
+    tool = copy.deepcopy(_SHAPED)
+    tool["function"]["parameters"]["properties"]["flag"] = {"type": ["boolean", "null"]}
+    sent = {}
+
+    def fake(url, body=None, timeout=None):
+        sent.update(url=url, body=body)
+        return _deepseek_answer('{"unit": "mm", "flag": null}')
+    monkeypatch.setattr(providers, "deepseek_request", fake)
+    result = openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [], tool)
+    assert sent["url"] == providers.DEEPSEEK_CHAT_URL and sent["body"]["tools"] == [tool]
+    assert result == {"unit": "mm", "flag": None}
+
+
+def test_the_strict_rewrite_is_deepseek_only(monkeypatch):
+    """Negative: OpenRouter receives the caller's schema unchanged."""
+    bodies = []
+    monkeypatch.setattr(openrouter, "_post_chat", lambda request, blocks: (
+        bodies.append(json.loads(request.data)) or _deepseek_answer('{"unit": "mm"}')))
+    monkeypatch.setattr(openrouter, "api_key", lambda: "test-key")
+    openrouter.call_tool("openai/gpt-test", "sys", [], _SHAPED)
+    assert bodies[0]["tools"] == [_SHAPED]
+
+
+@pytest.mark.parametrize("builder", [
+    "kicadgen.services.datasheet_extractor:_single_component_tool",
+    "kicadgen.services.datasheet_extractor:_openai_tool",
+    "kicadgen.services.datasheet_extractor:_pin_numbering_tool",
+    "kicadgen.services.datasheet_extractor:_pad_positions_tool",
+])
+def test_the_document_tools_are_sent_strict(builder):
+    """The document readings whose shape broke are the ones strict mode protects
+    (each accepted by DeepSeek's beta endpoint in a real call of 2026-10-31)."""
+    import importlib
+    module, name = builder.split(":")
+    assert openrouter.strict_tool(getattr(importlib.import_module(module), name)()) is not None
+
+
+def test_a_refused_strict_request_is_sent_once_more_in_normal_mode(monkeypatch):
+    """The beta endpoint refusing a schema (or gone) is not billed: one normal resend."""
+    sent = []
+
+    def fake(url, body=None, timeout=None):
+        sent.append((url, copy.deepcopy(body["tools"][0])))
+        if url == providers.DEEPSEEK_BETA_CHAT_URL:
+            raise providers.ProviderError("DeepSeek ha risposto con un errore: HTTP 400",
+                                          http_status=400)
+        return _deepseek_answer('{"unit": "mm", "pads": null}')
+    monkeypatch.setattr(providers, "deepseek_request", fake)
+    result = openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [], _SHAPED)
+    assert [url for url, _ in sent] == [providers.DEEPSEEK_BETA_CHAT_URL, providers.DEEPSEEK_CHAT_URL]
+    assert sent[1][1] == _SHAPED
+    assert result == {"unit": "mm", "pads": None}, "normal mode: the answer is not rewritten"
+
+
+@pytest.mark.parametrize("status", [401, 402, 429, 500])
+def test_key_balance_and_rate_errors_are_not_resent(monkeypatch, status):
+    """Negative: they would fail the same way on the normal endpoint."""
+    calls = []
+
+    def fake(url, body=None, timeout=None):
+        calls.append(url)
+        raise providers.ProviderError(f"HTTP {status}", http_status=status)
+    monkeypatch.setattr(providers, "deepseek_request", fake)
+    with pytest.raises(providers.ProviderError):
+        openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [], _SHAPED)
+    assert calls == [providers.DEEPSEEK_BETA_CHAT_URL]
+
+
+def test_the_ai_log_says_when_a_call_goes_strict():
+    from kicadgen.services import ai_diagnostics
+    _, strict_lines = ai_diagnostics._prompt_snapshot({
+        "model": "deepseek-api/deepseek-flash", "system_prompt": "s", "content_blocks": [],
+        "tool": _SHAPED})
+    _, normal_lines = ai_diagnostics._prompt_snapshot({
+        "model": "openai/gpt-test", "system_prompt": "s", "content_blocks": [], "tool": _SHAPED})
+    assert "AI_CALL_PROMPT_STRICT deepseek-beta" in strict_lines
+    assert not any(line.startswith("AI_CALL_PROMPT_STRICT") for line in normal_lines)

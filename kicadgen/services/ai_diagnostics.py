@@ -115,7 +115,22 @@ def _prompt_snapshot(arguments: dict) -> tuple[str, list[str]]:
                      json.dumps(block, ensure_ascii=False, sort_keys=True))
     lines.append("AI_CALL_PROMPT_TOOL " + json.dumps(tool_value, ensure_ascii=False, sort_keys=True))
     lines.append("AI_CALL_PROMPT_OPTIONS " + json.dumps(options, ensure_ascii=False, sort_keys=True))
+    if _sent_strict(arguments.get("model"), tool):
+        # The schema above is the caller's; DeepSeek receives its strict form
+        # on the beta endpoint (normal mode again only if that is refused).
+        lines.append("AI_CALL_PROMPT_STRICT deepseek-beta")
     return digest, lines
+
+
+def _sent_strict(model, tool) -> bool:
+    """Whether the call is sent to DeepSeek in strict mode (see openrouter.strict_tool)."""
+    try:
+        from .openrouter import strict_tool
+        from .providers import PROVIDER_DEEPSEEK, provider_of
+        return (isinstance(tool, dict) and provider_of(str(model or "")) == PROVIDER_DEEPSEEK
+                and strict_tool(tool) is not None)
+    except Exception:  # noqa: BLE001 - a log line must never break the call
+        return False
 
 
 def _usage_snapshot():

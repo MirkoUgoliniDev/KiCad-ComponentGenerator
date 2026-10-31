@@ -106,6 +106,57 @@ def test_a_single_part_calls_the_dedicated_tool_with_its_prompt(offline, monkeyp
     assert params.lead_diameter_mm == pytest.approx(0.508)
 
 
+def _flattened_pad():
+    """The broken shape deepseek-flash returned once out of three identical
+    requests (2026-10-31): one pad's fields at the top level, pads a string."""
+    return dict(drawing_unit="mm", contacts_view="bottom", confidence="high", pads="1",
+                pads_origin="custom", x_mm=0.0, y_mm=0.0, drill_mm=1.2, pad_type="thru_hole",
+                pad_length_mm=2.2, pad_width_mm=2.2, shape="circle")
+
+
+def test_a_broken_answer_shape_is_logged_and_paid_once_more(offline, monkeypatch, tmp_path):
+    """Positive: the same request comes back well formed and is used."""
+    call = Mock(side_effect=[_flattened_pad(), _single()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    lines = []
+    params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           document_roles={"quote.png": ["hires"]},
+                                           progress=lines.append)
+    assert call.call_count == 2
+    first, second = (c.kwargs for c in call.call_args_list)
+    assert {k: v for k, v in first.items() if k != "content_blocks"} == {
+        k: v for k, v in second.items() if k != "content_blocks"}
+    # Same request plus one block naming the broken schema rule, no value.
+    assert second["content_blocks"][:-1] == first["content_blocks"]
+    assert second["content_blocks"][-1] == {"type": "text", "text": ext._SHAPE_CORRECTION}
+    assert any(line.startswith("AI_RESPONSE_UNREADABLE attempt=1 {") and '"pads": "1"' in line
+               for line in lines)
+    assert [p["number"] for p in params.package_geometry["pins"]] == ["1", "2", "5"]
+
+
+def test_two_broken_answer_shapes_stop_without_a_third_call(offline, monkeypatch, tmp_path):
+    """Negative: one retry only, both answers in the log."""
+    call = Mock(side_effect=[_flattened_pad(), _single(pads=[]), _single()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    lines = []
+    with pytest.raises(ExtractionError, match="Anche il nuovo tentativo.*pads OPPURE"):
+        ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                      document_roles={"quote.png": ["hires"]},
+                                      progress=lines.append)
+    assert call.call_count == 2
+    assert [l.split(" ", 2)[1] for l in lines if l.startswith("AI_RESPONSE_UNREADABLE")] == [
+        "attempt=1", "attempt=2"]
+
+
+def test_a_well_formed_answer_is_not_paid_twice(offline, monkeypatch, tmp_path):
+    """Negative: a valid shape, even with numbers later found wrong, is one call."""
+    call = Mock(side_effect=[_single(), _single()])
+    monkeypatch.setattr(ext, "call_tool", call)
+    ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                  document_roles={"quote.png": ["hires"]})
+    assert call.call_count == 1
+
+
 def test_a_board_keeps_the_main_tool_and_prompt(offline, monkeypatch, tmp_path):
     """Negative: the family decides; a module answer is not passed through the mapping."""
     call = Mock(return_value=dict(layout="castellated", body_length_mm=40, body_width_mm=20,

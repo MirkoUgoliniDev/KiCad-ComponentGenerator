@@ -49,6 +49,9 @@ DEEPSEEK_PREFIX = "deepseek-api/"
 DEEPSEEK_API_BASE = "https://api.deepseek.com"
 
 DEEPSEEK_CHAT_URL = f"{DEEPSEEK_API_BASE}/chat/completions"
+#: Beta endpoint: same chat API, with strict function calling (the schema is
+#: enforced while the answer is generated).
+DEEPSEEK_BETA_CHAT_URL = f"{DEEPSEEK_API_BASE}/beta/chat/completions"
 DEEPSEEK_MODELS_URL = f"{DEEPSEEK_API_BASE}/models"
 DEEPSEEK_BALANCE_URL = f"{DEEPSEEK_API_BASE}/user/balance"
 DEEPSEEK_KEY_ENV = "DEEPSEEK_API_KEY"

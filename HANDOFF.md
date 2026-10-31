@@ -1,5 +1,47 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 31/10 mattina — COMPLETATO e committato (OK utente «ok»): risposta principale con forma sbagliata
+Utente (screenshot 07:10, «?? ma cosa ?»): «La risposta deve descrivere i terminali in pads
+OPPURE una griglia in grid (trovati: pads=False, grid=False)» due volte di fila.
+Diagnosi con 3 chiamate reali identiche (0,003 USD): 2 risposte ben formate, 1 rotta —
+deepseek-flash ha appiattito UN pad al primo livello (pads="1", x_mm, y_mm, drill_mm...).
+E' una risposta malformata a caso, come gli argomenti JSON illeggibili (punto 137).
+Piano (autonomia gia' data dall'utente per questo problema):
+- single_answer_to_data solleva AnswerShapeError (sottoclasse di ExtractionError, con raw)
+  quando la forma contraddice lo schema (non oggetto; ne' pads ne' grid; entrambi);
+- main_call: AnswerShapeError ha lo STESSO unico nuovo tentativo di ToolArgumentsError,
+  con messaggi propri (non «JSON illeggibile») e risposta nel log AI;
+- test: forma rotta poi buona = successo con 2 chiamate; rotta due volte = errore dopo 2
+  chiamate; risposta valida = 1 chiamata (negativo).
+Commit 65aee39 gia' su ADVANCED e main; l'MSI in costruzione e' di 65aee39: va rifatto dopo.
+MISURE REALI (circa 0,08 USD in tutto, deepseek-flash, disegno del rele'):
+- prima risposta rotta 25-45% (2/12, 4/12, 6/11, 6/16, 7/16): rumore, NON dipende da
+  pad_chains, grid o `pads` required (A/B fatti);
+- un nuovo tentativo identico: 7/9 ok; con il blocco di CORREZIONE (_SHAPE_CORRECTION):
+  12/16 ok (2 forme rotte due volte, 2 «foro >= piazzola», difetto di VALORE diverso);
+- DeepSeek strict mode (/beta/chat/completions, function.strict=true, ogni proprieta'
+  required, additionalProperties false, opzionali = anyOf[...,null]): 1/16 rotta.
+Decisione (autonomia): strict per OGNI chiamata DeepSeek, schema convertito
+meccanicamente; se uno schema ha oggetti a chiavi libere o costrutti non ammessi si
+manda normale; i null delle opzionali tolti dalla risposta (= campo omesso). Resta il
+nuovo tentativo con correzione.
+REVISIONE avversariale (1 agente, nessun grave) e correzioni:
+- fallback: HTTP 400/404/422 dal /beta (rifiuto, non addebitato) -> stessa richiesta UNA
+  volta in modo normale; 401/402/429/5xx no;
+- TUTTE le proprieta' nullable in strict, anche le required: il decoder non forza un
+  numero che il modello non sa leggere; i validatori giudicano le required come prima;
+- lista di parole chiave AMMESSE (_STRICT_KEYWORDS), null in enum rifiutato;
+- log AI: riga AI_CALL_PROMPT_STRICT deepseek-beta quando la chiamata va strict.
+VERIFICHE REALI dopo le correzioni: 8 strumenti strict (single, main, numbering, pad
+positions, classify, leads, markings, terminals) accettati dal /beta; rele' 15/16 ok
+(prima risposta rotta 2/16, recuperate; 1 «x_mm deve essere numerico» = pad lasciato
+vuoto, rifiutato apertamente); token in uscita +10% (mediana 1830 contro 1680).
+LIMITE dichiarato: benefici misurati su UN disegno e UN modello (deepseek-flash).
+SUITE COMPLETA 31/10 sul codice finale: 10837 passati, 13 saltati, 19 sottotest, 0 falliti.
+Committato con OK dell'utente («ok», 31/10), merge in main e MSI ricostruito nello stesso giro.
+Residuo NON toccato (decisione dell'utente): «foro >= piazzola» stimata dal modello
+(2/32), rifiutato dalla validazione; cambiarlo tocca la politica delle piazzole stimate.
+
 ## 31/10 — COMPLETATO e committato (OK utente «ok procedi»)
 Lettura dedicata dei pad con modello a parte (pad_model, gpt-5.6-sol), controllo dei fori
 disegnati (drawing_holes.py), blocco quando nulla conferma, tool_choice compatibile con Claude 5.5.
