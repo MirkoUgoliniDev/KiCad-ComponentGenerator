@@ -1,5 +1,15 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 31/10 — RELEASE v1.0.5 PUBBLICATA (utente: «committa pusha merge e pubblica»)
+- Tag v1.0.5 da ADVANCED (commit 7ec98fb «release: v1.0.5»), fast-forward in main.
+- Workflow «Windows MSI release» verde (build + publish); Release:
+  https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.5
+  asset KiCadGen-1.0.5.msi (485 226 488 byte). Test MSI in VM: non ancora fatto.
+- Contiene 65aee39 (pad dal modello dedicato + controllo fori) e fdcfb32 (DeepSeek strict).
+- PROSSIMO: l'utente fornira' altri rele' e componenti (almeno 2 SMD) per la verifica A/B
+  «prompt dedicato per tipologia THT/SMD contro prompt singolo attuale». Materiale gia'
+  arrivato, NON tracciato e da non committare: docs/T7N  T7N-WG/ (datasheet PDF + foto).
+
 ## 31/10 mattina — COMPLETATO e committato (OK utente «ok»): risposta principale con forma sbagliata
 Utente (screenshot 07:10, «?? ma cosa ?»): «La risposta deve descrivere i terminali in pads
 OPPURE una griglia in grid (trovati: pads=False, grid=False)» due volte di fila.
