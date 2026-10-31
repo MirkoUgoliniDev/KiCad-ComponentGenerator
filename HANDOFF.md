@@ -38,7 +38,13 @@ positions, classify, leads, markings, terminals) accettati dal /beta; rele' 15/1
 vuoto, rifiutato apertamente); token in uscita +10% (mediana 1830 contro 1680).
 LIMITE dichiarato: benefici misurati su UN disegno e UN modello (deepseek-flash).
 SUITE COMPLETA 31/10 sul codice finale: 10837 passati, 13 saltati, 19 sottotest, 0 falliti.
-Committato con OK dell'utente («ok», 31/10), merge in main e MSI ricostruito nello stesso giro.
+Committato con OK dell'utente («ok», 31/10) come fdcfb32, merge fast-forward in main.
+MSI locale ricostruito da fdcfb32: dist\KiCadGen-1.0.4.msi, 460.4 MB, --check-runtime OK,
+SHA-256 b07b9373fc88a27a329bb1e2e0dc98f1c2244e686d704a279afede2445daddc6. Versione ancora
+1.0.4 (gia' pubblicata): NON distribuibile, serve la release 1.0.5 (non autorizzata).
+Utente: rele' «ora mi pare corretto». Domanda aperta all'utente: prompt dedicato per
+tipologia (THT/SMD)? Proposta verifica A/B su piu' componenti con footprint noto; in
+attesa di 3-4 componenti (almeno 2 SMD) con disegno in immagine.
 Residuo NON toccato (decisione dell'utente): «foro >= piazzola» stimata dal modello
 (2/32), rifiutato dalla validazione; cambiarlo tocca la politica delle piazzole stimate.
 
