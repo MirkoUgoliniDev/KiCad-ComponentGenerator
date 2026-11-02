@@ -1,5 +1,13 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 02/11 sera — COMMITTATO (utente: «ok committa e pusha e mergia in main poi pusha»)
+Commit `5f1b03b` su ADVANCED (griglia unica, origine di disegno, fori trasparenti, puntini piu'
+chiari, magnete sui puntini), merge `fc12451` in main, entrambi pushati; di nuovo su ADVANCED.
+Suite: A 6556/9/19, B 4589/4, 0 falliti = 11145 passati, 13 saltati, 19 sottotest.
+`docs/T7NS5D4-12/` (PDF/foto utente) escluso. Nessun MSI ricostruito, nessuna release.
+Aperti (segnalati, non richiesti): X/Y e casella origine mancano nella finestra dei pad delle
+strip e dei contatti castellati; la griglia che segue l'origine sposta anche l'aggancio.
+
 ## 02/11 — COMMIT di tutto il lavoro 31/10-02/11 (utente: «ok committa tutto, pusha e mergia ok? poi porta in prog e rifai pacchetto»)
 Suite completa 02/11: A 6533/9/19, B 4584/4, 0 falliti = 11117 passati, 13 saltati, 19 sottotest.
 Branch ADVANCED; commit, push, merge in main, push main, ritorno su ADVANCED («porta in prog»
