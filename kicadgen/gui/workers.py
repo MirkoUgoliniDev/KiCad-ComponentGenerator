@@ -748,6 +748,7 @@ class ExtractWorker(QThread):
         smd_model_path: Path | None = None,
         numbering_prompt: str | None = None,
         pad_model: str | None = None,
+        part_number: str | None = None,
     ):
         """@brief Snapshot extraction settings before starting background work.
 
@@ -781,6 +782,10 @@ class ExtractWorker(QThread):
         @param pad_model Model of the dedicated pad-position reading of a
             single part (profile field 'pad_model'); None or blank uses
             `model`. Forwarded like `crop_prompt`.
+        @param part_number Part number of the component (GUI field «Sigla»):
+            the KiCad library footprints it names confirm the pad geometry of
+            a single part; None or blank searches nothing. Forwarded like
+            `crop_prompt`.
         @note YOLO changes photo proposals only; AI verification remains configured.
         """
         super().__init__()
@@ -790,6 +795,8 @@ class ExtractWorker(QThread):
         self.numbering_prompt = numbering_prompt
         #: Model of the dedicated pad-position reading; None = `model`.
         self.pad_model = pad_model
+        #: Part number of the component (field «Sigla»); None = no library search.
+        self.part_number = part_number
         self.extra_instructions = extra_instructions
         self.include_nc_pins = include_nc_pins
         self.model = model
@@ -909,6 +916,7 @@ class ExtractWorker(QThread):
                                   crop_model=self.crop_model,
                                   numbering_prompt=self.numbering_prompt,
                                   pad_model=self.pad_model,
+                                  part_number=self.part_number,
                                   cancel=self.cancel_event),
                 **phase_kwargs(extract, self._forward_phase),
             )

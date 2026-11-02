@@ -575,7 +575,7 @@ RELAY = {4: (0.0, 0.0), 1: (2.54, -7.62), 5: (5.08, -2.54), 3: (17.78, 0.0), 2: 
 
 
 def test_real_relay_bottom_view():
-    path = _real("generated/VE12H-K/docs/quote-pinout.jpeg")
+    path = _real("tests/data/drawings/ve12hk_quote_pinout.jpeg")
     assert _check(path, RELAY).status == "confirmed"
     assert _check(path, RELAY, (20.5, 10.5)).status == "confirmed"
     wrong = dict(RELAY)
@@ -587,8 +587,10 @@ def test_real_relay_low_resolution_is_not_contradicted():
     # Earlier, smaller copy of the same page: the middle hole is not detected
     # and the lower-left one is pulled by a leader line. The correct reading
     # must not be reported as wrong; a wrong one still is.
-    path = _real("generated/VE12H-K/docs/.history/a2cd1dd9e18e46b19efef7ce05e395f6/quote.png")
-    assert _check(path, RELAY).status != "not_confirmed"
+    path = _real("tests/data/drawings/ve12hk_quote_lowres.png")
+    # Since the crossing-line fix of 2026-10-31 the middle hole is found and
+    # the correct reading is confirmed, not only left uncontradicted.
+    assert _check(path, RELAY).status == "confirmed"
     wrong = dict(RELAY)
     wrong[1], wrong[5] = (RELAY[1][0], RELAY[5][1]), (RELAY[5][0], RELAY[1][1])
     assert _check(path, wrong).status == "not_confirmed"

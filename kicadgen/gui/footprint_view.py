@@ -33,6 +33,27 @@ DRAWING_KEY_ROLE = 0x445257
 #: point index -1 means the WHOLE drawing (a press on its body).
 HANDLE_KEY_ROLE = 0x48444C
 
+#: Item data role of a pad's copper item: "header:<number>" for a pin-header
+#: pad, "package:<pad index>:<number>" for a package pad.
+PAD_KEY_ROLE = 0x504144
+
+#: Item data role of the items drawn WITH a package pad (its drill hole, its
+#: number, its function label): the pad index, so a pad drag moves them along.
+PAD_PART_ROLE = 0x504150
+
+#: Colours of the centring crosshair of a dragged pad (user, 2026-11-02:
+#: «un mirino al centro del pad per centrare ... si deve diversificare quando
+#: sono nel reticolo a 2.54 oppure fuori» (a crosshair at the pad centre, different on and off the
+#: grid)): green with the centre on a main-grid node,
+#: orange (Catppuccin Mocha «peach») off the grid.
+PAD_CROSSHAIR_ON_GRID = '#a6e3a1'
+PAD_CROSSHAIR_OFF_GRID = '#fab387'
+
+#: Screen pixels within which a dragged pad centre is caught by a main-grid
+#: node (the magnet). A pointing tolerance of the display, like the measure
+#: reaches, not a geometric quantity of the part.
+PAD_GRID_MAGNET_PX = 8.0
+
 #: Item data role marking the anchor square of a Reference/Value text (a
 #: child of the text group). Hidden at rest; shown while the pointer is near
 #: the text or the text is dragged, as the symbol editor's property anchors.
@@ -76,11 +97,12 @@ HOVER_KEEP_MARGIN_PX = HOVER_MARGIN_PX
 
 
 class FootprintView(QGraphicsView):
-    """@brief Navigate the footprint with anchored zoom and mouse panning; drag its texts and drawing handles.
+    """@brief Navigate the footprint with anchored zoom and mouse panning; drag its texts, drawing handles and package pads.
 
     @note Geometry is never changed here: a drag only names its target
         (`('text', key)`, `('handle', drawing index, point index)` with point
-        index -1 for the whole drawing) to the `GestureController`, whose host
+        index -1 for the whole drawing, `('pad', package pad index)`) to the
+        `GestureController`, whose host
         (the window, see `attach_host`) snaps, commits and redraws (user,
         2026-10-13). Without a host the view only pans and zooms.
     """
@@ -95,6 +117,8 @@ class FootprintView(QGraphicsView):
     text_hovered = pyqtSignal(str)
     #: Ctrl+click on a user drawing (body or handle): its index, to add or remove.
     drawing_toggled = pyqtSignal(int)
+    #: Ctrl+click on a package pad: its index in the package, to add or remove.
+    pad_toggled = pyqtSignal(int)
     #: A Shift+drag rubber band ended: its scene rectangle and whether Ctrl
     #: was held at its start (additive).
     band_selected = pyqtSignal(QRectF, bool)
@@ -135,6 +159,9 @@ class FootprintView(QGraphicsView):
         self.click_collector: PointCollector | None = None
         self.click_router: ClickToolRouter | None = None
         self._click_host = None
+        #: The shared measuring tool (`canvas_measure.MeasureTool`), set by the
+        #: window; its Escape ladder runs before the router's key handling.
+        self.measure = None
         # Hover without a button pressed: the snap marker follows the pointer.
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -334,6 +361,23 @@ class FootprintView(QGraphicsView):
         step = self.grid_step()
         return None if step is None else step / self._fine_divisor
 
+    def snap_to_main_grid(self, x, y):
+        """@brief Snap a scene point to the nearest node of the visible MAIN grid.
+
+        @param x Scene x (px).
+        @param y Scene y (px).
+        @return The nearest crossing of the main grid lines shown on screen
+            (same step and origin as the lines), or None when the grid is
+            hidden or unset.
+        @note Pads go through here (they keep the main grid, user,
+            2026-10-13); graphic elements use the fine grid (`snap_to_grid`).
+        """
+        step = self.grid_step()
+        if step is None:
+            return None
+        ox, oy = self._grid[1]
+        return ox + round((x - ox) / step) * step, oy + round((y - oy) / step) * step
+
     def snap_to_grid(self, x, y, fallback_step):
         """@brief Snap a scene point to the nodes of the drawing (fine) grid.
 
@@ -441,6 +485,21 @@ class FootprintView(QGraphicsView):
             if key is not None:
                 drawing, point = str(key).split(":")
                 return int(drawing), int(point)
+        return None
+
+    def _pad_at(self, pos):
+        """The index of the PACKAGE pad under a viewport point, or None.
+
+        Pin-header pads ("header:<number>") are not returned: their position
+        is computed from pitch and row spacing, so there is nothing to drag.
+        """
+        for item in self._items_near(pos):
+            token = item.data(PAD_KEY_ROLE)
+            if token is None:
+                continue
+            parts = str(token).split(":", 2)
+            if parts[0] == "package" and len(parts) == 3:
+                return int(parts[1])
         return None
 
     def _drawing_at(self, pos):
@@ -599,8 +658,9 @@ class FootprintView(QGraphicsView):
             2026-10-29, C2/C9): no drag and no context menu with the pan armed.
         @note Selection (shared `canvas_selection`): Shift+left press starts
             the rubber band, Ctrl+left press on a drawing emits
-            `drawing_toggled`; a plain press on a drawing is selected by the
-            host when its drag begins (`gesture_begin`); a left press on the
+            `drawing_toggled`, on a package pad `pad_toggled`; a plain press
+            on a drawing or a package pad is selected by the host when its
+            drag begins (`gesture_begin`); a left press on the
             background pans, and its release without a drag emits
             `background_clicked` (not for a Ctrl click, which is additive).
             Any press while the band is drawn is swallowed.
@@ -608,6 +668,13 @@ class FootprintView(QGraphicsView):
             off first (`_press_gesture`, plan docs/canvas-gestures-plan.md
             D13), as the symbol editor does.
         """
+        if (self.measure is not None and event.button() == Qt.MouseButton.RightButton
+                and not self.band.active and not self.camera.pan_active and not self._dragging()
+                and self.measure.context_menu(event.pos(), event.globalPosition().toPoint(), self)):
+            # A right press on a measure opens its menu («Rimuovi misura»,
+            # remove measure), never the pad or drawing menu underneath.
+            event.accept()
+            return
         if self.click_router is not None and self.click_router.press(event):
             return
         if self.band.active:
@@ -642,7 +709,7 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             for item in self.scene().items(self.mapToScene(event.pos())):
-                pad_index = item.data(0x504144)
+                pad_index = item.data(PAD_KEY_ROLE)
                 if pad_index is not None:
                     self.pad_context_requested.emit(str(pad_index))
                     event.accept()
@@ -658,6 +725,14 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             if modifiers & Qt.KeyboardModifier.ControlModifier:
+                # Same priority as a plain press: a drawing handle, then a
+                # package pad, then the body of a drawing.
+                pad = self._pad_at(event.pos()) if self._handle_at(event.pos()) is None else None
+                if pad is not None:
+                    # Ctrl+click on a pad, as on a pin of the symbol editor.
+                    self.pad_toggled.emit(pad)
+                    event.accept()
+                    return
                 index = self._drawing_at(event.pos())
                 if index >= 0:
                     self.drawing_toggled.emit(index)
@@ -666,8 +741,9 @@ class FootprintView(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             # Priority: a visible handle (the smallest, most deliberate
             # target), then a text (Reference/Value sit above the drawings:
-            # a label inside a rectangle must stay draggable), then the
-            # body of a drawing.
+            # a label inside a rectangle must stay draggable), then a package
+            # pad (a pad inside a drawn outline must stay draggable), then
+            # the body of a drawing.
             handle = self._handle_at(event.pos())
             item, key = (None, None) if handle is not None else self._text_item_at(event.pos())
             point = self.mapToScene(event.pos())
@@ -675,6 +751,12 @@ class FootprintView(QGraphicsView):
                 # The dragged text keeps its anchor square wherever the
                 # pointer goes, as a dragged property in the symbol editor.
                 self._report_text_hover(key)
+                event.accept()
+                return
+            pad = self._pad_at(event.pos()) if handle is None and item is None else None
+            if pad is not None and self._press_gesture(('pad', pad), point):
+                # The window moves the pad (or the selected pads) on the
+                # grid, as the symbol editor moves its pins (user, 2026-11-02).
                 event.accept()
                 return
             if handle is None:
@@ -714,6 +796,9 @@ class FootprintView(QGraphicsView):
             under the drag re-binds the new item, decision D4); a handle
             step goes to the host, which snaps it and shows the ghost.
         """
+        if self.measure is not None and event.buttons() == Qt.MouseButton.NoButton:
+            # Hovering a measure highlights it (Delete / right click remove it).
+            self.measure.hover_measure(event.pos())
         if self._dragging():
             self.gestures.move(self.mapToScene(event.pos()))
             event.accept()
@@ -749,6 +834,8 @@ class FootprintView(QGraphicsView):
         """
         if self.click_router is not None and self._draw_mode:
             self.click_router.leave()
+        if self.measure is not None:
+            self.measure.hover_measure(None)
         if self._handle_drag is None:
             self._report_hover(-1)
         if self._text_drag is None:
@@ -797,7 +884,7 @@ class FootprintView(QGraphicsView):
             super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        """@brief Qt override: in draw mode a left double click closes the shape.
+        """@brief Qt override: a left double click on a measure edits its value; in draw mode it closes the shape.
 
         @param event Qt mouse double-click event.
         @note A fast second click reaches Qt as press, release, DOUBLE CLICK:
@@ -808,6 +895,11 @@ class FootprintView(QGraphicsView):
             is not added twice and, being quiet, shows no refusal: a true
             double click on the last vertex of a line just finishes it.
         """
+        if (self.measure is not None and event.button() == Qt.MouseButton.LeftButton
+                and self.measure.edit_at(event.pos())):
+            # A double click on a measure edits its value («Modifica quota…»).
+            event.accept()
+            return
         if self.click_router is not None and self.click_router.double_click(event):
             return
         super().mouseDoubleClickEvent(event)
@@ -825,7 +917,12 @@ class FootprintView(QGraphicsView):
         @note Then Escape cancels a rubber band; with nothing at all to
             cancel (no tool, pan, band or drag) it emits `escape_idle`, on
             which the host clears the drawing selection.
+        @note With the measuring tool armed its Escape ladder runs first
+            (`MeasureTool.escape`, plan docs/canvas-measure-plan.md D-M3):
+            the pending point, then the measures, then the router disarms.
         """
+        if self.measure is not None and self.measure.escape(event, self.camera):
+            return
         if self.click_router is not None and self.click_router.key(event):
             return
         if event.key() == Qt.Key.Key_Escape and self.camera.pan_cancel():

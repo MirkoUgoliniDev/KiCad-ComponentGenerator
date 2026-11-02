@@ -26,6 +26,13 @@ from .canvas_menus import ElementClipboard, MenuEntry
 from .canvas_selection import IndexSelection, RubberBand, encloses, is_click
 from .canvas_camera import Camera
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
+from .canvas_measure import (CLEAR_MEASURES_SOURCE, MEASURE_KEY, MEASURE_SPEC, MEASURE_TOOLTIP_SOURCE,
+                             TAG_PIN_END, MeasureTool, SnapTargets, bounds_without_measures, circle_polygon)
+
+#: Hit radius of a pin connection point for the measuring tool, mm: a
+#: quarter of the 2.54 mm pin grid, so the hit areas of neighbouring pins
+#: never overlap (a pointing area, like a pad's copper in the footprint).
+PIN_MEASURE_HIT_MM = 0.635
 from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
                               DragPlan, GestureController, HoverGroups, Identity, KeyRepeatFilter,
@@ -646,6 +653,9 @@ class _SymbolView(QGraphicsView):
         #: `ClickToolRouter` of the same tools (press, release, double click, keys,
         #: move, leave, hide), set together with `collector`.
         self.clicktools = None
+        #: The shared measuring tool (`canvas_measure.MeasureTool`), set by the
+        #: tab; its Escape ladder runs before the router's key handling.
+        self.measure = None
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
@@ -722,6 +732,15 @@ class _SymbolView(QGraphicsView):
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         self._tool_took_right_press = False
         self._clear_press = None
+        if (self.measure is not None and event.button() == Qt.MouseButton.RightButton
+                and not self.band.active and not self.camera.pan_active and self.gesture is None
+                and self.measure.context_menu(event.pos(), event.globalPosition().toPoint(), self)):
+            # A right press on a measure opens its menu («Rimuovi misura»,
+            # remove measure); the context-menu event that follows must not
+            # open the pin or element menu underneath.
+            self._tool_took_right_press = True
+            event.accept()
+            return
         if self.band.active:
             # A right or middle press while the band grows is swallowed: no
             # context menu, no selection change until the band is released.
@@ -839,6 +858,8 @@ class _SymbolView(QGraphicsView):
         self.pointer_left.emit()
         if self.clicktools is not None:
             self.clicktools.leave()
+        if self.measure is not None:
+            self.measure.hover_measure(None)
         super().leaveEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -847,6 +868,9 @@ class _SymbolView(QGraphicsView):
         @param event The mouse event.
         """
         self.pointer_changed.emit(self.mapToScene(event.pos()))
+        if self.measure is not None and event.buttons() == Qt.MouseButton.NoButton:
+            # Hovering a measure highlights it (Delete / right click remove it).
+            self.measure.hover_measure(event.pos())
         if self.clicktools is not None:
             # Not consuming: the readout and the pan/drag below go on.
             self.clicktools.move(event)
@@ -910,7 +934,11 @@ class _SymbolView(QGraphicsView):
         """@brief Qt override: Enter/Escape finish or cancel wiring, placement and drags.
 
         @param event The key event; other keys reach the base class.
+        @note With the measuring tool armed its Escape ladder runs first
+            (`MeasureTool.escape`, plan docs/canvas-measure-plan.md D-M3).
         """
+        if self.measure is not None and self.measure.escape(event, self.camera):
+            return
         if self.clicktools is not None and self.clicktools.key(event):
             return
         if event.key() == Qt.Key.Key_Escape and self.placing:
@@ -1278,6 +1306,13 @@ class SymbolTab(QWidget):
                                        on_arm=self.view.cancel_interaction)
         self.view.collector = self._collector
         self.view.clicktools = self._router
+        #: The shared measuring tool (user, 2026-10-31), the same as the footprint
+        #: preview's: pin connection points, body corners and edges, 10 units per mm.
+        self._measure = MeasureTool(self.view, self._collector, units_per_mm=SCENE_UNITS_PER_MM,
+                                    translate=self.tx, centre_tag=TAG_PIN_END,
+                                    on_changed=self._measures_changed)
+        self._measure.router = self._router
+        self.view.measure = self._measure
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
         self.table_toggle = icon_button('pinout-table.svg', 'Mostra/nascondi tabella pin')
         self.table_toggle.defaultAction().setCheckable(True)
@@ -1290,6 +1325,10 @@ class SymbolTab(QWidget):
         self.grid_check.defaultAction().setCheckable(True)
         self.grid_check.defaultAction().setChecked(True)
         self.grid_check.defaultAction().toggled.connect(self.view.set_grid_visible)
+        self.measure_button = icon_button('measure-ruler.svg', MEASURE_TOOLTIP_SOURCE, self.toggle_measure)
+        self.measure_button.defaultAction().setCheckable(True)
+        self.clear_measures_button = icon_button('delete.svg', CLEAR_MEASURES_SOURCE, self.clear_measures)
+        self.clear_measures_button.defaultAction().setEnabled(False)
         separator()
         self.undo_button = icon_button('edit-undo.svg', 'Annulla modifica', self.undo)
         self.redo_button = icon_button('edit-redo.svg', 'Ripeti modifica', self.redo)
@@ -1429,7 +1468,8 @@ class SymbolTab(QWidget):
         bindings += [(key, lambda x=dx, y=dy: self._nudge_selected(x, y))
                      for key, dx, dy in [('Left', -1, 0), ('Right', 1, 0), ('Up', 0, 1), ('Down', 0, -1)]]
         bindings += [(key, lambda d=degrees: rotate_selected(d)) for key, degrees in [('R', -90), ('Shift+R', 90)]]
-        bindings.append(('Delete', self._delete_selected_graphic))
+        # A hovered measure takes Delete first (it is an overlay, no draft edit).
+        bindings.append(('Delete', lambda: self._measure.remove_hovered() or self._delete_selected_graphic()))
         # Clipboard of elements (user, 2026-10-12): copy, paste, duplicate.
         bindings += [('Ctrl+C', self.copy_selected), ('Ctrl+V', self.paste), ('Ctrl+D', self.duplicate_selected)]
         bind_shortcuts(self.view, bindings, self._checkpoint.run, Qt.ShortcutContext.WidgetShortcut)
@@ -1503,6 +1543,10 @@ class SymbolTab(QWidget):
         # abandoned here, as the footprint preview abandons its draw tool on a
         # project switch (`_cancel_footprint_drawing`).
         self._router.disarm()
+        # Measures are NOT cleared here: a reload of the same geometry keeps
+        # them and a changed geometry drops them through `_sync_measures`; the
+        # project switch clears them (`MainWindow._apply_project_state`), as
+        # the footprint preview does (plan docs/canvas-measure-plan.md D-M4).
         pending = self._pending_draft()
         carry = self._carry
         if pending is None and carry is not None and carry['kept']:
@@ -2681,7 +2725,7 @@ class SymbolTab(QWidget):
         @return A copy of the collector's points.
         """
         collector = getattr(self, '_collector', None)
-        if collector is None or collector.spec is None or collector.spec.key == 'wire':
+        if collector is None or collector.spec is None or collector.spec.key in ('wire', MEASURE_KEY):
             return []
         return collector.points
 
@@ -2692,7 +2736,7 @@ class SymbolTab(QWidget):
         @return The tool key or None.
         """
         collector = getattr(self, '_collector', None)
-        if collector is None or collector.spec is None or collector.spec.key == 'wire':
+        if collector is None or collector.spec is None or collector.spec.key in ('wire', MEASURE_KEY):
             return None
         return collector.spec.key
 
@@ -2701,8 +2745,85 @@ class SymbolTab(QWidget):
         from ..generators.symbol_glyphs import SHAPE_TOOLS
         self.wire_button.defaultAction().setChecked(False)
         self.palette.set_tool_checked('wire', False)
+        if hasattr(self, 'measure_button'):
+            self.measure_button.defaultAction().setChecked(False)
         for key, _label, _kind, _count in SHAPE_TOOLS:
             self.palette.set_tool_checked(key, False)
+
+    # ── Measuring tool (shared `canvas_measure`, plan docs/canvas-measure-plan.md) ──
+
+    def toggle_measure(self):
+        """@brief «Misura»: arm the measuring tool, or disarm it when armed.
+
+        @return True when the tool is armed afterwards.
+        @note Arming ends any armed wire, shape tool or glyph placing first
+            (one armed tool at a time); the measures already shown stay.
+        """
+        if self._measure.armed:
+            self._router.disarm()
+        elif self._symbol is not None:
+            self.view.placing = False
+            self._arming = True
+            try:
+                self._router.arm(MEASURE_SPEC)
+            finally:
+                self._arming = False
+        armed = self._measure.armed
+        self.measure_button.defaultAction().setChecked(armed)
+        return armed
+
+    def clear_measures(self):
+        """@brief «Cancella misure»: remove every measure (the tool stays as it is).
+
+        @return True when there was something to clear.
+        """
+        return self._measure.clear()
+
+    def _measures_changed(self, count):
+        """Enable «Cancella misure» while measures exist."""
+        button = getattr(self, 'clear_measures_button', None)
+        if button is not None:
+            button.defaultAction().setEnabled(count > 0)
+
+    @staticmethod
+    def _measure_targets(symbol):
+        """@brief What the measuring tool snaps to in a laid-out symbol, in scene units.
+
+        @param symbol The `SymbolLayout` drawn, or None.
+        @return `SnapTargets`: every pin connection point (the OUTER end, where
+            KiCad connects a wire; label = pin number) with a round hit area of
+            PIN_MEASURE_HIT_MM, and the corners and edges of the body
+            rectangle; empty without a symbol.
+        """
+        if symbol is None:
+            return SnapTargets()
+        s = SCENE_UNITS_PER_MM
+        centres = tuple((float(p.x) * s, -float(p.y) * s, str(p.pin.number),
+                         circle_polygon(float(p.x) * s, -float(p.y) * s, PIN_MEASURE_HIT_MM * s))
+                        for p in symbol.pins)
+        w, h = symbol.width * s / 2, symbol.height * s / 2
+        corners, edges = SnapTargets.rectangle(-w, -h, w, h)
+        return SnapTargets(centres=centres, corners=corners, edges=edges)
+
+    def _sync_measures(self, symbol):
+        """After a redraw: draw the measures again, or drop them when the geometry changed.
+
+        An invalid draft (`symbol` None) keeps the measures (`MeasureTool.sync(None)`).
+        The targets are rebuilt only when the pin positions or the body size
+        changed: `_draw` runs on every edit, and the pin hit circles are not
+        free for a large symbol.
+        """
+        measure = getattr(self, '_measure', None)
+        if measure is None:
+            return
+        if symbol is None:
+            measure.sync(None)
+            return
+        key = (symbol.width, symbol.height, tuple((p.pin.number, p.x, p.y) for p in symbol.pins))
+        cached = getattr(self, '_measure_targets_cache', None)
+        if cached is None or cached[0] != key:
+            cached = self._measure_targets_cache = (key, self._measure_targets(symbol))
+        measure.sync(cached[1])
 
     def start_wire(self):
         """@brief Arm the wire tool: every click adds a point until the wire is closed."""
@@ -2719,10 +2840,13 @@ class SymbolTab(QWidget):
     def tool_armed(self, spec):
         """@brief Host callback: a click tool was armed; show it as active and print its hint.
 
-        @param spec The armed `ToolSpec` (`wire` or a shape tool).
+        @param spec The armed `ToolSpec` (`wire`, a shape tool or the measuring tool).
         """
         self._uncheck_tool_buttons()
-        if spec.key == 'wire':
+        if spec.key == MEASURE_KEY:
+            self.measure_button.defaultAction().setChecked(True)
+            self.set_status(self.tx(MEASURE_TOOLTIP_SOURCE))
+        elif spec.key == 'wire':
             self.wire_button.defaultAction().setChecked(True)
             self.palette.set_tool_checked('wire', True)
             self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
@@ -2733,8 +2857,10 @@ class SymbolTab(QWidget):
     def tool_disarmed(self, spec):
         """@brief Host callback: the tool ended and nothing replaced it; show every tool as inactive.
 
-        @param spec The tool that ended.
+        @param spec The tool that ended; the measuring tool also drops its markers.
         """
+        if spec.key == MEASURE_KEY:
+            self._measure.disarmed()
         self._uncheck_tool_buttons()
         self._wire_cursor_item = None
         # A tool ended through the direct API (`finish_wire`) did not pass through a router
@@ -2750,7 +2876,11 @@ class SymbolTab(QWidget):
         @param points A copy of the collected points.
         @note A tool that stays armed after a commit or a refusal does not redraw
             here: `tool_finished` has just redrawn the scene (`_stay_redraw_done`).
+            The measuring tool redraws only its own markers (no `_draw`).
         """
+        if spec.key == MEASURE_KEY:
+            self._measure.points_changed(points)
+            return
         if self._stay_redraw_done and not points:
             self._stay_redraw_done = False
             return
@@ -2766,6 +2896,9 @@ class SymbolTab(QWidget):
         @note No `_draw`: moving the pointer redraws nothing (a perf contract,
             tests/test_symbol_clicktool_parity.py).
         """
+        if spec.key == MEASURE_KEY:
+            self._measure.preview_changed(points, preview)
+            return
         self._reshape_band(points, preview)
 
     def _reshape_band(self, points, preview):
@@ -2804,6 +2937,8 @@ class SymbolTab(QWidget):
         """
         if self._symbol is None:
             return []
+        if spec.key == MEASURE_KEY:
+            return self._measure.snap(point, free, points)
         x, y = point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM
         if spec.key == 'wire':
             return self._next_wire_points(x, y, free, points)
@@ -2818,7 +2953,10 @@ class SymbolTab(QWidget):
             with an invalid draft, where nothing is drawn and every click is ignored.
         """
         if self._symbol is not None:
-            self.set_status(self.tx('Punto coincidente con il precedente.'))
+            status = self.tx('Punto coincidente con il precedente.')
+            if spec.key == MEASURE_KEY:
+                status += ' ' + self.tx('Scegli un altro punto da misurare.')
+            self.set_status(status)
 
     def tool_finished(self, spec, points, commit):
         """@brief Host callback: the tool ended; commit the points as a wire or a shape, or abandon them.
@@ -2828,7 +2966,10 @@ class SymbolTab(QWidget):
         @param commit False abandons the points.
         @return True when the shape tool stays armed (a persistent shape, or a shape
             that could not be made); False for the wire, the text and every abandon.
+            The measuring tool stays armed after a measure (`MeasureTool.finished`).
         """
+        if spec.key == MEASURE_KEY:
+            return self._measure.finished(points, commit)
         self._wire_cursor_item = None
         self._finish_result = False
         if spec.key == 'wire':
@@ -5179,7 +5320,8 @@ class SymbolTab(QWidget):
         """
         if self._symbol is not None:
             scene = self.view.scene()
-            scene.setSceneRect(scene.itemsBoundingRect().adjusted(-35, -35, 35, 35))
+            # Measures are an overlay: they never frame the symbol (plan docs/canvas-measure-plan.md D-M5).
+            scene.setSceneRect(bounds_without_measures(scene).adjusted(-35, -35, 35, 35))
         self._update_handle_visibility(self._cursor_position)
 
     def _draw_graphics(self, scene, scale, rows=None):
@@ -5487,6 +5629,9 @@ class SymbolTab(QWidget):
         self._wire_cursor_item = None
         self._property_items = {}
         self._gestures.forget_items()
+        measure = getattr(self, '_measure', None)
+        if measure is not None:
+            measure.forget_items()
 
     def _clear_scene(self, scene, keep=()):
         """Remove every top-level item of `scene` except the kept ones in `keep` (pin roots, body).
@@ -5682,6 +5827,7 @@ class SymbolTab(QWidget):
             # (`add_wire_point`, `add_shape_point`); the redraw of a valid
             # draft brings the rubber band back, so fixing the name lets the
             # user finish the wire instead of starting it again.
+            self._sync_measures(None)
             return
         scale = SCENE_UNITS_PER_MM
         theme = self.theme
@@ -5790,6 +5936,8 @@ class SymbolTab(QWidget):
         if self._gesture_before is not None:
             scene.setSceneRect(self._gesture_scene_rect)
         else:
-            scene.setSceneRect(scene.itemsBoundingRect().adjusted(-35, -35, 35, 35))
+            scene.setSceneRect(bounds_without_measures(scene).adjusted(-35, -35, 35, 35))
         if self.view.auto_fit:
             self.view.fit()
+        # After the scene rect and the fit: measures are an overlay, they never frame.
+        self._sync_measures(symbol)

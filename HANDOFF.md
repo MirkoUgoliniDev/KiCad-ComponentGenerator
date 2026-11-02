@@ -1,5 +1,435 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 02/11 — COMMIT di tutto il lavoro 31/10-02/11 (utente: «ok committa tutto, pusha e mergia ok? poi porta in prog e rifai pacchetto»)
+Suite completa 02/11: A 6533/9/19, B 4584/4, 0 falliti = 11117 passati, 13 saltati, 19 sottotest.
+Branch ADVANCED; commit, push, merge in main, push main, ritorno su ADVANCED («porta in prog»
+interpretato come ritorno sul branch di lavoro), MSI locale ricostruito, NESSUNA release.
+`docs/T7NS5D4-12/` (PDF/foto utente) escluso dal commit. Hash nella sezione sotto dopo il commit.
+Il promemoria 01/11 qui sotto e' CHIUSO per i punti 1-3 (suite, commit, prova Misura).
+Ancora da confermare dall'utente: pad-pad «si muove il secondo».
+
+## 02/11 — FATTO (OK utente «ok proced i»): spostare i pad trascinandoli nell'anteprima footprint
+Utente: «il righello di misura mi pare fatto bene» (punto 3 del promemoria 01/11: Misura
+PROVATA e approvata) + «mi servirebbe anche poter muovere la posizione del pad ... ricicla
+quello fatto per lo spostamento di oggetti in Electrical symbol». Screenshot: rele' T7NS5D4-12,
+pad 14/12/11/A2/A1, percorso PackageGeometry (suggerimento «clic destro su un pad» visibile).
+Il lavoro del 31/10-01/11 resta NON committato (promemoria sopra ancora valido).
+Piano proposto e approvato:
+1. Sinistro premuto su un pad + trascina = sposta il pad, agganciato alla griglia; numero,
+   foro ed etichetta seguono. Destro invariato (finestra forma/dimensioni).
+2. Selezione pad come i pin del simbolo: clic seleziona, Ctrl+clic aggiunge/toglie, riquadro
+   Shift+trascina seleziona pad e disegni, clic sullo sfondo/Esc svuota; piu' pad selezionati
+   si spostano insieme. Pad selezionati col colore di selezione del simbolo.
+3. Un trascinamento = un passo di annullamento; Esc rimette a posto; rilascio senza
+   spostamento non cambia nulla. Selezione pad svuotata da undo/redo e da un nuovo package.
+4. Passa dalla bozza footprint (`_edit_footprint_draft({"package_pins": ...})`), Applica/Annulla.
+5. Quote e righello si aggiornano al ridisegno del rilascio.
+6. La posizione spostata e' una modifica utente della bozza: non passa dal blocco
+   dell'estrazione (quello agisce solo sulla generazione automatica dopo l'analisi).
+Interpretazioni/decisioni del coordinatore (da dire all'utente):
+- Solo pad del package (posizione libera, `package:<i>:<n>`). Pad dei pin header (griglia
+  passo/interasse) NON trascinabili: servirebbe uno scostamento per pad, secondo passo.
+- Aggancio: lo SPOSTAMENTO e' un multiplo del passo della griglia principale (non la
+  posizione assoluta): un pad misurato fuori griglia (es. 12.2 mm) non salta sul nodo piu'
+  vicino al primo movimento. Griglia nascosta = passo 0.01 mm. Come le forme del simbolo.
+- Durante il trascinamento si spostano solo gli oggetti disegnati del pad (passi agganciati,
+  nessun ridisegno); il commit avviene al rilascio. Con origine package diversa da
+  «body_center» il centro corpo e' stimato dal campo dei pad (`body_frame_offset`, euristica
+  dichiarata): spostare un pad estremo ri-centra il disegno DOPO il rilascio. Le posizioni
+  relative dei pad restano esatte.
+- Delta riportato nel riferimento sorgente del package (inversa di rotazione/specchiatura di
+  `pins_seen_from_top`); package validato intero (sovrapposizioni) prima del commit.
+- Priorita' alla pressione: maniglia > testo > pad > corpo di un disegno.
+STATO (02/11): IMPLEMENTATO, NON committato, in attesa del canvas-parity-reviewer e della prova utente.
+- footprint_view.py: PAD_KEY_ROLE (ex 0x504144 letterale), PAD_PART_ROLE (foro/numero/etichetta
+  funzione del pad), `_pad_at` (solo token «package:»), segnale `pad_toggled`, pressione su pad.
+- main_window.py: `_fp_pad_selection` + `_fp_selected_pads` (chiave = oggetto package + numeri,
+  riportata da `_rebind_package_pins`, svuotata da undo/redo), `_select_footprint_pad`,
+  `_toggle_footprint_pad_selection`, pad nel riquadro e in `_clear_footprint_selection`,
+  `_fp_pad_pen` (colore di selezione del simbolo), `_begin/_step/_end_pad_drag`,
+  `_pad_drag_delta`, `_move_package_pads` (inversa di `pins_seen_from_top`; rifiuto con toast
+  «Spostamento scartato.»). `_add_preview_pin_function` ora restituisce l'etichetta.
+- Suggerimento sopra l'anteprima: «Trascina un pad per spostarlo; tasto destro per modificarne
+  forma e dimensioni.» (4 lingue; chiave vecchia rimossa). DB profili da committare.
+- Test: tests/test_footprint_pad_drag.py 18 verdi; footprint_*, canvas_*, symbol_*parity,
+  package_pad_dialog, documentation, gui_review_fixes: 1203 verdi; i18n 83 verdi.
+  Suite completa NON ancora rilanciata.
+- canvas-parity-reviewer (02/11): 3 difetti + 3 asimmetrie, TUTTI corretti:
+  1. con pad selezionati Canc/R/Ctrl+D/Ctrl+C agivano sul disegno sotto il puntatore ->
+     `_fp_targets` = [] con pad selezionati; FRECCE spostano i pad di un passo della griglia
+     principale (`_nudge_footprint_targets`, come i pin del simbolo);
+  2. trascinamento sopravvissuto a un package sostituito da un'analisi -> il drag ricorda il
+     package, rilascio su un altro package rifiutato;
+  3. ridisegno a meta' trascinamento -> pad invisibili: `_rebind_pad_drag_items` (come D4 testi);
+  4. selezione mista pad+disegni -> ESCLUSIVA come pin/elementi nel simbolo (clic, Ctrl+clic,
+     riquadro: se racchiude pad seleziona solo i pad);
+  5. cursore SizeAll sui pad (non in montaggio su header, `_package_pads_movable`);
+  6. Ctrl+clic con la stessa priorita' del clic: pad prima del corpo di un disegno.
+  Test: test_footprint_pad_drag.py 26 verdi; suite correlate (footprint_*, canvas_*,
+  symbol_*parity, package_pad_dialog, documentation, gui_review_fixes, i18n,
+  untranslated_texts) 1251 verdi. Suite completa NON rilanciata. Prossimo: prova utente.
+- Non fatto (non promesso): R sui pad (rotazione), trascinamento dei pad dei pin header.
+PROVA UTENTE (02/11): «si sposta, ma a salti non è uniforme!!! ... orrendo verifica in modo
+preciso». Riproduzione misurata (pad THT, origine pin1, vista dal basso, griglia accesa):
+1. il pad resta fermo e poi salta di un passo intero (2.54 mm): passi del DELTA arrotondato;
+   partendo fuori griglia salta anche fuori dalle linee visibili -> movimento irregolare;
+2. con origine diversa da body_center, al rilascio TUTTO il disegno si ricentra (centro corpo
+   ri-stimato dal campo dei pad) -> secondo salto.
+FATTO (NON committato): `_step_pad_drag` sposta i pad col delta GREZZO del mouse,
+`_build_pad_ghosts` contorni tratteggiati (z 20, colore selezione) spostati da
+`_pad_drag_delta` = nodo della griglia principale visibile piu' vicino al centro del pad
+premuto (`FootprintView.snap_to_main_grid`; griglia spenta: 0.01 mm assoluti); rilascio sul
+contorno; `_keep_unmoved_pads_on_screen` sposta le barre di scorrimento dello spostamento di
+un pad non toccato. Verificato su un caso tipo rele' (THT, vista dal basso, origine pin1,
+vista adattata): pad 14 allo stesso pixel prima e dopo. Frecce: passo relativo (invariato).
+test_footprint_pad_drag.py 30 verdi (contratto cambiato e annotato nel test); suite
+correlate 1255 verdi. Suite completa NON rilanciata. In attesa della seconda prova utente.
+SECONDA PROVA UTENTE (02/11): «ora è più fluido, però non vorrei avere pad fantasma quando
+sposto e mi serve un mirino al centro del pad per centrare e si deve diversificare quando sono
+nel reticolo a 2.54 oppure fuori» + «poi dovrebbe essere possibile editare la distanza
+indicata nel righello per adattare lo spaziamento tra i due oggetti in misura; se uno è un
+bordo deve modificare solo posizione pad» + «no non funziona! avevo chiesto un mirino ...»
+(= costruiscilo). IN CORSO:
+A. Niente contorno tratteggiato. Mirino (croce) al centro del pad premuto durante il drag;
+   VERDE quando il centro e' su un nodo della griglia principale (aggancio a calamita entro
+   pochi px schermo), ARANCIONE fuori griglia: il pad resta dove lo porti (0.01 mm). Il
+   rilascio lascia il pad dove si vede.
+B. Doppio clic sulla quota del righello (o menu «Modifica quota…»): nuovo valore in mm; si
+   muovono solo i pad. Pad-bordo: pad perpendicolare al bordo. Pad-spigolo/punto: lungo la
+   misura. Quota orizz./vert.: solo quella componente. Pad-pad: si muove il pad cliccato per
+   SECONDO (scelta del coordinatore, raccomandata; utente non ha risposto: confermare).
+   Senza pad: non modificabile. La quota resta e mostra il nuovo valore. Un passo di undo.
+STATO A+B: IMPLEMENTATI (NON committati).
+- A: `_build_pad_crosshair`/`_style_pad_crosshair`/`_pad_drag_delta` (calamita
+  PAD_GRID_MAGNET_PX = 8 px schermo; colori PAD_CROSSHAIR_ON_GRID #a6e3a1 / OFF #fab387 in
+  footprint_view.py); `_commit_pad_move` (move + compensazione vista), usato anche dalle frecce.
+- B: canvas_measure.py: `measure_mover`, `edit_displacement`, `reanchor_measurement`
+  (D-M4 CAMBIATO: le misure seguono i bersagli invece di sparire; vedi
+  docs/canvas-measure-plan.md «Changes of 2026-11-02»), `MeasureTool(on_edit=...)`,
+  `edit`, `edit_at` (doppio clic), voce menu «Modifica quota…» (grigia senza pad).
+  main_window: `_edit_footprint_measure`, `_ask_measure_value`, `_package_pad_at`.
+  Simbolo: misure solo lettura (differenza voluta, motivata nel piano).
+- 5 nuove stringhe i18n (Modifica quota…, Modifica quota, Nuova distanza:, Quota non
+  modificabile., messaggio pin header). Test: test_canvas_measure_edit.py 13 verdi,
+  test_footprint_pad_drag.py 31 verdi, 2 asserzioni di test_footprint_measure_parity.py
+  ribaltate (menu con EDIT_MEASURE). Suite correlate 1273 verdi (02/11); suite completa NON
+  rilanciata. In attesa della prova utente e della conferma «pad-pad: si muove il secondo».
+Proposta APPROVATA dall'utente («ok», 02/11): pad che segue il mouse in modo continuo (come REF**),
+contorno tratteggiato sul nodo di griglia dove atterrera' (posizione ASSOLUTA sui nodi della
+griglia visibile, non piu' delta), rilascio sul contorno; dopo il rilascio la vista si
+compensa cosi' i pad non spostati restano fermi sullo schermo.
+
+## PROMEMORIA PER DOMANI 01/11 (utente: «per oggi va bene così, scrivi un promemoria per domani»)
+Branch ADVANCED, ultimo commit cd69363 (v1.0.5). TUTTO il lavoro del 31/10 pomeriggio/sera e'
+NON COMMITTATO (file in stage + modifiche successive non ancora ri-aggiunte).
+`docs/T7NS5D4-12/` (PDF e foto dell'utente) NON va committato.
+1. Leggere l'esito della suite completa lanciata alle ~00:30: `.venv/claude-full-final8.log`
+   (la precedente aveva 5 fallimenti in test_user_pin_names/test_review_pass3_residuals,
+   corretti: `_settle_extracted_pinout` tiene solo righe che nominano un pad; 33 test mirati
+   verdi). Se rossa: correggere e rilanciare (tools/run_test_halves.py both).
+2. Con suite verde: pre-commit-check (segreti, DB profili: le nuove chiavi i18n devono essere
+   in data/analysis_profiles.sqlite3, commenti in inglese), `git add -A -- . ':!docs/T7NS5D4-12'`,
+   commit, push ADVANCED, merge in main, push main, build MSI locale
+   (scripts/build-windows.ps1 -IncludeYoloModel). AUTORIZZATO dall'utente il 31/10 sera
+   («committa tutto, pusha, mergia in main, pusha e crea pacchetto»); MSI solo locale,
+   NESSUNA release pubblicata. Riallineare conteggi in HANDOFF e .claude/CLAUDE.md.
+3. Far provare all'utente lo strumento «Misura» (non ancora provato nella versione finale) e
+   una nuova analisi del T7N con il ritaglio che CONTIENE «Bottom view on solder pins».
+4. Ancora aperti (non autorizzati o non fatti): foro Ø1.3 letto come terminale (esce 1.55);
+   larghezza corpo 16.9 (= altezza) letta come larghezza; anteprima che mostra una lettura
+   bloccata; S2 (asse lungo del corpo con una sola quota e corpo ruotato); S3 (pinout:
+   numero che vince su un nome che indica un altro pad); quote fra i pin automatiche nel
+   footprint (funzione nuova, intento da confermare); origine footprint sul pin 1 (KLC,
+   decisione dell'utente); verifica A/B prompt per tipologia con altri componenti.
+Cosa c'e' nel lavoro non committato (dettagli nelle sezioni sotto):
+- Estrazione: griglia di un componente singolo -> pad verificati; lettura dedicata con pad in
+  piu' = non confermata; numerazione che non sta nella griglia = blocco; misura posizioni sui
+  fori (`_settle_by_measure`); lettura confermata sostituisce numeri per convenzione;
+  vista sconosciuta + disposizione non simmetrica (coi numeri) = blocco; corpo posizionato
+  asse per asse (quota dal bordo > contorno disegnato > stima); controlli D-A..D-D, H1-H2,
+  M1-M3.
+- drawing_holes: fori piccoli attraversati da linee d'asse trovati; glifi non giustificano
+  piu' una lettura; contorni TRATTEGGIATI; `measured_layout`, `measured_outline`.
+- Sigla del componente (campo GUI) + library_footprints (testimone geometrico dalle librerie
+  KiCad); DeepSeek: modelli solo testo rifiutati prima di pagare.
+- Simbolo: pin = pad del footprint (`generators/symbol_pins.py`).
+- Strumento «Misura» in anteprima footprint ed editor simbolo (canvas_measure.py condiviso):
+  aggancio al centro del pad, spigoli/bordi, linee guida, quote lineari stile datasheet,
+  rimozione singola. Due parity-review e tre generality-audit gia' assorbiti.
+- Banco di prova fisso: tests/data/drawings/ (T7N pagina + ritaglio, VE12H-K x2).
+
+## 31/10 pomeriggio — IN CORSO (OK utente «ok»): griglia di un componente singolo senza controlli
+Utente (render 3D del rele' T7N con 4 pin, «questo è scandaloso»). Analisi 15:30,
+deepseek-flash, file Pinout.png (ritaglio del datasheet) + foto; il PDF e' stato tolto
+perche' l'API DeepSeek non legge PDF. Footprint generato: 4 pad 1,2,4,5 su griglia
+2x2 passo 12.2 x 6.0, foro 1.55. Vero (disegno «Bottom view on solder pins»): 5 pin
+A1, A2, 11, 12, 14; 11 a 2.0 mm fuori dalla colonna A1/A2, file a 12.0, Ø1.3 +0.1 = foro.
+Catena di cause:
+1. Il modello principale ha risposto con `grid` 2x2 e ha rinumerato da se' i pin
+   (note: «ho mappato A1=1, A2=2, 14=4, 12=5»). La griglia accetta solo numeri interi.
+2. La lettura dedicata della numerazione ha visto 5 pin su 4 posizioni; scartata come
+   difettosa («pin 11 compare piu' volte») -> `apply_dedicated_numbering` regola (a):
+   resta la numerazione principale, solo una nota, NESSUN blocco.
+3. Difetto di classe: la lettura dedicata dei pad (pad_model) + controllo dei fori
+   disegnati + blocco valgono solo per le risposte `pads` (`_validate_main_response`,
+   ramo `_has_explicit_pads`); una risposta `grid` di un componente singolo li salta.
+4. Ø1.3 nella vista dei pin lato saldature letto come terminale -> foro alzato a 1.55
+   (domanda separata all'utente, NON ancora autorizzata).
+Piano autorizzato:
+- A. Componente singolo (SINGLE_COMPONENT_FAMILIES) con risposta a griglia: la griglia
+  viene convertita nei pad che descrive (`package_geometry`, nella vista e unita' del
+  disegno) e passa dallo stesso controllo dei `pads` (lettura dedicata, fori, blocco).
+- B. Lettura della numerazione con piu' pin delle posizioni o pin ripetuti: prova che
+  la griglia e' sbagliata -> blocco, non scarto silenzioso.
+- Costo: una chiamata pad_model in piu' per i componenti singoli descritti a griglia.
+Stato (15:55): A e B SCRITTI, non committati. `_grid_as_pads` + `single_answer_to_data`;
+`GridMisfitError` (fuori griglia / pin ripetuto / stessa posizione) -> `read_pin_numbering`
+"contradicts_grid" -> `apply_dedicated_numbering` blocca. Test: griglia -> pad (ordine
+colonne, pin_map + offset corpo -> body_center, row_spacing mai sostituito dal passo),
+end-to-end T7N bloccato e griglia vera confermata; lettura fuori griglia blocca, malformata
+no. Mirati 207 verdi; suite completa e generality-auditor in corso.
+Generality-auditor (16:10) -> correzioni applicate:
+- D1 (alto): una lettura dedicata con pad IN PIU' confermava la griglia (sottoinsieme).
+  Ora pad visti solo dalla lettura dedicata = non confermato (`apply_dedicated_pads` e
+  `_resolve_chain_candidate`: stesso INSIEME di pin). Vale anche per i pads.
+  CORREZIONE: il test T7N passava per la numerazione inventata, non per il pin in piu';
+  aggiunto il test della griglia giusta senza il pin fuori griglia.
+- D2: griglia senza foro restava SMD -> ora sempre thru_hole, foro mancante resta mancante.
+- D3: controllo foro<=terminale esteso ai pad espliciti (`_lift_pad_drills_above_the_lead`);
+  quote della griglia non dichiarate «read» elencate nella nota.
+- D4: blocco della numerazione SOLO per piu' numeri stampati distinti che posizioni;
+  pin ripetuto / fuori griglia / stessa posizione = scarto come prima (GridMisfitError tolto).
+- S1: rifiuto «solo testo» solo con catalogo entro TTL; pad_model solo testo -> modello
+  principale. S2: nota «numerazione per convenzione». S3: docstring. S4 (offset corpo
+  parziale) NON fatto: resta l'euristica dichiarata di body_frame_offset.
+Mirati 271 verdi; suite completa rilanciata.
+C. Secondo difetto segnalato (15:47, screenshot «answer without the required shape» con
+deepseek-api/deepseek-v4-pro): il modello e' SOLO TESTO (catalogo OpenRouter
+deepseek/deepseek-v4-pro = ["text"]), riceveva «[Unsupported Image]», due chiamate pagate.
+Correzione scritta: `openrouter.deepseek_declared_text_only` (euristica dichiarata: modalita'
+di deepseek/<nome> nel catalogo OpenRouter in cache) -> ProviderError prima della richiesta
+se ci sono immagini. Test positivi/negativi in test_providers.py. Traduzioni aggiunte.
+D. AUTORIZZATA (utente «ok proviamo», dopo aver chiuso A-C): campo «Sigla» del componente,
+precompilato dal nome del progetto e modificabile; serve SOLO a cercare nelle librerie
+ufficiali KiCad un footprint candidato, che vale come una lettura in piu' e deve essere
+confermato come le altre (fori disegnati / accordo con le letture); mai regole sul nome.
+Il nome del progetto da solo non basta (testo libero: «T7N  T7N-WG»).
+Stato (16:50): SCRITTA, non committata. `kicadgen/services/library_footprints.py`
+(ricerca per codice di serie nel nome del .kicad_mod, euristica dichiarata; centri dei pad
+numerati; confronto a meno di traslazione + quarto di giro nella vista dichiarata, mai
+specchio); `_layout_checker(documents, library, view_of)` = fori disegnati + libreria;
+`_library_witness`; `_hole_text`/`_settle_by_holes` con testi «footprint KiCad»; anche il
+ramo «solo PDF» ora puo' essere confermato dalla libreria. GUI: `field_part_number` sotto
+«Tipologia componente», in PROJECT_WIDGETS, vuoto -> nome progetto (scritto nel campo),
+`CLEARED_WHEN_UNDECLARED`. Worker `part_number`. Test: tests/test_library_footprints.py,
+tests/test_part_number_field.py. Limite dichiarato: layout simmetrici allo specchio (come
+il T7N) non vengono DECISI dalla libreria (stessa regola dei fori: lo specchio torna anche
+lui), la libreria li conferma solo quando le due letture gia' concordano.
+Nelle librerie KiCad 10 installate: 117 footprint di rele' (Omron, Finder, Hongfa, Schrack
+RT/RY...), NESSUN T7N.
+PROVA REALE utente (17:00, deepseek-flash + pad_model gpt-5.6-sol, sigla T7NS5D4-12):
+generazione BLOCCATA (corretto: nessun file scritto). Risposta principale tutta sbagliata;
+lettura dedicata 4/5 giusta (11 messo 2 mm a DESTRA della colonna A1/A2 invece che a
+sinistra; nella vista quotata non ci sono numeri, vengono dallo schema accanto). Controllo
+fori: «too_few_circles» anche con le posizioni VERE -> `_find_circles` trova 4 fori su 5
+(manca A1 in alto a sinistra, ~(649,98) px, r 3 px; trovati 11 (640,124), A2 (649,150),
+12 (701,150), 14 (702,98)). L'anteprima mostra la risposta principale bloccata: fuorviante.
+Utente: «usa agenti esperti e risolvi». Piano (17:15):
+- Agente 1, SOLO drawing_holes.py + suoi test: trovare il foro mancato (classe: fori piccoli
+  con linee d'asse/quote che li toccano), e nuova funzione che dia le POSIZIONI MISURATE
+  dei fori assegnando i numeri da una lettura (n-1 pad combaciano, unico foro/pad residuo).
+- Agente 2, SOLO library_footprints.py + tests/test_library_footprints.py: audit sigla C1
+  (varianti/prefissi: ancoraggio ai separatori, solo la serie piu' specifica, candidati con
+  geometrie diverse = nessun verdetto), C4 (marca davanti, «xx», solo numeri), C5 (tetto 12).
+- Io: datasheet_extractor.py (C2 libreria vs fori = conflitto, C3 guardia specchio
+  invariante alla rotazione, aggancio posizioni misurate), main_window (S5: nome progetto
+  non scritto nel campo, anteprima di un risultato bloccato).
+Stato 17:45: agente 2 FATTO (ricerca ancorata ai segmenti, solo il codice piu' lungo vota,
+candidati di geometrie diverse -> check_layout None, segmenti di sole lettere iniziali
+opzionali per forma, «xx» segnaposto, solo-numeri = segmento intero, tetto 64 solo di
+sicurezza; «g5v2h1» senza separatori non trova piu' nulla: contratto cambiato). Io: C2
+(`_WitnessConflict`; disegno non verificabile -> vale la libreria; «distorted/body_scale»
+restano), C3 (`_same_up_to_quarter_turns` nella guardia specchio per verdetti di
+libreria), S5 (nome progetto usato ma non scritto nel campo). tests/test_geometry_witnesses.py.
+Mirati verdi. In attesa: agente 1 (fori), poi aggancio `measured_layout` in
+apply_dedicated_pads, suite completa, generality-auditor finale.
+Stato 18:30: agente 1 FATTO (drawing_holes: causa = test «carta dentro il foro» falsato
+dalle linee d'asse sui fori piccoli; `_crossing_lines`, `_is_localised`, regola del cerchio
+contenuto; T7N 5/5 fori, VE12H-K ora «confirmed»; nuova `measured_layout`). Io: aggancio
+`_settle_by_measure` (da `_settle_by_holes` quando nessuna lettura e' confermata) +
+`_layout_measurer`. REPLAY OFFLINE del caso reale T7N (risposte dell'utente delle 17:00
+ricostruite dal log): nessun blocco, 11 spostato sul foro libero (0.03, 6.13), altri 4 come
+la lettura dedicata; scarto 0.13 mm in Y da risoluzione dell'immagine (dichiarato).
+Test: tests/test_geometry_witnesses.py (anche e2e sulla pagina reale, saltato se manca: la
+pagina e' materiale privato NON committato). Mirati 381 verdi. In corso: suite completa
+(.venv/claude-full-final.log) e generality-auditor finale su TUTTO il diff.
+Aperti: anteprima che mostra una lettura bloccata; foro Ø1.3 letto come terminale (1.55).
+Auditor finale (19:00) -> corretti: D-A `_settle_by_measure` scavalcava i rifiuti di
+`_pick_by_holes` (ora: misura solo se NESSUNA lettura e' confermata, solo letture con un
+pad spostato, il risultato ripassa `_pick_by_holes` + scala); D-B un pad trovato da una
+lettura e assente dalla risposta blocca sempre (`_settle_by_holes`); D-C sul pad spostato si
+sostituisce solo l'asse fuori tolleranza (T7N: Y resta 6.0 stampato), nota «STIMATA dai
+pixel»; D-D fori diversi fra i pad -> nessuna alzata, solo nota. Limiti dichiarati non
+risolti: una risposta con un pin in meno che NESSUNA lettura vede (lettura dedicata fallita)
+puo' ancora essere confermata da 4 fori su 5 (servirebbe «foro libero = pin mancante» in
+drawing_holes); margine stretto di `_is_localised` (0.91 contro 0.85); `contradicts_grid`
+conta solo numeri interi; test sulle pagine reali saltati in CI (materiale privato).
+Mirati 155 verdi; suite completa in corso (.venv/claude-full-final2.log).
+19:30 seconda prova reale: lettura dedicata GIUSTA al 100% e confermata dai fori (0.23 mm),
+ma blocco perche' la risposta principale sbagliata risultava «non verificabile»: la
+scappatoia `_missed_hole_explains` usava come appigli 3 glifi sparsi nella pagina. Corretto
+(solo cerchi con evidenza di foro possono giustificare): ora la principale e' «no_match»;
+test drawing_holes 105 verdi. NON ancora rigiocato end-to-end.
+NUOVO DIFETTO (screenshot): il SIMBOLO ha 10 pin: i 5 del pinout con numeri inventati dal
+modello (1 Coil_A1, 2 Coil_A2, 3 Common_11, 4 NC_14, 5 NO_12) + i 5 pad (11, 12, 14, A1, A2)
+senza nome. Il simbolo unisce pinout e pad invece di imporre «pin del simbolo = pad».
+Anteprima dopo blocco: mostra la risposta scartata.
+UTENTE: «fermati e ragioniamo». STOP alle modifiche finche' non si concorda il piano.
+Poi: prova con Opus 4.1 (0.22 USD): griglia 2x3 numerata per convenzione 1-5; lettura dedicata
+gpt-5.6-sol giusta e confermata dai fori, ma blocco per nessun numero in comune (DIFETTO DI
+STRUTTURA: la risposta principale fa da scheletro; proposta «la lettura confermata dai fori
+diventa l'elenco dei pad» + «pin del simbolo = pad», NON ancora autorizzata).
+Prova con immagine ritagliata pulita (disegno + schema + Dimensions): footprint con
+disposizione e nomi GIUSTI; ma corpo centrato sui pin (11 a ~4.2 mm dal bordo invece di
+2.05). Misura sui pixel: il tratteggio e' il corpo (22.1 x 15.9 mm), 11 a 2.1 mm dal bordo,
+14/12 a 5.8 mm dall'altro, file ~centrate. Causa: corpo posizionato solo con bordo noto su
+entrambi i lati e assi, altrimenti centrato (euristica body_frame_offset).
+AUTORIZZATO (utente «ok.», sera 31/10): corpo posizionato ASSE PER ASSE: 1) quota dal bordo
+letta (catena con fermata «edge» a un capo), 2) contorno misurato sul disegno
+(drawing_holes._outline_around), 3) solo altrimenti centrato, dichiarato stima. Verifica
+offline su T7N e VE12H-K.
+FATTO (20:30) livelli 1 e 3: `pads_from_chains` mette in spans["edges"] le fermate «edge»
+per asse; `_write_chain_pads` posiziona il corpo asse per asse (due bordi -> meta'; un bordo
++ misura del corpo -> bordo ± meta', solo se tutti i pad restano dentro; altrimenti centrato
+= STIMA nominata nelle note); `_settle_by_measure` non usa le quote dal bordo (catena gia'
+sbagliata). Replay offline dell'ultima prova riuscita (Opus 4.1 + gpt-5.6-sol, immagine
+nuova): 11 a 2.05 dal bordo destro, 14/12 a 6.25 dal sinistro, file ±6.0. Test
+tests/test_body_placement_axis.py; contratto spans aggiornato in test_pad_dimension_chains.
+Livello 2 (contorno TRATTEGGIATO misurato) NON fatto: `_outline_around` trova solo contorni
+a tratto pieno; serve lavoro sul rilevatore (tocca anche il controllo di scala).
+Test sulle pagine reali: l'utente ha SOSTITUITO docs/T7NS5D4-12/Pinout.png con il ritaglio
+nuovo (977x767); i test dell'agente 1 cercavano la pagina 858x717 per percorso -> ora per
+misura, saltati se assente (la vecchia esiste solo in .history). Da decidere con l'utente:
+fixture committate in tests/data (ritagli del datasheet) = banco di prova.
+AUTORIZZATO (utente «si puoi»): banco di prova fisso in tests/data/drawings/:
+t7n_datasheet_page.png (858x717, pagina della prova delle 17:00), t7n_drawing_crop.png
+(977x767, ritaglio pulito dell'utente), ve12hk_quote_pinout.jpeg, ve12hk_quote_lowres.png
+(estratti dei datasheet pubblici). TEL-8 NON copiato (non chiesto). I test reali puntano li'
+(nessuno saltato); low-res VE12H ora richiede «confirmed»; nuovi e2e sul ritaglio pulito
+(ultima prova dell'utente rigiocata: corpo dalla quota 2.05). La cartella docs/T7N... resta
+fuori dai commit. Suite completa in corso: .venv/claude-full-final4.log.
+PROVA 18:12 (Opus 4.1 + ritaglio pulito): footprint SPECCHIATO (11 a sinistra) perche' il
+ritaglio ha perso «Bottom view on solder pins»: vista «unknown» assunta top SENZA chiedere;
+distanza dal bordo 2.05 giusta; larghezza corpo 16.9 (= altezza) letta come larghezza.
+IN CODA (non ancora fatti): vista sconosciuta + disposizione non simmetrica -> chiedere
+all'utente invece di assumere top; simbolo = pad; foro 1.3 letto come terminale; anteprima
+dopo blocco; contorno tratteggiato (livello 2); controllo larghezza/altezza del corpo.
+IN CORSO (utente «procedi !», 31/10 sera): STRUMENTO DI MISURA nell'anteprima footprint e,
+con i componenti condivisi, nell'editor simbolo. Intento confermato: pulsante «Misura»
+(righello); clic aggancia al CENTRO del pad (simbolo: estremo del pin); secondo clic su un
+altro pad o su bordo/spigolo del corpo (agganciati); linea di quota con frecce, distanza in
+mm + ΔX/ΔY; per un bordo la distanza perpendicolare; misure persistenti fino a Esc o
+«Cancella misure»; NON scritte nei file KiCad. Base: ToolSpec("measure", count=2) sul
+PointCollector/ClickToolRouter esistenti; nuovo modulo condiviso kicadgen/gui/canvas_measure.py;
+piano docs/canvas-measure-plan.md; test di parita' e unitari. Affidato a un agente
+(file: canvas_measure.py, footprint host in main_window.py, symbol_tab.py, footprint_view.py,
+test, i18n). Io non tocco quei file finche' l'agente lavora.
+Stato 21:30: agente FATTO. kicadgen/gui/canvas_measure.py (MeasureAnchor, SnapTargets,
+snap_point, measure, measurement_label, add_dimension_line [estratto da _add_dim_h/_v,
+identico pixel per pixel], screen_dot [estratto da _screen_dot], MeasureOverlay,
+MeasureTool), icona assets/measure-ruler.svg, docs/canvas-measure-plan.md (D-M1..D-M9),
+tests/test_canvas_measure.py (38), parity footprint/simbolo, golden
+tests/data/measure_golden/footprint_dimensions.json. Agganci: centro pad / estremo pin >
+spigolo > piede sul bordo entro 10 px schermo; Esc: punto in sospeso -> misure -> disarmo.
+Misure azzerate se cambiano i bersagli (rigenerazione), cambio progetto, «Cancella misure».
+Da fare: canvas-parity-reviewer, suite completa, DB profili da committare (5 chiavi i18n).
+22:00 parity-reviewer: D1 Esc durante trascinamento non annulla (rilascio = nuovo punto),
+D2 simbolo: «Adatta» inquadra le misure; A1 simbolo azzera le misure a ogni set_data;
+A3 punto in sospeso sopravvive alla rigenerazione -> rimandati all'agente.
+Utente ha provato: «non ci siamo», l'aggancio al centro del pad non funziona (raggio 10 px
+attorno al centro, clic sul rame cade sulla griglia). Nuove regole mandate all'agente:
+clic dentro la forma del pad (+6 px) -> centro; spigolo 12 px, bordo 10 px; evidenziazione
+del bersaglio + etichetta «Pad 11 · centro»/«Spigolo»/«Bordo»; anteprima dal vivo della
+quota dopo il primo clic; niente aggancio alla griglia («Punto libero»).
+Utente: «committa tutto, pusha, mergia in main, pusha e crea pacchetto» -> autorizzato;
+deciso di farlo DOPO queste correzioni e una suite verde (file gia' in stage, docs/T7NS5D4-12
+escluso). MSI solo locale, nessuna release pubblicata.
+Utente poi: quote lineari stile CAD (linee guida di allineamento sulla verticale/orizzontale
+del centro di un altro pad, quota orizzontale/verticale con linee di richiamo, posizionata
+con un terzo clic) + rimozione della singola misura -> mandati all'agente misura. Commit/
+merge/MSI rinviati a dopo la prova dell'utente.
+Utente: «scatena agenti esperti!» (22:30) -> tre agenti in parallelo su file DISGIUNTI:
+- E (datasheet_extractor.py + suoi test): lettura confermata dai fori = elenco dei pad quando
+  la numerazione principale e' convenzione o disgiunta; vista sconosciuta + disposizione non
+  simmetrica allo specchio -> blocco con richiesta di dichiarare la vista.
+- S (generatore simbolo, NON symbol_tab/main_window): pin del simbolo = pad del footprint,
+  pinout solo per i nomi.
+- H (drawing_holes.py + test): contorno TRATTEGGIATO riconosciuto e misurato, API
+  `measured_outline` (aggancio nell'estrattore lo faccio io dopo).
+L'agente misura possiede main_window.py, symbol_tab.py, footprint_view.py, canvas_measure.py.
+Agente S FATTO: kicadgen/generators/symbol_pins.py `pinout_on_pads(pinout, pad_numbers)`
+(numero esatto, poi token del nome che coincide con UN pad, euristica dichiarata; voci senza
+pad = nota, mai pin), tests/test_symbol_pins_from_pads.py (12), 3 voci i18n. DA APPLICARE IO
+in main_window.py `_settle_extracted_pinout` (~9803), quando l'agente misura ha finito:
+  candidate=[dict(r) for r in candidate if isinstance(r, dict)]; pads=self._settle_pad_ids();
+  if pads is not None: placed=pinout_on_pads(candidate, pads); candidate=placed.rows;
+  log delle note (ATTENZIONE + note.localized()); proposed da candidate; riusare `pads` piu'
+  sotto (togliere il secondo `pads = self._settle_pad_ids()`). Causa dei 10 pin:
+  `_refresh_symbol_tab` (~17712) = pinout + riga vuota per ogni pad non elencato.
+Agente E FATTO: `_replace_by_confirmed_reading` (lettura confermata da riscontro geometrico
+sostituisce l'elenco dei pad se la numerazione principale e' convenzione — flag
+`_numbers_by_convention` da `_grid_as_pads` — o disgiunta e non sottoinsieme; attributi
+uniformi dalla principale, altrimenti blocco), `_mirror_equivalent` (simmetria CON i numeri:
+il T7N e' simmetrico come forma ma non numerato) + `_require_declared_view` (vista
+sconosciuta + disposizione non equivalente allo specchio -> blocco «SPECCHIATO»).
+tests/test_confirmed_reading_replacement.py (20 + 2 miei). Io: convenzione sulla STESSA
+forma della lettura dedicata = un solo layout (prima bloccava per «due confermate»).
+Effetto per l'utente: ogni componente singolo con vista sconosciuta e pad non allineati su
+una retta ora si blocca finche' la vista non e' dichiarata.
+Agente H FATTO: drawing_holes riconosce contorni TRATTEGGIATI/puntinati (`_bridged_thin`,
+`_outline_rect`, `_body_disagrees`), nuova `measured_outline` (contorno nel riferimento mm
+della lettura); tests/test_drawing_outline.py (16). Euristica dichiarata e fragile:
+OUTLINE_NEIGHBOUR_MAX 1/3 (riquadri schema 0.27 contro testo 0.30). Il disegno del T7N e'
+leggermente fuori scala (22.0 x 16.15 disegnati per 22.5 x 16.5).
+Io: livello 2 agganciato (`_outline_measurer` in data durante apply_dedicated_pads;
+`_write_chain_pads` passo 3 = contorno disegnato, la quota stampata resta piu' forte);
+quando principale e dedicata CONCORDANO si scrivono le somme della dedicata (prima il corpo
+non veniva mai posizionato in quel caso), salvo principale gia' centrata sul corpo e nessuna
+quota dal bordo. Test aggiornati/aggiunti; 190 verdi.
+Agente misura FATTO (round 2): D1 (`ClickToolRouter.cancel_tool`), D2
+(`bounds_without_measures`), A1, A3 corretti; aggancio sulla forma del pad (+6 px) al
+centro, spigolo 12 px, bordo 10 px, niente griglia («Punto libero»), evidenziazione +
+etichetta, anteprima tratteggiata, linee guida X/Y 8 px, quote lineari con linee di
+richiamo e terzo clic di posizionamento (LINEAR_DOMINANCE 3), rimozione singola (hover +
+Canc, clic destro «Rimuovi misura» dal menu condiviso). Test: 966 verdi (set canvas/parity).
+Io: aggancio `pinout_on_pads` in `_settle_extracted_pinout` + tests/test_symbol_pins_window.py.
+In corso (23:30): suite completa (.venv/claude-full-final6.log), generality-auditor
+(estrazione/contorno/simbolo), canvas-parity-reviewer (misura finale). Poi prova utente,
+poi commit/push/merge/MSI (autorizzati).
+Generality-auditor (round 3) -> corretti: H1 sostituzione con meno pad della risposta =
+mai (perdeva un terminale); S1 sostituzione SOLO per numerazione per convenzione (numeri
+letti da entrambe = blocco); H2 entrambe le fermate «edge» su un asse = centro a meta' anche
+se l'altro asse non e' quotato; M1/M2 risposta principale «body_center»: il suo riferimento
+resta, le quote dal bordo della dedicata lo CONTROLLANO (`_edge_frame_clash`,
+EDGE_FRAME_QUOTES=3 arrotondamenti) e se discordano blocco; M3 `measured_outline` valido
+solo se TUTTI gli abbinamenti confermati (con fori «evidenza») danno lo stesso contorno.
+Non fatti (dichiarati): S2 asse lungo del corpo con una sola quota dal bordo e corpo ruotato;
+S3 numero di tabella che vince su un nome che indica un altro pad (solo nota nel log).
+Test 134 verdi; suite da rilanciare.
+Secondo parity-review misura -> corretti dall'agente: clic destro sopra una misura non ruba
+piu' la chiusura degli altri strumenti (menu solo se nessuno strumento raccoglie punti);
+riquadro di selezione nel footprint; dentro il rame vince sul margine del vicino; linee
+guida; Canc ricalcola la misura sotto il puntatore; «Cancella misure» annulla anche il punto
+in sospeso. Decisioni mie (non chieste all'utente, coerenti con gli altri strumenti):
+geometria temporaneamente non valida = misure mantenute; package che non si costruisce =
+bersagli dai pad disegnati. Set canvas/parity 889 verdi + 15 sonde del revisore.
+Suite completa in corso: .venv/claude-full-final7.log.
+IN CODA (funzione nuova, intento da confermare): quote fra i pin nel footprint come nel
+disegno quotato. Domanda utente: pad su griglia 0.1" -> risposto NO (quote metriche);
+accennata la convenzione KLC origine sul pin 1 (decisione dell'utente, non chiesta).
+Utente 16:45 «ma cosa stai facendo ?? delle regole specifiche per il componente attuale?»:
+risposto che non ci sono regole per componente; tutte le modifiche valgono per la classe.
+
 ## 31/10 — RELEASE v1.0.5 PUBBLICATA (utente: «committa pusha merge e pubblica»)
 - Tag v1.0.5 da ADVANCED (commit 7ec98fb «release: v1.0.5»), fast-forward in main.
 - Workflow «Windows MSI release» verde (build + publish); Release:
