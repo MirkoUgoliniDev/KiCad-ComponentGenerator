@@ -4,7 +4,12 @@
 Suite completa 02/11: A 6533/9/19, B 4584/4, 0 falliti = 11117 passati, 13 saltati, 19 sottotest.
 Branch ADVANCED; commit, push, merge in main, push main, ritorno su ADVANCED («porta in prog»
 interpretato come ritorno sul branch di lavoro), MSI locale ricostruito, NESSUNA release.
-`docs/T7NS5D4-12/` (PDF/foto utente) escluso dal commit. Hash nella sezione sotto dopo il commit.
+`docs/T7NS5D4-12/` (PDF/foto utente) escluso dal commit. FATTO: commit `1482d94` su ADVANCED,
+merge `d759e0e` in main, entrambi pushati; di nuovo su ADVANCED. MSI locale ricostruito:
+dist\KiCadGen-1.0.5.msi 460.5 MB (-IncludeYoloModel), `--check-runtime` OK (onnxruntime OK);
+avvisi: ICE60 attesi, ICE03 su SetWIXUI_EXITDIALOGOPTIONALTEXT (stringa lunga della pagina
+finale), PyInstaller pyvista.trame / onnxruntime.quantization non raccolti (moduli non usati).
+Versione invariata 1.0.5 (gia' pubblicata): NESSUNA release. Prova in VM a cura dell'utente.
 Il promemoria 01/11 qui sotto e' CHIUSO per i punti 1-3 (suite, commit, prova Misura).
 Ancora da confermare dall'utente: pad-pad «si muove il secondo».
 
