@@ -66,18 +66,45 @@ def test_the_call_sends_the_drawing_alone_with_the_grid_and_validates_the_answer
 
 
 @pytest.mark.parametrize("answer", [
+    "not a dict",
+    _answer([{"pin": "uno", "row": 0, "col": 0}]),          # malformed entry
+    # A repeated number or an index out of range can be the reader's slip
+    # (two images of one pinout, rows counted from 1): discarded, no block.
     _answer([{"pin": 1, "row": 0, "col": 9}]),             # outside 8 columns
     _answer([{"pin": 1, "row": 0, "col": 0}, {"pin": 1, "row": 1, "col": 0}]),   # twice
-    "not a dict",
+    _answer([{"pin": 1, "row": 0, "col": 0}, {"pin": 2, "row": 0, "col": 0}]),   # one position
 ])
 def test_an_unusable_answer_is_reported_as_discarded_with_its_reason(tmp_path, answer):
     logs = []
     reading = read_pin_numbering([_drawing(tmp_path)], rows=2, cols=8, model="m",
                                  call=Mock(return_value=answer), progress=logs.append)
     assert reading["pins"] == [] and reading["discarded"]
+    assert not reading.get("contradicts_grid")
     data = {"pin_map": list(ZIGZAG), "contacts_view": "bottom"}
     apply_dedicated_numbering(data, reading)
     assert data["pin_map"] == ZIGZAG and "risposta scartata" in data["_numbering_note"]
+    assert "_pin_map_conflict" not in data
+
+
+def test_more_printed_numbers_than_grid_positions_block_the_generation(tmp_path):
+    """User, 2026-10-31 (T7N relay): five printed pins on a 2x2 grid were
+    discarded and a footprint with invented numbers came out. More DISTINCT
+    printed numbers than positions cannot fit any grid of that size: block."""
+    five = _answer([{"pin": p, "row": r, "col": c}
+                    for p, r, c in ((1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1), (5, 1, 0))])
+    reading = read_pin_numbering([_drawing(tmp_path)], rows=2, cols=2, model="m",
+                                 call=Mock(return_value=five))
+    assert reading["pins"] == [] and reading["contradicts_grid"] is True
+    data = {"pin_map": [{"pin": 1, "row": 0, "col": 0}], "contacts_view": "bottom"}
+    apply_dedicated_numbering(data, reading)
+    assert "2x2" in data["_pin_map_conflict"] and "5 numeri" in data["_pin_map_conflict"]
+    assert data["_numbering_note"] == data["_pin_map_conflict"]
+    # Negative: as many distinct numbers as positions is not a contradiction.
+    four = _answer([{"pin": p, "row": r, "col": c}
+                    for p, r, c in ((1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1))])
+    reading = read_pin_numbering([_drawing(tmp_path)], rows=2, cols=2, model="m",
+                                 call=Mock(return_value=four))
+    assert not reading.get("contradicts_grid") and len(reading["pins"]) == 4
 
 
 def test_a_failed_call_is_best_effort_and_says_so(tmp_path):

@@ -1277,6 +1277,32 @@ def _load_models_cache(ignore_ttl: bool = False) -> Optional[list[dict]]:
         return None
 
 
+def deepseek_declared_text_only(model: str) -> bool:
+    """@brief Whether a DeepSeek direct-API model is declared text only.
+
+    @param model Identifier with the DeepSeek direct prefix (e.g. ``deepseek-api/deepseek-v4-pro``).
+    @return True only when OpenRouter's cached catalog, still within its
+        refresh period (MODELS_CACHE_TTL_S), lists the same model
+        (``deepseek/<name>``) with declared input modalities and no "image";
+        False when the catalog is missing or stale, or the model is not
+        listed, declares nothing, or reads images: stale data never refuses.
+    @note DECLARED HEURISTIC. DeepSeek's own /models declares no modalities,
+        so the identity ``deepseek-api/<name>`` = ``deepseek/<name>`` (the same
+        model through two routes, see providers) borrows OpenRouter's
+        declaration. It only ever refuses a model declared text only; an
+        unknown model is sent as before. A modality field in DeepSeek's own
+        list would make it unnecessary.
+    """
+    from .providers import provider_model_name
+    rows = _load_models_cache() or []
+    wanted = "deepseek/" + provider_model_name(model)
+    for raw in rows:
+        info = _model_from_payload(raw) if isinstance(raw, dict) and raw.get("id") == wanted else None
+        if info is not None:
+            return bool(info.input_modalities) and "image" not in info.input_modalities
+    return False
+
+
 def _write_models_cache(payload: list[dict]) -> None:
     """Atomic cache write: a temporary file in the same directory, then fsutil.replace_file.
 
@@ -1623,6 +1649,14 @@ def _call_tool(
         if has_pdf:
             raise ProviderError(tx("L'API diretta di DeepSeek non legge i PDF: per un "
                                    "datasheet PDF scegli un modello OpenRouter che li legga."))
+        if (any(isinstance(b, dict) and b.get("type") == "image_url" for b in content_blocks)
+                and deepseek_declared_text_only(model)):
+            # Refused before the request, so nothing is billed: a text-only
+            # model gets «[Unsupported Image]» in place of every picture and
+            # answers without terminals (user, 2026-10-31, deepseek-v4-pro).
+            raise ProviderError(tx("Il modello {model} legge solo testo, non le immagini: per "
+                                   "foto e disegni scegli un modello che legga le immagini.",
+                                   model=model))
         # Reasoning rejects any tool_choice (HTTP 400, 27/09 and 29/09) and
         # consumes paid tokens: the structured answer matters more.
         # Always off (user, 2026-10-02: the «Ragionamento DeepSeek» (DeepSeek

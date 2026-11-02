@@ -207,7 +207,7 @@ DEVELOPER_NAME = "Mirko Ugolini"
 #: `group_3d` is not saved: since 2026-09-26 it follows FreeCAD's availability
 #: only, and an old file with it off would silently disable every 3D model.
 PROJECT_WIDGETS = (
-    "combo_component_type", "field_component_prompt", "combo_photo_detector",
+    "combo_component_type", "field_component_prompt", "field_part_number", "combo_photo_detector",
     "field_yolo_model", "field_smd_model", "group_castellated",
     "field_description", "field_tags",
     "field_rows", "field_cols", "field_pitch", "field_row_spacing", "field_pad",
@@ -223,6 +223,10 @@ PROJECT_WIDGETS = (
 #: Fields of the local weight files: empty = the default. A project that does
 #: not declare them brings them back empty instead of inheriting the previous ones.
 MODEL_FILE_WIDGETS = ("field_yolo_model", "field_smd_model")
+#: Project fields that go back empty when a project does not declare them
+#: (saved before the field existed): a part number belongs to one component
+#: and must never be inherited from the project opened before.
+CLEARED_WHEN_UNDECLARED = MODEL_FILE_WIDGETS + ("field_part_number",)
 #: Pause before re-enabling «Estrai parametri con AI» (extract parameters with
 #: AI) after an interrupted preparation (missing documents, detector not
 #: available...): clicks that arrived while the interface was frozen are
@@ -1231,11 +1235,9 @@ def _screen_dot(scene, x, y, size, outline, fill, role, z):
     @param z Z value.
     @return The ellipse item.
     """
-    from PyQt6.QtWidgets import QGraphicsItem
-    half = size / 2
-    dot = scene.addEllipse(-half, -half, size, size, QPen(QColor(outline), 1.6), QBrush(QColor(fill)))
-    dot.setPos(x, y)
-    dot.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+    # Shared with the measuring tool (`canvas_measure.screen_dot`).
+    from .canvas_measure import screen_dot
+    dot = screen_dot(scene, x, y, size, outline, fill)
     dot.setData(role, True)
     dot.setZValue(z)
     return dot
@@ -1736,6 +1738,17 @@ class MainWindow(QMainWindow):
         #: turn, a field edit) or adds drawings (a paste) carries into the
         #: list it commits; None otherwise.
         self._fp_selection_carry = None
+        #: Selected package pads (indices into `package_geometry.pins`), the
+        #: same selection model as the drawings'. Valid only for the pad
+        #: numbers it was made on (`_fp_pad_selection_key`): read it through
+        #: `_fp_selected_pads`.
+        self._fp_pad_selection = IndexSelection()
+        #: (package object, pad numbers) the pad selection indexes; another
+        #: package or other pads clear it on the next read.
+        self._fp_pad_selection_key = None
+        #: The pad drag in progress: {"members", "items", "press", "delta"}
+        #: (see `_begin_pad_drag`), None when no pad is dragged.
+        self._fp_pad_drag = None
         #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
         #: Consumed by `_flush_footprint_rewrite` just before its single
         #: attempt (a failed start is logged once, never retried in a loop)
@@ -3679,6 +3692,15 @@ class MainWindow(QMainWindow):
             self._on_component_type_changed
         )
         ai_form.addRow("Tipologia componente:", self.combo_component_type)
+        # Part number of a single part: it only finds KiCad library footprints
+        # that confirm the geometry read from the drawing, never the numbering.
+        self.field_part_number = QLineEdit()
+        self.field_part_number.setPlaceholderText("Vuoto: si usa il nome del progetto")
+        self.field_part_number.setToolTip(
+            "Sigla del componente (es. G5V-2-H1). Per un componente singolo cerca nelle librerie "
+            "KiCad un footprint con quella serie: serve solo a confermare la disposizione dei pad "
+            "letta dal disegno, numeri e nomi dei pin restano quelli del disegno.")
+        ai_form.addRow("Sigla del componente:", self.field_part_number)
         self.group_single_tht_pads = QGroupBox("Piazzole del componente THT")
         single_tht_layout = QHBoxLayout(self.group_single_tht_pads)
         single_tht_layout.setContentsMargins(10, 6, 10, 6)
@@ -4604,6 +4626,18 @@ class MainWindow(QMainWindow):
 
     def _component_name(self) -> str:
         return self.field_name.text().strip() if hasattr(self, "field_name") else ""
+
+    def _part_number_for_analysis(self) -> str | None:
+        """@brief The part number of the next analysis: the «Sigla» field, else the project name.
+
+        @return The text to search the KiCad libraries with, or None when both
+            are blank. The project name is used, never written into the field:
+            a fallback saved as typed data would go stale after a rename and
+            look like a part number the user declared (generality audit S5).
+            The field's placeholder says the project name is used, and the
+            analysis log names the part number searched.
+        """
+        return self.field_part_number.text().strip() or self._component_name() or None
 
     def _project_dir_or_none(self) -> Path | None:
         """@brief Project folder, or None while the project has no name."""
@@ -5702,6 +5736,7 @@ class MainWindow(QMainWindow):
             numbering_prompt=profile.get('numbering_prompt') or None,
             # Global, never per type (analysis_profiles.resolve); blank = `model`.
             pad_model=profile.get('pad_model') or None,
+            part_number=self._part_number_for_analysis(),
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
         )
@@ -8141,7 +8176,7 @@ class MainWindow(QMainWindow):
             values = state.get("widgets") if isinstance(state.get("widgets"), dict) else {}
             if widget is not None and name in values and not set_widget_value(widget, values[name]):
                 skipped.append(name)
-            elif widget is not None and name not in values and name in MODEL_FILE_WIDGETS:
+            elif widget is not None and name not in values and name in CLEARED_WHEN_UNDECLARED:
                 # A weight file not declared by the project (saved before the
                 # field) is the default, not the one of the project opened before
                 # (adversarial check B3, 2026-10-02).
@@ -8313,6 +8348,12 @@ class MainWindow(QMainWindow):
         self._end_footprint_drawing_interaction()
         self._refresh_footprint_undo_buttons()
         self._cancel_footprint_drawing()
+        # Measures belong to the project being left, in both tabs (plan
+        # docs/canvas-measure-plan.md D-M4).
+        self._clear_footprint_measures()
+        symbol_tab = getattr(self, "symbol_tab", None)
+        if symbol_tab is not None:
+            symbol_tab.clear_measures()
         self._refresh_type_effect()
         self.package_geometry = package_geometry
         # After the package: the designator proposal reads its family.
@@ -9795,10 +9836,23 @@ class MainWindow(QMainWindow):
         if candidate is None:
             return
         candidate = [dict(row) for row in candidate if isinstance(row, dict)]
+        pads = self._settle_pad_ids()
+        if pads is not None:
+            # The symbol's pins are exactly the footprint's pads; the pinout
+            # only names them (user, 2026-10-31, T7N relay: invented pinout
+            # numbers 1..5 plus the pads 11..A2 made a ten-pin symbol).
+            from ..generators.symbol_pins import pinout_on_pads
+            placed = pinout_on_pads(candidate, pads)
+            # Only rows that NAME a pad (or carry more than pin and name):
+            # an empty pinout still means «no names», and unnamed pads are
+            # added by the symbol tab itself (_refresh_symbol_tab).
+            candidate = [row for row in placed.rows
+                         if _pin_name_text(row.get("name")) or set(row) - {"pin", "name"}]
+            for note in placed.notes:
+                self._append_log(tx("ATTENZIONE: ") + note.localized())
         proposed = {_pin_key(row.get("pin")): _pin_name_text(row.get("name")) for row in candidate}
         # From now on the user's names are judged against THIS analysis (L1).
         self._analysis_pin_names = dict(proposed)
-        pads = self._settle_pad_ids()
         vanished = sorted((pin for pin in self._user_pin_names
                            if pads is not None and pin not in pads),
                           key=lambda pin: pin_sort_key({"pin": pin}))
@@ -14839,7 +14893,7 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(QLabel("Anteprima 2D (silkscreen + pad, con quote):"))
         self.preview_pad_hint = QLabel(self.i18n.text(
-            "Tasto destro su un pad per modificarne forma e dimensioni."))
+            "Trascina un pad per spostarlo; tasto destro per modificarne forma e dimensioni."))
         header.addWidget(self.preview_pad_hint)
         header.addStretch()
         for asset, tooltip, callback in (
@@ -14850,6 +14904,17 @@ class MainWindow(QMainWindow):
             button = self._view_tool_button(asset, tooltip)
             button.clicked.connect(callback)
             header.addWidget(button)
+        # Measuring tool (user, 2026-10-31), the same shared tool as the symbol
+        # editor's (`canvas_measure`): pad centres, body corners and edges.
+        from .canvas_measure import CLEAR_MEASURES_SOURCE, MEASURE_TOOLTIP_SOURCE
+        self.btn_fp_measure = self._view_tool_button('measure-ruler.svg', MEASURE_TOOLTIP_SOURCE,
+                                                     checkable=True)
+        self.btn_fp_measure.clicked.connect(lambda _checked=False: self._toggle_footprint_measure())
+        self.btn_fp_measure_clear = self._view_tool_button('delete.svg', CLEAR_MEASURES_SOURCE)
+        self.btn_fp_measure_clear.clicked.connect(lambda _checked=False: self._clear_footprint_measures())
+        self.btn_fp_measure_clear.setEnabled(False)
+        header.addWidget(self.btn_fp_measure)
+        header.addWidget(self.btn_fp_measure_clear)
         # Undo/redo of the drawings, same icons and shortcuts as the symbol
         # editor (user rule, 2026-10-13: same feature, same look everywhere).
         self.btn_fp_undo = self._view_tool_button('edit-undo.svg', 'Annulla modifica')
@@ -14928,6 +14993,15 @@ class MainWindow(QMainWindow):
         # The window is the gesture host: `gesture_begin` / `gesture_step` /
         # `gesture_end` snap and commit what the view's controller reports.
         self.preview_view.attach_host(self)
+        from .canvas_measure import MeasureTool
+        #: The shared measuring tool on the preview's click collector (20 scene px per mm).
+        self._fp_measure = MeasureTool(
+            self.preview_view, self.preview_view.click_collector, units_per_mm=_FP_PREVIEW_MM_TO_PX,
+            translate=self.i18n.text,
+            on_changed=lambda count: self.btn_fp_measure_clear.setEnabled(count > 0),
+            on_edit=self._edit_footprint_measure)
+        self._fp_measure.router = self.preview_view.click_router
+        self.preview_view.measure = self._fp_measure
         self.preview_view.set_framing_provider(self._preview_framing_rect)
         self.preview_view.set_fine_divisor(self.combo_fine_grid.currentData())
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
@@ -15022,10 +15096,14 @@ class MainWindow(QMainWindow):
                     ('Ctrl+D', command(self._duplicate_hovered_drawing, has_target)),
                     ('Ctrl+C', self._copy_hovered_drawing),
                     ('Ctrl+V', command(self._paste_footprint_drawings, can_paste)),
-                    ('Delete', command(self._delete_hovered_drawing, has_target))]
+                    # A hovered measure takes Delete first (it is an overlay, no draft edit).
+                    ('Delete', lambda delete=command(self._delete_hovered_drawing, has_target):
+                        self._fp_measure.remove_hovered() or delete())]
         # Arrow nudge and R / Shift+R turn (review 2026-10-29, C8, as the
         # symbol editor): one drawing-grid step, Y down on the footprint.
-        bindings += [(key, command(lambda x=dx, y=dy: self._nudge_footprint_drawings(x, y), has_target))
+        # Selected pads take the arrows first, as selected pins do.
+        can_nudge = lambda: bool(self._fp_selected_pads()) or has_target()
+        bindings += [(key, command(lambda x=dx, y=dy: self._nudge_footprint_targets(x, y), can_nudge))
                      for key, dx, dy in [('Left', -1, 0), ('Right', 1, 0), ('Up', 0, -1), ('Down', 0, 1)]]
         bindings += [(key, command(lambda ccw=ccw: self._turn_footprint_targets(ccw), has_target))
                      for key, ccw in [('R', False), ('Shift+R', True)]]
@@ -15035,6 +15113,7 @@ class MainWindow(QMainWindow):
             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
         self.preview_view.drawing_toggled.connect(self._toggle_footprint_drawing_selection)
+        self.preview_view.pad_toggled.connect(self._toggle_footprint_pad_selection)
         self.preview_view.band_selected.connect(self._select_footprint_drawings_in)
         self.preview_view.background_clicked.connect(self._clear_footprint_selection)
         self.preview_view.escape_idle.connect(self._clear_footprint_selection)
@@ -15099,6 +15178,10 @@ class MainWindow(QMainWindow):
 
     # ── Footprint draw tools: the window is the ClickToolHost of the preview ──
 
+    #: Key of the shared measuring tool (`canvas_measure.MEASURE_KEY`), on which
+    #: the host callbacks dispatch.
+    _MEASURE_KEY = "measure"
+
     def _fp_click_collector(self):
         """@brief The preview's `PointCollector`, or None before the preview exists."""
         return getattr(getattr(self, "preview_view", None), "click_collector", None)
@@ -15108,13 +15191,19 @@ class MainWindow(QMainWindow):
         """@brief Key of the armed palette tool of the preview, or None (read-only)."""
         collector = self._fp_click_collector()
         spec = collector.spec if collector is not None else None
-        return spec.key if spec is not None else None
+        # The measuring tool is not a palette tool: its anchors are not drawing points.
+        return spec.key if spec is not None and spec.key != self._MEASURE_KEY else None
 
     @property
     def _fp_draw_clicks(self) -> list:
-        """@brief Copy of the points clicked for the shape in progress, footprint mm (read-only)."""
+        """@brief Copy of the points clicked for the shape in progress, footprint mm (read-only).
+
+        @return [] while the measuring tool (whose points are anchors) or no tool is armed.
+        """
         collector = self._fp_click_collector()
-        return collector.points if collector is not None else []
+        if collector is None or self._fp_draw_tool is None:
+            return []
+        return collector.points
 
     def _toggle_footprint_draw_tool(self, key: str) -> None:
         """@brief Arm a palette tool of the preview, or disarm the armed one."""
@@ -15145,7 +15234,114 @@ class MainWindow(QMainWindow):
         self._fp_handle_origin = None
         for button in getattr(self, "_fp_draw_buttons", {}).values():
             button.setChecked(False)
+        measure_button = getattr(self, "btn_fp_measure", None)
+        if measure_button is not None:
+            measure_button.setChecked(False)
         self._refresh_draw_markers()
+
+    # ── Measuring tool (shared `canvas_measure`, plan docs/canvas-measure-plan.md) ──
+
+    def _toggle_footprint_measure(self) -> None:
+        """@brief «Misura»: arm the measuring tool, or disarm it when armed.
+
+        @note Arming ends any armed palette tool first (one armed tool at a
+            time); the measures already shown stay.
+        """
+        from .canvas_measure import MEASURE_SPEC
+        armed = self._fp_measure.armed
+        self._cancel_footprint_drawing()
+        if not armed:
+            self.preview_view.set_draw_mode(True, MEASURE_SPEC)
+        self.btn_fp_measure.setChecked(self._fp_measure.armed)
+
+    def _clear_footprint_measures(self) -> None:
+        """@brief «Cancella misure»: remove every measure of the preview (the tool stays as it is)."""
+        measure = getattr(self, "_fp_measure", None)
+        if measure is not None:
+            measure.clear()
+
+    @staticmethod
+    def _footprint_measure_targets(footprint):
+        """@brief What the measuring tool snaps to in a built footprint, in scene px.
+
+        @param footprint The `Footprint` the preview drew (the one the .kicad_mod holds), or None.
+        @return `SnapTargets`: every pad position (`Pad.at`, label = pad
+            number) with its copper outline as hit shape (`pad_polygon`: the
+            pad's shape, size and rotation as written to the .kicad_mod),
+            and the corners and edges of the F.Fab body outline (`FpRect`,
+            `FpLine`); empty without a footprint.
+        """
+        from ..core.footprint import FpLine, FpRect
+        from .canvas_measure import SnapTargets, pad_polygon
+        if footprint is None:
+            return SnapTargets()
+        k = _FP_PREVIEW_MM_TO_PX
+        centres = tuple(
+            (float(p.at[0]) * k, float(p.at[1]) * k, str(p.number or ""),
+             pad_polygon(float(p.at[0]) * k, float(p.at[1]) * k, float(p.size[0]) * k, float(p.size[1]) * k,
+                         str(p.shape), float(p.rotation or 0.0)))
+            for p in footprint.pads)
+        corners, edges = [], []
+        for graphic in footprint.graphics:
+            if getattr(graphic, "layer", None) != "F.Fab":
+                continue
+            if isinstance(graphic, FpRect):
+                rect_corners, rect_edges = SnapTargets.rectangle(
+                    graphic.start[0] * k, graphic.start[1] * k, graphic.end[0] * k, graphic.end[1] * k)
+                corners.extend(rect_corners)
+                edges.extend(rect_edges)
+            elif isinstance(graphic, FpLine):
+                start = (graphic.start[0] * k, graphic.start[1] * k)
+                end = (graphic.end[0] * k, graphic.end[1] * k)
+                corners.extend((start, end))
+                edges.append((*start, *end))
+        return SnapTargets(centres=centres, corners=tuple(dict.fromkeys(corners)),
+                           edges=tuple(dict.fromkeys(edges)))
+
+    def _sync_footprint_measures(self, footprint, package=None) -> None:
+        """@brief After a preview redraw: draw the measures again, or drop them if the geometry changed.
+
+        @param footprint The footprint just drawn, or None when it could not be built.
+        @param package The package the drawer drew, when the drawer is the
+            package one: if its footprint did not build, the snap targets
+            come from the pads it drew (review 2026-10-31, decision b).
+        @note No footprint and no package: the draft is transiently invalid
+            and the measures are kept (`MeasureTool.sync(None)`, decision a).
+        """
+        measure = getattr(self, "_fp_measure", None)
+        if measure is None:
+            return
+        if footprint is not None:
+            measure.sync(self._footprint_measure_targets(footprint))
+        elif package is not None:
+            measure.sync(self._package_measure_targets(package))
+        else:
+            measure.sync(None)
+
+    @staticmethod
+    def _package_measure_targets(package):
+        """@brief Snap targets of a package from the pads the preview draws (its footprint did not build).
+
+        @param package The `PackageGeometry` drawn.
+        @return `SnapTargets` of `package.pins_seen_from_top()` (pad centre,
+            copper outline from shape, size and rotation) and of the body
+            outline `pad_outline` gives, the same geometry the drawer shows.
+        """
+        from ..core.package_geometry import pad_outline
+        from .canvas_measure import SnapTargets, pad_polygon
+        k = _FP_PREVIEW_MM_TO_PX
+        centres = tuple(
+            (pin.x_mm * k, pin.y_mm * k, str(pin.number),
+             pad_polygon(pin.x_mm * k, pin.y_mm * k, pin.pad_length_mm * k, pin.pad_width_mm * k,
+                         str(pin.shape), float(pin.rotation_deg or 0.0)))
+            for pin in package.pins_seen_from_top())
+        corners, edges = (), ()
+        if package.body_length_mm and package.body_width_mm:
+            outline = [(x * k, y * k) for x, y in pad_outline(
+                0.0, 0.0, package.body_length_mm, package.body_width_mm, package.orientation_deg)]
+            corners = tuple(outline)
+            edges = tuple((*outline[i], *outline[(i + 1) % len(outline)]) for i in range(len(outline)))
+        return SnapTargets(centres=centres, corners=corners, edges=edges)
 
     def tool_snap(self, spec, point, free: bool, points) -> list:
         """@brief `ClickToolHost`: the point a click or a hover at `point` would add, on the drawn grid.
@@ -15154,8 +15350,11 @@ class MainWindow(QMainWindow):
         @param point Raw scene position (px).
         @param free Shift state (unused: the footprint has no free mode).
         @param points Points collected so far (unused).
-        @return One footprint point in mm.
+        @return One footprint point in mm; for the measuring tool one
+            `MeasureAnchor` in scene px (`MeasureTool.snap`).
         """
+        if spec.key == self._MEASURE_KEY:
+            return self._fp_measure.snap(point, free, points)
         return [self._snapped_draw_point(point.x(), point.y())]
 
     def tool_points_changed(self, spec, points: list) -> None:
@@ -15167,6 +15366,9 @@ class MainWindow(QMainWindow):
             nothing to draw yet and `_cancel_footprint_drawing` just cleaned
             the markers.
         """
+        if spec.key == self._MEASURE_KEY:
+            self._fp_measure.points_changed(points)
+            return
         if points:
             self._refresh_draw_markers()
 
@@ -15180,6 +15382,9 @@ class MainWindow(QMainWindow):
             telling, so the node is compared with the one already shown: the
             number of rebuilds stays the number of snapped-node changes.
         """
+        if spec.key == self._MEASURE_KEY:
+            self._fp_measure.preview_changed(points, preview)
+            return
         node = preview[0] if preview else None
         if node != self._fp_draw_hover:
             self._fp_draw_hover = node
@@ -15191,6 +15396,10 @@ class MainWindow(QMainWindow):
         @param spec The armed tool (unused).
         @param reason Why the click added nothing (`REFUSED_COINCIDENT`).
         """
+        if spec.key == self._MEASURE_KEY:
+            self._draw_feedback_toast(self.i18n.text("Punto coincidente con il precedente."),
+                                      self.i18n.text("Scegli un altro punto da misurare."))
+            return
         self._draw_feedback_toast(self.i18n.text(
             "Punto coincidente con il precedente."), self.i18n.text(
             "Con la griglia attiva i click si agganciano ai suoi nodi: "
@@ -15203,8 +15412,11 @@ class MainWindow(QMainWindow):
         @param points The clicked points (footprint mm).
         @param commit False when the tool was cancelled: the cancel path
             resets the state itself and nothing is stored.
-        @return Always False: every footprint tool is one-shot.
+        @return False for the palette tools (one-shot); the measuring tool
+            stays armed after a measure (`MeasureTool.finished`).
         """
+        if spec.key == self._MEASURE_KEY:
+            return self._fp_measure.finished(points, commit)
         if commit:
             self._fp_skip_disarm = True
             try:
@@ -15219,6 +15431,9 @@ class MainWindow(QMainWindow):
         @param spec The tool now armed; its key names the palette button.
         """
         self._fp_draw_dirty = True
+        if spec.key == self._MEASURE_KEY:
+            self.btn_fp_measure.setChecked(True)
+            return
         button = getattr(self, "_fp_draw_buttons", {}).get(spec.key)
         if button is not None:
             button.setChecked(True)
@@ -15226,8 +15441,11 @@ class MainWindow(QMainWindow):
     def tool_disarmed(self, spec) -> None:
         """@brief `ClickToolHost`: the tool ended by Escape or a hide; reset the draw state once.
 
-        @param spec The tool that ended (unused).
+        @param spec The tool that ended; the measuring tool also drops its markers.
         """
+        if spec.key == self._MEASURE_KEY:
+            self._fp_measure.disarmed()
+            self.btn_fp_measure.setChecked(False)
         if self._fp_skip_disarm:
             self._fp_skip_disarm = False
             return
@@ -15468,6 +15686,11 @@ class MainWindow(QMainWindow):
         self.package_geometry = new
         if getattr(self, "_fp_draft_package", None) is old:
             self._fp_draft_package = new
+        key = getattr(self, "_fp_pad_selection_key", None)
+        if key is not None and key[0] is old:
+            # The same package edited (a pad moved or resized): its pad
+            # selection stays; `_fp_selected_pads` then checks the numbers.
+            self._fp_pad_selection_key = (new, key[1])
         if getattr(self, "_last_params", None) is old:
             self._last_params = new
 
@@ -15525,6 +15748,9 @@ class MainWindow(QMainWindow):
         if self._fp_applied is None:
             self._fp_applied = deepcopy(current)
             self._fp_draft_package = self.package_geometry
+        # Undo and redo clear the pad selection too, as the drawings' one
+        # (the restored pads keep their numbers, which would keep it).
+        self._fp_pad_selection.clear()
         self._set_footprint_edit_state(source.pop())
         target.append(current)
         self._footprint_draft_changed()
@@ -16223,8 +16449,13 @@ class MainWindow(QMainWindow):
         """@brief The drawings a keyboard command acts on.
 
         @return The selection when there is one, else the drawing under the
-            pointer (as before the selection existed), else [].
+            pointer (as before the selection existed), else []. [] while
+            pads are selected: Delete, R, Ctrl+D and Ctrl+C never fall back
+            to a drawing the user did not select (pads are not deleted,
+            turned or copied; the arrows move them, `_nudge_footprint_targets`).
         """
+        if self._fp_selected_pads():
+            return []
         selected = self._fp_selected_indices()
         if selected:
             return selected
@@ -16235,7 +16466,10 @@ class MainWindow(QMainWindow):
         """@brief Make `index` the primary selected drawing; `additive` keeps the others.
 
         @param index Index of a drawing; an unknown one does nothing.
-        @param additive True keeps the rest of the selection.
+        @param additive True keeps the rest of the drawing selection.
+        @note Pads and drawings are never selected together, as pins and
+            elements in the symbol editor (`SymbolTab._select_pins`): a
+            selected drawing drops the selected pads.
         @note A press that leaves the selection as it was (the same primary
             and members, on the same drawings revision) restyles nothing
             (review 2026-10-29, C10): every press on a drawing comes here,
@@ -16245,9 +16479,12 @@ class MainWindow(QMainWindow):
             return
         revision = self._fp_selection_revision
         self._fp_selected_indices()
+        pads = self._fp_selected_pads()
         before = self._fp_selection.snapshot()
         self._fp_selection.select(index, additive)
-        if revision == self._fp_selection_revision and self._fp_selection.snapshot() == before:
+        self._fp_pad_selection.clear()
+        if (revision == self._fp_selection_revision and self._fp_selection.snapshot() == before
+                and not pads):
             return
         self._refresh_drawing_selection()
 
@@ -16260,13 +16497,70 @@ class MainWindow(QMainWindow):
             return
         self._fp_selected_indices()
         self._fp_selection.toggle(index)
+        # Pads and drawings are never selected together (`_select_footprint_drawing`).
+        self._fp_pad_selection.clear()
         self._refresh_drawing_selection()
 
     def _clear_footprint_selection(self) -> None:
-        """@brief Select no drawing (background click, Escape with nothing else to cancel)."""
-        if self._fp_selected_indices():
+        """@brief Select no drawing and no pad (background click, Escape with nothing else to cancel)."""
+        if self._fp_selected_indices() or self._fp_selected_pads():
             self._fp_selection.clear()
+            self._fp_pad_selection.clear()
             self._refresh_drawing_selection()
+
+    def _fp_selected_pads(self) -> list:
+        """@brief The selected package pad indices, valid for the current package pads.
+
+        @return Sorted indices into `package_geometry.pins`; [] without a package.
+        @note The selection belongs to the package object and the pad numbers
+            it was made on: another package (a new analysis, a project
+            switch, even with the same numbers) or other pads clear it on the
+            next read. An edit of the same package rebinds it to a copy
+            (`_rebind_package_pins`), which carries the selection, so moved
+            pads stay selected, as moved pins in the symbol editor.
+        """
+        package = getattr(self, "package_geometry", None)
+        numbers = tuple(str(pin.number) for pin in package.pins) if package is not None else ()
+        key = self._fp_pad_selection_key
+        if key is None or key[0] is not package or key[1] != numbers:
+            self._fp_pad_selection.clear()
+            self._fp_pad_selection_key = (package, numbers)
+        return self._fp_pad_selection.indices(len(numbers))
+
+    def _select_footprint_pad(self, index: int, additive: bool = False) -> None:
+        """@brief Make package pad `index` the primary selected pad; `additive` keeps the others.
+
+        @param index Index into `package_geometry.pins`; an unknown one does nothing.
+        @param additive True keeps the other selected pads; False makes this
+            pad the whole selection.
+        @note Pads and drawings are never selected together, as pins and
+            elements in the symbol editor: a selected pad drops the selected
+            drawings.
+        """
+        count = len(self.package_geometry.pins) if getattr(self, "package_geometry", None) is not None else 0
+        if not 0 <= index < count:
+            return
+        self._fp_selected_pads()
+        before = (self._fp_pad_selection.snapshot(), tuple(self._fp_selected_indices()))
+        self._fp_pad_selection.select(index, additive)
+        self._fp_selection.clear()
+        if (self._fp_pad_selection.snapshot(), tuple(self._fp_selected_indices())) != before:
+            self._refresh_drawing_selection()
+
+    def _toggle_footprint_pad_selection(self, index: int) -> None:
+        """@brief Ctrl+click on a package pad: add it to the selection, or remove it.
+
+        @param index Index into `package_geometry.pins`; an unknown one does nothing.
+        """
+        count = len(self.package_geometry.pins) if getattr(self, "package_geometry", None) is not None else 0
+        if not 0 <= index < count:
+            return
+        self._fp_selected_pads()
+        self._fp_pad_selection.toggle(index)
+        # Pads and drawings are never selected together (`_select_footprint_pad`).
+        self._fp_selected_indices()
+        self._fp_selection.clear()
+        self._refresh_drawing_selection()
 
     def _footprint_drawing_scene_bounds(self, index: int):
         """@brief Scene rectangle (px) of what drawing `index` draws, for the rubber band.
@@ -16284,14 +16578,20 @@ class MainWindow(QMainWindow):
         return QRectF(x0, y0, x1 - x0, y1 - y0)
 
     def _select_footprint_drawings_in(self, rect, additive: bool) -> None:
-        """@brief Rubber band: select the drawings whose WHOLE drawn bounds lie inside `rect`.
+        """@brief Rubber band: select the drawings and package pads whose WHOLE drawn bounds lie inside `rect`.
 
         @param rect Scene rectangle (px) of the band.
         @param additive True (Ctrl held) adds them to the current selection.
         @note The containment rule is the shared `canvas_selection.encloses`
-            (the symbol editor's), which accepts a zero-height line.
+            (the symbol editor's), which accepts a zero-height line. A pad
+            counts by its copper item's drawn bounds.
+        @note Pads and drawings are never selected together, the symbol
+            editor's rule for pins and elements: a band that encloses pads
+            selects only the pads; otherwise it selects drawings and drops
+            the selected pads.
         """
         from .canvas_selection import encloses
+        from .footprint_view import PAD_KEY_ROLE
         inside = []
         for index in range(len(self.footprint_drawings)):
             bounds = self._footprint_drawing_scene_bounds(index)
@@ -16299,8 +16599,22 @@ class MainWindow(QMainWindow):
                 continue
             if encloses(rect, (bounds.left(), bounds.top(), bounds.right(), bounds.bottom())):
                 inside.append(index)
+        pads = []
+        for item in self.preview_scene.items():
+            parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
+            if parts[0] != "package" or len(parts) != 3:
+                continue
+            bounds = item.sceneBoundingRect()
+            if encloses(rect, (bounds.left(), bounds.top(), bounds.right(), bounds.bottom())):
+                pads.append(int(parts[1]))
         self._fp_selected_indices()
-        self._fp_selection.set_many(inside, additive)
+        self._fp_selected_pads()
+        if pads:
+            self._fp_pad_selection.set_many(pads, additive)
+            self._fp_selection.clear()
+        else:
+            self._fp_selection.set_many(inside, additive)
+            self._fp_pad_selection.clear()
         self._refresh_drawing_selection()
 
     #: Item data role of the outline drawn around a selected text drawing.
@@ -16355,17 +16669,36 @@ class MainWindow(QMainWindow):
         item.setPen(pen)
 
     def _refresh_drawing_selection(self) -> None:
-        """@brief Recolour the drawn drawings after the selection changed (no redraw)."""
-        from .footprint_view import DRAWING_KEY_ROLE
+        """@brief Recolour the drawn drawings and package pads after the selection changed (no redraw)."""
+        from .footprint_view import DRAWING_KEY_ROLE, PAD_KEY_ROLE
         scene = getattr(self, "preview_scene", None)
         if scene is None:
             return
         selected = set(self._fp_selected_indices())
+        pads = set(self._fp_selected_pads())
         for item in scene.items():
             index = item.data(DRAWING_KEY_ROLE)
             if index is not None and 0 <= int(index) < len(self.footprint_drawings):
                 self._style_drawing_item(item, self.footprint_drawings[int(index)],
                                          int(index) in selected, _FP_PREVIEW_MM_TO_PX)
+                continue
+            parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
+            if parts[0] == "package" and len(parts) == 3:
+                item.setPen(self._fp_pad_pen(int(parts[1]) in pads))
+
+    def _fp_pad_pen(self, selected: bool) -> QPen:
+        """@brief Outline of a package pad in the preview: plain, or in the selection colour.
+
+        @param selected True draws it in the symbol editor's selection colour
+            (`_fp_selected_colour`), thick enough to read around the copper,
+            as a selected drawing.
+        @return The pen to set on the pad's copper item.
+        """
+        if not selected:
+            return QPen(QColor(SURFACE1))
+        pen = QPen(QColor(self._fp_selected_colour()))
+        pen.setWidthF(2.5)
+        return pen
 
     def _delete_drawings(self, indices) -> bool:
         """@brief Remove the drawings at `indices` as ONE undo step; the selection is cleared.
@@ -16429,6 +16762,21 @@ class MainWindow(QMainWindow):
                 self._end_footprint_drawing_interaction()
             return handler()
         return run
+
+    def _nudge_footprint_targets(self, dx: int, dy: int) -> bool:
+        """@brief Arrow key: move the selected pads by one main-grid step, else nudge the drawings.
+
+        @param dx Steps along X (-1, 0 or 1), right positive.
+        @param dy Steps along Y (-1, 0 or 1), down positive (footprint axes).
+        @return True when the draft changed (one undo step per key press or repeat).
+        @note Pads keep the main grid, as a drag (`_pad_drag_delta`) and as
+            the symbol editor nudges its pins by one pin-grid step.
+        """
+        pads = self._fp_selected_pads()
+        if not pads:
+            return self._nudge_footprint_drawings(dx, dy)
+        step = (self.preview_view.grid_step() or 0.01 * _FP_PREVIEW_MM_TO_PX) / _FP_PREVIEW_MM_TO_PX
+        return self._commit_pad_move(pads, dx * step, dy * step)
 
     def _nudge_footprint_drawings(self, dx: int, dy: int) -> bool:
         """@brief Arrow key: move the selected drawings (else the hovered one) by one drawing-grid step.
@@ -17239,6 +17587,15 @@ class MainWindow(QMainWindow):
             scene being cleared (kept-items rule). The drag itself goes on:
             `_draw_footprint_texts` re-binds the new text item (D4).
         """
+        measure = getattr(self, "_fp_measure", None)
+        if measure is not None:
+            measure.forget_items()
+        drag = getattr(self, "_fp_pad_drag", None)
+        if drag is not None:
+            # The pad items and the crosshair of a running pad drag die with
+            # the scene; `_rebind_pad_drag_items` draws them again.
+            drag["items"] = []
+            drag["crosshair"] = None
         view = getattr(self, "preview_view", None)
         if view is None:
             return
@@ -17249,12 +17606,13 @@ class MainWindow(QMainWindow):
     def gesture_begin(self, target: tuple, point: QPointF):
         """@brief GestureHost: plan a drag the footprint view pressed.
 
-        @param target `('text', key)` for a Reference/Value text, or
+        @param target `('text', key)` for a Reference/Value text,
             `('handle', drawing index, point index)` with point index -1
-            for the whole drawing (the drawing is selected on the press).
+            for the whole drawing (the drawing is selected on the press), or
+            `('pad', package pad index)` (`_begin_pad_drag`).
         @param point Scene position (px) of the press.
-        @return A live `DragPlan` moving the text group, a stepped one for a handle, or None to refuse
-            (unknown target or a text not drawn): the press then pans.
+        @return A live `DragPlan` moving the text group, a stepped one for a handle or a pad, or None
+            to refuse (unknown target, a text not drawn, a pad that cannot move): the press then pans.
         """
         from .canvas_gestures import DragPlan
         if target[0] == "text":
@@ -17275,16 +17633,20 @@ class MainWindow(QMainWindow):
             self._select_footprint_drawing(index, additive=body and index in self._fp_selected_indices())
             self._on_footprint_handle_pressed(int(target[1]), int(target[2]), point.x(), point.y())
             return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
+        if target[0] == "pad" and len(target) == 2:
+            return self._begin_pad_drag(int(target[1]), point)
         return None
 
     def gesture_step(self, target: tuple, point: QPointF) -> None:
-        """@brief GestureHost: one step of a handle drag (every move and the drop point).
+        """@brief GestureHost: one step of a handle or pad drag (every move and the drop point).
 
-        @param target The `('handle', index, point index)` target.
+        @param target The `('handle', index, point index)` or `('pad', index)` target.
         @param point Scene position (px) of the pointer.
         """
         if target[0] == "handle":
             self._on_footprint_handle_dragged(int(target[1]), int(target[2]), point.x(), point.y())
+        elif target[0] == "pad":
+            self._step_pad_drag(point)
 
     def gesture_end(self, target: tuple, last, commit: bool) -> None:
         """@brief GestureHost: the drag ended; commit the drop once, or undo the picture of a cancel.
@@ -17317,6 +17679,410 @@ class MainWindow(QMainWindow):
             self._fp_handle_drag = None
             self._fp_handle_origin = None
             self._refresh_drawing_handles()
+            return
+        if target[0] == "pad":
+            self._end_pad_drag(commit)
+
+    def _begin_pad_drag(self, index: int, point: QPointF):
+        """@brief Select the pressed package pad and plan the drag of the selected pads.
+
+        @param index Index of the pressed pad in `package_geometry.pins`.
+        @param point Scene position (px) of the press.
+        @return A stepped `DragPlan`, or None to refuse the press (no
+            package, an unknown pad, or a part mounted on a pin header,
+            whose drawn pads are the header's: `_edit_preview_pad` edits the
+            header pad there too).
+        @note As a pin of the symbol editor: a press on a pad outside the
+            selection makes it the selection; a press on a selected pad
+            keeps the selection, and every selected pad moves.
+        """
+        from .canvas_gestures import DragPlan
+        package = getattr(self, "package_geometry", None)
+        if package is None or not 0 <= index < len(package.pins) or not self._package_pads_movable():
+            return None
+        if index not in self._fp_selected_pads():
+            self._select_footprint_pad(index)
+        members = sorted(self._fp_selected_pads())
+        pressed = package.pins_seen_from_top()[index]
+        self._fp_pad_drag = {"members": members, "items": self._pad_items(members),
+                             "press": QPointF(point), "delta": QPointF(0.0, 0.0),
+                             "on_grid": False, "package": package, "pressed": index,
+                             "crosshair": None,
+                             # Centre (scene px) of the pressed pad: the one the crosshair marks.
+                             "anchor": QPointF(pressed.x_mm * _FP_PREVIEW_MM_TO_PX,
+                                               pressed.y_mm * _FP_PREVIEW_MM_TO_PX)}
+        self._fp_pad_drag["on_grid"] = self._pad_centre_on_grid(self._fp_pad_drag["anchor"])
+        self._build_pad_crosshair()
+        return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
+
+    def _package_pads_movable(self) -> bool:
+        """@brief Whether the drawn package pads are the footprint's own, and so can be dragged.
+
+        @return False for a part mounted on a pin header, whose footprint
+            pads are the header's (`_edit_preview_pad` edits the header pad there).
+        """
+        return self.combo_mounting.currentData() not in {"headers", "headers_square"}
+
+    def _pad_items(self, members) -> list:
+        """@brief The drawn items of the package pads `members`, with their positions now.
+
+        @param members Indices into `package_geometry.pins`.
+        @return [(item, position)] for every copper item, drill hole, number
+            and function label of those pads.
+        """
+        from .footprint_view import PAD_KEY_ROLE, PAD_PART_ROLE
+        members = set(members)
+        items = []
+        for item in self.preview_scene.items():
+            parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
+            owner = int(parts[1]) if parts[0] == "package" and len(parts) == 3 else item.data(PAD_PART_ROLE)
+            if owner is not None and int(owner) in members:
+                items.append((item, QPointF(item.pos())))
+        return items
+
+    def _pad_centre_on_grid(self, centre: QPointF) -> bool:
+        """@brief Whether a pad centre (scene px) sits on a node of the visible main grid.
+
+        @param centre Scene position (px) of the pad centre.
+        @return True within 1e-6 px of a node; False off the nodes or with the grid hidden.
+        """
+        node = self.preview_view.snap_to_main_grid(centre.x(), centre.y())
+        return node is not None and abs(node[0] - centre.x()) < 1e-6 and abs(node[1] - centre.y()) < 1e-6
+
+    def _build_pad_crosshair(self) -> None:
+        """@brief Draw the centring crosshair through the pressed pad's centre.
+
+        @note Two lines crossing at the centre, half again as long as the
+            pad's drawn copper, in a pen one screen pixel wide at any zoom,
+            green on a grid node and orange off the grid
+            (`_style_pad_crosshair`). Built in Python and added with
+            `addItem` (kept-items rule): `_forget_preview_items` drops it
+            before a `scene.clear()`.
+        """
+        from PyQt6.QtWidgets import QGraphicsPathItem
+        from .footprint_view import PAD_KEY_ROLE
+        drag = self._fp_pad_drag
+        anchor = drag["anchor"]
+        half = 0.0
+        for item, origin in drag["items"]:
+            parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
+            if parts[0] == "package" and len(parts) == 3 and int(parts[1]) == drag["pressed"]:
+                rect = item.sceneBoundingRect().translated(origin - item.pos())
+                half = max(half, rect.width() / 2, rect.height() / 2)
+        half = 1.5 * (half or 0.5 * _FP_PREVIEW_MM_TO_PX)
+        path = QPainterPath()
+        path.moveTo(anchor.x() - half, anchor.y())
+        path.lineTo(anchor.x() + half, anchor.y())
+        path.moveTo(anchor.x(), anchor.y() - half)
+        path.lineTo(anchor.x(), anchor.y() + half)
+        crosshair = QGraphicsPathItem(path)
+        crosshair.setZValue(20)
+        crosshair.setPos(drag["delta"])
+        self.preview_scene.addItem(crosshair)
+        drag["crosshair"] = crosshair
+        self._style_pad_crosshair()
+
+    def _style_pad_crosshair(self) -> None:
+        """Colour the crosshair of the running pad drag by its grid state (green on a node, orange off)."""
+        from .canvas_gestures import _alive
+        from .footprint_view import PAD_CROSSHAIR_OFF_GRID, PAD_CROSSHAIR_ON_GRID
+        drag = self._fp_pad_drag
+        crosshair = drag["crosshair"] if drag is not None else None
+        if not _alive(crosshair):
+            return
+        pen = QPen(QColor(PAD_CROSSHAIR_ON_GRID if drag["on_grid"] else PAD_CROSSHAIR_OFF_GRID))
+        pen.setWidthF(1.5)
+        pen.setCosmetic(True)
+        crosshair.setPen(pen)
+
+    def _rebind_pad_drag_items(self) -> None:
+        """@brief A redraw rebuilt the pads mid-drag: follow the new items from where they are drawn.
+
+        @note As a text drag after a redraw (decision D4): the dragged pads
+            keep following the pointer instead of freezing on screen, and the
+            crosshair is drawn again. A redraw of ANOTHER package (an analysis
+            that finished under the drag) binds nothing: its pads are not the
+            ones pressed, and the drop is refused (`_end_pad_drag`).
+        """
+        drag = self._fp_pad_drag
+        if drag is None or self.package_geometry is not drag["package"]:
+            return
+        drag["items"] = self._pad_items(drag["members"])
+        self._build_pad_crosshair()
+        self._place_pad_drag_items(drag["items"], drag["delta"])
+
+    def _pad_drag_delta(self, point: QPointF) -> tuple:
+        """@brief Where the pointer carries the pressed pad: (displacement in scene px, on a grid node).
+
+        @param point Scene position (px) of the pointer.
+        @return The displacement of the pressed pad's centre and whether it
+            ends on a node of the visible MAIN grid (pads keep the main grid,
+            never the drawing one: user, 2026-10-13).
+        @note CONTRACT CHANGED (user, 2026-11-02: «mi serve un mirino al centro del pad per centrare e si deve diversificare quando sono nel reticolo a 2.54 oppure fuori»
+            (a crosshair at the pad centre, different on and off the 2.54 grid)): the grid
+            no longer forces the position, it helps. A centre carried within
+            PAD_GRID_MAGNET_PX screen px of a node is caught by it (on the
+            grid); anywhere else the pad stays where the pointer puts it,
+            rounded to 0.01 mm (off the grid). With the grid hidden the pad
+            is always free. The other selected pads move by the same
+            displacement, keeping their relative positions.
+        """
+        from .footprint_view import PAD_GRID_MAGNET_PX
+        drag = self._fp_pad_drag
+        target = drag["anchor"] + (point - drag["press"])
+        node = self.preview_view.snap_to_main_grid(target.x(), target.y())
+        scale = max(abs(self.preview_view.transform().m11()), 1e-9)
+        if node is not None and math.hypot(node[0] - target.x(), node[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
+            return QPointF(node[0], node[1]) - drag["anchor"], True
+        fine = 0.01 * _FP_PREVIEW_MM_TO_PX
+        free = QPointF(round(target.x() / fine) * fine, round(target.y() / fine) * fine)
+        return free - drag["anchor"], self._pad_centre_on_grid(free)
+
+    def _step_pad_drag(self, point: QPointF) -> None:
+        """@brief The pads follow the pointer; the crosshair turns green on a grid node, orange off it.
+
+        @param point Scene position (px) of the pointer.
+        @note The drawn pads move to the displacement `_pad_drag_delta`
+            gives: the pointer itself, to 0.01 mm, except within the magnet
+            reach of a node, where the pad centre sits on the node. The
+            package is changed once, at the drop (`_end_pad_drag`), where the
+            pad is seen: the preview is not rebuilt at each move.
+        """
+        drag = self._fp_pad_drag
+        if drag is None:
+            return
+        delta, on_grid = self._pad_drag_delta(point)
+        if delta != drag["delta"]:
+            drag["delta"] = delta
+            self._place_pad_drag_items(drag["items"], delta)
+            from .canvas_gestures import _alive
+            if _alive(drag["crosshair"]):
+                drag["crosshair"].setPos(delta)
+        if on_grid != drag["on_grid"]:
+            drag["on_grid"] = on_grid
+            self._style_pad_crosshair()
+
+    @staticmethod
+    def _place_pad_drag_items(items, delta: QPointF) -> None:
+        """Put every surviving (item, press position) of a pad drag at its press position plus `delta`."""
+        from .canvas_gestures import _alive
+        for item, origin in items:
+            if _alive(item):
+                item.setPos(origin + delta)
+
+    @staticmethod
+    def _remove_pad_crosshair(drag) -> None:
+        """Take the crosshair of a finished pad drag out of the scene."""
+        from .canvas_gestures import _alive
+        crosshair = drag["crosshair"]
+        if _alive(crosshair) and crosshair.scene() is not None:
+            crosshair.scene().removeItem(crosshair)
+        drag["crosshair"] = None
+
+    def _end_pad_drag(self, commit: bool) -> None:
+        """@brief A pad drag ended: commit the pads where they are seen, once, or put their items back.
+
+        @param commit True on a drop, False on a cancel (Escape, a change of
+            the draft while the button is down).
+        @note A drop where the pads were changes nothing (no undo step, no
+            draft), as a pin dropped where it was pressed.
+        @note A drop on a package other than the pressed one (replaced by
+            an analysis while the button was down) changes nothing: the
+            drag's indices name the old package's pads.
+        @note After the commit the camera is moved by the shift of an
+            unmoved pad (`_keep_unmoved_pads_on_screen`): with a body centre
+            estimated from the pad field the drawing re-centres, and the
+            pads the user did not touch must not jump on screen.
+        """
+        drag, self._fp_pad_drag = self._fp_pad_drag, None
+        if drag is None:
+            return
+        self._remove_pad_crosshair(drag)
+        delta = drag["delta"]
+        if commit and (delta.x(), delta.y()) != (0.0, 0.0) and self.package_geometry is drag["package"]:
+            if self._commit_pad_move(drag["members"], delta.x() / _FP_PREVIEW_MM_TO_PX,
+                                     delta.y() / _FP_PREVIEW_MM_TO_PX):
+                return
+        self._place_pad_drag_items(drag["items"], QPointF(0.0, 0.0))
+
+    def _commit_pad_move(self, members, dx_mm: float, dy_mm: float) -> bool:
+        """@brief Move package pads as one draft step and keep the untouched pads still on screen.
+
+        @param members Indices into `package_geometry.pins`.
+        @param dx_mm Displacement along the footprint X axis (mm, right).
+        @param dy_mm Displacement along the footprint Y axis (mm, down).
+        @return True when the draft changed (the preview was redrawn).
+        """
+        reference = self._unmoved_pad_position(members)
+        if not self._move_package_pads(members, dx_mm, dy_mm):
+            return False
+        self._keep_unmoved_pads_on_screen(reference)
+        return True
+
+    def _package_pad_at(self, x: float, y: float):
+        """@brief Index of the package pad whose centre is at a scene point (px), or None.
+
+        @param x Scene x (px).
+        @param y Scene y (px).
+        @return The index into `package_geometry.pins`; None without a
+            package, for a pin-header pad or a point on no pad centre.
+        @note The measuring tool's targets are the built footprint's pads
+            (`Pad.at`), written from `pins_seen_from_top`: the same centres,
+            compared within 0.05 px (0.0025 mm) of rounding.
+        """
+        package = getattr(self, "package_geometry", None)
+        if package is None or not self._package_pads_movable():
+            return None
+        for index, pin in enumerate(package.pins_seen_from_top()):
+            if (abs(pin.x_mm * _FP_PREVIEW_MM_TO_PX - x) < 0.05
+                    and abs(pin.y_mm * _FP_PREVIEW_MM_TO_PX - y) < 0.05):
+                return index
+        return None
+
+    def _ask_measure_value(self, current_mm: float):
+        """@brief Ask the new value of a measure, in mm.
+
+        @param current_mm The measured value shown first.
+        @return The value typed (mm), or None when the dialog was cancelled.
+        """
+        from PyQt6.QtWidgets import QDialogButtonBox
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.i18n.text("Modifica quota"))
+        form = QFormLayout(dialog)
+        value = QDoubleSpinBox(dialog)
+        value.setRange(0.0, 1000.0)
+        value.setDecimals(3)
+        value.setSingleStep(0.1)
+        value.setSuffix(" mm")
+        value.setValue(round(float(current_mm), 3))
+        form.addRow(self.i18n.text("Nuova distanza:"), value)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        value.selectAll()
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
+            return None
+        return value.value()
+
+    def _edit_footprint_measure(self, measurement) -> bool:
+        """@brief «Modifica quota…» of a footprint measure: move ONE pad so the measure takes the typed value.
+
+        @param measurement The measure (`canvas_measure.Measurement`), editable.
+        @return True when the pad moved (one undo step of the footprint draft).
+        @note User, 2026-11-02: «editare la distanza indicata nel righello per
+            adattare lo spaziamento tra i due oggetti in misura; se uno è un
+            bordo deve modificare solo posizione pad» (edit the distance in the
+            ruler to adjust the spacing; with an edge, move only the pad). Only a pad moves, never the
+            body: the second clicked pad (the first is the reference), else
+            the only pad (`measure_mover`), along the measured direction
+            (`edit_displacement`). The measure follows the pad and shows the
+            new value (`MeasureOverlay.sync`). The moved pad is refused like a
+            drag (overlap, KiCad's reach) with the same toast.
+        """
+        from .canvas_measure import edit_displacement, measure_mover
+        mover = measure_mover(measurement)
+        anchor = measurement.second if mover == "second" else measurement.first
+        index = self._package_pad_at(anchor.x, anchor.y) if mover else None
+        if index is None:
+            self._draw_feedback_toast(self.i18n.text("Quota non modificabile."), self.i18n.text(
+                "Si spostano solo i pad del componente: quelli di un pin header seguono passo e "
+                "interasse fra le file."))
+            return False
+        value = self._ask_measure_value(measurement.distance_mm)
+        if value is None or abs(value - measurement.distance_mm) < 5e-4:
+            return False
+        move = edit_displacement(measurement, value, _FP_PREVIEW_MM_TO_PX)
+        if move is None:
+            return False
+        _end, dx, dy = move
+        return self._commit_pad_move([index], dx / _FP_PREVIEW_MM_TO_PX, dy / _FP_PREVIEW_MM_TO_PX)
+
+    def _unmoved_pad_position(self, members):
+        """@brief (index, top-view position in mm) of the first pad a drag leaves in place, or None.
+
+        @param members Indices of the moved pads.
+        @return The reference `_keep_unmoved_pads_on_screen` compares after the commit.
+        """
+        for index, pin in enumerate(self.package_geometry.pins_seen_from_top()):
+            if index not in members:
+                return index, (pin.x_mm, pin.y_mm)
+        return None
+
+    def _keep_unmoved_pads_on_screen(self, reference) -> None:
+        """@brief Scroll the preview by the shift of an unmoved pad, so the untouched pads stay put on screen.
+
+        @param reference (index, (x, y) mm) from `_unmoved_pad_position`
+            before the commit; None (every pad moved) does nothing.
+        @note Only the camera moves; the footprint is as committed. With an
+            origin other than «body_center» the body is re-estimated from the
+            pad field (`PackageGeometry.body_frame_offset`, a declared
+            heuristic): the body outline moves, the pads the user did not
+            touch do not. The scroll bars are moved in device pixels, as the
+            camera's pan; a scroll range too small for the whole shift keeps
+            the rest.
+        """
+        package = self.package_geometry
+        if reference is None or package is None:
+            return
+        index, (x0, y0) = reference
+        pins = package.pins_seen_from_top()
+        if not 0 <= index < len(pins):
+            return
+        dx_mm, dy_mm = pins[index].x_mm - x0, pins[index].y_mm - y0
+        if (round(dx_mm, 9), round(dy_mm, 9)) == (0.0, 0.0):
+            return
+        view = self.preview_view
+        transform = view.transform()
+        hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
+        hbar.setValue(hbar.value() + round(dx_mm * _FP_PREVIEW_MM_TO_PX * transform.m11()))
+        vbar.setValue(vbar.value() + round(dy_mm * _FP_PREVIEW_MM_TO_PX * transform.m22()))
+
+    def _move_package_pads(self, indices, dx_mm: float, dy_mm: float) -> bool:
+        """@brief Move package pads by a displacement seen on the footprint, as ONE undo step of the draft.
+
+        @param indices Indices into `package_geometry.pins`; unknown ones are skipped.
+        @param dx_mm Displacement along the footprint X axis (mm, right).
+        @param dy_mm Displacement along the footprint Y axis (mm, down).
+        @return True when the draft changed; False when nothing moved or the
+            moved package is refused (overlapping pads, out of KiCad's
+            reach): then nothing changes and a toast says why.
+        @note The pads are stored in the package's SOURCE frame
+            (`PackageGeometry.pins_seen_from_top`: a bottom view or a mirror
+            negates X, then the package orientation turns the points). The
+            displacement is taken back through the inverse turn and the same
+            reflection, so the pad lands where it was dropped at any
+            orientation, not only at multiples of 90 degrees.
+        @note With an origin other than «body_center» the body centre is
+            estimated from the pad field (`body_frame_offset`, a declared
+            heuristic): moving an outer pad moves that estimate, so the
+            drawing re-centres after the drop while the pads keep exactly the
+            relative positions the user gave them.
+        """
+        package = getattr(self, "package_geometry", None)
+        if package is None:
+            return False
+        chosen = sorted({i for i in indices if 0 <= i < len(package.pins)})
+        if not chosen or (dx_mm, dy_mm) == (0.0, 0.0):
+            return False
+        angle = math.radians(package.orientation_deg % 360)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        # Inverse of `_rotate_kicad` (its transpose), then the reflection.
+        sx, sy = dx_mm * cos_a - dy_mm * sin_a, dx_mm * sin_a + dy_mm * cos_a
+        if (int(package.source_view == "bottom") + int(package.mirrored)) % 2:
+            sx = -sx
+        pins = list(package.pins)
+        for index in chosen:
+            pin = pins[index]
+            pins[index] = replace(pin, x_mm=round(float(pin.x_mm) + sx, 6) + 0.0,
+                                  y_mm=round(float(pin.y_mm) + sy, 6) + 0.0)
+        try:
+            replace(package, pins=pins).pins_seen_from_top()
+        except (TypeError, ValueError) as exc:
+            self._draw_feedback_toast(self.i18n.text("Spostamento scartato."), str(exc))
+            return False
+        return self._edit_footprint_draft({"package_pins": pins})
 
     def _drop_footprint_text(self, key: str, origin: QPointF, delta: QPointF) -> None:
         """@brief Commit a text drop, unless it is not a move (as the symbol editor's property drop).
@@ -19660,9 +20426,11 @@ class MainWindow(QMainWindow):
             serves to judge the distances. Shared by `_fit_preview` and by
             the view's resize refit (`FootprintView.set_framing_provider`).
         """
+        from .canvas_measure import MEASURE_ITEM_ROLE
         rect = None
         for item in self.preview_scene.items():
-            if item.data(_GRID_ITEM):
+            # The grid and the measures (an overlay) never change the framing.
+            if item.data(_GRID_ITEM) or item.data(MEASURE_ITEM_ROLE):
                 continue
             bounds = item.sceneBoundingRect()
             rect = bounds if rect is None else rect.united(bounds)
@@ -19765,12 +20533,13 @@ class MainWindow(QMainWindow):
 
         This is a preview annotation, not a change to the electrical pad ID.
         Top/bottom rows use vertical text to leave adjacent pins readable.
+        Returns the label item, or None when the pin has no documented name.
         """
         name = next((str(row.get("name") or "").strip() for row in self.pinout or ()
                      if isinstance(row, dict)
                      and str(row.get("pin", "")).strip() == str(number).strip()), fallback)
         if not name:
-            return
+            return None
         label = self.preview_scene.addSimpleText(f"({name})")
         label.setData(0, "pin-function")
         label.setData(1, str(number))
@@ -19798,6 +20567,7 @@ class MainWindow(QMainWindow):
             x = bounds.left() - rect.width() - 4
         label.setPos(x - rect.left(), y - rect.top())
         label.setZValue(5)
+        return label
 
     def _draw_preview_castellated(self, p: CastellatedModuleParams) -> None:
         """Preview of the castellated module: body, pads and outline dimensions.
@@ -19872,6 +20642,7 @@ class MainWindow(QMainWindow):
         self._draw_footprint_drawings(mm_to_px)
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+        self._sync_footprint_measures(built)
 
     def _add_castellated_pad_shape(self, p, placement, mm_to_px, pen, brush,
                                    xs_px, ys_px) -> None:
@@ -19994,6 +20765,7 @@ class MainWindow(QMainWindow):
         if params is None:
             self._forget_preview_items()
             self.preview_scene.clear()
+            self._sync_footprint_measures(None)
             return
         if isinstance(params, PackageGeometry):
             self._draw_preview_package(params)
@@ -20016,6 +20788,7 @@ class MainWindow(QMainWindow):
             footprint = build_pin_header(p)
         except (ValueError, TypeError, OverflowError) as exc:
             self._set_mounting_error(str(exc))
+            self._sync_footprint_measures(None)
             return
         courtyard = next(g for g in footprint.graphics if g.layer == "F.CrtYd")
         # The generator's courtyard encloses the body AND populated copper.
@@ -20141,6 +20914,7 @@ class MainWindow(QMainWindow):
         self._draw_footprint_drawings(mm_to_px)
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+        self._sync_footprint_measures(footprint)
 
     def _draw_preview_package(self, package: PackageGeometry) -> None:
         """@brief Draw package copper shapes and drill openings as exported to KiCad."""
@@ -20168,8 +20942,10 @@ class MainWindow(QMainWindow):
                 -body_l / 2 * mm_to_px, -body_w / 2 * mm_to_px,
                 body_l * mm_to_px, body_w * mm_to_px, silk_pen,
             )
-        pad_pen = QPen(QColor(SURFACE1))
+        from .footprint_view import PAD_KEY_ROLE, PAD_PART_ROLE
         pad_brush = QBrush(QColor(BLUE))
+        selected_pads = set(self._fp_selected_pads())
+        movable = self._package_pads_movable()
         # Display margin only pads the grid, never the measured component.
         extent = ([-body_l / 2, -body_w / 2, body_l / 2, body_w / 2]
                   if package.body_length_mm and package.body_width_mm else
@@ -20188,10 +20964,14 @@ class MainWindow(QMainWindow):
                 item = self.preview_scene.addRect(x - w / 2, y - h / 2, w, h)
             item.setTransformOriginPoint(x, y)
             item.setRotation(-pin.rotation_deg)  # KiCad is counter-clockwise, Qt clockwise.
-            item.setPen(pad_pen)
+            item.setPen(self._fp_pad_pen(pad_index in selected_pads))
             item.setBrush(pad_brush)
             item.setToolTip(self._pad_tooltip(pin.number))
-            item.setData(0x504144, f"package:{pad_index}:{pin.number}")
+            item.setData(PAD_KEY_ROLE, f"package:{pad_index}:{pin.number}")
+            if movable:
+                # The move cursor says the pad can be dragged, as on a pin
+                # of the symbol editor and on a footprint drawing.
+                item.setCursor(Qt.CursorShape.SizeAllCursor)
             drilled = pin.pad_type in ("thru_hole", "np_thru_hole") and pin.drill_mm
             if drilled:
                 diameter = pin.drill_mm * mm_to_px
@@ -20199,6 +20979,7 @@ class MainWindow(QMainWindow):
                     x - diameter / 2, y - diameter / 2, diameter, diameter,
                     QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
                 hole.setZValue(1)
+                hole.setData(PAD_PART_ROLE, pad_index)
             angle = math.radians(pin.rotation_deg)
             ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
             a, b = pin.pad_length_mm / 2, pin.pad_width_mm / 2
@@ -20234,10 +21015,13 @@ class MainWindow(QMainWindow):
                     label_y = bounds.top() - rect.height() - 3
             number.setPos(label_x, label_y)
             number.setZValue(5)
+            number.setData(PAD_PART_ROLE, pad_index)
             if pin.side in ("top", "bottom", "left", "right"):
-                self._add_preview_pin_function(pin.number, pin.side,
+                label = self._add_preview_pin_function(pin.number, pin.side,
                     number.sceneBoundingRect().united(item.sceneBoundingRect()), pin.name,
                     max_length=(body_w if pin.side in ("top", "bottom") else body_l) * mm_to_px * .3)
+                if label is not None:
+                    label.setData(PAD_PART_ROLE, pad_index)
         left, top, right, bottom = [value * mm_to_px for value in extent]
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2,
@@ -20248,6 +21032,8 @@ class MainWindow(QMainWindow):
         self._draw_footprint_drawings(mm_to_px)
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
+        self._sync_footprint_measures(built, package=package)
+        self._rebind_pad_drag_items()
 
     def _edit_preview_pad(self, token: str) -> None:
         """@brief Open the pad editor for a pad clicked in the 2D preview.
@@ -20674,38 +21460,35 @@ class MainWindow(QMainWindow):
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
 
     def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
-        """Draw a horizontal dimension line with ticks and centred text."""
-        pen = QPen(QColor(YELLOW))
-        pen.setWidthF(1.0)
-        tick = 5
-        self.preview_scene.addLine(x1, y - tick, x1, y + tick, pen)
-        self.preview_scene.addLine(x2, y - tick, x2, y + tick, pen)
-        self.preview_scene.addLine(x1, y, x2, y, pen)
-        label = self.preview_scene.addSimpleText(text)
-        label.setBrush(QBrush(QColor(YELLOW)))
-        label.setPos((x1 + x2) / 2 - label.boundingRect().width() / 2, y - 18)
+        """@brief Draw a horizontal dimension line with ticks and centred text.
+
+        @param x1 Left end, scene px.
+        @param x2 Right end, scene px.
+        @param y Height of the line, scene px.
+        @param text Translated label.
+        @note Drawn by the shared `canvas_measure.add_dimension_line` (the
+            measuring tool uses the same function): same items as before the
+            factoring (tests/test_footprint_measure_parity.py).
+        """
+        from .canvas_measure import DIMENSION_STYLE_HORIZONTAL, add_dimension_line
+        add_dimension_line(self.preview_scene, (x1, y), (x2, y), text, DIMENSION_STYLE_HORIZONTAL,
+                           normal=(0.0, 1.0))
 
     def _add_dim_v(self, y1: float, y2: float, x: float, text: str) -> None:
-        """Draw a vertical dimension line with ticks and rotated text.
+        """@brief Draw a vertical dimension line with ticks and rotated text.
 
-        The text runs along the dimension (as in technical drawings): written
-        horizontally, the labels of nearby vertical dimensions -- margin chain
-        and overall dimension -- ended up on top of each other.
+        @param y1 Top end, scene px.
+        @param y2 Bottom end, scene px.
+        @param x Abscissa of the line, scene px.
+        @param text Translated label.
+        @note The text runs along the dimension (as in technical drawings):
+            written horizontally, the labels of nearby vertical dimensions --
+            margin chain and overall dimension -- ended up on top of each
+            other. Drawn by the shared `canvas_measure.add_dimension_line`.
         """
-        pen = QPen(QColor(YELLOW))
-        pen.setWidthF(1.0)
-        tick = 5
-        self.preview_scene.addLine(x - tick, y1, x + tick, y1, pen)
-        self.preview_scene.addLine(x - tick, y2, x + tick, y2, pen)
-        self.preview_scene.addLine(x, y1, x, y2, pen)
-
-        label = self.preview_scene.addSimpleText(text)
-        label.setBrush(QBrush(QColor(YELLOW)))
-        label.setRotation(-90)
-        # Rotating by -90 around the origin, the text extends upwards
-        # (height -> width): it is repositioned to centre it on the dimension.
-        rect = label.boundingRect()
-        label.setPos(x + 6, (y1 + y2) / 2 + rect.width() / 2)
+        from .canvas_measure import DIMENSION_STYLE_VERTICAL, add_dimension_line
+        add_dimension_line(self.preview_scene, (x, y1), (x, y2), text, DIMENSION_STYLE_VERTICAL,
+                           normal=(1.0, 0.0))
 
     def _sync_3d_pin_functions(self):
         setter = getattr(self.preview_3d, 'set_pin_functions', None)

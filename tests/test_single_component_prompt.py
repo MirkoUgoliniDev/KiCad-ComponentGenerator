@@ -48,13 +48,95 @@ def test_pads_become_explicit_package_geometry_in_the_declared_view():
     assert geometry["body_length_mm"] == 20.5 and data["lead_exit"] == "bottom"
 
 
-def test_a_declared_grid_is_flattened_into_the_matrix_fields():
+def test_a_declared_grid_becomes_the_explicit_pads_it_describes():
+    """User, 2026-10-31 (T7N relay): a grid skipped the pad reading and the
+    hole check. It now becomes pads, in the drawing's view, so it goes
+    through the same checks as pads read one by one."""
     data = single_answer_to_data(_single(pads=[], grid={
         "rows": 2, "cols": 8, "pitch_mm": 2.54, "row_spacing_mm": 10.16, "pad_diameter_mm": 1.5,
         "drill_mm": 0.8, "populated_pins": [1, 7, 8, 9, 10, 16]}))
-    assert "package_geometry" not in data
-    assert (data["rows"], data["cols"], data["pitch_mm"], data["row_spacing_mm"]) == (2, 8, 2.54, 10.16)
-    assert data["populated_pins"] == [1, 7, 8, 9, 10, 16]
+    assert "rows" not in data and "pitch_mm" not in data
+    geometry = data["package_geometry"]
+    assert geometry["source_view"] == "bottom" and geometry["origin"] == "pin1"
+    # Column order: pin = col * rows + row + 1 at (col * pitch, row * row_spacing).
+    pads = {p["number"]: (p["x_mm"], p["y_mm"]) for p in geometry["pins"]}
+    assert pads == pytest.approx({"1": (0.0, 0.0), "7": (3 * 2.54, 0.0), "8": (3 * 2.54, 10.16),
+                                  "9": (4 * 2.54, 0.0), "10": (4 * 2.54, 10.16),
+                                  "16": (7 * 2.54, 10.16)})
+    first = geometry["pins"][0]
+    assert first["drill_mm"] == 0.8 and first["pad_length_mm"] == first["pad_width_mm"] == 1.5
+    assert first["pad_type"] == "thru_hole" and first["shape"] == "circle"
+    assert "6 pad espliciti" in data["notes"]
+    assert ext._has_explicit_pads(data)
+
+
+def test_a_grid_pin_map_and_body_offsets_place_the_pads_around_the_body_centre():
+    data = single_answer_to_data(_single(pads=[], body_length_mm=10.0, body_width_mm=8.0, grid={
+        "rows": 2, "cols": 2, "pitch_mm": 6.0, "row_spacing_mm": 4.0, "pad_diameter_mm": 2.0,
+        "drill_mm": 1.0, "body_offset_x_mm": -2.0, "body_offset_y_mm": -2.0,
+        "pin_map": [{"pin": 1, "row": 0, "col": 0}, {"pin": 2, "row": 1, "col": 0},
+                    {"pin": 3, "row": 1, "col": 1}, {"pin": 4, "row": 0, "col": 1}]}))
+    geometry = data["package_geometry"]
+    assert geometry["origin"] == "body_center"
+    # Body centre at (-2 + 5, -2 + 4) = (3, 2) from the grid origin.
+    pads = {p["number"]: (p["x_mm"], p["y_mm"]) for p in geometry["pins"]}
+    assert pads == pytest.approx({"1": (-3.0, -2.0), "2": (-3.0, 2.0), "3": (3.0, 2.0),
+                                  "4": (3.0, -2.0)})
+
+
+def test_a_grid_without_a_drill_stays_through_hole():
+    """Generality audit D2: a missing drill is not a reason to make SMD pads."""
+    data = single_answer_to_data(_single(pads=[], grid={
+        "rows": 1, "cols": 3, "pitch_mm": 2.54, "pad_diameter_mm": 1.8, "drill_mm": None}))
+    pins = data["package_geometry"]["pins"]
+    assert all(p["pad_type"] == "thru_hole" and "drill_mm" not in p for p in pins)
+
+
+def test_a_grid_says_when_its_numbering_and_quotes_are_not_read():
+    data = single_answer_to_data(_single(pads=[], value_sources={"pitch_mm": "read",
+                                                                 "drill_mm": "estimated"},
+                                         grid={"rows": 1, "cols": 2, "pitch_mm": 5.0,
+                                               "pad_diameter_mm": 2.0, "drill_mm": 1.0}))
+    assert "per convenzione" in data["notes"]
+    assert "drill_mm" in data["notes"] and "pad_diameter_mm" in data["notes"]
+    assert "pitch_mm" not in data["notes"].split("lette:")[1]
+    # Negative: a numbering read from the drawing is not called a convention.
+    data = single_answer_to_data(_single(pads=[], grid={
+        "rows": 1, "cols": 2, "pitch_mm": 5.0, "pad_diameter_mm": 2.0, "drill_mm": 1.0,
+        "pin_map": [{"pin": 1, "row": 0, "col": 0}, {"pin": 2, "row": 0, "col": 1}]}))
+    assert "per convenzione" not in data["notes"]
+
+
+def test_explicit_pad_holes_not_wider_than_the_lead_are_lifted():
+    """Generality audit D3: the structural lead-vs-hole rule on through-hole pads
+    that share one hole, hence one lead."""
+    data = single_answer_to_data(_single(lead_diameter_mm=1.3, pads=[
+        dict(p, drill_mm=1.3, pad_length_mm=1.6, pad_width_mm=1.6) for p in PADS]))
+    params = ext._params_from_tool_arguments(data)
+    pins = {p["number"]: p for p in params.package_geometry["pins"]}
+    assert all(p["drill_mm"] == pytest.approx(1.55) for p in pins.values())
+    assert pins["1"]["pad_length_mm"] == pins["1"]["pad_width_mm"] == pytest.approx(2.35)
+    assert "fori dei pad 1, 2, 5 " in params.notes
+
+
+def test_pads_with_different_holes_are_only_flagged_against_the_one_lead():
+    """Final audit D-D: thick contact leads and thin coil leads; the one lead
+    diameter may belong to some pads only, so no hole is changed."""
+    data = single_answer_to_data(_single(lead_diameter_mm=1.3, pads=[
+        dict(PADS[0], drill_mm=1.0), dict(PADS[1], drill_mm=1.0), dict(PADS[2], drill_mm=1.6)]))
+    params = ext._params_from_tool_arguments(data)
+    pins = {p["number"]: p for p in params.package_geometry["pins"]}
+    assert (pins["1"]["drill_mm"], pins["2"]["drill_mm"], pins["5"]["drill_mm"]) == (1.0, 1.0, 1.6)
+    assert "fori dei pad 1, 2 non maggiori" in params.notes and "non modificati" in params.notes
+
+
+def test_a_grid_never_reuses_the_pitch_as_the_row_spacing():
+    """Negative: two rows without a row spacing leave the second row unplaced."""
+    data = single_answer_to_data(_single(pads=[], grid={
+        "rows": 2, "cols": 2, "pitch_mm": 5.0, "pad_diameter_mm": 2.0, "drill_mm": 1.0}))
+    pads = {p["number"]: (p["x_mm"], p["y_mm"]) for p in data["package_geometry"]["pins"]}
+    assert pads["1"] == (0.0, 0.0) and pads["3"] == (5.0, 0.0)
+    assert pads["2"][1] is None and pads["4"][1] is None
 
 
 @pytest.mark.parametrize("extra", [dict(pads=[]), dict(grid={"rows": 2, "cols": 2, "pad_diameter_mm": 1.5, "drill_mm": 0.8})])
@@ -374,6 +456,70 @@ def test_end_to_end_a_single_part_with_pads_gets_the_second_reading(offline, mon
     # (adversarial review G1) positions nothing confirms block anyway.
     assert call.call_count == 1, "no drawing role: no dedicated call"
     assert params.pin_map_conflict and "nessun disegno in immagine" in params.pin_map_conflict
+
+
+def _grid_answer(rows, cols, pitch, row_spacing, pin_map=None):
+    grid = {"rows": rows, "cols": cols, "pitch_mm": pitch, "row_spacing_mm": row_spacing,
+            "pad_diameter_mm": 2.0, "drill_mm": 1.3}
+    if pin_map is not None:
+        grid["pin_map"] = pin_map
+    return _single(pads=[], grid=grid)
+
+
+def test_end_to_end_a_grid_hiding_an_off_grid_pin_is_blocked(offline, monkeypatch, tmp_path):
+    """User, 2026-10-31 (T7N relay, «questo è scandaloso»): the main answer
+    squeezed five pins, one of them 2 mm off the column, into a 2x2 grid
+    with invented numbers. The grid now gets the dedicated pad reading, whose
+    printed numbers share none with the invented ones: the generation stops."""
+    main = _grid_answer(2, 2, 12.2, 6.0, pin_map=[
+        {"pin": 1, "row": 0, "col": 0}, {"pin": 2, "row": 1, "col": 0},
+        {"pin": 4, "row": 0, "col": 1}, {"pin": 5, "row": 1, "col": 1}])
+    second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
+        {"axis": "x", "stops": ["11", "A1,A2", "14,12"], "values": [2.0, 12.2]},
+        {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
+    call = Mock(side_effect=[main, second])
+    monkeypatch.setattr(ext, "call_tool", call)
+    params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           document_roles={"quote.png": ["pinout"]})
+    assert call.call_count == 2
+    assert call.call_args_list[1].kwargs["tool"]["function"]["name"] == "report_pad_positions"
+    assert params.pin_map_conflict and "NON confermate" in params.pin_map_conflict
+
+
+def test_end_to_end_a_correct_grid_that_leaves_out_an_off_grid_pin_is_blocked(
+        offline, monkeypatch, tmp_path):
+    """Generality audit D1: the four grid pins are right and numbered right,
+    but the drawing has a fifth pin off the grid. Pads the main answer has
+    cannot confirm a terminal it left out."""
+    main = _grid_answer(2, 2, 12.2, 12.0)
+    second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
+        {"axis": "x", "stops": ["5", "1,2", "3,4"], "values": [2.0, 12.2]},
+        {"axis": "y", "stops": ["1,3", "5", "2,4"], "values": [6.0, 6.0]}]}
+    call = Mock(side_effect=[main, second])
+    monkeypatch.setattr(ext, "call_tool", call)
+    params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           document_roles={"quote.png": ["pinout"]})
+    assert params.pin_map_conflict and "non ha (5)" in params.pin_map_conflict
+
+
+def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, monkeypatch,
+                                                                       tmp_path):
+    """Positive: a real regular grid, read the same way by the dedicated
+    reading, is confirmed and builds the footprint at the grid positions."""
+    main = _grid_answer(2, 2, 12.2, 12.0)
+    second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
+        {"axis": "x", "stops": ["1,2", "3,4"], "values": [12.2]},
+        {"axis": "y", "stops": ["1,3", "2,4"], "values": [12.0]}]}
+    call = Mock(side_effect=[main, second])
+    monkeypatch.setattr(ext, "call_tool", call)
+    params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           document_roles={"quote.png": ["pinout"]})
+    assert call.call_count == 2 and not params.pin_map_conflict
+    pins = params.package_geometry["pins"]
+    xs = sorted({round(float(p["x_mm"]), 3) for p in pins})
+    ys = sorted({round(float(p["y_mm"]), 3) for p in pins})
+    assert len(pins) == 4 and xs[1] - xs[0] == pytest.approx(12.2)
+    assert ys[1] - ys[0] == pytest.approx(12.0)
 
 
 _CHAINS_ANSWER = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [

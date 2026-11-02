@@ -11,7 +11,10 @@ actually drawn in the image, without any AI and without any network access:
 2. photographs are refused by a paper/ink gate: they are not line drawings and
    their round features are not drawn holes;
 3. small drawn circles are found by a ring matched filter over a scale
-   pyramid, refined on the ink and filtered against text glyphs;
+   pyramid, refined on the ink and filtered against text glyphs; ink of a
+   centre or extension line crossing a small hole does not count as fill,
+   a ring must be localised (not a stretch of two parallel lines or a bar),
+   and of two overlapping circles the less completely inked one goes;
 4. the reading (pad centres in mm, page orientation) is matched to the
    circles by similarity hypotheses built on its longest baselines;
 5. "confirmed" means a displacement test: mapped by a similarity (uniform
@@ -20,8 +23,12 @@ actually drawn in the image, without any AI and without any network access:
    shear an affine fit would add, expressed as a displacement over the
    reading's shorter extent, stays within the same tolerance. A reading
    that only fits after a stretch is "distorted";
-6. optionally the outline rectangle drawn around the matched holes is
-   compared with the body size of the reading, also as a displacement.
+6. optionally the outline rectangle drawn around the matched holes (solid,
+   dashed or dotted, see :func:`_outline_rect`) is compared with the body
+   size of the reading, also as a displacement.
+
+A third entry point, :func:`measured_outline`, returns that drawn outline
+in the reading's own mm frame through the inverse of the confirmed fit.
 
 Every image analysis (photo gate, ink mask, circles) is cached per file, so
 checking several competing readings against one page detects once.
@@ -33,9 +40,18 @@ alone on paper) as the reading has pads. Otherwise the image cannot tell a
 wrong reading from a page whose circles are letters, and the answer is
 "unverifiable" with reason "too_few_circles".
 
-@note This is a CHECK, never a measurement: no millimetre value is produced
-    from pixels to replace the quotes. It answers only whether the given set
-    of pad centres fits the drawn circles.
+A second entry point, :func:`measured_layout`, deduces the position of ONE
+misplaced pad of a reading: when every other pad (at least MIN_PADS) sits on
+its drawn hole and exactly one hole drawn like a hole is left free near the
+misplaced pad's reading, that pad is moved onto it. Any ambiguity (several
+candidate holes, several fitting anchorings, a mirrored reading moving the
+pad elsewhere) refuses the deduction.
+
+@note :func:`check_pad_layout` is a CHECK, never a measurement: no
+    millimetre value is produced from pixels to replace the quotes. It
+    answers only whether the given set of pad centres fits the drawn
+    circles. :func:`measured_layout` measures the position of the single
+    moved pad only; the other pads keep their quotes.
 @note What it cannot see: pad NUMBERS (two pads with exchanged numbers form
     the same point set), a reading that omits pads (extra circles are
     allowed), errors smaller than the tolerance, a whole axis rescaled
@@ -219,10 +235,44 @@ MAX_ROTATION_DEG = 3.0
 #: with its own tolerance would make it unnecessary.
 BODY_ALLOWANCE_MM = 0.5
 
-#: Minimum coverage of the four sides of an outline rectangle: an outline is a
-#: continuous solid line; 10 % tolerates JPEG dropout and gaps where text or
-#: arrows overlap. Dotted and dashed centre lines (about 50 %) fail.
+#: Minimum coverage of the four sides of an outline rectangle, measured after
+#: the dash gaps are bridged (see OUTLINE_GAP_STROKES): 10 % tolerates JPEG
+#: dropout and gaps where text or arrows overlap. A side drawn with gaps
+#: longer than the bridge (a sparse dotted line, a row of separate words)
+#: stays below it.
 OUTLINE_COVER_MIN = 0.90
+
+#: Longest gap bridged along an outline side, in stroke widths (plus 1 px of
+#: anti-aliasing). A body outline seen "on solder pins" is often drawn
+#: dashed or dotted; ISO 128-20 spaces dashes and dots by 3 line widths, so
+#: a gap up to that length is a gap of one drawn line, not a gap between two
+#: different drawn things. Measured on the T7NS relay pages: gaps of 1-3 px
+#: at a 1.9 px stroke.
+OUTLINE_GAP_STROKES = 3.0
+
+#: Thickest line, in stroke widths (plus 2 px of anti-aliasing and JPEG
+#: blur), whose pixels may be bridged into an outline side: ISO 128-20 draws
+#: thick lines twice as wide as thin ones. Ink thicker than that across the
+#: side direction (a letter stem, a crossing line, a filled area) is dropped
+#: BEFORE bridging, so a row of text cannot be closed into a line by its
+#: vertical strokes or its filled blobs.
+OUTLINE_THIN_STROKES = 2.0
+
+#: A side that needs its dash gaps bridged must stand on its own: the strips
+#: one dash gap wide on both sides of it may hold clutter (ink that is
+#: neither a straight line nor an enclosed hole) along at most this fraction
+#: of its length. The stems of left-aligned text, stacked line over line,
+#: look like a dashed vertical line but carry the rest of their letters
+#: beside them. Declared heuristic, calibrated on the T7NS and VE12H pages:
+#: the dashed outlines around pin holes measured 0.00-0.14, labelled dashed
+#: schematic boxes 0.19-0.27, stacked text stems 0.30-0.92 (all but one
+#: above 0.39). The margin to text is THIN: this guard alone does not keep
+#: text out, the rectangle must also close on four sides around the holes,
+#: and the horizontal sides lose text rows earlier (whole letters are
+#: dropped in :func:`_bridged_thin`). A solid side is not held to it (text
+#: cannot draw one). A vector drawing (lines as objects with a dash style)
+#: would make it unnecessary.
+OUTLINE_NEIGHBOUR_MAX = 1 / 3
 
 #: At most this many distinct circle assignments are refined per image.
 MAX_ASSIGNMENTS = 50
@@ -574,14 +624,58 @@ def _radial_profile(mask: np.ndarray, cu: float, cv: float, ru: float) -> np.nda
     return profile
 
 
-def _paper_sides(mask: np.ndarray, cu: float, cv: float, ru: float, margin: float) -> tuple[float, float]:
-    """Fractions of directions with paper inside [0.3r, r-m] and outside [r+m, r+m+0.5r]."""
+def _is_localised(mask: np.ndarray, cu: float, cv: float, ru: float) -> bool:
+    """True when the ring is a closed curve around its centre, not a stretch of a longer structure.
+
+    The same ring moved by one radius along +-X or +-Y must NOT pass the
+    ring coverage test (COVERAGE_MIN) again. Moved by r, a third of the
+    ring (a 120 degree arc through the old centre) runs across the hole's
+    interior, which is paper apart from the crossings of its centre lines:
+    a drawn hole keeps at most about 2/3 of its coverage there (0.45-0.73
+    measured on the T7NS and VE12H relay pages). Two parallel lines, a
+    solid bar beside a line or a thick stroke give the same coverage at any
+    position along their direction (0.91-0.99 on the VE12H leads and body
+    wall), which the paper-inside test cannot see once crossing-line
+    directions are left out of it. No new threshold: "would be accepted as
+    a ring there too" is the detector's own coverage criterion.
+    """
+    for du, dv in ((ru, 0.0), (-ru, 0.0), (0.0, ru), (0.0, -ru)):
+        if _ring_coverage(mask, cu + du, cv + dv, ru) >= COVERAGE_MIN:
+            return False
+    return True
+
+
+def _paper_sides(mask: np.ndarray, cu: float, cv: float, ru: float, margin: float,
+                 lines: Sequence[tuple[str, int]] = ()) -> tuple[float, float]:
+    """Fractions of directions with paper inside [0.3r, r-m] and outside [r+m, r+m+0.5r].
+
+    ``lines`` are the crossing lines of the circle (see :func:`_crossing_lines`:
+    working-image rows of horizontal lines, columns of vertical ones). A
+    direction whose samples are ALL ink lying on the pixels of such a line
+    tells nothing about fill or texture: it is left out of the fraction
+    instead of being counted as ink. Ink off those pixels still counts, so
+    a solid disc or bar crossed by a line keeps failing. Why: the inner band
+    of a hole of 3 px radius lies about 1 px from its centre, where two 1 px
+    centre lines alone cover most directions (paper on 0.29-0.53 of them on
+    the T7NS relay page, against the PAPER_SIDES_MIN of 0.5) although the
+    quarters between them are paper. A side with no direction left counts
+    as 0 (no paper shown).
+    """
+    rows = [row for axis, row in lines if axis == "h"]
+    cols = [col for axis, col in lines if axis == "v"]
     fractions = []
     for lo, hi in ((0.3 * ru, ru - margin), (ru + margin, ru + margin + 0.5 * ru)):
         if hi <= lo:
             hi = lo + 1
         xs, ys = _ring_samples(cu, cv, np.linspace(lo, hi, 6), 72)
-        fractions.append(float((~_fine(mask, xs, ys)).any(axis=1).mean()))
+        hit = _fine(mask, xs, ys)
+        paper = (~hit).any(axis=1)
+        judged = np.ones(len(paper), bool)
+        if rows or cols:
+            on_line = np.isin(np.floor(ys / UPSCALE).astype(int), list(rows)) \
+                | np.isin(np.floor(xs / UPSCALE).astype(int), list(cols))
+            judged = paper | ~(hit & on_line).all(axis=1)
+        fractions.append(float(paper[judged].sum() / judged.sum()) if judged.any() else 0.0)
     return fractions[0], fractions[1]
 
 
@@ -789,8 +883,11 @@ def _find_circles(grey: np.ndarray, mask: np.ndarray) -> list[_Circle]:
             continue
         if float(np.nanstd(profile[near]) / ru) > ROUND_TOLERANCE:
             continue
-        inside, outside = _paper_sides(mask, cu, cv, ru, margin * UPSCALE)
+        inside, outside = _paper_sides(mask, cu, cv, ru, margin * UPSCALE,
+                                       _crossing_lines(cx, cy, rr, ink, sw))
         if inside < PAPER_SIDES_MIN or outside < PAPER_SIDES_MIN:
+            continue
+        if not _is_localised(mask, cu, cv, ru):
             continue
         found.append(_Circle(cx, cy, rr, coverage))
 
@@ -802,13 +899,24 @@ def _find_circles(grey: np.ndarray, mask: np.ndarray) -> list[_Circle]:
         if not duplicate:
             kept.append(circle)
     # A small circle whose centre lies inside a bigger one, not concentric with
-    # it, is a cell between a hole outline and its centre lines (or a glyph
-    # counter): two drawn holes never overlap.
+    # it, conflicts with it: two drawn holes never overlap, so one of the two
+    # is not a hole. Either the small one is a cell between a hole outline
+    # and its centre lines (or a glyph counter), or the big one is a
+    # composite of a small hole and a leader or extension line touching it
+    # (VE12H relay page: the true hole at ring coverage 1.0 inside a 0.90
+    # composite). A drawn circle is a closed stroke, a composite has gaps
+    # where it leaves the ring: the less covered of the two goes; on equal
+    # coverage the small one goes, as before.
     kept = [c for c in kept
-            if not any(k.r > 1.4 * c.r and 0.2 * k.r < math.hypot(c.x - k.x, c.y - k.y) < k.r
-                       for k in kept)]
+            if not any((_overlaps(c, k) and k.coverage >= c.coverage)
+                       or (_overlaps(k, c) and k.coverage > c.coverage) for k in kept)]
     kept = [c for c in kept if not _is_glyph(c, ink, kept)][:MAX_CIRCLES]
     return [replace(c, evidence=_hole_evidence(c, ink, sw)) for c in kept]
+
+
+def _overlaps(small: _Circle, big: _Circle) -> bool:
+    """True when ``small``'s centre lies inside ``big`` (1.4 times larger or more), not concentric."""
+    return big.r > 1.4 * small.r and 0.2 * big.r < math.hypot(small.x - big.x, small.y - big.y) < big.r
 
 
 def _bridge(run: np.ndarray, gap: int) -> np.ndarray:
@@ -819,6 +927,61 @@ def _bridge(run: np.ndarray, gap: int) -> np.ndarray:
         if 1 < b - a <= gap + 1:
             out[a:b] = True
     return out
+
+
+def _crossing_lines(x: float, y: float, r: float, ink: np.ndarray, sw: float,
+                    first_only: bool = False) -> list[tuple[str, int]]:
+    """Horizontal / vertical lines through a circle's centre that continue outside it.
+
+    Returns ("h", row) / ("v", column) pixel indices of the working image.
+    A line counts when it is inked across the centre (+-0.6 r, at least 50 %
+    after bridging dashes over gaps of up to 2 stroke widths + 1 px), runs on
+    outside the ring for at least two diameters on one side (50 % inked after
+    bridging) and is thin there (paper on both sides across it for at least
+    70 % of its inked samples). Offsets of -1, 0 and +1 px from the centre
+    are tried, so a line drawn a pixel off the fitted centre is found. These
+    are the drafting conventions documented in :func:`_hole_evidence`; with
+    ``first_only`` the search stops at the first line.
+    """
+    height, width = ink.shape
+    step = 0.5
+    gap = int(round((2 * sw + 1) / step))
+
+    def inked(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+        """Ink at rounded sample positions; outside the image counts as paper."""
+        xi, yi = np.round(xs).astype(int), np.round(ys).astype(int)
+        ok = (xi >= 0) & (xi < width) & (yi >= 0) & (yi < height)
+        out = np.zeros(xi.shape, bool)
+        out[ok] = ink[yi[ok], xi[ok]]
+        return out
+
+    found: list[tuple[str, int]] = []
+    inner = np.arange(-0.6 * r, 0.6 * r + 1e-9, step)
+    outer = np.arange(r + sw + 1, 5 * r + 1e-9, step)
+    for dx, dy in ((1.0, 0.0), (0.0, 1.0)):
+        for offset in (-1.0, 0.0, 1.0):
+            px, py = x + dy * offset, y + dx * offset
+            centre_ok = _bridge(inked(px + dx * inner, py + dy * inner), gap).mean() >= 0.5
+            if not centre_ok:
+                continue
+            for sign in (-1.0, 1.0):
+                xs, ys = px + sign * dx * outer, py + sign * dy * outer
+                run = inked(xs, ys)
+                if not run.size or _bridge(run, gap).mean() < 0.5:
+                    continue
+                # A line is thin: beside its inked samples, on both sides
+                # across it, there is paper. A row through a line of text
+                # crosses strokes that extend across it, so bridging the
+                # gaps between letters does not make it a line.
+                side = sw + 1.5
+                clear = ~inked(xs[run] + dy * side, ys[run] + dx * side) \
+                    & ~inked(xs[run] - dy * side, ys[run] - dx * side)
+                if clear.mean() >= 0.7:
+                    found.append(("h", int(round(py))) if dx else ("v", int(round(px))))
+                    if first_only:
+                        return found
+                    break
+    return found
 
 
 def _hole_evidence(circle: _Circle, ink: np.ndarray, sw: float) -> bool:
@@ -847,8 +1010,8 @@ def _hole_evidence(circle: _Circle, ink: np.ndarray, sw: float) -> bool:
     """
     height, width = ink.shape
     r = circle.r
-    step = 0.5
-    gap = int(round((2 * sw + 1) / step))
+    if _crossing_lines(circle.x, circle.y, r, ink, sw, first_only=True):
+        return True
 
     def inked(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
         """Ink at rounded sample positions; outside the image counts as paper."""
@@ -858,27 +1021,6 @@ def _hole_evidence(circle: _Circle, ink: np.ndarray, sw: float) -> bool:
         out[ok] = ink[yi[ok], xi[ok]]
         return out
 
-    inner = np.arange(-0.6 * r, 0.6 * r + 1e-9, step)
-    outer = np.arange(r + sw + 1, 5 * r + 1e-9, step)
-    for dx, dy in ((1.0, 0.0), (0.0, 1.0)):
-        for offset in (-1.0, 0.0, 1.0):
-            px, py = circle.x + dy * offset, circle.y + dx * offset
-            centre_ok = _bridge(inked(px + dx * inner, py + dy * inner), gap).mean() >= 0.5
-            if not centre_ok:
-                continue
-            for sign in (-1.0, 1.0):
-                xs, ys = px + sign * dx * outer, py + sign * dy * outer
-                run = inked(xs, ys)
-                if not run.size or _bridge(run, gap).mean() < 0.5:
-                    continue
-                # A line is thin: beside its inked samples, on both sides
-                # across it, there is paper. A row through a line of text
-                # crosses strokes that extend across it, so bridging the
-                # gaps between letters does not make it a line.
-                side = sw + 1.5
-                clear = ~inked(xs[run] + dy * side, ys[run] + dx * side)                     & ~inked(xs[run] - dy * side, ys[run] - dx * side)
-                if clear.mean() >= 0.7:
-                    return True
     angles = np.linspace(0, 2 * math.pi, 72, endpoint=False)
     radii = np.arange(r + sw + 1.5, 3 * r + 1e-9, 1.0)
     if radii.size == 0:
@@ -893,11 +1035,51 @@ def _hole_evidence(circle: _Circle, ink: np.ndarray, sw: float) -> bool:
 # Outline rectangle (body scale check)
 # ---------------------------------------------------------------------------
 
-def _line_bands(mask: np.ndarray, horizontal: bool, min_length: int) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    """Straight ink runs of at least ``min_length`` px and the row/column bands holding them."""
+def _bridged_thin(mask: np.ndarray, horizontal: bool, stroke: float) -> np.ndarray:
+    """Thin ink along one direction with the dash gaps of a line closed.
+
+    Pixels whose ink run ACROSS the direction is longer than a thick line
+    (OUTLINE_THIN_STROKES) are dropped first; the remaining pixels are then
+    closed along the direction over gaps of up to OUTLINE_GAP_STROKES stroke
+    widths, so a dashed or dotted line becomes one continuous run while a
+    solid line is unchanged.
+    """
+    thick = int(math.ceil(OUTLINE_THIN_STROKES * stroke)) + 2
+    gap = int(math.ceil(OUTLINE_GAP_STROKES * stroke)) + 1
+    across = (1, thick + 1) if horizontal else (thick + 1, 1)
+    long_across = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, across))
+    thin = cv2.bitwise_and(mask, cv2.bitwise_not(long_across))
+    # Pixel by pixel the top and bottom arcs of a round letter are thin too;
+    # a whole piece of ink that spreads across the direction further than a
+    # thick line (a letter, a symbol, a diagonal) is not a dash or a dot.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(thin, connectivity=8)
+    extent = stats[:, cv2.CC_STAT_HEIGHT if horizontal else cv2.CC_STAT_WIDTH]
+    keep = extent <= thick
+    keep[0] = False
+    thin = np.where(keep[labels], 255, 0).astype(np.uint8)
+    # Closed with a kernel 3 px across: an anti-aliased line drawn at a
+    # sub-pixel offset puts consecutive dashes on adjacent rows (columns).
+    along = (gap + 1, 3) if horizontal else (3, gap + 1)
+    return cv2.morphologyEx(thin, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, along))
+
+
+def _line_bands(mask: np.ndarray, horizontal: bool, min_length: int,
+                stroke: float | None = None) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int]]]:
+    """Straight runs of at least ``min_length`` px and the row/column bands holding them.
+
+    Returns (solid, dashed, bands): ``solid`` holds the straight runs of the
+    ink itself; ``dashed`` those of the thin ink with its dash gaps bridged
+    (see :func:`_bridged_thin`), empty when ``stroke`` is None; ``bands``
+    are the runs of consecutive rows (columns) holding either.
+    """
     shape = (min_length, 1) if horizontal else (1, min_length)
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, shape))
-    profile = (opened > 0).sum(axis=1 if horizontal else 0)
+    element = cv2.getStructuringElement(cv2.MORPH_RECT, shape)
+    solid = cv2.morphologyEx(mask, cv2.MORPH_OPEN, element)
+    if stroke is None:
+        dashed = np.zeros_like(solid)
+    else:
+        dashed = cv2.morphologyEx(_bridged_thin(mask, horizontal, stroke), cv2.MORPH_OPEN, element)
+    profile = ((solid | dashed) > 0).sum(axis=1 if horizontal else 0)
     indices = np.nonzero(profile)[0]
     bands: list[tuple[int, int]] = []
     for i in indices:
@@ -906,21 +1088,53 @@ def _line_bands(mask: np.ndarray, horizontal: bool, min_length: int) -> tuple[np
             bands[-1] = (bands[-1][0], i)
         else:
             bands.append((i, i))
-    return opened, bands
+    return solid, dashed, bands
 
 
-def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, float] | None:
-    """Width and height, px, of the smallest solid rectangle enclosing all the circles.
+def _outline_rect(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, float, float, float] | None:
+    """Smallest drawn rectangle enclosing all the circles: (left, top, right, bottom) px, or None.
 
-    A side counts when it is inked for at least OUTLINE_COVER_MIN of its
-    length; the circles must lie fully inside. None when no such rectangle exists.
+    Each side is a straight horizontal or vertical band lying outside every
+    circle, and the four sides close into a rectangle (each side is measured
+    between the centres of the two sides it meets). A side counts when:
+
+    - its ink alone covers at least OUTLINE_COVER_MIN of its length (a solid
+      line), or
+    - its thin ink with the dash gaps bridged (see :func:`_bridged_thin`)
+      covers OUTLINE_COVER_MIN AND the strips beside it, one dash gap wide
+      on each side, hold clutter (ink that is neither a straight line nor
+      one of the enclosed holes) along at most OUTLINE_NEIGHBOUR_MAX of its
+      length (a dashed or dotted line standing on its own, not the aligned
+      stems of a column of text with the rest of their letters beside them).
+
+    @note Same image axes as the mask: x to the right, y down, px.
     """
     height, width = mask.shape
     min_length = max(8, int(0.04 * min(height, width)))
-    h_lines, rows = _line_bands(mask, True, min_length)
-    v_lines, cols = _line_bands(mask, False, min_length)
-    h_ok = np.cumsum(np.pad(cv2.dilate(h_lines, np.ones((3, 3), np.uint8)) > 0, ((0, 0), (1, 0))), axis=1)
-    v_ok = np.cumsum(np.pad(cv2.dilate(v_lines, np.ones((3, 3), np.uint8)) > 0, ((1, 0), (0, 0))), axis=0)
+    stroke = _stroke_width(mask)
+    gap = int(math.ceil(OUTLINE_GAP_STROKES * stroke)) + 1
+    h_solid, h_dashed, rows = _line_bands(mask, True, min_length, stroke)
+    v_solid, v_dashed, cols = _line_bands(mask, False, min_length, stroke)
+    grow = np.ones((3, 3), np.uint8)
+
+    def along_x(lines: np.ndarray) -> np.ndarray:
+        """Cumulative count, along each row, of pixels within 1 px of a line."""
+        return np.cumsum(np.pad(cv2.dilate(lines, grow) > 0, ((0, 0), (1, 0))), axis=1)
+
+    def along_y(lines: np.ndarray) -> np.ndarray:
+        """Cumulative count, along each column, of pixels within 1 px of a line."""
+        return np.cumsum(np.pad(cv2.dilate(lines, grow) > 0, ((1, 0), (0, 0))), axis=0)
+
+    h_solid_ok, h_dashed_ok = along_x(h_solid), along_x(h_dashed)
+    v_solid_ok, v_dashed_ok = along_y(v_solid), along_y(v_dashed)
+    # What stands beside a side: ink that is neither a straight line (a
+    # crossing or parallel line is drawing, not clutter) nor one of the
+    # holes the rectangle encloses (holes often sit close to the outline).
+    lines = cv2.dilate(h_solid | h_dashed | v_solid | v_dashed, grow)
+    holes = np.zeros_like(mask)
+    for c in circles:
+        cv2.circle(holes, (int(round(c.x)), int(round(c.y))), int(math.ceil(c.r + 2)), 255, -1)
+    clutter = (mask > 0) & (lines == 0) & (holes == 0)
     left_edge = min(c.x - c.r for c in circles)
     right_edge = max(c.x + c.r for c in circles)
     top_edge = min(c.y - c.r for c in circles)
@@ -935,23 +1149,52 @@ def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float
     lefts = [b for b in cols if centre(b) < left_edge]
     rights = [b for b in cols if centre(b) > right_edge]
 
-    def h_cover(band: tuple[int, int], xa: int, xb: int) -> float:
-        """Best inked fraction of a horizontal side over the rows of its band."""
-        return max((h_ok[r, xb] - h_ok[r, xa]) / max(1, xb - xa) for r in range(band[0], band[1] + 1))
+    def cover(ok: np.ndarray, horizontal: bool, band: tuple[int, int], a: int, b: int) -> float:
+        """Best covered fraction of a side over the rows (columns) of its band."""
+        if horizontal:
+            return max((ok[r, b] - ok[r, a]) / max(1, b - a) for r in range(band[0], band[1] + 1))
+        return max((ok[b, c] - ok[a, c]) / max(1, b - a) for c in range(band[0], band[1] + 1))
 
-    def v_cover(band: tuple[int, int], ya: int, yb: int) -> float:
-        """Best inked fraction of a vertical side over the columns of its band."""
-        return max((v_ok[yb, c] - v_ok[ya, c]) / max(1, yb - ya) for c in range(band[0], band[1] + 1))
+    def crowded(horizontal: bool, band: tuple[int, int], a: int, b: int) -> float:
+        """Fraction of a side's length with clutter in the strips beside it (1 px clear of the band)."""
+        limit = height if horizontal else width
+        before = slice(max(0, band[0] - 1 - gap), max(0, band[0] - 1))
+        after = slice(min(limit, band[1] + 2), min(limit, band[1] + 2 + gap))
+        if horizontal:
+            near = clutter[before, a:b].any(axis=0) | clutter[after, a:b].any(axis=0)
+        else:
+            near = clutter[a:b, before].any(axis=1) | clutter[a:b, after].any(axis=1)
+        return float(near.mean()) if near.size else 1.0
+
+    verdicts: dict[tuple, bool] = {}
+
+    def side_ok(horizontal: bool, band: tuple[int, int], a: int, b: int) -> bool:
+        """True when a side between ``a`` and ``b`` is drawn solid, or dashed and on its own."""
+        key = (horizontal, band, a, b)
+        if key not in verdicts:
+            solid_ok, dashed_ok = (h_solid_ok, h_dashed_ok) if horizontal else (v_solid_ok, v_dashed_ok)
+            verdicts[key] = (cover(solid_ok, horizontal, band, a, b) >= OUTLINE_COVER_MIN
+                             or (cover(dashed_ok, horizontal, band, a, b) >= OUTLINE_COVER_MIN
+                                 and crowded(horizontal, band, a, b) <= OUTLINE_NEIGHBOUR_MAX))
+        return verdicts[key]
 
     combos = [(t, b, l, r) for t in tops for b in bottoms for l in lefts for r in rights]
     combos.sort(key=lambda q: (centre(q[3]) - centre(q[2])) * (centre(q[1]) - centre(q[0])))
     for t, b, l, r in combos:
         xa, xb = int(centre(l)), int(centre(r))
         ya, yb = int(centre(t)), int(centre(b))
-        if min(h_cover(t, xa, xb), h_cover(b, xa, xb), v_cover(l, ya, yb), v_cover(r, ya, yb)) \
-                >= OUTLINE_COVER_MIN:
-            return centre(r) - centre(l), centre(b) - centre(t)
+        if (side_ok(True, t, xa, xb) and side_ok(True, b, xa, xb)
+                and side_ok(False, l, ya, yb) and side_ok(False, r, ya, yb)):
+            return centre(l), centre(t), centre(r), centre(b)
     return None
+
+
+def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, float] | None:
+    """Width and height, px, of the smallest drawn rectangle enclosing all the circles (see :func:`_outline_rect`)."""
+    rect = _outline_rect(mask, circles)
+    if rect is None:
+        return None
+    return rect[2] - rect[0], rect[3] - rect[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1180,15 +1423,22 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
         return _Fit("low_resolution", max_error, tolerance)
     if body is not None:
         outline = _outline_around(mask, [circles[k] for k in assign])
-        if outline is not None:
-            # The outline width is the distance between two drawn edges, each
-            # placed within the tolerance: their difference may reach two
-            # tolerances, plus the drafting allowance of a body outline.
-            allowed = 2 * tolerance_px + BODY_ALLOWANCE_MM * sim.scale
-            if (abs(outline[0] - body[0] * sim.scale) > allowed
-                    or abs(outline[1] - body[1] * sim.scale) > allowed):
-                return _Fit("body_scale", max_error, tolerance)
+        if outline is not None and _body_disagrees(outline, body, sim.scale, tolerance_px):
+            return _Fit("body_scale", max_error, tolerance)
     return _Fit("confirmed", max_error, tolerance)
+
+
+def _body_disagrees(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
+                    tolerance_px: float) -> bool:
+    """True when a drawn outline (width, height px) and a body size (mm) differ beyond the allowance.
+
+    The outline width is the distance between two drawn edges, each placed
+    within the tolerance: their difference may reach two tolerances, plus
+    the drafting allowance of a body outline (BODY_ALLOWANCE_MM).
+    """
+    allowed = 2 * tolerance_px + BODY_ALLOWANCE_MM * scale
+    return (abs(outline_px[0] - body[0] * scale) > allowed
+            or abs(outline_px[1] - body[1] * scale) > allowed)
 
 
 class _BudgetExceeded(Exception):
@@ -1255,7 +1505,12 @@ def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign
     detected (another pad's hole), which is not a missed hole.
     """
     n = len(points)
-    assigned = [p for p in range(n) if assign[p] >= 0]
+    # Only circles drawn like holes may excuse a reading, as only they may
+    # contradict one (_check_image): an explanation anchored on glyph
+    # counters scattered over the page excused a reading wrong everywhere
+    # and kept a confirmed one from being chosen (user run 2026-10-31,
+    # T7N relay: three of the four anchors were letters far from the view).
+    assigned = [p for p in range(n) if assign[p] >= 0 and circles[assign[p]].evidence]
     if len(assigned) < MIN_PADS:
         return False
     sub = points[assigned]
@@ -1446,3 +1701,395 @@ def _summarise(results: Sequence[_ImageResult]) -> LayoutCheck:
     if results:
         return LayoutCheck(UNVERIFIABLE, "not_a_drawing", None, None, None, 0)
     return LayoutCheck(UNVERIFIABLE, "no_image", None, None, None, 0)
+
+
+# ---------------------------------------------------------------------------
+# Measured layout: one pad moved onto the only free drawn hole
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MeasuredLayout:
+    """@brief Outcome of :func:`measured_layout`: pad positions deduced from the drawn holes.
+
+    @note ``positions_mm`` maps every pad of the reading to (x, y) mm in the
+        reading's own frame (page orientation): the reading's values for the
+        pads that sit on their holes, the measured value for ``moved``.
+        ``measured_mm`` gives every pad as measured from its hole through the
+        inverse of the fit, for comparison. ``moved`` is the key of the pad
+        put onto a hole, None when every pad already sat on one;
+        ``moved_from_mm`` is its value in the reading. ``max_error_mm`` is
+        the largest leave-one-out displacement of the anchored pads and
+        ``tolerance_mm`` the tolerance it was held to; ``image`` is the file
+        name of the drawing that decided. Measured positions are rounded to
+        0.01 mm; their real uncertainty is about one pixel of the drawing
+        (``tolerance_mm`` is three pixels or 0.15 mm, whichever is larger).
+    """
+
+    positions_mm: dict
+    measured_mm: dict
+    moved: object | None
+    moved_from_mm: tuple[float, float] | None
+    max_error_mm: float
+    tolerance_mm: float
+    image: str
+
+
+# Marker of an anchoring whose missing pad could go onto several free holes.
+_AMBIGUOUS = "ambiguous"
+
+
+def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
+                    body_mm: Sequence[float] | None = None) -> MeasuredLayout | None:
+    """@brief Deduce pad positions from the drawn holes when at most one pad of a reading is off.
+
+    A similarity fit (uniform scale, rotation within MAX_ROTATION_DEG,
+    translation, never a mirror) is searched, with the machinery of
+    :func:`check_pad_layout`, in which every pad but at most ONE lands on a
+    detected hole within the tolerance, the anchored pads alone passing the
+    same confirmation test (leave-one-out displacement, stretch and shear,
+    resolution). When one pad misses, the free hole it should take is looked
+    for around the place where the fit puts its reading: a detected circle
+    of about the anchored holes' size (SIMILAR_RADIUS), assigned to no other
+    pad, no farther than the distance from that pad's reading to its nearest
+    anchored pad. Exactly one such circle must exist and it must be drawn
+    like a hole (centre line or isolation, see :func:`_hole_evidence`); the
+    pad is moved onto it.
+
+    Why the deduction is safe: n - 1 anchored pads (at least MIN_PADS) fix
+    scale, rotation and translation without the missing pad, so its
+    position is the only unknown, and a single free hole leaves a single
+    answer. Every way the answer could be one of several is refused.
+
+    @param images Candidate drawing images, as for :func:`check_pad_layout`.
+    @param pads_mm Pad key -> (x, y) mm AS SEEN ON THE PAGE (X right, Y
+        down, arbitrary origin), e.g. a dedicated pad reading.
+    @param body_mm Optional (length along page X, width along page Y) mm;
+        when given and an outline is found around the holes, the final
+        layout must agree with it as in :func:`check_pad_layout`.
+    @return A :class:`MeasuredLayout`, or None when the answer is not unique
+        or not deducible: fewer than MIN_PADS anchored pads (a move needs at
+        least MIN_PADS + 1 pads), more than one pad off its hole, no free hole
+        or several candidate holes for the missing pad, the only candidate
+        not drawn like a hole, several different anchorings fitting, the
+        reading mirrored about either page axis also fitting (checked when a
+        pad is moved), the body outline disagreeing, or two images giving
+        different answers. With every pad on its hole the reading is
+        returned unchanged (moved None).
+    @throws ValueError When a pad coordinate or a body size is not a finite
+        number (a positive one for the body).
+    @note POSITIONS ONLY: pad numbers always come from the reading, never
+        from the holes, and only the moved pad gets a position measured in
+        pixels; the others keep their quoted values.
+    @note Declared heuristic: the search radius (distance from the pad's
+        reading to its nearest anchored pad) bounds how far a pad can be
+        misread before the correction would carry it past another pad,
+        which is no longer a local misreading. Chosen on the T7NS relay
+        reading (pad 11 read 2.0 mm right of its hole, nearest pad 6.3 mm
+        away, the hole the mirrored reading would take 14.4 mm away). A
+        second independent reading of the misplaced pad, or a vector drawing
+        with explicit hole numbers, would make it unnecessary.
+    """
+    points = _validated_points(pads_mm)
+    body = _validated_body(body_mm)
+    keys = list(pads_mm.keys())
+    if len(points) < MIN_PADS or len(points) > MAX_PADS:
+        return None
+    answer: MeasuredLayout | None = None
+    for path in images:
+        path = Path(path)
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        analysis = _analyse(path)
+        if analysis is None or not analysis.drawing:
+            continue
+        result = _measure_image(path.name, analysis, points, keys, body)
+        if result is None:
+            continue
+        if answer is not None and (result.positions_mm != answer.positions_mm
+                                   or result.moved != answer.moved):
+            return None
+        answer = answer or result
+    return answer
+
+
+def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle],
+                       mask: np.ndarray) -> tuple[set, set]:
+    """Distinct complete assignments (all pads on holes) and one-pad-moved ones of a reading.
+
+    Returns (full, moved): ``full`` holds assignment tuples whose fit is
+    confirmed as drawn; ``moved`` holds (assignment, moved pad) pairs, or an
+    (_AMBIGUOUS, anchoring) entry when an anchoring leaves several free
+    holes for its missing pad, so that the ambiguity counts as a second
+    answer.
+    """
+    full: set = set()
+    moved: set = set()
+    if len(circles) < len(points) - 1:
+        return full, moved
+    radii = np.array([c.r for c in circles])
+    centres = np.array([(c.x, c.y) for c in circles], float)
+    for assign in _hypothesis_assignments(points, circles, max_misses=1)[:MAX_ASSIGNMENTS]:
+        missing = np.nonzero(assign < 0)[0]
+        if missing.size == 0:
+            if _fit_assignment(points, circles, assign, mask, None).stage == "confirmed":
+                full.add(tuple(int(v) for v in assign))
+            continue
+        pad = int(missing[0])
+        anchored = np.nonzero(assign >= 0)[0]
+        if len(anchored) < MIN_PADS:
+            continue
+        if _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage != "confirmed":
+            continue
+        sim = _fit_similarity(points[anchored], centres[assign[anchored]])
+        read_px = sim.project(points[pad:pad + 1])[0]
+        reach_px = float(np.linalg.norm(points[anchored] - points[pad], axis=1).min()) * sim.scale
+        used = {int(v) for v in assign[anchored]}
+        ratio = radii / float(np.median(radii[assign[anchored]]))
+        near = np.linalg.norm(centres - read_px, axis=1) <= reach_px
+        similar = (ratio >= 1 / SIMILAR_RADIUS) & (ratio <= SIMILAR_RADIUS)
+        free = [int(k) for k in np.nonzero(near & similar)[0] if int(k) not in used]
+        anchoring = tuple(int(v) for v in assign)
+        if len(free) > 1:
+            moved.add((_AMBIGUOUS, anchoring))
+        elif len(free) == 1 and circles[free[0]].evidence:
+            complete = list(anchoring)
+            complete[pad] = free[0]
+            moved.add((tuple(complete), pad))
+    return full, moved
+
+
+def _centres(circles: Sequence[_Circle], assign: np.ndarray) -> np.ndarray:
+    """Image px of the circles of a complete assignment, (n, 2)."""
+    return np.array([(circles[k].x, circles[k].y) for k in assign], float)
+
+
+def _measured_points(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
+                     pad: int | None) -> np.ndarray:
+    """Every pad's hole in the reading's mm frame, by the inverse of the fit on the pads other than ``pad``."""
+    centres = _centres(circles, assign)
+    anchored = [p for p in range(len(points)) if p != pad]
+    sim = _fit_similarity(points[anchored], centres[anchored])
+    z = (centres[:, 0] + 1j * centres[:, 1] - sim.shift) / sim.gain
+    return np.column_stack([z.real, z.imag])
+
+
+def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: list,
+                   body: tuple[float, float] | None) -> MeasuredLayout | None:
+    """Unique measured layout of one reading on one analysed drawing, or None."""
+    circles, mask = list(analysis.circles), analysis.mask
+    full, moved = _layout_candidates(points, circles, mask)
+    if full:
+        # The reading fits as it is: nothing to deduce, unless it fits in
+        # two different ways.
+        if len(full) != 1:
+            return None
+        assign, pad = np.array(next(iter(full))), None
+    else:
+        if len(moved) != 1:
+            return None
+        complete, pad = next(iter(moved))
+        if complete == _AMBIGUOUS:
+            return None
+        assign = np.array(complete)
+    measured = _measured_points(points, circles, assign, pad)
+    anchored = [p for p in range(len(points)) if p != pad]
+    anchored_fit = _fit_assignment(points[anchored], circles, assign[anchored], mask, None)
+    if pad is not None:
+        # A reading of the other face (mirrored about a page axis) that also
+        # fits is a second explanation. It is harmless only when it moves
+        # the same pad to the same place (a layout symmetric about that
+        # axis with the pad on the axis); a full fit of the mirror, or a
+        # move elsewhere, leaves two answers: refuse.
+        for flip in (np.array([-1.0, 1.0]), np.array([1.0, -1.0])):
+            other_full, other_moved = _layout_candidates(points * flip, circles, mask)
+            if other_full:
+                return None
+            for other_assign, other_pad in other_moved:
+                if other_assign == _AMBIGUOUS or other_pad != pad:
+                    return None
+                other = _measured_points(points * flip, circles, np.array(other_assign), pad)[pad] * flip
+                if np.linalg.norm(other - measured[pad]) > anchored_fit.tolerance_mm:
+                    return None
+    final = points.copy()
+    if pad is not None:
+        final[pad] = measured[pad]
+    # The completed layout must pass the whole check, body outline included.
+    if _fit_assignment(final, circles, assign, mask, body).stage != "confirmed":
+        return None
+
+    def pair(row: np.ndarray) -> tuple[float, float]:
+        """Point rounded to 0.01 mm, without negative zero."""
+        return (round(float(row[0]), 2) + 0.0, round(float(row[1]), 2) + 0.0)
+
+    return MeasuredLayout(
+        positions_mm={key: (pair(measured[i]) if i == pad else (float(points[i][0]), float(points[i][1])))
+                      for i, key in enumerate(keys)},
+        measured_mm={key: pair(measured[i]) for i, key in enumerate(keys)},
+        moved=None if pad is None else keys[pad],
+        moved_from_mm=None if pad is None else (float(points[pad][0]), float(points[pad][1])),
+        max_error_mm=round(anchored_fit.max_error_mm, 4),
+        tolerance_mm=round(anchored_fit.tolerance_mm, 4),
+        image=name,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Measured outline: the drawn body rectangle in the reading's frame
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MeasuredOutline:
+    """@brief Outcome of :func:`measured_outline`: the body outline drawn around the holes.
+
+    @note ``left_mm``, ``top_mm``, ``right_mm`` and ``bottom_mm`` are the
+        edges of the drawn outline in the reading's own mm frame (the frame
+        of ``pads_mm``: page orientation, X right, Y down, the reading's
+        origin), rounded to 0.01 mm; left < right and top < bottom.
+        ``tolerance_mm`` is the tolerance of the confirmed fit (three pixels
+        or 0.15 mm, whichever is larger): each edge is placed to about that
+        accuracy. ``image`` is the file name of the drawing that decided.
+    """
+
+    left_mm: float
+    top_mm: float
+    right_mm: float
+    bottom_mm: float
+    tolerance_mm: float
+    image: str
+
+    @property
+    def width_mm(self) -> float:
+        """@brief Outline extent along page X, mm.
+
+        @return right_mm - left_mm.
+        """
+        return self.right_mm - self.left_mm
+
+    @property
+    def height_mm(self) -> float:
+        """@brief Outline extent along page Y, mm.
+
+        @return bottom_mm - top_mm.
+        """
+        return self.bottom_mm - self.top_mm
+
+
+def measured_outline(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
+                     body_mm: Sequence[float] | None = None) -> MeasuredOutline | None:
+    """@brief Measure the body outline drawn around the holes, in the frame of a confirmed reading.
+
+    The reading is matched to the drawn holes exactly as by
+    :func:`check_pad_layout` without a body: the first assignment whose fit
+    is confirmed (displacement test, stretch and shear, rotation,
+    resolution) decides. The smallest rectangle drawn around ITS holes,
+    solid or dashed/dotted (see :func:`_outline_rect`), is then mapped back
+    into the reading's mm frame through the inverse of the similarity fitted
+    on all the pads. Each edge is the mean of its two mapped corners (the
+    fit may rotate the page by up to MAX_ROTATION_DEG).
+
+    @param images Candidate drawing images, as for :func:`check_pad_layout`.
+    @param pads_mm Pad key -> (x, y) mm AS SEEN ON THE PAGE (X right, Y
+        down, arbitrary origin); the outline comes back in this frame.
+    @param body_mm Optional (length along page X, width along page Y) mm;
+        when given, the outline's width and height must agree with it
+        within two fit tolerances plus BODY_ALLOWANCE_MM, as in the body
+        check of :func:`check_pad_layout`.
+    @return A :class:`MeasuredOutline`, or None when fewer than MIN_PADS or
+        more than MAX_PADS pads are given, no image confirms the reading,
+        the confirmed image has no closed rectangle around the matched
+        holes, the outline of any image disagrees with ``body_mm``, or two
+        images give outlines whose edges differ by more than their larger
+        tolerance.
+    @throws ValueError When a pad coordinate or a body size is not a finite
+        number (a positive one for the body).
+    @note A MEASUREMENT in pixels, scaled by the reading's own quotes: it is
+        as good as the drawing's proportions (the T7NS relay page draws its
+        22.5 x 16.5 mm body about 21.9 x 16.1 mm). The rectangle is a DRAWN
+        outline (often the body seen from the solder side); it is not told
+        apart from another drawn rectangle that encloses the holes more
+        tightly, such as a keep-out frame.
+    """
+    points = _validated_points(pads_mm)
+    body = _validated_body(body_mm)
+    if len(points) < MIN_PADS or len(points) > MAX_PADS:
+        return None
+    answer: MeasuredOutline | None = None
+    for path in images:
+        path = Path(path)
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        analysis = _analyse(path)
+        if analysis is None or not analysis.drawing:
+            continue
+        result = _outline_image(path.name, analysis, points, body)
+        if result is _REFUSED:
+            return None
+        if result is None:
+            continue
+        if answer is not None:
+            limit = max(answer.tolerance_mm, result.tolerance_mm)
+            edges = ((answer.left_mm, result.left_mm), (answer.top_mm, result.top_mm),
+                     (answer.right_mm, result.right_mm), (answer.bottom_mm, result.bottom_mm))
+            if any(abs(a - b) > limit for a, b in edges):
+                return None
+        answer = answer or result
+    return answer
+
+
+# Marker of an image whose outline contradicts the body size given.
+_REFUSED = "refused"
+
+
+def _outline_image(name: str, analysis: _Analysis, points: np.ndarray,
+                   body: tuple[float, float] | None) -> MeasuredOutline | str | None:
+    """Outline of one analysed drawing in the reading's frame, None, or _REFUSED on a body contradiction.
+
+    Every confirmed assignment of the reading is looked at, not the first
+    (generality audit M3, 2026-10-31): a page drawing the same hole pattern
+    twice (a PCB layout and a bottom view, or a schematic box whose
+    terminals copy the holes) confirms the reading on each, and the outline
+    of whichever came first would place the body. The outline counts only
+    when every confirmed assignment anchored on circles drawn like holes
+    gives the same rectangle (within the fit tolerance), and at least one
+    does.
+    """
+    circles, mask = list(analysis.circles), analysis.mask
+    if len(circles) < len(points):
+        return None
+    found: list[MeasuredOutline] = []
+    for assign in _hypothesis_assignments(points, circles)[:MAX_ASSIGNMENTS]:
+        fit = _fit_assignment(points, circles, assign, mask, None)
+        if fit.stage != "confirmed":
+            continue
+        if not all(circles[k].evidence for k in assign):
+            continue
+        rect = _outline_rect(mask, [circles[k] for k in assign])
+        if rect is None:
+            return None
+        sim = _fit_similarity(points, _centres(circles, assign))
+        left, top, right, bottom = rect
+        if body is not None and _body_disagrees((right - left, bottom - top), body, sim.scale,
+                                                fit.tolerance_mm * sim.scale):
+            return _REFUSED
+        corners = np.array([left + 1j * top, right + 1j * top, right + 1j * bottom, left + 1j * bottom])
+        mm = (corners - sim.shift) / sim.gain
+
+        def edge(a: complex, b: complex, imaginary: bool) -> float:
+            """Mean of one coordinate of two mapped corners, rounded to 0.01 mm."""
+            value = (a.imag + b.imag) / 2 if imaginary else (a.real + b.real) / 2
+            return round(float(value), 2) + 0.0
+
+        found.append(MeasuredOutline(
+            left_mm=edge(mm[0], mm[3], False), top_mm=edge(mm[0], mm[1], True),
+            right_mm=edge(mm[1], mm[2], False), bottom_mm=edge(mm[2], mm[3], True),
+            tolerance_mm=round(fit.tolerance_mm, 4), image=name))
+    if not found:
+        return None
+    first = found[0]
+    for other in found[1:]:
+        limit = max(first.tolerance_mm, other.tolerance_mm)
+        if any(abs(a - b) > limit for a, b in (
+                (first.left_mm, other.left_mm), (first.top_mm, other.top_mm),
+                (first.right_mm, other.right_mm), (first.bottom_mm, other.bottom_mm))):
+            return None
+    return first

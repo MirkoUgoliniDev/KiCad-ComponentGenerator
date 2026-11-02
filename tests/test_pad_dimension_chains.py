@@ -48,7 +48,11 @@ def test_chains_are_added_up_with_shared_stops_and_outline_spans():
     result = pads_from_chains(CHAINS)
     assert result["problems"] == [] and result["unplaced"] == []
     assert _distances(result["pads"]) == pytest.approx(_distances(TRUE))
-    assert result["spans"] == {"x": pytest.approx(15.0), "y": pytest.approx(9.0)}
+    assert result["spans"] == {"x": pytest.approx(15.0), "y": pytest.approx(9.0),
+                               # Where the outline stops are (2026-10-31: the body is
+                               # placed axis by axis, _write_chain_pads).
+                               "edges": {"x": pytest.approx((0.0, 15.0)),
+                                         "y": pytest.approx((0.0, 9.0))}}
 
 
 def test_the_declared_unit_is_converted():

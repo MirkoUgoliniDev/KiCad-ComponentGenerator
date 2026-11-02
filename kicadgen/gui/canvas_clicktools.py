@@ -630,11 +630,7 @@ class ClickToolRouter:
                 self._cursor_set = False
                 self._sync_cursor()
             else:
-                self._press = None
-                self._last_hover = None
-                self._swallow_release = False
-                self._collector.cancel()
-                self._sync_cursor()
+                self.cancel_tool()
             event.accept()
             return True
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -643,6 +639,22 @@ class ClickToolRouter:
             event.accept()
             return True
         return False
+
+    def cancel_tool(self) -> bool:
+        """@brief Cancel the armed tool as Escape does: forget the press record first, then `collector.cancel()`.
+
+        @return True when a tool was cancelled (or re-armed itself by its host); False when idle.
+        @note A caller that cancels on its own key (the measuring tool's
+            Escape ladder) must come here, not to the collector: a press
+            recorded before the cancel would otherwise turn the following
+            release into a new (quiet) point.
+        """
+        self._press = None
+        self._last_hover = None
+        self._swallow_release = False
+        cancelled = self._collector.cancel()
+        self._sync_cursor()
+        return cancelled
 
     def move(self, event) -> bool:
         """@brief A mouse move: hover the preview.

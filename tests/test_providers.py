@@ -102,6 +102,73 @@ def test_a_pdf_is_refused_before_any_deepseek_request(monkeypatch):
         openrouter.call_tool("deepseek-api/deepseek-flash", "sys", [], _TOOL, has_pdf=True)
 
 
+_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def _catalog(monkeypatch, tmp_path, rows):
+    """A cached OpenRouter catalog with `rows`, read whatever its age."""
+    import json
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    monkeypatch.setattr(openrouter, "MODELS_CACHE_PATH", path)
+
+
+_ROWS = [{"id": "deepseek/deepseek-v4-pro", "architecture": {"input_modalities": ["text"]}},
+         {"id": "deepseek/deepseek-v4.1-flash",
+          "architecture": {"input_modalities": ["text", "image"]}},
+         {"id": "deepseek/deepseek-undeclared", "architecture": {}}]
+
+
+def test_images_to_a_model_declared_text_only_are_refused_before_the_request(monkeypatch,
+                                                                             tmp_path):
+    """User, 2026-10-31: deepseek-v4-pro got «[Unsupported Image]» for the photo
+    and the pinout, answered without terminals twice and both calls were paid."""
+    _catalog(monkeypatch, tmp_path, _ROWS)
+    monkeypatch.setattr(providers, "deepseek_request",
+                        lambda *a, **k: pytest.fail("no request for unreadable images"))
+    with pytest.raises(providers.ProviderError, match="solo testo"):
+        openrouter.call_tool("deepseek-api/deepseek-v4-pro", "sys", [_IMAGE], _TOOL)
+
+
+@pytest.mark.parametrize("model, blocks", [
+    ("deepseek-api/deepseek-v4.1-flash", [_IMAGE]),     # declared to read images
+    ("deepseek-api/deepseek-undeclared", [_IMAGE]),     # nothing declared: sent as before
+    ("deepseek-api/deepseek-unlisted", [_IMAGE]),       # not in the catalog
+    ("deepseek-api/deepseek-v4-pro", [{"type": "text", "text": "hi"}]),   # no image
+])
+def test_a_model_not_declared_text_only_or_a_text_request_is_sent(monkeypatch, tmp_path,
+                                                                  model, blocks):
+    _catalog(monkeypatch, tmp_path, _ROWS)
+    sent = []
+    monkeypatch.setattr(providers, "deepseek_request", lambda url, body, **k: sent.append(body) or {
+        "choices": [{"message": {"tool_calls": [{"function": {
+            "name": "report", "arguments": "{}"}}]}}]})
+    openrouter.call_tool(model, "sys", blocks, _TOOL)
+    assert len(sent) == 1
+
+
+def test_a_stale_catalog_never_refuses_a_model(monkeypatch, tmp_path):
+    """The model may have gained image input since: stale data only lets it through."""
+    import os
+    _catalog(monkeypatch, tmp_path, _ROWS)
+    old = openrouter.MODELS_CACHE_PATH.stat().st_mtime - openrouter.MODELS_CACHE_TTL_S - 60
+    os.utime(openrouter.MODELS_CACHE_PATH, (old, old))
+    assert openrouter.deepseek_declared_text_only("deepseek-api/deepseek-v4-pro") is False
+
+
+def test_a_text_only_pad_model_falls_back_to_the_main_model(monkeypatch, tmp_path):
+    from kicadgen.services import datasheet_extractor as ext
+    _catalog(monkeypatch, tmp_path, _ROWS)
+    logs = []
+    chosen = ext._pad_reading_model("deepseek-api/deepseek-v4-pro", "deepseek-api/deepseek-flash",
+                                    "single_tht", logs.append, None)
+    assert chosen == "deepseek-api/deepseek-flash" and any("solo testo" in l for l in logs)
+    # Negative: an image-reading pad model of the same provider is kept.
+    assert ext._pad_reading_model("deepseek-api/deepseek-v4.1-flash",
+                                  "deepseek-api/deepseek-flash", "single_tht", logs.append,
+                                  None) == "deepseek-api/deepseek-v4.1-flash"
+
+
 # ── GUI: picker filter and balance line ───────────────────────────────────
 
 def test_the_picker_starts_on_the_provider_of_the_current_model(qapp, monkeypatch):
