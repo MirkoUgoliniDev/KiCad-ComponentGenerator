@@ -602,8 +602,33 @@ def _align_form_labels(form: QFormLayout, width: int = FORM_LABEL_MINIMUM_WIDTH)
         label.setFixedWidth(width)
     return width
 
-#: Marks preview grid lines so fit-to-content calculations can exclude them.
-_GRID_ITEM = 0
+def _pad_origin_key(number: str, occurrence: int = 1) -> str:
+    """@brief Drawing-origin key of a pad: «pad:<number>», «pad:<number>#<k>» for the k-th pad sharing it.
+
+    @param number Pad number as written in the footprint (stripped).
+    @param occurrence 1 for the first pad with this number in drawing order, 2 for the second...
+    @return The key; pads sharing a number (a split land) stay distinct.
+    """
+    return f"pad:{number}" if occurrence <= 1 else f"pad:{number}#{occurrence}"
+
+
+def _source_frame_delta(package, dx_mm: float, dy_mm: float) -> tuple:
+    """@brief A displacement seen on the footprint, taken back to the package's source frame.
+
+    @param package The `PackageGeometry` whose pads move.
+    @param dx_mm Displacement along the footprint X axis, mm (right).
+    @param dy_mm Displacement along the footprint Y axis, mm (down).
+    @return (dx, dy) in the frame the package stores its pads in: the inverse
+        of `PackageGeometry.pins_seen_from_top` (inverse turn, then the
+        reflection of a bottom view or a mirror), at any orientation.
+    """
+    angle = math.radians(package.orientation_deg % 360)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    # Inverse of `_rotate_kicad` (its transpose), then the reflection.
+    sx, sy = dx_mm * cos_a - dy_mm * sin_a, dx_mm * sin_a + dy_mm * cos_a
+    if (int(package.source_view == "bottom") + int(package.mirrored)) % 2:
+        sx = -sx
+    return sx, sy
 
 
 def _side_pinout(side: dict) -> list[dict]:
@@ -990,6 +1015,9 @@ def _positive_frame(length, width):
 #: Scene px per footprint mm of the 2D footprint preview (every drawer of
 #: the preview, the drawing snap and the handles use this scale).
 _FP_PREVIEW_MM_TO_PX = 20.0
+#: Key of the default drawing origin of the footprint preview: the footprint's
+#: own (0, 0), the point KiCad places by (see `_set_footprint_origin_points`).
+FP_ORIGIN_DEFAULT = "origin"
 
 
 #: Pixel size of the reference font a user text is laid out in before the
@@ -1687,6 +1715,15 @@ class MainWindow(QMainWindow):
         #: {key: (x, y)} mm in footprint coordinates (user, 2026-10-13);
         #: a key left out keeps the generator's default.
         self.footprint_text_positions: dict[str, tuple] = {}
+        #: Drawing origin of the footprint preview (user, 2026-11-02): a view
+        #: aid only, never written to the .kicad_mod and never part of the
+        #: footprint draft. Key of a point of `_fp_origin_points`.
+        self.footprint_drawing_origin: str = FP_ORIGIN_DEFAULT
+        #: Candidate drawing origins of the footprint drawn last: key -> (x, y)
+        #: mm in footprint coordinates (Y down); filled by every preview drawer.
+        self._fp_origin_points: dict[str, tuple] = {}
+        #: Body centre of the footprint drawn last, mm: names the body corners.
+        self._fp_body_centre_mm: tuple = (0.0, 0.0)
         #: User drawings of the footprint preview (validated records, see
         #: core.footprint.validate_footprint_drawings); drawn in every 2D
         #: preview and appended to the exported .kicad_mod (user, 2026-10-13).
@@ -8085,6 +8122,8 @@ class MainWindow(QMainWindow):
             "host_mounting": self._mounting_state(),
             "footprint_texts": text_positions_json(applied["texts"]),
             "footprint_drawings": deepcopy(applied["drawings"]),
+            # A view setting, saved as soon as it changes (never a draft edit).
+            "footprint_drawing_origin": self.footprint_drawing_origin,
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
@@ -8327,6 +8366,11 @@ class MainWindow(QMainWindow):
         # where the user sees them (saved with the project's next save).
         self.footprint_drawings = _migrate_drawing_texts(
             validate_footprint_drawings(state.get("footprint_drawings")))
+        origin = state.get("footprint_drawing_origin")
+        # A key the next drawing cannot resolve falls back to the footprint
+        # origin there (`_drawing_origin_mm`); only the type is checked here.
+        self.footprint_drawing_origin = (origin if isinstance(origin, str) and origin.strip()
+                                         else FP_ORIGIN_DEFAULT)
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
         # What the file holds is the applied state: no draft, nothing offered
         # until `_offer_footprint_recovery` reads this project's recovery file.
@@ -15006,6 +15050,7 @@ class MainWindow(QMainWindow):
         self.preview_view.set_fine_divisor(self.combo_fine_grid.currentData())
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
         self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
+        self.preview_view.background_context_requested.connect(self._footprint_background_context_menu)
         self.preview_view.setMinimumHeight(500)
         # The footprint is drawn at a relatively high scene scale (20 px/mm).
         # Without these hints circles, square-pad corners and small pin labels
@@ -15076,6 +15121,15 @@ class MainWindow(QMainWindow):
         # (user, 2026-10-13): free tools only, no numbered pads.
         canvas_row.addWidget(self._build_footprint_palette())
         outer.addLayout(canvas_row, 1)
+        #: Pointer line under the canvas, the symbol editor's (`canvas_origin.readout_text`)
+        #: plus the drawing origin it is measured from.
+        self.preview_readout = QLabel()
+        self.preview_readout.setProperty("i18n_skip", True)
+        outer.addWidget(self.preview_readout)
+        #: Last pointer position over the footprint, scene px (kept when the pointer leaves).
+        self._fp_cursor_position = None
+        self.preview_view.pointer_changed.connect(self._update_footprint_readout)
+        self.preview_view.camera_changed.connect(self._update_footprint_readout)
         self.preview_view.drawing_hovered.connect(self._on_footprint_drawing_hovered)
         self.preview_view.text_hovered.connect(self._on_footprint_text_hovered)
         from .canvas_gestures import DeferredCheckpoint, bind_shortcuts
@@ -16769,8 +16823,9 @@ class MainWindow(QMainWindow):
         @param dx Steps along X (-1, 0 or 1), right positive.
         @param dy Steps along Y (-1, 0 or 1), down positive (footprint axes).
         @return True when the draft changed (one undo step per key press or repeat).
-        @note Pads keep the main grid, as a drag (`_pad_drag_delta`) and as
-            the symbol editor nudges its pins by one pin-grid step.
+        @note An arrow key moves pads by one MAIN-grid step, as the symbol
+            editor nudges its pins by one pin-grid step; only a drag
+            (`_pad_drag_delta`) can also land on a fine-grid dot.
         """
         pads = self._fp_selected_pads()
         if not pads:
@@ -17706,12 +17761,12 @@ class MainWindow(QMainWindow):
         pressed = package.pins_seen_from_top()[index]
         self._fp_pad_drag = {"members": members, "items": self._pad_items(members),
                              "press": QPointF(point), "delta": QPointF(0.0, 0.0),
-                             "on_grid": False, "package": package, "pressed": index,
+                             "snap": "free", "package": package, "pressed": index,
                              "crosshair": None,
                              # Centre (scene px) of the pressed pad: the one the crosshair marks.
                              "anchor": QPointF(pressed.x_mm * _FP_PREVIEW_MM_TO_PX,
                                                pressed.y_mm * _FP_PREVIEW_MM_TO_PX)}
-        self._fp_pad_drag["on_grid"] = self._pad_centre_on_grid(self._fp_pad_drag["anchor"])
+        self._fp_pad_drag["snap"] = self._pad_centre_snap(self._fp_pad_drag["anchor"])
         self._build_pad_crosshair()
         return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
 
@@ -17740,22 +17795,32 @@ class MainWindow(QMainWindow):
                 items.append((item, QPointF(item.pos())))
         return items
 
-    def _pad_centre_on_grid(self, centre: QPointF) -> bool:
-        """@brief Whether a pad centre (scene px) sits on a node of the visible main grid.
+    def _pad_centre_snap(self, centre: QPointF) -> str:
+        """@brief Where a pad centre (scene px) sits: on a main-grid node, on a visible dot, or free.
 
         @param centre Scene position (px) of the pad centre.
-        @return True within 1e-6 px of a node; False off the nodes or with the grid hidden.
+        @return "main" within 1e-6 px of a node of the visible main grid; "dot"
+            within 1e-6 px of a fine-grid dot while the dots are drawn
+            (`FootprintView.fine_dots_visible`); "free" otherwise and with the
+            grid hidden.
         """
-        node = self.preview_view.snap_to_main_grid(centre.x(), centre.y())
-        return node is not None and abs(node[0] - centre.x()) < 1e-6 and abs(node[1] - centre.y()) < 1e-6
+        view = self.preview_view
+        node = view.snap_to_main_grid(centre.x(), centre.y())
+        if node is not None and abs(node[0] - centre.x()) < 1e-6 and abs(node[1] - centre.y()) < 1e-6:
+            return "main"
+        if node is not None and view.fine_dots_visible():
+            dot = view.snap_to_grid(centre.x(), centre.y(), 0.0)
+            if abs(dot[0] - centre.x()) < 1e-6 and abs(dot[1] - centre.y()) < 1e-6:
+                return "dot"
+        return "free"
 
     def _build_pad_crosshair(self) -> None:
         """@brief Draw the centring crosshair through the pressed pad's centre.
 
         @note Two lines crossing at the centre, half again as long as the
             pad's drawn copper, in a pen one screen pixel wide at any zoom,
-            green on a grid node and orange off the grid
-            (`_style_pad_crosshair`). Built in Python and added with
+            green on a main-grid node, light blue on a grid dot and orange
+            off the grid (`_style_pad_crosshair`). Built in Python and added with
             `addItem` (kept-items rule): `_forget_preview_items` drops it
             before a `scene.clear()`.
         """
@@ -17783,14 +17848,16 @@ class MainWindow(QMainWindow):
         self._style_pad_crosshair()
 
     def _style_pad_crosshair(self) -> None:
-        """Colour the crosshair of the running pad drag by its grid state (green on a node, orange off)."""
+        """Colour the crosshair of the running pad drag by its snap: green node, light blue dot, orange free."""
         from .canvas_gestures import _alive
-        from .footprint_view import PAD_CROSSHAIR_OFF_GRID, PAD_CROSSHAIR_ON_GRID
+        from .footprint_view import PAD_CROSSHAIR_OFF_GRID, PAD_CROSSHAIR_ON_DOT, PAD_CROSSHAIR_ON_GRID
         drag = self._fp_pad_drag
         crosshair = drag["crosshair"] if drag is not None else None
         if not _alive(crosshair):
             return
-        pen = QPen(QColor(PAD_CROSSHAIR_ON_GRID if drag["on_grid"] else PAD_CROSSHAIR_OFF_GRID))
+        colour = {"main": PAD_CROSSHAIR_ON_GRID, "dot": PAD_CROSSHAIR_ON_DOT}.get(drag["snap"],
+                                                                                PAD_CROSSHAIR_OFF_GRID)
+        pen = QPen(QColor(colour))
         pen.setWidthF(1.5)
         pen.setCosmetic(True)
         crosshair.setPen(pen)
@@ -17812,12 +17879,19 @@ class MainWindow(QMainWindow):
         self._place_pad_drag_items(drag["items"], drag["delta"])
 
     def _pad_drag_delta(self, point: QPointF) -> tuple:
-        """@brief Where the pointer carries the pressed pad: (displacement in scene px, on a grid node).
+        """@brief Where the pointer carries the pressed pad: (displacement in scene px, snap state).
 
         @param point Scene position (px) of the pointer.
-        @return The displacement of the pressed pad's centre and whether it
-            ends on a node of the visible MAIN grid (pads keep the main grid,
-            never the drawing one: user, 2026-10-13).
+        @return The displacement of the pressed pad's centre and where it
+            ends: "main" (a node of the visible main grid), "dot" (a visible
+            fine-grid dot) or "free".
+        @note CONTRACT CHANGED (user, 2026-11-02: «deve esserci un magnete per
+            ancorare anche nei pallini della griglia», a magnet for the grid
+            dots too): within the magnet reach a main node wins; failing that,
+            a dot of the drawing grid catches the centre, but only while the
+            dots are drawn (`fine_dots_visible`: nobody aims at a dot that is
+            not shown). Where the dots are 5-8 screen px apart the reach covers
+            almost every position, so at that zoom the pad steps dot by dot.
         @note CONTRACT CHANGED (user, 2026-11-02: «mi serve un mirino al centro del pad per centrare e si deve diversificare quando sono nel reticolo a 2.54 oppure fuori»
             (a crosshair at the pad centre, different on and off the 2.54 grid)): the grid
             no longer forces the position, it helps. A centre carried within
@@ -17833,13 +17907,17 @@ class MainWindow(QMainWindow):
         node = self.preview_view.snap_to_main_grid(target.x(), target.y())
         scale = max(abs(self.preview_view.transform().m11()), 1e-9)
         if node is not None and math.hypot(node[0] - target.x(), node[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
-            return QPointF(node[0], node[1]) - drag["anchor"], True
+            return QPointF(node[0], node[1]) - drag["anchor"], "main"
+        if node is not None and self.preview_view.fine_dots_visible():
+            dot = self.preview_view.snap_to_grid(target.x(), target.y(), 0.0)
+            if math.hypot(dot[0] - target.x(), dot[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
+                return QPointF(dot[0], dot[1]) - drag["anchor"], "dot"
         fine = 0.01 * _FP_PREVIEW_MM_TO_PX
         free = QPointF(round(target.x() / fine) * fine, round(target.y() / fine) * fine)
-        return free - drag["anchor"], self._pad_centre_on_grid(free)
+        return free - drag["anchor"], self._pad_centre_snap(free)
 
     def _step_pad_drag(self, point: QPointF) -> None:
-        """@brief The pads follow the pointer; the crosshair turns green on a grid node, orange off it.
+        """@brief The pads follow the pointer; the crosshair turns green on a node, light blue on a dot, orange off the grid.
 
         @param point Scene position (px) of the pointer.
         @note The drawn pads move to the displacement `_pad_drag_delta`
@@ -17851,15 +17929,15 @@ class MainWindow(QMainWindow):
         drag = self._fp_pad_drag
         if drag is None:
             return
-        delta, on_grid = self._pad_drag_delta(point)
+        delta, snap = self._pad_drag_delta(point)
         if delta != drag["delta"]:
             drag["delta"] = delta
             self._place_pad_drag_items(drag["items"], delta)
             from .canvas_gestures import _alive
             if _alive(drag["crosshair"]):
                 drag["crosshair"].setPos(delta)
-        if on_grid != drag["on_grid"]:
-            drag["on_grid"] = on_grid
+        if snap != drag["snap"]:
+            drag["snap"] = snap
             self._style_pad_crosshair()
 
     @staticmethod
@@ -18066,12 +18144,7 @@ class MainWindow(QMainWindow):
         chosen = sorted({i for i in indices if 0 <= i < len(package.pins)})
         if not chosen or (dx_mm, dy_mm) == (0.0, 0.0):
             return False
-        angle = math.radians(package.orientation_deg % 360)
-        cos_a, sin_a = math.cos(angle), math.sin(angle)
-        # Inverse of `_rotate_kicad` (its transpose), then the reflection.
-        sx, sy = dx_mm * cos_a - dy_mm * sin_a, dx_mm * sin_a + dy_mm * cos_a
-        if (int(package.source_view == "bottom") + int(package.mirrored)) % 2:
-            sx = -sx
+        sx, sy = _source_frame_delta(package, dx_mm, dy_mm)
         pins = list(package.pins)
         for index in chosen:
             pin = pins[index]
@@ -20398,39 +20471,30 @@ class MainWindow(QMainWindow):
         view = getattr(self, "preview_view", None)
         spec = getattr(self, "_preview_grid_spec", None)
         if view is not None and spec is not None:
-            step = (2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0) * spec["mm_to_px"]
-            origin = tuple(value * spec["mm_to_px"] for value in spec["origin"])
-            view.set_grid(step, origin, checked)
-        # Grid visibility is not a request to redraw/refit the footprint.
-        for item in self.preview_scene.items():
-            if item.data(_GRID_ITEM):
-                item.setVisible(checked)
+            # Grid visibility is not a request to redraw/refit the footprint.
+            self._apply_preview_grid()
 
     def _on_grid_unit_changed(self) -> None:
         self._config["grid_unit"] = self.combo_grid_unit.currentData()
         self._save_config_safely()
         spec = getattr(self, '_preview_grid_spec', None)
         if spec is not None:
-            for item in self.preview_scene.items():
-                if item.data(_GRID_ITEM):
-                    self.preview_scene.removeItem(item)
             self._draw_grid(**spec)
 
     def _preview_framing_rect(self):
-        """@brief The scene rectangle the footprint camera frames: the non-grid items plus a 12 px margin.
+        """@brief The scene rectangle the footprint camera frames: the footprint items plus a 12 px margin.
 
         @return A `QRectF`, or None when the scene holds nothing to frame.
-        @note The grid extends beyond the component: by including it in the
-            framing, switching it on and off changed the size of the drawing
-            for the same footprint -- confusing precisely when the grid
-            serves to judge the distances. Shared by `_fit_preview` and by
-            the view's resize refit (`FootprintView.set_framing_provider`).
+        @note The grid is painted by the view's background, never as scene
+            items, so switching it on and off cannot change the framing.
+            Shared by `_fit_preview` and by the view's resize refit
+            (`FootprintView.set_framing_provider`).
         """
         from .canvas_measure import MEASURE_ITEM_ROLE
         rect = None
         for item in self.preview_scene.items():
-            # The grid and the measures (an overlay) never change the framing.
-            if item.data(_GRID_ITEM) or item.data(MEASURE_ITEM_ROLE):
+            # The measures (an overlay) never change the framing.
+            if item.data(MEASURE_ITEM_ROLE):
                 continue
             bounds = item.sceneBoundingRect()
             rect = bounds if rect is None else rect.united(bounds)
@@ -20454,8 +20518,7 @@ class MainWindow(QMainWindow):
         rect = self._preview_framing_rect()
         if rect is None:
             return
-        # Keep the scrollable extent independent of grid visibility/spacing.
-        # An implicit scene rect can grow with previously drawn grid items.
+        # Keep the scrollable extent fixed to the framed footprint.
         self.preview_scene.setSceneRect(rect)
         self.preview_view.camera.fit(rect, force=force, reset=True)
 
@@ -20464,52 +20527,39 @@ class MainWindow(QMainWindow):
         x0: float = 0.0, y0: float = 0.0,
         origin: tuple = (0.0, 0.0),
     ) -> None:
-        """Reference grid, with a pitch in mm or in tenths of an inch.
+        """Set the pitch (mm or tenths of an inch) and origin of the preview grid.
 
-        A line marked every 5 steps acts as a coarse reference (5 mm or half
-        an inch), the others are thin.
-
-        (x0, y0) is the corner from which the area to cover starts: zero for
-        the matrix footprint, which has pin 1 at the origin, negative for the
-        castellated modules, centred on the origin.
+        The grid itself is painted only by the view's background (the shared
+        `canvas_grid.paint_grid`, as in the symbol editor): no grid lines are
+        added to the scene, so there is one grid and nothing to hide, remove
+        or exclude from the framing (user, 2026-11-02: «una basta ed avanza»).
+        The area arguments are kept in `_preview_grid_spec` for the redraws
+        of the grid controls; (x0, y0) is the corner of the area the footprint
+        covers: zero for the matrix footprint, which has pin 1 at the origin,
+        negative for the castellated modules, centred on the origin.
         """
         self._preview_grid_spec = dict(mm_to_px=mm_to_px, width=width, height=height,
                                        margin=margin, x0=x0, y0=y0, origin=origin)
+        self._apply_preview_grid()
+
+    def _apply_preview_grid(self) -> None:
+        """@brief Give the view its grid: step of the chosen unit, origin, visibility.
+
+        @note The grid passes through the drawer's origin (`_preview_grid_spec`,
+            e.g. the first pad), unless the user chose a drawing origin: then
+            through that point, so the dimensions of a datasheet measured from
+            it land on grid nodes (user, 2026-11-02).
+        """
+        spec = getattr(self, "_preview_grid_spec", None)
+        if spec is None:
+            return
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
-        self.preview_view.set_grid(
-            step * mm_to_px,
-            tuple(value * mm_to_px for value in origin),
-            self.chk_grid.isChecked(),
-        )
-
-        minor = QPen(QColor(SURFACE1))
-        minor.setWidthF(0.5)
-        major = QPen(QColor(SURFACE2))
-        major.setWidthF(1.0)
-
-        ox, oy = origin
-        pad = margin + 2.0
-        i_min, i_max = math.floor((x0 - pad - ox) / step), math.ceil((x0 + width + pad - ox) / step)
-        j_min, j_max = math.floor((y0 - pad - oy) / step), math.ceil((y0 + height + pad - oy) / step)
-
-        for i in range(i_min, i_max + 1):
-            pen = major if i % 5 == 0 else minor
-            x = (ox + i * step) * mm_to_px
-            line = self.preview_scene.addLine(
-                x, (oy + j_min * step) * mm_to_px, x, (oy + j_max * step) * mm_to_px, pen
-            )
-            line.setZValue(-10)  # behind pads, silkscreen and dimensions
-            line.setData(_GRID_ITEM, True)
-            line.setVisible(self.chk_grid.isChecked())
-        for j in range(j_min, j_max + 1):
-            pen = major if j % 5 == 0 else minor
-            y = (oy + j * step) * mm_to_px
-            line = self.preview_scene.addLine(
-                (ox + i_min * step) * mm_to_px, y, (ox + i_max * step) * mm_to_px, y, pen
-            )
-            line.setZValue(-10)
-            line.setData(_GRID_ITEM, True)
-            line.setVisible(self.chk_grid.isChecked())
+        origin = spec["origin"]
+        if self._resolved_drawing_origin() != FP_ORIGIN_DEFAULT:
+            origin = self._drawing_origin_mm()
+        self.preview_view.set_grid(step * spec["mm_to_px"],
+                                   tuple(value * spec["mm_to_px"] for value in origin),
+                                   self.chk_grid.isChecked())
 
     def _pad_tooltip(self, number) -> str:
         """@brief Popup text of one pad of the 2D preview, from the pinout table.
@@ -20640,6 +20690,10 @@ class MainWindow(QMainWindow):
 
         self._draw_footprint_texts(mm_to_px, built)
         self._draw_footprint_drawings(mm_to_px)
+        self._set_footprint_origin_points(
+            [(-p.body_length / 2, -p.body_width / 2), (p.body_length / 2, -p.body_width / 2),
+             (p.body_length / 2, p.body_width / 2), (-p.body_length / 2, p.body_width / 2)],
+            [(placement.number, placement.x, placement.y) for placement in pad_positions(p)])
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(built)
@@ -20664,7 +20718,7 @@ class MainWindow(QMainWindow):
             written to the .kicad_mod.
         """
         from ..generators.castellated_module import CONTACT_THROUGH_HOLE, continuous_pad
-        hole_brush = QBrush(QColor(BASE))
+        from .footprint_view import HoledEllipseItem, HoledPathItem, add_hole_outline
         hole_pen = QPen(QColor(SURFACE2))
         pad = continuous_pad(p, placement)
         if pad is not None:
@@ -20673,32 +20727,36 @@ class MainWindow(QMainWindow):
             radius = min(w, h) / 2
             path = QPainterPath()
             path.addRoundedRect(QRectF(x - w / 2, y - h / 2, w, h), radius, radius)
-            copper = self.preview_scene.addPath(path, pen, brush)
+            copper = HoledPathItem(path)
+            copper.setPen(pen)
+            copper.setBrush(brush)
+            self.preview_scene.addItem(copper)
             copper.setZValue(1)
             # Only the through hole: the footprint is the pad on the board
             # that hosts the module, and there the half hole does not exist (it is
             # a machining of the MODULE's edge, which lives in the 3D model).
             if pad.drill and pad.drill > 0:
-                d = pad.drill * mm_to_px
-                hole = self.preview_scene.addEllipse(
-                    pad.drill_x * mm_to_px - d / 2, pad.drill_y * mm_to_px - d / 2, d, d,
-                    hole_pen, hole_brush)
-                hole.setZValue(2)
+                centre = QPointF(pad.drill_x * mm_to_px, pad.drill_y * mm_to_px)
+                copper.set_hole(centre, pad.drill * mm_to_px)
+                add_hole_outline(self.preview_scene, centre, pad.drill * mm_to_px, hole_pen, 2)
             xs_px.extend([x - w / 2, x + w / 2])
             ys_px.extend([y - h / 2, y + h / 2])
             return copper
         w, h = placement.width * mm_to_px, placement.height * mm_to_px
         x, y = placement.x * mm_to_px, placement.y * mm_to_px
         if placement.style == CONTACT_THROUGH_HOLE:
-            ring = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h, pen, brush)
+            ring = HoledEllipseItem(x - w / 2, y - h / 2, w, h)
+            ring.setPen(pen)
+            ring.setBrush(brush)
+            self.preview_scene.addItem(ring)
             ring.setZValue(1)
             # Hole of this contact's side (the sides may have different holes).
             geometry = getattr(p, "contact_geometry", None)
             drill = geometry(placement).drill if callable(geometry) else p.thru_hole_drill
             d = drill * mm_to_px
             if d > 0:
-                hole = self.preview_scene.addEllipse(x - d / 2, y - d / 2, d, d, hole_pen, hole_brush)
-                hole.setZValue(2)
+                ring.set_hole(QPointF(x, y), d)
+                add_hole_outline(self.preview_scene, QPointF(x, y), d, hole_pen, 2)
             copper = ring
         else:
             item = QGraphicsRectItem(x - w / 2, y - h / 2, w, h)
@@ -20765,6 +20823,9 @@ class MainWindow(QMainWindow):
         if params is None:
             self._forget_preview_items()
             self.preview_scene.clear()
+            # No footprint: no origin marker and no coordinate readout.
+            self._fp_origin_points = {}
+            self._apply_drawing_origin()
             self._sync_footprint_measures(None)
             return
         if isinstance(params, PackageGeometry):
@@ -20788,6 +20849,9 @@ class MainWindow(QMainWindow):
             footprint = build_pin_header(p)
         except (ValueError, TypeError, OverflowError) as exc:
             self._set_mounting_error(str(exc))
+            # Nothing drawn: no origin marker and no points to offer.
+            self._fp_origin_points = {}
+            self._apply_drawing_origin()
             self._sync_footprint_measures(None)
             return
         courtyard = next(g for g in footprint.graphics if g.layer == "F.CrtYd")
@@ -20831,13 +20895,14 @@ class MainWindow(QMainWindow):
             radius = size * mm_to_px / 2
             pad_shape = override.get("shape", "rect" if pin == 1 or p.pad_shape == "rect"
                                      else "circle")
+            from .footprint_view import HoledEllipseItem, HoledRectItem, add_hole_outline
             if pad_shape == "rect":
-                item: QGraphicsRectItem | QGraphicsEllipseItem = QGraphicsRectItem(
+                item: QGraphicsRectItem | QGraphicsEllipseItem = HoledRectItem(
                     x - r, y - r, 2 * r, 2 * r
                 )
             else:
-                item = QGraphicsEllipseItem(x - radius, y - radius,
-                                            2 * radius, 2 * radius)
+                item = HoledEllipseItem(x - radius, y - radius,
+                                        2 * radius, 2 * radius)
             if pad_shape == "rect":
                 item.setRect(x - radius, y - radius, 2 * radius, 2 * radius)
             item.setPen(pad_pen)
@@ -20846,11 +20911,9 @@ class MainWindow(QMainWindow):
             item.setData(0x504144, f"header:{pin}")
             self.preview_scene.addItem(item)
 
-            hole_r = p.drill * mm_to_px / 2
-            hole = self.preview_scene.addEllipse(
-                x - hole_r, y - hole_r, 2 * hole_r, 2 * hole_r,
-                QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
-            hole.setZValue(1)
+            item.set_hole(QPointF(x, y), p.drill * mm_to_px)
+            add_hole_outline(self.preview_scene, QPointF(x, y), p.drill * mm_to_px,
+                             QPen(QColor(SURFACE1)), 1)
 
             # Keep the exported drill visible in the grid-header path too.
             number = self.preview_scene.addSimpleText(str(pin))
@@ -20912,6 +20975,9 @@ class MainWindow(QMainWindow):
 
         self._draw_footprint_texts(mm_to_px, footprint)
         self._draw_footprint_drawings(mm_to_px)
+        self._set_footprint_origin_points(
+            [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+            [(pin, x_mm, y_mm) for pin, x_mm, y_mm in pin_positions(p)])
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(footprint)
@@ -20931,6 +20997,7 @@ class MainWindow(QMainWindow):
             from ..core.package_geometry import pad_outline
             corners = pad_outline(0.0, 0.0, package.body_length_mm, package.body_width_mm,
                                   package.orientation_deg)
+            body_corners = corners
             self.preview_scene.addPolygon(
                 QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in corners]), silk_pen)
             body_l = 2 * max(abs(x) for x, _ in corners)
@@ -20942,7 +21009,11 @@ class MainWindow(QMainWindow):
                 -body_l / 2 * mm_to_px, -body_w / 2 * mm_to_px,
                 body_l * mm_to_px, body_w * mm_to_px, silk_pen,
             )
-        from .footprint_view import PAD_KEY_ROLE, PAD_PART_ROLE
+            # The drawn box, an envelope of the pads when the body is unknown.
+            body_corners = [(-body_l / 2, -body_w / 2), (body_l / 2, -body_w / 2),
+                            (body_l / 2, body_w / 2), (-body_l / 2, body_w / 2)]
+        from .footprint_view import (PAD_KEY_ROLE, PAD_PART_ROLE, HoledEllipseItem, HoledPathItem,
+                                     HoledRectItem, add_hole_outline)
         pad_brush = QBrush(QColor(BLUE))
         selected_pads = set(self._fp_selected_pads())
         movable = self._package_pads_movable()
@@ -20954,14 +21025,15 @@ class MainWindow(QMainWindow):
             x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
             w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
             if pin.shape == "circle":
-                item = self.preview_scene.addEllipse(x - w / 2, y - h / 2, w, h)
+                item = HoledEllipseItem(x - w / 2, y - h / 2, w, h)
             elif pin.shape in ("oval", "roundrect"):
                 path = QPainterPath()
                 radius = min(w, h) * (0.5 if pin.shape == "oval" else 0.25)
                 path.addRoundedRect(QRectF(x - w / 2, y - h / 2, w, h), radius, radius)
-                item = self.preview_scene.addPath(path)
+                item = HoledPathItem(path)
             else:
-                item = self.preview_scene.addRect(x - w / 2, y - h / 2, w, h)
+                item = HoledRectItem(x - w / 2, y - h / 2, w, h)
+            self.preview_scene.addItem(item)
             item.setTransformOriginPoint(x, y)
             item.setRotation(-pin.rotation_deg)  # KiCad is counter-clockwise, Qt clockwise.
             item.setPen(self._fp_pad_pen(pad_index in selected_pads))
@@ -20975,10 +21047,11 @@ class MainWindow(QMainWindow):
             drilled = pin.pad_type in ("thru_hole", "np_thru_hole") and pin.drill_mm
             if drilled:
                 diameter = pin.drill_mm * mm_to_px
-                hole = self.preview_scene.addEllipse(
-                    x - diameter / 2, y - diameter / 2, diameter, diameter,
-                    QPen(QColor(SURFACE1)), QBrush(QColor(BASE)))
-                hole.setZValue(1)
+                # The hole is centred on the pad's turning point: the same in
+                # item and scene coordinates at any pad angle.
+                item.set_hole(QPointF(x, y), diameter)
+                hole = add_hole_outline(self.preview_scene, QPointF(x, y), diameter,
+                                        QPen(QColor(SURFACE1)), 1)
                 hole.setData(PAD_PART_ROLE, pad_index)
             angle = math.radians(pin.rotation_deg)
             ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
@@ -21030,6 +21103,8 @@ class MainWindow(QMainWindow):
         self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
         self._draw_footprint_texts(mm_to_px, built)
         self._draw_footprint_drawings(mm_to_px)
+        self._set_footprint_origin_points(body_corners,
+                                          [(pin.number, pin.x_mm, pin.y_mm) for pin in pins])
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(built, package=package)
@@ -21348,6 +21423,189 @@ class MainWindow(QMainWindow):
             # 2026-10-27, B6). Deferred, so the chosen action is still valid above.
             menu.deleteLater()
 
+    # ── Drawing origin of the footprint preview (user, 2026-11-02) ──
+
+    def _set_footprint_origin_points(self, body_corners, pads) -> None:
+        """@brief Record the points a drawing origin can be, then show the chosen one.
+
+        @param body_corners The four corners of the drawn body outline, (x, y)
+            mm in footprint coordinates, turned with the body when it is.
+        @param pads (number, x, y) of every pad centre, mm, in drawing order;
+            empty numbers (mechanical holes) are skipped. Pads sharing a number
+            (a pin split into several lands) get one key each (`_pad_origin_key`).
+        @note Called by every preview drawer, so the points follow the body
+            and the pads as they change: the origin is stored as a KEY, never
+            as coordinates. Order matters for `nearest_point` ties: the
+            footprint origin first, then the body centre, corners, pads.
+        """
+        corners = [(float(x), float(y)) for x, y in body_corners]
+        centre = ((sum(x for x, _ in corners) / len(corners), sum(y for _, y in corners) / len(corners))
+                  if corners else (0.0, 0.0))
+        points = {FP_ORIGIN_DEFAULT: (0.0, 0.0)}
+        if math.hypot(*centre) > 1e-9:
+            points["center"] = centre
+        for index, corner in enumerate(corners):
+            points[f"corner:{index}"] = corner
+        seen: dict[str, int] = {}
+        for number, x, y in pads:
+            number = str(number).strip()
+            if not number:
+                continue
+            seen[number] = seen.get(number, 0) + 1
+            points[_pad_origin_key(number, seen[number])] = (float(x), float(y))
+        self._fp_origin_points = points
+        self._fp_body_centre_mm = centre
+        self._apply_drawing_origin()
+
+    def _drawing_origin_mm(self) -> tuple:
+        """@brief The drawing origin in footprint coordinates, mm.
+
+        @return The chosen point; the footprint's (0, 0) when the chosen key
+            is not among the points of the footprint drawn last (a pad that no
+            longer exists, another family): the setting itself is kept, so the
+            point comes back when it exists again.
+        """
+        points = getattr(self, "_fp_origin_points", {})
+        return points.get(self.footprint_drawing_origin, points.get(FP_ORIGIN_DEFAULT, (0.0, 0.0)))
+
+    def _resolved_drawing_origin(self) -> str:
+        """@brief Key of the point the drawing origin really is now (the default when unresolved).
+
+        @return `footprint_drawing_origin` when the footprint drawn last has
+            that point, else `FP_ORIGIN_DEFAULT`.
+        """
+        key = self.footprint_drawing_origin
+        return key if key in getattr(self, "_fp_origin_points", {}) else FP_ORIGIN_DEFAULT
+
+    def _apply_drawing_origin(self) -> None:
+        """@brief Show the drawing origin: the marker in the view and the grid through it."""
+        view = getattr(self, "preview_view", None)
+        if view is None:
+            return
+        x, y = self._drawing_origin_mm()
+        view.set_drawing_origin(QPointF(x * _FP_PREVIEW_MM_TO_PX, y * _FP_PREVIEW_MM_TO_PX)
+                                if self._fp_origin_points else None)
+        self._apply_preview_grid()
+        self._update_footprint_readout()
+
+    def _footprint_origin_name(self, key: str) -> str:
+        """@brief Translated name of a drawing-origin point, as the menu and the readout show it.
+
+        @param key A key of `_fp_origin_points`.
+        @return E.g. «spigolo in basso a sinistra» (bottom-left corner), «pad 12».
+        @note A corner is named by where it lies from the body centre on the
+            screen (Y down), so a turned body still gets the name the user sees;
+            a corner straight above the centre (a body turned by 45 degrees) is
+            «spigolo in alto» (top corner).
+        """
+        if key.startswith("pad:"):
+            return self.i18n.text("pad {number}").format(number=key[4:].split("#")[0])
+        if key == "center":
+            return self.i18n.text("centro del corpo")
+        if key.startswith("corner:") and key in self._fp_origin_points:
+            x, y = self._fp_origin_points[key]
+            cx, cy = self._fp_body_centre_mm
+            tolerance = 1e-6
+            vertical = "alto" if y < cy - tolerance else "basso" if y > cy + tolerance else ""
+            horizontal = "sinistra" if x < cx - tolerance else "destra" if x > cx + tolerance else ""
+            names = {("alto", "sinistra"): "spigolo in alto a sinistra",
+                     ("alto", "destra"): "spigolo in alto a destra",
+                     ("basso", "sinistra"): "spigolo in basso a sinistra",
+                     ("basso", "destra"): "spigolo in basso a destra",
+                     ("alto", ""): "spigolo in alto", ("basso", ""): "spigolo in basso",
+                     ("", "sinistra"): "spigolo a sinistra", ("", "destra"): "spigolo a destra"}
+            return self.i18n.text(names.get((vertical, horizontal), "spigolo del corpo"))
+        return self.i18n.text("origine del footprint")
+
+    def _to_drawing_mm(self, x_mm: float, y_mm: float) -> tuple:
+        """@brief Footprint coordinates (mm, Y down) seen from the drawing origin (mm, Y up).
+
+        @param x_mm Footprint X, mm.
+        @param y_mm Footprint Y, mm (KiCad axes, Y down).
+        @return (x, y) mm from the drawing origin, X right and Y up.
+        """
+        from .canvas_origin import to_drawing_mm
+        return to_drawing_mm((x_mm, y_mm), self._drawing_origin_mm(), 1.0)
+
+    def _footprint_readout_text(self, scene_point) -> str:
+        """@brief The pointer line under the preview, as the symbol editor's, plus the origin.
+
+        @param scene_point Last scene `QPointF` of the pointer, px, or None.
+        @return «X … Y … mm  |  zoom%  |  da: <origin>» (`canvas_origin.readout_text`),
+            X right and Y UP from the drawing origin; only the zoom without a
+            pointer position, and without the origin when no footprint is drawn.
+        """
+        from .canvas_origin import readout_text
+        point = None
+        if scene_point is not None and self._fp_origin_points:
+            point = self._to_drawing_mm(scene_point.x() / _FP_PREVIEW_MM_TO_PX,
+                                        scene_point.y() / _FP_PREVIEW_MM_TO_PX)
+        text = readout_text(point, self.preview_view.transform().m11())
+        if self._fp_origin_points:
+            text += "  |  " + self.i18n.text("da: {origin}").format(
+                origin=self._footprint_origin_name(self._resolved_drawing_origin()))
+        return text
+
+    def _update_footprint_readout(self, point=None) -> None:
+        """@brief Refresh the pointer line: on a move (new point), a camera change or a new origin.
+
+        @param point New scene `QPointF` of the pointer, or None to keep the last one
+            (the line keeps the last position when the pointer leaves, as the
+            symbol editor's).
+        """
+        label = getattr(self, "preview_readout", None)
+        if label is None:
+            return
+        if point is not None:
+            self._fp_cursor_position = QPointF(point)
+        label.setText(self._footprint_readout_text(self._fp_cursor_position))
+
+    def _set_footprint_drawing_origin(self, key: str) -> None:
+        """@brief Choose the drawing origin and save it with the project at once.
+
+        @param key A key of `_fp_origin_points`, or `FP_ORIGIN_DEFAULT`.
+        @note A view setting, not an edit (user, 2026-11-02): no undo step, no
+            pending draft, the .kicad_mod is never rewritten; the project file
+            keeps the key (`footprint_drawing_origin`).
+        """
+        key = key if key in self._fp_origin_points else FP_ORIGIN_DEFAULT
+        if key == self.footprint_drawing_origin:
+            return
+        self.footprint_drawing_origin = key
+        self._apply_drawing_origin()
+        self._save_project_config()
+
+    def _footprint_background_context_menu(self, scene_point, global_pos) -> None:
+        """@brief Right click on the preview background: choose the drawing origin.
+
+        @param scene_point Scene `QPointF` of the click, px.
+        @param global_pos Screen `QPoint` where the menu opens.
+        @note The offered point is the candidate nearest to the click (body
+            corners and centre, footprint origin, pads), named in the menu
+            item, so the user sees what will be chosen before choosing it.
+        """
+        if not self._fp_origin_points:
+            return
+        from .canvas_origin import nearest_point
+        here = (scene_point.x() / _FP_PREVIEW_MM_TO_PX, scene_point.y() / _FP_PREVIEW_MM_TO_PX)
+        key = nearest_point(self._fp_origin_points, here)
+        current = self._resolved_drawing_origin()
+        menu = QMenu(self)
+        try:
+            choose = menu.addAction(self.i18n.text("Imposta origine di disegno: {name}").format(
+                name=self._footprint_origin_name(key)))
+            choose.setEnabled(key != current)
+            reset = menu.addAction(self.i18n.text("Ripristina origine del footprint"))
+            reset.setEnabled(self.footprint_drawing_origin != FP_ORIGIN_DEFAULT)
+            chosen = menu.exec(global_pos)
+            if chosen is choose:
+                self._set_footprint_drawing_origin(key)
+            elif chosen is reset:
+                self._set_footprint_drawing_origin(FP_ORIGIN_DEFAULT)
+        finally:
+            # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
+            menu.deleteLater()
+
     def _edit_package_pad(self, pad_index: int) -> None:
         """@brief Edit the selected package pad's shape, dimensions and, for a holed pad, its drill.
 
@@ -21406,6 +21664,44 @@ class MainWindow(QMainWindow):
             drill.setSuffix(" mm")
             drill.setValue(float(pin.drill_mm))
             form.addRow(self.i18n.text("Foro:"), drill)
+        # Position measured from the drawing origin, Y up (user, 2026-11-02):
+        # the numbers of a datasheet dimensioned from that point.
+        seen = package.pins_seen_from_top()[pad_index]
+        rel_x, rel_y = self._to_drawing_mm(seen.x_mm, seen.y_mm)
+
+        def position_control(value):
+            control = QDoubleSpinBox(dialog)
+            control.setRange(-1000.0, 1000.0)
+            control.setDecimals(3)
+            control.setSingleStep(0.1)
+            control.setSuffix(" mm")
+            control.setValue(round(float(value), 3) + 0.0)
+            return control
+
+        pos_x, pos_y = position_control(rel_x), position_control(rel_y)
+        shown_x, shown_y = pos_x.value(), pos_y.value()
+        form.addRow(self.i18n.text("Posizione X:"), pos_x)
+        form.addRow(self.i18n.text("Posizione Y:"), pos_y)
+        form.addRow(QLabel(self.i18n.text("Misurata da: {origin} (Y verso l'alto).").format(
+            origin=self._footprint_origin_name(self._resolved_drawing_origin()))))
+        number = str(pin.number).strip()
+        occurrence = sum(1 for other in package.pins[:pad_index + 1] if str(other.number).strip() == number)
+        origin_key = _pad_origin_key(number, occurrence)
+        as_origin = None
+        was_origin = self._resolved_drawing_origin() == origin_key
+        if str(pin.number).strip():
+            as_origin = QCheckBox(self.i18n.text("Usa questo pad come origine di disegno"), dialog)
+            as_origin.setChecked(was_origin)
+
+            def follow_origin(checked):
+                # A pad measured from itself is always at 0, 0: its position
+                # is edited from another origin.
+                pos_x.setEnabled(not checked)
+                pos_y.setEnabled(not checked)
+
+            as_origin.toggled.connect(follow_origin)
+            follow_origin(was_origin)
+            form.addRow(as_origin)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel, parent=dialog)
         buttons.accepted.connect(dialog.accept)
@@ -21413,29 +21709,86 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
+        wants_origin = as_origin is not None and as_origin.isChecked()
+        # A changed field is the typed position: the move is taken from the
+        # EXACT position, not from the 3-decimal value shown, so the pad lands
+        # on the typed number. An untouched field moves nothing on its axis.
+        move_x = pos_x.value() - rel_x if pos_x.isEnabled() and pos_x.value() != shown_x else 0.0
+        move_y = pos_y.value() - rel_y if pos_y.isEnabled() and pos_y.value() != shown_y else 0.0
+        self._apply_package_pad_dialog(pad_index, shape.currentData(), width.value(), height.value(),
+                                       None if drill is None else drill.value(), (move_x, move_y))
+        if wants_origin != was_origin:
+            self._set_footprint_drawing_origin(origin_key if wants_origin else FP_ORIGIN_DEFAULT)
 
-        selected_shape = shape.currentData()
-        pad_width, pad_height = width.value(), height.value()
+    def _apply_package_pad_dialog(self, pad_index: int, selected_shape: str, pad_width: float,
+                                  pad_height: float, drill_mm, move_mm: tuple) -> bool:
+        """@brief Apply the values of the pad dialog as ONE draft edit.
+
+        @param pad_index Index of the pad in `package_geometry.pins`.
+        @param selected_shape Shape key chosen in the dialog ("square" is a
+            rectangle with equal sides).
+        @param pad_width Pad width, mm.
+        @param pad_height Pad height, mm (ignored for "square").
+        @param drill_mm Drill diameter, mm, or None for a pad without a hole.
+        @param move_mm (dx, dy) change of the position fields, mm, X right and
+            Y UP as the drawing origin measures them; (0, 0) moves nothing.
+        @return True when the draft changed.
+        @note Shape, size, drill and position are one undo step. The moved
+            pad is validated on a copy (overlaps, KiCad reach); a refused
+            value changes nothing and says why.
+        @note With a package origin other than «body_center» the body centre
+            is ESTIMATED from the pad field (`body_frame_offset`, a declared
+            heuristic): moving an outer pad re-centres the drawing, so a
+            position measured from a body point or from the footprint origin
+            can read differently after the move. Said with a toast, never
+            silent; the distances between pads are exact.
+        """
+        package = self.package_geometry
+        if package is None or not 0 <= pad_index < len(package.pins):
+            return False
+        pin = package.pins[pad_index]
         if selected_shape == "square":
             selected_shape = "rect"
             pad_height = pad_width
         updated = replace(pin, shape=selected_shape,
                           pad_length_mm=pad_width, pad_width_mm=pad_height,
-                          **({"drill_mm": drill.value()} if drill is not None else {}))
+                          **({"drill_mm": drill_mm} if drill_mm is not None else {}))
+        dx, dy = float(move_mm[0]), float(move_mm[1])
+        if (dx, dy) != (0.0, 0.0):
+            # The fields read Y up; the footprint's Y points down.
+            sx, sy = _source_frame_delta(package, dx, -dy)
+            updated = replace(updated, x_mm=round(float(updated.x_mm) + sx, 6) + 0.0,
+                              y_mm=round(float(updated.y_mm) + sy, 6) + 0.0)
         new_pins = list(package.pins)
         new_pins[pad_index] = updated
         if new_pins == list(package.pins):
-            return
+            return False
         # Validated on a copy: the package object itself is never mutated
         # (a worker may hold it, see `_rebind_package_pins`).
         try:
-            replace(package, pins=new_pins).validate()
+            moved = replace(package, pins=new_pins)
+            moved.validate()
+            moved.pins_seen_from_top()
         except (TypeError, ValueError) as exc:
             QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"), str(exc))
-            return
+            return False
+        wanted = None
+        if (dx, dy) != (0.0, 0.0):
+            before = package.pins_seen_from_top()[pad_index]
+            bx, by = self._to_drawing_mm(before.x_mm, before.y_mm)
+            wanted = (bx + dx, by + dy)
         # CONTRACT CHANGED 2026-10-14 (footprint draft, user): the pad is a
         # draft edit; «Applica» saves it and rewrites the .kicad_mod.
         self._edit_footprint_draft({"package_pins": new_pins})
+        if wanted is not None:
+            after = self.package_geometry.pins_seen_from_top()[pad_index]
+            ax, ay = self._to_drawing_mm(after.x_mm, after.y_mm)
+            if math.hypot(ax - wanted[0], ay - wanted[1]) > 5e-4:
+                self._draw_feedback_toast(
+                    self.i18n.text("Il disegno si è ricentrato."),
+                    self.i18n.text("Il centro del corpo è stimato dal campo dei pad: spostando un pad "
+                                   "esterno si sposta anche la stima. Le distanze fra i pad sono esatte."))
+        return True
 
     #: Italian fallbacks of the dimension-label keys, used only until the
     #: catalogue carries them: `I18n.tr` would otherwise show the bare key.

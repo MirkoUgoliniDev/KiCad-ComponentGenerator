@@ -492,3 +492,70 @@ def test_a_pin_header_pad_is_not_a_drag_target(fp):
     assert window.preview_view._pad_at(vp(window, -10, -10)) is None
     assert window.preview_view._pad_at(vp(window, -3, -2)) == 0
     assert window.preview_view._pad_at(QPoint(0, 0) + vp(window, 0, 4)) is None
+
+
+# ── Magnet on the grid dots (user, 2026-11-02: «deve esserci un magnete per
+#    ancorare anche nei pallini della griglia», a magnet for the grid dots too) ──
+
+def _dot_window(window, qapp, monkeypatch, divisor):
+    """Pads on a 1 mm grid at 40 px per mm, with `divisor` dots per step."""
+    window = _grid_window(window, qapp, monkeypatch,
+                          [PinSpec("1", -3.1, 0.0, 1.0, 1.0), PinSpec("2", 3.1, 0.0, 1.0, 1.0)])
+    window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(divisor))
+    qapp.processEvents()
+    assert window.preview_view.fine_divisor() == divisor
+    return window
+
+
+def _press_and_move(window, start, end):
+    viewport = window.preview_view.viewport()
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, NO, vp(window, *start))
+    QTest.mouseMove(viewport, vp(window, *end))
+
+
+def test_near_a_visible_dot_the_centre_is_caught_and_the_crosshair_is_light_blue(window, qapp, monkeypatch):
+    """@brief Positive: 3 px from a drawn dot the centre lands on it; negative: without dots the same drop stays free."""
+    from kicadgen.gui.footprint_view import PAD_CROSSHAIR_OFF_GRID, PAD_CROSSHAIR_ON_DOT
+    window = _dot_window(window, qapp, monkeypatch, 2)
+    assert window.preview_view.fine_dots_visible(), "0.5 mm dots at 40 px/mm are 20 px apart"
+    step, (ox, oy) = _grid(window)
+    # A dot off both lines (half a step right and down of a node), 3 screen px away.
+    dot = (ox + round((-5.0 - ox) / step) * step + step / 2, oy + step / 2)
+    near = (dot[0] + 0.075, dot[1])
+    _press_and_move(window, (-3.1, 0.0), near)
+    assert _crosshair(window).pen().color().name() == PAD_CROSSHAIR_ON_DOT
+    QTest.mouseRelease(window.preview_view.viewport(), Qt.MouseButton.LeftButton, NO, vp(window, *near))
+    assert top(window)["1"] == pytest.approx(dot, abs=1e-6)
+    # Negative: no dots drawn (divisor 1), the same move is free.
+    window._undo_footprint_drawing()
+    window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
+    qapp.processEvents()
+    assert not window.preview_view.fine_dots_visible()
+    _press_and_move(window, (-3.1, 0.0), near)
+    assert _crosshair(window).pen().color().name() == PAD_CROSSHAIR_OFF_GRID
+    QTest.mouseRelease(window.preview_view.viewport(), Qt.MouseButton.LeftButton, NO, vp(window, *near))
+    assert top(window)["1"] == pytest.approx(near, abs=0.0251)
+
+
+def test_a_main_node_wins_over_a_nearer_dot_within_the_reach(window, qapp, monkeypatch):
+    """@brief Positive: a node 3 px away beats a dot 5 px away; negative: the dot alone catches past the node's reach."""
+    from kicadgen.gui.footprint_view import PAD_CROSSHAIR_ON_DOT, PAD_CROSSHAIR_ON_GRID
+    window = _dot_window(window, qapp, monkeypatch, 5)
+    assert window.preview_view.fine_dots_visible(), "0.2 mm dots at 40 px/mm are 8 px apart"
+    step, (ox, oy) = _grid(window)
+    node = (ox + round((-5.0 - ox) / step) * step, oy + round((1.0 - oy) / step) * step)
+    # Diagonal towards the dot (0.2, 0.2) mm away: 3 px from the node on each axis.
+    near_node = (node[0] + 0.053, node[1] + 0.053)
+    _press_and_move(window, (-3.1, 0.0), near_node)
+    assert _crosshair(window).pen().color().name() == PAD_CROSSHAIR_ON_GRID
+    QTest.mouseRelease(window.preview_view.viewport(), Qt.MouseButton.LeftButton, NO, vp(window, *near_node))
+    assert top(window)["1"] == pytest.approx(node, abs=1e-6)
+    window._undo_footprint_drawing()
+    # On the dot (0.4, 0.4) mm from the node: 22 px from it, only the dot reaches.
+    dot = (node[0] + 0.4, node[1] + 0.4)
+    _press_and_move(window, (-3.1, 0.0), (dot[0] + 0.03, dot[1]))
+    assert _crosshair(window).pen().color().name() == PAD_CROSSHAIR_ON_DOT
+    QTest.mouseRelease(window.preview_view.viewport(), Qt.MouseButton.LeftButton, NO,
+                       vp(window, dot[0] + 0.03, dot[1]))
+    assert top(window)["1"] == pytest.approx(dot, abs=1e-6)

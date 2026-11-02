@@ -10,13 +10,14 @@ tools collect their points through `canvas_clicktools` (a `PointCollector`
 driven by a `ClickToolRouter`), the same state machine as the symbol
 editor's wire and shape tools: the window is the `ClickToolHost`.
 """
-from PyQt6.QtCore import Qt, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QGraphicsView
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QPainterPath
+from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsView
 
 from .canvas_camera import Camera
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
-from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
+from .canvas_grid import DARK_GRID_DOT_COLOR, ExposedRegion, GridStyle, dots_legible, paint_grid
+from .canvas_origin import paint_origin_marker
 from .canvas_gestures import (
     HOVER_MARGIN_PX, CancelOnEscapeAndHide, GestureController, HoverGroups, KeyRepeatFilter,
     install_canvas_filters,
@@ -41,17 +42,114 @@ PAD_KEY_ROLE = 0x504144
 #: number, its function label): the pad index, so a pad drag moves them along.
 PAD_PART_ROLE = 0x504150
 
+#: Item data role of the outline of a drill hole in the preview (True).
+HOLE_ROLE = 0x484F4C
+
+
+class _HoleCut:
+    """@brief Mixin of a copper item that leaves its drill hole unpainted.
+
+    @note User, 2026-11-02: «perché dentro il pad non fa vedere il reticolo?»
+        (why is the grid not visible inside the pad?). The hole used to be a
+        disc filled with the background colour laid over the copper: it hid
+        the grid (painted by the view's background) and every item under it.
+        The copper now clips the hole away while it paints, so whatever lies
+        beneath shows through; the item keeps its type, its rectangle or path
+        and its full click area (a press in the hole still takes the pad).
+    """
+
+    def __init__(self, *args):
+        """@brief Build the Qt item with the given arguments, without a hole yet.
+
+        @param args The arguments of the Qt item class (rectangle or path).
+        """
+        super().__init__(*args)
+        self._hole = None
+
+    def set_hole(self, centre: QPointF, diameter: float) -> None:
+        """@brief Leave a round hole unpainted.
+
+        @param centre Hole centre in ITEM coordinates (px).
+        @param diameter Hole diameter, px; 0 or less removes the hole.
+        """
+        self._hole = (QPointF(centre), float(diameter)) if diameter > 0 else None
+        self.update()
+
+    def hole(self):
+        """@brief The hole as (centre, diameter) in item coordinates, or None.
+
+        @return A tuple, or None for a pad without a hole.
+        """
+        return self._hole
+
+    def paint(self, painter, option, widget=None):
+        """@brief Qt override: paint the copper with the hole clipped away.
+
+        @param painter Painter in item coordinates.
+        @param option Style option of the item.
+        @param widget Widget painted on, or None.
+        """
+        if self._hole is None:
+            super().paint(painter, option, widget)
+            return
+        centre, diameter = self._hole
+        clip = QPainterPath()
+        clip.addRect(self.boundingRect().adjusted(-2.0, -2.0, 2.0, 2.0))
+        clip.addEllipse(centre, diameter / 2, diameter / 2)
+        clip.setFillRule(Qt.FillRule.OddEvenFill)
+        painter.save()
+        try:
+            painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+            super().paint(painter, option, widget)
+        finally:
+            painter.restore()
+
+
+class HoledEllipseItem(_HoleCut, QGraphicsEllipseItem):
+    """@brief A round or elliptic pad whose drill hole shows what lies beneath."""
+
+
+class HoledRectItem(_HoleCut, QGraphicsRectItem):
+    """@brief A rectangular pad whose drill hole shows what lies beneath."""
+
+
+class HoledPathItem(_HoleCut, QGraphicsPathItem):
+    """@brief A rounded or stadium pad whose drill hole shows what lies beneath."""
+
+
+def add_hole_outline(scene, centre: QPointF, diameter: float, pen, z: float):
+    """@brief Draw the outline of a drill hole, unfilled, and return it.
+
+    @param scene The preview scene.
+    @param centre Hole centre, scene px.
+    @param diameter Hole diameter, px.
+    @param pen Outline pen.
+    @param z Z value (above the copper it pierces).
+    @return The ellipse item, marked with `HOLE_ROLE`.
+    @note No brush: the copper leaves the hole unpainted (`_HoleCut`), so the
+        grid and the items under it stay visible inside the outline.
+    """
+    radius = diameter / 2
+    item = scene.addEllipse(centre.x() - radius, centre.y() - radius, diameter, diameter, pen)
+    item.setZValue(z)
+    item.setData(HOLE_ROLE, True)
+    return item
+
 #: Colours of the centring crosshair of a dragged pad (user, 2026-11-02:
 #: «un mirino al centro del pad per centrare ... si deve diversificare quando
 #: sono nel reticolo a 2.54 oppure fuori» (a crosshair at the pad centre, different on and off the
 #: grid)): green with the centre on a main-grid node,
-#: orange (Catppuccin Mocha «peach») off the grid.
+#: orange (Catppuccin Mocha «peach») off the grid; light blue («sky») on a
+#: visible dot of the drawing grid (user, 2026-11-02: «deve esserci un magnete
+#: per ancorare anche nei pallini della griglia», a magnet for the grid dots too).
 PAD_CROSSHAIR_ON_GRID = '#a6e3a1'
+PAD_CROSSHAIR_ON_DOT = '#89dceb'
 PAD_CROSSHAIR_OFF_GRID = '#fab387'
 
 #: Screen pixels within which a dragged pad centre is caught by a main-grid
-#: node (the magnet). A pointing tolerance of the display, like the measure
-#: reaches, not a geometric quantity of the part.
+#: node or, failing that, by a visible fine-grid dot (the magnet). A pointing
+#: tolerance of the display, like the measure reaches, not a geometric
+#: quantity of the part.
 PAD_GRID_MAGNET_PX = 8.0
 
 #: Item data role marking the anchor square of a Reference/Value text (a
@@ -72,7 +170,7 @@ FINE_GRID_MIN_SCREEN_PX = 5.0
 
 #: Colours of the main grid lines and of the fine-grid dots (dark preview).
 GRID_LINE_COLOR = '#36364b'
-GRID_DOT_COLOR = '#4a4a63'
+GRID_DOT_COLOR = DARK_GRID_DOT_COLOR
 
 #: Zoom limits of the footprint camera, view px per scene px. The scene is 20 px
 #: per mm; the symbol editor's 10 units per mm has its own limits (plan D13).
@@ -126,6 +224,15 @@ class FootprintView(QGraphicsView):
     background_clicked = pyqtSignal()
     #: Escape with nothing else to cancel (no tool, pan, band or drag).
     escape_idle = pyqtSignal()
+    #: Right click on the background (no measure, text, drawing or pad under
+    #: the pointer, no tool armed): scene point and global screen position.
+    background_context_requested = pyqtSignal(QPointF, QPoint)
+    #: The pointer moved over the canvas: its scene point (as the symbol view).
+    pointer_changed = pyqtSignal(object)
+    #: The pointer left the viewport (as the symbol view).
+    pointer_left = pyqtSignal()
+    #: Zoom or pan changed (the shared camera's `changed`, as the symbol view).
+    camera_changed = pyqtSignal()
 
     def __init__(self, scene):
         """@brief A view without a gesture host: pan and zoom only until `attach_host`.
@@ -139,6 +246,7 @@ class FootprintView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         #: Zoom, wheel, pan and fit, shared with the symbol editor.
         self.camera = Camera(self, limits=ZOOM_LIMITS)
+        self.camera.changed.connect(self.camera_changed)
         #: Where `drawBackground` learns which part of the viewport is being painted.
         self._exposed = ExposedRegion(self)
         #: Callable returning the scene rectangle the camera frames (or None):
@@ -179,6 +287,8 @@ class FootprintView(QGraphicsView):
         #: Viewport position of a left press on the background that started a
         #: pan; its release decides whether it was a click (`is_click`).
         self._background_press = None
+        #: Scene point of the drawing origin marker (shared `canvas_origin`), or None.
+        self._drawing_origin = None
 
     @property
     def auto_fit(self):
@@ -399,6 +509,35 @@ class FootprintView(QGraphicsView):
         if step <= 0:
             return float(x), float(y)
         return ox + round((x - ox) / step) * step, oy + round((y - oy) / step) * step
+
+    def set_drawing_origin(self, point):
+        """@brief Show the drawing origin marker at a scene point, or hide it.
+
+        @param point Scene `QPointF` (px), or None to hide the marker.
+        @note The marker is painted in `drawForeground`, not added to the
+            scene: every redraw clears the scene, and an overlay must never
+            enter the framing or the item hit tests.
+        """
+        point = None if point is None else QPointF(point)
+        if point != self._drawing_origin:
+            self._drawing_origin = point
+            self.viewport().update()
+
+    def drawing_origin(self):
+        """@brief The scene point of the drawing origin marker, or None.
+
+        @return A `QPointF` copy, or None when no marker is shown.
+        """
+        return None if self._drawing_origin is None else QPointF(self._drawing_origin)
+
+    def drawForeground(self, painter, rect):
+        """@brief Qt override: paint the drawing origin marker above the footprint.
+
+        @param painter Painter in scene coordinates.
+        @param rect Exposed scene rectangle (unused: the marker is tiny).
+        """
+        super().drawForeground(painter, rect)
+        paint_origin_marker(painter, self, self._drawing_origin)
 
     def drawBackground(self, painter, rect):
         """@brief Qt override: draw the grid lines (and fine dots) where Qt paints, like the symbol editor.
@@ -714,6 +853,12 @@ class FootprintView(QGraphicsView):
                     self.pad_context_requested.emit(str(pad_index))
                     event.accept()
                     return
+            # Nothing of the footprint under the pointer: the background menu
+            # (the drawing origin, user 2026-11-02).
+            self.background_context_requested.emit(self.mapToScene(event.pos()),
+                                                   event.globalPosition().toPoint())
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and not self._dragging():
             # Selection gestures shared with the symbol editor (plan
             # docs/canvas-selection-plan.md): Shift+drag draws the rubber
@@ -799,6 +944,8 @@ class FootprintView(QGraphicsView):
         if self.measure is not None and event.buttons() == Qt.MouseButton.NoButton:
             # Hovering a measure highlights it (Delete / right click remove it).
             self.measure.hover_measure(event.pos())
+        # The coordinates follow the pointer in every state (drag, pan, tool).
+        self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self._dragging():
             self.gestures.move(self.mapToScene(event.pos()))
             event.accept()
@@ -840,6 +987,7 @@ class FootprintView(QGraphicsView):
             self._report_hover(-1)
         if self._text_drag is None:
             self._report_text_hover("")
+        self.pointer_left.emit()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):

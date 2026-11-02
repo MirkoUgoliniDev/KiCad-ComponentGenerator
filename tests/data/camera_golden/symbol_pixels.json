@@ -20,19 +20,19 @@
   "sparse": "e54ab8003d77dc8aee12b417b2fafcf9d96a25ed"
  },
  "fine_dark_legible_x1": {
-  "grab": "fe95184fdd2a05998736e4b6f474efeba434e2e9",
+  "grab": "e3efc8b93eb92bf6747029d4e647707278bd9088",
   "legible": true,
-  "sparse": "4083a83db3a196c4e4c2bba76c11155e3b6157de"
+  "sparse": "cd1f09bb0931e142ab47f33853f06a6c8155c667"
  },
  "fine_dark_legible_x3": {
-  "grab": "19a5f5c20be2b40a0b5d6a9a5468483273c34718",
+  "grab": "2ab6fc13fe76a48752d230eadc523821916d74c7",
   "legible": true,
-  "sparse": "53f9bfbab602163811352328befc0e4888574dd9"
+  "sparse": "74b1a5b9ecf7d70410239d31b492d9c9a62684bd"
  },
  "fine_dark_legible_x6": {
-  "grab": "930bdf6f4e81c6ba3ea30f9e981f4066af3517a0",
+  "grab": "69e84ea20e087f4cfc1425b26bddd24aefc21568",
   "legible": true,
-  "sparse": "44daad570dce09dedf2013f07f6aa21d5d2359d8"
+  "sparse": "c83b77172cb4c0d4444aa9a283487b217260672a"
  },
  "fine_light_illegible_x0_5": {
   "grab": "ceb6f47b120f20f3b7e57a50746fe8fe83448ddd",

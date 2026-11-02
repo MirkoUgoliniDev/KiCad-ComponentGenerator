@@ -4,9 +4,148 @@
 Suite completa 02/11: A 6533/9/19, B 4584/4, 0 falliti = 11117 passati, 13 saltati, 19 sottotest.
 Branch ADVANCED; commit, push, merge in main, push main, ritorno su ADVANCED («porta in prog»
 interpretato come ritorno sul branch di lavoro), MSI locale ricostruito, NESSUNA release.
-`docs/T7NS5D4-12/` (PDF/foto utente) escluso dal commit. Hash nella sezione sotto dopo il commit.
+`docs/T7NS5D4-12/` (PDF/foto utente) escluso dal commit. FATTO: commit `1482d94` su ADVANCED,
+merge `d759e0e` in main, entrambi pushati; di nuovo su ADVANCED. MSI locale ricostruito:
+dist\KiCadGen-1.0.5.msi 460.5 MB (-IncludeYoloModel), `--check-runtime` OK (onnxruntime OK);
+avvisi: ICE60 attesi, ICE03 su SetWIXUI_EXITDIALOGOPTIONALTEXT (stringa lunga della pagina
+finale), PyInstaller pyvista.trame / onnxruntime.quantization non raccolti (moduli non usati).
+Versione invariata 1.0.5 (gia' pubblicata): NESSUNA release. Prova in VM a cura dell'utente.
 Il promemoria 01/11 qui sotto e' CHIUSO per i punti 1-3 (suite, commit, prova Misura).
 Ancora da confermare dall'utente: pad-pad «si muove il secondo».
+
+## 02/11 sera — IN CORSO (utente: «vorrei evitare una griglia sopra l'altra ok ? una basta ed avanza !!»)
+Diagnosi: l'anteprima footprint disegna DUE griglie. (1) Quella condivisa in `drawBackground`
+(`canvas_grid.paint_grid`, infinita, linee uniformi, come l'editor simboli). (2) Quella vecchia
+come oggetti di scena in `MainWindow._draw_grid` (`_GRID_ITEM`): area finita corpo+margine,
+una linea ogni 5 passi piu' marcata. Effetto visto dall'utente: linee «piu' marcate» e una
+cornice rettangolare (il bordo dell'area della griglia vecchia).
+Piano: togliere gli oggetti-linea di `_draw_grid`, che resta solo per impostare passo/origine
+della griglia condivisa (`set_grid`) e `_preview_grid_spec`; ripulire filtri `_GRID_ITEM`
+diventati inutili; aggiornare i test che contano/leggono le linee-oggetto (contratto nuovo:
+nessun oggetto di griglia nella scena, griglia data da `preview_view.grid_step()`/origine).
+STATO: FATTO, NON committato, in attesa della prova utente. `_draw_grid` ora imposta solo
+passo/origine della vista; `_GRID_ITEM` rimosso. Difetto trovato e chiuso insieme: `_GRID_ITEM`
+era la chiave dati 0, la stessa delle etichette «pin-function», quindi togliere la spunta
+«Griglia» nascondeva anche le funzioni dei pin. Test aggiornati (contratto nuovo, commentato):
+test_preview_grid (+ test di regressione su etichette/griglia), test_footprint_camera_grid_parity,
+test_footprint_measure_parity. Mirati: 147 verdi + documentazione 21 verdi. Suite completa NON eseguita.
+
+## 02/11 sera — IN DISCUSSIONE: origine coordinate sullo spigolo in basso a sinistra del corpo
+Utente (screenshot rele' T7NS5D4-12): «per un componente come rele' sarebbe interessante avere
+il riferimento coordinate qui» = spigolo in basso a sinistra del corpo. Oggi l'origine del
+footprint e' sempre il centro corpo (`PackageGeometry.pins_seen_from_top`, `body_frame_offset`).
+Punti da chiarire: (a) ancora del .kicad_mod (KLC F5.1: THT = pin 1, SMD = centro; spigolo =
+fuori convenzione) oppure solo riferimento delle quote nell'interfaccia; (b) la scelta va
+DICHIARATA (attributo/opzione), non dedotta da «e' un rele'» (regola: niente regole sui nomi).
+NIENTE implementato; serve OK esplicito sull'intento.
+DECISIONE utente: «mi basta come riferimento per il disegno» = SOLO interfaccia, il .kicad_mod
+resta con l'origine al centro corpo. Oggi nell'anteprima nessuna coordinata e' visibile: la
+finestra del pad (tasto destro) ha solo forma/dimensioni/foro; griglia ancorata al primo pad.
+Proposta inviata all'utente (attesa OK): origine di disegno scelta col tasto destro su uno
+spigolo del corpo, il centro o un pad; mirino visibile; griglia ancorata li'; X/Y del cursore
+relative; posizione X/Y nella finestra del pad; salvata nella bozza footprint, mai nel file.
+OK utente alla proposta («ok»), con Y VERSO L'ALTO. Poi variante del punto 6 approvata («ok
+proced i»): l'origine NON entra nella bozza (renderebbe il footprint «non applicato» e
+bloccherebbe l'installazione per un cambio che non tocca il file); si salva subito nel progetto
+come impostazione di visualizzazione, come l'unita' della griglia; niente Ctrl+Z, si torna
+indietro con «Ripristina origine del footprint».
+## 02/11 sera — IN CORSO: origine di disegno nell'anteprima footprint
+Piano di implementazione:
+- `kicadgen/gui/canvas_origin.py` (nuovo, condiviso): conversione scena px <-> mm relativi
+  all'origine con Y verso l'alto, mirino disegnato in primo piano dalla vista, etichetta X/Y del
+  cursore nell'angolo in basso a sinistra della vista.
+- Candidati ricalcolati a ogni disegno, in tutte le famiglie (package, castellated, matrice):
+  «origin» = (0,0) del footprint (predefinito), centro corpo se diverso, 4 spigoli del corpo
+  (ruotati col package), pad. Origine salvata come CHIAVE (non coordinate): segue il corpo/pad
+  quando cambiano; chiave sparita -> si torna all'origine del footprint.
+- Tasto destro sullo sfondo: menu «Imposta origine di disegno: <punto piu' vicino>» e
+  «Ripristina origine del footprint». Tasto destro sul pad: invariato (finestra del pad), che
+  ora mostra X/Y del pad rispetto all'origine (modificabili per i pad del package) e la casella
+  «Usa questo pad come origine di disegno».
+- Griglia ancorata all'origine di disegno quando l'utente ne ha scelta una.
+- Editor simboli: per ora NO (il simbolo non ha un'origine da scegliere); differenza da
+  registrare e da proporre all'utente a fine lavoro (regola «stessa UX nelle schede»).
+STATO: IMPLEMENTATO, NON committato. Contratto e differenze in docs/canvas-origin-plan.md.
+- canvas_origin.py nuovo; footprint_view.py: segnale background_context_requested, mirino in
+  drawForeground, etichetta X/Y (CoordinateReadout); main_window.py: metodi «Drawing origin»,
+  `_apply_preview_grid`, `_apply_package_pad_dialog` (forma+dimensioni+foro+posizione = UN passo),
+  `_source_frame_delta` (estratto da `_move_package_pads`). 21 voci nuove nel catalogo i18n.
+- Difetto trovato e corretto durante i test: i campi X/Y mostrano 3 decimali; lo spostamento era
+  «digitato - mostrato» e il pad atterrava fino a 0.0005 mm fuori. Ora parte dalla posizione esatta.
+- Con origine package «pin1»/«custom» il centro corpo e' stimato (`body_frame_offset`): una
+  posizione digitata rispetto a uno spigolo/origine footprint puo' ricentrare il disegno -> toast
+  «Il disegno si è ricentrato.» (test positivo/negativo). Rispetto a un altro pad e' esatta.
+- Contratto test cambiato: test_footprint_drawings (clic destro sullo sfondo apre ora il menu
+  dell'origine, non nessun menu). Test nuovi: test_canvas_origin (6), test_footprint_drawing_origin (10).
+- Mirati: canvas/parity/footprint/preview/package/doc/i18n 1542 verdi + 1 contratto aggiornato.
+  Suite completa in corso; canvas-parity-reviewer lanciato.
+- CORREZIONE di quanto scritto sopra: l'editor simboli HA GIA' un'etichetta X/Y (sotto la tela,
+  `symbol_tab._update_readout`). Il canvas-parity-reviewer l'ha trovato. La prima versione
+  aveva un'etichetta dentro la vista, che inoltre scivolava via a ogni pan. E' stata sostituita:
+  ora c'e' la stessa riga dell'editor simboli, sotto la tela, scritta dalla funzione condivisa
+  `canvas_origin.readout_text` (usata da entrambe le schede, simbolo byte-identico) + «da: <origine>».
+  La vista footprint emette pointer_changed/pointer_left/camera_changed come quella del simbolo.
+- Altri difetti della revisione, corretti con test: (2) una chiave non risolta spostava la
+  griglia su (0,0) invece di lasciare quella del disegnatore; (3) pad con lo stesso numero ->
+  chiavi `pad:N`, `pad:N#2`; (4) intestazione pin non costruibile -> niente mirino vecchio;
+  (5) la riga si aggiorna subito a un cambio di origine e di zoom.
+- Segnalati e NON fatti (da dire all'utente): i pad delle strip (header) e i contatti castellati
+  non hanno X/Y ne' la casella origine nella finestra (si scelgono col menu sullo sfondo); la
+  griglia che segue l'origine sposta anche l'aggancio dei trascinamenti successivi (voluto).
+- Rilancio mirati larghi + suite completa dopo le correzioni.
+
+## 02/11 sera — IN CORSO (OK utente «ok»): griglia visibile dentro i fori dei pad
+Utente (screenshot pad 12 ingrandito): «perché dentro il pad non fa vedere il reticolo?».
+Causa: il foro e' un disco PIENO col colore dello sfondo (BASE) a z=1 sopra il pad: copre la
+griglia (dipinta nello sfondo della vista) e ogni oggetto sotto (la linea di misura si interrompe).
+Piano: rame del pad = forma meno il foro (QPainterPath, riempimento OddEven), foro = solo
+contorno senza riempimento; in tutte le famiglie (package, strip, castellati se hanno fori).
+Test: un punto al centro del foro deve mostrare il colore della griglia/sfondo dipinto, non un
+oggetto pieno; negativo: il rame dell'anello resta pieno.
+STATO: FATTO, NON committato. footprint_view.py: mixin `_HoleCut` + HoledEllipseItem/
+HoledRectItem/HoledPathItem (stesso tipo Qt di prima, il foro viene ritagliato al momento
+del disegno, l'area di clic resta piena), `add_hole_outline` (contorno senza riempimento,
+HOLE_ROLE). Usati nei tre disegnatori (package, strip, castellati). Contratto dei test
+cambiato in test_package_preview_drills e test_preview_review (fori riconosciuti da HOLE_ROLE,
+senza riempimento). Nuovo tests/test_preview_hole_see_through.py: un quadrato rosso SOTTO il
+pad si vede dentro il foro e non sull'anello (con il disco pieno di prima fallirebbe).
+Castellati: coperti dai test esistenti dei contatti, senza un test a pixel dedicato.
+- GOLDEN RIGENERATI (KICADGEN_REGEN_CAMERA_GOLDEN=1): tests/data/camera_golden/footprint_camera.json
+  e footprint_grid.json. Causa UNICA verificata: la riga X/Y sotto la tela accorcia la vista
+  (scroll verticale -10 px, meno righe/punti). Prova: con `outer.addWidget(self.preview_readout)`
+  disattivato temporaneamente, i golden VECCHI passano 28/28; codice poi ripristinato.
+- Mirati larghi (prima dei fori): 2005 verdi, 1 errore = i golden sopra. Suite completa in corso.
+
+## 02/11 sera — IN CORSO (utente: «puoi fare i puntini della griglia un poco più evidenti?»)
+Piano: un solo colore dei puntini per le tele scure, condiviso in canvas_grid (prima
+footprint #4a4a63 e simbolo scuro #4d4d6b, definiti in due posti), piu' chiaro: #6c6c8e.
+Stessa dimensione (1.5 px). Tema chiaro dell'editor simboli invariato. Golden pixel da
+rigenerare: verificare che cambino SOLO le voci con puntini (dots > 0), non quelle a sole linee.
+STATO: FATTO, NON committato. `canvas_grid.DARK_GRID_DOT_COLOR = '#6c6c8e'` usato da
+footprint_view (GRID_DOT_COLOR) e dal tema «dark» di symbol_tab. Golden rigenerati con
+KICADGEN_REGEN_CAMERA_GOLDEN=1 e verificati: footprint_grid.json cambiano esattamente le 33
+voci con dots>0 (tutte), symbol_pixels.json solo fine_dark_legible_x1/x3/x6; voci a sole linee
+e tema chiaro identiche. La suite completa partita prima e' stata invalidata (codice cambiato
+durante l'esecuzione): da rilanciare.
+
+## 02/11 sera — IN CORSO (OK utente «ok proced i»): magnete anche sui puntini della griglia
+Utente: «allora deve esserci un magnete per ancorare anche nei pallini della griglia».
+Comportamento approvato: trascinando un pad, (1) entro PAD_GRID_MAGNET_PX (8 px schermo) da un
+incrocio della griglia principale -> incrocio; (2) altrimenti entro 8 px da un puntino
+VISIBILE (fine_dots_visible) -> puntino; (3) altrimenti libero a 0.01 mm. Mirino: verde
+incrocio, AZZURRO puntino (nuovo), arancione libero. Piu' pad: stesso spostamento.
+Nota detta all'utente: con puntini fitti (5-8 px) il pad finisce quasi sempre su un puntino.
+STATO: FATTO, NON committato. `_pad_drag_delta` restituisce "main"/"dot"/"free" (prima un bool);
+`_pad_centre_snap` sostituisce `_pad_centre_on_grid`; drag["snap"] al posto di drag["on_grid"];
+PAD_CROSSHAIR_ON_DOT '#89dceb'. Le frecce spostano ancora di un passo della griglia principale
+(non richiesto di cambiarle). Test nuovi in test_footprint_pad_drag: puntino vicino -> puntino +
+azzurro, senza puntini stesso movimento libero + arancione; incrocio a 3 px batte puntino a 5 px.
+Pad drag 33 verdi.
+SUITE COMPLETA 02/11 sera su TUTTO il lavoro della sera (griglia unica, origine di disegno,
+fori trasparenti, puntini piu' chiari, magnete sui puntini): A 6556/9/19, B 4589/4, 0 falliti
+= 11145 passati, 13 saltati, 19 sottotest. NIENTE committato: serve l'OK dell'utente.
+Trappola: `run_test_halves.py both ... | tail -40` perde il riepilogo della prima meta' e
+l'exit code e' quello di tail: lanciare le meta' con l'output intero in un file.
 
 ## 02/11 — FATTO (OK utente «ok proced i»): spostare i pad trascinandoli nell'anteprima footprint
 Utente: «il righello di misura mi pare fatto bene» (punto 3 del promemoria 01/11: Misura
