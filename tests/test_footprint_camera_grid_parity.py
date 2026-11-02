@@ -149,12 +149,9 @@ EMPTY = QPoint(880, 690)
 
 
 def _content_rect(window):
-    """Union of the scene items that are not grid lines, grown by the 12 px margin of `_fit_preview`."""
-    from kicadgen.gui import main_window as gui
+    """Union of the scene items (the grid is painted by the view, not an item), grown by the 12 px margin of `_fit_preview`."""
     rect = None
     for item in window.preview_scene.items():
-        if item.data(gui._GRID_ITEM):
-            continue
         bounds = item.sceneBoundingRect()
         rect = bounds if rect is None else rect.united(bounds)
     return rect.adjusted(-12, -12, 12, 12)
@@ -430,11 +427,15 @@ def test_fit_frames_the_non_grid_items_with_a_12px_margin_and_sets_the_scene_rec
                                                       _r(expected.width()), _r(expected.height())]})
 
 
-def test_fit_ignores_the_grid_items(fp):
-    """@brief Positive: toggling or changing the unit of the grid leaves the framing identical; negative: grid lines do exist."""
-    from kicadgen.gui import main_window as gui
+def test_fit_ignores_the_grid(fp):
+    """@brief Positive: toggling or changing the unit of the grid leaves the framing identical; negative: the grid is shown.
+
+    @note CONTRACT CHANGED 2026-11-02 (user: «una basta ed avanza»): the grid is
+        painted only by the view's background, so the precondition is the view's
+        visible grid, no longer grid lines among the scene items.
+    """
     view = fp.preview_view
-    assert any(i.data(gui._GRID_ITEM) for i in fp.preview_scene.items())
+    assert view.grid_step() is not None
     fp._fit_preview(force=True)
     reference = (_state(view), fp.preview_scene.sceneRect())
     fp.chk_grid.setChecked(False)

@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsSi
 from kicadgen.core.package_geometry import PackageGeometry, PinSpec
 from kicadgen.generators.host_mounting import header_footprint_params
 from kicadgen.generators.package import build_package
-from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+from kicadgen.gui.footprint_view import HOLE_ROLE, TEXT_KEY_ROLE
+from PyQt6.QtCore import Qt
 from kicadgen.gui.theme import BASE, BLUE
 from tests.test_contact_style import dev_kit
 
@@ -18,8 +19,12 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
     copper = [item for item in items if item.toolTip()
               and not isinstance(item, QGraphicsSimpleTextItem)
               and item.data(TEXT_KEY_ROLE) is None]
-    holes = [item for item in items if isinstance(item, QGraphicsEllipseItem)
-             and item.brush().color().name() == BASE]
+    # CONTRACT CHANGED 2026-11-02 (user: the grid must show inside a hole):
+    # a hole is an UNFILLED outline marked HOLE_ROLE, and the copper leaves it
+    # unpainted (`hole()`), instead of a disc filled with the background colour.
+    holes = [item for item in items if item.data(HOLE_ROLE)]
+    assert all(isinstance(item, QGraphicsEllipseItem)
+               and item.brush().style() == Qt.BrushStyle.NoBrush for item in holes)
     # Pin numbers only: the footprint's Reference/Value texts (draggable,
     # with a tooltip of their own since 2026-10-13) are not pin labels.
     labels = [item for item in items if isinstance(item, QGraphicsSimpleTextItem)
@@ -40,6 +45,7 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
         assert ring.rect().width() == pytest.approx(pad.size[0] * 20)
         hole = next(item for item in holes if item.rect().center() == ring.rect().center())
         assert hole.rect().width() == pytest.approx(pad.drill * 20)
+        assert ring.hole() == (hole.rect().center(), pytest.approx(pad.drill * 20))
         assert hole.zValue() > ring.zValue()
         assert not any(label.sceneBoundingRect().intersects(hole.sceneBoundingRect())
                        for label in labels + annotations)

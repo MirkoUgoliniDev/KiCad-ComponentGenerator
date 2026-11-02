@@ -32,9 +32,11 @@ def test_grid_header_preview_shows_exported_drills(window, monkeypatch):
     params = header_footprint_params(PinHeaderParams(rows=2, cols=3), 1.8, .9)
     monkeypatch.setattr(window, '_preview_params', lambda: params)
     window._draw_preview()
+    # CONTRACT CHANGED 2026-11-02: holes are unfilled outlines marked HOLE_ROLE
+    # (the grid shows inside them), no longer discs filled with the background.
+    from kicadgen.gui.footprint_view import HOLE_ROLE
     holes = [item for item in window.preview_scene.items()
-             if isinstance(item, QGraphicsEllipseItem)
-             and item.brush().color().name() == BASE]
+             if isinstance(item, QGraphicsEllipseItem) and item.data(HOLE_ROLE)]
     labels = [item for item in window.preview_scene.items()
               if isinstance(item, QGraphicsSimpleTextItem) and item.toolTip()
               and not _is_property_text(item)]

@@ -39,8 +39,6 @@ def _dimension_items(window):
     yellow = QColor(gui.YELLOW)
     found = []
     for item in window.preview_scene.items(Qt.SortOrder.AscendingOrder):
-        if item.data(gui._GRID_ITEM):
-            continue
         if isinstance(item, QGraphicsLineItem) and item.pen().color() == yellow:
             line = item.line()
             found.append(["line", *(round(v, 4) for v in (line.x1(), line.y1(), line.x2(), line.y2())),

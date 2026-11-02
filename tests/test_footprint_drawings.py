@@ -992,7 +992,12 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     assert saves == [True]
     menus.clear()
     _send(view, QEvent.Type.MouseButtonPress, -5000, -5000, Qt.MouseButton.RightButton)
-    assert menus == [], "no drawing there: no drawing menu"
+    # CONTRACT CHANGED 2026-11-02 (drawing origin, user): the background has
+    # its own menu now; what must not open there is a DRAWING menu.
+    # Far up and left of the footprint: the nearest point is the top-left corner.
+    assert [[a.text() for a in m.actions()] for m in menus] == [[
+        "Imposta origine di disegno: spigolo in alto a sinistra", "Ripristina origine del footprint"]], \
+        "no drawing there: only the drawing-origin menu"
     view.camera.pan_cancel()
 
 

@@ -14,7 +14,7 @@
   "scale": 2.617013,
   "scroll": [
    -271,
-   -267
+   -257
   ]
  },
  "limit/max": {
@@ -26,7 +26,7 @@
   "scale": 40.0,
   "scroll": [
    -519,
-   -408
+   -398
   ]
  },
  "limit/min": {
@@ -38,7 +38,7 @@
   "scale": 0.02,
   "scroll": [
    -479,
-   -368
+   -358
   ]
  },
  "pan/LeftButton/0.5": {
@@ -54,7 +54,7 @@
   "scale": 0.5,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "pan/LeftButton/1.0": {
@@ -70,7 +70,7 @@
   "scale": 1.0,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "pan/LeftButton/2.5": {
@@ -86,7 +86,7 @@
   "scale": 2.5,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "pan/MiddleButton/0.5": {
@@ -102,7 +102,7 @@
   "scale": 0.5,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "pan/MiddleButton/1.0": {
@@ -118,7 +118,7 @@
   "scale": 1.0,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "pan/MiddleButton/2.5": {
@@ -134,43 +134,43 @@
   "scale": 2.5,
   "scroll": [
    -410,
-   -324
+   -314
   ]
  },
  "wheel/-1": {
   "auto_fit": false,
   "centre": [
    34.8,
-   28.8
+   26.4
   ],
   "scale": 0.833333,
   "scroll": [
    -450,
-   -344
+   -336
   ]
  },
  "wheel/-3": {
   "auto_fit": false,
   "centre": [
    129.6,
-   107.136
+   100.224
   ],
   "scale": 0.578704,
   "scroll": [
    -404,
-   -306
+   -300
   ]
  },
  "wheel/-4": {
   "auto_fit": false,
   "centre": [
    190.7712,
-   157.5936
+   147.2256
   ],
   "scale": 0.482253,
   "scroll": [
    -387,
-   -292
+   -287
   ]
  },
  "wheel/0": {
@@ -182,91 +182,91 @@
   "scale": 1.0,
   "scroll": [
    -480,
-   -369
+   -359
   ]
  },
  "wheel/1": {
   "auto_fit": false,
   "centre": [
    -30.833333,
-   -25.833333
+   -24.166667
   ],
   "scale": 1.2,
   "scroll": [
    -516,
-   -399
+   -387
   ]
  },
  "wheel/2": {
   "auto_fit": false,
   "centre": [
    -55.555556,
-   -46.527778
+   -43.055556
   ],
   "scale": 1.44,
   "scroll": [
    -559,
-   -435
+   -420
   ]
  },
  "wheel/3": {
   "auto_fit": false,
   "centre": [
    -76.388889,
-   -63.078704
+   -59.027778
   ],
   "scale": 1.728,
   "scroll": [
    -611,
-   -477
+   -460
   ]
  },
  "wheel/4": {
   "auto_fit": false,
   "centre": [
    -93.557099,
-   -77.642747
+   -72.337963
   ],
   "scale": 2.0736,
   "scroll": [
    -673,
-   -529
+   -508
   ]
  },
  "wheel_clamped/-10": {
   "auto_fit": false,
   "centre": [
    190.7712,
-   157.5936
+   147.2256
   ],
   "scale": 0.482253,
   "scroll": [
    -387,
-   -292
+   -287
   ]
  },
  "wheel_clamped/10": {
   "auto_fit": false,
   "centre": [
    -93.557099,
-   -77.642747
+   -72.337963
   ],
   "scale": 2.0736,
   "scroll": [
    -673,
-   -529
+   -508
   ]
  },
  "wheel_clamped/5": {
   "auto_fit": false,
   "centre": [
    -93.557099,
-   -77.642747
+   -72.337963
   ],
   "scale": 2.0736,
   "scroll": [
    -673,
-   -529
+   -508
   ]
  },
  "zoom/centre/0.5": {
@@ -278,7 +278,7 @@
   "scale": 0.5,
   "scroll": [
    -480,
-   -369
+   -359
   ]
  },
  "zoom/centre/0.578704": {
@@ -290,7 +290,7 @@
   "scale": 0.578704,
   "scroll": [
    -480,
-   -369
+   -359
   ]
  },
  "zoom/centre/1.2": {
@@ -302,7 +302,7 @@
   "scale": 1.2,
   "scroll": [
    -480,
-   -369
+   -359
   ]
  },
  "zoom/centre/2": {
@@ -314,7 +314,7 @@
   "scale": 2.0,
   "scroll": [
    -481,
-   -370
+   -360
   ]
  },
  "zoom/centre/7.3": {
@@ -326,127 +326,127 @@
   "scale": 7.3,
   "scroll": [
    -486,
-   -375
+   -365
   ]
  },
  "zoom/lower_right/0.5": {
   "auto_fit": false,
   "centre": [
    -322.0,
-   -234.0
+   -244.0
   ],
   "scale": 0.5,
   "scroll": [
    -640,
-   -485
+   -480
   ]
  },
  "zoom/lower_right/0.578704": {
   "auto_fit": false,
   "centre": [
    -235.008,
-   -169.344
+   -177.984
   ],
   "scale": 0.578704,
   "scroll": [
    -615,
-   -466
+   -461
   ]
  },
  "zoom/lower_right/1.2": {
   "auto_fit": false,
   "centre": [
    52.5,
-   37.5
+   39.166667
   ],
   "scale": 1.2,
   "scroll": [
    -416,
-   -323
+   -311
   ]
  },
  "zoom/lower_right/2": {
   "auto_fit": false,
   "centre": [
    159.5,
-   115.0
+   120.0
   ],
   "scale": 2.0,
   "scroll": [
    -160,
-   -138
+   -118
   ]
  },
  "zoom/lower_right/7.3": {
   "auto_fit": false,
   "centre": [
    276.027397,
-   199.178082
+   207.808219
   ],
   "scale": 7.3,
   "scroll": [
    1536,
-   1086
+   1159
   ]
  },
  "zoom/upper_left/0.5": {
   "auto_fit": false,
   "centre": [
    378.0,
-   286.0
+   276.0
   ],
   "scale": 0.5,
   "scroll": [
    -290,
-   -225
+   -220
   ]
  },
  "zoom/upper_left/0.578704": {
   "auto_fit": false,
   "centre": [
    274.752,
-   209.088
+   202.176
   ],
   "scale": 0.578704,
   "scroll": [
    -320,
-   -247
+   -241
   ]
  },
  "zoom/upper_left/1.2": {
   "auto_fit": false,
   "centre": [
    -64.166667,
-   -49.166667
+   -47.5
   ],
   "scale": 1.2,
   "scroll": [
    -556,
-   -427
+   -415
   ]
  },
  "zoom/upper_left/2": {
   "auto_fit": false,
   "centre": [
    -190.5,
-   -145.0
+   -140.0
   ],
   "scale": 2.0,
   "scroll": [
    -860,
-   -658
+   -638
   ]
  },
  "zoom/upper_left/7.3": {
   "auto_fit": false,
   "centre": [
    -328.082192,
-   -249.589041
+   -240.958904
   ],
   "scale": 7.3,
   "scroll": [
    -2874,
-   -2190
+   -2117
   ]
  }
 }

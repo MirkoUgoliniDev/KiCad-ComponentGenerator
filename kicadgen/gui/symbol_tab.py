@@ -33,7 +33,8 @@ from .canvas_measure import (CLEAR_MEASURES_SOURCE, MEASURE_KEY, MEASURE_SPEC, M
 #: quarter of the 2.54 mm pin grid, so the hit areas of neighbouring pins
 #: never overlap (a pointing area, like a pad's copper in the footprint).
 PIN_MEASURE_HIT_MM = 0.635
-from .canvas_grid import ExposedRegion, GridStyle, dots_legible, paint_grid
+from .canvas_origin import readout_text
+from .canvas_grid import DARK_GRID_DOT_COLOR, ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
                               DragPlan, GestureController, HoverGroups, Identity, KeyRepeatFilter,
                               bind_shortcuts, install_canvas_filters)
@@ -407,7 +408,7 @@ class TextDialog(QDialog):
 #: with dark drawings, as in KiCad).
 CANVAS_THEMES = {
     'dark': {
-        'canvas': '#181825', 'grid': '#36364b', 'grid_dots': '#4d4d6b', 'body_fill': '#242438', 'outline': '#89b4fa',
+        'canvas': '#181825', 'grid': '#36364b', 'grid_dots': DARK_GRID_DOT_COLOR, 'body_fill': '#242438', 'outline': '#89b4fa',
         'graphic': '#cdd6f4', 'graphic_fill': '#242438', 'pin': '#89b4fa', 'pin_name': '#cdd6f4',
         'pin_number': '#cdd6f4', 'selected': '#f9e2af', 'terminal': '#a6e3a1', 'handle': '#a6e3a1',
         'wire': '#f9e2af',
@@ -4534,8 +4535,9 @@ class SymbolTab(QWidget):
             # The tool being drawn follows the cursor (rubber band, `tool_preview_changed`).
             self._router.hover_at(point)
         cursor = self._cursor_position
-        value = '' if cursor is None else f'X {cursor.x()/10:.2f}  Y {-cursor.y()/10:.2f} mm  |  '
-        value += f'{self.view.transform().m11()*100:.0f}%'
+        # The pointer line shared with the footprint preview (`canvas_origin`).
+        value = readout_text(None if cursor is None else (cursor.x() / 10, -cursor.y() / 10),
+                             self.view.transform().m11())
         chosen = self._selection_ids()
         if self._symbol is not None:
             pin = next((p for p in self._symbol.pins if p.pin.number == self._selected_pin), None)

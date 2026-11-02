@@ -253,8 +253,14 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11117 passed,
-13 skipped and 19 subtests (2026-11-02, branch `ADVANCED`, halves A 6533/9/19, B 4584/4: shared
+is 11145 passed,
+13 skipped and 19 subtests (2026-11-02 evening, branch `ADVANCED`, halves A 6556/9/19, B 4589/4:
+one grid only in the footprint preview (the old scene-item grid removed), a view-only drawing
+origin — body corner, centre, footprint origin or pad — with marker, grid through it and the
+symbol editor's pointer line measured from it with Y up, pad position typed from it, drill
+holes that show the grid beneath, brighter dark-grid dots shared by both tabs, pad magnet on
+the visible grid dots, see docs/canvas-origin-plan.md; before that, 11117 passed,
+2026-11-02, halves A 6533/9/19, B 4584/4: shared
 «Misura» ruler in both tabs with editable footprint dimensions («Modifica quota…», one pad moves) and
 measures that follow their targets; package pads dragged in the footprint preview with selection,
 a green/orange centring crosshair and a grid magnet; single-component grid answers checked against the

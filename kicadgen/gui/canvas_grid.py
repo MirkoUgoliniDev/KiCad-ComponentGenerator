@@ -25,6 +25,12 @@ from PyQt6.QtWidgets import QApplication, QGraphicsView
 #: Device pixels added around a grid line before it is tested against the paint region.
 GRID_PAINT_MARGIN_PX = 2
 
+#: Colour of the fine-grid dots on the DARK canvases of both tabs (symbol editor
+#: «dark» theme and footprint preview): one value, so the two grids look alike.
+#: Brightened on 2026-11-02 (user: «puntini della griglia un poco più evidenti»,
+#: grid dots a little more visible); before, #4d4d6b and #4a4a63.
+DARK_GRID_DOT_COLOR = '#6c6c8e'
+
 
 class ExposedRegion(QObject):
     """@brief The region of the paint event being handled, available to `drawBackground`.
