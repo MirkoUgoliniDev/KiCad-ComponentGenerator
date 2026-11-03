@@ -5,7 +5,7 @@ Suite completa (seconda, full-0311d): A 6723/9/19, B 4635/4, 0 falliti = 11358 p
 19 sottotest. Contenuto: revisione completa (10 revisori), correzione di tutti i rilievi (7 correttori +
 coordinatore), verifica di generalita' e sue correzioni, quote del corpo modificabili e contorno col mouse,
 colore quote, pinout con tutti i pad e pin alfanumerici, courtyard pin header 0.5 (decisione utente),
-skill/agenti A-G, note KiCad 9. Hash del commit: vedi la riga seguente al secondo commit.
+skill/agenti A-G, note KiCad 9. Commit `5ea9d27` su ADVANCED (non pushato, non mergiato).
 Restano da fare/decidere: push e merge (non autorizzati); prova dell'utente nell'app (contorno col mouse,
 tabella pin del rele', quote); rilievo 7 dell'audit (nota interasse assunto solo nella descrizione).
 
