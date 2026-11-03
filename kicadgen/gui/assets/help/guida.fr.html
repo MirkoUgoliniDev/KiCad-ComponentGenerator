@@ -384,6 +384,14 @@ appliqué après une fermeture inattendue. Les commandes de l’onglet
 <span class="ui">KiCad</span> utilisent le fichier appliqué : un brouillon non appliqué n’est
 pas installé et <span class="ui">Vérifier le composant pour
 KiCad</span> le signale.</p>
+<p>Dans l’empreinte d’un boîtier, les deux côtés du corps sont des <strong>cotes
+modifiables</strong> : un double clic sur la cote, ou un clic droit puis
+<span class="ui">Modifier la cote…</span>, demande la nouvelle valeur ; le corps
+reste centré, les pastilles restent à leur place et une seule annulation revient en
+arrière. Le contour du corps se déplace et se redimensionne aussi à la souris :
+huit poignées, <kbd>Maj</kbd> pour un redimensionnement symétrique, l’aimant de la
+grille, <kbd>Échap</kbd> pour annuler le glissement. Le tableau du brochage liste
+toutes les pastilles de l’empreinte, y compris celles sans nom.</p>
 <p>Pour les cartes, le panneau <span class="ui">Empreinte sur la carte principale</span>
 permet de choisir le montage directement depuis l’aperçu, sans revenir
 au début ni répéter l’analyse :</p>
@@ -619,6 +627,29 @@ KiCad avec <em>Gérer les bibliothèques de symboles</em>.
 le modèle STEP et les documents. L’onglet <span class="ui">Exportations</span>
 (<kbd>Ctrl</kbd>+<kbd>6</kbd>) conserve l’historique des installations et des
 exportations du symbole faites depuis cet ordinateur.</p>
+<p>Avant d’installer, le programme peut poser d’autres questions, seulement
+lorsqu’elles s’appliquent ; rien n’est écrit tant que vous n’avez pas répondu :</p>
+<ul>
+  <li><span class="ui">Bibliothèque KiCadGen déjà enregistrée</span> : pour une
+  installation dans le projet, la table globale a déjà une bibliothèque
+  <code>KiCadGen</code> à un autre emplacement. Dans ce projet, KiCad utilisera la
+  bibliothèque du projet et ne trouvera plus les empreintes de la bibliothèque
+  globale du même nom.</li>
+  <li><span class="ui">Projet ouvert dans KiCad</span> : les fichiers de verrouillage
+  de KiCad (<code>~&lt;nom&gt;.kicad_pro.lck</code> et similaires) indiquent que le
+  projet est ouvert. KiCad ne verra la nouvelle bibliothèque qu’après la réouverture
+  du projet : fermez-le d’abord, sans enregistrer ses réglages de bibliothèques.</li>
+  <li>Un KiCad antérieur à la version 10.0 ne sait pas lire les fichiers générés :
+  l’installation comme bibliothèque globale est refusée et aucun fichier ne
+  change.</li>
+</ul>
+<p>Si un fichier était maintenu ouvert (par un antivirus, par exemple), un dossier
+temporaire <code>.kicadgen-rollback-…</code> peut rester dans la destination après
+l’installation : il ne contient que des copies des fichiers précédents, une
+installation ultérieure le supprime après un jour, ou vous pouvez le supprimer
+vous-même. Un historique des exportations illisible (<code>kicad_exports.json</code>)
+est mis de côté sous le nom <code>kicad_exports.json.corrupt-&lt;date-heure&gt;</code>
+et un nouveau est commencé : aucun enregistrement n’est perdu en silence.</p>
 <h3>Vérification du composant</h3>
 <p>Dans l’onglet <span class="ui">KiCad</span>, l’icône <span class="ui">Vérifier le composant pour KiCad</span>
 contrôle les fichiers générés, la correspondance des numéros broche-pastille et, si <code>kicad-cli</code> est

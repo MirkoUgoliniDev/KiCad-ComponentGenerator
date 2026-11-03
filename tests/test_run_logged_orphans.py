@@ -68,11 +68,16 @@ def _wait_pid(pid_file, timeout=20.0):
 
 
 def test_a_child_that_exits_leaving_a_grandchild_returns_promptly(tmp_path):
-    """@brief Positive: the run ends with the child, with its exit code and output, no timeout."""
+    """@brief Positive: the run ends with the child, with its exit code and output, no timeout.
+
+    The silence budget (8 s) leaves room for two interpreter starts on a
+    loaded machine; a run that waited for the orphan would still raise
+    `TimeoutExpired` well before the grandchild's 30 s sleep ends.
+    """
     pid_file = tmp_path / "grandchild.pid"
     started = time.monotonic()
     result = process_log.run_logged([sys.executable, "-c", _LEAVES_A_GRANDCHILD, str(pid_file)],
-                                    tmp_path / "freecad.log", timeout=1)
+                                    tmp_path / "freecad.log", timeout=8)
     elapsed = time.monotonic() - started
     assert result.returncode == 0
     assert "KICADGEN_STEP_OK" in result.stdout

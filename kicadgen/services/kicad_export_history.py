@@ -89,6 +89,45 @@ def _set_aside(target: Path) -> Path:
     return candidate
 
 
+#: Times `_previous_records` reads the history again after another instance
+#: moved or replaced it in the meantime. One race is all two windows can
+#: produce; the bound only keeps a file that keeps vanishing from looping.
+_RACE_RETRIES = 3
+
+
+def _previous_records(target: Path) -> list[dict]:
+    """@brief Records to keep, setting an unreadable history aside first.
+
+    @param target History file.
+    @return The records of the history (or of the copy just set aside, when
+        it turns out to be readable); [] when there are none.
+    @throws OSError When the file cannot be read or moved: nothing is
+        written then.
+    @note Two instances can both read the same corrupt history (review
+        2026-11-03, D11). The one that moves it second finds it gone
+        (FileNotFoundError): the history is read again, now the valid file
+        the first one wrote, instead of losing this record. When the second
+        one moves the FIRST one's valid file (it was replaced between read
+        and rename), the moved copy is read back and its records are kept
+        (the copy stays beside it under its ``.corrupt-`` name: a duplicate,
+        never a loss).
+    """
+    for _attempt in range(_RACE_RETRIES):
+        try:
+            return _records_for_update(target)
+        except _UnreadableHistory:
+            pass
+        try:
+            aside = _set_aside(target)
+        except FileNotFoundError:
+            continue
+        try:
+            return _records_for_update(aside)
+        except _UnreadableHistory:
+            return []
+    raise FileNotFoundError(f"history kept changing: {target}")
+
+
 def record_export(*, component: str, kind: str, source: str,
                   destination: str, path: Path | None = None) -> bool:
     """@brief Atomically add a successful KiCad export/install event to local history.
@@ -117,11 +156,7 @@ def record_export(*, component: str, kind: str, source: str,
     temporary = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            previous = _records_for_update(target)
-        except _UnreadableHistory:
-            _set_aside(target)
-            previous = []
+        previous = _previous_records(target)
         data = [record, *previous][:MAX_RECORDS]
         payload = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)

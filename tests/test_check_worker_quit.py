@@ -46,15 +46,27 @@ def test_a_command_deaf_to_the_stop_cannot_hold_the_exit(qapp, monkeypatch):
 
 
 def test_a_verification_that_sees_the_stop_ends_and_stays_owned(qapp, monkeypatch):
-    """@brief Negative: checks emitted between commands see the stop at once."""
+    """@brief Negative: checks emitted between commands see the stop at once.
+
+    The stop is sent once the first check was emitted (a start marker, not a
+    fixed sleep that a loaded machine can outlast or undershoot), and the
+    thread is always reaped, even when an assertion fails.
+    """
+    first = threading.Event()
+
     def checks(*, emit, **_):
         for _ in range(1000):
             emit(Check("OK", "step", ""))
+            first.set()
             time.sleep(0.01)
     monkeypatch.setattr(ccd, "verify_component", checks)
     worker = _worker()
     worker.start()
-    time.sleep(0.05)
-    worker._stop_for_quit()
-    assert worker.isFinished() and worker.aborted
-    assert worker.parent() is qapp
+    try:
+        assert first.wait(5), "the fake verification must have started"
+        worker._stop_for_quit()
+        assert worker.isFinished() and worker.aborted
+        assert worker.parent() is qapp
+    finally:
+        worker.stop()
+        worker.wait(15000)

@@ -20,6 +20,12 @@ Position, height, color and marking keep the evidence: they move or paint the
 same body. A height that is an estimate (`component_state.height_is_estimated`)
 is marked «stimata» in its cell; changing it by hand records it as the
 user's reading (`component_state.mark_height_measured`).
+
+A cell nobody edited gives back the SOURCE value exactly as it was, missing
+or None included: the cell has to show something (a missing height shows the
+new body's 0.6 mm, a missing colour #303030, a rotation of -90 reads 270°),
+but what it shows only to be readable is not a value the user entered, and a
+plain «Applica» must not turn an estimate or an absence into a measurement.
 """
 from copy import deepcopy
 
@@ -41,10 +47,27 @@ _NUMBERS = ((2, "x_mm", -300.0), (3, "y_mm", -300.0), (4, "length_mm", 0.05),
 _GEOMETRY_EVIDENCE = ("package_evidence", "terminal_geometry", "model_match", "model_selection")
 #: Keys that describe the KiCad model chosen for the body type.
 _MODEL_EVIDENCE = ("model_match", "model_selection")
+#: Marker of a key the source component did not have.
+_MISSING = object()
+#: Columns whose shown text or choice is compared with the opening one.
+_NAME_COLUMN, _ROTATION_COLUMN, _COLOR_COLUMN = 0, 7, 8
 #: A new body, as the old «Aggiungi componente» created it.
 NEW_COMPONENT = dict(name="Componente", kind="generic", x_mm=0.0, y_mm=0.0, length_mm=2.0,
                      width_mm=1.2, height_mm=0.6, rotation_deg=0.0, color_hex="#303030",
                      marking="")
+
+
+def _number(value) -> float:
+    """A stored number as the cells read it: missing or None reads 0.0."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _angle(value) -> float:
+    """A stored rotation as the «Rot.» cell reads it, in [0, 360) degrees."""
+    return _number(value) % 360
 
 
 class ComponentEditorDialog(QDialog):
@@ -70,9 +93,10 @@ class ComponentEditorDialog(QDialog):
         self._originals = []
         #: Full dict of each row (detection metadata travels with the row).
         self._rows_data = []
-        #: Per row, key -> (unrounded source value, value the spin box showed
-        #: after its own rounding). A cell still showing that value was not
-        #: edited and gives back the source value, never the rounded one.
+        #: Per row, key -> (source value or _MISSING, value the cell showed
+        #: when opened: spin box value after its own rounding, name/colour
+        #: text, rotation choice). A cell still showing that value was not
+        #: edited and gives back the source value, never the shown one.
         self._shown_numbers = []
         layout = QVBoxLayout(self)
         note = QLabel("Origine al centro del modulo, X a destra, Y in basso come nel footprint; "
@@ -112,7 +136,8 @@ class ComponentEditorDialog(QDialog):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self._originals.append(deepcopy(component) if original else None)
-        self.table.setCellWidget(row, 0, QLineEdit(str(component.get("name") or "")))
+        name_text = str(component.get("name") or "")
+        self.table.setCellWidget(row, _NAME_COLUMN, QLineEdit(name_text))
         kind = QComboBox()
         for key in self._kinds:
             kind.addItem(key, key)
@@ -131,7 +156,7 @@ class ComponentEditorDialog(QDialog):
             spin.setRange(min(minimum, value), max(300.0, value))
             spin.setSingleStep(0.1)
             spin.setValue(value)
-            shown[key] = (value, spin.value())
+            shown[key] = (component.get(key, _MISSING), spin.value())
             if key == "height_mm" and height_is_estimated(component):
                 # Same cell, but it reads as an estimate and not a measurement.
                 spin.setSuffix(" ~")
@@ -148,10 +173,17 @@ class ComponentEditorDialog(QDialog):
         if rotation.findData(angle) < 0:
             rotation.addItem(f"{angle:g}°", angle)
         rotation.setCurrentIndex(max(rotation.findData(angle), 0))
-        self.table.setCellWidget(row, 7, rotation)
-        color = QLineEdit(str(component.get("color_hex") or "#303030"))
+        self.table.setCellWidget(row, _ROTATION_COLUMN, rotation)
+        color_text = str(component.get("color_hex") or "#303030")
+        color = QLineEdit(color_text)
         color.setMaxLength(7)
-        self.table.setCellWidget(row, 8, color)
+        self.table.setCellWidget(row, _COLOR_COLUMN, color)
+        shown["name"] = (component.get("name", _MISSING), name_text)
+        shown["rotation_deg"] = (component.get("rotation_deg", _MISSING),
+                                 rotation.currentData())
+        # setMaxLength(7) truncates a longer source text: compare with what
+        # the cell really shows.
+        shown["color_hex"] = (component.get("color_hex", _MISSING), color.text())
         self.table.setCellWidget(row, 9, QLineEdit(str(component.get("marking") or "")))
         # Data not shown (detection metadata) travel with the row.
         self._rows_data.append(component)
@@ -188,54 +220,82 @@ class ComponentEditorDialog(QDialog):
         del self._rows_data[row]
         del self._shown_numbers[row]
 
+    @staticmethod
+    def _keep_or_set(entry: dict, key: str, shown: tuple, current, value) -> bool:
+        """Give back the source value of an unedited cell, else store `value`.
+
+        @param entry Row dict being rebuilt (a copy of the source component).
+        @param key Component key of the cell.
+        @param shown (source value or _MISSING, what the cell showed when opened).
+        @param current What the cell shows now (text, choice or spin value).
+        @param value Value to store when the cell was edited.
+        @return True when the cell was edited.
+        """
+        source, opened = shown
+        if current == opened:
+            if source is _MISSING:
+                entry.pop(key, None)
+            else:
+                entry[key] = source
+            return False
+        entry[key] = value
+        return True
+
     def components(self) -> list:
         """@brief The components as the table shows them now, evidence adjusted.
 
         @return New dicts: detection metadata of each row plus its edited values.
+        @note A cell nobody edited keeps the source value as it was, absent
+            and None included; only an edited height is recorded as measured.
         """
         result = []
         for row in range(self.table.rowCount()):
             entry = deepcopy(self._rows_data[row])
             original = self._originals[row]
-            entry["name"] = self.table.cellWidget(row, 0).text().strip() or "Componente"
+            shown = self._shown_numbers[row]
+            name = self.table.cellWidget(row, _NAME_COLUMN).text()
+            self._keep_or_set(entry, "name", shown["name"], name,
+                              name.strip() or "Componente")
             entry["kind"] = self.table.cellWidget(row, 1).currentData() or "generic"
+            edited_height = False
             for column, key, _minimum in _NUMBERS:
                 current = self.table.cellWidget(row, column).value()
-                source, shown = self._shown_numbers[row][key]
-                # The spin box rounds to its decimals: a cell nobody edited
-                # still shows the rounded value and must give back the source
-                # value, or every long-decimal row would read as edited and
-                # lose its evidence on a plain «Applica» (Apply).
-                entry[key] = source if current == shown else current
-            # The cell showed the component height, or the new component's
-            # one if missing: a different value was typed by hand.
-            before = (original if original is not None else {}).get(
-                "height_mm", NEW_COMPONENT["height_mm"])
-            if abs(float(entry["height_mm"]) - float(before or 0.0)) > 1e-9:
+                # The spin box rounds to its decimals and shows a stand-in for
+                # a missing value: a cell nobody edited still shows that and
+                # must give back the source, or every long-decimal row would
+                # read as edited and lose its evidence on a plain «Applica»
+                # (Apply), and a missing height would become a measured one.
+                edited = self._keep_or_set(entry, key, shown[key], current, current)
+                edited_height = edited_height or (edited and key == "height_mm")
+            if edited_height:
                 mark_height_measured(entry)
-            entry["rotation_deg"] = float(self.table.cellWidget(row, 7).currentData() or 0.0)
-            entry["color_hex"] = self.table.cellWidget(row, 8).text().strip() or "#303030"
+            rotation = float(self.table.cellWidget(row, _ROTATION_COLUMN).currentData() or 0.0)
+            self._keep_or_set(entry, "rotation_deg", shown["rotation_deg"], rotation, rotation)
+            color = self.table.cellWidget(row, _COLOR_COLUMN).text()
+            self._keep_or_set(entry, "color_hex", shown["color_hex"], color,
+                              color.strip() or "#303030")
             entry["marking"] = self.table.cellWidget(row, 9).text().strip()
             if original is not None:
-                resized = any(abs(float(entry[key]) - float(original.get(key) or 0.0)) > 1e-9
+                # Compared as the cells read them: a source -90 and an
+                # unedited 270° cell are the same orientation.
+                turned = (_angle(entry.get("rotation_deg"))
+                          != _angle(original.get("rotation_deg")))
+                retyped = entry["kind"] != (original.get("kind") or "generic")
+                resized = any(abs(_number(entry.get(key)) - _number(original.get(key))) > 1e-9
                               for key in ("length_mm", "width_mm"))
                 if resized:
                     entry["bbox_basis"] = "unknown"
                     for key in _GEOMETRY_EVIDENCE:
                         entry.pop(key, None)
-                elif (entry["kind"] != (original.get("kind") or "generic")
-                      or entry["rotation_deg"] != float(original.get("rotation_deg") or 0.0) % 360):
+                elif retyped or turned:
                     for key in _MODEL_EVIDENCE:
                         entry.pop(key, None)
                 # The body the SMD network saw is no longer this one: type,
                 # size, position or rotation changed by hand remove its
                 # identity and its pose, which would otherwise choose model
                 # and orientation in place of the correction (audit 2026-10-02).
-                if resized or any(
-                        entry[key] != original.get(key, entry[key])
-                        for key in ("x_mm", "y_mm")) or (
-                        entry["kind"] != (original.get("kind") or "generic")) or (
-                        entry["rotation_deg"] != float(original.get("rotation_deg") or 0.0) % 360):
+                moved = any(entry.get(key) != original.get(key) for key in ("x_mm", "y_mm"))
+                if resized or moved or retyped or turned:
                     drop_classifier_identity(entry)
             result.append(entry)
         return result

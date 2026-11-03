@@ -191,7 +191,10 @@ def describe(path) -> RecentProject:
     try:
         document = json.loads(config_file.read_text(encoding="utf-8"))
         combo = document["state"]["widgets"]["combo_component_type"]
-    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError):
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError, RecursionError):
+        # RecursionError: a file nested deeply enough exhausts the JSON
+        # parser; unreadable like any other, or the start page would crash
+        # at every launch (review O6, 2026-11-03).
         combo = None
     if isinstance(combo, dict):
         if isinstance(combo.get("text"), str):

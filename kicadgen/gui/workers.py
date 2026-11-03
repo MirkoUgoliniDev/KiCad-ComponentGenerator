@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import QApplication
 
 from ..cad3d.body_params import Body3DParams
 from ..cad3d.kicad_models import measuring_listener, archive_progress_listener
-from ..cad3d.step_generator import Cad3DError
+from ..cad3d.step_generator import Cad3DCancelled, Cad3DError
 from ..core.package_geometry import PackageGeometry
 from ..generators.castellated_module import CastellatedModuleParams
 from ..generators.pin_header import PinHeaderParams
@@ -541,6 +541,9 @@ class GenerateWorker(_Cad3DRunWorker):
                     self.progress.emit(note)
                 self.cad3d_done.emit(str(result["step_path"]))
             except Cad3DError as exc:
+                # The window tells a user's interruption from a fault by this
+                # flag, never by the (translated) text (second review 2026-11-03, C6).
+                self.cad3d_cancelled = isinstance(exc, Cad3DCancelled)
                 self.cad3d_error.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - reported in the UI, not fatal
                 self.cad3d_error.emit(tx("Errore inatteso: {exc}", exc=exc))
@@ -611,6 +614,8 @@ class Cad3DWorker(_Cad3DRunWorker):
                 self.warning.emit(warning)
             self.done.emit(str(result["step_path"]))
         except Cad3DError as exc:
+            # See GenerateWorker: the interruption is a flag, not a text.
+            self.cad3d_cancelled = isinstance(exc, Cad3DCancelled)
             self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001 - reported in the UI, not fatal
             self.error.emit(tx("Errore inatteso: {exc}", exc=exc))
@@ -656,9 +661,21 @@ class UpdateCheckWorker(QThread):
         self.deleteLater()
 
     def run(self):
-        """@brief QThread override: emit the `UpdateCheckResult` (the check never raises)."""
-        from ..services import update_check
-        self.done.emit(update_check.check_latest_release())
+        """@brief QThread override: always emit one `UpdateCheckResult`.
+
+        @note The check itself never raises; the guard also covers a failed
+            import, so an unexpected error becomes a "network" result instead
+            of reaching sys.excepthook (which ends the process).
+        """
+        try:
+            from ..services import update_check
+            result = update_check.check_latest_release()
+        except Exception as exc:  # noqa: BLE001 - the signal must always fire
+            from ..services.update_check import ERROR_NETWORK, UpdateCheckResult
+            from .. import __version__
+            result = UpdateCheckResult(str(__version__), error_kind=ERROR_NETWORK,
+                                       error=f"{type(exc).__name__}: {exc}")
+        self.done.emit(result)
 
 
 class TerminalDetailWorker(QThread):
@@ -690,11 +707,13 @@ class TerminalDetailWorker(QThread):
 
     def run(self):
         """@brief QThread override: observe terminals (or refine leads only) and emit the updated components."""
-        from ..services.photo_terminals import observe_terminals
-        from ..services.photo_leads import refine_leads
-        from ..services.openrouter import call_tool
-        from ..services.ai_diagnostics import make_logged_call
         try:
+            # Imported inside the guard: a failed import must reach the error
+            # signal, not sys.excepthook (which ends the process).
+            from ..services.photo_terminals import observe_terminals
+            from ..services.photo_leads import refine_leads
+            from ..services.openrouter import call_tool
+            from ..services.ai_diagnostics import make_logged_call
             operation = refine_leads if self.only_leads else observe_terminals
             self.done.emit(operation(self.photo, self.components, self.model,
                 make_logged_call(call_tool, self.progress.emit, log_prompt=True), self.progress.emit,
@@ -981,8 +1000,16 @@ class YoloPretestWorker(ExtractWorker):
             a defect, and it must stop instead of spending), and that error is
             caught like any other worker error and reported through `error`.
         """
-        from ..services.datasheet_extractor import COMPONENT_KINDS
-        from ..services.photo_inventory import ReviewCancelled, extract_inventory
+        try:
+            # Imported inside a guard: a failed import must reach the error
+            # signal, not sys.excepthook (which ends the process). Kept apart
+            # from the main guard because its `except ReviewCancelled` needs
+            # the name bound.
+            from ..services.datasheet_extractor import COMPONENT_KINDS
+            from ..services.photo_inventory import ReviewCancelled, extract_inventory
+        except Exception as exc:  # noqa: BLE001 - reported in the UI like every worker error
+            self.error.emit(str(exc))
+            return
 
         def no_ai(**_kwargs):
             # The yolo_only branch never calls the model: if it happened it
@@ -1102,11 +1129,13 @@ class ReconcileWorker(QThread):
 
     def run(self) -> None:
         """@brief Run the reconciliation with the same logged call as the extraction."""
-        from ..services.photo_inventory import reconcile_saved_proposals
-        from ..services.openrouter import call_tool
-        from ..services.ai_diagnostics import make_logged_call
-        from ..services import providers
         try:
+            # Imported inside the guard: a failed import must reach the error
+            # signal, not sys.excepthook (which ends the process).
+            from ..services.photo_inventory import reconcile_saved_proposals
+            from ..services.openrouter import call_tool
+            from ..services.ai_diagnostics import make_logged_call
+            from ..services import providers
             # Key and credit of every DIRECT provider the rerun uses: the
             # inventory model and, if different, the one of the crop readings
             # (OpenRouter is already verified by _ensure_api_key).

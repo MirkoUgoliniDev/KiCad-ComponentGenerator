@@ -444,15 +444,17 @@ class _Stuck:
 
 def test_h9_a_child_that_refuses_to_die_does_not_hang_and_is_logged(caplog):
     """@brief Negative: the reaping gives up after the grace and says so."""
-    with caplog.at_level(logging.WARNING, logger="kicadgen.cad3d.kicad_models"):
-        assert km._reap_killed_child(_Stuck(), grace_s=0.01) is False
+    # One reaper for every FreeCAD child (2026-11-03, C7): kicad_models uses
+    # process_log's.
+    with caplog.at_level(logging.WARNING, logger="kicadgen.cad3d.process_log"):
+        assert km.reap_killed_child(_Stuck(), grace_s=0.01) is False
     assert "4242" in caplog.text
 
 
 def test_h9_a_child_that_exits_is_reaped():
     """@brief Positive: an ordinary exit returns at once."""
     process = subprocess.Popen([sys.executable, "-c", "pass"])
-    assert km._reap_killed_child(process, grace_s=20) is True
+    assert km.reap_killed_child(process, grace_s=20) is True
 
 
 # ── H10: one library listing per attach_models call ───────────────────────

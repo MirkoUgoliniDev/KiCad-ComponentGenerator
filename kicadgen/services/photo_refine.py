@@ -788,7 +788,9 @@ def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
         the image frame, touches at most one side of the frame, is surrounded
         by background on every free side, is axis-aligned within
         MAX_BOARD_TILT_DEG, has opposite edges parallel and of equal length
-        within the edge drift bound (no keystone: `_keystone_px`), has the
+        within the edge drift bound, each pair changing the extent it bounds
+        by at most the same bound relative to that extent (no keystone:
+        `_opposite_sides_keep_scale`), has the
         declared X/Y proportions IN THE DECLARED ORIENTATION within
         MAX_BOARD_ASPECT_ERROR (first pass; the second pass accepts the only
         such region with other proportions, `_search_any_aspect`), at least
@@ -859,18 +861,24 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
             continue
         # minAreaRect's angle sees a common lean of the sides, not a keystone
         # (a perspective view whose top edge is shorter than the bottom one).
-        # The bound is PER EDGE (how far one edge's far end may drift, as
-        # edge_drift above) and every side is held to it ON ITS OWN, measured
-        # against the image axes: a common tilt, a symmetric keystone, a
-        # single leaning side and any sum of them are all caught by the one
-        # existing bound (generality audit 2026-11-03: half the lean
-        # DIFFERENCE let one side lean twice the bound). The bound is the
-        # existing one, not chosen here. Margins on the sample photos
-        # (2026-11-03), reported as a check, not a tuning: ESP32 keystone
-        # 36 px on a 2592 px side, about 18 px per edge against a bound of
-        # 25.9 (0.69 of it, the thinnest); RS485 about 2 px against 10.1.
+        # Two checks, both from the one existing bound, none chosen here:
+        # - POSITION: every side on its own may drift at most `drift_allowance`
+        #   from the image axis, as edge_drift above (generality audit
+        #   2026-11-03: half the lean DIFFERENCE let one side lean twice it).
+        # - SCALE: two opposite sides leaning apart make the extent between
+        #   them differ from one end to the other. That error is relative to
+        #   the extent they bound, not to the long side: the same pixels are
+        #   a small X error and a large Y error on an elongated board (review
+        #   2026-11-03: a keystone about the vertical axis passed with 3.8 %
+        #   Y-scale difference on RS485 proportions). A common lean (tilt)
+        #   changes no extent and is not counted here. See
+        #   `_opposite_sides_keep_scale`.
         # A rejected perspective view yields «board not found», like a tilted one.
-        if _edge_lean_px(contour) > drift_allowance:
+        signed_leans = _side_leans_px(contour, signed=True)
+        if max(abs(lean) for lean in signed_leans) > drift_allowance:
+            continue
+        _, _, extent_x, extent_y = cv2.boundingRect(contour)
+        if not _opposite_sides_keep_scale(signed_leans, extent_x, extent_y):
             continue
         bx, by, bw, bh = cv2.boundingRect(contour)
         if mid_step:
@@ -902,14 +910,46 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
     return candidates
 
 
-def _edge_lean_px(contour) -> float:
-    """Largest drift, in px, of one side of a contour from the image axis it should follow.
+def _opposite_sides_keep_scale(signed_leans, extent_x: float, extent_y: float) -> bool:
+    """True when no pair of opposite sides changes the extent between them by more than the drift bound allows.
 
-    Same side fits as `_keystone_px` (Theil-Sen on the row ends, away from
-    the corners); each side's own lean over its whole length, the largest of
-    the four, is what one edge's far end drifts.
+    `signed_leans` are the (left, right, top, bottom) leans of
+    `_side_leans_px(..., signed=True)`. The left and right sides drift along
+    X, so their lean DIFFERENCE is how much the X extent changes from top to
+    bottom; the top and bottom sides' difference is how much the Y extent
+    changes from left to right. A common lean (a tilt) does not change the
+    extent and is left to the tilt and per-side position checks. The change
+    is held RELATIVE to the extent it changes.
+
+    The tolerance is the existing per-edge bound applied to each of the two
+    edges of the pair, measured on the extent it scales: 2 x
+    max(MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO x extent). On a
+    square board this is what the per-side position check already allowed
+    for a symmetric keystone; on an elongated one it tightens only the pair
+    across the short extent, where the same pixels are a larger scale error.
+    The pixel floor is the existing rasterisation floor for small images,
+    not a new number.
+
+    Margins on the sample photos (2026-11-03), reported as a check, not a
+    tuning: ESP32 2593 x 1042 px, left/right +18.6/-17.0 px, change 35.6
+    against 51.9 (0.69), top/bottom +12.3/+2.8, change 9.5 against 20.8
+    (0.46); RS485 987 x 426 px, left/right -2.1/+3.8, change 5.9 against
+    19.7 (0.30), top/bottom 0.0/-5.1, change 5.1 against 10.0 (0.51, the
+    pixel floor dominates). Fragile point: the ESP32 top edge alone leans
+    12.3 px, more than 1 % of its Y extent (10.4): a per-edge relative bound
+    instead of the pair difference would refuse that photo.
+
+    @param signed_leans Signed side leans in px: (left, right, top, bottom).
+    @param extent_x Contour extent along the image X, in px.
+    @param extent_y Contour extent along the image Y, in px.
+    @return Whether both pairs keep the scale within the bound.
     """
-    return max(lean for lean in _side_leans_px(contour))
+    left, right, top, bottom = signed_leans
+    for change, extent in ((abs(right - left), extent_x), (abs(bottom - top), extent_y)):
+        allowance = 2 * max(MAX_BOARD_EDGE_DRIFT_PX, MAX_BOARD_EDGE_DRIFT_RATIO * extent)
+        if change > allowance:
+            return False
+    return True
 
 
 def _keystone_px(contour) -> float:

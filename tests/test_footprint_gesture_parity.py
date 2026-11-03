@@ -11,6 +11,21 @@ regenerated only when `KICADGEN_REGEN_GESTURE_GOLDEN` is set.
 
 The tests at the end pin the decisions D1-D5, D8 and D9 of the plan (§1c)
 as applied on 2026-10-17; each says what the footprint did before.
+
+GOLDEN CHANGED 2026-11-03 (generator review fixes, KLC courtyard margins:
+pin header 0.5 mm, packages and castellated modules 0.25 mm, user decision
+2026-11-03; the header margin was 1.0 mm): the header's text start follows
+the new frame, so every committed text x moved by -1.0 mm (e.g. 5.0 -> 4.0
+in f1_text_drag) in the six records d3_right_click, d4_redraw, d5_cancel
+and f1_text_click/drag/jiggle, regenerated once. Only those coordinates
+changed: the gesture contract (draw counts, undo depth, recovery writes)
+is the same.
+
+GOLDEN CHANGED AGAIN 2026-11-03 (second adversarial review): the header's
+pin-1 dot is now inside the frame, which grew, so the committed Reference
+texts sit 1.0 mm higher (y -1.0 -> -2.0; d2_wheel also x 4.0 -> 3.0) in
+d2_wheel, d3_right_click, d4_redraw, d5_cancel and f1_text_click/drag/
+jiggle. Draw counts, undo depth and recovery writes are unchanged.
 """
 import json
 import os

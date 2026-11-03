@@ -816,7 +816,7 @@ class ProfileStore:
         original = self.get_type(key)
         if not original:
             raise ProfileError(tx("Tipologia da duplicare non trovata."))
-        return self.save_type(None,label=original['label']+' — copia',family=original['family'],
+        return self.save_type(None,label=tx('{label} — copia', label=original['label']),family=original['family'],
             instructions=original['instructions'],active=True,overrides=self.overrides(key))
 
     def delete_type(self,key):

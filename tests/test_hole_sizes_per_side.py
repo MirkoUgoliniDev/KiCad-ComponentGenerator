@@ -92,14 +92,30 @@ def test_an_assumed_size_behaves_as_its_float_and_keeps_its_type_when_copied():
 
 # ── (3) Passo fine: quote dichiarate, assunte, rifiutate ────────────
 
+#: CONTRACT CHANGED 2026-11-03 (second review, G1/G5): every side that keeps
+#: an ASSUMED size (reference hole or land, the 0.76-radius half-hole centre)
+#: now gets one «quote non lette dai documenti» note. The tests below are about
+#: REDUCED estimates, so they read the notes without that one, and check it
+#: separately where the side keeps a reference.
+_ASSUMED_NOTE = "quote non lette dai documenti"
+
+
+def _reduction_notes(notes):
+    return [note for note in notes if _ASSUMED_NOTE not in note]
+
+
 def test_small_declared_half_holes_on_a_fine_pitch_are_used_as_they_are():
     params = fine_pitch()
     for side in params.sides:
         side.hole_diameter = 0.6
     params.validate()
-    assert params.geometry_notes() == []
+    assert _reduction_notes(params.geometry_notes()) == []
     notches, contacts, _, notes = step_generator.castellated_contact_payload(params, "#d4af37")
-    assert {n["radius"] for n in notches} == {0.3} and notes == []
+    assert {n["radius"] for n in notches} == {0.3} and _reduction_notes(notes) == []
+    # The declared half-holes are not among the assumed sizes; the centre
+    # from the 0.76-radius ratio still is (no hole_inset declared).
+    assert all("semi-foro 0.60mm" not in note for note in notes)
+    assert all(_ASSUMED_NOTE in note and "0.76" in note for note in params.geometry_notes())
     assert _notch_walls(notches) >= MIN_HOLE_WALL_MM - 1e-9
 
 
@@ -110,10 +126,10 @@ def test_the_assumed_half_hole_is_reduced_to_fit_the_pitch_and_declared():
     geometry = params.side_geometry(params.sides[0])
     assert geometry.half_hole_source == "estimate_pitch"
     assert geometry.half_hole == pytest.approx(1.27 - MIN_HOLE_WALL_MM)
-    notes = params.geometry_notes()
+    notes = _reduction_notes(params.geometry_notes())
     assert len(notes) == 4 and all("stimato 1.07mm" in note for note in notes)
     notches, _, _, payload_notes = step_generator.castellated_contact_payload(params, "#d4af37")
-    assert payload_notes == notes
+    assert _reduction_notes(payload_notes) == notes
     assert _notch_walls(notches) >= MIN_HOLE_WALL_MM - 1e-9
     assert _walls(params.drilled_holes()) >= MIN_HOLE_WALL_MM - 1e-9
 
@@ -135,7 +151,9 @@ def test_the_same_module_on_a_2_54_pitch_keeps_the_reference_without_notes():
     params.validate()
     assert params.side_geometry(params.sides[0]).half_hole == 1.7
     assert params.side_geometry(params.sides[0]).half_hole_source == "reference"
-    assert params.geometry_notes() == []
+    assert _reduction_notes(params.geometry_notes()) == []
+    # Nothing reduced, but the kept reference is never silent (G1).
+    assert all("semi-foro 1.70mm" in note for note in params.geometry_notes())
 
 
 @pytest.mark.parametrize("pitch,expected,source", [
@@ -222,7 +240,7 @@ def test_only_the_side_whose_pitch_is_too_small_gets_an_estimate():
     left, right = (params.side_geometry(side) for side in params.sides)
     assert (left.half_hole, left.half_hole_source) == (1.7, "reference")
     assert (right.half_hole, right.half_hole_source) == (pytest.approx(1.07), "estimate_pitch")
-    notes = params.geometry_notes()
+    notes = _reduction_notes(params.geometry_notes())
     assert len(notes) == 1 and notes[0].startswith("Lato destro")
 
 

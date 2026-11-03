@@ -316,3 +316,43 @@ def test_a_manifest_nested_too_deeply_is_a_document_error(tmp_path):
     with pytest.raises(DocumentError):
         store.read()
     assert store.path.read_text() == text
+
+
+# -- review S9 (2026-11-03): the system refusing a read is a DocumentError ----------
+
+def test_an_unreadable_manifest_is_a_document_error(tmp_path, monkeypatch):
+    """Positive: OSError reading the manifest becomes DocumentError, file untouched.
+    Negative: a readable manifest is read as before."""
+    store = DocumentSet(tmp_path / 'docs')
+    store.import_file('hires', picture(tmp_path / 'p.png'))
+    before = store.path.read_bytes()
+    original = Path.read_text
+
+    def refusing(self, *args, **kwargs):
+        if self == store.path:
+            raise PermissionError(13, 'Permission denied')
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', refusing)
+    with pytest.raises(DocumentError):
+        store.read()
+    monkeypatch.setattr(Path, 'read_text', original)
+    assert store.path.read_bytes() == before
+    assert store.read()['roles'] == {'p.png': ['hires']}
+
+
+def test_a_source_the_system_refuses_to_read_is_a_document_error(tmp_path, monkeypatch):
+    """Positive: OSError opening a PDF source becomes DocumentError. Negative: the same
+    PDF, readable, is imported."""
+    source = pdf(tmp_path / 'datasheet.pdf')
+    store = DocumentSet(tmp_path / 'docs')
+    original = Path.open
+
+    def refusing(self, *args, **kwargs):
+        if self == source:
+            raise PermissionError(13, 'Permission denied')
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', refusing)
+    with pytest.raises(DocumentError):
+        store.import_file('datasheet', source)
+    monkeypatch.setattr(Path, 'open', original)
+    assert store.import_file('datasheet', source).name == 'datasheet.pdf'

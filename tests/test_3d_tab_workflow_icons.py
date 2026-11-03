@@ -240,9 +240,12 @@ def test_dimension_labels_follow_the_language(window):  # noqa: F811
     assert any(text.startswith("totale ") for text in italian), "premessa: disegno italiano"
     window._on_language_changed(window.language_combo.findData("en"))
     english = _scene_texts(window)
-    # CONTRACT CHANGED 2026-11-03: the header's overall size follows its
-    # courtyard (KLC margin 0.25 mm, was 1.0 mm), so the value is read from
-    # the drawing; the contract is the language of the label, not the number.
+    # CONTRACT CHANGED 2026-11-03: the header's courtyard margin is 0.5 mm
+    # (KLC connectors, user decision 2026-11-03; it was 1.0 mm and doubled as
+    # the frame offset), and a header without a body is framed by its pads
+    # plus the silk clearance; the overall size follows that frame, so the
+    # value is read from the drawing. The contract is the language of the
+    # label, not the number.
     import re
     template = re.escape(DEFAULT_TRANSLATIONS["dim.total"]["en"]).replace(re.escape("{value:.2f}"), r"\d+\.\d\d")
     assert any(re.fullmatch(template, text) for text in english)

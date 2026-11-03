@@ -56,13 +56,12 @@ def test_the_square_pin1_pad_reaches_further_on_the_diagonal():
                 pin_map={1: (0, 0), 4: (1, 1)})
     with pytest.raises(ValueError):
         PinHeaderParams(**base).validate()
-    # CONTRACT CHANGED 2026-11-03: the square pad is the pin-1 marker's pin
-    # (`core.silk.pin_one`), so without a pin 1 the LOWEST number is square:
-    # {2, 4} alone would square pin 2. The round-against-round case keeps a
-    # far pin 1 to carry the square pad.
+    # The round-against-round case keeps a far pin 1 to carry the square pad.
     PinHeaderParams(**dict(base, cols=4, pin_map={1: (0, 3), 2: (0, 0), 4: (1, 1)})).validate()
-    with pytest.raises(ValueError):
-        PinHeaderParams(**dict(base, pin_map={2: (0, 0), 4: (1, 1)})).validate()
+    # CONTRACT CHANGED 2026-11-03 (second review, N3/G4): without a pin 1 NO
+    # pad is square (the lowest number is no longer marked), so {2, 4} alone
+    # are two round pads, 0.42 mm apart: accepted.
+    PinHeaderParams(**dict(base, pin_map={2: (0, 0), 4: (1, 1)})).validate()
 
 
 def test_a_sparse_map_on_a_fine_grid_is_judged_on_the_emitted_pads():

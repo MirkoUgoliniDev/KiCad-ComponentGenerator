@@ -384,6 +384,14 @@ Datei <code>.kicad_mod</code>, <span class="ui">Abbrechen</span> verwirft die ni
 <span class="ui">KiCad</span> verwenden die übernommene Datei: Ein nicht übernommener Entwurf wird nicht
 installiert, und <span class="ui">Bauteil für KiCad prüfen</span> meldet
 ihn.</p>
+<p>Im Footprint eines Gehäuses sind die beiden Körperseiten <strong>bearbeitbare
+Maße</strong>: Ein Doppelklick auf das Maß, oder ein Rechtsklick und
+<span class="ui">Maß bearbeiten…</span>, fragt den neuen Wert ab; der Körper bleibt
+zentriert, die Pads bleiben, wo sie sind, und ein einziger Rückgängig-Schritt macht
+es ungeschehen. Die Körperkontur lässt sich auch mit der Maus verschieben und in der
+Größe ändern: acht Griffe, <kbd>Umschalt</kbd> für eine symmetrische Größenänderung,
+der Rastermagnet, <kbd>Esc</kbd> bricht das Ziehen ab. Die Pinbelegungstabelle
+listet jedes Pad des Footprints auf, auch die ohne Namen.</p>
 <p>Bei Platinen können Sie im Bereich <span class="ui">Footprint auf der Trägerplatine</span>
 die Montage direkt in der Vorschau wählen, ohne zum Anfang
 zurückzukehren oder die Analyse zu wiederholen:</p>
@@ -619,6 +627,30 @@ KiCad mit <em>Symbolbibliotheken verwalten</em> hinzugefügt.
 STEP-Modell und Dokumenten. Die Registerkarte <span class="ui">Exporte</span>
 (<kbd>Strg</kbd>+<kbd>6</kbd>) bewahrt den Verlauf der Installationen und der
 Symbolexporte auf, die von diesem Computer aus vorgenommen wurden.</p>
+<p>Vor der Installation kann das Programm weitere Fragen stellen, nur wenn sie
+zutreffen; bis zu Ihrer Antwort wird nichts geschrieben:</p>
+<ul>
+  <li><span class="ui">KiCadGen-Bibliothek bereits registriert</span>: Bei einer
+  Projektinstallation hat die globale Tabelle bereits eine Bibliothek
+  <code>KiCadGen</code> an einem anderen Ort. In diesem Projekt verwendet KiCad die
+  Projektbibliothek und findet die Footprints der gleichnamigen globalen Bibliothek
+  nicht mehr.</li>
+  <li><span class="ui">Projekt in KiCad geöffnet</span>: Die Sperrdateien von KiCad
+  (<code>~&lt;Name&gt;.kicad_pro.lck</code> und ähnliche) zeigen, dass das Projekt
+  geöffnet ist. KiCad sieht die neue Bibliothek erst, nachdem das Projekt erneut
+  geöffnet wurde: Schließen Sie es vorher, ohne seine Bibliothekseinstellungen zu
+  speichern.</li>
+  <li>Ein KiCad älter als Version 10.0 kann die erzeugten Dateien nicht lesen: Die
+  Installation als globale Bibliothek wird abgelehnt, und keine Datei ändert
+  sich.</li>
+</ul>
+<p>Wurde eine Datei offen gehalten (zum Beispiel von einem Virenscanner), kann nach
+der Installation ein temporärer Ordner <code>.kicadgen-rollback-…</code> im Ziel
+zurückbleiben: Er enthält nur Kopien der vorherigen Dateien, eine spätere
+Installation entfernt ihn nach einem Tag, oder Sie löschen ihn selbst. Ein nicht
+mehr lesbarer Exportverlauf (<code>kicad_exports.json</code>) wird als
+<code>kicad_exports.json.corrupt-&lt;Datum-Uhrzeit&gt;</code> beiseitegelegt und ein
+neuer begonnen: Kein Eintrag geht stillschweigend verloren.</p>
 <h3>Prüfung des Bauteils</h3>
 <p>In der Registerkarte <span class="ui">KiCad</span> prüft das Symbol <span class="ui">Bauteil für KiCad prüfen</span>
 die erzeugten Dateien und die Übereinstimmung der Pin-Pad-Nummern und testet, falls <code>kicad-cli</code>

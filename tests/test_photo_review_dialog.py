@@ -2394,3 +2394,28 @@ def test_the_l_key_arms_the_lasso(dialog, app):
     assert dialog.lasso_button.isChecked()
     QTest.keyClick(dialog, Qt.Key.Key_L)
     assert not dialog.lasso_button.isChecked()
+
+
+@pytest.mark.parametrize("stage", ["detector", "inventory"])
+def test_the_detector_overlap_doubt_is_listed_among_the_warnings(app, png, stage):
+    """@brief Positive and negative (review P5): only a body flagged by the detector says so.
+
+    `photo_yolo` sets ``_yolo_overlap_doubt_with`` on a box that overlaps a
+    confident body by no more than the edge uncertainty; its neighbour, same
+    geometry but without the flag, must not carry the warning.
+    """
+    from kicadgen.gui.photo_review_dialog import STAGE_DETECTOR, STAGE_INVENTORY
+    rows = [dict(name="C1", kind="capacitor", x_mm=0.0, y_mm=0.0, length_mm=2.0,
+                 width_mm=1.0, height_mm=0.6, rotation_deg=0.0, confidence="high",
+                 _yolo_overlap_doubt_with=7),
+            dict(name="C2", kind="capacitor", x_mm=5.0, y_mm=0.0, length_mm=2.0,
+                 width_mm=1.0, height_mm=0.6, rotation_deg=0.0, confidence="high")]
+    widget = PhotoReviewDialog(png, rows, 40, 20,
+                               stage=STAGE_DETECTOR if stage == "detector" else STAGE_INVENTORY)
+    try:
+        flagged, plain = (widget._warnings(item) for item in widget._items)
+        assert any("piazzola" in line for line in flagged)
+        assert not any("piazzola" in line for line in plain)
+    finally:
+        widget.close()
+        app.processEvents()

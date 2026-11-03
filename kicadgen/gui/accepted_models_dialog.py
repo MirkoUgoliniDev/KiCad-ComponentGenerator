@@ -17,7 +17,7 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHBoxLayout, QHeaderView, QLabel,
-    QPushButton, QStyle, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
+    QMessageBox, QPushButton, QStyle, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
 )
 
 from ..services.accepted_models import (
@@ -454,8 +454,21 @@ class AcceptedModelsDialog(QDialog):
             preview.deleteLater()
 
     def _delete_selected(self) -> None:
+        """Delete the selected archive entries after an explicit confirmation.
+
+        The deletion cannot be undone (the entries leave the SQLite archive),
+        so the question names how many entries go and defaults to «No».
+        """
         ids = self._selected_ids()
         if not ids:
+            return
+        answer = QMessageBox.question(
+            self, self._tr("Elimina abbinamenti"),
+            self._tr("Eliminare {count} voci dall'archivio degli abbinamenti accettati? "
+                     "L'operazione non si può annullare.").format(count=len(ids)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
             return
         try:
             removed = self.store.delete(ids)

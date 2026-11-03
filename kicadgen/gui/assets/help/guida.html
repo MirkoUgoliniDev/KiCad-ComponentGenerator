@@ -384,6 +384,14 @@ applicata dopo una chiusura imprevista. I comandi della scheda
 <span class="ui">KiCad</span> usano il file applicato: una bozza non applicata non
 viene installata e la segnala <span class="ui">Verifica componente per
 KiCad</span>.</p>
+<p>Nei footprint di un package i due lati del corpo sono <strong>quote
+modificabili</strong>: un doppio clic sulla quota, oppure il clic destro e
+<span class="ui">Modifica quota…</span>, chiede il nuovo valore; il corpo resta
+centrato, le piazzole restano dove sono e la modifica si annulla in un passo. Il
+contorno del corpo si sposta e si ridimensiona anche con il mouse: otto maniglie,
+<kbd>Maiusc</kbd> per un ridimensionamento simmetrico, la calamita della griglia,
+<kbd>Esc</kbd> per annullare il trascinamento. La tabella del pinout elenca ogni
+piazzola del footprint, anche quelle senza nome.</p>
 <p>Per le schede, il riquadro <span class="ui">Footprint sulla scheda ospitante</span>
 permette di scegliere il montaggio direttamente dall'anteprima, senza tornare
 all'inizio o ripetere l'analisi:</p>
@@ -619,6 +627,27 @@ KiCad con <em>Gestisci librerie di simboli</em>.
 modello STEP e documenti. La scheda <span class="ui">Esportazioni</span>
 (<kbd>Ctrl</kbd>+<kbd>6</kbd>) conserva lo storico delle installazioni e delle
 esportazioni del simbolo fatte da questo computer.</p>
+<p>Prima di installare il programma può fare altre domande, solo quando servono;
+finché non rispondi non scrive nulla:</p>
+<ul>
+  <li><span class="ui">Libreria KiCadGen già registrata</span>: installando nel
+  progetto, la tabella globale ha già una libreria <code>KiCadGen</code> in
+  un'altra posizione. In quel progetto KiCad userà la libreria del progetto e non
+  troverà più i footprint della libreria globale con lo stesso nome.</li>
+  <li><span class="ui">Progetto aperto in KiCad</span>: i file di blocco di KiCad
+  (<code>~&lt;nome&gt;.kicad_pro.lck</code> e simili) dicono che il progetto è
+  aperto. KiCad vedrà la nuova libreria solo dopo averlo riaperto: meglio chiuderlo
+  prima, senza salvare le impostazioni delle librerie.</li>
+  <li>Un KiCad più vecchio della versione 10.0 non sa leggere i file generati:
+  l'installazione come libreria globale viene rifiutata e nessun file cambia.</li>
+</ul>
+<p>Se un file era tenuto aperto (per esempio da un antivirus), dopo l'installazione
+può restare nella cartella di destinazione una cartella temporanea
+<code>.kicadgen-rollback-…</code>: contiene solo copie dei file precedenti, una
+prossima installazione la elimina dopo un giorno, oppure puoi cancellarla tu. Uno
+storico delle esportazioni illeggibile (<code>kicad_exports.json</code>) viene
+spostato da parte come <code>kicad_exports.json.corrupt-&lt;data-ora&gt;</code> e
+ne viene iniziato uno nuovo: nessuna registrazione si perde in silenzio.</p>
 <h3>Verifica del componente</h3>
 <p>Nel tab <span class="ui">KiCad</span>, l'icona <span class="ui">Verifica componente per KiCad</span>
 controlla i file generati, la corrispondenza dei numeri pin-pad e, se <code>kicad-cli</code> è

@@ -104,6 +104,36 @@ def test_invalid_partial_or_pcb_features_are_reported(bad):
     assert messages
 
 
+@pytest.mark.parametrize("bad", [
+    detection(bbox=[True, .2, .3, .4]), detection(bbox=[.1, .2, ".3", .4]),
+    detection(bbox=[False, False, True, True]),
+    detection(height_mm=True), detection(height_mm="0.5"),
+    detection(rotation_deg=False), detection(rotation_deg="90"),
+])
+def test_booleans_and_strings_are_not_numbers_in_a_view_answer(bad):
+    """Review 2026-11-03: float() accepted True as 1.0 and "0.5" as 0.5.
+
+    The same values as real numbers decode (positive twin); as booleans or
+    strings the entry is discarded and logged, as photo_grounding does.
+    """
+    messages = []
+    assert inv.decode_detections([bad], (0, 0, 1, 1), 40, 20, "crop", messages.append) == []
+    assert messages
+
+
+def test_the_numeric_twins_of_the_rejected_values_decode():
+    assert decode([detection(bbox=[0, .2, 1, .4])])
+    assert decode([detection(height_mm=1)])
+    assert decode([detection(rotation_deg=0)])
+    assert decode([detection(rotation_deg=90.0, bbox=[.1, .1, .12, .3])])
+
+
+def test_the_view_height_source_is_the_extractor_constant():
+    from kicadgen.services import datasheet_extractor
+    assert inv.VIEW_AI_HEIGHT_SOURCE is datasheet_extractor.AI_ANSWER_HEIGHT_SOURCE
+    assert decode([detection()])[0]["_height_source"] == datasheet_extractor.AI_ANSWER_HEIGHT_SOURCE
+
+
 def test_different_classifications_same_box_merge_but_are_flagged():
     first = decode([detection(kind="resistor")])
     second = decode([detection(kind="capacitor")], source="B")

@@ -8,7 +8,7 @@ import re
 import subprocess
 import tempfile
 
-from .system_dependencies import find_kicad_cli
+from .system_dependencies import check_kicad_version, find_kicad_cli
 from .kicad_library import (ComponentArtifacts, UTF8_BOM, create_preview_project,
                             step_file_is_complete, _decode_utf8, _direct_child_ranges,
                             _node_arguments)
@@ -113,6 +113,10 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     @note No exception escapes for a footprint without electrical pads or an
         incomplete STEP file: the ValueError raised internally is caught and
         reported as an ERROR check.
+    @note A kicad-cli older than `kicad_library.MINIMUM_KICAD_VERSION` is an
+        ERROR «Versione KiCad» before the exports, unless a supported KiCad
+        is installed too: that one then runs the exports, with a WARN naming
+        both. An unknown version gives no verdict.
     """
     results = []
     def add(status, title, detail):
@@ -142,6 +146,21 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
         add('SKIP', tx('KiCad'), tx('KiCad CLI non disponibile: apertura reale non verificata.'))
     else:
         add('OK', tx('KiCad CLI'), cli)
+        # The exports below only prove something when this KiCad reads the
+        # file format written (review 2026-11-03, D2); unknown -> no verdict.
+        verdict = check_kicad_version(cli)
+        if verdict.supported is False and verdict.newer_cli:
+            add('WARN', tx('Versione KiCad'), tx(
+                'KiCad {version} ({path}) è più vecchio del minimo {minimum}: '
+                'la verifica usa KiCad {newer} ({newer_path}).',
+                version=verdict.version, path=cli, minimum=verdict.minimum,
+                newer=verdict.newer_version, newer_path=verdict.newer_cli))
+            cli = verdict.newer_cli
+        elif verdict.supported is False:
+            add('ERROR', tx('Versione KiCad'), tx(
+                'KiCad {version} ({path}) è più vecchio del minimo {minimum}: '
+                'non legge i file generati. Installare KiCad {minimum} o successivo.',
+                version=verdict.version, path=cli, minimum=verdict.minimum))
     if pending:
         add('WARN', tx('Modifiche non applicate'), tx('Verificato il simbolo applicato; la bozza non è inclusa.'))
     if footprint_pending:

@@ -246,10 +246,17 @@ def test_marker_follows_pin_one_when_sides_are_listed_right_first():
     assert sum(1 for g in fp.graphics if isinstance(g, FpCircle)) == 1
 
 
-def test_pin_one_falls_back_to_the_lowest_natural_number():
+def test_pin_one_marks_only_a_declared_first_pin():
+    """@brief CONTRACT CHANGED 2026-11-03 (second review, G4): no lowest-number fallback.
+
+    Without a pad "1" the marker used to go to the lowest natural number, a
+    guess (the anode of a K/A diode, terminal 11 of a relay). Now only "1",
+    or "A1" of an all-lettered numbering, is marked; otherwise no marker.
+    """
     assert pin_one(["3", "1", "2"]) == "1"
-    assert pin_one(["A10", "A2", "B1"]) == "A2"
-    assert pin_one([10, 2, 3]) == "2"
+    assert pin_one(["A10", "A2", "B1"]) is None
+    assert pin_one(["A10", "A1", "B1"]) == "A1"
+    assert pin_one([10, 2, 3]) is None
     assert pin_one(["", "   "]) is None
 
 
@@ -471,7 +478,10 @@ def test_package_has_courtyard_fab_and_pin_one_marker_off_the_copper():
     court = next(g for g in fp.graphics if isinstance(g, FpRect) and g.layer == "F.CrtYd")
     fab = next(g for g in fp.graphics if isinstance(g, FpRect) and g.layer == "F.Fab")
     assert fab.start == (-2, -2.25) and fab.end == (2, 2.25)
-    assert court.start == pytest.approx((-3.35, -2.5)) and court.end == pytest.approx((3.35, 2.5))
+    # CONTRACT CHANGED 2026-11-03 (second review, N4): the courtyard encloses
+    # the pin-1 dot's ink too; the dot lies outside the pin-1 corner, so the
+    # courtyard grows on that side only.
+    assert court.start == pytest.approx((-4.2, -2.5)) and court.end == pytest.approx((3.35, 2.5))
     marker = _marker(fp)
     assert _nearest_pad(fp, marker.center) == "1"
     for pad in fp.pads:
@@ -486,7 +496,10 @@ def test_package_has_courtyard_fab_and_pin_one_marker_off_the_copper():
 def test_package_without_body_still_gets_a_courtyard_around_the_pads():
     fp = build_package(_package(PinSpec("1", 0, 0, 1, 1), PinSpec("2", 3, 0, 1, 1)))
     court = next(g for g in fp.graphics if isinstance(g, FpRect) and g.layer == "F.CrtYd")
-    assert court.start == pytest.approx((-0.75, -0.75)) and court.end == pytest.approx((3.75, 0.75))
+    # CONTRACT CHANGED 2026-11-03 (second review, N4): the courtyard encloses
+    # the pin-1 dot's ink too; the dot lies outside the pin-1 corner, so the
+    # courtyard grows on that side only.
+    assert court.start == pytest.approx((-1.49, -1.49)) and court.end == pytest.approx((3.75, 0.75))
     # CONTRACT CHANGED 2026-10-14 (L-3): the KLC ${REFERENCE} text sits on
     # F.Fab of every footprint; without a body there is still no F.Fab outline.
     assert not any(g.layer == "F.Fab" for g in fp.graphics if type(g).__name__ != "FpText")

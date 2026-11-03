@@ -412,6 +412,13 @@ crash (`.footprint-draft.json` in the project). «Update footprint only»
 rewrites the file from the mounting choice without calling the AI or
 rebuilding the 3D.
 
+In a package footprint the two body sides are **editable dimensions**:
+double click one, or right click → «Edit dimension…», and type the new size
+(the body stays centred, the pads stay where they are, one undo step). The
+body outline is also moved and resized with the mouse: eight handles, Shift
+for a symmetric resize, the grid magnet, Escape to cancel the drag. The
+pinout table lists every pad of the footprint, unnamed ones included.
+
 ### Electrical symbol
 
 ![Electrical symbol editor with the 44 pins of the module and the glyph palette](docs/images/en-symbol.png)
@@ -537,6 +544,26 @@ scratch file and rolls back everything it touched if a step fails. A table
 that is not UTF-8 or a write refused by the operating system is reported with
 the real path.
 
+Further questions, asked only when they apply and before anything is written:
+
+- **KiCadGen library already registered**: for a project install, the global
+  table already has a `KiCadGen` library at another location. In that project
+  KiCad uses the project's library and no longer finds the global library's
+  footprints of the same name.
+- **Project open in KiCad**: KiCad's lock files (`~<name>.kicad_pro.lck` and
+  the like) show the project is open. KiCad sees the new library only after
+  the project is reopened: close it first, without saving its library settings.
+- A KiCad older than **10.0** cannot read the generated files: the global
+  installation is refused and nothing changes.
+
+If a file was held open (an antivirus scan, for example), a temporary
+`.kicadgen-rollback-…` folder may remain in the destination: it holds only
+copies of the previous files, and a later installation removes it after one
+day (or delete it yourself). An export history that can no longer be read
+(`kicad_exports.json`) is moved aside as
+`kicad_exports.json.corrupt-<date-time>` and a new one is started, so no
+record is lost silently.
+
 The **symbol** is not registered in any `sym-lib-table`: export the
 `.kicad_sym` and add it in KiCad with *Manage Symbol Libraries*, then set
 the symbol's Footprint to `KiCadGen:<name>`.
@@ -618,13 +645,15 @@ The diagram shows the main direction only: every package also uses
 ## Testing
 
 ```powershell
-.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
+.venv/Scripts/python.exe tools/run_test_halves.py both -- --basetemp=.venv/claude-test-run
 ```
 
-The suite is large (close to ten thousand tests; the current count is kept
-in `HANDOFF.md`) and is run in two halves in CI
-(`tools/run_test_halves.py`) because a single process can die with a native
-Qt/VTK crash. Use a fresh temporary directory for every run.
+The suite is large (more than eleven thousand tests; the current count is
+kept in `HANDOFF.md`) and is run in two halves, each in its own process, both
+locally and in CI, because a single process can die with a native Qt/VTK
+crash. For the files touched by a change, run them directly:
+`.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-<topic> tests/test_<area>.py`.
+Use a fresh temporary directory for every run.
 
 ## Licensing
 

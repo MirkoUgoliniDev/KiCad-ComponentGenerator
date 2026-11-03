@@ -1231,6 +1231,37 @@ def test_an_overlap_within_the_box_uncertainty_is_a_doubt_not_a_pad(setup):
     assert small['_yolo_overlap_doubt_with'] == by_conf[.9]['_yolo_proposal_id']
 
 
+def test_an_overlap_doubt_is_a_review_reason_with_its_tolerance_in_mm(setup):
+    """@brief Review 2026-11-03: the overlap doubt reaches the row as a review reason, in mm.
+
+    Same layout as the doubt case: the small box enters the body by less
+    than the two facing edges' uncertainty. The row carries `_uncertain`, a
+    `_review_reason` naming the other body with depth and tolerance in mm,
+    and the log states the tolerance in mm. Negative: the separate
+    neighbour of the pad case (30 px gap) carries no doubt and no reason.
+    """
+    session, _ = setup
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([109, 320, 34, 20], 3, .8),
+                    ([70, 320, 40, 20], 3, .7)), _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    lines = []
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True, log=lines.append)
+    by_conf = {round(row['_yolo_confidence'], 2): row for row in rows}
+    small, body = by_conf[.8], by_conf[.9]
+    depth, tolerance = small['_yolo_overlap_doubt_depth_mm'], small['_yolo_overlap_doubt_tolerance_mm']
+    assert 0 < depth <= tolerance
+    assert small['_uncertain'] is True
+    reason = small['_review_reason']
+    assert f"YOLO candidate {body['_id']}" in reason
+    assert f'{depth:.2f} mm' in reason and f'({tolerance:.2f} mm)' in reason
+    assert any('flagged as doubts' in line and f'{tolerance:.2f}' in line and ' mm' in line
+               for line in lines)
+    assert not by_conf[.7].get('_yolo_overlap_doubt_with')
+    assert '_review_reason' not in by_conf[.7]
+    assert '_review_reason' not in body
+
+
 def test_a_contact_class_overlapping_a_body_edge_is_its_pad_however_shallow():
     """@brief Positivo strutturale: il rilevatore stesso dice «pads»: non e' mai un corpo.
 

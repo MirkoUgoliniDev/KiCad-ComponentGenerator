@@ -140,3 +140,113 @@ def test_a_moved_body_carries_drawings_and_placed_texts_with_the_pads(body):
     drag(window, vp(window, -11.0, 4.0), vp(window, -10.0, 4.0))
     assert window.footprint_drawings[0]["points"] == [[-7.0, -8.0], [5.0, -8.0]]
     assert window.footprint_text_positions["Value"] == pytest.approx((-1.0, 10.0))
+
+
+# ── Second review 2026-11-03 ───────────────────────────────────────────
+
+def _click(window, pos):
+    viewport = window.preview_view.viewport()
+    QTest.mouseMove(viewport, pos)
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_a_click_on_a_handle_off_the_grid_changes_nothing(window, qapp, monkeypatch):
+    """U1/V1: a body whose sides are off the 0.01 mm grid; a click is not a resize. A drag still resizes."""
+    _show(window, qapp, monkeypatch, _package(body_length_mm=22.005))
+    _click(window, vp(window, 11.0025, 8.0))
+    assert size(window) == (22.005, 16.0) and not window.has_pending_footprint_edits()
+    assert not window._fp_drawings_undo
+    drag(window, vp(window, 11.0025, 8.0), vp(window, 13.0025, 8.0))
+    assert window.package_geometry.body_length_mm != 22.005
+
+
+def test_a_click_on_a_pad_off_the_grid_changes_nothing(window, qapp, monkeypatch):
+    """V1 for pads: a pad at -6.0025 stays there after a click."""
+    pins = [PinSpec("1", -6.0025, -6.0, 1.3, 1.3, pad_type="thru_hole", drill_mm=.8, shape="circle")] + PINS[1:]
+    _show(window, qapp, monkeypatch, _package(pins=pins))
+    _click(window, vp(window, -6.0025, -6.0))
+    pin = window.package_geometry.pins_seen_from_top()[0]
+    assert (pin.x_mm, pin.y_mm) == pytest.approx((-6.0025, -6.0), abs=1e-9)
+    assert not window.has_pending_footprint_edits()
+
+
+def test_undo_of_a_body_move_keeps_the_pads_still_on_screen(body):
+    """V2/B5: undo re-centres the footprint like the drop did; the pads do not jump."""
+    window = body
+    view = window.preview_view
+    pad_on_screen = lambda: view.mapFromScene(QPointF(*(c * PX for c in top(window)["1"])))
+    before = pad_on_screen()
+    drag(window, vp(window, -11.0, 4.0), vp(window, -8.0, 4.0))
+    after_drag = pad_on_screen()
+    window._undo_footprint_drawing()
+    after_undo = pad_on_screen()
+    assert (after_drag - before).manhattanLength() <= 2
+    assert (after_undo - before).manhattanLength() <= 2
+
+
+def test_the_handles_show_only_near_the_outline(body):
+    """V3: the shared ring rule, as the symbol body: not over the middle of the body."""
+    from kicadgen.gui.footprint_view import BODY_PART_ROLE
+    window = body
+    view = window.preview_view
+    handles = [i for i in window.preview_scene.items() if i.data(BODY_PART_ROLE) not in (None, "move")]
+    view._report_body_hover(vp(window, 0.0, 0.0))
+    assert handles and not any(h.isVisible() for h in handles)
+    view._report_body_hover(vp(window, 11.0, 0.5))
+    assert all(h.isVisible() for h in handles)
+
+
+def test_ctrl_press_on_the_outline_starts_no_body_drag(body):
+    """V6: Ctrl+click selects and never drags."""
+    window = body
+    viewport = window.preview_view.viewport()
+    pos = vp(window, -11.0, 4.0)
+    QTest.mousePress(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, pos)
+    QTest.mouseMove(viewport, vp(window, -8.0, 4.0))
+    QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, vp(window, -8.0, 4.0))
+    assert size(window) == (22.0, 16.0) and not window.has_pending_footprint_edits()
+
+
+def test_a_move_keeps_the_body_size_exactly(window, qapp, monkeypatch):
+    """B2: a move never changes the stored size by float noise, at any quarter turn."""
+    _show(window, qapp, monkeypatch, _package(body_length_mm=4.9, body_width_mm=3.9, orientation_deg=90.0,
+                                              pins=[PinSpec("1", 0.0, 0.0, .6, .6)]))
+    drag(window, vp(window, -1.95, 1.0), vp(window, -0.95, 1.0))
+    assert (window.package_geometry.body_length_mm, window.package_geometry.body_width_mm) == (4.9, 3.9)
+
+
+def test_the_outline_menu_keeps_the_drawing_origin_and_adds_the_body_sizes(body, monkeypatch):
+    """A right click on a body corner offers the nearest drawing origin first, then the two sizes.
+
+    Regression found by the suite (2026-11-03): the outline's own menu had
+    taken the origin entries away from the corners. Negative twin: a right
+    click inside the body, off the outline, opens the background menu with
+    the origin entries only.
+    """
+    from PyQt6.QtWidgets import QMenu
+    window = body
+    offered, edited = [], []
+    pick = {"index": 2}
+
+    def choose(menu, *_args):
+        actions = [a for a in menu.actions() if not a.isSeparator()]
+        offered.append([a.text() for a in actions])
+        return actions[pick["index"]] if pick["index"] < len(actions) else None
+
+    monkeypatch.setattr(QMenu, "exec", choose)
+    monkeypatch.setattr(window, "_edit_body_dimension", edited.append)
+    viewport = window.preview_view.viewport()
+    corner = vp(window, -11.0, 8.0)
+    QTest.mouseMove(viewport, corner)
+    QTest.mousePress(viewport, Qt.MouseButton.RightButton, pos=corner)
+    QTest.mouseRelease(viewport, Qt.MouseButton.RightButton, pos=corner)
+    assert offered[-1][0].startswith("Imposta origine di disegno:")
+    assert offered[-1][2:] == ["Modifica quota orizzontale…", "Modifica quota verticale…"]
+    assert edited == [window.BODY_DIM_X]
+    inside = vp(window, 0.0, 3.0)
+    QTest.mouseMove(viewport, inside)
+    QTest.mousePress(viewport, Qt.MouseButton.RightButton, pos=inside)
+    QTest.mouseRelease(viewport, Qt.MouseButton.RightButton, pos=inside)
+    assert len(offered[-1]) == 2 and offered[-1][0].startswith("Imposta origine di disegno:")
+    assert edited == [window.BODY_DIM_X]

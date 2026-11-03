@@ -475,6 +475,13 @@ def test_half_hole_and_through_hole_outputs_are_byte_identical(name, script, mon
     rendered = _uuidless(_with_legacy_silk(build_castellated_module(params)))
     assert hashlib.sha256(rendered.encode()).hexdigest() == footprint
     described = step_generator.castellated_contact_payload(params, "#d4af37")
+    # CONTRACT CHANGED 2026-11-03 (second review, G1/G5): the notes now name
+    # the sizes taken from the reference instead of read (one «quote non
+    # lette dai documenti» note per side); folded out here, every other
+    # payload byte is the pinned one. The notes are tested in
+    # tests/test_review_1103b_generators.py.
+    described = (*described[:3], [note for note in described[3]
+                                  if "quote non lette dai documenti" not in note])
     assert hashlib.sha256(json.dumps(described, sort_keys=True).encode()).hexdigest() == payload
     specs = [script["_contact_features"](copy.deepcopy(c), _bounds(params), PLATING, PAD_T)
              for c in described[1]]

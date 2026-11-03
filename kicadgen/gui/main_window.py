@@ -66,7 +66,7 @@ from ..services.datasheet_extractor import (
     DEFAULT_SYSTEM_PROMPT, ExtractedParams,
     extract_pin_header_params,
 )
-from ..services.system_dependencies import detect_external_applications
+from ..services.system_dependencies import check_kicad_version, detect_external_applications
 from ..services.kicad_library import (
     KiCadLibraryError,
     create_preview_project,
@@ -76,6 +76,7 @@ from ..services.kicad_library import (
     MINIMUM_KICAD_VERSION,
     plan_component_install,
     resolve_global_fp_lib_table,
+    rollback_left_of,
 )
 from ..services.kicad_export_history import load_history as load_kicad_export_history
 from ..services.kicad_export_history import record_export as record_kicad_export
@@ -614,6 +615,16 @@ def _pad_origin_key(number: str, occurrence: int = 1) -> str:
     return f"pad:{number}" if occurrence <= 1 else f"pad:{number}#{occurrence}"
 
 
+#: Cursor of each part of the editable body: hover on a handle and the drag itself.
+_BODY_PART_CURSORS = {
+    "move": Qt.CursorShape.SizeAllCursor,
+    "n": Qt.CursorShape.SizeVerCursor, "s": Qt.CursorShape.SizeVerCursor,
+    "e": Qt.CursorShape.SizeHorCursor, "w": Qt.CursorShape.SizeHorCursor,
+    "nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.SizeFDiagCursor,
+    "ne": Qt.CursorShape.SizeBDiagCursor, "sw": Qt.CursorShape.SizeBDiagCursor,
+}
+
+
 def _shifted_drawings(drawings, dx_mm: float, dy_mm: float) -> list:
     """@brief Copies of footprint drawing records with every point moved by (dx, dy) mm.
 
@@ -644,8 +655,13 @@ def _pin_map_key(pin):
         text for «A1», «EP» (review 2026-11-03: alphanumeric pins).
     @throws ValueError When the label is empty or not a pin label.
     """
+    # Only text and whole ints are labels: None would read «None», a float
+    # «1.0» (second review 2026-11-03, A4); a printed «0» is a label as in
+    # the extraction (`_pin_label`).
+    if pin is None or isinstance(pin, (bool, float)) or not isinstance(pin, (int, str)):
+        raise ValueError(tx("\"{token}\" non e' un numero di pin valido.", token=str(pin)))
     text = str(pin).strip()
-    if isinstance(pin, bool) or not _PIN_LABEL_RE.fullmatch(text):
+    if not _PIN_LABEL_RE.fullmatch(text):
         raise ValueError(tx("\"{token}\" non e' un numero di pin valido.", token=text))
     # «01» stays text, as in the extraction: a pad «01» is not pad 1.
     return int(text) if text.isdigit() and str(int(text)) == text else text
@@ -1895,6 +1911,12 @@ class MainWindow(QMainWindow):
         #: anchored at pin 1 was built with no message). Saved with the
         #: project (`body_size_declared`).
         self._body_size_declared: bool = False
+        #: True when the castellated module's TOTAL height came from the
+        #: documents (an analysis gave `body_height_mm`): only then the 3D
+        #: builds the estimated «Componenti» block over the board. A flag of
+        #: provenance, saved with the project (second review 2026-11-03, G2:
+        #: «height != 5 mm» built an invented block after a thickness edit).
+        self._cast_height_declared: bool = False
         #: Pin names the USER applied (symbol editor «Applica», pinout
         #: dialog), {pin number: name}; names that came from an analysis are
         #: not in it. A new analysis that would replace or drop one of them
@@ -5634,7 +5656,11 @@ class MainWindow(QMainWindow):
 
     #: Attributes of the in-memory photo state an extraction start resets.
     _PHOTO_STATE_ATTRS = ("_last_extracted", "_photo_png", "_photo_body_fields",
-                          "_photo_overlay_png", "_photo_source")
+                          "_photo_overlay_png", "_photo_source",
+                          # Reset by the start too (second review 2026-11-03, A3):
+                          # a castellated row spacing read from the documents.
+                          "_declared_row_spacing", "_relaunch_base_synthesized",
+                          "_auto_after_extraction")
 
     def _photo_state_snapshot(self) -> dict:
         """@brief The in-memory photo state `_start_extract_worker` resets, by reference.
@@ -6891,9 +6917,15 @@ class MainWindow(QMainWindow):
         if not self._ensure_api_key():
             return
         self._begin_ai_run("Rilancio inventario")
+        # As for the extraction start: nothing ran when the worker never
+        # started, so the state the start reset comes back (A3).
+        photo_state = self._photo_state_snapshot()
         try:
             self._start_reconcile_worker(bundle, photo_png, params, model, profile, synthesized)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
+            worker = getattr(self, "_reconcile_worker", None)
+            if worker is None or not worker.isRunning():
+                self._restore_photo_state(photo_state)
             self._on_extract_finished()
             self._on_extract_error(str(exc))
 
@@ -8229,6 +8261,7 @@ class MainWindow(QMainWindow):
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
             "board_size_known": bool(getattr(self, "_board_size_known", False)),
             "body_size_declared": bool(getattr(self, "_body_size_declared", False)),
+            "cast_height_declared": bool(getattr(self, "_cast_height_declared", False)),
             "yolo_settings": self._chosen_yolo_settings(),
             "pcb_thickness": {
                 "source": getattr(self, "_pcb_thickness_source", "standard"),
@@ -8429,6 +8462,15 @@ class MainWindow(QMainWindow):
             (self.field_body_length.value(), self.field_body_width.value(),
              self.field_body_height.value()) != PLACEHOLDER_BODY_MM
             or self._legacy_body_evidence(state))
+        height_declared = state.get("cast_height_declared")
+        # Projects saved before the flag (2026-11-03): DECLARED HEURISTIC, the
+        # old rule (a height other than the placeholder and other than the
+        # PCB thickness the analysis puts there when it finds none). It reads
+        # wrong when the PCB thickness was edited after the analysis; saving
+        # the project once writes the flag and makes this branch unused.
+        self._cast_height_declared = (
+            height_declared if isinstance(height_declared, bool) else
+            self.field_body_height.value() not in (PLACEHOLDER_BODY_MM[2], self.field_cast_pcb.value()))
         known = state.get("board_size_known")
         # Projects saved before 26/09: the dimensions are known if the project
         # already has a footprint, that is if an analysis wrote them.
@@ -9103,18 +9145,21 @@ class MainWindow(QMainWindow):
         if problem:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), self.i18n.text(problem))
             return
+        # A new project starts from the general settings, not from those
+        # of the project opened before (user decision of 2026-09-24). Built
+        # BEFORE leaving the current project and creating the folder: a type
+        # missing from the profile store left an empty phantom project
+        # behind (second review 2026-11-03, A6).
+        try:
+            initial_state = self._state_for_project_type(self._general_project_state, selected_type)
+        except (ValueError, ProfileError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
+            return
         if not self._can_leave_project():
             return
         try:
             (self._library_root() / name / DOCS_SUBDIR).mkdir(parents=True, exist_ok=False)
         except OSError as exc:
-            QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
-            return
-        # A new project starts from the general settings, not from those
-        # of the project opened before (user decision of 2026-09-24).
-        try:
-            initial_state = self._state_for_project_type(self._general_project_state, selected_type)
-        except ValueError as exc:
             QMessageBox.warning(self, self.i18n.text("Nuovo progetto"), str(exc))
             return
         self._switch_project(name, initial_state)
@@ -10243,10 +10288,17 @@ class MainWindow(QMainWindow):
                 if value is not None:
                     widget.setValue(value)
             self._sync_single_tht_pad_controls()
-            self.field_populated_pins.setText(
-                ",".join(str(p) for p in sorted(params.populated_pins))
-                if params.populated_pins else ""
-            )
+            if not self._relaunch_base_synthesized:
+                # A base rebuilt from the fields (inventory re-run without an
+                # extraction) carries no populated pins: it must not wipe the
+                # field (second review 2026-11-03, A2).
+                # Natural pin order through the one sort key: populated pins
+                # mix ints and printed labels («A1») since 2026-11-03, and a
+                # plain sorted() raised TypeError halfway through the apply.
+                self.field_populated_pins.setText(
+                    ",".join(str(p) for p in sorted(params.populated_pins,
+                                                    key=lambda pin: pin_sort_key({"pin": pin})))
+                    if params.populated_pins else "")
 
         self._apply_extracted_pcb_thickness(params)
 
@@ -10255,8 +10307,10 @@ class MainWindow(QMainWindow):
             # A board assembly uses PCB thickness and individual component heights.
             # Missing overall height must neither block it nor reuse an old value.
             self.field_body_height.setValue(params.body_height_mm or self.field_cast_pcb.value())
-        if not params.is_castellated():
-            # The body of a pin matrix is declared only by THIS analysis: an
+            self._cast_height_declared = bool(params.body_height_mm)
+        if not params.is_castellated() and not self._relaunch_base_synthesized:
+            # The body of a pin matrix is declared only by THIS analysis (a
+            # base rebuilt from the fields is no analysis, A2): an
             # analysis without body quotes leaves the fields as they were,
             # and those values (placeholder, or another analysis's) must not
             # build a body (audit 2026-10-15, item 4).
@@ -10273,6 +10327,19 @@ class MainWindow(QMainWindow):
             if params.pin_length_3d_mm is not None:
                 self.field_pin_length_3d.setValue(params.pin_length_3d_mm)
 
+        # The pin map read by this analysis is in place BEFORE the pinout is
+        # settled: `_settle_pad_ids` builds the pads from it (second review
+        # 2026-11-03, the old order judged names against the previous map).
+        if params.pin_map:
+            self.pin_map = {
+                _pin_map_key(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
+            }
+            self._append_log(
+                tx("Posizione dei pin letta dal disegno ({n_pin_map} pin): la numerazione "
+                   "non segue l'ordine colonna per colonna.",
+                   n_pin_map=len(self.pin_map))
+            )
+
         # Precedence (item 11): an explicit pinout table, else the names the
         # analysis read beside each pad of a package, else the side names of
         # a castellated module (collected above), else nothing new.
@@ -10286,15 +10353,6 @@ class MainWindow(QMainWindow):
                                     count=len(named)))
         self._settle_extracted_pinout(pinout_candidate)
 
-        if params.pin_map:
-            self.pin_map = {
-                _pin_map_key(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
-            }
-            self._append_log(
-                tx("Posizione dei pin letta dal disegno ({n_pin_map} pin): la numerazione "
-                   "non segue l'ordine colonna per colonna.",
-                   n_pin_map=len(self.pin_map))
-            )
 
         self._apply_extracted_body_color(params)
         for warning in self._plausibility_warnings(params):
@@ -10761,7 +10819,9 @@ class MainWindow(QMainWindow):
                 origin = tx(", da scegliere")
             else:
                 origin = tx(", scelto dall'utente")
-            label = CONTACT_STYLE_LABELS.get(style, style) if style else CONTACT_STYLE_UNKNOWN_LABEL
+            # Translated like the rest of the line (second review 2026-11-03, A5).
+            label = self.i18n.text(CONTACT_STYLE_LABELS.get(style, style) if style
+                                   else CONTACT_STYLE_UNKNOWN_LABEL)
             # The shared, translated side summary (review 2026-11-03, L1).
             described.append(f"{self._side_summary(s)} ({label}{origin})")
         self._append_log(tx("Contatti del modulo: ") + ", ".join(described))
@@ -11049,7 +11109,8 @@ class MainWindow(QMainWindow):
             self._append_log(
                 tx("ATTENZIONE: il generatore installato non conosce ancora il tipo di "
                    "contatto: la scelta viene ignorata e footprint e modello STEP restano «{get}».",
-                   get=CONTACT_STYLE_LABELS.get(default_contact_style(), default_contact_style())))
+                   get=self.i18n.text(CONTACT_STYLE_LABELS.get(default_contact_style(),
+                                                               default_contact_style()))))
 
     def _sides_from_table(self) -> list[CastellatedSide]:
         """@brief The castellated sides as the table describes them now.
@@ -13576,6 +13637,38 @@ class MainWindow(QMainWindow):
         except (KiCadLibraryError, OSError):
             return None
 
+    def _kicad_version_check(self):
+        """@brief The version check of the kicad-cli found on this computer, or None without KiCad.
+
+        @return `system_dependencies.KiCadVersionCheck` (version, minimum,
+            supported, newer_cli, newer_version), or None.
+        """
+        try:
+            applications = detect_external_applications()
+            if not applications.kicad_cli:
+                return None
+            return check_kicad_version(applications.kicad_cli)
+        except (OSError, ValueError):
+            return None
+
+    def _detected_kicad_version(self):
+        """The version of the KiCad found on this computer (a project install only warns when it is too old), or None."""
+        check = self._kicad_version_check()
+        return getattr(check, "version", None) if check is not None else None
+
+    def _kicad_error_text_with_rollback(self, exc) -> str:
+        """@brief The install error text, plus the rollback folder a failed install could not remove.
+
+        @param exc The KiCadLibraryError or OSError.
+        @return The translated message (second review 2026-11-03, D8: the
+            folder named in the error context was dropped).
+        """
+        text = self._kicad_error_text(exc)
+        left = rollback_left_of(exc) if isinstance(exc, KiCadLibraryError) else None
+        if left:
+            text += "\n\n" + self.i18n.tr("kicad.result_rollback_left", path=str(left))
+        return text
+
     def _confirm_install_plan_warnings(self, plan, project_library: bool) -> bool:
         """@brief Refuse an install into a too old KiCad and ask about a shadowing row or an open project.
 
@@ -13584,17 +13677,28 @@ class MainWindow(QMainWindow):
         @return True to go on; False when refused or declined.
         """
         if getattr(plan, "kicad_too_old", False):
-            QMessageBox.warning(
-                self, self.i18n.text("Installazione KiCad non riuscita"),
-                self.i18n.tr("kicad.error.kicad_too_old", version=plan.kicad_version,
-                             minimum=MINIMUM_KICAD_VERSION, path=str(plan.table_path)))
+            text = self.i18n.tr("kicad.error.kicad_too_old", version=plan.kicad_version,
+                                minimum=MINIMUM_KICAD_VERSION, path=str(plan.table_path))
+            check = self._kicad_version_check()
+            if check is not None and getattr(check, "newer_cli", None):
+                # A newer KiCad is installed too: say which, and how to use it (D4).
+                text += "\n\n" + self.i18n.tr("kicad.too_old_newer_installed",
+                                               version=check.newer_version, path=str(check.newer_cli))
+            QMessageBox.warning(self, self.i18n.text("Installazione KiCad non riuscita"), text)
             return False
+        if getattr(plan, "shadowing", None) is None and getattr(plan, "shadowing_error", None):
+            # The other scope's table could not be read: not a blocker, said in the log (D6).
+            self._append_log(self.i18n.tr("kicad.plan_shadowing_unreadable", error=plan.shadowing_error))
         questions = []
         shadowing = getattr(plan, "shadowing", None)
         if shadowing is not None:
             key = "kicad.plan_shadowing_global" if project_library else "kicad.plan_shadowing_project"
             questions.append(("Libreria KiCadGen già registrata", self.i18n.tr(
                 key, table=str(shadowing.table_path), library=shadowing.library, uri=shadowing.uri)))
+        if getattr(plan, "detected_kicad_too_old", False):
+            questions.append(("Versione KiCad", self.i18n.tr(
+                "kicad.plan_detected_kicad_old", version=plan.detected_kicad_version,
+                minimum=MINIMUM_KICAD_VERSION)))
         if getattr(plan, "kicad_open", False):
             questions.append(("Progetto aperto in KiCad", self.i18n.tr(
                 "kicad.plan_kicad_open", files="\n".join(map(str, plan.open_locks)))))
@@ -13650,7 +13754,8 @@ class MainWindow(QMainWindow):
                 artifacts, destination, library_name="KiCadGen",
                 project_library=project_library, table_path=table_path,
                 other_table_path=self._other_scope_table(project_library),
-                kicad_version=table_version)
+                kicad_version=table_version,
+                detected_kicad_version=self._detected_kicad_version() if project_library else None)
         except (KiCadLibraryError, OSError) as exc:
             # OSError: an unreachable destination fails in resolve()/is_dir()
             # before any check of the library (review 2026-11-03).
@@ -13716,12 +13821,12 @@ class MainWindow(QMainWindow):
                     continue
                 QMessageBox.warning(
                     self, self.i18n.text("Installazione KiCad non riuscita"),
-                    self._kicad_error_text(exc))
+                    self._kicad_error_text_with_rollback(exc))
                 return
             except OSError as exc:
                 QMessageBox.warning(
                     self, self.i18n.text("Installazione KiCad non riuscita"),
-                    self._kicad_error_text(exc))
+                    self._kicad_error_text_with_rollback(exc))
                 return
         message = self.i18n.tr(
             "kicad.install_complete", identifier=result.identifier,
@@ -14101,7 +14206,7 @@ class MainWindow(QMainWindow):
             length = package.body_length_mm
             width = package.body_width_mm
             height = package.body_height_mm
-            return Body3DParams(
+            body = Body3DParams(
                 length_mm=length, width_mm=width, height_mm=height,
                 offset_x_mm=-length / 2, offset_y_mm=-width / 2,
                 pin_diameter_mm=max(0.3, min(self.field_drill.value() * 0.65, 0.8)),
@@ -14112,6 +14217,13 @@ class MainWindow(QMainWindow):
                 # leads too (VE12H-K relay, 2026-10-10: the choice was lost here).
                 pin_numbers_3d=self._pin_numbers_3d(),
             )
+            # The lead diameter quoted by the documents, when there is one:
+            # step_generator uses it instead of the drill-based estimate
+            # (second review 2026-11-03, G6). An optional attribute, not a
+            # field: recorded bodies of existing projects stay current.
+            extracted = getattr(self, "_last_extracted", None)
+            body.lead_diameter_mm = getattr(extracted, "lead_diameter_mm", None)
+            return body
         if self._is_castellated():
             # The module PCB is centred on the origin like the footprint:
             # envelope and offset are derived from there, not from the hand-typed fields.
@@ -14130,10 +14242,9 @@ class MainWindow(QMainWindow):
                 **self._pins_3d_kwargs(),
             )
             # The total height builds the estimated «Componenti» block only
-            # when it is not the placeholder (review 2026-11-03): same declared
-            # heuristic as `_body_size_declared` on project load (a documented
-            # 5 mm reads as undeclared), read by step_generator.
-            body.height_declared = self.field_body_height.value() != PLACEHOLDER_BODY_MM[2]
+            # when the documents gave it (`_cast_height_declared`, a recorded
+            # provenance), read by step_generator.
+            body.height_declared = bool(getattr(self, "_cast_height_declared", False))
             return body
         if not self._matrix_body_declared():
             # CONTRACT CHANGED 2026-10-15 (audit item 4): like the package
@@ -15038,6 +15149,21 @@ class MainWindow(QMainWindow):
         self._show_generated_mesh(Path(path))
         self._set_accept_models_ready(True)
 
+    def _is_cad_cancel(self, message: str) -> bool:
+        """@brief Whether a 3D failure is the user's interruption, not a fault.
+
+        @param message The text the worker emitted.
+        @return True when the emitting worker flagged a `Cad3DCancelled`
+            (any interface language), or when the text carries the cancel
+            message in Italian or in the current language (direct calls,
+            older workers). Second review 2026-11-03, C6: the Italian
+            substring alone logged an EN/FR/DE interruption as «ERRORE 3D».
+        """
+        sender = self.sender()
+        if sender is not None and getattr(sender, "cad3d_cancelled", False):
+            return True
+        return CAD_ABORT_MESSAGE in message or tx(CAD_ABORT_MESSAGE) in message
+
     def _on_cad3d_error(self, message: str) -> None:
         """@brief Record that the 3D model was not completed.
 
@@ -15050,7 +15176,7 @@ class MainWindow(QMainWindow):
         self._realign_after_3d_failure()
         if not self._cad_result_is_current():
             return
-        if CAD_ABORT_MESSAGE in message:
+        if self._is_cad_cancel(message):
             self._append_log(tx("INTERROTTO 3D: {message}", message=message))
             return
         self._append_log(tx("ERRORE 3D: {message}", message=message))
@@ -15216,6 +15342,7 @@ class MainWindow(QMainWindow):
         self.preview_view.background_context_requested.connect(self._footprint_background_context_menu)
         self.preview_view.dimension_context_requested.connect(self._on_dimension_context)
         self.preview_view.dimension_edit_requested.connect(self._edit_body_dimension)
+        self.preview_view.body_context_requested.connect(self._on_body_context)
         self.preview_view.setMinimumHeight(500)
         # The footprint is drawn at a relatively high scene scale (20 px/mm).
         # Without these hints circles, square-pad corners and small pin labels
@@ -15916,6 +16043,17 @@ class MainWindow(QMainWindow):
         """
         self._rebind_package(pins=list(pins))
 
+    def _sync_body_fields(self, body) -> None:
+        """@brief Show a package body (length, width) in mm in the body fields.
+
+        @param body (length, width) along the package's own axes.
+        @note Applied state only (called by «Applica»): the fields are saved
+            with the project, and a draft never reaches the file.
+        """
+        length, width = body
+        self.field_body_length.setValue(float(length))
+        self.field_body_width.setValue(float(width))
+
     def _rebind_package_body(self, body) -> None:
         """@brief Give the package a new body (length, width) in mm by rebinding it to a copy.
 
@@ -16008,10 +16146,41 @@ class MainWindow(QMainWindow):
         # Undo and redo clear the pad selection too, as the drawings' one
         # (the restored pads keep their numbers, which would keep it).
         self._fp_pad_selection.clear()
+        before = self._uniform_pad_positions()
         self._set_footprint_edit_state(source.pop())
         target.append(current)
         self._footprint_draft_changed()
+        self._keep_recentred_footprint_still(before)
         return True
+
+    def _uniform_pad_positions(self):
+        """Top-view pad centres (mm) of the package, or None without one: the reference of `_keep_recentred_footprint_still`."""
+        package = getattr(self, "package_geometry", None)
+        if package is None:
+            return None
+        try:
+            return [(pin.x_mm, pin.y_mm) for pin in package.pins_seen_from_top()]
+        except (TypeError, ValueError):
+            return None
+
+    def _keep_recentred_footprint_still(self, before) -> None:
+        """@brief After undo/redo, scroll by a UNIFORM shift of every pad so the footprint does not jump.
+
+        @param before `_uniform_pad_positions` before the step.
+        @note A body move re-expresses every pad from the new body centre
+            and scrolls the camera so nothing but the outline moves; undo and
+            redo must do the same (second review 2026-11-03). Only a shift
+            shared by ALL pads is such a re-centring; a pad edit moves some
+            pads and scrolls nothing.
+        """
+        after = self._uniform_pad_positions()
+        if not before or not after or len(before) != len(after):
+            return
+        shifts = {(round(b[0] - a[0], 6), round(b[1] - a[1], 6)) for a, b in zip(before, after)}
+        if len(shifts) == 1:
+            dx, dy = shifts.pop()
+            if (dx, dy) != (0.0, 0.0):
+                self._scroll_preview_mm(dx, dy)
 
     def _footprint_draft_changed(self) -> None:
         """@brief Show the draft after any change: preview, buttons, recovery file, KiCad tab.
@@ -16067,6 +16236,10 @@ class MainWindow(QMainWindow):
         applied = self._fp_applied
         current = self._footprint_edit_state()
         body_edit = current["package_body"] != applied.get("package_body")
+        if body_edit and current["package_body"] is not None:
+            # The body fields follow the applied body (second review 2026-11-03,
+            # U5): they still showed the extracted size after an edit.
+            self._sync_body_fields(current["package_body"])
         pad_edit = (current["pad_overrides"] != applied["pad_overrides"]
                     or current["package_pins"] != applied["package_pins"] or body_edit)
         self._fp_applied = None
@@ -17913,6 +18086,7 @@ class MainWindow(QMainWindow):
             return
         view.hover.clear()
         view.forget_dimension_hover()
+        view.forget_body_editor()
         if view.gestures is not None:
             view.gestures.forget_items()
 
@@ -17997,10 +18171,18 @@ class MainWindow(QMainWindow):
             self._fp_handle_origin = None
             self._refresh_drawing_handles()
             return
+        # A release still within the click distance of its press is a click,
+        # not a move: nothing is committed (second review 2026-11-03: the
+        # grid snap of the last step shifted a pad or the body left off the
+        # grid), as the symbol editor restores a clicked element.
         if target[0] == "pad":
-            self._end_pad_drag(commit)
+            drag = self._fp_pad_drag
+            clicked = drag is not None and last is not None and self._within_click(drag["press"], last)
+            self._end_pad_drag(commit and not clicked)
         elif target[0] == "body":
-            self._end_body_drag(commit)
+            drag = getattr(self, "_fp_body_drag", None)
+            clicked = drag is not None and last is not None and self._within_click(drag["press"], last)
+            self._end_body_drag(commit and not clicked)
 
     # ── Package body edited with the mouse (user, 2026-11-03) ──────────
 
@@ -18040,6 +18222,7 @@ class MainWindow(QMainWindow):
         spots = {"nw": (left, top), "n": (middle_x, top), "ne": (right, top), "e": (right, middle_y),
                  "se": (right, bottom), "s": (middle_x, bottom), "sw": (left, bottom), "w": (left, middle_y)}
         hint = self.i18n.text("Maniglia del corpo: trascinala per ridimensionarlo.")
+        handles = []
         for part, (x_mm, y_mm) in spots.items():
             handle = _screen_handle(self.preview_scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
             # Not a drawing handle: the drawings' hover refresh removes every
@@ -18047,7 +18230,11 @@ class MainWindow(QMainWindow):
             handle.setData(0x48474F, None)
             handle.setData(BODY_PART_ROLE, part)
             handle.setToolTip(hint)
+            # The resize cursor shows on hover, as on the symbol body's handles.
+            handle.setCursor(_BODY_PART_CURSORS[part])
             handle.setVisible(False)
+            handles.append(handle)
+        self.preview_view.set_body_editor(outline, handles)
 
     def _begin_body_drag(self, part: str, point: QPointF):
         """@brief Plan a move or resize of the package body.
@@ -18066,11 +18253,21 @@ class MainWindow(QMainWindow):
         rect = (-screen_l / 2, -screen_w / 2, screen_l / 2, screen_w / 2)
         self._fp_body_drag = {"part": part, "press": QPointF(point), "rect": rect, "new": rect,
                               "package": package, "ghost": None, "label": None}
-        cursor = (Qt.CursorShape.SizeAllCursor if part == "move" else
-                  Qt.CursorShape.SizeVerCursor if part in ("n", "s") else
-                  Qt.CursorShape.SizeHorCursor if part in ("e", "w") else
-                  Qt.CursorShape.SizeFDiagCursor if part in ("nw", "se") else Qt.CursorShape.SizeBDiagCursor)
-        return DragPlan("stepped", cursor=cursor)
+        return DragPlan("stepped", cursor=_BODY_PART_CURSORS[part])
+
+    def _within_click(self, press: QPointF, point: QPointF) -> bool:
+        """@brief Whether a pointer at `point` is still a click from `press` (both scene px).
+
+        @param press Scene position of the press.
+        @param point Scene position of the pointer now.
+        @return True within the platform's drag distance in VIEWPORT pixels
+            (`canvas_selection.is_click`): such a gesture moves nothing, as a
+            click on a pin of the symbol editor (second review 2026-11-03: a
+            click on a pad or the body outline snapped it to the grid).
+        """
+        from .canvas_selection import is_click
+        view = self.preview_view
+        return is_click(view.mapFromScene(press), view.mapFromScene(point))
 
     def _magnet_point(self, target: QPointF) -> tuple:
         """@brief Where the grid magnet puts a dragged point: (point, snap state).
@@ -18200,17 +18397,25 @@ class MainWindow(QMainWindow):
             return
         if all(abs(a - b) < 5e-4 for a, b in zip(drag["new"], drag["rect"])):
             return
-        self._commit_body_rect(drag["new"])
+        self._commit_body_rect(drag["new"], keep_size=drag["part"] == "move")
 
-    def _commit_body_rect(self, rect) -> bool:
+    def _commit_body_rect(self, rect, keep_size: bool = False) -> bool:
         """@brief Make `rect` (mm, screen frame) the package body as one draft step.
 
         @param rect (left, top, right, bottom) of the new body on screen.
         @return True when the draft changed.
         """
         package = self.package_geometry
-        left, top, right, bottom = (round(value, 6) for value in rect)
-        screen_l, screen_w = right - left, bottom - top
+        left, top, right, bottom = rect
+        if keep_size:
+            # A move keeps the body EXACTLY: sizes recomputed from two moved
+            # sides carry float noise (3.9 -> 3.9000000000000004) that made a
+            # move count as a body edit at random (second review 2026-11-03).
+            length, width = _package_body(package)
+            quarter_turn = round(float(package.orientation_deg or 0.0) / 90.0) % 2
+            screen_l, screen_w = (length, width) if quarter_turn == 0 else (width, length)
+        else:
+            screen_l, screen_w = round(right - left, 6), round(bottom - top, 6)
         if not (MIN_LENGTH_MM <= screen_l <= MAX_LENGTH_MM and MIN_LENGTH_MM <= screen_w <= MAX_LENGTH_MM):
             self._draw_feedback_toast(self.i18n.text("Quota scartata."), self.i18n.text(
                 "Il corpo deve misurare fra {low} e {high} mm.").format(low=MIN_LENGTH_MM, high=MAX_LENGTH_MM))
@@ -18226,24 +18431,33 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError) as exc:
             self._draw_feedback_toast(self.i18n.text("Quota scartata."), str(exc))
             return False
-        changes = {"package_body": body}
-        if (round(cx, 6), round(cy, 6)) != (0.0, 0.0):
-            changes = {"package_pins": pins, "package_body": body,
-                       "drawings": _shifted_drawings(self.footprint_drawings, -cx, -cy),
-                       "texts": {key: (round(x - cx, 6) + 0.0, round(y - cy, 6) + 0.0)
-                                 for key, (x, y) in self.footprint_text_positions.items()}}
-        self._append_log(self.i18n.text("Footprint: corpo portato a {length:.2f} x {width:.2f} mm "
-                                        "(quota scritta a mano, pad fermi).").format(
-                                            length=body[0], width=body[1]))
+        changes = {}
+        if body != _package_body(package):
+            changes["package_body"] = body
+        moved = (round(cx, 6), round(cy, 6)) != (0.0, 0.0)
+        if moved:
+            changes.update({"package_pins": pins,
+                            "drawings": _shifted_drawings(self.footprint_drawings, -cx, -cy),
+                            "texts": {key: (round(x - cx, 6) + 0.0, round(y - cy, 6) + 0.0)
+                                      for key, (x, y) in self.footprint_text_positions.items()}})
+        if not changes:
+            return False
+        # Each gesture says what it did (second review 2026-11-03: a drag
+        # logged «quota scritta a mano, pad fermi» while the pads' file
+        # coordinates had changed).
+        if "package_body" in changes:
+            self._append_log(self.i18n.text(
+                "Footprint: corpo portato a {length:.2f} x {width:.2f} mm col mouse.").format(
+                    length=body[0], width=body[1]))
+        if moved:
+            self._append_log(self.i18n.text(
+                "Footprint: corpo spostato di {dx:.2f}, {dy:.2f} mm; pad, disegni e testi riferiti "
+                "al nuovo centro del corpo (fermi sullo schermo).").format(dx=cx, dy=-cy))
         changed = self._edit_footprint_draft(changes)
         if changed and "package_pins" in changes:
             # The origin follows the body centre: scroll by the pads' shift so
             # they stay where they were on screen.
-            view = self.preview_view
-            transform = view.transform()
-            hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
-            hbar.setValue(hbar.value() + round(-cx * _FP_PREVIEW_MM_TO_PX * transform.m11()))
-            vbar.setValue(vbar.value() + round(-cy * _FP_PREVIEW_MM_TO_PX * transform.m22()))
+            self._scroll_preview_mm(-cx, -cy)
         return changed
 
     def _begin_pad_drag(self, index: int, point: QPointF):
@@ -18284,7 +18498,21 @@ class MainWindow(QMainWindow):
         @return False for a part mounted on a pin header, whose footprint
             pads are the header's (`_edit_preview_pad` edits the header pad there).
         """
-        return self.combo_mounting.currentData() not in {"headers", "headers_square"}
+        return not self._host_header_lands_apply()
+
+    def _host_header_lands_apply(self) -> bool:
+        """@brief Whether the footprint's pads are the host header's lands (strip header mounting of a board).
+
+        @return True only when the mounting mode is a strip header AND the
+            project is a photographed board, the same condition
+            `_host_footprint_params` uses to apply the header lands.
+        @note Second review 2026-11-03 (B1): a «Strip header» mode left on a
+            project that is no longer a board (the combo is hidden there)
+            disabled the body editor and sent pad clicks to a header editor
+            whose edits were never applied.
+        """
+        return (self.combo_mounting.currentData() in {"headers", "headers_square"}
+                and self._photo_inventory_family() is True)
 
     def _pad_items(self, members) -> list:
         """@brief The drawn items of the package pads `members`, with their positions now.
@@ -18608,6 +18836,17 @@ class MainWindow(QMainWindow):
         dx_mm, dy_mm = pins[index].x_mm - x0, pins[index].y_mm - y0
         if (round(dx_mm, 9), round(dy_mm, 9)) == (0.0, 0.0):
             return
+        self._scroll_preview_mm(dx_mm, dy_mm)
+
+    def _scroll_preview_mm(self, dx_mm: float, dy_mm: float) -> None:
+        """@brief Scroll the footprint preview by a scene shift in mm, so what moved by it stays put on screen.
+
+        @param dx_mm Shift along X (mm, right) of what must stay still.
+        @param dy_mm Shift along Y (mm, down).
+        @note The one place for this camera move (second review 2026-11-03:
+            the body commit and the pad re-centring each had a copy). The
+            scroll bars take whole device pixels.
+        """
         view = self.preview_view
         transform = view.transform()
         hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
@@ -19022,7 +19261,7 @@ class MainWindow(QMainWindow):
             raise ValueError(mismatch)
         pins, body = symbol_inputs(rows)
         return self._component_name(), pins, dict(
-            footprint=self.symbol_tab.footprint(), body=body, graphics=symbol_graphics(rows),
+            footprint=self.symbol_tab.footprint(), body=body, graphics=self._logged_symbol_graphics(rows),
             metadata=self._symbol_metadata(), properties=symbol_property_positions(rows))
 
     def _save_applied_electrical_symbol(self, path=None, *, quiet=False):
@@ -19159,8 +19398,30 @@ class MainWindow(QMainWindow):
             return rows
         known = {_pin_key(row.get("pin")) for row in rows}
         extra = [{"pin": pad, "name": ""} for pad in pads if _pin_key(pad) not in known]
-        self._name_pads_from_geometry(extra, log=False)
+        # A name proposed by the pad drawing is marked: the dialog applies it
+        # only when the user changes it (second review 2026-11-03, B3/U2: an
+        # untouched OK recorded the drawing's names as the user's).
+        from .pinout_dialog import PREFILLED_KEY
+        filled = set(self._name_pads_from_geometry(extra, log=False))
+        for row in extra:
+            if _pin_key(row.get("pin")) in filled:
+                row[PREFILLED_KEY] = True
         return rows + extra
+
+    def _logged_symbol_graphics(self, rows) -> list:
+        """@brief The symbol's graphic records for the file, logging any record dropped or converted on load.
+
+        @param rows The applied symbol rows.
+        @return `symbol_graphics(rows, notes)`; each note (an old collinear
+            arc made a polyline, an invalid record left out) goes to the log,
+            never silently (second review 2026-11-03, N1).
+        """
+        from ..generators.symbol_glyphs import symbol_graphics
+        notes = []
+        graphics = symbol_graphics(rows, notes)
+        for note in notes:
+            self._append_log(tx("ATTENZIONE: ") + str(note))
+        return graphics
 
     def _show_pinout_dialog(self) -> None:
         """@brief Edit the pinout table in a modal dialog and apply the accepted rows."""
@@ -20429,7 +20690,7 @@ class MainWindow(QMainWindow):
         self._realign_after_3d_failure()
         if not self._cad_result_is_current():
             return
-        if CAD_ABORT_MESSAGE in message:
+        if self._is_cad_cancel(message):
             self._append_log(tx("INTERROTTO 3D: {message}", message=message))
             # Interrupted after FreeCAD started, the run removed the previous
             # model: say so, instead of letting one believe it is still there.
@@ -21451,7 +21712,7 @@ class MainWindow(QMainWindow):
         positions = list(pin_positions(p))
         # The square pad is the pin-1 marker's pin, as in the written file
         # (`pin_header.square_pad_pin`): «A1» on a header numbered A1, A2...
-        square = square_pad_pin([pin for pin, _x, _y in positions])
+        square = square_pad_pin([pin for pin, _x, _y in positions], p)
         for pin, x_mm, y_mm in positions:
             x, y = x_mm * mm_to_px, y_mm * mm_to_px
             xs_px.append(x)
@@ -21588,19 +21849,34 @@ class MainWindow(QMainWindow):
             stays as before, computed.
         """
         left, top, right, bottom = [value * mm_to_px for value in extent]
+        # The dimension lines go beyond the footprint texts that face them, so
+        # a default Value never covers a body number (its double click and
+        # menu would go to the text, which wins by the press priority).
+        below, beside = bottom, right
+        from .footprint_view import TEXT_KEY_ROLE
+        for item in self.preview_scene.items():
+            if item.data(TEXT_KEY_ROLE) is None or item.parentItem() is not None:
+                continue
+            rect = item.sceneBoundingRect()
+            if rect.right() > left and rect.left() < right and rect.top() >= top:
+                below = max(below, rect.bottom())
+            if rect.bottom() > top and rect.top() < bottom and rect.left() >= left:
+                beside = max(beside, rect.right())
         total_h = self._dim_label("dim.total", extent[2] - extent[0])
         total_v = self._dim_label("dim.total", extent[3] - extent[1])
         if not self._body_dimensions_editable(package):
-            self._add_dim_h(left, right, bottom + 40, total_h)
-            self._add_dim_v(top, bottom, right + 40, total_v)
+            self._add_dim_h(left, right, below + 40, total_h)
+            self._add_dim_v(top, bottom, beside + 40, total_v)
             return
         half_l, half_w = body_l / 2 * mm_to_px, body_w / 2 * mm_to_px
-        self._add_dim_h(-half_l, half_l, bottom + 40, f"{body_l:.2f} mm", edit_key=self.BODY_DIM_X)
-        self._add_dim_v(-half_w, half_w, right + 40, f"{body_w:.2f} mm", edit_key=self.BODY_DIM_Y)
-        body = (-body_l / 2, -body_w / 2, body_l / 2, body_w / 2)
-        if any(abs(a - b) > 1e-6 for a, b in zip(extent, body)):
-            self._add_dim_h(left, right, bottom + 80, total_h)
-            self._add_dim_v(top, bottom, right + 80, total_v)
+        self._add_dim_h(-half_l, half_l, below + 40, f"{body_l:.2f} mm", edit_key=self.BODY_DIM_X)
+        self._add_dim_v(-half_w, half_w, beside + 40, f"{body_w:.2f} mm", edit_key=self.BODY_DIM_Y)
+        # The computed overall size per AXIS, only where pads stick out on
+        # that axis (second review 2026-11-03: a SOIC repeated its body width).
+        if abs(extent[0] + body_l / 2) > 1e-6 or abs(extent[2] - body_l / 2) > 1e-6:
+            self._add_dim_h(left, right, below + 80, total_h)
+        if abs(extent[1] + body_w / 2) > 1e-6 or abs(extent[3] - body_w / 2) > 1e-6:
+            self._add_dim_v(top, bottom, beside + 80, total_v)
 
     def _on_dimension_context(self, key: str, global_pos) -> None:
         """@brief Right click on an editable dimension: the shared element menu with «Modifica quota…».
@@ -21614,6 +21890,37 @@ class MainWindow(QMainWindow):
         menu, keys = canvas_menus.build_element_menu(self.preview_view, "", entries)
         if canvas_menus.exec_element_menu(menu, keys, global_pos) == EDIT_MEASURE:
             self._edit_body_dimension(key)
+
+    def _on_body_context(self, scene_point, global_pos) -> None:
+        """@brief Right click on the body outline: the drawing-origin entries, then the two body sizes.
+
+        @param scene_point Scene `QPointF` of the click, px.
+        @param global_pos Screen `QPoint` where the menu opens.
+        @note The outline covers the body's interior, corners and centre,
+            i.e. the very points offered as drawing origins: the origin
+            entries stay first, as on the background, so the body editor does
+            not take them away (regression found by the suite 2026-11-03).
+        """
+        package = getattr(self, "package_geometry", None)
+        if package is None or not self._body_outline_editable(package):
+            self._footprint_background_context_menu(scene_point, global_pos)
+            return
+        menu = QMenu(self)
+        try:
+            origin = self._add_origin_actions(menu, scene_point)
+            menu.addSeparator()
+            width = menu.addAction(self.i18n.text("Modifica quota orizzontale…"))
+            height = menu.addAction(self.i18n.text("Modifica quota verticale…"))
+            chosen = menu.exec(global_pos)
+            if chosen is width:
+                self._edit_body_dimension(self.BODY_DIM_X)
+            elif chosen is height:
+                self._edit_body_dimension(self.BODY_DIM_Y)
+            else:
+                origin(chosen)
+        finally:
+            # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
+            menu.deleteLater()
 
     def _edit_body_dimension(self, key: str) -> bool:
         """@brief «Modifica quota…» of a body side: the typed value becomes that body size, pads unmoved.
@@ -21776,8 +22083,10 @@ class MainWindow(QMainWindow):
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2,
                         origin=package_preview_grid_origin(package))
-        self._draw_package_dimensions(package, extent, body_l, body_w, mm_to_px)
+        # Texts first: the dimensions are laid out beyond them (second review
+        # 2026-11-03, the default Value text covered the body number).
         self._draw_footprint_texts(mm_to_px, built)
+        self._draw_package_dimensions(package, extent, body_l, body_w, mm_to_px)
         self._draw_footprint_drawings(mm_to_px)
         self._set_footprint_origin_points(body_corners,
                                           [(pin.number, pin.x_mm, pin.y_mm) for pin in pins])
@@ -21793,11 +22102,10 @@ class MainWindow(QMainWindow):
             package pad of a header-mounted part edits the header pad.
         """
         parts = str(token).split(":", 2)
-        mode = self.combo_mounting.currentData()
         if parts[0] == "header" and len(parts) == 2:
             self._edit_header_pad(parts[1])
         elif parts[0] == "package" and len(parts) == 3:
-            if mode in {"headers", "headers_square"}:
+            if self._host_header_lands_apply():
                 self._edit_header_pad(parts[2])
             else:
                 self._edit_package_pad(int(parts[1]))
@@ -21823,15 +22131,16 @@ class MainWindow(QMainWindow):
         number = str(number)
         mode = self.combo_mounting.currentData()
         base_shape = "rect" if mode == "headers_square" else "circle"
-        if mode == "headers":
-            # The same pin-1 rule as the written header (`square_pad_pin`).
-            try:
-                drawn = self._preview_params()
-                pins = [pin for pin, _x, _y in pin_positions(drawn)] if isinstance(drawn, PinHeaderParams) else []
-            except Exception:  # noqa: BLE001 - no readable header: the plain «1» rule
-                pins = []
-            square = square_pad_pin(pins) if pins else "1"
-            base_shape = "rect" if pin_key(number) == square else "circle"
+        # The same pin-1 rule as the written header, in EVERY mode that draws
+        # a pin header (second review 2026-11-03, B6: in «direct» mode pin 1
+        # was drawn square while this dialog called its default a circle).
+        try:
+            drawn = self._preview_params()
+        except Exception:  # noqa: BLE001 - no readable header: the mode's default
+            drawn = None
+        if isinstance(drawn, PinHeaderParams):
+            pins = [pin for pin, _x, _y in pin_positions(drawn)]
+            base_shape = default_pad_shape(drawn, number, square_pad_pin(pins, drawn))
         current = self.header_pad_overrides.get(number, {})
         current_shape = current.get("shape", base_shape)
         # Reference pad and drill of the footprint actually drawn: in direct
@@ -22271,25 +22580,42 @@ class MainWindow(QMainWindow):
         """
         if not self._fp_origin_points:
             return
+        menu = QMenu(self)
+        try:
+            origin = self._add_origin_actions(menu, scene_point)
+            origin(menu.exec(global_pos))
+        finally:
+            # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
+            menu.deleteLater()
+
+    def _add_origin_actions(self, menu, scene_point):
+        """@brief Add «Imposta origine di disegno: …» and «Ripristina origine del footprint» to `menu`.
+
+        @param menu The QMenu being built.
+        @param scene_point Scene `QPointF` of the click, px: the offered point
+            is the candidate nearest to it.
+        @return A callable taking the chosen action (or None) that applies it
+            when it is one of these entries; it does nothing otherwise.
+        @note Shared by the background menu and the body outline's menu.
+        """
+        if not self._fp_origin_points:
+            return lambda _chosen: None
         from .canvas_origin import nearest_point
         here = (scene_point.x() / _FP_PREVIEW_MM_TO_PX, scene_point.y() / _FP_PREVIEW_MM_TO_PX)
         key = nearest_point(self._fp_origin_points, here)
-        current = self._resolved_drawing_origin()
-        menu = QMenu(self)
-        try:
-            choose = menu.addAction(self.i18n.text("Imposta origine di disegno: {name}").format(
-                name=self._footprint_origin_name(key)))
-            choose.setEnabled(key != current)
-            reset = menu.addAction(self.i18n.text("Ripristina origine del footprint"))
-            reset.setEnabled(self.footprint_drawing_origin != FP_ORIGIN_DEFAULT)
-            chosen = menu.exec(global_pos)
+        choose = menu.addAction(self.i18n.text("Imposta origine di disegno: {name}").format(
+            name=self._footprint_origin_name(key)))
+        choose.setEnabled(key != self._resolved_drawing_origin())
+        reset = menu.addAction(self.i18n.text("Ripristina origine del footprint"))
+        reset.setEnabled(self.footprint_drawing_origin != FP_ORIGIN_DEFAULT)
+
+        def apply(chosen) -> None:
+            # Compared by identity: QMenu.exec returns the action object itself.
             if chosen is choose:
                 self._set_footprint_drawing_origin(key)
             elif chosen is reset:
                 self._set_footprint_drawing_origin(FP_ORIGIN_DEFAULT)
-        finally:
-            # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
-            menu.deleteLater()
+        return apply
 
     def _edit_package_pad(self, pad_index: int) -> None:
         """@brief Edit the selected package pad's shape, dimensions and, for a holed pad, its drill.

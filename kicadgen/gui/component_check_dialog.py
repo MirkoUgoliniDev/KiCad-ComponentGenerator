@@ -228,8 +228,17 @@ class ComponentCheckDialog(QDialog):
 
     @staticmethod
     def _pin_ranges(values):
-        numeric = sorted({int(value) for value in values if value.isdigit()})
-        other = sorted({value for value in values if not value.isdigit()})
+        """Pin numbers as compact ranges («1–4, 7, A1»).
+
+        Only a canonical ASCII decimal joins a range: «01» is another pin than
+        «1» (KiCad compares pad numbers as text) and must not collapse into
+        it, and a Unicode digit such as «²» passes `str.isdigit` but not
+        `int`. Every other value is listed as written.
+        """
+        def canonical(value):
+            return value.isascii() and value.isdigit() and str(int(value)) == value
+        numeric = sorted({int(value) for value in values if canonical(value)})
+        other = sorted({value for value in values if not canonical(value)})
         parts = []
         if numeric:
             start = previous = numeric[0]

@@ -24,7 +24,11 @@ from .messages import CACHE_HIT, WARNING, as_warning, kind_of, tx, warning
 # Constants only: photo_refine handles the absence of OpenCV on its own.
 from ..cad3d.measurement_uncertainty import (ASSUMED_SCALE_PX_PER_MM, EDGE_UNCERTAINTY_PX,
                                              elongation_hinge)
-from ..core.validation import positive_number
+from ..core.validation import finite_number, positive_number
+# One meaning, one string: the view decoder's height provenance is the
+# extractor's. datasheet_extractor imports this module only inside functions,
+# so this module-level import makes no cycle.
+from .datasheet_extractor import AI_ANSWER_HEIGHT_SOURCE as VIEW_AI_HEIGHT_SOURCE
 from .photo_refine import MIN_PACKAGE_PIXELS_HINT, SMALLEST_EXPECTED_PART_MM
 
 
@@ -207,11 +211,10 @@ def _view_scale_px_per_mm(region, photo_px, body_length, body_width):
     return min(scales) if len(scales) == 2 else None
 
 
-#: `_height_source` of a height decoded from a vision model's view answer:
-#: an estimate from a top photo, never a measurement. Same value as
-#: datasheet_extractor.AI_ANSWER_HEIGHT_SOURCE (one meaning, one string; not
-#: imported, that module imports this one).
-VIEW_AI_HEIGHT_SOURCE = "ai_answer_visual_estimate_not_measured"
+# VIEW_AI_HEIGHT_SOURCE (imported at the top): `_height_source` of a height
+# decoded from a vision model's view answer, an estimate from a top photo,
+# never a measurement. It IS datasheet_extractor.AI_ANSWER_HEIGHT_SOURCE (one
+# meaning, one string), imported rather than repeated.
 
 
 def decode_detections(raw, region, body_length, body_width, source, log, photo_px=None):
@@ -254,14 +257,20 @@ def decode_detections(raw, region, body_length, body_width, source, log, photo_p
             bbox = entry["bbox"]
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise ValueError(tx("rettangolo non valido"))
-            left, top, right, bottom = map(float, bbox)
-            if not all(math.isfinite(v) and 0 <= v <= 1 for v in (left, top, right, bottom)):
+            # Numbers only, as photo_grounding validates its answers: float()
+            # would turn True into 1.0 and "0.5" into 0.5, accepting an
+            # answer that does not follow the schema.
+            corners = [finite_number(value) for value in bbox]
+            if any(value is None for value in corners):
+                raise ValueError(tx("rettangolo non valido"))
+            left, top, right, bottom = corners
+            if not all(0 <= v <= 1 for v in (left, top, right, bottom)):
                 raise ValueError("rettangolo fuori foto")
             if right <= left or bottom <= top:
                 raise ValueError("rettangolo vuoto/invertito")
-            height = float(entry["height_mm"])
-            angle = float(entry["rotation_deg"])
-            if not math.isfinite(height) or height <= 0 or angle not in (0, 90, 180, 270):
+            height = positive_number(entry["height_mm"])
+            angle = finite_number(entry["rotation_deg"])
+            if height is None or angle not in (0, 90, 180, 270):
                 raise ValueError(tx("altezza/orientamento non valido"))
             x0, x1 = rx0 + left * (rx1-rx0), rx0 + right * (rx1-rx0)
             y0, y1 = ry0 + top * (ry1-ry0), ry0 + bottom * (ry1-ry0)
@@ -1462,9 +1471,14 @@ def classify_smd_rows(rows, photo, frame_px, mm_per_pixel, log, cancel, announce
         row['footprint_candidates'] = prediction['footprint_candidates']
         # Keep the measured body's angle: KiCad pose is separate evidence.
         row['_orientation_verified'] = False
-        row['_review_reason'] = ('Tipo e orientamento proposti dalla rete locale; '
-            'altezza stimata e abbinamento KiCad da verificare.' if prediction['accepted']
-            else 'Rete locale: tipo non riconosciuto o confidenza insufficiente.')
+        network = ('Tipo e orientamento proposti dalla rete locale; '
+                   'altezza stimata e abbinamento KiCad da verificare.' if prediction['accepted']
+                   else 'Rete locale: tipo non riconosciuto o confidenza insufficiente.')
+        # Appended, never overwritten: a doubt the detector raised (an overlap
+        # within its edge uncertainty) must survive the classification
+        # (second review 2026-11-03).
+        previous = row.get('_review_reason')
+        row['_review_reason'] = f'{previous} | {network}' if previous else network
     log(tx("Rete SMD locale: {n} corpi classificati; {accepted} sopra soglia.",
            n=len(rows), accepted=sum(p['accepted'] for p in predictions)))
     return predictions
@@ -1586,6 +1600,18 @@ def recheck_unresolved_smd_rows(photo, report, rows, length, width, model, call,
         # seen), but it is not a type, so «tipo letto dall'AI» (type read by
         # the AI) is not said.
     return pending
+
+
+def _offset_declared(raw_sides, edge: str) -> bool:
+    """True when the answer gave a number for the row offset of `edge` (an omitted one only means «centred» by contract)."""
+    for entry in raw_sides if isinstance(raw_sides, (list, tuple)) else ():
+        if isinstance(entry, dict) and str(entry.get("edge") or "").strip().lower() == edge:
+            offset = entry.get("offset_mm") if entry.get("offset_mm") is not None else entry.get("offset")
+            try:
+                return finite_number(float(offset)) is not None
+            except (TypeError, ValueError):
+                return False
+    return False
 
 
 def extract_inventory(paths, model, length, width, kinds, call, progress=None,
@@ -1806,13 +1832,24 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # presence of the contacts is a fact of the copper along the edge.
         if any(item.no_notch for item in disagreements):
             from .edge_lands import count_edge_copper
-            from .edge_notches import normalized_sides
-            pitches = {edge: side.get("pitch_mm") for edge, side in
-                       normalized_sides(declared.get("castellated_sides")).items()}
+            from .edge_notches import _declared_centres_mm, normalized_sides
+            sides = normalized_sides(declared.get("castellated_sides"))
+            pitches = {edge: side.get("pitch_mm") for edge, side in sides.items()}
             for item in disagreements:
                 if item.no_notch:
+                    # The copper is read AT the declared contact positions too
+                    # (second review 2026-11-03): presence and absence are
+                    # measured where the contacts are said to be.
+                    try:
+                        centres = _declared_centres_mm(dict(sides[item.edge], edge=item.edge),
+                                                       item.edge, length, width)
+                    except (KeyError, TypeError, ValueError):
+                        centres = None
                     copper = count_edge_copper(photo, item.edge, pitches.get(item.edge),
-                                               length, width, declared_count=item.declared)
+                                               length, width, declared_count=item.declared,
+                                               declared_centres_mm=centres,
+                                               centres_assumed=not _offset_declared(
+                                                   declared.get("castellated_sides"), item.edge))
                     item.copper_found = copper.found
                     item.copper_centres_mm = list(copper.centres_mm)
                     item.copper_reason = copper.reason

@@ -33,14 +33,27 @@ second run over old files, so the checks below matter more than usual.
   contained in a Windows Job Object (`contain_process`/`release_process`)
   and killed with its whole process tree, never a bare `subprocess.run`.
   The run ends with the CHILD, not with its pipe: a descendant still holding
-  stdout is ended after `EXIT_DRAIN_GRACE_S`, never reported as a timeout.
+  stdout is ended `EXIT_DRAIN_GRACE_S` after the child's exit (counted from
+  the exit, never restarted by later lines), never reported as a timeout;
+  a pipe closed while the child lives keeps the cancel and the watchdog.
+  **Liveness**: silence = no output AND no CPU progress of the child's job
+  (`process_log.CpuActivity`, Job Object accounting). `Part.read`,
+  `Import.insert` and OCCT booleans hold the GIL, so heartbeat threads stay
+  silent during a parse (proved with FreeCAD 1.1); without a job
+  (non-Windows) output alone counts. CPU alone covers at most
+  `cpu_silence_limit(timeout)` (`CPU_ONLY_SILENCE_FACTOR` x timeout) after
+  the last output; a child that keeps printing is bounded only by cancel.
   Two launches keep their own loop on purpose, with the same machinery
-  (`child_environment`, job, tree kill): the model-measuring child in
-  `kicad_models.py` (silence = a finished model in `progress.jsonl` OR any
-  output, the script beats at `heartbeat_interval(timeout)`, tail kept in
+  (`child_environment`, job, tree kill, `reap_killed_child`): the
+  model-measuring child in `kicad_models.py` (silence = no finished model in
+  `progress.jsonl`, no output and no job CPU; the script beats at
+  `heartbeat_interval(timeout)`, tail kept in
   `<user cache>/freecad-measure.log`) and the candidate preview in
   `gui/model_candidates_dialog.py` (a whole-run limit, since the child only
-  prints its result at the end). A new launch uses `run_logged`.
+  prints its result at the end; output read by a helper thread, every wait
+  bounded). A new launch uses `run_logged`.
+- **A user interruption is `Cad3DCancelled`** (a `Cad3DError`): recognise it
+  by type, never by looking for its text, which is translated.
 - **Outputs are staged and published atomically**: write to the
   `.kicadgen-partial` sibling, rename on success, remove on failure. A kill
   must never leave a truncated STEP or an old file looking current.

@@ -39,3 +39,31 @@ def test_without_a_translator_the_message_stays_the_italian_source(tmp_path, mon
     with pytest.raises(project_state.ProjectConfigError) as caught:
         project_state.read_project_config(tmp_path)
     assert str(caught.value).startswith(f"{path.name} illeggibile: ")
+
+
+def test_a_project_file_nested_too_deep_is_refused_not_a_crash(tmp_path):
+    """@brief Positive: a nesting deeper than the parser's stack is a ProjectConfigError."""
+    depth = 100_000
+    _config(tmp_path, '{"format": "kicadgen-project", "version": 1, "state": {"a": '
+            + "[" * depth + "]" * depth + "}}")
+    with pytest.raises(project_state.ProjectConfigError):
+        project_state.read_project_config(tmp_path)
+
+
+def test_a_state_too_deep_for_the_non_finite_walk_is_refused(tmp_path, monkeypatch):
+    """@brief Positive: the RecursionError of the NaN walk becomes a ProjectConfigError."""
+    _config(tmp_path, '{"format": "kicadgen-project", "version": 1, "state": {"a": [[1]]}}')
+
+    def too_deep(*_args):
+        raise RecursionError("maximum recursion depth exceeded")
+    monkeypatch.setattr(project_state, "_drop_non_finite", too_deep)
+    with pytest.raises(project_state.ProjectConfigError):
+        project_state.read_project_config(tmp_path)
+
+
+def test_a_moderately_nested_state_is_still_read(tmp_path):
+    """@brief Negative: ordinary nesting is read as before."""
+    _config(tmp_path, '{"format": "kicadgen-project", "version": 1, "state": {"a": '
+            + "[" * 50 + "]" * 50 + "}}")
+    state = project_state.read_project_config(tmp_path)
+    assert isinstance(state["a"], list)

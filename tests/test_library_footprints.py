@@ -242,8 +242,11 @@ def test_a_mirrored_chiral_layout_or_another_layout_is_no_match():
     footprint = _footprint(_top_view_turned(RELAY_BOTTOM))
     moved = dict(RELAY_BOTTOM, **{"11": (0.0, 5.0)})
     assert lib.check_layout(moved, "bottom", [footprint], 0.1).reason == "no_match"
+    # A reading with one pad fewer than the footprint is no geometric evidence
+    # either way: the witness abstains (review S3, 2026-11-03), it never says
+    # "no_match" for a count.
     four = {k: v for k, v in RELAY_BOTTOM.items() if k != "11"}
-    assert lib.check_layout(four, "bottom", [footprint], 0.1).reason == "no_match"
+    assert lib.check_layout(four, "bottom", [footprint], 0.1) is None
 
 
 def test_no_candidate_or_an_unknown_view_gives_no_opinion():
@@ -349,10 +352,40 @@ def test_stacked_pads_of_one_number_are_one_centre_and_still_confirm(tmp_path):
 
 
 def test_distinct_numbers_at_distinct_places_stay_distinct(tmp_path):
-    """Negative: without repeated numbers nothing is merged, and a reading missing a pad
-    is still no match."""
+    """Negative: without repeated numbers nothing is merged; a reading missing a pad has
+    another count, on which the witness abstains (review S3), while a reading with the
+    same count and another geometry is still no match."""
     path = _write_pads(tmp_path, "Row_X", [("1", 0, 0), ("2", 2, 0), ("3", 4, 0)])
     footprint = lib.read_footprint(path)
-    assert len(footprint.centres) == 3
-    verdict = lib.check_layout({"1": (0, 0), "2": (2, 0)}, "top", [footprint], 0.1)
-    assert verdict.status == "not_confirmed"
+    assert len(footprint.centres) == 3 and footprint.repeated_apart == ()
+    assert lib.check_layout({"1": (0, 0), "2": (2, 0)}, "top", [footprint], 0.1) is None
+    verdict = lib.check_layout({"1": (0, 0), "2": (2, 0), "3": (4, 1)}, "top", [footprint], 0.1)
+    assert verdict.reason == "no_match"
+
+
+# -- review S3 (2026-11-03): a number repeated at distant places -----------------------
+
+def test_mounting_tabs_sharing_a_number_far_apart_make_the_witness_abstain(tmp_path):
+    """Positive: two «MP» tabs at opposite ends of a connector are two terminals; their mean
+    is a phantom point no reading has, so the footprint gives no verdict instead of
+    "no_match" against a correct reading."""
+    path = _write_pads(tmp_path, "Conn_X", [("1", 0, 0), ("2", 1, 0), ("3", 2, 0),
+                                             ("MP", -2, 2), ("MP", 4, 2)])
+    footprint = lib.read_footprint(path)
+    assert footprint.repeated_apart == ("MP",)
+    reading = {"1": (0, 0), "2": (1, 0), "3": (2, 0), "MP": (-2, 2)}
+    assert lib.check_layout(reading, "top", [footprint], 0.1) is None
+
+
+def test_touching_pads_of_one_number_still_merge_and_judge(tmp_path):
+    """Negative: the same number on pads whose extents touch is one copper island (stacked
+    or tiled pads): merged into one centre, and the witness still says no_match for a
+    reading of the same count with another geometry."""
+    path = _write_pads(tmp_path, "Tab_X", [("1", 0, 0), ("2", 4, 0),
+                                            ("MP", 2, 3), ("MP", 2.9, 3)])
+    footprint = lib.read_footprint(path)
+    assert footprint.repeated_apart == () and len(footprint.centres) == 3
+    assert lib.check_layout({"1": (0, 0), "2": (4, 0), "MP": (2.45, 3)}, "top",
+                            [footprint], 0.1).status == "confirmed"
+    assert lib.check_layout({"1": (0, 0), "2": (4, 0), "MP": (2.45, 5)}, "top",
+                            [footprint], 0.1).reason == "no_match"

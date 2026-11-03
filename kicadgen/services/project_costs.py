@@ -137,7 +137,7 @@ def _read(path: Path) -> Optional[dict]:
         return None
     # OSError (file busy for a moment) goes up as it is: it is not a damaged
     # file and must never be reported, or treated, as one.
-    return _parse(path, path.read_text(encoding="utf-8"))
+    return _parse(path, path.read_bytes())
 
 
 #: Totals of the cost files read by load_project_costs:
@@ -165,8 +165,8 @@ def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
         cached = _LOADED.get(key)
         totals = cached[1].get(run) if cached is not None and cached[0] == raw else None
     if totals is None:
-        # Same decoding errors as read_text; JSON ignores the newline style.
-        totals = _totals(_parse(path, raw.decode("utf-8")), run)
+        # Decoded inside _parse: bytes that are not UTF-8 are a damaged file.
+        totals = _totals(_parse(path, raw), run)
         with _LOADED_LOCK:
             cached = _LOADED.get(key)
             if cached is None or cached[0] != raw:
@@ -178,9 +178,15 @@ def _loaded_totals(path: Path, run: Optional[int]) -> Optional[ProjectCosts]:
                    run_by_provider=dict(totals.run_by_provider))
 
 
-def _parse(path: Path, text: str) -> dict:
-    """Validate and price the text of a cost file; ProjectCostsError when it is not usable."""
+def _parse(path: Path, raw) -> dict:
+    """Validate and price the content of a cost file; ProjectCostsError when it is not usable.
+
+    `raw` is the file's bytes (or already decoded text). Bytes that are not
+    UTF-8 are a damaged file like broken JSON (UnicodeDecodeError is a
+    ValueError), never an unhandled error (review S5, 2026-11-03).
+    """
     try:
+        text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
         data = json.loads(text)
     except ValueError as exc:
         raise ProjectCostsError(f"{path.name}: {exc}") from None

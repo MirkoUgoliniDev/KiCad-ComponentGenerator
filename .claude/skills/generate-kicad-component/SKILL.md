@@ -55,7 +55,11 @@ done, `pre-commit-check` before a commit (only after the user's explicit OK).
   pin numbers and positions (S4.3); designator, description, keywords,
   datasheet, footprint filters (S6.x); footprint F.Fab and F.CrtYd outlines
   (F5.2, F5.3), Reference/Value texts (F5.1), attribute and description (F5.4,
-  F9.1). Courtyard margin 0.25 mm is the general value; family-specific
+  F9.1). Courtyard margin (user decision 2026-11-03, KLC F5.3): **0.5 mm
+  for pin headers** (connector clearance, `pin_header.COURTYARD_MARGIN_MM`),
+  **0.25 mm for packages and castellated modules**
+  (`package.COURTYARD_MARGIN_MM`); the margin follows the generator, a
+  structural attribute, never the part's name. Other family-specific
   clearances need the KLC text before becoming a rule.
 - **Known divergence**: package footprints put the origin at the body centre,
   while KiCad's THT convention is pin 1 at (0, 0). Changing it is a user

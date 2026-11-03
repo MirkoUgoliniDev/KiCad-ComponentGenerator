@@ -1204,6 +1204,18 @@ def _sum_tolerance(quotes: int, factor: float = 1.0) -> float:
     return max(PAD_READING_TOLERANCE_MM, rounding * quotes)
 
 
+def _reading_tolerance(factor: Optional[float]) -> float:
+    """Tolerance, mm, between two readings of one pad offset in a drawing of unit `factor`.
+
+    PAD_READING_TOLERANCE_MM in a millimetre drawing, but never below the
+    rounding of ONE printed quote in the drawing's own unit (_sum_tolerance):
+    a quote of 0.01 inch rounds by 0.127 mm, more than 0.1 mm, so two correct
+    readings of an inch drawing were flagged as disagreeing (review G10,
+    2026-11-03). An undeclared unit (None) keeps the millimetre value.
+    """
+    return _sum_tolerance(1, factor if factor is not None else 1.0)
+
+
 def _axis_from_chains(chains, axis: str, factor: float, problems: list, malformed: list) -> tuple:
     """Solve one axis: (positions in mm, quotes summed to reach each node) of the main component.
 
@@ -2083,13 +2095,13 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
                 ("chains", candidate["pads"], candidate["spans"], candidate["centred"])]
     if not views_differ:
         readings.append(("dedicated", dedicated, spans, _centred(spans, exchanged)))
-    if complete and not _offset_disagreements(candidate["pads"], dedicated, numbers,
-                                              PAD_READING_TOLERANCE_MM):
+    tolerance = _reading_tolerance(factor)
+    if complete and not _offset_disagreements(candidate["pads"], dedicated, numbers, tolerance):
         _write_chain_pads(data, pins, candidate, factor)
         note = tx("Posizioni dei pad prese dalle catene di quote della risposta principale: la "
                   "lettura dedicata concorda con esse (scostamenti entro {tolerance} mm) e non "
-                  "con le coordinate calcolate dal modello.", tolerance=PAD_READING_TOLERANCE_MM)
-    elif complete and not _offset_disagreements(main, dedicated, numbers, PAD_READING_TOLERANCE_MM):
+                  "con le coordinate calcolate dal modello.", tolerance=tolerance)
+    elif complete and not _offset_disagreements(main, dedicated, numbers, tolerance):
         if not dedicated_closed:
             # Two readings that were never checked against the drawing may
             # share one misread quote (the reported failure mode): without a
@@ -2105,7 +2117,7 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
         note = tx("Posizioni dei pad confermate dalla lettura dedicata ({count} pad, scostamenti "
                   "entro {tolerance} mm); le catene di quote della risposta principale, che non "
                   "concordavano, sono state scartate.", count=len(numbers),
-                  tolerance=PAD_READING_TOLERANCE_MM)
+                  tolerance=tolerance)
     elif not complete:
         extra = tx("Lettura dedicata ({view}): {dedicated}. Incompleta o con vista diversa "
                    "dalla risposta principale: non basta a decidere.", view=reading["view"],
@@ -2181,7 +2193,8 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         (_settle_by_measure). None measures nothing.
     @note Rules, the same for every part: the two readings choose their own
         origins, so SIGNED OFFSETS between pads of the same number are
-        compared, both in millimetres, within PAD_READING_TOLERANCE_MM.
+        compared, both in millimetres, within _reading_tolerance
+        (PAD_READING_TOLERANCE_MM, or one quote's rounding in an inch drawing).
         Confirmed: every common pair agrees, the declared views agree and the
         dedicated reading placed every pin and no other (pads only the
         dedicated reading found are terminals the answer left out). Otherwise the positions are NOT
@@ -2226,6 +2239,10 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
     if not isinstance(pins, (list, tuple)) or not pins:
         return
+    # Pin numbers are text everywhere below (pads are keyed by text): a model
+    # that sends 1 instead of "1" must not raise a KeyError and lose the paid
+    # main answer and the paid pad reading (review S1, 2026-11-03).
+    _normalise_pin_numbers(pins)
     factor = _declared_unit_factor(data)
     if factor is None:
         # The main answer's coordinates have no declared unit: nothing can
@@ -2265,7 +2282,8 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         return
     dedicated = reading["pads"]
     common = sorted(set(main) & set(dedicated))
-    disagreements = _offset_disagreements(main, dedicated, common, PAD_READING_TOLERANCE_MM)
+    tolerance = _reading_tolerance(factor)
+    disagreements = _offset_disagreements(main, dedicated, common, tolerance)
     views_differ = (main_view in ("top", "bottom") and reading["view"] in ("top", "bottom")
                     and main_view != reading["view"])
     problems, exchanged = ([], False) if repeated else _chain_contradictions(geometry, reading,
@@ -2325,7 +2343,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         if set(main) <= set(dedicated):
             note = tx("Posizioni dei pad confermate dalla lettura dedicata ({count} pad, "
                       "scostamenti entro {tolerance} mm).", count=len(common),
-                      tolerance=PAD_READING_TOLERANCE_MM)
+                      tolerance=tolerance)
             verdict = holes(main)
             if verdict is not None and verdict.status == "not_confirmed":
                 note += " " + tx("Attenzione: {holes}; controllare il disegno.",
@@ -2394,6 +2412,18 @@ def _pad_number_text(value) -> str:
         The validation rejects the empty number.
     """
     return "" if value is None else str(value).strip()
+
+
+def _normalise_pin_numbers(pins) -> None:
+    """Rewrite in place every pin ``number`` as stripped text (``_pad_number_text``).
+
+    Pads, readings and witnesses are keyed by text; a number the model sent
+    as an integer would otherwise miss its key. A pin without a ``number``
+    key is left alone so the validation still reports it.
+    """
+    for pin in pins:
+        if isinstance(pin, dict) and "number" in pin:
+            pin["number"] = _pad_number_text(pin["number"])
 
 
 def _pad_number_key(number: str):
@@ -2611,7 +2641,7 @@ def _require_declared_view(data: dict, progress=None) -> None:
     _block(data, message, progress)
 
 
-def _layout_checker(documents, library=None, view_of=None):
+def _layout_checker(documents, library=None, view_of=None, tolerance_mm=None):
     """The `check_layout` of apply_dedicated_pads: the drawn holes and the library footprints.
 
     @param documents Drawing images whose holes are found (drawing_holes);
@@ -2621,6 +2651,9 @@ def _layout_checker(documents, library=None, view_of=None):
     @param view_of Zero-argument callable returning the view the pads are
         read in ("top", "bottom", other); the library footprints are top
         views, so they are compared only when it is known.
+    @param tolerance_mm Largest pad-centre distance the library witness
+        accepts (_reading_tolerance of the drawing's unit); None means
+        PAD_READING_TOLERANCE_MM.
     @return None when there is nothing to check with; otherwise a callable
         (pads, body) -> verdict. Two independent geometry witnesses, one
         verdict (generality audit C2, 2026-10-31):
@@ -2647,7 +2680,8 @@ def _layout_checker(documents, library=None, view_of=None):
             return holes
         from .library_footprints import check_layout
         witness = check_layout(pads, view_of() if view_of else None, library,
-                               PAD_READING_TOLERANCE_MM)
+                               tolerance_mm if tolerance_mm is not None
+                               else PAD_READING_TOLERANCE_MM)
         verdicts = [v for v in (holes, witness) if v is not None]
         confirming = [v for v in verdicts if _holes_confirm(v)]
         contradicting = [v for v in verdicts if getattr(v, "reason", None) == "no_match"]
@@ -3248,7 +3282,8 @@ def _place_pins_from_chains(data: dict, chains) -> None:
         data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
         return
     solved = pads_from_chains(chains, factor)
-    numbers = [pin["number"] for pin in pins]
+    _normalise_pin_numbers(pins)
+    numbers = [pin.get("number") for pin in pins]
     missing = sorted(set(numbers) - set(solved["pads"]))
     # Contradictions between chains and with the body, then unreadable chains.
     problems, exchanged = _chain_contradictions(geometry, solved, factor)
@@ -3280,7 +3315,7 @@ def _place_pins_from_chains(data: dict, chains) -> None:
     candidate = {"pads": solved["pads"], "spans": spans,
                  "centred": spans["x"] is not None and spans["y"] is not None and not exchanged}
     disagreements = _offset_disagreements(before, solved["pads"], numbers,
-                                          PAD_READING_TOLERANCE_MM)
+                                          _reading_tolerance(factor))
     if not disagreements:
         _write_chain_pads(data, pins, candidate, factor)
         return
@@ -4302,9 +4337,12 @@ def _pin_label(value):
         string since 2026-11-03), or an integer from older answers and tests.
     @return An int >= 1 for a label made of ASCII digits only (its historical
         type, so numeric grids keep comparing with populated_pins and the
-        numbering conventions); the stripped text for any other label; None
-        for a malformed value (booleans, fractions, numbers below 1, empty
-        or non-label text).
+        numbering conventions); the TEXT «0» for pad 0 (a real pad number on
+        some packages, accepted by _validated_pinout too: one rule, review
+        S7 2026-11-03), so it is a label like «A1» and stays outside the
+        automatic 1..rows x cols numbering; the stripped text for any other
+        label; None for a malformed value (booleans, fractions, negative
+        numbers, empty or non-label text).
     @note Pin numbers are TEXT (T7NS5D4-12 relay, 2026-11-03: a schema
         declaring ``pin`` an integer made the model drop pads A1 and A2).
         Mixed int/str values are compared through `_pin_text`, never as ints.
@@ -4317,13 +4355,14 @@ def _pin_label(value):
             return None
         if text.isascii() and text.isdigit():
             number = int(text)
-            if number < 1:
-                return None
             # «01» stays text: the drawing printed it so, and a pad «01» is
-            # not pad 1 (generality audit 2026-11-03).
-            return number if str(number) == text else text
+            # not pad 1 (generality audit 2026-11-03). Pad «0» stays text
+            # too: it has no place in the 1..N automatic numbering.
+            return number if number >= 1 and str(number) == text else text
         return text
     number = _optional_number(value, integer=True)
+    if number == 0:
+        return "0"
     return number if number is not None and number >= 1 else None
 
 
@@ -4363,8 +4402,8 @@ def _pin_map_seen_from_top(
     @return The entries seen from above, or None when `pin_map` is empty.
 
     @throws ExtractionError When an entry is not an object with a printed
-        pin label (`_pin_label`: «1», «A1», «EP»; numbers below 1, booleans
-        and fractions rejected) and integral row >= 0 and col >= 0,
+        pin label (`_pin_label`: «1», «A1», «EP», «0» as text; negative
+        numbers, booleans and fractions rejected) and integral row >= 0 and col >= 0,
         lies outside the rows x cols matrix (rows checked when given), or
         repeats a pin number or a position. The map is a numbering convention
         as a whole, so one bad entry invalidates it.
@@ -4635,10 +4674,17 @@ def _canonicalize_answer(data: dict) -> None:
 
     unit = data.get("drawing_unit")
     if unit is None:
+        # The schema requires the unit; a missing one is read as mm, but
+        # SAID, like an unknown one, and its provenance is kept as
+        # undeclared for _value_sources (review S6, 2026-11-03).
+        notes.append(tx("DUBBIO unita' di misura non dichiarata: quote trattate come "
+                        "millimetri, da verificare."))
+        data["_unit_undeclared"] = True
         unit = "mm"
     elif unit not in _UNIT_TO_MM:
         notes.append(tx("DUBBIO unita' di misura {unit!r} non riconosciuta: quote trattate come "
                         "millimetri, da verificare.", unit=unit))
+        data["_unit_undeclared"] = True
         unit = "mm"
     if unit != "mm":
         _convert_units(data, _UNIT_TO_MM[unit])
@@ -6280,7 +6326,8 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
         data["_outline_measurer"] = _outline_measurer(documents)
         try:
             apply_dedicated_pads(data, reading, progress, check_layout=_layout_checker(
-                documents, numbering.get("library"), view_of),
+                documents, numbering.get("library"), view_of,
+                _reading_tolerance(_declared_unit_factor(data))),
                 measure_layout=_layout_measurer(documents))
         finally:
             data.pop("_outline_measurer", None)
@@ -6301,7 +6348,8 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             "nessun disegno in immagine con ruolo pinout o vista dall'alto: la lettura dedicata "
             "non si puo' fare (un PDF non si ingrandisce)")}, progress,
             check_layout=_layout_checker([], numbering.get("library"),
-                                         lambda: data.get("contacts_view")))
+                                         lambda: data.get("contacts_view"),
+                                         _reading_tolerance(_declared_unit_factor(data))))
     if (numbering and _has_explicit_pads(data)
             and numbering.get("component_family") in SINGLE_COMPONENT_FAMILIES):
         # After the readings, which may have adopted a view: an unknown view
@@ -6944,8 +6992,15 @@ def _value_sources(data: dict, params: "ExtractedParams", sides, notes: list) ->
     @param notes Notes of the result, for a malformed `value_sources`.
     @return {field: source} with the key scheme of ExtractedParams.value_sources;
         a value without a valid declaration is UNDECLARED_SOURCE, never "read".
+        ``drawing_unit`` is UNDECLARED_SOURCE when the answer gave no known
+        unit (`_canonicalize_answer` read its lengths as mm).
     """
     sources = {}
+    if data.get("_unit_undeclared"):
+        # Every length was read in a unit the answer did not declare (or
+        # declared unknown) and taken as mm: the unit itself is a value
+        # without provenance, listed by _review_notes.
+        sources["drawing_unit"] = UNDECLARED_SOURCE
     declared = _declared_sources(data.get("value_sources"), _TOP_LENGTH_KEYS, notes,
                                  "value_sources")
     for key in _TOP_LENGTH_KEYS:
@@ -7329,14 +7384,24 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
     populated = _validated_populated_pins(raw_populated, max_pin, notes, None)
     if not pin_map:
         return None, populated, None
+    if not all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in (rows, cols)):
+        # A partial map without a known grid (rows or cols missing, e.g. an
+        # answer whose footprint comes from package_geometry and whose matrix
+        # is informative only): no convention can complete the anchors, so
+        # the map is set aside with a note, never a crash that loses the
+        # paid answer (review S2, 2026-11-03).
+        notes.append(tx("pin_map parziale ignorata: righe o colonne della griglia non note, "
+                        "nessuna convenzione puo' completarla. Verificare la numerazione sul "
+                        "disegno."))
+        return None, populated, None
     expected = len(populated) if populated else (max_pin or 0)
     anchors = {entry["pin"]: (entry["row"], entry["col"]) for entry in pin_map}
-    fitting = [name for name, convention in _numbering_conventions(int(rows), int(cols)).items()
+    fitting = [name for name, convention in _numbering_conventions(rows, cols).items()
                if all(convention.get(pin) == position for pin, position in anchors.items())]
     summary = ", ".join(f"{pin}@({r},{c})" for pin, (r, c)
                         in sorted(anchors.items(), key=lambda item: _pin_sort_key(item[0])))
     if len(fitting) == 1:
-        convention = _numbering_conventions(int(rows), int(cols))[fitting[0]]
+        convention = _numbering_conventions(rows, cols)[fitting[0]]
         completed = [{"pin": pin, "row": row, "col": col}
                      for pin, (row, col) in sorted(convention.items())]
         if populated:
@@ -7684,9 +7749,10 @@ def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
         declares, in the source order; None when none is kept.
     @note ``pin`` is a nonnegative integer (an integral float such as 3.0
         included; 0 is a real pad number on some packages and the symbol
-        and pinout tables accept any pin text) or a nonempty label such as
-        "A2" for grid packages. An entry without a usable pin id is dropped
-        with a note: there is no pin to keep (review D2).
+        and pinout tables accept any pin text -- `_pin_label` accepts it
+        too, as the text «0», for pin maps and populated pins) or a nonempty
+        label such as "A2" for grid packages. An entry without a usable pin
+        id is dropped with a note: there is no pin to keep (review D2).
     @note A missing ``name``, or one that is not text, does not drop the pin: the symbol
         must keep every pin of the source pinout, so the pin stays with an
         empty name and a note names the discarded ``pinout[i].name`` (review G5).
@@ -7734,7 +7800,14 @@ def _validated_lead_exit(raw, notes: list) -> Optional[str]:
 #: hole has to be estimated from the lead: the usual 0.2-0.3 mm of the
 #: project rules for through-hole parts (middle of the range, declared).
 LEAD_TO_HOLE_CLEARANCE_MM = 0.25
-#: Annular copper, in mm, added to an estimated hole for an estimated pad.
+#: Copper, in mm, added to an estimated hole DIAMETER for an estimated pad:
+#: a 0.4 mm ring per side. DECLARED HEURISTIC (review G8, 2026-11-03): no
+#: standard is cited for it -- it is a common through-hole design-rule
+#: choice, comfortably above the IPC-7251 minimum ring of MIN_ANNULAR_RING_MM
+#: and the usual fabrication allowance, chosen so an estimated pad stays
+#: solderable. It is only ever applied to values already marked ESTIMATED
+#: (a lifted drill, a pad that no longer clears it); a pad diameter read from
+#: the drawing or the manufacturer's land pattern makes it superfluous.
 HOLE_TO_PAD_ANNULUS_MM = 0.8
 #: Smallest copper ring per side, in mm, a through-hole pad must keep around
 #: a lifted hole for the pad to be solderable: a declared manufacturing

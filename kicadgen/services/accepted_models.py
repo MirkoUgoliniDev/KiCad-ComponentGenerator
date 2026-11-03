@@ -72,6 +72,32 @@ TERMINAL_COUNT_CATEGORIES = frozenset({
 #: wins, i.e. the user's latest correction.
 RECENCY_TIE_MARGIN = 0.05
 
+# Visual-similarity thresholds (cosine similarity in [0, 1] of the local
+# OpenCV crop descriptors, component_image_match.similarity). DECLARED
+# HEURISTICS (review G7, 2026-11-03): they were set by judgement when the
+# visual path was added, NOT tuned on a labelled set of crops -- no such set
+# exists in the repository. What would replace them: a benchmark of accepted
+# crops (same part / different part pairs) from which the score and margin
+# distributions give the thresholds with a stated error rate. They only ever
+# narrow or recover candidates that already passed the mechanical checks
+# (dimensions within tolerance, terminal count), never select a model alone.
+
+#: Smallest visual score for which an entry recorded with the OTHER size
+#: basis («body» vs «total») is recovered: the same crop, read with another
+#: basis label by the AI. Kept high because the dimensions were compared on
+#: different bases.
+VISUAL_BASIS_RECOVERY_MIN = 0.92
+#: Lead the recovered entry's visual score must have over the best entry of
+#: another model: a recovery must be unambiguous.
+VISUAL_BASIS_RECOVERY_MARGIN = 0.08
+#: Visual scores within this gap of the best one count as a visual tie
+#: inside the geometric/recency band.
+VISUAL_TIE_MARGIN = 0.04
+#: Smallest best visual score that lets images narrow a geometric/recency
+#: tie; below it the crops are not recognisably similar and the established
+#: rule (most recent choice) decides.
+VISUAL_TIEBREAK_MIN = 0.45
+
 #: Recognised measurement bases, with the matcher's aliases.
 _BASIS_ALIASES = {"leads": "total", "body_and_leads": "total"}
 _BASES = ("unknown", "body", "total", "pads")
@@ -827,12 +853,12 @@ class AcceptedModelStore:
         strict = [item for item in compatible if item[1]["basis"] == sig["basis"]]
         recovered = []
         for item in compatible:
-            if (item in strict or item[5] < .92
+            if (item in strict or item[5] < VISUAL_BASIS_RECOVERY_MIN
                     or {item[1]["basis"], sig["basis"]} != {"body", "total"}):
                 continue
             competitors = [other[5] for other in compatible
                            if other[1]["model_ref"] != item[1]["model_ref"]]
-            if item[5] - max(competitors, default=0.0) >= .08:
+            if item[5] - max(competitors, default=0.0) >= VISUAL_BASIS_RECOVERY_MARGIN:
                 recovered.append(item)
         compatible = strict + recovered
         if not compatible:
@@ -841,10 +867,10 @@ class AcceptedModelStore:
         closest = min(item[0] for item in compatible)
         band = [item for item in compatible if item[0] <= closest + RECENCY_TIE_MARGIN]
         best_visual = max((item[5] for item in band), default=0.0)
-        visual_tie = [item for item in band if item[5] >= best_visual - 0.04]
+        visual_tie = [item for item in band if item[5] >= best_visual - VISUAL_TIE_MARGIN]
         # Let images break a geometric/recency tie only when a reference is
         # recognizably similar. Weak visual scores leave the established rule.
-        if best_visual >= 0.45 and len(visual_tie) < len(band):
+        if best_visual >= VISUAL_TIEBREAK_MIN and len(visual_tie) < len(band):
             band = visual_tie
         band.sort(key=lambda item: (item[1]["last_accepted"], item[1]["id"]), reverse=True)
         error, row, path, tolerance, source, visual_score = band[0]

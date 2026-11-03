@@ -64,3 +64,27 @@ def test_only_a_project_install_looks_at_the_global_table(window, monkeypatch):
     monkeypatch.setattr(gui, "resolve_global_fp_lib_table", lambda cli: SimpleNamespace(path=Path("g/fp-lib-table")))
     assert window._other_scope_table(True) == Path("g/fp-lib-table")
     assert window._other_scope_table(False) is None
+
+
+def test_a_project_install_with_an_old_kicad_asks_and_an_unreadable_other_table_is_logged(boxes, monkeypatch):
+    """D2/D6 (second review 2026-11-03): an old local KiCad is a question (not a refusal); an unreadable table a log line."""
+    window, shown, _answer = boxes
+    logged = []
+    monkeypatch.setattr(window, "_append_log", logged.append)
+    plan = _plan(detected_kicad_too_old=True, detected_kicad_version="9.0.7", shadowing_error="bad table")
+    assert window._confirm_install_plan_warnings(plan, project_library=True)
+    assert len(shown["question"]) == 1 and "9.0.7" in shown["question"][0]
+    assert logged and "bad table" in logged[0]
+    shown["question"].clear()
+    assert window._confirm_install_plan_warnings(_plan(), project_library=True)
+    assert shown["question"] == [], "negative: a current KiCad asks nothing"
+
+
+def test_a_failed_install_names_the_rollback_folder_left(window, tmp_path):
+    """D8: the error text carries the leftover rollback folder; without one it is the plain error."""
+    from kicadgen.services.kicad_library import KiCadLibraryError
+    left = tmp_path / ".kicadgen-rollback-x"
+    with_left = KiCadLibraryError("install_write_refused", path=str(tmp_path), rollback_left=str(left))
+    without = KiCadLibraryError("install_write_refused", path=str(tmp_path))
+    assert str(left) in window._kicad_error_text_with_rollback(with_left)
+    assert str(left) not in window._kicad_error_text_with_rollback(without)

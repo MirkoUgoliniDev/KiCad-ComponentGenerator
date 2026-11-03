@@ -286,9 +286,13 @@ def test_package_courtyard_is_rounded_outwards():
 # ── 10. The pin-1 pad of a header numbered A1, A2... ──────────────────────
 
 def test_the_square_pad_follows_the_pin_one_marker_rule():
-    params = PinHeaderParams(rows=1, cols=3, pin_map={"A1": (0, 0), "A2": (0, 1), "A10": (0, 2)})
-    fp = build_pin_header(params)
-    assert _pad(fp, "A1").shape == "rect"
-    assert _pad(fp, "A2").shape == "circle" and _pad(fp, "A10").shape == "circle"
+    # CONTRACT CHANGED (generality audit 2026-11-03, GA8): A1 is pin 1 only
+    # on a real grid (two row letters, two columns); one lettered row is not.
+    grid = build_pin_header(PinHeaderParams(rows=2, cols=2, pin_map={
+        "A1": (0, 0), "A2": (0, 1), "B1": (1, 0), "B2": (1, 1)}))
+    assert _pad(grid, "A1").shape == "rect"
+    assert all(_pad(grid, n).shape == "circle" for n in ("A2", "B1", "B2"))
+    row = build_pin_header(PinHeaderParams(rows=1, cols=3, pin_map={"A1": (0, 0), "A2": (0, 1), "A10": (0, 2)}))
+    assert all(_pad(row, n).shape == "circle" for n in ("A1", "A2", "A10"))
     numbered = build_pin_header(PinHeaderParams(rows=1, cols=2))
     assert _pad(numbered, "1").shape == "rect" and _pad(numbered, "2").shape == "circle"

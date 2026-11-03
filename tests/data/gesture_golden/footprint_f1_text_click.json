@@ -20,7 +20,7 @@
       "texts": {
         "Reference": [
           2.0,
-          -2.0
+          -3.0
         ],
         "anchor": "left_bottom"
       }
@@ -29,7 +29,7 @@
     "texts": {
       "Reference": [
         2.0,
-        -2.0
+        -3.0
       ]
     },
     "undo": 1

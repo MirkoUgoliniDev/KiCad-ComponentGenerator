@@ -83,7 +83,10 @@ def test_courtyard_unites_asymmetric_body_and_protruding_pads():
         body_offset_y=1.0, margin=0.25,
     ))
     rect = _rect(fp, "F.CrtYd")
-    assert rect.start == (-4.25, -1.25)
+    # CONTRACT CHANGED 2026-11-03 (second review, N4): the courtyard encloses
+    # the pin-1 dot's ink too; the dot lies outside the pin-1 corner, so the
+    # courtyard grows on that side only.
+    assert rect.start == (-5.17, -1.25)
     assert rect.end == (7.25, 6.25)
     assert rect.width == 0.05
 
@@ -111,7 +114,11 @@ def test_empty_population_has_finite_courtyard(body):
     # without a body and without pads the silk frames the declared grid at
     # the silk clearance plus half a stroke (0.26 mm), and the courtyard adds
     # the margin: 0.76 mm.
-    assert rect.start == ((-0.5, -0.5) if body else (-0.76, -0.76))
+    # CONTRACT CHANGED 2026-11-03 (second review, N4): the courtyard encloses
+    # the pin-1 dot's ink too; the dot lies outside the pin-1 corner, so the
+    # courtyard grows on that side only.
+    # The unpopulated pin 1 keeps its mark at its grid position (N3).
+    assert rect.start == ((-1.42, -1.42) if body else (-1.57, -1.57))
     assert rect.end == ((5.5, 3.5) if body else (0.76, 0.76))
 
 
@@ -156,8 +163,11 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
     assert not any(g.layer == "F.Fab" for g in fp.graphics if type(g).__name__ != "FpText")
     courtyard = _rect(fp, "F.CrtYd")
     # CONTRACT CHANGED 2026-11-03: the silk frame (see above) plus the margin.
-    assert courtyard.start == pytest.approx((-1.41, -1.41))
     assert courtyard.end == pytest.approx((5.41, 6.41))
+    # CONTRACT CHANGED 2026-11-03 (second review, N4): the courtyard encloses
+    # the pin-1 dot's ink too; the dot lies outside the pin-1 corner, so the
+    # courtyard grows on that side only.
+    assert courtyard.start == pytest.approx((-2.22, -2.22))
 
 
 @pytest.mark.parametrize("field", [

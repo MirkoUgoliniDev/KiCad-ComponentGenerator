@@ -131,9 +131,35 @@ def _legacy_klc_layers(fp):
     return fp
 
 
+#: CONTRACT CHANGED 2026-11-03 (second review, G1/G5): the footprint
+#: description records every hole, land and half-hole centre the module
+#: ASSUMES instead of reading («; lato sinistro: semi-foro 1.70mm, ...
+#: assunti, non misurati (stima)»): the pinned modules use the historical
+#: reference sizes, so their description gained that text and nothing else.
+#: The fold removes exactly those entries; test_the_assumed_size_fold_only_
+#: touches_the_description below proves it hides nothing more.
+_ASSUMED_SIZES = re.compile(r"; lato [a-z]+: [^;\"]*? assunti, non misurati \(stima\)")
+
+
+def _without_assumed_sizes(text):
+    return _ASSUMED_SIZES.sub("", text)
+
+
 def _uuidless(fp):
     text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(_legacy_klc_layers(fp)).render())
+    text = _without_assumed_sizes(text)
     return _DESCRIPTION_PROPERTY.sub('(property "Description" ""', text, count=1)
+
+
+def test_the_assumed_size_fold_only_touches_the_description():
+    """@brief Folding the G1 assumed-size text back changes the descr/Description lines only."""
+    fp = build_castellated_module(rs485())
+    plain = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render()).splitlines()
+    folded = _without_assumed_sizes("\n".join(plain)).splitlines()
+    assert len(plain) == len(folded)
+    changed = [(a.strip(), b.strip()) for a, b in zip(plain, folded) if a != b]
+    assert changed and all(a.split()[0] in ("(descr", '(property') for a, _ in changed)
+    assert all("assunti, non misurati (stima)" in a and "assunti" not in b for a, b in changed)
 
 
 def test_the_klc_layer_fold_only_touches_the_outlines():

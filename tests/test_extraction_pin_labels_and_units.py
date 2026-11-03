@@ -75,9 +75,12 @@ def test_a_numeric_pin_map_works_as_before():
     assert [entry["pin"] for entry in entries] == [1, 2]
 
 
-@pytest.mark.parametrize("pin", [True, 0, "0", "", "pin 1", 1.5, None, "A 1", "-3"])
+# CONTRACT CHANGED 2026-11-03 (review S7): pad 0 is a real pad number that
+# _validated_pinout already accepted; _pin_label now accepts it too, as the
+# text «0», so 0 and «0» left this list of malformed pins. Negative numbers stay.
+@pytest.mark.parametrize("pin", [True, -1, "", "pin 1", 1.5, None, "A 1", "-3"])
 def test_a_malformed_pin_is_still_refused(pin):
-    """Negative: booleans, numbers below 1, fractions, blanks and sentences are not labels."""
+    """Negative: booleans, negative numbers, fractions, blanks and sentences are not labels."""
     with pytest.raises(ExtractionError):
         ext._pin_map_seen_from_top([{"pin": pin, "row": 0, "col": 0}], 2, "top", 1)
 
@@ -261,3 +264,24 @@ def test_model_chains_without_a_declared_unit_leave_the_model_coordinates():
     assert "unita' non dichiarata" in data["notes"]
     assert [(p["x_mm"], p["y_mm"]) for p in data["package_geometry"]["pins"]] == [
         (0.0, 0.0), (2.54, 0.0)]
+
+
+# ── Review S7 (2026-11-03): pad 0, one rule for pin maps and pinouts ─────────
+
+@pytest.mark.parametrize("pin", [0, "0", " 0 "])
+def test_pad_zero_is_a_text_label_in_a_pin_map_and_a_pinout(pin):
+    """Positive: pad 0 no longer invalidates a whole pin_map; it is the text «0», like the
+    pinout keeps it."""
+    entries = ext._pin_map_seen_from_top(
+        [{"pin": pin, "row": 0, "col": 0}, {"pin": 1, "row": 0, "col": 1}], 2, "top", 1)
+    assert [entry["pin"] for entry in entries] == ["0", 1]
+    assert ext._validated_pinout([{"pin": pin, "name": "GND"}], [])[0]["pin"] in (0, "0")
+
+
+def test_pad_zero_stays_outside_the_automatic_numbering():
+    """Negative: «0» is a label, so without a map placing it it is not a populated pin of the
+    automatic 1..rows x cols numbering, while «1» is."""
+    notes = []
+    assert ext._validated_populated_pins(["0", "1"], 4, notes, None) == [1]
+    assert notes
+    assert ext._validated_populated_pins(["0", "1"], 4, [], mapped=["0", 1]) == ["0", 1]

@@ -1,12 +1,50 @@
 """@brief Derive host-board lands without changing the photographed module geometry."""
 
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
 from math import isfinite
+from typing import Optional
 
 from ..core.package_geometry import PackageGeometry, PinSpec, pad_outline, polygon_separation
 from ..services.messages import tx
 from .castellated_module import CastellatedModuleParams, pad_positions, MIN_COPPER_GAP_MM
-from .pin_header import PinHeaderParams, pad_copper_gap, pin_key, validate_pad_overrides
+from .pin_header import (COURTYARD_MARGIN_MM as HEADER_COURTYARD_MARGIN_MM, PinHeaderParams,
+                         pad_copper_gap, pin_key, validate_pad_overrides)
+
+
+@dataclass
+class HostLandGeometry(PackageGeometry):
+    """@brief Host-board lands for pin headers: a PackageGeometry that declares its courtyard clearance.
+
+    @note Pin headers are connectors, so their lands take the connector
+        courtyard clearance `pin_header.COURTYARD_MARGIN_MM` (0.5 mm, user
+        decision 2026-11-03), the margin the PinHeaderParams path already
+        used; `generators.package.build_package` reads `courtyard_margin_mm`
+        (review 2026-11-03, N8: the package path gave 0.25 mm). A subclass
+        and not a new PackageGeometry field, so the physical geometry the
+        analysis returns, its saved form and the keys derived from it stay
+        exactly as they were.
+    """
+    #: Courtyard clearance around body and lands, mm.
+    courtyard_margin_mm: Optional[float] = HEADER_COURTYARD_MARGIN_MM
+
+    def validate(self) -> None:
+        """@brief Validate the lands as a PackageGeometry, and the declared clearance.
+
+        @throws ValueError As PackageGeometry.validate, or when the clearance
+            is not a finite number >= 0.
+        """
+        super().validate()
+        margin = self.courtyard_margin_mm
+        if margin is not None and (isinstance(margin, bool) or not isinstance(margin, (int, float))
+                                   or not isfinite(margin) or margin < 0):
+            raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
+
+
+def _host_lands(geometry: PackageGeometry, **changes) -> HostLandGeometry:
+    """`geometry` as HostLandGeometry with `changes` applied, every PackageGeometry field kept."""
+    values = {field.name: getattr(geometry, field.name) for field in fields(PackageGeometry)}
+    values.update(changes)
+    return HostLandGeometry(**values)
 
 
 def _land_gap(pin, other) -> float:
@@ -64,6 +102,10 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
     @param pad_overrides Optional {pin number: {"size": mm, "shape": str}}
         applied to single lands instead of the shared diameter and shape.
     @return Independent parameters used only by footprint export and 2D preview.
+        A package or castellated module gives a HostLandGeometry carrying the
+        header courtyard clearance (`pin_header.COURTYARD_MARGIN_MM`): pin
+        headers are connectors, and the PinHeaderParams path already used
+        that margin (review 2026-11-03, N8: the package path gave 0.25 mm).
     @throws ValueError For missing closed holes, invalid sizes or overlapping lands,
         or an override that `pin_header.validate_pad_overrides` refuses (the
         same rule on every path: package and castellated modules included).
@@ -105,7 +147,7 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
                 pin, pad_length_mm=size, pad_width_mm=size,
                 shape=override.get("shape", shape), drill_mm=drill))
         _validate_header_clearance([pin for pin in result_pins if pin.pad_type != "np_thru_hole"])
-        result = replace(params, pins=result_pins)
+        result = _host_lands(params, pins=result_pins)
         result.validate()
         return result
     if not isinstance(params, CastellatedModuleParams):
@@ -128,9 +170,9 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
                             pad_type="thru_hole", shape=override.get("shape", shape),
                             drill_mm=drill))
     _validate_header_clearance(pins)
-    result = PackageGeometry(name=params.name, family="module",
-                             body_length_mm=params.body_length,
-                             body_width_mm=params.body_width,
-                             confidence="high", needs_review=False, pins=pins)
+    result = HostLandGeometry(name=params.name, family="module",
+                              body_length_mm=params.body_length,
+                              body_width_mm=params.body_width,
+                              confidence="high", needs_review=False, pins=pins)
     result.validate()
     return result

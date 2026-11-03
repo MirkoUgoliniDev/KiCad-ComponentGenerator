@@ -1,5 +1,210 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 03/11 notte — IN CORSO: correzione di TUTTI i rilievi della seconda revisione (utente: «ok»)
+Piano approvato: le parti delicate le fa il COORDINATORE in sequenza, con test che riproduce prima il difetto:
+(1) pin come testo: A1, A4, ordine pin_map/settle, N6; (2) editor del corpo: U1/V1 (anche pad), V2/B5, V3/B4/U4
+(HoverGroups ring), B2, U3, U5, U6, U7/V11, V5, V6, V7, V8, V9, V10, B1, B6, B3/U2; (3) lati castellated P1/P2:
+rame misurato ALLE POSIZIONI DICHIARATE (dopo che Fc ha finito photo_inventory). Poi G2, A2, A3, A5, A6, cablaggi
+GUI di Fe (D5, D6, D8), testi nel catalogo, verifica di generalita', suite.
+Correttori in parallelo su file disgiunti (non toccano i18n.py, main_window.py, HANDOFF.md):
+Fa generatori/core: N1-N11, G1, G4, G5. Fb servizi: S1-S9, G3/S3, G7, G8, G10. Fc foto: P3-P9 (non edge_lands).
+Fd cad3d + model_candidates_dialog: C1-C7, G6, G9, O3. Fe consegna KiCad: D1-D11 (API; GUI al coordinatore).
+Ff GUI altro: O1, O2, O4-O8, P5 (mostrare il dubbio), U8. Fg packaging/doc: K1-K9, D10.
+AVANZAMENTO coordinatore (03/11 notte): FATTI A1 (sorted con pin_sort_key + pin_map PRIMA del settle; test
+test_alphanumeric_pins_apply), A4 (_pin_map_key rifiuta None/float/bool), U1/V1 (clic = nessun commit, deciso al
+rilascio come nel simbolo, anche per i pad), B2 (spostamento tiene le dimensioni esatte), V2/B5
+(_keep_recentred_footprint_still dopo annulla/ripeti), V3/B4/U4 (maniglie nel HoverGroups con ring, set_body_editor,
+refresh dopo il ridisegno, niente scansioni), V4 (rame del pad vince sulla maniglia), V5 (menu del contorno), V6 (Ctrl),
+V7 (cursori), V8 (Maiusc), V9 (_scroll_preview_mm unico), V10 (pulizia su armo/Hide), U7/V11 (log per gesto), U3
+(quote oltre i testi), U6 (totale per asse), U5 (campi corpo all'Applica), B1 (_host_header_lands_apply), B3/U2
+(PREFILLED_KEY), P1/P2 (edge_lands: _declared_position_verdict + test del fondo binomiale al 5 %; RS485: fantasmi 0,
+reali 3/4; ESP32: file vere confermate 18/19, fantasmi 0; catena casuale 1.27 -> None), _review_reason SMD accodato.
+FATTI dai correttori: Fe (D1-D11), Ff (O1, O2, P5-GUI, O4, U8, O5-O8), Fc (P3-P9), Fd (C1-C7, O3, G6, G9: vivacita' FreeCAD dal tempo CPU del Job Object, provata con FreeCAD reale), Fg (K1-K9, D10), Fb (S1-S9, G3/S3, G7, G8, G10, O6-recent). In corso: Fa.
+POI coordinatore: G2 (_cast_height_declared), A2 (base sintetica non tocca pin popolati/corpo; il caso base REALE che riapplica campi corretti a mano NON e' stato toccato: da dire), A3, A5, A6, C6 (flag cad3d_cancelled + _is_cad_cancel), G6 (lead_diameter_mm), cablaggi Fe, testi Fe/Ff/Fc/Fd/Fb.
+DA FARE coordinatore: G2, A2, A3, A5, A6, cablaggi Fe (D2, D4, D6, D8), B6 e N1 (dopo Fa), C6 (dopo Fd), testi nel
+catalogo (Fe, Ff, Fc, miei), golden measure da rigenerare, verifica di generalita', suite.
+DECISIONE utente D2 (03/11): «le quote nel simbolo non hanno senso» = niente quote nel simbolo. D1 (editor
+del corpo del simbolo come il footprint) ancora da chiedere.
+STATO 03/11 notte tardi: tutti i correttori finiti e integrati, golden rigenerati (note «GOLDEN CHANGED AGAIN»),
+suite completa lanciata. VERIFICA DI GENERALITA' (generality-auditor) sul diff del giro 2: CORREZIONE della mia
+diagnosi P1/P2 — il verdetto alle posizioni dichiarate era SBAGLIATO in tre punti, confermati dal coordinatore
+su foto reale (RS485 lato destro, 4 contatti veri, letto con offset +3 mm -> 0 = lato ESCLUSO senza chiamata AI):
+ (GA1) «non rifiuto il caso» (coda binomiale >= 5 %) trattato come prova di ASSENZA -> 0; (GA2) posizioni non
+ tutte leggibili + 0 corrispondenze -> coda 1.0 -> 0; (GA3) offset non dichiarato -> fila supposta centrata
+ (contact_positions: offset or 0.0) e letta come se fosse dichiarata.
+FATTO (03/11 notte tardi, 438 test mirati verdi; suite completa rilanciata da capo dopo le modifiche): GA1-GA11
+come sotto. Prova su foto reali (scratchpad probe_verdict.py): RS485 destro 4 veri all'offset giusto -> 4; offset
+sbagliati -> None (prima 0 = lato escluso); fantasma bottom RS485 -> 0; fantasma top RS485 (1 su 2) -> None (da
+rivedere); fantasmi ESP32 sinistra/destra -> 0; file ESP32 da 23 -> 18/19. Contratti cambiati e scritti nei test:
+pin_one(["A1","A2","A10"]) ora None (una sola riga di lettere non e' una griglia); il caso «rame per caso a 1 di 2»
+ora None (prima 0). Testi nuovi nel catalogo (4), tolto quello del vecchio «frequente quanto ... nessuna fila».
+SUITE FINALE 03/11 notte (codice attuale, NON committato, base b5b6e08, branch ADVANCED): 11605 passati, 13 saltati,
+19 sottotest. Prima meta' 6846/9/19 + 2 falliti per contratto B1 (test_footprint_pad_drag: «headers» su un progetto
+non-scheda) poi aggiornati e verdi da soli (file 33/33; la meta' intera NON rilanciata dopo: cambiati solo test).
+Seconda meta' rilanciata dopo il menu del corpo: 4757/4 verde. Database dei profili allineato (4 testi nuovi),
+nessun segreto. In attesa dell'OK dell'utente per il commit.
+STORIA SUITE 03/11 notte: seconda meta' VERDE 4757 passati, 4 saltati. Prima meta' MORTA due volte allo STESSO punto (50 %,
+nessun riepilogo, exit 1): NON era il crash casuale del punto 113 ma una REGRESSIONE MIA dell'editor del corpo: il
+clic destro sul contorno/spigolo apriva il menu del corpo al posto di «Imposta origine di disegno…» (spigoli e centro
+del corpo sono proprio i punti di origine); il test test_right_click_on_the_background_offers_the_nearest_point
+sceglieva la prima voce = «Modifica quota» = QInputDialog vero = blocco. CORRETTO: il menu del contorno ha prima le
+voci dell'origine (_add_origin_actions, condiviso con lo sfondo), poi le due quote; segnale body_context_requested
+ora (QPointF scena, QPoint schermo); test nuovo positivo/negativo in test_footprint_body_outline_drag. Prima meta'
+rilanciata. NOTA (non toccato, non autorizzato): tools/run_test_halves.py non stampa nulla quando una meta' muore
+senza riepilogo (il codice d'uscita e' giusto).
+PIANO (coordinatore, autorizzato dal piano «ok»): GA1 parziale -> None (mai 0); GA2 0 solo se TUTTE lette e
+nessuna differisce; GA3 posizioni passate solo con offset DICHIARATO (altrimenti la catena cieca di prima);
+GA4 corrispondenza piena confermata solo se improbabile per caso sul fondo del bordo (stima di Laplace, niente
+minimo di 10 campioni: GA6, campioni a mezzo passo); GA7 passo troppo fine per la finestra -> None; GA5 commento
+di MIN_ROW_LANDS falso (catene casuali di 5-6 a 1.27 viste su RS485): dichiarato FRAGILE; GA8 pin_one A1 solo su
+una griglia vera (>= 2 lettere di riga e >= 2 colonne: {A1,A2} di una bobina -> nessun segno); GA9 pad con lo
+stesso numero sovrapposti ammessi tranne copie (stessa misura e centri l'uno dentro l'altro); GA10 commento
+della migrazione _cast_height_declared; GA11 test positivi/negativi mancanti. CONSEGUENZA DA DIRE ALL'UTENTE: il
+lato fantasma top di RS485 (1 rame su 2 posizioni) non e' piu' escluso da solo: resta segnalato da rivedere,
+perche' 2 posizioni non bastano a distinguere un fantasma da una fila con un contatto coperto.
+
+## 03/11 sera — RAPPORTO seconda revisione (12/12 rapporti; fase 1, nessuna correzione)
+Verifica del coordinatore: A1 (riga 10247 sorted su int+str) e N2 (validate QFN-64 = 0.25 s, ripetuto a ogni
+ridisegno) confermati di persona; gli altri alti riprodotti dai revisori (U1/V1 da due revisori indipendenti,
+G3/S3 idem). Tutti «segnalati, non autorizzati» finche' l'utente non sceglie.
+ALTI: A1, N1, N2, P1, U1(=V1). Regressioni delle correzioni di stamattina: A1, N1, N2, N3, N4(header), P1, S1, S3,
+D1, G2, B2, B3/U2, U1, V2, V3.
+
+## Generalità trasversale (generality-auditor)
+- G1 [C] castellated_module.py:1066/141 — misure di riferimento RS485 (mezzo foro 1.7, foro 1.0, anello 1.7, land 3.6x1.8) usate in silenzio senza nota (nemmeno nella descrizione .kicad_mod).
+- G2 [C, MIO OGGI] main_window.py:14136 height_declared = altezza != 5.0: dopo un cambio spessore PCB il blocco «Componenti» viene inventato; un 5.0 documentato e' trattato come non dichiarato. Stesso schema in _declared_size (1051).
+- G3 [C] library_footprints.py:264/337 — conteggi diversi -> no_match (contraddizione); pad con stesso numero mediati in un pad inesistente (MP ±5 -> 0). Puo' bloccare una lettura confermata dal disegno.
+- G4 [C] core/silk.py:123 pin_one — senza pad «1» il segno pin 1 e' indovinato (K/A -> A = anodo; rele' -> 11). Usato da package.py:164 e square_pad_pin.
+- G5 [L] castellated_module.py:110 HALF_HOLE_INSET_RATIO 0.76 dal campione, presentato come convenzione, mai annotato.
+- G6 [L] lead_diameter_mm letto ma non usato dal 3D (step_generator 1376: drill*0.65, max 0.8).
+- G7 [L] soglie non dichiarate: accepted_models.py 830/835/844/847, component_image_match.py 372, kicad_models.py 3642.
+- G8 [L] HOLE_TO_PAD_ANNULUS_MM 0.8 (datasheet_extractor 7738) senza motivazione.
+- G9 [L] step_generator.py:697 max(0.6, ...) non dichiarato.
+- G10 [S] PAD_READING_TOLERANCE_MM 0.1 fissa < 0.127 di una quota in pollici (2268, 2092, testimone).
+- G11 test mancanti per G2 e G3.
+
+## GUI A (main_window 1-11500)
+- A1 HIGH [C, REGRESSIONE oggi] main_window.py:10247 sorted(populated_pins) con int+str -> TypeError: applicazione dell'estrazione interrotta a meta' (pin_map None, pin popolati vuoti, progetto non salvato). Anche: pin_map assegnato DOPO _settle_extracted_pinout (10289 vs 10287).
+- A2 MED [C] 6830-6851 «Rilancia inventario» con base sintetica cancella pin popolati e _body_size_declared; con base reale ri-applica campi gia' corretti dall'utente.
+- A3 LOW [C, MIO] _PHOTO_STATE_ATTRS senza _declared_row_spacing; _relaunch_inventory non ripristina nulla in errore.
+- A4 LOW [C, MIO] _pin_map_key accetta None->'None', 1.0->'1.0', 0.
+- A5 LOW [L] 10764/11052 CONTACT_STYLE_LABELS non tradotti.
+- A6 LOW [L] _new_project crea la cartella prima di _state_for_project_type; sqlite3.Error non catturato.
+
+## Foto (generality-auditor)
+- P1 HIGH [C foto reale, REGRESSIONE oggi: F3 + MIO allargamento] edge_lands.py:490-504/631-643: lati dichiarati < 5 e qualunque catena di 2 al passo -> None -> lato TENUTO. RS485 (punto 164: lati fantasma che l'utente disse «non ci devono essere») ora tenuti con avviso: top None, bottom None, right None (prima tutti 0). Commento 625-630 contraddice il codice. Correzione generale: misurare il rame ALLE POSIZIONI DICHIARATE (assenza misurata), non con la catena cieca.
+- P2 MED [C foto reale] MIN_ROW_LANDS: la premessa «catene casuali < 5 a ogni passo» e' falsa a 1.27 (6) e 1.00 (5) su RS485: finestra indipendente dal passo.
+- P3 MED [C sintetico] photo_refine: limite per lato in px (1 % lato lungo) consente 3.8 % di differenza di scala in Y. Commento ancora «0.69/36 px».
+- P4 MED [C] photo_crop_reading SOIC_ROW_END_MARGIN_MM sbagliato per MS-013 (wide): SOIC-16W nominale rifiutato con tolleranza piccola.
+- P5 MED [L] photo_yolo _yolo_overlap_doubt_with mai mostrato all'utente.
+- P6 MED [C] photo_inventory.decode_detections accetta booleani/stringhe (percorso legacy).
+- P7 LOW 1+2 con tab osservato -> SOT-23 comunque. P8 LOW nota leaded_rejected dice «indicata dal modello»; ambiguita' senza nota. P9 LOW costante altezza duplicata.
+
+## GUI altro
+- O1 MED [C] component_editor_dialog.py:126/209 — «Applica» senza modifiche: altezza ASSENTE -> 0.6 misurata; None -> 0.0; colore assente -> #303030; nome assente -> «Componente»; rotazione -90 -> 270.
+- O2 MED [S] photo_review_dialog.py:167 _MatchWorker._stop_for_quit: attesa 5 s senza distacco -> «QThread destroyed while running» all'uscita.
+- O3 MED-LOW [C] model_candidates_dialog: finestra «Scelta del modello STEP» in italiano in EN/FR/DE (manca retranslate_widgets).
+- O4 LOW [C] pinout_dialog.py:76 nome None mostrato e salvato come «None».
+- O5 LOW [L] accepted_models_dialog.py:456 eliminazione voci senza conferma.
+- O6 LOW [C] project_state.py:231 RecursionError non catturato (anche recent_projects.describe).
+- O7 LOW [C] component_check_dialog.py:231 _pin_ranges: «01» e «1» collassano; int('²') solleva nello slot.
+- O8 LOW [S] _JobResults: file in copia -> hash ripetuti.
+
+## Packaging / CI / .claude
+- K1 LOW [C] workers.py:658 UpdateCheckWorker senza try; update_check._result_from_release fuori dal try (tag con > 4300 cifre -> os._exit).
+- K2 LOW [C] workers.py 693/1105/984 import fuori dal try (Terminal/Reconcile/YoloPretest).
+- K3 LOW [C] crash_report.py:398 nota falsa «worker-thread exceptions end only their thread».
+- K4 LOW-MED [S] --check-runtime nel .exe windowed: print persi (console=False).
+- K5 LOW [C] main.py RUNTIME_MODULES richiede onnxruntime (opzionale) da sorgenti.
+- K6 LOW [C, MIO] decisione courtyard pin header 0.5 non scritta in verify/generate skill, note KiCad 9, commenti test (3d_tab_workflow_icons, measure_parity).
+- K7 LOW [S] test con budget di tempo stretti (measure_heartbeat, run_logged_orphans, check_worker_quit).
+- K8 LOW [C] README:621 comando suite a processo singolo; installer-change skill senza --basetemp.
+- K9 LOW [C, MIO] golden gesture/camera rigenerati senza nota nel modulo di test.
+
+## Consegna KiCad
+- D1 MED [C, REGRESSIONE oggi] kicad_library.py:2073 abspath invece di resolve: reinstallazione via junction/SUBST/unita' mappata = falso «library_entry_conflict» (e falso shadowing). Fix: samefile/resolve nel confronto, riga utente invariata.
+- D2 MED [C] check_kicad_version mai usato: verify_component dice «OK KiCad CLI» per KiCad 9; installazione di progetto non passa la versione.
+- D3 LOW-MED [C] _sweep_stale_rollback_dirs segue una junction e ne svuota il contenuto (confine di sicurezza).
+- D4 LOW [S] rifiuto «troppo vecchio» puo' nominare il KiCad sbagliato (9 nel PATH, 10 installato).
+- D5 LOW rifiuto «troppo vecchio» dopo dialogo cartella e KLC.
+- D6 LOW shadowing_error mai mostrato. D7 LOW avviso shadowing ripetuto a ogni reinstallazione.
+- D8 LOW rollback_left perso nel ramo d'errore. D9 LOW globale: docstring promette controllo non fatto.
+- D10 LOW README/guide non aggiornati (nuove domande). D11 LOW [S] corsa su storico corrotto con due istanze.
+
+## Generatori + core
+- N1 HIGH [C, REGRESSIONE oggi] symbol_glyphs.py:1845/2030 un arco collineare salvato prima di oggi fa rifiutare TUTTA la lista: il simbolo perde tutti i disegni e il successivo posizionamento li sovrascrive (perdita dati). Fix: scartare/convertire solo il record cattivo con nota.
+- N2 HIGH [C, REGRESSIONE oggi] package_geometry.py:212 copper_separation su tutte le coppie senza prefiltro: QFN-64 0.34 s, 100 pad 0.78 s, LGA 400 pad 11.5 s per validate; chiamato piu' volte a ogni ridisegno/clic -> GUI bloccata.
+- N3 MED [C, REGRESSIONE oggi] pin_header square_pad_pin: pin 1 non popolato -> pad 2 quadrato e puntino pin 1 nella posizione sbagliata (caso DC/DC del docstring).
+- N4 MED [C] puntino pin 1 fuori dal courtyard (header: regressione col margine 0.5; package: preesistente).
+- N5 MED [C] package_geometry _finite accetta stringhe numeriche -> TypeError dopo.
+- N6 MED [C] pin popolato «01» accettato ma pad scartato in silenzio (pin_header validate vs pin_positions).
+- N7 LOW-MED [C] castellated/pin_header validate non chiama validate_pad_number: anteprima vuota senza messaggio.
+- N8 LOW [C] modulo su header via build_package = 0.25, via PinHeaderParams = 0.5.
+- N9 LOW [C] pad con stesso numero sovrapposti (EP + via termiche) rifiutati.
+- N10 LOW [C] glyph di libreria con arco collineare caricato ma poi rifiutato in silenzio. N11 LOW is_pin_one morto.
+
+## GUI B (main_window 11501-fine)
+- B1 MED [C] modalita' di montaggio «Strip header» nascosta resta attiva per componenti singoli: contorno e pad non modificabili, clic sul pad apre l'editor header che non cambia nulla (predicato diverso da _host_footprint_params).
+- B2 MED [C, MIO OGGI] _commit_body_rect: in uno spostamento la dimensione ricalcolata ha rumore (3.9000000000000004) -> «body_edit» a caso: STEP rigenerato o no a seconda del rumore; log «quota scritta a mano» per uno spostamento.
+- B3 MED [L, MIO OGGI] tabella pinout: OK senza modifiche salva i nomi del disegno come nomi dell'utente, senza log.
+- B4 LOW [C, MIO] subito dopo un rilascio le maniglie sono nascoste: nuova pressione sullo spigolo sposta invece di ridimensionare.
+- B5 LOW [L, MIO] annulla/ripeti di uno spostamento del corpo non compensa la camera: tutto salta a schermo.
+- B6 LOW [L] _edit_header_pad in modalita' «direct»: pin 1 disegnato quadrato, finestra lo tratta come cerchio.
+- B7 LOW [L] rollback_left e shadowing_error non mostrati (dup D6/D8).
+
+## Servizi / estrazione
+- S1 MED [C, REGRESSIONE classe pin-testo] datasheet_extractor.py:1524 (+1889, 1979, 2351) _write_chain_pads indicizza con il numero grezzo (int) -> KeyError: risposta principale e lettura pad PAGATE perse.
+- S2 MED [C] datasheet_extractor.py:7334 int(rows) con rows None (package_geometry presente + pin_map parziale) -> TypeError, risposta persa.
+- S3 MED [C, REGRESSIONE oggi L13] library_footprints.py:236 media per numero: tab MP lontani -> punto fantasma -> no_match -> blocco di una lettura corretta (= G3).
+- S4 LOW-MED [C] http.client.HTTPException (IncompleteRead) non gestita in openrouter._error_message/list_models e providers._error_detail.
+- S5 LOW-MED [C] project_costs.py:140/169 UnicodeDecodeError fuori dal contratto (crash nel refresh).
+- S6 LOW [L] _canonicalize_answer: unita' mancante = mm in silenzio nel percorso principale.
+- S7 LOW [L] _pin_label rifiuta «0» (invalida tutta la mappa) mentre _validated_pinout lo accetta; docstring vecchia.
+- S8 LOW [L] analysis_profiles.py:819 « — copia» non tradotto.
+- S9 LOW [S] drawing_holes senza .gif; document_roles OSError non convertito.
+
+## 3D (cad3d)
+- C1 MED [C freecadcmd] heartbeat (misura, import, build) non batte durante Part.read/Import.insert (GIL non rilasciato): STEP lenti ancora uccisi a 300 s. Fix: vivacita' dal tempo CPU del Job Object.
+- C2 MED [C] step_generator.py:143 _rectangle_axes: rotazione in (-2.8e-14, 0) -> angle 360.0 -> IndexError.
+- C3 MED [C sim] model_candidates_dialog.py:452/457 communicate() senza timeout dopo il kill: senza job (Linux o assegnazione rifiutata) attesa illimitata; manca encoding utf-8.
+- C4 LOW [S] process_log 676: discendente che stampa tiene vivo run_logged per sempre.
+- C5 LOW [S] process_log 670/718: EOF con figlio vivo -> wait senza annullo.
+- C6 LOW [L] CAD_ABORT_MESSAGE tradotto all'import (sempre italiano), usato anche come marcatore.
+- C7 LOW codice duplicato/morto (child_environment, _reap_killed_child) e commento superato (step_generator 1162).
+
+## Funzioni nuove (utente avversario)
+- U1 MED-ALTO [C, MIO OGGI] clic SENZA movimento sul contorno/maniglia sposta o ridimensiona il corpo e sposta tutti i pad (magnete sulla posizione assoluta; i pad agganciano lo spostamento). Bozza «da applicare».
+- U2 MED [C, MIO] = B3: tabella pinout, OK senza modifiche -> nomi del disegno salvati come dell'utente (rele' reale A1 Coil+, A2 Coil-).
+- U3 MED [C, MIO] testo Value di default sopra il numero orizzontale del corpo: doppio clic/tasto destro su «22.50 mm» vanno al Value.
+- U4 LOW-MED [C, MIO] ogni movimento del mouse scansiona la scena due volte (900 pad: 6.9 ms).
+- U5 LOW [C, MIO] campi corpo non sincronizzati dopo la modifica (22.5 x 16.5 restano).
+- U6 LOW [C, MIO] «totale» su entrambi gli assi anche se i pad sporgono su uno solo.
+- U7 LOW [L, MIO] log del trascinamento = quello della quota scritta a mano.
+- U8 LOW [L] intestazione tabella pinout superata.
+
+## Canvas
+- V1 MED [C, = U1] clic senza movimento su maniglia/pad cambia il footprint (anche i pad: preesistente); il simbolo garantisce il contrario.
+- V2 MED [C, MIO = B5] annulla/ripeti spostamento corpo: il footprint salta a schermo.
+- V3 MED [C, MIO] maniglie del corpo visibili ovunque dentro il corpo: logica locale invece di HoverGroups(ring=True) come il simbolo; dopo il rilascio restano nascoste (= B4); costo scansioni (= U4).
+- V4 LOW-MED [C] maniglia del corpo vince su un pad sul bordo (QFN/DFN): decisione.
+- V5 LOW [C] contorno senza menu tasto destro (il piano diceva «stessi menu»).
+- V6 LOW [C] Ctrl+pressione sul contorno avvia il trascinamento.
+- V7 LOW cursore non coerente col simbolo. V8 LOW Maiusc senza movimento non aggiorna l'anteprima.
+- V9 LOW codice camera duplicato (arrotondamento a px interi). V10 LOW stato hover lasciato all'armo di uno strumento/Hide. V11 LOW log e validazione duplicati.
+- Decisioni: D1 stesso editor per il corpo del simbolo? D2 quote modificabili anche nel simbolo?
+
+
+## 03/11 sera — IN CORSO: SECONDA revisione avversariale completa (utente: «rifare un super controllo ... prenditi il tempo che ti serve»)
+Base: merge 540988a (main) = b5b6e08 (ADVANCED). FASE 1 = SOLO RAPPORTO, correzioni dopo l'OK.
+12 revisori in sola lettura: GUI A (main_window 1-11500), GUI B (11501-fine), GUI altro, Canvas
+(canvas-parity-reviewer), Services/estrazione, Foto (generality-auditor), Generatori+core (kicad-cli),
+cad3d (freecadcmd), Consegna KiCad (kicad-workflow-reviewer), Packaging/CI/.claude, NUOVE FUNZIONI di oggi
+(editor del corpo col mouse, quote modificabili, pinout con tutti i pad, pin alfanumerici: prova da utente
+avversario), GENERALITA' trasversale (generality-auditor su tutte le soglie di rilevamento/geometria).
+Gia' noti, da NON riportare: rilievo 7 (nota interasse assunta solo nella descrizione); scelte utente
+(origine footprint al centro corpo; courtyard pin header 0.5); fragilita' dichiarate (prospettiva ESP32 a
+0.72 del limite, mezzi fori a un solo criterio, VIEW_ASSOCIATION_IOU 0.60 dichiarata).
+
 ## 03/11 — COMMIT (utente: «ok procedi», interpretato come OK al commit su ADVANCED; NON push, NON merge)
 Suite completa (seconda, full-0311d): A 6723/9/19, B 4635/4, 0 falliti = 11358 passati, 13 saltati,
 19 sottotest. Contenuto: revisione completa (10 revisori), correzione di tutti i rilievi (7 correttori +

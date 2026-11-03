@@ -2577,10 +2577,20 @@ class SymbolTab(QWidget):
     def _graphics(self, rows=None):
         """The placed glyphs the draft carries (validated), [] when none or malformed."""
         from ..generators.symbol_glyphs import symbol_graphics
+        notes = []
         try:
-            return symbol_graphics(self.draft_rows() if rows is None else rows)
+            graphics = symbol_graphics(self.draft_rows() if rows is None else rows, notes)
         except ValueError:
             return []
+        # A record dropped or converted on load (an old collinear arc, second
+        # review 2026-11-03) is said once, not at every redraw.
+        reported = self.__dict__.setdefault("_reported_graphic_notes", set())
+        for note in notes:
+            text = str(note)
+            if text not in reported:
+                reported.add(text)
+                self.set_status(text)
+        return graphics
 
     def _property_texts(self):
         """The texts of Reference and Value as KiCad shows them (`property_texts`)."""

@@ -1351,7 +1351,9 @@ def list_models(force_refresh: bool = False) -> list[ModelInfo]:
                 payload = _models_list(_json_from_response(response))
             if payload is None:
                 raise ValueError("unexpected /models payload shape")
-        except (urllib.error.URLError, ValueError, OSError) as exc:
+        except (urllib.error.URLError, ValueError, OSError, http.client.HTTPException) as exc:
+            # A list cut short (IncompleteRead, an HTTPException) is a network
+            # failure too: the cache answers (review S4, 2026-11-03).
             payload = _load_models_cache(ignore_ttl=True)
             if payload is None:
                 detail = (_error_message(exc) if isinstance(exc, urllib.error.HTTPError)
@@ -1461,7 +1463,8 @@ def _error_message(exc: urllib.error.HTTPError) -> str:
         previous_text = "; previous_errors=" + ",".join(history) if history else ""
         return (f"HTTP {status} {_safe_error_text(message)}; provider_detail={category}{limits}{previous_text}"
                 + _diagnostic_context(body, status))
-    except (ValueError, OSError):
+    except (ValueError, OSError, http.client.HTTPException):
+        # An error body cut short (IncompleteRead) leaves the status only.
         pass
     return f"HTTP {status} {_safe_error_text(exc.reason)}" + _diagnostic_context(status=status)
 

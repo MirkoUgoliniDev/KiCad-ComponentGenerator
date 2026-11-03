@@ -430,3 +430,21 @@ def test_a_failed_lock_write_closes_the_handle_and_removes_the_lock(tmp_path, mo
     assert not (tmp_path / project_costs.LOCK_FILE).exists()
     monkeypatch.undo()
     assert add_call(tmp_path, {"cost_usd": 0.01, "model": "m"}).calls == 1
+
+
+def test_a_file_that_is_not_utf8_is_a_damaged_file_not_a_crash(tmp_path):
+    """Review S5 (2026-11-03). Positive: bytes that are not UTF-8 raise ProjectCostsError
+    for both the reading and the writing path, and the file is left as it was.
+    Negative: the same content in UTF-8 is read."""
+    path = tmp_path / COSTS_FILE
+    good = json.dumps({"format": "kicadgen-ai-costs", "version": 1, "total_usd": 0.5,
+                       "calls": 1, "calls_without_cost": 0, "entries": []})
+    damaged = good.encode("utf-8").replace(b"[]", b"[\xff]")
+    path.write_bytes(damaged)
+    with pytest.raises(ProjectCostsError):
+        load_project_costs(tmp_path)
+    with pytest.raises(ProjectCostsError):
+        add_call(tmp_path, {"cost_usd": 0.1})
+    assert path.read_bytes() == damaged
+    path.write_text(good, encoding="utf-8")
+    assert load_project_costs(tmp_path).total_usd == pytest.approx(0.5)

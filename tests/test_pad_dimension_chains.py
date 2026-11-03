@@ -361,3 +361,53 @@ def test_incomplete_or_unclosed_main_chains_keep_the_model_coordinates(chains, r
     data = single_answer_to_data(_single(TRUE, chains))
     assert _pins(data) == TRUE and data["package_geometry"]["origin"] == "custom"
     assert "somme del modello" in data["notes"] and reason in data["notes"]
+
+
+# ── Pin numbers sent as integers (review S1, 2026-11-03) ─────────────────
+
+def test_integer_pin_numbers_in_an_agreeing_reading_are_written_not_lost():
+    """Positive: the model sent 1 instead of "1"; the pads are keyed by text, the
+    agreeing reading is written and the numbers come out as text."""
+    data = _main({int(n): xy for n, xy in TRUE.items()})
+    apply_dedicated_pads(data, _reading(CHAINS))
+    assert "_pin_map_conflict" not in data and "confermate" in data["_numbering_note"]
+    assert {p["number"] for p in data["package_geometry"]["pins"]} == set(TRUE)
+    assert data["package_geometry"]["origin"] == "body_center"
+
+
+def test_integer_pin_numbers_in_a_disagreeing_reading_still_block():
+    """Negative: text keys do not turn a different layout into an agreement."""
+    data = _main({int(n): xy for n, xy in SUMMED_WRONG.items()})
+    apply_dedicated_pads(data, _reading(CHAINS))
+    assert "non coincidono" in data["_pin_map_conflict"]
+
+
+# ── Review G10 (2026-11-03): the reading tolerance follows the drawing's unit ──
+
+#: 0.004 inch = 0.1016 mm: below the rounding of one 0.01-inch quote (0.127 mm),
+#: just above the 0.1 mm of a millimetre drawing.
+_INCH_SLIP_MM = 0.004 * 25.4
+
+
+def _inch_main(pads):
+    data = _main({n: (x / 25.4, y / 25.4) for n, (x, y) in pads.items()},
+                 length=15.0 / 25.4, width=9.0 / 25.4)
+    data["drawing_unit"] = "inch"
+    return data
+
+
+def test_an_inch_drawing_tolerates_the_rounding_of_one_inch_quote():
+    """Positive: two readings of an inch drawing 0.004 in apart agree."""
+    slipped = dict(TRUE, **{"4": (TRUE["4"][0] + _INCH_SLIP_MM, TRUE["4"][1])})
+    inches = [dict(chain, values=[v / 25.4 for v in chain["values"]]) for chain in CHAINS]
+    data = _inch_main(slipped)
+    apply_dedicated_pads(data, _reading(inches, factor=25.4))
+    assert "_pin_map_conflict" not in data and "confermate" in data["_numbering_note"]
+
+
+def test_a_millimetre_drawing_keeps_its_tighter_tolerance():
+    """Negative: the same 0.1016 mm slip in a millimetre drawing is a disagreement."""
+    slipped = dict(TRUE, **{"4": (TRUE["4"][0] + _INCH_SLIP_MM, TRUE["4"][1])})
+    data = _main(slipped)
+    apply_dedicated_pads(data, _reading(CHAINS))
+    assert "non coincidono" in data["_pin_map_conflict"]

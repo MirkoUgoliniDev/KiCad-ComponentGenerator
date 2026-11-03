@@ -51,11 +51,19 @@ def _remembered(path, key):
 
 
 def _remember(path, key, value) -> None:
-    identity = _identity(path)
+    _remember_identity(_identity(path), key, value)
+
+
+def _remember_identity(identity, key, value) -> None:
+    """Keep `value` for the file content `identity` describes (None keeps nothing)."""
     if identity is None:
         return
     with _RESULTS_LOCK:
         _RESULTS.setdefault(identity, {})[key] = value
+
+
+#: Marker of "the caller did not say which identity its job examined".
+_NOT_GIVEN = object()
 
 
 class _JobResults:
@@ -66,38 +74,66 @@ class _JobResults:
     details would start the same job again, whose result redraws the details
     (review finding 2026-11-03: thousands of starts in two seconds). The
     refused result is kept here, by path, until the selection really changes.
+
+    A file that changes WHILE its job runs (a model still being copied) has
+    the same loop with another cause: its identity at the end is not the one
+    examined, so the session cache never answers for it. Its result is
+    remembered under the identity the job examined (it describes that
+    content, not the current one) and kept here too, by path, until the
+    selection really changes: one job per selection, not one per redraw.
     """
 
     def __init__(self) -> None:
         """@brief Start with no result kept outside the session cache."""
         self._unstored: dict[tuple, object] = {}
+        #: Results of files that changed while their job ran, by (path, kind).
+        self._settled: dict[tuple, object] = {}
 
     @staticmethod
     def _key(path, kind) -> tuple:
         return (os.path.normcase(os.path.abspath(str(path))), kind)
 
-    def store(self, path, kind, value) -> None:
-        """@brief Keep `value` in the session cache, or here when the file has no identity.
+    def store(self, path, kind, value, examined=_NOT_GIVEN) -> None:
+        """@brief Keep `value` in the session cache, or here when it cannot answer for the file.
 
         @param path File the job examined.
         @param kind Job kind ("sha256", "check", "smd_check").
         @param value Job result, already normalised by the caller.
+        @param examined Identity (`_identity`) of the file when the job read
+            it; omitted, the file is assumed unchanged since then.
         """
-        if _identity(path) is None:
-            self._unstored[self._key(path, kind)] = value
+        key = self._key(path, kind)
+        current = _identity(path)
+        if examined is _NOT_GIVEN:
+            examined = current
+        if current is None:
+            self._unstored[key] = value
+            return
+        self._unstored.pop(key, None)
+        if examined is not None:
+            _remember_identity(examined, kind, value)
+        if examined != current:
+            # The file changed under the job: its result answers for this
+            # selection only, or every redraw would start the job again.
+            self._settled[key] = value
         else:
-            self._unstored.pop(self._key(path, kind), None)
-            _remember(path, kind, value)
+            self._settled.pop(key, None)
 
     def get(self, path, kind):
         """@brief The known result of `kind` on `path`, or None when still unknown.
 
         @param path File path.
         @param kind Job kind.
-        @return The cached result, else the one kept for a vanished file, else None.
+        @return The cached result for the file as it is now, else the one kept
+            for a vanished file or for a file that changed during its job,
+            else None.
         """
         found = _remembered(path, kind)
-        return found if found is not None else self._unstored.get(self._key(path, kind))
+        if found is not None:
+            return found
+        key = self._key(path, kind)
+        found = self._unstored.get(key)
+        return found if found is not None else self._settled.get(key)
 
     def forget(self, path) -> None:
         """@brief Drop the results kept for `path`: a new selection examines it again.
@@ -106,8 +142,9 @@ class _JobResults:
         """
         if path:
             name = self._key(path, "")[0]
-            for key in [key for key in self._unstored if key[0] == name]:
-                del self._unstored[key]
+            for kept in (self._unstored, self._settled):
+                for key in [key for key in kept if key[0] == name]:
+                    del kept[key]
 
 
 #: Zero-width space: lets a long path or identifier wrap after a separator
@@ -148,9 +185,16 @@ class _Job(QRunnable):
         super().__init__()
         self.kind, self.path = kind, path
         self.signals = _Signals()
+        #: Identity of the file when the job read it (set by `run`).
+        self.examined = None
 
     def run(self):
-        """@brief QRunnable override: compute and emit (kind, path, result)."""
+        """@brief QRunnable override: compute and emit (kind, path, result).
+
+        @note The file identity is taken before reading it, so the result is
+            remembered for the content examined even if the file changes meanwhile.
+        """
+        self.examined = _identity(self.path)
         try:
             if self.kind == "sha256":
                 result = yolo_models.sha256_of(self.path)
@@ -321,8 +365,11 @@ class YoloModelDialog(QDialog):
         QThreadPool.globalInstance().start(job)
 
     def _job_ready(self, kind, path, result) -> None:
-        self._jobs = [job for job in self._jobs if not (job.kind == kind and job.path == path)]
-        self._results.store(path, kind, result if kind == "check" else (result or ""))
+        done = [job for job in self._jobs if job.kind == kind and job.path == path]
+        self._jobs = [job for job in self._jobs if job not in done]
+        examined = done[0].examined if done else _NOT_GIVEN
+        self._results.store(path, kind, result if kind == "check" else (result or ""),
+                            examined=examined)
         if self._same(path, self.selected_path()):
             self._show_selected()
 

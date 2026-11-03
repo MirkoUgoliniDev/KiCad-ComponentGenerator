@@ -62,9 +62,11 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
 from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, FpText,
-                              Pad, courtyard_corners, fab_reference_text, require_kicad_reach)
+                              Pad, courtyard_corners, fab_reference_text, require_kicad_reach,
+                              validate_pad_number)
 from ..core.output_names import validate_output_name
-from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
+from ..core.silk import (PIN_ONE_UNMARKED_NOTE, keepout_box, marker_ink_box, pin_one, pin_one_marker,
+                         silk_rectangle)
 from ..core.sexpr import SExpr, sx
 from ..services.messages import tx
 
@@ -107,10 +109,21 @@ MIN_COPPER_GAP_MM = 0.2
 #: unnecessary.
 MIN_ESTIMATED_DRILL_MM = 0.3
 
-#: Centre of the half-hole relative to the edge, in fractions of the radius,
-#: when it is not declared (historical convention: a castellated hole is a
-#: hole drilled near the edge and then cut, the centre lies INSIDE the board).
+#: DECLARED HEURISTIC: centre of an undeclared half-hole measured inward from
+#: the edge, in radii. Physical basis: a castellation is a hole drilled near
+#: the edge and then cut, so its centre lies INSIDE the board (ratio < 1) and
+#: more than half of it stays plated. The value 0.76 is not a standard: it
+#: was taken from the historical RS485/TTL sample (1.7 mm half-holes) and
+#: no other module was used to tune it. It is applied only when
+#: `CastellatedModuleParams.hole_inset` is not declared, and every side that
+#: uses it says so (`geometry_notes`, footprint description). A declared
+#: hole inset (edge-to-centre distance from the drawing) makes it unnecessary.
 HALF_HOLE_INSET_RATIO = 0.76
+
+#: Text appended to the footprint description (fixed file language, see
+#: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) for every side that uses an
+#: assumed size: "{label}" is the Italian side name, "{sizes}" the list.
+ASSUMED_SIZES_DESCRIPTION = "lato {label}: {sizes} assunti, non misurati (stima)"
 
 
 class AssumedSize(float):
@@ -1144,7 +1157,87 @@ class CastellatedModuleParams:
             notes.extend(self._copper_fit_notes(side, geometry, label))
             notes.extend(self._inset_notes(side, geometry, label))
             notes.extend(self._pad_notes(side, label))
+            notes.extend(self._assumed_size_notes(side, label))
         return notes
+
+    def assumed_sizes(self, side: CastellatedSide) -> List[tuple]:
+        """@brief The sizes of one side used as ASSUMED values, kept as they are, never measured.
+
+        @param side One of self.sides.
+        @return (kind, value) pairs, mm, in the order half_hole, half_hole_inset,
+            drill, ring, pad_length, pad_width: every size whose provenance is
+            SIZE_REFERENCE or PAD_ASSUMED (the historical sample's reference or
+            an AssumedSize estimate that fitted, so nothing reduced it and no
+            other note names it), plus the half-hole centre from
+            HALF_HOLE_INSET_RATIO when `hole_inset` is not declared.
+        @note Before 2026-11-03 these sizes were used silently when the
+            documents gave none (review G1/G5): the reference holes and land
+            of one historical module would reach a footprint as if measured.
+        """
+        geometry = self.side_geometry(side)
+        style = side.contact_style
+        sizes = []
+        if style_has_half_hole(style):
+            if geometry.half_hole_source == SIZE_REFERENCE:
+                sizes.append(("half_hole", geometry.half_hole))
+            if self.hole_inset is None and geometry.half_hole > 0:
+                sizes.append(("half_hole_inset", geometry.half_hole_inset))
+        if style == CONTACT_THROUGH_HOLE or geometry.has_thru_holes:
+            if geometry.drill_source == SIZE_REFERENCE:
+                sizes.append(("drill", geometry.drill))
+            if geometry.ring_source == SIZE_REFERENCE:
+                sizes.append(("ring", geometry.ring))
+        size = self._pad_size_of(side)
+        if size is not None and style != CONTACT_THROUGH_HOLE:
+            if size.length_source == PAD_ASSUMED:
+                sizes.append(("pad_length", size.length))
+            if size.width_source == PAD_ASSUMED:
+                sizes.append(("pad_width", size.width))
+        return sizes
+
+    def _assumed_size_notes(self, side: CastellatedSide, label: str) -> List[str]:
+        """One localized note naming every assumed size of a side, [] when there is none."""
+        sizes = self.assumed_sizes(side)
+        if not sizes:
+            return []
+        names = {
+            "half_hole": lambda v: tx("semi-foro {value:.2f}mm", value=v),
+            "half_hole_inset": lambda v: tx("centro del semi-foro a {value:.2f}mm dal bordo "
+                                            "({ratio} raggi, rapporto del modulo campione)",
+                                            value=v, ratio=HALF_HOLE_INSET_RATIO),
+            "drill": lambda v: tx("foro passante {value:.2f}mm", value=v),
+            "ring": lambda v: tx("corona {value:.2f}mm", value=v),
+            "pad_length": lambda v: tx("lunghezza piazzola {value:.2f}mm", value=v),
+            "pad_width": lambda v: tx("larghezza piazzola {value:.2f}mm", value=v),
+        }
+        listed = ", ".join(names[kind](value) for kind, value in sizes)
+        return [tx("Lato {label}: quote non lette dai documenti, usati valori assunti e non misurati "
+                   "su questo modulo (riferimento di un modulo campione o stima): {sizes}. Indica le "
+                   "quote misurate per averle esatte.", label=label, sizes=listed)]
+
+    def assumed_sizes_description(self) -> str:
+        """@brief The footprint-description text that records every assumed size, fixed file language.
+
+        @return "" when no side uses an assumed size, otherwise one
+            ASSUMED_SIZES_DESCRIPTION entry per side joined by "; ".
+        @note Italian whatever the interface language, like the other notes
+            written into the library (`core.footprint.FOOTPRINT_TEXT_LANGUAGE`):
+            the estimate is recorded where the library user reads it.
+        """
+        names = {"half_hole": "semi-foro {:.2f}mm",
+                 "half_hole_inset": "centro semi-foro a {:.2f}mm dal bordo",
+                 "drill": "foro {:.2f}mm", "ring": "corona {:.2f}mm",
+                 "pad_length": "lunghezza piazzola {:.2f}mm", "pad_width": "larghezza piazzola {:.2f}mm"}
+        entries = []
+        for side in self.sides:
+            if side.edge not in EDGES or side.contact_style not in CONTACT_STYLES:
+                continue
+            sizes = self.assumed_sizes(side)
+            if sizes:
+                entries.append(ASSUMED_SIZES_DESCRIPTION.format(
+                    label=EDGE_LABELS[side.edge],
+                    sizes=", ".join(names[kind].format(value) for kind, value in sizes)))
+        return "; ".join(entries)
 
     def _pad_notes(self, side: CastellatedSide, label: str) -> List[str]:
         """Notes on the estimated pad sizes of one side that were reduced (pad_sizes)."""
@@ -1252,8 +1345,9 @@ class CastellatedModuleParams:
     def half_hole_inset(self) -> float:
         """@brief Distance from the edge of the centre of the MODULE's half-hole, in mm.
 
-        @return The declared value, otherwise HALF_HOLE_INSET_RATIO radii as
-            by convention, computed on the module diameter (hole_diameter).
+        @return The declared value, otherwise HALF_HOLE_INSET_RATIO radii (a
+            declared heuristic, reported by geometry_notes), computed on the
+            module diameter (hole_diameter).
         @note A castellation is a normal hole drilled near the edge and then
             cut: its centre lies INSIDE the board. The value of each side,
             which may have a half-hole of its own, is SideGeometry.half_hole_inset.
@@ -1821,6 +1915,10 @@ class CastellatedModuleParams:
                        count=side.count)
                 )
             for number in numbers:
+                # The rule every footprint path applies (`core.footprint`):
+                # a number with a blank used to pass here and fail only at
+                # build time, leaving the preview blank (review 2026-11-03, N7).
+                validate_pad_number(number)
                 if number in seen_numbers:
                     raise ValueError(
                         tx("Il pin {number} compare sia sul lato {seen_numbers} sia su quello "
@@ -2505,31 +2603,28 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         width=FAB_WIDTH_MM,
     ))
 
-    # Courtyard: real envelope, body plus the pads protruding from the edge.
+    # Courtyard: real envelope, body plus the pads protruding from the edge
+    # (and the pin-1 dot, added below once it is placed).
     lands = placements + [pad for pad in stadiums if pad is not None]
     extent_x = max([half_length] + [abs(p.x) + p.width / 2 for p in lands])
     extent_y = max([half_width] + [abs(p.y) + p.height / 2 for p in lands])
-    # KLC F5.3: courtyard corners on the 0.01 mm grid, rounded outwards so
-    # the clearance is never below the margin.
-    courtyard_start, courtyard_end = courtyard_corners(
-        (-extent_x - params.margin, -extent_y - params.margin),
-        (extent_x + params.margin, extent_y + params.margin))
-    fp.add_graphic(FpRect(
-        start=courtyard_start,
-        end=courtyard_end,
-        layer="F.CrtYd",
-        width=0.05,
-    ))
+    # Inserted here once the dot is known, so the file keeps its order.
+    courtyard_index = len(fp.graphics)
 
     # Reference at the body centre on F.Fab (KLC F5.2): the silkscreen
     # ends up covered once the module is mounted, F.Fab stays readable in
     # the assembly drawings. Same helper as every other generator.
     fp.add_graphic(fab_reference_text((0, 0), (params.body_length, params.body_width)))
 
-    # The marker indicates the pad numbered "1" (or the lowest number), not
-    # the first pad produced: with reverse=True or with the sides listed
-    # starting from the right the first one produced is another pin.
+    # The marker indicates the pad numbered "1" (or "A1" of a grid
+    # numbering, `core.silk.pin_one`), not the first pad produced: with
+    # reverse=True or with the sides listed starting from the right the first
+    # one produced is another pin. Without such a pad there is no marker,
+    # and the description says so.
     first_number = pin_one(placement.number for placement in placements)
+    if first_number is None:
+        fp.description = f"{fp.description}; {PIN_ONE_UNMARKED_NOTE}"
+    marker = None
     for placement, stadium in zip(placements, stadiums):
         if stadium is not None:
             # ONE single pad per contact, as on the real board: continuous copper
@@ -2594,7 +2689,8 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
             # own ink radius (radius + half stroke) is added by pin_one_marker.
             marker_keepouts = [keepout_box(*_copper_outline_bbox(params, p), line_width=0.0)
                                for p in placements]
-            fp.add_graphic(pin_one_marker(center, marker_keepouts, direction))
+            marker = pin_one_marker(center, marker_keepouts, direction)
+            fp.add_graphic(marker)
 
         # Contact label (PE, B-, A+, GND...) on F.Fab, past the inner edge of
         # the pad: readable in the assembly drawing without having to consult
@@ -2621,6 +2717,31 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
                 size=0.8, thickness=0.12,
             ))
 
+    low = [-extent_x, -extent_y]
+    high = [extent_x, extent_y]
+    if marker is not None:
+        # The courtyard encloses the pin-1 dot's ink too (review 2026-11-03,
+        # N4): the envelope stays the body-centred one when the dot is inside.
+        x0, y0, x1, y1 = marker_ink_box(marker)
+        low = [min(low[0], x0), min(low[1], y0)]
+        high = [max(high[0], x1), max(high[1], y1)]
+    # KLC F5.3: courtyard corners on the 0.01 mm grid, rounded outwards so
+    # the clearance is never below the margin.
+    courtyard_start, courtyard_end = courtyard_corners(
+        (low[0] - params.margin, low[1] - params.margin),
+        (high[0] + params.margin, high[1] + params.margin))
+    fp.graphics.insert(courtyard_index, FpRect(
+        start=courtyard_start,
+        end=courtyard_end,
+        layer="F.CrtYd",
+        width=0.05,
+    ))
+
+    assumed = params.assumed_sizes_description()
+    if assumed:
+        # Sizes nobody declared are estimates: recorded in the library
+        # itself, not only in the session log (G1).
+        fp.description = f"{fp.description}; {assumed}"
     if fp.attr == "smd" and any(pad.pad_type == "thru_hole" for pad in fp.pads):
         # The criterion is the combination that KiCad flags (SMD type with
         # drilled pads), not the contact type: it holds for the stepped lands

@@ -1177,9 +1177,49 @@ def _on_body_surface(retained, others, container_confidence):
                     row["on_body_of"] = container["proposal_id"]
                     row["abuts_body"] = True
                     links.append((row["proposal_id"], container["proposal_id"]))
-                else:
-                    row.setdefault("overlap_doubt_with", container["proposal_id"])
+                elif "overlap_doubt_with" not in row:
+                    row["overlap_doubt_with"] = container["proposal_id"]
+                    # Kept for the review reason in mm (detect_yolo_components):
+                    # the overlap per image axis and the tolerance it was held to.
+                    row["overlap_doubt_depth_px"] = (min(box[2], x1) - max(box[0], x0),
+                                                     min(box[3], y1) - max(box[1], y0))
+                    row["overlap_doubt_uncertainty_px"] = uncertainty
     return links
+
+
+def _overlap_doubt_fields(row, review_ids, mm_per_px_x, mm_per_px_y):
+    """Component fields of an overlap doubt: the other body, depth and tolerance in mm, and a review reason.
+
+    `_review_reason` follows the components' convention (a human sentence,
+    '|'-joined with any earlier one; `_uncertain` is already True on every
+    detector row), so the review shows the doubt with its numbers.
+    """
+    depth, tolerance = _overlap_doubt_mm(row, mm_per_px_x, mm_per_px_y)
+    other = review_ids.get(row["overlap_doubt_with"])
+    reason = tx("Si sovrappone al corpo {other} di {depth:.2f} mm, entro l'incertezza dei "
+                "bordi del rilevatore ({tolerance:.2f} mm): può essere un corpo separato o una "
+                "sua piazzola, da verificare sulla foto.",
+                other=(f"YOLO candidate {other}" if other is not None
+                       else str(row["overlap_doubt_with"])),
+                depth=depth, tolerance=tolerance)
+    return {"_yolo_overlap_doubt_with": row["overlap_doubt_with"],
+            "_yolo_overlap_doubt_depth_mm": depth,
+            "_yolo_overlap_doubt_tolerance_mm": tolerance,
+            "_review_reason": reason, "_uncertain": True}
+
+
+def _overlap_doubt_mm(row, mm_per_px_x, mm_per_px_y):
+    """(depth, tolerance) in mm of an overlap doubt, on the axis where the overlap is shallowest.
+
+    The doubt compares the shallower of the two overlaps with the two edges'
+    uncertainty (_on_body_surface); both are photo pixels, converted with the
+    scale of that axis.
+    """
+    depth_x, depth_y = row["overlap_doubt_depth_px"]
+    uncertainty = row["overlap_doubt_uncertainty_px"]
+    along_x = depth_x * mm_per_px_x <= depth_y * mm_per_px_y
+    scale = mm_per_px_x if along_x else mm_per_px_y
+    return (depth_x if along_x else depth_y) * scale, uncertainty * scale
 
 
 #: Edge uncertainty of a detector box, in MODEL-INPUT pixels (the 640 px
@@ -1764,14 +1804,19 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
              "proposals to keep by hand, not deleted.")
     doubts = [row for row in retained + list(review_proposals)
               if row.get("overlap_doubt_with") and not row.get("on_body_of")]
+    mm_per_px_x, mm_per_px_y = length_mm / width, width_mm / height
     if doubts:
+        tolerances = [_overlap_doubt_mm(row, mm_per_px_x, mm_per_px_y)[1] for row in doubts]
         emit(f"YOLO local: {len(doubts)} boxes overlap a body already found by no more than "
-             "the detector's edge uncertainty; kept as bodies, flagged as doubts.")
+             f"the detector's edge uncertainty ({min(tolerances):.2f}-{max(tolerances):.2f} mm "
+             "for the two facing edges); kept as bodies, flagged as doubts to review.")
     rebuilt = [row for row in review_proposals if row.get("recovered_from")]
     weak = [row for row in review_proposals if not row.get("recovered_from")]
     returned = retained + ((rebuilt + weak) if include_review_candidates else [])
     returned.sort(key=lambda row: (row["box"][1], row["box"][0]))
     components = []
+    # Proposal id -> review id, so an overlap doubt can name the other body.
+    review_ids = {row["proposal_id"]: identifier for identifier, row in enumerate(returned, 1)}
     for identifier, row in enumerate(returned, 1):
         x0, y0, x1, y1 = [v / dim for v, dim in zip(row["box"], (width, height, width, height))]
         sx, sy = (x1 - x0) * length_mm, (y1 - y0) * width_mm
@@ -1816,7 +1861,7 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
                 "_yolo_abuts_body": bool(row.get("abuts_body"))} if row.get("on_body_of") else {}),
             # Overlaps a confident body by no more than the boxes' edge
             # uncertainty: maybe a separate body, maybe its pad -- a doubt.
-            **({"_yolo_overlap_doubt_with": row["overlap_doubt_with"]}
+            **(_overlap_doubt_fields(row, review_ids, mm_per_px_x, mm_per_px_y)
                if row.get("overlap_doubt_with") and not row.get("on_body_of") else {}),
             # Presence attested by a confident fragment, footprint measured by
             # a view that contains it whole but with less confidence.

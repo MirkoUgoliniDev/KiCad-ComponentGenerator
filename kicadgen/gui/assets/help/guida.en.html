@@ -384,6 +384,14 @@ applied after an unexpected shutdown. The commands of the
 <span class="ui">KiCad</span> tab use the applied file: a draft not applied is not
 installed and is reported by <span class="ui">Check component for
 KiCad</span>.</p>
+<p>In a package footprint the two body sides are <strong>editable
+dimensions</strong>: double click the dimension, or right click and choose
+<span class="ui">Edit dimension…</span>, and type the new value; the body stays
+centred, the pads stay where they are and one undo step reverts it. The body
+outline can also be moved and resized with the mouse: eight handles,
+<kbd>Shift</kbd> for a symmetric resize, the grid magnet, <kbd>Esc</kbd> to cancel
+the drag. The pinout table lists every pad of the footprint, unnamed ones
+included.</p>
 <p>For boards, the <span class="ui">Host-board footprint</span> panel
 lets you choose the mounting directly from the preview, without going back
 to the beginning or repeating the analysis:</p>
@@ -619,6 +627,27 @@ KiCad with <em>Manage Symbol Libraries</em>.
 STEP model and documents. The <span class="ui">Exports</span> tab
 (<kbd>Ctrl</kbd>+<kbd>6</kbd>) keeps the history of the installations and
 symbol exports made from this computer.</p>
+<p>Before installing, the program may ask further questions, only when they
+apply; nothing is written until you answer:</p>
+<ul>
+  <li><span class="ui">KiCadGen library already registered</span>: for a project
+  install, the global table already has a <code>KiCadGen</code> library at another
+  location. In that project KiCad will use the project's library and will no longer
+  find the footprints of the global library with the same name.</li>
+  <li><span class="ui">Project open in KiCad</span>: KiCad's lock files
+  (<code>~&lt;name&gt;.kicad_pro.lck</code> and the like) show the project is open.
+  KiCad will see the new library only after the project is reopened: close it
+  first, without saving its library settings.</li>
+  <li>A KiCad older than version 10.0 cannot read the generated files: the global
+  library installation is refused and no file changes.</li>
+</ul>
+<p>If a file was held open (by an antivirus, for example), a temporary
+<code>.kicadgen-rollback-…</code> folder may remain in the destination after the
+installation: it holds only copies of the previous files, a later installation
+removes it after one day, or you can delete it yourself. An export history that
+can no longer be read (<code>kicad_exports.json</code>) is moved aside as
+<code>kicad_exports.json.corrupt-&lt;date-time&gt;</code> and a new one is started:
+no record is lost silently.</p>
 <h3>Checking the component</h3>
 <p>In the <span class="ui">KiCad</span> tab, the <span class="ui">Check component for KiCad</span> icon
 checks the generated files, the match of the pin-pad numbers and, if <code>kicad-cli</code> is

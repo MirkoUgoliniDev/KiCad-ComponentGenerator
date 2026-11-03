@@ -47,9 +47,10 @@ from functools import lru_cache
 from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
-from .process_log import (CANCEL_POLL_INTERVAL_S, KILL_REAP_GRACE_S, NO_WINDOW_FLAGS,
+from .process_log import (CANCEL_POLL_INTERVAL_S, NO_WINDOW_FLAGS, CpuActivity,
                           ProcessCancelled, cap_log, child_environment, contain_process,
-                          heartbeat_interval, kill_process_tree, release_process)
+                          cpu_silence_limit, heartbeat_interval, kill_process_tree,
+                          reap_killed_child, release_process)
 from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
@@ -252,8 +253,8 @@ MEASURE_LOG_FILENAME = "freecad-measure.log"
 MEASURE_LOG_TAIL_BYTES = 64 * 1024
 
 #: Seconds a killed measuring child is waited for before giving up on it is
-#: `process_log.KILL_REAP_GRACE_S` (imported above): one bound for every
-#: FreeCAD child of the package (2026-10-27 review, H9; 2026-10-29, H2).
+#: `process_log.KILL_REAP_GRACE_S`, applied by `process_log.reap_killed_child`:
+#: one bound and one reaper for every FreeCAD child of the package (2026-10-27 review, H9; 2026-10-29, H2).
 
 # Resource budget, not a geometric threshold: never launch a library-wide CAD batch.
 MAX_CANDIDATE_MEASUREMENTS = 64
@@ -1468,7 +1469,9 @@ with open(os.path.join(folder, "in.json"), encoding="utf-8") as handle:
 # comes from the parent (process_log.heartbeat_interval of its timeout), never
 # from a number written here. The thread only prints: FreeCAD is not
 # thread-safe. DECLARED LIMIT, as for freecad_parts._ImportHeartbeat: a beat
-# goes out only while the reader releases the GIL.
+# goes out only while the reader releases the GIL, and Part.read does not
+# (proved 2026-11-03), so on Windows the parent also counts the CPU time of
+# the child's job as activity; the beat remains the evidence elsewhere.
 _beat_lock = threading.Lock()
 _current = [None, 0.0]
 
@@ -1683,31 +1686,6 @@ def _measure_remaining(freecad, remaining, measured, timeout, cancel) -> dict:
     return measured
 
 
-def _reap_killed_child(process, grace_s: float = KILL_REAP_GRACE_S) -> bool:
-    """@brief Wait for a child that was just killed, with a bound.
-
-    @param process `subprocess.Popen` whose tree was just terminated.
-    @param grace_s Seconds to wait before giving up on the reaping.
-    @return True when the child exited within the grace, False when it is
-        still alive (the kill was refused or is still being delivered).
-    @note SAFETY BOUNDARY (2026-10-27 review, H9): an unbounded `wait()`
-        after the kill would hang the matching -- and the cancel that asked
-        for it -- whenever TerminateProcess is refused. The child left behind
-        is logged and the measuring continues without it: its exchange
-        folder is temporary and the output goes to a file, so a straggler
-        cannot block this process.
-    """
-    import subprocess
-    try:
-        process.wait(timeout=grace_s)
-        return True
-    except subprocess.TimeoutExpired:
-        logging.getLogger(__name__).warning(
-            "measuring child pid %s did not exit within %.1f s after the kill; left behind",
-            getattr(process, "pid", "?"), grace_s)
-        return False
-
-
 def _remove_exchange_folder(folder: str) -> None:
     """Delete a measuring batch's exchange folder; a failure is logged, never raised.
 
@@ -1838,10 +1816,16 @@ def _keep_measure_log(output_path: Path, command, outcome) -> None:
 def _watch_measuring_child(process, base: Path, command, timeout, cancel):
     """Silence watchdog and cancel channel of one measuring child (see `_measure_batch`).
 
-    Activity is EITHER a finished measurement (a line in `progress.jsonl`)
-    OR any output of the child (its heartbeat while a slow `Part.read`
-    works, written to `freecad.out`): 2026-11-03 review, a healthy read
-    longer than the timeout used to be killed and remembered as stalled.
+    Activity is a finished measurement (a line in `progress.jsonl`), any
+    output of the child (its heartbeat, written to `freecad.out`), or -- when
+    the child is in a Windows job -- CPU time burnt by the job
+    (`process_log.CpuActivity`): 2026-11-03 review, a healthy read longer
+    than the timeout used to be killed and remembered as stalled, and the
+    heartbeat alone could not prevent it because `Part.read` holds the GIL
+    (second review, C1). CPU activity alone covers at most
+    `process_log.cpu_silence_limit(timeout)` seconds after the last output or
+    finished measure, so an endless OCCT loop is still declared stalled; a
+    child that keeps printing is bounded only by the cancel channel.
     """
     import subprocess
 
@@ -1853,8 +1837,9 @@ def _watch_measuring_child(process, base: Path, command, timeout, cancel):
         """The only place where the measurement child process is killed (with its own children)."""
         kill_process_tree(process)
         # Bounded: a refused TerminateProcess must not hang here. A child
-        # still alive afterwards is abandoned (logged by the reaper).
-        _reap_killed_child(process)
+        # still alive afterwards is abandoned (logged by the reaper, shared
+        # with `run_logged`).
+        reap_killed_child(process)
 
     def progress_size():
         sizes = []
@@ -1867,7 +1852,10 @@ def _watch_measuring_child(process, base: Path, command, timeout, cancel):
 
     try:
         seen = progress_size()
-        deadline = time.monotonic() + timeout
+        last_activity = time.monotonic()
+        deadline = last_activity + timeout
+        cpu = CpuActivity(process, timeout)
+        cpu_limit = cpu_silence_limit(timeout)
         while True:
             try:
                 process.wait(timeout=CANCEL_POLL_INTERVAL_S)
@@ -1887,11 +1875,16 @@ def _watch_measuring_child(process, base: Path, command, timeout, cancel):
                 stopped = MatchingCancelled(command, output=tail)
                 break
             size = progress_size()
+            now = time.monotonic()
             if size != seen:
                 # A finished measure or a heartbeat: the child is alive,
                 # the silence count restarts.
-                seen, deadline = size, time.monotonic() + timeout
-            elif time.monotonic() >= deadline:
+                seen, last_activity, deadline = size, now, now + timeout
+            elif cpu.busy(now):
+                # Silent but burning CPU (a parse holding the GIL): alive, up
+                # to the declared bound since the last visible activity.
+                deadline = max(deadline, min(now + timeout, last_activity + cpu_limit))
+            if now >= deadline:
                 kill_child()
                 outcome = "stalled"
                 break

@@ -806,11 +806,53 @@ def test_a_lead_topology_names_a_family_only_when_the_envelope_fits_it():
     assert _derive(_obs(2, 1, 0, 0), envelope=None)['package'] == ''
 
 
+def test_an_observed_tab_keys_every_lead_topology():
+    """Review 2026-11-03: a tab seen on a 1 + 2 body gives no name, as leaded_family_from_evidence.
+
+    Positive and negative differ only by the observed tab: the same 1 + 2
+    body on a SOT-23 envelope is a SOT-23 without a tab and nothing with
+    one (no registered 3-lead family with a tab is that small). The same
+    holds for a 4 + 4 body: a SOIC has no tab.
+    """
+    assert _derive(_obs(2, 1, 0, 0, tab=False), envelope=(3.0, 1.5, 0.1))['package'] == 'SOT-23'
+    tabbed = _derive(_obs(2, 1, 0, 0, tab=True), envelope=(3.0, 1.5, 0.1))
+    assert tabbed['package'] == '' and tabbed['notes'] == []
+    assert crop.leaded_family_from_evidence(3, True, (3.0, 1.5, 0.1)) is None
+    assert _derive(_obs(2, 3, 0, 0, tab=True), envelope=(3.0, 2.6, 0.2))['package'] == ''
+    assert _derive(_obs(4, 4, 0, 0, tab=False), envelope=(6.0, 4.9, 0.2))['package'] == 'SOIC-8'
+    assert _derive(_obs(4, 4, 0, 0, tab=True), envelope=(6.0, 4.9, 0.2))['package'] == ''
+
+
+def test_an_ambiguous_lead_topology_leaves_a_note_and_a_rejected_one_says_it_was_derived():
+    """Review 2026-11-03: several fitting families leave a review note, not silence.
+
+    With a coarse photo tolerance a 2.5 x 2.5 mm 1 + 2 body fits SOT-23 and
+    SOT-323 strictly: no name, and a note listing both. The same body with a
+    tight tolerance fits one family and leaves no note.
+    """
+    ambiguous = _derive(_obs(2, 1, 0, 0), envelope=(2.5, 2.5, 0.35))
+    assert ambiguous['package'] == ''
+    assert ambiguous['notes'] == ['leaded_ambiguous:SOT-23/SOT-323']
+    single = _derive(_obs(2, 1, 0, 0), envelope=(3.0, 1.5, 0.1))
+    assert single['package'] == 'SOT-23' and single['notes'] == []
+    text = crop._note_text('leaded_ambiguous:SOT-23/SOT-323', (2.5, 2.5, 0.35), '')
+    assert 'SOT-23/SOT-323' in text and 'ricavata dai piedini osservati' in text
+    assert "piu' d'una" in text and 'indicata dal modello' not in text
+    # A family the program derived from the leads is not «indicated by the model».
+    rejected = crop._note_text('leaded_rejected:SOT-23-5', (6.0, 5.0, 0.1), '')
+    assert 'ricavata dai piedini osservati' in rejected and 'indicata dal modello' not in rejected
+    soic = crop._note_text('soic_rejected:4', (4.0, 4.0, 0.17), 'SOIC-8')
+    assert 'ricavata dai piedini osservati' in soic and '«SOIC-8»' in soic
+    # Negative: a size family the MODEL chose keeps its wording.
+    model = crop._note_text('size_family_rejected:SMA', (3.0, 1.5, 0.17), '')
+    assert 'indicata dal modello' in model
+
+
 def test_a_soic_body_is_at_least_its_lead_row_plus_the_smallest_end_margin():
     """@brief Revisione 2026-11-03: 4 + 4 piedini su 4.0 x 4.0 mm non e' un SOIC-8.
 
     Il corpo lungo le file e' la fila di piedini (3 x 1.27 = 3.81 mm) piu'
-    almeno il margine minimo registrato (0.9 mm): 4.71 mm. 4.0 mm sta sotto
+    almeno il margine minimo registrato (0.91 mm, MS-012): 4.72 mm. 4.0 mm sta sotto
     anche con la tolleranza della foto; 4.9 mm (corpo nominale) passa.
     """
     square = _derive(_obs(4, 4, 0, 0), envelope=(4.0, 4.0, 0.17))
@@ -845,11 +887,64 @@ def test_a_soic_row_the_body_cannot_hold_is_rejected():
     body_only = _derive(_obs(4, 4, 0, 0), envelope=(5.77, 4.84, 0.17))
     assert body_only['package'] == 'SOIC-8' and body_only['notes'] == []
     # The module stays rejected by the row side: 8.22 and 6.75 both exceed
-    # 3 * 1.27 + 1.3 + 0.17 = 5.28 mm, whichever side is taken along the rows.
-    assert 3 * crop.SOIC_PITCH_MM + crop.SOIC_ROW_END_MARGIN_MM[1] + 0.17 < 6.75
+    # the longest 4-per-row body of either standard plus the tolerance,
+    # whichever side is taken along the rows.
+    longest_margin = max(crop.soic_row_end_margin_mm(std)[1] for std in crop.SOIC_OUTLINES_MM)
+    assert 3 * crop.SOIC_PITCH_MM + longest_margin + 0.17 < 6.75
     assert not crop.soic_fits(4, (8.22, 6.75, 0.17))
     # Negative: a box narrower than the narrow body is not a SOIC either.
     assert not crop.soic_fits(4, (4.9, 3.0, 0.17))
+
+
+def test_soic_margins_are_derived_per_jedec_standard():
+    """Review 2026-11-03: MS-012 (narrow) and MS-013 (wide) have their own end margins."""
+    narrow = crop.soic_row_end_margin_mm('JEDEC MS-012')
+    wide = crop.soic_row_end_margin_mm('JEDEC MS-013')
+    assert narrow == pytest.approx((0.91, 1.19), abs=1e-9)
+    assert wide == pytest.approx((1.17, 1.63), abs=1e-9)
+
+
+@pytest.mark.parametrize('envelope', [
+    (10.30, 7.50, 0.05),     # SOIC-16W nominal, body-only box
+    (10.30, 10.30, 0.05),    # SOIC-16W nominal, leads included
+    (10.50, 10.65, 0.05),    # SOIC-16W at the registered maximum
+    (10.10, 7.40, 0.05),     # SOIC-16W at the registered minimum
+])
+def test_a_wide_body_soic_16_is_accepted_at_nominal_and_at_maximum(envelope):
+    """Review 2026-11-03: one margin range 0.9-1.3 mm rejected a nominal MS-013 SOIC-16W.
+
+    Its body is 10.30 mm along the rows, 8.89 mm of lead row plus a 1.41 mm
+    margin, outside the old range even with a small photo tolerance.
+    """
+    assert crop.soic_fits(8, envelope)
+    assert crop.leaded_family_from_evidence(16, None, envelope) == 'SOIC-16'
+
+
+def test_a_wide_body_soic_28_at_maximum_is_accepted():
+    assert crop.soic_fits(14, (18.10, 10.65, 0.05))
+
+
+@pytest.mark.parametrize('envelope', [
+    (5.00, 6.20, 0.05),      # SOIC-8 at the MS-012 maximum, leads included
+    (4.80, 3.80, 0.05),      # SOIC-8 at the MS-012 minimum, body-only
+    (9.90, 6.00, 0.05),      # SOIC-16 narrow nominal
+])
+def test_a_narrow_body_soic_is_still_accepted(envelope):
+    leads_per_row = 4 if envelope[0] < 6 else 8
+    assert crop.soic_fits(leads_per_row, envelope)
+
+
+def test_a_narrow_row_length_with_a_wide_span_is_no_registered_soic():
+    """Negative: a body with the MS-012 row length but a span only MS-013 has.
+
+    The old single table mixed the narrow row with the wide span and
+    accepted it; each standard alone rejects it, in both orientations.
+    """
+    assert not crop.soic_fits(8, (9.90, 11.00, 0.05))
+    assert not crop.soic_fits(4, (4.80, 10.30, 0.05))
+    # Positive twins: the same spans with the wide-body row length.
+    assert crop.soic_fits(8, (10.30, 11.00, 0.05))
+    assert crop.soic_fits(4, (5.30, 10.30, 0.05))
 
 
 def test_a_cylinder_derives_diode_with_a_melf_family_only_when_the_size_fits():

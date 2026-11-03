@@ -40,11 +40,18 @@ ORIGINS = {"body_center", "pin1", "custom"}
 
 
 def _finite(value: float, name: str, positive: bool = False) -> float:
-    if isinstance(value, bool):
+    """Return `value` as a float, refusing anything but a real int/float.
+
+    A numeric string such as "90" is refused, not converted: the geometry
+    keeps the value it was given and later arithmetic on it (orientation,
+    rotation) would raise TypeError far from the cause (review 2026-11-03,
+    N5). `core.validation.finite_number` is the shared type rule.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(tx("{name} deve essere numerico", name=name))
     try:
         value = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except OverflowError as exc:
         raise ValueError(tx("{name} deve essere numerico", name=name)) from exc
     if not math.isfinite(value) or (positive and value <= 0):
         raise ValueError(tx("{name} deve essere {value} valido",
@@ -166,6 +173,14 @@ class PackageGeometry:
             electrical pin. What is refused is a shared number with
             CONFLICTING non-empty names, the structural sign of a misread
             number rather than of a multi-pad pin.
+        @note Pads sharing one non-empty number may also overlap (an exposed
+            pad with thermal-via lands numbered like it); pads of different
+            numbers, or unnumbered holes, may not.
+        @note The overlap test is exact on the copper KiCad draws but only
+            measures pairs whose enclosing boxes come within tolerance
+            (`overlapping_pad_pairs`): a 400-pad grid validates in
+            milliseconds, with the verdicts and the reported pair of a
+            check of every pair.
         """
         # The package name is the default footprint name (`build_package`)
         # and so a file stem: the shared rule refuses an empty name or a path
@@ -196,11 +211,17 @@ class PackageGeometry:
         names: dict = {}
         outlines = []
         for pin in self.pins:
-            pin.validate()
-            name = str(pin.name or "").strip()
-            known = names.get(pin.number)
-            if known and name and known.casefold() != name.casefold():
-                raise ValueError(tx("pin duplicato: {number}", number=pin.number))
+            try:
+                pin.validate()
+                name = str(pin.name or "").strip()
+                known = names.get(pin.number)
+                if known and name and known.casefold() != name.casefold():
+                    raise ValueError(tx("pin duplicato: {number}", number=pin.number))
+            except ValueError:
+                # The pads validated so far may already overlap: that error
+                # comes first in pin order, as it always did.
+                _raise_first_overlap(outlines)
+                raise
             names[pin.number] = known or name
             # The copper KiCad draws (`pad_copper_shape`): a rotated core
             # grown by the corner radius, so a circle is a disc, an oval a
@@ -209,16 +230,8 @@ class PackageGeometry:
             # disc next to a rectangle's corner, are judged on the real
             # copper, not on bounding squares that would overlap; rotated
             # rectangles (QFN) keep their rotated outline.
-            outline = pad_copper_shape(pin)
-            for other_pin, other in outlines:
-                separation = copper_separation(outline, other)
-                if separation <= 1e-6:
-                    raise ValueError(
-                        tx("pad sovrapposti tra i pin {other_number} e {number}",
-                           other_number=other_pin.number,
-                           number=pin.number)
-                    )
-            outlines.append((pin, outline))
+            outlines.append((pin, pad_copper_shape(pin)))
+        _raise_first_overlap(outlines)
 
     def body_frame_offset(self) -> tuple:
         """@brief Point of the pad coordinates taken as the body centre, mm.
@@ -303,6 +316,93 @@ class PackageGeometry:
                 drill_mm=pin.drill_mm,
             ))
         return result
+
+
+#: Copper separation, mm, at or below which two pads count as overlapping.
+#: It absorbs float noise only: pads that merely touch are refused too.
+_OVERLAP_EPS = 1e-6
+
+
+def _copper_box(shape: tuple) -> tuple:
+    """Axis-aligned box (x0, y0, x1, y1), mm, enclosing a `pad_copper_shape` copper."""
+    core, radius = shape
+    xs = [point[0] for point in core]
+    ys = [point[1] for point in core]
+    return (min(xs) - radius, min(ys) - radius, max(xs) + radius, max(ys) + radius)
+
+
+def overlapping_pad_pairs(outlines: Sequence) -> list:
+    """@brief Pairs of pads whose copper overlaps or touches, in validation order.
+
+    @param outlines (pin, `pad_copper_shape`) tuples in pin order.
+    @return (j, i) index pairs with i < j, sorted as a pairwise loop over j
+        then i would meet them; pads sharing the same non-empty number are
+        never paired (they are one electrical pin, see PackageGeometry.validate).
+    @note Same verdicts as testing every pair with `copper_separation`, at
+        sweep cost: two coppers whose enclosing boxes are apart by more than
+        `_OVERLAP_EPS` along X or Y are at least that far apart, so only pairs
+        whose boxes come within the tolerance are measured exactly. The boxes
+        are swept along the axis where the pad field is wider, so a column of
+        pads is not compared all against all.
+    """
+    if len(outlines) < 2:
+        return []
+    boxes = [_copper_box(shape) for _pin, shape in outlines]
+    spread_x = max(box[2] for box in boxes) - min(box[0] for box in boxes)
+    spread_y = max(box[3] for box in boxes) - min(box[1] for box in boxes)
+    lo, hi, cross_lo, cross_hi = (0, 2, 1, 3) if spread_x >= spread_y else (1, 3, 0, 2)
+    order = sorted(range(len(boxes)), key=lambda index: boxes[index][lo])
+    candidates = []
+    for position, first in enumerate(order):
+        box_a = boxes[first]
+        for second in order[position + 1:]:
+            box_b = boxes[second]
+            if box_b[lo] > box_a[hi] + _OVERLAP_EPS:
+                break
+            if (box_b[cross_lo] > box_a[cross_hi] + _OVERLAP_EPS
+                    or box_a[cross_lo] > box_b[cross_hi] + _OVERLAP_EPS):
+                continue
+            candidates.append((max(first, second), min(first, second)))
+    pairs = []
+    for later, earlier in sorted(candidates):
+        number_a = str(outlines[later][0].number)
+        number_b = str(outlines[earlier][0].number)
+        # Pads repeating one number are the same pin (an exposed pad split
+        # into lands, thermal vias numbered like their pad): their copper
+        # may overlap by design (review 2026-11-03, N9) -- unless they are
+        # COPIES of one pad (a double reading: same size, each centre inside
+        # the other's box), which is an error, not a pin (generality audit
+        # 2026-11-03, GA9).
+        if number_a.strip() and number_a == number_b and not _copies(boxes[later], boxes[earlier]):
+            continue
+        if copper_separation(outlines[later][1], outlines[earlier][1]) <= _OVERLAP_EPS:
+            pairs.append((later, earlier))
+    return pairs
+
+
+def _copies(box_a, box_b) -> bool:
+    """True when two copper boxes are the same pad read twice: same size within the overlap tolerance and each centre inside the other box."""
+    size_a = (box_a[2] - box_a[0], box_a[3] - box_a[1])
+    size_b = (box_b[2] - box_b[0], box_b[3] - box_b[1])
+    if any(abs(a - b) > _OVERLAP_EPS for a, b in zip(size_a, size_b)):
+        return False
+
+    def inside(box, other):
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        return other[0] <= cx <= other[2] and other[1] <= cy <= other[3]
+    return inside(box_a, box_b) and inside(box_b, box_a)
+
+
+def _raise_first_overlap(outlines: Sequence) -> None:
+    """Raise the overlap error of the first overlapping pair in pin order, if any."""
+    pairs = overlapping_pad_pairs(outlines)
+    if pairs:
+        later, earlier = pairs[0]
+        raise ValueError(
+            tx("pad sovrapposti tra i pin {other_number} e {number}",
+               other_number=outlines[earlier][0].number,
+               number=outlines[later][0].number)
+        )
 
 
 def _rotate_kicad(x: float, y: float, cos_a: float, sin_a: float) -> tuple:
