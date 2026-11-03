@@ -112,7 +112,7 @@ verdetto dei fori ad apply_dedicated_body per dire se il contorno e' stato contr
 `standoff` sopra il PCB nel STEP; tipo di fermata nello schema dei pad; la terza chiamata parte anche a pad
 bloccati (costo ~0.02 USD). Suite run8 (prima delle correzioni dell'audit): seconda meta' 4757/4 verde; prima meta' 6857/9/19 + 9 rossi =
 8 replay offline con due risposte finte (StopIteration alla terza chiamata: estesi con {"drawing_unit": "mm"},
-neutra) + test_message_localization letto a meta' modifica del catalogo; tutti verdi da soli (78). Suite run9 INTERA sul codice definitivo: VERDE, 11627 passati, 13 saltati, 19 sottotest (meta' 6870/9/19 e 4757/4). In attesa dell'OK dell'utente per il commit, poi release v1.0.6.
+neutra) + test_message_localization letto a meta' modifica del catalogo; tutti verdi da soli (78). Suite run9 INTERA sul codice definitivo: VERDE, 11627 passati, 13 saltati, 19 sottotest (meta' 6870/9/19 e 4757/4). COMMITTATO su ADVANCED come 6cb4158 (OK utente: «commit e release v1.0.6»); release in corso con scripts/publish-release.ps1.
 TRAPPOLA: gli heredoc del tool Bash collassano le
 barre rovesciate (una "\n" di sorgente diventa un ritorno a capo vero): gli script di patch si scrivono con Write.
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
