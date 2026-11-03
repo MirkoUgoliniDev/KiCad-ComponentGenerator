@@ -246,7 +246,7 @@ poi torna qui e quando hai finito spegni il PC». Sequenza: suite run12 verde ->
 push ADVANCED -> merge in main (--no-ff) + push main -> scripts/publish-release.ps1 -Version 1.0.6 da main
 (esige la suite GitHub verde sul commit) -> gh run watch della release -> rapporto nell'handoff -> shutdown.
 L'analisi reale del rele' con lo spareggio NON e' stata fatta prima della release (utente assente): da fare.
-SUITE run12 VERDE (04/11 00:30): 11649 passati, 13 saltati, 19 sottotest (meta' 6892/9/19 e 4757/4).
+SUITE run12 VERDE (04/11 00:30): 11649 passati, 13 saltati, 19 sottotest (meta' 6892/9/19 e 4757/4). COMMITTATO su ADVANCED come d982feb; push, merge in main e release v1.0.6 in corso (autorizzati).
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
 ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1
 -Version 1.0.6 (commit release, tag v1.0.6 permanente, push di ADVANCED e del tag), poi gh run watch.
