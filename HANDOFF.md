@@ -246,6 +246,24 @@ poi torna qui e quando hai finito spegni il PC». Sequenza: suite run12 verde ->
 push ADVANCED -> merge in main (--no-ff) + push main -> scripts/publish-release.ps1 -Version 1.0.6 da main
 (esige la suite GitHub verde sul commit) -> gh run watch della release -> rapporto nell'handoff -> shutdown.
 L'analisi reale del rele' con lo spareggio NON e' stata fatta prima della release (utente assente): da fare.
+RELEASE v1.0.6 (04/11 00:28): merge ADVANCED -> main 59feefd (Tests GitHub verdi, run 41736733117),
+publish-release.ps1 da main: commit «release: v1.0.6» bfc1710, tag v1.0.6 pushato, workflow «Windows MSI
+release» run 41739407782 in corso; ADVANCED portato a bfc1710 (ff) e pushato. Esito nel punto seguente.
+ESITO (04/11 ~01:15): workflow VERDE, Release pubblicata
+https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.6 con KiCadGen-1.0.6.msi
+(485.6 MB, non prerelease). Build locale di verifica fatta prima (1.0.5, 460.7 MB, solo ICE60). PC spento su
+richiesta dell'utente a fine lavoro.
+APERTO per la prossima sessione (in ordine): (1) analisi REALE del rele' T7NS5D4-12 nell'app con lo spareggio
+(~0.4 USD): verificare altezza 16.9, STEP generato, funzioni dei pin dal simbolo; se la terza lettura sui
+riquadri legge ancora «19,3», passare al testimone geometrico (rettangolo della vista frontale: rapporto h/l
+dentro UN rettangolo, mai la scala dei fori; sul foglio 16.9 passa per 2 px, 19.3 fallisce per 16 px);
+(2) E: riquadri ingranditi anche per la chiamata PRINCIPALE e per la lettura dei pad, «detail: high» per i
+modelli OpenAI, dimensioni in pixel nel log AI, compositing RGBA su bianco senza ingrandimento, PDF rasterizzati
+per le letture dedicate; (3) standoff usato dal STEP (corpo posato a 0.4 mm); (4) tipo di fermata
+(terminale/foro) nello schema delle catene (fragilita' dichiarata della sostituzione dei pad); (5) pin_length
+None lascia il campo GUI vecchio; (6) banco di prova del modello principale su piu' disegni (~1 USD) per
+decidere se sostituire claude-opus-4.1; (7) tools/run_test_halves.py non stampa nulla quando una meta' muore
+senza riepilogo; (8) D1: editor del corpo del simbolo col mouse come nel footprint (da chiedere).
 SUITE run12 VERDE (04/11 00:30): 11649 passati, 13 saltati, 19 sottotest (meta' 6892/9/19 e 4757/4). COMMITTATO su ADVANCED come d982feb; push, merge in main e release v1.0.6 in corso (autorizzati).
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
 ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1
