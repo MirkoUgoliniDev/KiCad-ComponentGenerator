@@ -42,7 +42,7 @@ SUITE FINALE 03/11 notte (codice attuale, NON committato, base b5b6e08, branch A
 19 sottotest. Prima meta' 6846/9/19 + 2 falliti per contratto B1 (test_footprint_pad_drag: «headers» su un progetto
 non-scheda) poi aggiornati e verdi da soli (file 33/33; la meta' intera NON rilanciata dopo: cambiati solo test).
 Seconda meta' rilanciata dopo il menu del corpo: 4757/4 verde. Database dei profili allineato (4 testi nuovi),
-nessun segreto. In attesa dell'OK dell'utente per il commit.
+nessun segreto. COMMITTATO su ADVANCED come b361848 (OK utente 03/11); push e merge NON autorizzati.
 STORIA SUITE 03/11 notte: seconda meta' VERDE 4757 passati, 4 saltati. Prima meta' MORTA due volte allo STESSO punto (50 %,
 nessun riepilogo, exit 1): NON era il crash casuale del punto 113 ma una REGRESSIONE MIA dell'editor del corpo: il
 clic destro sul contorno/spigolo apriva il menu del corpo al posto di «Imposta origine di disegno…» (spigoli e centro
