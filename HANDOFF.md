@@ -115,6 +115,138 @@ bloccati (costo ~0.02 USD). Suite run8 (prima delle correzioni dell'audit): seco
 neutra) + test_message_localization letto a meta' modifica del catalogo; tutti verdi da soli (78). Suite run9 INTERA sul codice definitivo: VERDE, 11627 passati, 13 saltati, 19 sottotest (meta' 6870/9/19 e 4757/4). COMMITTATO su ADVANCED come 6cb4158 (OK utente: «commit e release v1.0.6»); release in corso con scripts/publish-release.ps1.
 TRAPPOLA: gli heredoc del tool Bash collassano le
 barre rovesciate (una "\n" di sorgente diventa un ritorno a capo vero): gli script di patch si scrivono con Write.
+22:33 UTENTE: nuova analisi col codice nuovo: pad OK (5, confermati dai fori), quote del corpo: lettura dedicata
+16.9 (giusta), principale 19.3 dichiarata «read» -> regola «due letture lette in disaccordo su quota verticale ->
+nessun valore» -> STEP ANCORA in attesa. Utente: «stai scherzando... ha sempre funzionato!!! migliora il prompt
+inviato all'AI!!! ok il valore è nella foto». INTERPRETAZIONE (da confermare nel rapporto): (1) migliorare
+l'istruzione sull'altezza in ENTRAMBI i prompt (classe di errore osservata: il modello CALCOLA — 18.9, 19.3 non sono
+numeri stampati — invece di TRASCRIVERE il numero stampato accanto alla freccia verticale del corpo; «esclusa la
+sporgenza dei terminali» lo spingeva a fare aritmetica); vecchio prompt singolo nei digest SUPERSEDED cosi' il DB
+dei profili prende il nuovo; (2) «ok il valore e' nella foto» = quando le due letture lette non coincidono si USA
+la trascrizione della quota stampata (lettura dedicata), altezza segnata «da verificare» con entrambi i valori
+nelle note e provenienza; il STEP viene generato. Release: riparte dopo commit + suite.
+22:45 UTENTE: «devi capire perché non ha funzionato!!! scatena agenti in modalità avversaria, deve funzionare!!!»
+-> fase 1 = SOLO rapporto: tre adversarial-reviewer in sola lettura, in parallelo, ambiti disgiunti: (1) prompt e
+schema (perché un modello conforme CALCOLA l'altezza invece di trascriverla; testo sostitutivo); (2) immagine
+inviata (Pinout.png codificata in 75322 caratteri: risoluzione, riduzione, «16,9» piccolo e ruotato; ritaglio
+ingrandito delle viste quotate come per le foto); (3) catena dati body_height_mm -> STEP, regola sul disaccordo
+(alternative: nessun valore / trascrizione segnata / provenienza / chiedere / testimone locale = rettangolo della
+vista laterale nel disegno alla scala dei fori). Nessuna modifica finché non arrivano i rapporti; poi correzione
+della CAUSA, non del sintomo, test, suite, commit con OK, release.
+RAPPORTO (2) immagine, arrivato: Pinout.png 977x767 inviata byte per byte (75322 caratteri riprodotti, sha uguale)
+a TUTTE le chiamate, mai ridotta ne' dal programma ne' dal provider (sotto i limiti 1568 px / 1.15 MP). CAUSA
+MISURATA: le cifre delle quote sono 8x12 px (0.3 lato-token Anthropic); «16,9» e' RUOTATA di 90° ed e' il testo
+PIU' CHIARO della pagina (pixel piu' scuro 80-85/255 per «6» e «9», virgola 143/255) contro «22,5» a 18-34/255:
+stessi pixel ai due modelli, opus-4.1 legge «6»->«8» (18,9) o salta, gpt-5.6-sol legge giusto. Il programma NON
+ingrandisce mai i disegni per i modelli OpenRouter (`enlarges=False` «historical assumption», photo_grounding
+274-342; test test_drawing_is_sent_byte_for_byte_to_a_provider_that_does_not_enlarge codifica il contratto), mentre
+per le foto manda ritagli ingranditi (crop_observation_images.prepare_observation_views). Rimedio proposto: per le
+letture dedicate (e il main) inviare le VISTE del disegno come ritagli ingranditi fino al limite del provider
+(segmentazione per gruppi di inchiostro con la morfologia di drawing_holes): ritaglio «Dimensions» 554x250 -> x2.83
+-> cifre 23x34 px, ~1500 token (+0.05 USD su opus, ~0 su gpt). Altri: «detail: high» sui blocchi dei disegni
+(OpenAI), compositing RGBA su bianco anche senza ingrandimento, dimensioni in pixel nel log AI, PDF non
+rasterizzati per le letture dedicate.
+RAPPORTO (1) prompt, arrivato. CAUSE CONFERMATE DAL LOG: (a) il blocco utente della richiesta diceva in TUTTE e
+quattro le analisi «Viste non fornite: Piazzole consigliate, Vista laterale / altezze» (datasheet_extractor
+5577-5588: Pinout.png dichiarata solo «top»/«pinout»; il ruolo side_view e' stato aggiunto dall'utente alle 22:35,
+DOPO l'ultima analisi) e il prompt dice «se nessuna vista mostra il corpo di profilo, ometti il campo»: un modello
+conforme OMETTE l'altezza -> le due analisi «mancante»; il testo del ruolo «top» dice «usalo per le quote in
+pianta». (b) il prompt definisce l'altezza per COSTRUZIONE (dal piano di appoggio alla sommita', esclusa la
+sporgenza) e il foglio stampa proprio i pezzi (16,9 / 0,4 / 3,5): 19,3 - 18,9 = 0,40 = lo standoff stampato ->
+il modello SOMMA; mai «trascrivi il numero stampato», mai «non sommare». (c) TRE definizioni diverse: schema
+body_height_mm (437-447: «spessore... cercala nella vista laterale», condiviso da scheda e singolo), prompt
+principale, prompt dedicato. (d) la regola «due "read" in disaccordo -> nessun valore» si fida dell'etichetta
+"read" autodichiarata, violata (19,3 calcolata e dichiarata letta); TESTIMONE STRUTTURALE disponibile: l'INSIEME
+delle quote verticali STAMPATE nella vista di profilo (campo printed_vertical_quotes nella lettura dedicata):
+un'altezza che non e' tra i numeri stampati e' un calcolo qualunque sia l'etichetta -> scartata; una che c'e' ->
+confermata. Operativo: il log AI non registra gli argomenti delle risposte riuscite (solo fields=N); il prompt
+singolo sta verbatim nel DB -> digest corrente in SUPERSEDED_SINGLE_PROMPT_DIGESTS + DB riseminato. Raccomandazione
+del revisore: per i disegni in immagine l'altezza viene dalla trascrizione dedicata (confermata dal proprio
+elenco di quote stampate); il valore del modello principale e' un secondo parere, confermato se sta nell'insieme
+stampato, altrimenti scartato con avviso, MAI un blocco; il blocco resta solo quando la lettura dedicata non puo'
+girare (PDF). Fragilita' da dichiarare: un foglio che stampa sia l'altezza del solo corpo sia corpo+distanziale.
+RAPPORTO (3) catena dati/regola, arrivato: catena body_height_mm -> STEP corretta (None coerente ovunque, nessun
+corpo segnaposto); DIFETTO = la regola si fida dell'etichetta "read" autodichiarata (unico punto che la usa come
+testimone); messaggio del rinvio falso («aggiungi un disegno quotato»); le note della lettura (vista usata) non
+arrivano al log; standoff letto e perso; pin_length_3d_mm None lascia il campo GUI vecchio. Misura sulla pagina
+vera: rettangolo della vista frontale 134 x 98.5 px -> rapporto 0.735 -> 16.54 mm alla sua scala (= 16.9 - 0.4):
+16.9 passa per 2 px, 19.3 fallisce per 16 px; le viste sono a scale diverse del 3 % -> un testimone sul disegno
+deve usare il RAPPORTO altezza/larghezza dentro un rettangolo, mai la scala dei fori. Raccomandazione: R1 niente
+provenienza autodichiarata come testimone + altezza principale UNDECLARED se nessun documento dichiara un ruolo
+che mostra altezze; R2 in disaccordo fra due letture sostenute: terza trascrizione (voto) o blocco con i due
+valori e scelta all'utente; R3 testimone sul rettangolo della vista laterale, dopo.
+PIANO A-E proposto all'utente alle 23:05: A richiesta («viste da cercare», ruolo top legge anche il profilo);
+B definizione unica dell'altezza (numero STAMPATO, niente aritmetica) in schema + due prompt, digest superato +
+DB; C elenco delle quote verticali stampate nella lettura dedicata come testimone strutturale (principale fuori
+elenco -> scartata; dedicata in elenco -> adottata con la vista; entrambe in elenco e diverse -> blocco coi due
+valori); D messaggi veri + argomenti delle risposte nel log AI; E ritagli ingranditi delle viste + detail high.
+UTENTE: «Fermati, voglio discuterne» -> discussione: il modello che sbaglia e' anthropic/claude-opus-4.1 (principale,
+0/5 sull'altezza), gpt-5.6-sol (dedicato) legge giusto. UTENTE 23:20: «ok sgraviamo» = PIANO A-D AUTORIZZATO
+(E = ritagli ingranditi DOPO la release). Suite GitHub su 86e025f VERDE (tag non creato). IN CORSO: A richiesta
+(«viste da cercare» per le immagini con quote; ruolo top legge anche il profilo); B una sola frase per l'altezza
+(_HEIGHT_RULE) in schema body_height_mm + prompt singolo + prompt/tool dedicati, digest del prompt singolo attuale
+in SUPERSEDED + DB; C printed_vertical_quotes nella lettura dedicata: per le quote verticali la dedicata presente
+nel SUO elenco e' il valore (adottata, vista nelle note); la principale: nell'elenco -> confermata, fuori ->
+scartata con avviso, assente -> «presa dalla lettura»; dedicata fuori elenco o elenco vuoto -> regole di oggi;
+due valori entrambi stampati e diversi -> blocco con i due valori (fragilita' corpo/corpo+distanziale dichiarata);
+D body_conflict in ExtractedParams mostrato dal rinvio del STEP; note della lettura (vista) nel log; argomenti delle
+risposte riuscite nel log AI; standoff nelle note. Poi test, suite, commit con OK, analisi reale sul rele' fatta
+dall'utente nell'app, release.
+FATTO (03/11 notte, NON committato), 349 + 139 test mirati verdi, suite run10 in corso: _HEIGHT_RULE (una frase,
+prima dello schema) usata da schema body_height_mm, prompt singolo (digest 15a7c81d... in SUPERSEDED, DB
+riseminato), prompt e tool dedicati; printed_vertical_quotes + standoff nella lettura dedicata (log con i numeri
+letti e la vista); apply_dedicated_body: regola dell'insieme stampato per le quote verticali, _body_conflict a
+due candidati stampati; ExtractedParams.body_conflict mostrato da _missing_body_reason e dal rinvio del STEP;
+log «Quote del corpo nella risposta principale: ... (provenienza)»; richiesta: DRAWING_VIEWS = side_view
+cercata nei disegni quotati («Viste da cercare nei disegni quotati forniti»), ruolo top riscritto. Contratti
+cambiati nei test: «Viste non fornite: Vista laterale» con top dichiarato; 18.9 «read» fuori dall'insieme
+stampato -> 16.9. NON fatto: gli argomenti completi delle risposte nel log AI (ai_diagnostics non stringa mai i
+valori per contratto: loggati solo i numeri del corpo); E ritagli ingranditi; pin_length None e campo GUI.
+AUDIT DI GENERALITA' su A-D (F1-F5, S1-S3) e CORREZIONE (03/11 notte tardi, NON committato, 408 test mirati
+verdi, suite run11 in corso): F1 l'elenco stampato della sola lettura dedicata era un AUTO-testimone -> ora anche
+la RISPOSTA PRINCIPALE elenca le quote verticali stampate (campo printed_vertical_quotes dello schema
+report_single_component, sanificato in _validate_main_response, nel log «quote verticali stampate elencate»):
+due elenchi indipendenti = due letture della stessa pagina, come i pad. Regola (_height_candidate +
+apply_dedicated_body): un valore e' SOSTENUTO da un elenco se vi compare (entro _reading_tolerance), non e' una
+quota di pianta/standoff/sporgenza (F3) e non e' la SOMMA di due quote elencate (l'aritmetica vietata; le
+differenze NON si provano: una quota vera accanto a una somma elencata diventerebbe «differenza»); un punto per
+elenco; in disaccordo vince chi ha 2 punti contro <2 (l'altro scartato con avviso che cita i due elenchi),
+altrimenti nessun valore + _body_conflict (solo per l'altezza, S3). F2 un valore principale giusto non viene
+piu' scartato per un solo elenco. S1 _HEIGHT_RULE = estensione stampata del corpo (sommita'-fondo, o piano di
+appoggio se quotato cosi'), niente costruzione «fino al PCB»; digest intermedi 3b6dfe4d... e c1b754da... in
+SUPERSEDED, DB riseminato. CONSEGUENZA DICHIARATA del test delle somme: un foglio che stampa 16.9, 0.4 e la
+loro somma 17.3 da' il corpo 16.9 (il STEP poggia sul PCB senza standoff). Due candidati stampati NON legati da
+somma (16.9 e 17.5) -> blocco coi due valori. PINOUT (utente: «perche' non ha riconosciuto i pin? la funzione
+era presente»): nel disegno la funzione e' DISEGNATA (simbolo del rele': bobina A1-A2, 11 comune, 12/14) non
+scritta; schema e prompt dicevano «ometti se non c'e' una tabella» -> pinout vuoto. Ora schema pinout + prompt
+singolo chiedono di ricavare la funzione dallo SCHEMA ELETTRICO accanto al pinout (bobina, comune, NC, NA,
+anodo, catodo), segnalata in notes come ricavata; _replace_by_confirmed_reading conserva i nomi dei pad coi
+numeri coincidenti. Caso relè atteso alla prossima analisi: pad 5 confermati; altezza 16.9 se la principale
+elenca le quote stampate (anche se risponde 19.3); funzioni dal simbolo se il modello obbedisce.
+ANALISI UTENTE 23:19 (codice nuovo): FUNZIONI DEI PIN estratte dal simbolo; pad 5 confermati; altezza: dedicata
+16.9 con elenco 16.9/0.4/3.5; principale 19.3 con elenco «19.3/0.4/3.5» = LEGGE «16,9» COME «19,3» (cifra ruotata
+12 px, la piu' chiara: «6» -> «9»); pareggio 1-1 -> nessun valore -> STEP rinviato con il messaggio vero.
+DECISIONE utente 23:30: «Terza lettura su ritagli ingranditi»: SOLO nei pareggi delle quote verticali il
+programma rifa' la lettura delle quote del corpo inviando il disegno a RIQUADRI ingranditi fino al limite del
+provider (4 tessere sovrapposte, cifre ~17x26 px) + l'intero, col MODELLO PRINCIPALE (indipendente dal lettore
+dedicato); terza lista/valore entrano nel voto: vince chi ha piu' punti, parita' -> blocco. Costo solo nei
+pareggi (~0.1 USD Opus). Testimone geometrico (rettangolo della vista frontale) DOPO la release. PIANO scritto
+PRIMA del codice; suite run11 (senza spareggio) in corso, da rifare dopo.
+FATTO (03/11 ~23:45, NON committato, 480 test mirati verdi, suite run12 in corso): `_enlarged_tile_blocks`
+(pagina intera + 4 riquadri 2x2 al 60 % del lato, ingranditi fino ai limiti del provider, PNG senza metadati,
+sfondo trasparente su bianco; TILE_SIDE_FRACTION dichiarata), `read_body_dimensions(..., enlarged=True)`,
+`apply_dedicated_body(..., tie_break=callable)`: chiamato UNA volta solo a punteggio pari; la terza lista
+aggiunge punti; vince chi sta avanti con >= 2, altrimenti conflitto; al sito di chiamata lo spareggio usa il
+MODELLO PRINCIPALE sui riquadri. tests/test_body_height_tie_break.py (9: voto, chiamata unica, nessuna chiamata
+senza pareggio, riquadri entro i limiti, pagina gia' al limite, end-to-end con quarta risposta). DB riseminato.
+PER L'UTENTE: riavviare l'app e rifare l'analisi del rele' (~0.4 USD con lo spareggio): atteso 16.9 se la terza
+lettura sui riquadri legge la cifra ingrandita.
+AUTORIZZAZIONE utente 03/11 ~23:50: «committa e pusha tutto, poi mergia in main e fai il pacchetto e pubblica,
+poi torna qui e quando hai finito spegni il PC». Sequenza: suite run12 verde -> commit su ADVANCED + handoff ->
+push ADVANCED -> merge in main (--no-ff) + push main -> scripts/publish-release.ps1 -Version 1.0.6 da main
+(esige la suite GitHub verde sul commit) -> gh run watch della release -> rapporto nell'handoff -> shutdown.
+L'analisi reale del rele' con lo spareggio NON e' stata fatta prima della release (utente assente): da fare.
+SUITE run12 VERDE (04/11 00:30): 11649 passati, 13 saltati, 19 sottotest (meta' 6892/9/19 e 4757/4).
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
 ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1
 -Version 1.0.6 (commit release, tag v1.0.6 permanente, push di ADVANCED e del tag), poi gh run watch.

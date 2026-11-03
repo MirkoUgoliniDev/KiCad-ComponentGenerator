@@ -261,16 +261,17 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11627 passed,
-13 skipped and 19 subtests (2026-11-03 night, branch `ADVANCED`, halves 6870/9/19 and 4757/4: second
+is 11649 passed,
+13 skipped and 19 subtests (2026-11-04 night, branch `ADVANCED`, halves 6892/9/19 and 4757/4: second
 adversarial review by 12 read-only agents and the fix of every finding by 7 fixers plus the coordinator;
 castellated sides read at the declared positions, a measured absence only when every position is read bare
 and the offset is declared, partial or chance matches left for review (generality audit GA1-GA11); pin-1
 mark on A1 only on a real grid; the body outline's menu keeps the drawing-origin entries; a chain reading
 confirmed by the drawn holes beats a competitor that fits only distorted, an incomplete main answer is replaced
 by the confirmed reading (fragile, declared); the body quotes of a single part are read a second time from the
-printed dimensions (height from the side view), provenance before value, no hand-typed height; see HANDOFF.md
-03/11 notte; before that, 11358 passed, 13 skipped and 19 subtests (2026-11-03, halves A 6723/9/19,
+printed dimensions (height from the side view), both answers list the printed vertical quotes and vote,
+a tie-break reading on enlarged tiles, pin functions read from a drawn circuit symbol, no hand-typed height;
+see HANDOFF.md 03/11 notte; before that, 11358 passed, 13 skipped and 19 subtests (2026-11-03, halves A 6723/9/19,
 B 4635/4: full
 adversarial review by 10 read-only agents and the fix of every finding by 7 fixers on disjoint files,
 then a generality audit of the fixes; pin numbers as text end to end (A1/A2), pinout table with every

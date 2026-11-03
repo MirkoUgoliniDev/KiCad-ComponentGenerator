@@ -62,7 +62,7 @@ def test_the_reading_uses_the_body_tool_and_the_given_model(tmp_path, monkeypatc
     kwargs = call.call_args.kwargs
     assert kwargs["model"] == "vendor/reader"
     assert kwargs["tool"]["function"]["name"] == "report_body_dimensions"
-    assert "quota VERTICALE" in kwargs["system_prompt"]
+    assert "UN SOLO numero STAMPATO" in kwargs["system_prompt"]
 
 
 # ── apply_dedicated_body ────────────────────────────────────────────────
@@ -174,3 +174,110 @@ def test_failed_discarded_or_empty_readings_change_nothing():
         data = _main(body_height_mm=18.9)
         apply_dedicated_body(data, reading)
         assert data["body_height_mm"] == 18.9
+
+
+# ── Two printed lists vote (user, 2026-11-03, «sgraviamo»; generality audit F1-F3) ──
+
+def _printed(values, printed, notes="altezza dalla vista frontale"):
+    return {"values": values, "printed": printed, "notes": notes}
+
+
+def test_a_main_height_listed_by_neither_reading_loses_to_the_quote_both_list():
+    """The relay: main 19.3 «read» (printed nowhere), both lists [16.9, 0.4, 3.5], dedicated 16.9."""
+    data = _main(body_length_mm=22.5, body_width_mm=16.5, body_height_mm=19.3)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [16.9, 0.4, 3.5]
+    logs = []
+    apply_dedicated_body(data, _printed({"body_height": 16.9, "lead_length": 3.5, "standoff": 0.4},
+                                        [16.9, 0.4, 3.5]), logs.append)
+    assert data["body_height_mm"] == pytest.approx(16.9)
+    assert data["package_geometry"]["body_height_mm"] == pytest.approx(16.9)
+    assert data["pin_length_3d_mm"] == pytest.approx(3.5)
+    assert "_body_conflict" not in data and "printed_vertical_quotes" not in data
+    assert any("19.30 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+    assert any("Lettura dedicata: altezza dalla vista frontale" in line for line in logs)
+    assert any("Distanziale stampato" in line and "0.40 mm" in line for line in logs)
+
+
+def test_a_right_main_height_is_never_discarded_on_one_list_alone():
+    """Audit F2 (negative twin): main 16.9 listed by itself, dedicated 16.5 listed by itself only ->
+    one point each, nobody wins, no value, conflict named; never «16.5 read»."""
+    data = _main(body_height_mm=16.9)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [16.9, 0.4, 3.5]
+    logs = []
+    apply_dedicated_body(data, _printed({"body_height": 16.5}, [16.5, 0.4, 3.5]), logs.append)
+    assert data["body_height_mm"] is None
+    assert "16.90 mm" in data["_body_conflict"] and "16.50 mm" in data["_body_conflict"]
+
+
+def test_a_main_height_both_lists_print_beats_a_dedicated_one_listed_once():
+    """Mirror of the relay case: the dedicated reading slipped, the main value is printed twice."""
+    data = _main(body_height_mm=16.9)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [16.9, 0.4, 3.5]
+    logs = []
+    apply_dedicated_body(data, _printed({"body_height": 17.3}, [16.9, 0.4, 3.5, 17.3]), logs.append)
+    assert data["body_height_mm"] == 16.9
+    assert any("17.30 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
+
+
+def test_a_listed_value_equal_to_a_plan_size_or_the_lead_never_supports_a_height():
+    """Audit F3: 16.5 is the plan width (listed by a model that wrote the view's width too)."""
+    data = _main(body_length_mm=22.5, body_width_mm=16.5, body_height_mm=16.9)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [16.9, 16.5, 3.5]
+    apply_dedicated_body(data, _printed({"body_height": 16.5, "lead_length": 3.5}, [16.5, 16.9, 3.5]))
+    assert data["body_height_mm"] == 16.9, "16.5 is listed twice but it is the width: no support"
+
+
+def test_a_height_that_is_the_sum_of_two_listed_quotes_is_a_computation():
+    """A model that summed 16.9 + 0.4 and then listed 17.3 gets no support from its own list."""
+    data = _main(body_height_mm=16.9)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [16.9, 0.4, 3.5]
+    apply_dedicated_body(data, _printed({"body_height": 17.3}, [17.3, 16.9, 0.4, 3.5]))
+    assert data["body_height_mm"] == 16.9
+
+
+def test_two_printed_candidates_in_both_lists_block_with_both_values():
+    """Declared fragility: two vertical quotes both printed twice, not one the sum of others
+    (16.9 and 17.5, e.g. a stepped housing) -> the lists do not decide, no value."""
+    data = _main(body_length_mm=22.5, body_height_mm=17.5)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [17.5, 16.9, 0.4]
+    logs = []
+    apply_dedicated_body(data, _printed({"body_height": 16.9}, [17.5, 16.9, 0.4]), logs.append)
+    assert data["body_height_mm"] is None and "body_height_mm" not in data["package_geometry"]
+    assert "17.50 mm" in data["_body_conflict"] and "16.90 mm" in data["_body_conflict"]
+    assert any("le quote stampate non decidono" in line for line in logs)
+
+
+def test_a_printed_overall_quote_that_is_the_sum_of_body_and_standoff_yields_to_the_body():
+    """Consequence of the sum rule, declared: a sheet printing 16.9, 0.4 and their sum 17.3 gives the
+    body-only 16.9 (the STEP then sits on the PCB without the standoff, said in the notes)."""
+    data = _main(body_length_mm=22.5, body_height_mm=17.3)
+    data["value_sources"]["body_height_mm"] = "read"
+    data["printed_vertical_quotes"] = [17.3, 16.9, 0.4]
+    apply_dedicated_body(data, _printed({"body_height": 16.9, "standoff": 0.4}, [17.3, 16.9, 0.4]))
+    assert data["body_height_mm"] == pytest.approx(16.9) and "_body_conflict" not in data
+
+
+def test_a_missing_main_height_is_adopted_only_when_both_lists_print_it():
+    data = _main(body_length_mm=22.5)
+    data["printed_vertical_quotes"] = [16.9, 0.4, 3.5]
+    apply_dedicated_body(data, _printed({"body_height": 16.9}, [16.9, 0.4, 3.5]))
+    assert data["body_height_mm"] == pytest.approx(16.9)
+    # One list only: adopted as an unconfirmed reading (the earlier rule), said so.
+    data = _main(body_length_mm=22.5)
+    logs = []
+    apply_dedicated_body(data, _printed({"body_height": 16.9}, [16.9, 0.4, 3.5]), logs.append)
+    assert data["body_height_mm"] == pytest.approx(16.9)
+    assert any("Non confermate da una seconda lettura" in line for line in logs)
+
+
+def test_without_any_printed_list_the_earlier_rules_apply():
+    data = _main(body_height_mm=16.9)
+    data["value_sources"]["body_height_mm"] = "read"
+    apply_dedicated_body(data, _printed({"body_height": 16.5}, []))
+    assert data["body_height_mm"] is None

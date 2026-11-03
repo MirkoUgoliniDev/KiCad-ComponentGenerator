@@ -14843,10 +14843,15 @@ class MainWindow(QMainWindow):
             if missing:
                 if automatic:
                     self._automatic_3d_deferred_reason = ", ".join(missing)
-                self._append_log(tx(
-                    "Modello STEP rinviato: mancano le quote documentate del corpo ({fields}). "
-                    "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
-                    "l'analisi per completare il modello STEP.", fields=", ".join(missing)))
+                conflict = getattr(extracted, "body_conflict", None)
+                if conflict:
+                    self._append_log(tx("Modello STEP rinviato: {conflict} Il footprint viene "
+                                        "comunque generato.", conflict=conflict))
+                else:
+                    self._append_log(tx(
+                        "Modello STEP rinviato: mancano le quote documentate del corpo ({fields}). "
+                        "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
+                        "l'analisi per completare il modello STEP.", fields=", ".join(missing)))
 
         self._last_params = params
         self._worker = GenerateWorker(
@@ -19897,6 +19902,11 @@ class MainWindow(QMainWindow):
             missing = [] if self._matrix_body_declared() else list(labels)
         if not missing:
             return ""
+        conflict = getattr(getattr(self, "_last_extracted", None), "body_conflict", None)
+        if conflict:
+            # The drawing has the quote, twice: say that, not «add a drawing».
+            return self.i18n.text(
+                "Modello STEP non disponibile: {conflict}").format(conflict=conflict)
         return self.i18n.text(
             "Modello STEP non disponibile: mancano le quote documentate del corpo ({fields}). "
             "Il programma non costruisce un corpo con misure inventate: aggiungi un disegno "
