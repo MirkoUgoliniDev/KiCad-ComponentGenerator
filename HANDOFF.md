@@ -43,6 +43,9 @@ SUITE FINALE 03/11 notte (codice attuale, NON committato, base b5b6e08, branch A
 non-scheda) poi aggiornati e verdi da soli (file 33/33; la meta' intera NON rilanciata dopo: cambiati solo test).
 Seconda meta' rilanciata dopo il menu del corpo: 4757/4 verde. Database dei profili allineato (4 testi nuovi),
 nessun segreto. COMMITTATO su ADVANCED come b361848 (OK utente 03/11); push e merge NON autorizzati.
+RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
+ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1
+-Version 1.0.6 (commit release, tag v1.0.6 permanente, push di ADVANCED e del tag), poi gh run watch.
 STORIA SUITE 03/11 notte: seconda meta' VERDE 4757 passati, 4 saltati. Prima meta' MORTA due volte allo STESSO punto (50 %,
 nessun riepilogo, exit 1): NON era il crash casuale del punto 113 ma una REGRESSIONE MIA dell'editor del corpo: il
 clic destro sul contorno/spigolo apriva il menu del corpo al posto di «Imposta origine di disegno…» (spigoli e centro
