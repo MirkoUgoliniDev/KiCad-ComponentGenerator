@@ -419,42 +419,67 @@ def _run_preview_child(command, cancel=None):
     @note The limit stays a WHOLE-RUN limit, not the silence watchdog of
         `run_logged`: the child prints only its result at the very end, so
         silence would say nothing about it.
+    @note Every wait is bounded (2026-11-03 second review, C3): the output is
+        read by a helper thread, and after a kill the child is reaped within
+        `KILL_REAP_GRACE_S` and a reader still blocked by a surviving
+        descendant is abandoned, never waited for.
     """
     from ..cad3d.process_log import (CANCEL_POLL_INTERVAL_S, EXIT_DRAIN_GRACE_S,
-                                     child_environment, contain_process,
-                                     kill_process_tree, release_process)
+                                     KILL_REAP_GRACE_S, child_environment, contain_process,
+                                     kill_process_tree, reap_killed_child, release_process)
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if cancel is not None and cancel.is_set():
         raise PreviewCancelled(command)
+    # Bytes, decoded as UTF-8 at the end: `read1` returns what is in the pipe
+    # at once, while a text-mode read waits for a full buffer or the end of
+    # the pipe, which a surviving descendant may never give.
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, errors='replace', creationflags=flags,
-                               env=child_environment())
+                               creationflags=flags, env=child_environment())
     contain_process(process)
+    # The pipe is read by a helper thread, as in `run_logged` (2026-11-03
+    # second review, C3): `communicate()` after the kill had no bound, and
+    # without a job (another platform, a refused assignment) a descendant
+    # still holding stdout blocked it until that descendant died. This thread
+    # only waits on the reader with a bound, so it can always abandon it.
+    chunks = []
+
+    def pump():
+        """Collect the child's stdout until the pipe closes."""
+        try:
+            for chunk in iter(lambda: process.stdout.read1(65536), b''):
+                chunks.append(chunk)
+        except (OSError, ValueError):
+            pass
+
+    reader = threading.Thread(target=pump, daemon=True, name='kicadgen-preview-output')
+    reader.start()
     try:
         deadline = time.monotonic() + PREVIEW_TIMEOUT_S
         exited_at = None
         while True:
-            try:
-                stdout, _ = process.communicate(timeout=CANCEL_POLL_INTERVAL_S)
-                break
-            except subprocess.TimeoutExpired:
-                pass
+            reader.join(timeout=CANCEL_POLL_INTERVAL_S)
             now = time.monotonic()
             stopped = cancel is not None and cancel.is_set()
-            if process.poll() is not None and not stopped:
+            exited = process.poll() is not None
+            if exited and not reader.is_alive():
+                break
+            if exited and not stopped:
                 # Exited, but a descendant still holds the pipe: what the
                 # child wrote is drained for a short grace, then the
-                # survivors are ended and the child's own result is used.
+                # survivors are ended and the child's own result is used,
+                # the reader abandoned after a bounded wait if one survives.
                 exited_at = now if exited_at is None else exited_at
                 if now - exited_at < EXIT_DRAIN_GRACE_S:
                     continue
                 kill_process_tree(process)
-                stdout, _ = process.communicate()
+                reader.join(timeout=KILL_REAP_GRACE_S)
                 break
+            # Alive (its pipe may already be closed: the loop keeps the
+            # whole-run limit and the cancel either way).
             if not (stopped or now >= deadline):
                 continue
             kill_process_tree(process)
-            process.communicate()
+            reap_killed_child(process)
             if stopped:
                 raise PreviewCancelled(command) from None
             raise subprocess.TimeoutExpired(command, PREVIEW_TIMEOUT_S) from None
@@ -464,6 +489,15 @@ def _run_preview_child(command, cancel=None):
         raise
     finally:
         release_process(process)
+        if not reader.is_alive():
+            # A stream another thread still reads is left to that daemon,
+            # which ends with the pipe.
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+    # Universal newlines, as the text-mode pipe used to give.
+    stdout = b''.join(chunks).decode('utf-8', errors='replace').replace('\r\n', '\n')
     if process.returncode:
         raise subprocess.CalledProcessError(process.returncode, command, stdout)
     return subprocess.CompletedProcess(command, process.returncode, stdout)
@@ -1006,7 +1040,7 @@ class ModelCandidatesDialog(QDialog):
         @param parent Optional parent widget.
         """
         super().__init__(parent)
-        self.setWindowTitle('Scelta del modello STEP')
+        self.setWindowTitle(tx('Scelta del modello STEP'))
         self.resize(820, 650)
         self._selection = dict(status='rejected', path='', rotation_deg=0.0)
         self._token = 0
@@ -1084,8 +1118,8 @@ class ModelCandidatesDialog(QDialog):
         title.setWordWrap(True)
         layout.addWidget(title)
         images = QHBoxLayout()
-        self.photo_label = QLabel('Ritaglio fotografico non disponibile')
-        self.preview_label = QLabel('Seleziona un candidato per visualizzare la geometria STEP reale')
+        self.photo_label = QLabel(tx('Ritaglio fotografico non disponibile'))
+        self.preview_label = QLabel(tx('Seleziona un candidato per visualizzare la geometria STEP reale'))
         for label in (self.photo_label, self.preview_label):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setMinimumSize(340, 220)
@@ -1152,11 +1186,11 @@ class ModelCandidatesDialog(QDialog):
         tools_column.addWidget(self.rotation_angle_label)
         # Colours of the STEP file in the preview (user, 2026-09-26): more
         # realistic but slower on large models. Remembered in config.json.
-        self.colors_checkbox = QCheckBox("Colori")
+        self.colors_checkbox = QCheckBox(tx("Colori"))
         self.colors_checkbox.setObjectName("preview_colors_toggle")
-        self.colors_checkbox.setToolTip(
+        self.colors_checkbox.setToolTip(tx(
             "Anteprima con i colori del modello KiCad. Spenta: tinta unica, piu' "
-            "veloce sui modelli grandi.")
+            "veloce sui modelli grandi."))
         self.colors_checkbox.setChecked(_preview_colors_enabled(_config_owner(self)))
         self.colors_checkbox.toggled.connect(self._colors_toggled)
         tools_column.addWidget(self.colors_checkbox, 0, Qt.AlignmentFlag.AlignRight)
@@ -1201,7 +1235,7 @@ class ModelCandidatesDialog(QDialog):
         filter_row = QHBoxLayout()
         self.library_filter = QLineEdit()
         self.library_filter.setObjectName('library_filter')
-        self.library_filter.setPlaceholderText('Filtra la libreria KiCad: es. wroom usb-c sot23…')
+        self.library_filter.setPlaceholderText(tx('Filtra la libreria KiCad: es. wroom usb-c sot23…'))
         self.library_filter.setClearButtonEnabled(True)
         filter_row.addWidget(self.library_filter, 1)
         self.library_count_label = QLabel('')
@@ -1223,12 +1257,12 @@ class ModelCandidatesDialog(QDialog):
         for candidate in self._candidates:
             self.candidate_list.addItem(str(candidate.get('package') or Path(candidate['path']).name))
         layout.addWidget(self.candidate_list)
-        self.details_label = QLabel('Scegli un candidato, filtra la libreria KiCad, scegli un file STEP oppure conserva il segnaposto.')
+        self.details_label = QLabel(tx('Scegli un candidato, filtra la libreria KiCad, scegli un file STEP oppure conserva il segnaposto.'))
         self.details_label.setTextFormat(Qt.TextFormat.PlainText)
         self.details_label.setWordWrap(True)
         self.details_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.details_label)
-        self.auto_rotation = QCheckBox('Automatico: deduci gli assi CAD dall’ingombro')
+        self.auto_rotation = QCheckBox(tx('Automatico: deduci gli assi CAD dall’ingombro'))
         self.auto_rotation.setChecked(_number(initial_rotation, None) is None)
         layout.addWidget(self.auto_rotation)
         self.rotation_hint = QLabel()
@@ -1238,7 +1272,7 @@ class ModelCandidatesDialog(QDialog):
         # same row raised the minimum width of the dialog from 750 to 963 px:
         # the state must sit beside the field, not force the window.
         rotation_row = QHBoxLayout()
-        rotation_row.addWidget(QLabel('Rotazione Z locale del CAD nativo'))
+        rotation_row.addWidget(QLabel(tx('Rotazione Z locale del CAD nativo')))
         self.rotation = _RotationSpinBox()
         self.rotation.setRange(-360, 360)
         self.rotation.setDecimals(2)

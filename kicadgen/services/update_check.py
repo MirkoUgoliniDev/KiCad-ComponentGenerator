@@ -183,7 +183,14 @@ def check_latest_release(timeout: float = DEFAULT_TIMEOUT_S, *,
     except Exception as exc:  # noqa: BLE001 - the contract is «never raises»
         return UpdateCheckResult(current, error_kind=ERROR_NETWORK,
                                  error=f"{type(exc).__name__}: {exc}")
-    return _result_from_release(current, data)
+    # The document is validated under its own guard: a hostile tag (e.g. more
+    # digits than Python's int-conversion limit) raises ValueError, which must
+    # become an "invalid_response" result, never an unhandled exception.
+    try:
+        return _result_from_release(current, data)
+    except Exception as exc:  # noqa: BLE001 - the contract is «never raises»
+        return UpdateCheckResult(current, error_kind=ERROR_INVALID_RESPONSE,
+                                 error=f"invalid release document: {type(exc).__name__}")
 
 
 def _result_from_release(current: str, data: object) -> UpdateCheckResult:

@@ -239,6 +239,63 @@ def test_a_keystone_perspective_view_is_not_a_board_but_a_rectangle_is():
     assert find_board(_keystone_board(30.0), BODY_LENGTH_MM, BODY_WIDTH_MM) is None
 
 
+def _keystone_about(axis: str, scale_difference: float, scale: float = 40.0):
+    """Board seen in perspective about one image axis, with a given relative scale difference.
+
+    axis "vertical": the right edge is shorter than the left one, so the Y
+    extent changes from left to right (top and bottom sides lean apart);
+    axis "horizontal": the top edge is shorter than the bottom one, so the X
+    extent changes from top to bottom. `scale_difference` is the change of
+    the extent relative to the extent itself, split equally between the two
+    leaning sides.
+    """
+    margin = int(round(8 * scale))
+    board_w, board_h = int(BODY_LENGTH_MM * scale), int(BODY_WIDTH_MM * scale)
+    img = np.full((board_h + 2 * margin, board_w + 2 * margin, 3), 235, dtype="uint8")
+    x0, y0, x1, y1 = margin, margin, margin + board_w, margin + board_h
+    if axis == "vertical":
+        half = scale_difference * board_h / 2
+        corners = [[x0, y0], [x1, y0 + half], [x1, y1 - half], [x0, y1]]
+    else:
+        half = scale_difference * board_w / 2
+        corners = [[x0 + half, y0], [x1 - half, y0], [x1, y1], [x0, y1]]
+    cv2.fillConvexPoly(img, np.int32(np.round(corners)), (22, 22, 22))
+    return img
+
+
+@pytest.mark.parametrize("axis", ["vertical", "horizontal"])
+def test_a_keystone_is_judged_on_the_scale_error_it_causes_about_either_axis(axis):
+    """Review 2026-11-03: the same RELATIVE scale difference gets the same verdict about either axis.
+
+    The bound used to be a pixel drift per side relative to the long side,
+    so a keystone about the vertical axis (top and bottom sides leaning
+    apart, which scales the SHORT extent) passed with several times the
+    scale error accepted about the other axis. Positive and negative differ
+    structurally: 1 % scale difference (within twice the 1 % per-edge bound)
+    against 3 % (beyond it), on both axes at the same resolution.
+    """
+    assert find_board(_keystone_about(axis, 0.01), BODY_LENGTH_MM, BODY_WIDTH_MM) is not None
+    assert find_board(_keystone_about(axis, 0.03), BODY_LENGTH_MM, BODY_WIDTH_MM) is None
+
+
+def test_a_vertical_axis_keystone_within_the_old_per_side_pixels_is_now_refused():
+    """A keystone the old per-side bound let through is refused for its Y-scale error.
+
+    At 40 px/mm the board is 1600 x 640 px: the old bound allowed each side
+    16 px (1 % of the long side), so 12 px per side, 24 px over a 640 px Y
+    extent (3.75 % Y-scale difference), passed. The pair bound on the Y
+    extent is 2 x 6.4 px.
+    """
+    from kicadgen.services.photo_refine import _opposite_sides_keep_scale
+    # Top and bottom leaning apart change the Y extent by 24 px: refused.
+    assert not _opposite_sides_keep_scale((0.0, 0.0, 12.0, -12.0), 1600, 640)
+    # The same pixels on left and right change the 1600 px X extent: kept.
+    assert _opposite_sides_keep_scale((12.0, -12.0, 0.0, 0.0), 1600, 640)
+    # A common lean (tilt) changes no extent: left to the tilt check.
+    assert _opposite_sides_keep_scale((0.0, 0.0, 12.0, 12.0), 1600, 640)
+    assert find_board(_keystone_about("vertical", 24 / 640), BODY_LENGTH_MM, BODY_WIDTH_MM) is None
+
+
 @pytest.mark.parametrize("scale", [6.0, 12.0, 20.0, 34.0])
 def test_find_board_verdict_does_not_depend_on_resolution(scale):
     """Stessa scheda, stessa inclinazione, risoluzioni diverse: stesso esito.

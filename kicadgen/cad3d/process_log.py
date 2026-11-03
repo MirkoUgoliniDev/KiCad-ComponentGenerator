@@ -297,6 +297,160 @@ def _terminate_job(process) -> bool:
         return False
 
 
+class _JobAccounting:
+    """Lazily built ctypes layout of JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (Windows only)."""
+
+    _type = None
+
+    @classmethod
+    def type(cls):
+        """Return the structure type, built on first use."""
+        if cls._type is None:
+            import ctypes
+            from ctypes import wintypes
+
+            class Accounting(ctypes.Structure):
+                _fields_ = [("TotalUserTime", ctypes.c_int64),
+                            ("TotalKernelTime", ctypes.c_int64),
+                            ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                            ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                            ("TotalPageFaultCount", wintypes.DWORD),
+                            ("TotalProcesses", wintypes.DWORD),
+                            ("ActiveProcesses", wintypes.DWORD),
+                            ("TotalTerminatedProcesses", wintypes.DWORD)]
+
+            cls._type = Accounting
+        return cls._type
+
+
+def job_cpu_seconds(process):
+    """@brief CPU time consumed so far by every process of the child's job, in seconds.
+
+    @param process `subprocess.Popen` passed to `contain_process`.
+    @return User plus kernel time of all the job's processes, those already
+        ended included (JobObjectBasicAccountingInformation), or None when
+        the child has no job (another platform, a test double, a refused
+        assignment, a released job) or the query fails.
+    @note The liveness evidence that does not depend on the child printing:
+        `Part.read`, `Import.insert` and OCCT booleans hold the GIL, so the
+        heartbeat threads stay silent for the whole parse (proved on
+        2026-11-03 with freecadcmd reading a 1295-ball BGA model: 12.7 s,
+        not one beat), while the job's CPU time keeps growing.
+    """
+    job = getattr(process, _JOB_ATTRIBUTE, None)
+    if not job:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        info = _JobAccounting.type()()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not kernel32.QueryInformationJobObject(wintypes.HANDLE(job), 1,  # basic accounting
+                                                  ctypes.byref(info), ctypes.sizeof(info), None):
+            return None
+    except (OSError, AttributeError, ValueError, TypeError):
+        return None
+    # FILETIME-like counters in 100 ns units.
+    return (info.TotalUserTime + info.TotalKernelTime) / 1e7
+
+
+#: Fraction of ONE core the child's job must burn between two samples to
+#: count as working while it prints nothing. It separates two states, not two
+#: observed runs: a parser at work takes a whole core (100 %), an idle or
+#: blocked process takes a scheduler tick now and then (15.6 ms in a second is
+#: about 1.5 %). A tenth sits far from both (ten times below the first,
+#: more than six times above the second), so neither the machine's speed nor
+#: the model's size moves a case across it. A parse throttled below a tenth
+#: of a core by a saturated machine would read as idle: then the heartbeat
+#: and the timeout decide, as before this evidence existed.
+CPU_BUSY_FRACTION = 0.1
+
+#: Longest wall-clock interval between two samples of the job's CPU time.
+#: A cost bound (one system call per second), not a threshold: the sample
+#: interval is also capped by `heartbeat_interval(timeout)` so that several
+#: samples always fit in a silence window, however short the timeout.
+CPU_SAMPLE_INTERVAL_S = 1.0
+
+#: How many silence windows CPU activity alone may cover, as a multiple of the
+#: run's own timeout (300 s -> 20 minutes without one output line).
+#:
+#: DECLARED BOUND, a budget and not a measurement: the CPU evidence keeps a
+#: slow healthy parse alive, but an OCCT boolean caught in an endless loop
+#: burns a core just the same and is indistinguishable from it from outside.
+#: Before the CPU evidence such a loop died after one timeout; now it dies
+#: after this many, so the protection is kept, only later. The largest silent
+#: step seen so far (an 8.8 MB library STEP) stayed under ONE timeout, so four
+#: leave a wide margin. Any output line (a heartbeat included) or a finished
+#: measure resets the count: a child that keeps printing is bounded only by
+#: the cancel channel, as before.
+CPU_ONLY_SILENCE_FACTOR = 4
+
+
+class CpuActivity:
+    """@brief Tell whether a contained child is burning CPU while it prints nothing.
+
+    @note Used by `run_logged` and by the model-measuring watchdog in
+        `kicad_models`: silence then means "no output AND no CPU progress".
+        Without a job (`job_cpu_seconds` returns None: non-Windows, a refused
+        assignment) `available` is False and liveness is judged on output
+        only, as before.
+    """
+
+    def __init__(self, process, timeout, clock=time.monotonic):
+        """@brief Take the first sample of the child's job CPU time.
+
+        @param process `subprocess.Popen` already passed to `contain_process`.
+        @param timeout Silence timeout of the caller, in seconds: it caps the
+            sample interval (see `CPU_SAMPLE_INTERVAL_S`).
+        @param clock Monotonic clock (tests pass a fake one).
+        """
+        self._process = process
+        self._clock = clock
+        try:
+            self._interval = min(CPU_SAMPLE_INTERVAL_S, heartbeat_interval(timeout))
+        except (TypeError, ValueError):
+            # An odd timeout (None, inf) keeps the plain cost bound.
+            self._interval = CPU_SAMPLE_INTERVAL_S
+        self._cpu = job_cpu_seconds(process)
+        self._at = clock()
+        self.available = self._cpu is not None
+
+    def busy(self, now=None) -> bool:
+        """@brief Whether the job burnt at least `CPU_BUSY_FRACTION` of a core since the last sample.
+
+        @param now Current monotonic time; None reads the clock.
+        @return True only on a sample that shows the child working; False
+            between samples, without a job, or when the query fails (which
+            also disables further samples).
+        """
+        if not self.available:
+            return False
+        now = self._clock() if now is None else now
+        elapsed = now - self._at
+        if elapsed < self._interval:
+            return False
+        cpu = job_cpu_seconds(self._process)
+        if cpu is None:
+            self.available = False
+            return False
+        working = (cpu - self._cpu) >= CPU_BUSY_FRACTION * elapsed
+        self._cpu, self._at = cpu, now
+        return working
+
+
+def cpu_silence_limit(timeout) -> float:
+    """@brief Longest output-less stretch CPU activity may keep alive (see `CPU_ONLY_SILENCE_FACTOR`).
+
+    @param timeout Silence timeout of the run, in seconds.
+    @return Seconds since the last output (or finished measure) after which
+        the child is killed even though it burns CPU.
+    """
+    try:
+        return float(timeout) * CPU_ONLY_SILENCE_FACTOR
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 def release_process(process) -> None:
     """@brief Close the child's job handle: with KILL_ON_JOB_CLOSE, any process left in it ends.
 
@@ -427,7 +581,10 @@ KILL_REAP_GRACE_S = 5.0
 #: the pipe stays open (2026-11-03 review). Only a descendant that inherited
 #: the pipe can keep it open after the child's exit; what the child itself
 #: wrote is already in the pipe buffer and arrives at once, so the grace only
-#: pays for scheduling, and it restarts at every line that still arrives. It
+#: pays for scheduling. It counts from the child's exit and is NOT restarted
+#: by later lines (2026-11-03 second review, C4): a descendant printing more
+#: often than the grace used to keep the run alive forever. Lines already
+#: queued when it expires are still logged. It
 #: is not a timeout of the work and not tuned on a run: without it the read
 #: never ended (the watchdog cannot fire for a process that is gone), and a
 #: later forced end reported a «no output» timeout for a child that had
@@ -560,8 +717,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
         for each non-blank output line of the child; None disables the
         notifications.
     @param timeout Seconds of SILENCE after which the child is considered hung.
-        The count restarts at every output line, so it is not a budget for
-        the whole job.
+        The count restarts at every output line and, when the child is in a
+        Windows job, at every sample showing the job burning CPU
+        (`CpuActivity`), so it is not a budget for the whole job.
     @param creationflags Process creation flags passed to `subprocess.Popen`
         (see `NO_WINDOW_FLAGS` to avoid a console window on Windows).
     @param cancel Cancellation channel: an object with `is_set()` and
@@ -598,8 +756,18 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
         to make the silent step speak. See `heartbeat_interval` and
         `freecad_parts._ImportHeartbeat`: now every long step beats, so
         silence means "stuck" again.
-    @note There is no absolute cap: a job that makes progress is not
-        interrupted for having progressed for a long time.
+    @note DECLARED LIMIT of the heartbeats, now covered (2026-11-03 second
+        review, C1): the heartbeat threads print only while the C++ call
+        releases the GIL, and `Part.read`/`Import.insert`/booleans do not, so
+        a slow healthy parse was silent. Silence is now "no output AND no CPU
+        progress of the job" (`CpuActivity`); without a job (non-Windows)
+        output alone counts, as before.
+    @note Bounds: CPU activity alone keeps the child alive for at most
+        `cpu_silence_limit(timeout)` seconds after the last output line (an
+        endless OCCT loop is still ended). A child that keeps PRINTING (a
+        heartbeat thread of a deadlocked call) has no absolute cap: it is
+        ended only by @p cancel, by design -- a job that makes progress is
+        not interrupted for having progressed for a long time.
     @note The run ends with the CHILD, not with the pipe (2026-11-03 review):
         a descendant holding the inherited pipe used to block the reading
         forever, then let the watchdog raise a timeout for a child that had
@@ -613,6 +781,7 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
     timed_out = threading.Event()
     cancelled = threading.Event()
     stragglers = False
+    silent_for = timeout
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cap_log(log_path)
@@ -660,50 +829,86 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                 # had already started): kill right away.
                 cancelled.set()
                 kill_child()
-            deadline = time.monotonic() + timeout
+            def record(text):
+                """Log one output line and forward it to the progress callback."""
+                lines.append(text)
+                handle.write(text)
+                handle.flush()
+                if progress and text.strip():
+                    # The child's warnings arrive as template + values:
+                    # they are translated here (see messages.render_child_line).
+                    progress("FreeCAD: " + render_child_line(text.rstrip()))
+
+            last_output = time.monotonic()
+            deadline = last_output + timeout
+            cpu = CpuActivity(process, timeout)
+            cpu_limit = cpu_silence_limit(timeout)
             exited_at = None
+            pipe_open = True
             while not (cancelled.is_set() or timed_out.is_set()):
-                try:
-                    line = incoming.get(timeout=CANCEL_POLL_INTERVAL_S)
-                except queue.Empty:
-                    line = None
-                if line is end_of_output:
-                    break
+                line = None
+                if pipe_open:
+                    try:
+                        line = incoming.get(timeout=CANCEL_POLL_INTERVAL_S)
+                    except queue.Empty:
+                        line = None
+                    if line is end_of_output:
+                        pipe_open, line = False, None
+                else:
+                    # Pipe closed while the child lives (2026-11-03 second
+                    # review, C5): no more output can come, but the cancel
+                    # and the watchdog must keep running, never a bare wait().
+                    try:
+                        process.wait(timeout=CANCEL_POLL_INTERVAL_S)
+                    except subprocess.TimeoutExpired:
+                        pass
                 now = time.monotonic()
                 if line is not None:
                     # Every line is proof that the process is working: the
                     # silence count restarts from zero.
-                    deadline = now + timeout
-                    if exited_at is not None:
-                        exited_at = now
-                    lines.append(line)
-                    handle.write(line)
-                    handle.flush()
-                    if progress and line.strip():
-                        # The child's warnings arrive as template + values:
-                        # they are translated here (see messages.render_child_line).
-                        progress("FreeCAD: " + render_child_line(line.rstrip()))
+                    last_output, deadline = now, now + timeout
+                    record(line)
                 if cancel is not None and cancel.is_set():
                     cancelled.set()
                     kill_child()
                     break
-                if line is not None:
-                    continue
                 if process.poll() is not None:
+                    if not pipe_open:
+                        break
                     # The child is gone but the pipe is still open: only a
                     # descendant can hold it. What the child wrote is drained
-                    # for a short grace, then the reading stops -- the run is
-                    # over and its verdict is the child's own exit, never a
-                    # «no output» timeout.
+                    # for a short grace counted from the exit and never
+                    # restarted by later lines, then the reading stops -- the
+                    # run is over and its verdict is the child's own exit,
+                    # never a «no output» timeout.
                     if exited_at is None:
                         exited_at = now
                     elif now - exited_at >= EXIT_DRAIN_GRACE_S:
                         stragglers = True
                         break
                     continue
+                if line is None and cpu.busy(now):
+                    # Silent but burning CPU (a parse holding the GIL): alive,
+                    # up to the declared bound since the last output line.
+                    deadline = max(deadline, min(now + timeout, last_output + cpu_limit))
                 if now >= deadline:
+                    silent_for = now - last_output
                     timed_out.set()
                     kill_child()
+            if stragglers:
+                # Lines already queued when the grace expired are kept: a
+                # bounded drain (what is in the queue NOW, not what a flooding
+                # descendant adds meanwhile). Meeting the end of the pipe
+                # there means nobody was left holding it.
+                for _ in range(incoming.qsize()):
+                    try:
+                        line = incoming.get_nowait()
+                    except queue.Empty:
+                        break
+                    if line is end_of_output:
+                        stragglers = False
+                        break
+                    record(line)
             if timed_out.is_set() or cancelled.is_set():
                 # Killed: reaped with a bound and abandoned if the kill was
                 # refused (logged by the reaper), never waited for forever.
@@ -744,7 +949,10 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                      # arrived, the silence that follows is the effect
                      # of the kill, not its cause: announcing it
                      # would accuse healthy work of a hang.
-                     + (tx(" (nessun output per {timeout} s)", timeout=timeout)
+                     # The silence reported is the timeout, or the longer
+                     # stretch the job's CPU activity covered before the bound.
+                     + (tx(" (nessun output per {timeout} s)",
+                           timeout=timeout if silent_for < timeout + 1 else int(silent_for))
                         if timed_out.is_set() and not cancelled.is_set() else "")
                      + (tx(" (interrotto su richiesta dell'utente)")
                         if cancelled.is_set() else "")

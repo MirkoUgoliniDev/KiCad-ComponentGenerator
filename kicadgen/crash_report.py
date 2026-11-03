@@ -403,7 +403,13 @@ def install(log_dir_provider: PathProvider, *, max_reports: int = DEFAULT_MAX_RE
         wraps this hook so that, after the report and the traceback, the
         process EXITS, as PyQt6 did before the reports existed, because a
         window that keeps running after an unhandled exception may be in an
-        inconsistent state. Worker-thread exceptions end only their thread.
+        inconsistent state. Only a plain `threading.Thread` target ends
+        alone: its exception goes through `threading.excepthook` and stops
+        that thread only. An exception escaping a QThread's `run()` or a
+        QRunnable's `run()` is delivered by PyQt6 to `sys.excepthook`, so it
+        is reported AND ends the whole process like a slot exception; worker
+        `run()` methods must therefore catch their own errors and report them
+        through a signal.
     """
     _state["provider"] = log_dir_provider
     _state["max_reports"] = max(1, int(max_reports))

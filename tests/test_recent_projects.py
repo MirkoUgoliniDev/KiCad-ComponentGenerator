@@ -240,3 +240,15 @@ def test_a_save_that_reports_failure_is_not_counted_as_saved():
     assert recent_projects._save({}, lambda config: False) is False
     assert recent_projects._save({}, lambda config: None) is True
     assert recent_projects._save({}, lambda config: True) is True
+
+
+def test_describe_of_a_deeply_nested_project_file_keeps_name_and_path(tmp_path):
+    """@brief Review O6 (2026-11-03): nesting that exhausts the JSON parser is unreadable,
+    never a crash of the start page. Negative: a well-formed file still gives its type."""
+    folder = tmp_path / "Profondo"
+    folder.mkdir()
+    (folder / rp.PROJECT_CONFIG_NAME).write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+    summary = rp.describe(folder)
+    assert (summary.name, summary.component_type) == ("Profondo", "")
+    good = _project(tmp_path, "Buono", {"text": "Relè", "data": "relay"})
+    assert rp.describe(good).component_type == "Relè"

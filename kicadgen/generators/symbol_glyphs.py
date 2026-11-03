@@ -430,7 +430,26 @@ def primitives_of(unit_form, legacy_text_degrees: bool = False) -> list[Primitiv
             text = _text_primitive(item, legacy_text_degrees)
             if text is not None:
                 result.append(text)
-    return result
+    # A primitive a placed record would refuse (an arc through collinear
+    # points, a non-finite coordinate, a negative stroke, an empty text) is
+    # left out here, like a zero-radius circle above: otherwise placing the
+    # glyph would store a record its own project then refuses (review
+    # 2026-11-03, N10). Checked at the origin: quarter turns, mirrors and
+    # translations keep a centre that exists.
+    return [primitive for primitive in result if _library_primitive_usable(primitive)]
+
+
+def _library_primitive_usable(primitive: Primitive) -> bool:
+    """True when `validate_instances` would accept `primitive` in a record placed at the origin."""
+    try:
+        _validate_primitive(_ORIGIN_RECORD, primitive_record(primitive))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+#: A record frame with no placement, used to check library primitives in their own frame.
+_ORIGIN_RECORD = {"x": 0.0, "y": 0.0, "rotation": 0, "mirror": False}
 
 
 def terminals_of(unit_form) -> list[Terminal]:
@@ -1831,37 +1850,135 @@ def validate_instances(instances) -> list[dict]:
         if not isinstance(primitives, list) or not primitives:
             raise ValueError(tx("Elementi grafici del simbolo non validi."))
         for primitive in primitives:
-            if not isinstance(primitive, dict):
-                raise ValueError(tx("Elementi grafici del simbolo non validi."))
-            points = primitive.get("points", ())
-            if not isinstance(points, (list, tuple)):
-                raise ValueError(tx("Elementi grafici del simbolo non validi."))
-            for point in points:
-                _validate_point(point)
-            _validate_primitive_shape(primitive, len(points))
-            # An arc through three collinear points (or so nearly collinear
-            # that its centre leaves KiCad's range) has no circle: KiCad
-            # reads its centre around 1e15 mm.
-            if primitive.get("kind") == "arc" and not _arc_placeable(record, points):
-                raise ValueError(tx("Elementi grafici del simbolo non validi."))
-            if primitive.get("kind") == "text":
-                if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
-                        or len(primitive.get("points", ())) != 1:
-                    raise ValueError(tx("Elementi grafici del simbolo non validi."))
-                # A control character (newline, tab, NUL...) has no place in
-                # a one-line symbol text: a hand-edited or legacy project
-                # record carrying one used to reach the `.kicad_sym` as a
-                # raw newline inside the quotes, and KiCad 10 then refused
-                # the whole library (review 2026-10-27, G1). Refused here,
-                # where the record is checked, with a message naming the cause.
-                if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in primitive["text"]):
-                    raise ValueError(tx("Testo dell'elemento grafico del simbolo con caratteri di controllo "
-                                        "(a capo, tabulazione): non ammessi."))
-                _finite_or_raise(primitive.get("size", TEXT_SIZE_MM))
-                if float(primitive.get("size", TEXT_SIZE_MM)) <= 0:
-                    raise ValueError(tx("Elementi grafici del simbolo non validi."))
+            _validate_primitive(record, primitive)
         result.append(record)
     return result
+
+
+def _validate_primitive(record: dict, primitive) -> None:
+    """One stored primitive of a placed record; ValueError when KiCad or the editor could not use it.
+
+    Shared by `validate_instances` (project records) and `primitives_of`
+    (library glyphs, checked at the origin before any placement), so a
+    catalogue glyph can never carry a primitive its own project refuses."""
+    if not isinstance(primitive, dict):
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    points = primitive.get("points", ())
+    if not isinstance(points, (list, tuple)):
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    for point in points:
+        _validate_point(point)
+    _validate_primitive_shape(primitive, len(points))
+    # An arc through three collinear points (or so nearly collinear
+    # that its centre leaves KiCad's range) has no circle: KiCad
+    # reads its centre around 1e15 mm.
+    if primitive.get("kind") == "arc" and not _arc_placeable(record, points):
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    if primitive.get("kind") == "text":
+        if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
+                or len(primitive.get("points", ())) != 1:
+            raise ValueError(tx("Elementi grafici del simbolo non validi."))
+        # A control character (newline, tab, NUL...) has no place in
+        # a one-line symbol text: a hand-edited or legacy project
+        # record carrying one used to reach the `.kicad_sym` as a
+        # raw newline inside the quotes, and KiCad 10 then refused
+        # the whole library (review 2026-10-27, G1). Refused here,
+        # where the record is checked, with a message naming the cause.
+        if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in primitive["text"]):
+            raise ValueError(tx("Testo dell'elemento grafico del simbolo con caratteri di controllo "
+                                "(a capo, tabulazione): non ammessi."))
+        _finite_or_raise(primitive.get("size", TEXT_SIZE_MM))
+        if float(primitive.get("size", TEXT_SIZE_MM)) <= 0:
+            raise ValueError(tx("Elementi grafici del simbolo non validi."))
+
+
+def _unplaceable_arcs_as_polylines(record) -> Optional[dict]:
+    """A copy of `record` whose arcs without a KiCad centre are polylines, or None when it has none.
+
+    A collinear arc (saved before arcs were checked) is drawn by the editor
+    as the straight path through its three points (`arc_points`): the
+    polyline start -> mid -> end draws exactly that path, so the conversion
+    loses nothing the user saw. Records that are not well-formed objects
+    are left to `validate_instances`."""
+    if not isinstance(record, dict) or not isinstance(record.get("primitives"), list):
+        return None
+    converted = None
+    for index, primitive in enumerate(record["primitives"]):
+        if not isinstance(primitive, dict) or primitive.get("kind") != "arc":
+            continue
+        points = primitive.get("points", ())
+        try:
+            if not isinstance(points, (list, tuple)) or len(points) != 3:
+                continue
+            for point in points:
+                _validate_point(point)
+            if _arc_placeable(record, points):
+                continue
+        except (ValueError, TypeError):
+            continue
+        if converted is None:
+            converted = dict(record)
+            converted["primitives"] = list(record["primitives"])
+        polyline = dict(primitive)
+        polyline["kind"] = "polyline"
+        polyline["points"] = [list(point) if isinstance(point, (list, tuple)) else dict(point)
+                              for point in points]
+        polyline["radius"] = 0.0
+        converted["primitives"][index] = polyline
+    return converted
+
+
+def load_instances(instances, notes: Optional[list] = None) -> tuple[list[dict], list[int]]:
+    """@brief The usable records of a saved `symbol_graphics` list: one bad record never costs the others.
+
+    @param instances The `symbol_graphics` value of a row (None = none).
+    @param notes Optional list that receives one localized note per record
+        converted or dropped, for the caller's log.
+    @return (records, kept): the records `validate_instances` accepts, in
+        order, and the index in `instances` each one came from.
+    @throws ValueError When `instances` itself is not a list (the whole
+        value is unreadable, not one record).
+    @note A record whose arc has no centre KiCad can hold (three collinear
+        points, saved before `shape_instance` refused them) is kept with that
+        arc turned into the polyline through its three points
+        (`_unplaceable_arcs_as_polylines`); any other record that
+        `validate_instances` refuses is dropped. Before this, one such legacy
+        record made the whole list invalid: the symbol tab showed no drawing
+        and the next placement saved over all of them (review 2026-11-03,
+        N1), the contract `core.footprint.validate_footprint_drawings`
+        already keeps for footprint drawings. New placements still refuse
+        collinear arcs (`shape_instance`, `set_shape_point`).
+    """
+    if instances is None:
+        return [], []
+    if not isinstance(instances, (list, tuple)):
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    records, kept = [], []
+    for index, record in enumerate(instances):
+        label = (str(record.get("label") or record.get("key") or index + 1)
+                 if isinstance(record, dict) else str(index + 1))
+        try:
+            records.extend(validate_instances([record]))
+            kept.append(index)
+            continue
+        except ValueError:
+            pass
+        converted = _unplaceable_arcs_as_polylines(record)
+        if converted is not None:
+            try:
+                records.extend(validate_instances([converted]))
+                kept.append(index)
+                if notes is not None:
+                    notes.append(tx("Simbolo: l'elemento grafico «{label}» aveva un arco con tre punti "
+                                    "allineati, che KiCad non puo' rappresentare; e' stato convertito in "
+                                    "una linea spezzata con gli stessi punti.", label=label))
+                continue
+            except ValueError:
+                pass
+        if notes is not None:
+            notes.append(tx("Simbolo: l'elemento grafico «{label}» non e' valido ed e' stato escluso; "
+                            "gli altri elementi sono stati caricati.", label=label))
+    return records, kept
 
 
 #: Number of points each fixed-arity primitive kind carries (`Primitive`);
@@ -2011,25 +2128,36 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
     return lines
 
 
-def symbol_graphics(rows) -> list[dict]:
+def symbol_graphics(rows, notes: Optional[list] = None) -> list[dict]:
     """@brief The placed glyphs carried by the symbol rows (every row holds the same list).
 
     @param rows Symbol rows of the project.
-    @return The validated list of the first row that carries `symbol_graphics`,
-        else []; every record has an `id` (`ensure_instance_ids`).
-    @throws ValueError When rows disagree or a record is malformed.
-    @note Ids assigned to a legacy record are written positionally into
-        every row's list, so the rows keep agreeing; they persist only when
-        the caller saves the rows back.
+    @param notes Optional list that receives one localized note per record
+        converted or left out (`load_instances`), for the caller's log.
+    @return The usable records of the first row that carries
+        `symbol_graphics` (`load_instances`), else []; every record has an
+        `id` (`ensure_instance_ids`).
+    @throws ValueError When rows disagree or the value is not a list. A
+        single malformed record no longer makes the whole list unreadable:
+        it is converted or left out and reported in `notes`.
+    @note Ids assigned to a legacy record are written into every row's
+        record at the same original position, so the rows keep agreeing;
+        they persist only when the caller saves the rows back. Converted or
+        dropped records are NOT changed in the rows: the returned list is
+        what the caller saves next.
     """
     lists = [row["symbol_graphics"] for row in rows if isinstance(row, dict) and "symbol_graphics" in row]
     if not lists:
         return []
     if any(entry != lists[0] for entry in lists):
         raise ValueError(tx("Elementi grafici del simbolo incoerenti fra i pin."))
-    result = ensure_instance_ids(validate_instances(lists[0]))
-    for entry in lists[1:]:
-        for record, source in zip(entry, result):
-            if isinstance(record, dict) and record.get("id") != source["id"]:
+    records, kept = load_instances(lists[0], notes)
+    result = ensure_instance_ids(records)
+    for entry in lists:
+        if not isinstance(entry, (list, tuple)):
+            continue
+        for source, index in zip(result, kept):
+            record = entry[index]
+            if isinstance(record, dict) and record is not source and record.get("id") != source["id"]:
                 record["id"] = source["id"]
     return result

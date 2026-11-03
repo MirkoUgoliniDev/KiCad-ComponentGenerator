@@ -67,23 +67,31 @@ def _model(tmp_path, name="R_slow"):
 
 
 def test_a_slow_read_that_beats_is_not_declared_stalled(monkeypatch, tmp_path, cache_dir):
-    """@brief Positive: one model longer than the timeout, beating, is measured."""
-    _arm(monkeypatch, beat=True, duration=3.0)
+    """@brief Positive: one model longer than the timeout, beating, is measured.
+
+    The silence budget (4 s) leaves room for a slow interpreter start on a
+    loaded machine before the first beat; the read (7 s) still outlasts it.
+    """
+    _arm(monkeypatch, beat=True, duration=7.0)
     model = _model(tmp_path)
-    result = km.measure_models([model], timeout=1.5)
+    result = km.measure_models([model], timeout=4.0)
     assert result[str(model)]["total"] == [1.6, 0.8, 0.4]
     assert not getattr(result, "stalled", {})
 
 
 def test_a_silent_slow_read_is_still_stalled(monkeypatch, tmp_path, cache_dir):
-    """@brief Negative: the same model WITHOUT heartbeat is stalled at the timeout, as before."""
-    _arm(monkeypatch, beat=False, duration=6.0)
+    """@brief Negative: the same model WITHOUT heartbeat is stalled at the timeout, as before.
+
+    The read (30 s) is far longer than the silence budget (4 s), so the upper
+    elapsed bound still proves the watchdog stopped it, not the read's end.
+    """
+    _arm(monkeypatch, beat=False, duration=30.0)
     model = _model(tmp_path)
     started = time.monotonic()
-    result = km.measure_models([model], timeout=1.5)
+    result = km.measure_models([model], timeout=4.0)
     assert result[str(model)] is None
-    assert result.stalled == {str(model): 1.5}
-    assert time.monotonic() - started < 6.0
+    assert result.stalled == {str(model): 4.0}
+    assert time.monotonic() - started < 20.0
 
 
 def test_the_heartbeat_period_comes_from_the_watchdog_timeout(monkeypatch, tmp_path, cache_dir):

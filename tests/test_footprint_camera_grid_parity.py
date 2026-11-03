@@ -23,6 +23,17 @@ laid out for a sparse region, same pixels) and, with the shared camera, a
 zoom that cannot move the scale or a null pan step no longer touches the
 picture. The grid pixel hashes did not change at all; the camera golden
 changed only in the keys listed in the phase-2 report.
+
+GOLDEN CHANGED 2026-11-03 (generator review fixes, KLC courtyard margins:
+pin header 0.5 mm, packages and castellated modules 0.25 mm, user decision
+2026-11-03; the header margin was 1.0 mm, and a header without a body is
+now framed by its pads plus the silk clearance): the drawn header grew
+slightly, so ONLY the «fit/forced» record of `footprint_camera.json` (its
+rect, centre, scale and scroll) was regenerated once. Zoom limits, pans,
+wheel steps, fit counts and the grid pixel hashes are unchanged.
+Regenerated AGAIN the same day (second adversarial review): the pin-1 dot
+ink and the dimensions laid out beyond the texts enlarge the drawn rect,
+so only «fit/forced» changed once more.
 """
 import hashlib
 import json

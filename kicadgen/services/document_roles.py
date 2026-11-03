@@ -225,7 +225,15 @@ class DocumentSet:
         if not self.path.exists():
             return {'version': MANIFEST_VERSION, 'roles': {}, 'original_names': {}}
         try:
-            data = json.loads(self.path.read_text(encoding='utf-8'))
+            text = self.path.read_text(encoding='utf-8')
+        except OSError as exc:
+            # A manifest that cannot be read (locked, no permission) is not a
+            # malformed one, but the caller still gets a DocumentError, never
+            # an uncaught exception (review S9, 2026-11-03).
+            raise DocumentError(tx("Associazioni documenti non leggibili: {exc}. Il file non è "
+                                   "stato modificato.", exc=exc.strerror or exc)) from exc
+        try:
+            data = json.loads(text)
             if not isinstance(data, dict) or not isinstance(data.get('roles'), dict):
                 raise ValueError(tx("versione non riconosciuta"))
             if data.get('version') == 1:
@@ -297,17 +305,24 @@ class DocumentSet:
 
     @staticmethod
     def _check_source(source):
-        """Refuse a file that is not a readable image/PDF of at most 20 MB."""
+        """Refuse a file that is not a readable image/PDF of at most 20 MB.
+
+        A file the system refuses to read (OSError: locked, no permission,
+        vanished) is refused as a DocumentError too (review S9, 2026-11-03).
+        """
         suffix = source.suffix.lower()
-        if suffix not in SUFFIXES or not source.is_file():
-            raise DocumentError(tx("Carica un’immagine PNG, JPEG, WEBP, GIF o un PDF."))
-        if not 0 < source.stat().st_size <= 20 * 1024 * 1024:
-            raise DocumentError(tx("File vuoto o superiore al limite di 20 MB."))
-        if suffix == '.pdf':
-            with source.open('rb') as stream:
-                if b'%PDF-' not in stream.read(1024):
-                    raise DocumentError(tx("Il file non contiene un PDF riconoscibile."))
-            return
+        try:
+            if suffix not in SUFFIXES or not source.is_file():
+                raise DocumentError(tx("Carica un’immagine PNG, JPEG, WEBP, GIF o un PDF."))
+            if not 0 < source.stat().st_size <= 20 * 1024 * 1024:
+                raise DocumentError(tx("File vuoto o superiore al limite di 20 MB."))
+            if suffix == '.pdf':
+                with source.open('rb') as stream:
+                    if b'%PDF-' not in stream.read(1024):
+                        raise DocumentError(tx("Il file non contiene un PDF riconoscibile."))
+                return
+        except OSError as exc:
+            raise DocumentError(tx("File non leggibile: {exc}.", exc=exc.strerror or exc)) from exc
         from PIL import Image
         try:
             with Image.open(source) as img:

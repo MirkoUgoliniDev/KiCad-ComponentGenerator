@@ -885,3 +885,24 @@ def test_the_ai_log_says_when_a_call_goes_strict():
         "model": "openai/gpt-test", "system_prompt": "s", "content_blocks": [], "tool": _SHAPED})
     assert "AI_CALL_PROMPT_STRICT deepseek-beta" in strict_lines
     assert not any(line.startswith("AI_CALL_PROMPT_STRICT") for line in normal_lines)
+
+
+def test_a_deepseek_error_body_cut_short_is_a_provider_error(monkeypatch):
+    """@brief Review S4 (2026-11-03): IncompleteRead while reading the error body.
+
+    Positive: the read stops with http.client.IncompleteRead and the call still
+    raises ProviderError with the status. Negative: a whole body keeps its category
+    (test_a_deepseek_error_shows_a_fixed_category_never_the_server_text).
+    """
+    import email.message
+    import http.client
+    import io
+    import urllib.error
+
+    class CutShort(io.BytesIO):
+        def read(self, size=-1):
+            raise http.client.IncompleteRead(b"{", 10)
+    error = urllib.error.HTTPError("https://deepseek.invalid", 502, "err",
+                                   email.message.Message(), CutShort())
+    text = _deepseek_failing_with(monkeypatch, error)
+    assert "502" in text

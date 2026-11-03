@@ -25,7 +25,11 @@ launch an interactive KiCad, change a global KiCad configuration, or commit.
 - Pad count, numbering, pitch, row spacing, drill, pad size and body size
   match the documents; estimates are marked as estimates in the notes.
 - F.Fab outline = body, F.SilkS outline outside it, F.CrtYd around
-  everything (0.25 mm general margin), Reference/Value present.
+  everything, Reference/Value present. Courtyard margin (user decision
+  2026-11-03, KLC F5.3): **0.5 mm for pin headers** (connectors,
+  `generators/pin_header.py`), **0.25 mm for packages and castellated
+  modules** (`generators/package.py`). The margin follows the generator,
+  never the part's name.
 - KLC: run `kicadgen/services/klc_checks.check_all` (or read the
   «Controlli KiCad (KLC)» panel) and report each finding with its code.
   Reference values: `docs/reference/kicad9-getting-started-notes.md`.

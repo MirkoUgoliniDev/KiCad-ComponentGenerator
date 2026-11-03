@@ -246,3 +246,92 @@ def test_new_crop_replaces_obsolete_crop_versions(tmp_path):
     [saved] = store.images(entry_id)
     assert saved["crop_version"] == am.IMAGE_CROP_VERSION
     assert saved["component_name"] == "C-02"
+
+
+# -- review G7 (2026-11-03): the declared visual thresholds, at their bounds ------------
+
+def _scored(monkeypatch, scores):
+    """Make every visual comparison return scores[i] for the i-th stored descriptor kind.
+
+    `scores` maps a stored descriptor (bytes) to the score it gets; the rotated
+    comparison adds nothing, so the declared threshold alone decides.
+    """
+    from kicadgen.services import component_image_match as cim
+
+    def similarity(_query, stored):
+        return scores.get(np.asarray(stored, np.float32).tobytes(), 0.0)
+    monkeypatch.setattr(cim, "similarity", similarity)
+    monkeypatch.setattr(cim, "rotated_image_similarity", lambda *_args: 0.0)
+
+
+def _two_crops():
+    first = np.zeros((96, 96, 3), dtype=np.uint8)
+    cv2.rectangle(first, (18, 28), (78, 68), (255, 255, 255), 5)
+    second = np.zeros((96, 96, 3), dtype=np.uint8)
+    cv2.line(second, (8, 8), (88, 88), (255, 255, 255), 8)
+    return first, second
+
+
+@pytest.mark.parametrize("delta, older_wins", [(0.01, True), (-0.01, False)])
+def test_images_break_a_tie_only_above_the_declared_minimum(tmp_path, monkeypatch, delta,
+                                                            older_wins):
+    """Positive: just above VISUAL_TIEBREAK_MIN the older, similar crop wins the tie.
+    Negative: just below it the recency rule decides (the newer entry)."""
+    root, paths = _library(tmp_path)
+    store = am.AcceptedModelStore(tmp_path / "archive.sqlite3")
+    first, second = _two_crops()
+    store.consolidate([_component(root, paths[0], image=first)], [root])
+    store.consolidate([_component(root, paths[1], image=second)], [root])
+    _scored(monkeypatch, {describe_crop(first).astype(np.float32).tobytes():
+                          am.VISUAL_TIEBREAK_MIN + delta})
+    found = store.find(_component(root, paths[1], descriptor=describe_crop(first)), [root])
+    assert found["path"] == root / (paths[0] if older_wins else paths[1])
+
+
+@pytest.mark.parametrize("delta, recovered", [(0.005, True), (-0.005, False)])
+def test_a_basis_change_is_recovered_only_above_the_declared_minimum(tmp_path, monkeypatch,
+                                                                    delta, recovered):
+    """Positive: just above VISUAL_BASIS_RECOVERY_MIN the entry recorded on the other size
+    basis is recovered. Negative: just below it nothing is recovered."""
+    root, paths = _library(tmp_path)
+    store = am.AcceptedModelStore(tmp_path / 'archive.sqlite3')
+    crop = _asymmetric_crop()
+    saved = _component(root, paths[0], image=crop)
+    saved.update(kind='ic', bbox_basis='total', length_mm=3.15, width_mm=2.79,
+                 pin_count=6, pin_count_confidence='high')
+    store.consolidate([saved], [root])
+    _scored(monkeypatch, {describe_crop(crop).astype(np.float32).tobytes():
+                          am.VISUAL_BASIS_RECOVERY_MIN + delta})
+    found = store.find(dict(saved, bbox_basis='body'), [root])
+    if recovered:
+        assert found is not None and found['basis_recovered_visually'] is True
+    else:
+        assert found is None
+
+
+def _orientation_votes(monkeypatch, best, other):
+    """Two stored examples at 0 and 90 degrees whose first quarter turn scores best / other."""
+    from kicadgen.services import component_image_match as cim
+    monkeypatch.setattr(cim, "_quarter_turn_descriptors",
+                        lambda png: ([png + b"0", png + b"1", png + b"2", png + b"3"], True))
+    table = {b"a0": best, b"b0": other}
+    monkeypatch.setattr(cim, "similarity", lambda _q, d: table.get(d, 0.0))
+    return cim.match_orientation(np.zeros(4, np.float32),
+                                 [{"id": 1, "image_png": b"a", "model_rotation_deg": 0},
+                                  {"id": 2, "image_png": b"b", "model_rotation_deg": 90}])
+
+
+@pytest.mark.parametrize("delta, status", [(0.01, "matched"), (-0.01, "unverified")])
+def test_an_angle_is_transferred_only_above_the_declared_score(monkeypatch, delta, status):
+    """Positive/negative around ORIENTATION_MIN_SCORE, with no competing angle."""
+    from kicadgen.services.component_image_match import ORIENTATION_MIN_SCORE
+    assert _orientation_votes(monkeypatch, ORIENTATION_MIN_SCORE + delta, 0.0)["status"] == status
+
+
+@pytest.mark.parametrize("delta, status", [(0.01, "matched"), (-0.01, "unverified")])
+def test_an_angle_is_transferred_only_with_the_declared_margin(monkeypatch, delta, status):
+    """Positive/negative around ORIENTATION_MIN_MARGIN over a vote for another angle."""
+    from kicadgen.services.component_image_match import ORIENTATION_MIN_MARGIN
+    best = 0.97
+    result = _orientation_votes(monkeypatch, best, best - ORIENTATION_MIN_MARGIN - delta)
+    assert result["status"] == status

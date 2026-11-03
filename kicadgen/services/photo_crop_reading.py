@@ -417,20 +417,45 @@ CYLINDER_FAMILIES = frozenset({'MELF', 'MiniMELF'})
 #: that needs standards knowledge beyond the table.
 _SIZE_FAMILY_SPELLINGS = {name.upper(): name for name in DIODE_SIZES_MM}
 _SIZE_FAMILY_SPELLINGS.update({'SMF': 'SOD-123F', 'MINI-MELF': 'MiniMELF'})
-#: Small-outline IC family, standard data (JEDEC MS-012 narrow body, MS-013
-#: wide body), not a measurement of any board. Along the lead rows the body
-#: is (n/2 - 1) pitches plus an end margin that the variants put between
-#: SOIC_ROW_END_MARGIN_MM (0.9 .. 1.3 mm in all: 4.9 / 8.65 / 9.9 mm for 8 /
-#: 14 / 16 leads); across the rows the BODY is SOIC_BODY_WIDTH_MM (narrow,
-#: wide) and the lead span, terminals included, SOIC_SPAN_MM (narrow, wide).
+#: Small-outline IC family, standard data, not a measurement of any board:
+#: JEDEC MS-012 (narrow body) and MS-013 (wide body), kept SEPARATE because
+#: a body has the row length, body width and lead span of ONE outline (as
+#: LEADED_SIZES_MM keeps one entry per registered outline). Per standard:
+#: `lengths` is the registered body length D along the rows, (min, max) mm,
+#: per lead count; `body_width` the body E1 and `span` the lead span E,
+#: terminals included, across the rows. Along the rows the body is
+#: (n/2 - 1) pitches plus an end margin; the margin range of a standard is
+#: derived from its registered lengths (`soic_row_end_margin_mm`) so it
+#: also covers lead counts the standard does not list: MS-012 0.91 .. 1.19
+#: mm, MS-013 1.17 .. 1.63 mm (review 2026-11-03: one range 0.9 .. 1.3 for
+#: both rejected a nominal 10.3 mm SOIC-16W, margin 1.41).
 #: The inventory box is sometimes body-only and sometimes leads-included
 #: (bbox_basis declares it but is not reliable, HANDOFF 148 replay: a real
 #: SOIC-8 boxed 5.77 x 4.84 mm), so the lower bounds are the body's and the
 #: upper bounds the span's.
 SOIC_PITCH_MM = 1.27
-SOIC_ROW_END_MARGIN_MM = (0.9, 1.3)
-SOIC_BODY_WIDTH_MM = (3.9, 7.5)
-SOIC_SPAN_MM = (6.0, 10.3)
+SOIC_OUTLINES_MM = {
+    'JEDEC MS-012': dict(lengths={8: (4.80, 5.00), 14: (8.55, 8.75), 16: (9.80, 10.00)},
+                         body_width=(3.80, 4.00), span=(5.80, 6.20)),
+    'JEDEC MS-013': dict(lengths={16: (10.10, 10.50), 18: (11.35, 11.75), 20: (12.60, 13.00),
+                                  24: (15.20, 15.60), 28: (17.70, 18.10)},
+                         body_width=(7.40, 7.60), span=(10.00, 10.65)),
+}
+
+
+def soic_row_end_margin_mm(standard):
+    """@brief End margin range, in mm, of a SOIC standard along its rows, derived from its registered lengths.
+
+    @param standard SOIC_OUTLINES_MM key.
+    @return (min, max): the smallest and largest body length minus the lead
+        row ((n/2 - 1) pitches) over the standard's registered lead counts.
+    """
+    lengths = SOIC_OUTLINES_MM[standard]['lengths']
+    margins = [(low - SOIC_PITCH_MM * (leads // 2 - 1), high - SOIC_PITCH_MM * (leads // 2 - 1))
+               for leads, (low, high) in lengths.items()]
+    return min(low for low, _ in margins), max(high for _, high in margins)
+
+
 #: Solder that the photo envelope may add across the rows: a toe fillet is
 #: bounded by the pad extension beyond the lead, of the order of half a
 #: millimetre per side. HEURISTIC, declared: not tuned on any board, a
@@ -553,15 +578,17 @@ def soic_fits(leads_per_row, envelope):
 
     @param leads_per_row Leads in one of the two rows.
     @param envelope (long_mm, short_mm, side_uncertainty_mm) of the body, or None.
-    @return True when one side of the envelope lies along the rows between
-        (n - 1) pitches plus the smallest end margin (the shortest registered
-        body: a box, body-only or not, holds at least the body) and (n - 1)
-        pitches plus the largest end margin, +- the photo tolerance, and the other side lies
-        across the rows between the narrow BODY width (a body-only box) and
-        the wide lead span plus SOIC_SOLDER_ALLOWANCE_MM (a leads-included
-        box with fillets), +- the tolerance; False without an envelope. The
-        envelope carries no orientation, so both assignments of the sides
-        are tried.
+    @return True when, for ONE standard of SOIC_OUTLINES_MM (narrow
+        MS-012 or wide MS-013), one side of the envelope lies along the rows
+        between (n - 1) pitches plus that standard's smallest end margin (a
+        box, body-only or not, holds at least the body) and (n - 1) pitches
+        plus its largest end margin, +- the photo tolerance, and the other
+        side lies across the rows between that standard's BODY width minimum
+        (a body-only box) and its lead span maximum plus
+        SOIC_SOLDER_ALLOWANCE_MM (a leads-included box with fillets), +- the
+        tolerance; False without an envelope. A narrow row length with a
+        wide span is no registered outline. The envelope carries no
+        orientation, so both assignments of the sides are tried.
     @note Lower AND upper bounds: HANDOFF 147 (d) read «SOIC-8» on a 3.15
         mm body (too short for 4 leads), and the HANDOFF 148 replay read it
         on an 8.2 x 6.8 mm module (too long: a SOIC-8 body is 4.9 mm along
@@ -571,16 +598,19 @@ def soic_fits(leads_per_row, envelope):
         return False
     long_mm, short_mm, tolerance = envelope
     pitches = SOIC_PITCH_MM * (leads_per_row - 1)
-    # Along the rows even a body-only box holds the BODY, which is the lead
-    # row plus the smallest registered end margin (review 2026-11-03: the
-    # lead row alone let a 4.0 x 4.0 mm body pass as a SOIC-8, whose body is
-    # at least 3.81 + 0.9 = 4.71 mm long).
-    row_min, row_max = pitches + SOIC_ROW_END_MARGIN_MM[0], pitches + SOIC_ROW_END_MARGIN_MM[1]
-    span_min, span_max = SOIC_BODY_WIDTH_MM[0], SOIC_SPAN_MM[1] + SOIC_SOLDER_ALLOWANCE_MM
-    for along, across in ((long_mm, short_mm), (short_mm, long_mm)):
-        if row_min - tolerance <= along <= row_max + tolerance \
-                and span_min - tolerance <= across <= span_max + tolerance:
-            return True
+    for standard, outline in SOIC_OUTLINES_MM.items():
+        # Along the rows even a body-only box holds the BODY, which is the
+        # lead row plus the smallest end margin of the standard (review
+        # 2026-11-03: the lead row alone let a 4.0 x 4.0 mm body pass as a
+        # SOIC-8, whose body is at least 3.81 + 0.91 = 4.72 mm long).
+        margin_min, margin_max = soic_row_end_margin_mm(standard)
+        row_min, row_max = pitches + margin_min, pitches + margin_max
+        span_min = outline['body_width'][0]
+        span_max = outline['span'][1] + SOIC_SOLDER_ALLOWANCE_MM
+        for along, across in ((long_mm, short_mm), (short_mm, long_mm)):
+            if row_min - tolerance <= along <= row_max + tolerance \
+                    and span_min - tolerance <= across <= span_max + tolerance:
+                return True
     return False
 
 
@@ -852,6 +882,8 @@ def parse_observation(data):
 
 #: Per-side lead topology (fewer, more leads on the two opposite rows; tab
 #: observed) -> the families of LEADED_SIZES_MM with exactly that topology.
+#: Every key carries the observed tab: a tab seen on a 1 + 2 body matches no
+#: entry and gives no name (as leaded_family_from_evidence), never a SOT-23.
 #: Standard outline data, not a board measurement: the count alone never
 #: names a family (review 2026-11-03: «SOT-23» was written on any 1 + 2 body,
 #: a SC-70 / SOT-323 included); the measured envelope chooses among these.
@@ -868,7 +900,8 @@ def _topology_family(candidates, envelope, notes):
 
     Same two tiers as leaded_family_from_evidence (strict outline first,
     then with the solder allowance); several fitting families is an
-    ambiguity left empty, none fitting (or no envelope) a rejection noted as
+    ambiguity left empty and noted as «leaded_ambiguous:<fitting names>»,
+    none fitting (or no envelope) a rejection noted as
     «leaded_rejected:<names>» like soic_rejected.
     """
     for strict in (True, False):
@@ -876,6 +909,9 @@ def _topology_family(candidates, envelope, notes):
         if len(fitting) == 1:
             return fitting[0]
         if fitting:
+            # Several families explain the measurement: the choice is the
+            # user's, and the row says so instead of staying silently empty.
+            notes.append('leaded_ambiguous:' + '/'.join(fitting))
             return ''
     notes.append('leaded_rejected:' + '/'.join(candidates))
     return ''
@@ -897,11 +933,15 @@ def _leaded_family(leads, tab, envelope, notes):
         low, high = sorted(rows)
         if (low, high) == (0, 3) and not tab:
             continue
-        candidates = _TOPOLOGY_FAMILIES.get((low, high, bool(tab) if (low, high) == (0, 3) else False))
+        candidates = _TOPOLOGY_FAMILIES.get((low, high, bool(tab)))
         if candidates:
             cls = 'ic' if (low, high) == (3, 3) else 'semiconductor_unknown'
             return cls, _topology_family(candidates, envelope, notes)
         if low == high >= 4:
+            # A SOIC has no heat tab: an observed tab names no SOIC, as
+            # _leaded_families excludes it.
+            if tab:
+                return 'ic', ''
             if soic_fits(low, envelope):
                 return 'ic', f'SOIC-{2 * low}'
             notes.append(f'soic_rejected:{low}')
@@ -985,7 +1025,8 @@ def derive_reading(observation, envelope=None, inventory_class=None, inventory_l
         contradictions that hold only when BOTH readings of the body raise
         them (read_bodies intersects them: 'print_contradicts_capacitor',
         'band_contradicts_unpolarised'); `notes` lists rejected names
-        («size_family_rejected:SMA», «soic_rejected:4») to be shown as
+        («size_family_rejected:SMA», «soic_rejected:4») and ambiguous
+        derivations («leaded_ambiguous:SOT-23/SOT-323») to be shown as
         review reasons; `leads` is the per-side tuple for a leaded package
         and (None, None, None, None) for a two-terminal body, whose end
         terminals are not leads; `contacts` is the observed contact count.
@@ -1563,8 +1604,10 @@ def _note_text(note, envelope, kept_package):
     or '' when the row's package is now empty: the text says which.
     """
     kind, _sep, value = note.partition(':')
-    # «leaded_rejected:SOT-23/SOT-323»: the names the lead topology allows,
-    # none confirmed by the envelope; it reads as the generic rejection below.
+    # soic_rejected, leaded_rejected and leaded_ambiguous name families the
+    # PROGRAM derived from the observed lead topology; size_family_* name a
+    # family the model chose. The sentence says which.
+    derived = kind in ('soic_rejected', 'leaded_rejected', 'leaded_ambiguous')
     if kind == 'soic_rejected':
         family = f'SOIC-{2 * int(value)}'
         if envelope is None:
@@ -1578,12 +1621,23 @@ def _note_text(note, envelope, kept_package):
         family = value
         if kind == 'size_family_shape':
             detail = tx("non corrisponde alla forma osservata")
+        elif kind == 'leaded_ambiguous' and envelope is not None:
+            detail = tx("piu' d'una e' compatibile con l'ingombro misurato {long:.2f} x "
+                        "{short:.2f} mm (tolleranza {tol:.2f} mm)", long=envelope[0],
+                        short=envelope[1], tol=envelope[2])
         elif envelope is None:
             detail = tx("nessun ingombro misurato per confermarla")
         else:
             detail = tx("incompatibile con l'ingombro misurato {long:.2f} x {short:.2f} mm "
                         "(tolleranza {tol:.2f} mm)", long=envelope[0], short=envelope[1],
                         tol=envelope[2])
+    if derived and kept_package:
+        return tx("Famiglia {family} ricavata dai piedini osservati ma {detail}: resta il "
+                  "package dell'inventario «{kept}», da verificare.", family=family,
+                  detail=detail, kept=kept_package)
+    if derived:
+        return tx("Famiglia {family} ricavata dai piedini osservati ma {detail}: package "
+                  "lasciato vuoto, da verificare.", family=family, detail=detail)
     if kept_package:
         return tx("Taglia {family} indicata dal modello ma {detail}: resta il package "
                   "dell'inventario «{kept}», da verificare.", family=family, detail=detail,

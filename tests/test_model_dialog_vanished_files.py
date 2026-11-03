@@ -152,3 +152,61 @@ def test_the_smd_list_names_each_file_format_from_its_suffix(qapp, tmp_path):
     finally:
         dialog.shutdown()
         dialog.deleteLater()
+
+
+def test_a_yolo_model_still_being_copied_is_examined_once_per_selection(qapp, tmp_path,
+                                                                       monkeypatch):
+    """@brief Review O8, positive: a file growing during its jobs starts each job once.
+
+    Every job appends to the file, as a copy in progress does: its identity at
+    the end is never the one examined, which used to restart the jobs on every
+    redraw. The result is remembered for the content the job read.
+    """
+    from kicadgen.services import yolo_models
+    folder = tmp_path / "models"
+    folder.mkdir()
+    growing = folder / "base.onnx"
+    growing.write_bytes(b"onnx")
+    sizes = []
+
+    def grow():
+        sizes.append(os.path.getsize(growing))
+        with open(growing, "ab") as handle:
+            handle.write(b"more")
+
+    def digest(path):
+        grow()
+        return "d" * 64
+
+    def validate(path):
+        grow()
+        return {"model_classes": ["ic"], "missing_classes": [], "class_order": "by name"}
+    monkeypatch.setattr(yolo_models, "sha256_of", digest)
+    monkeypatch.setattr(photo_yolo, "validate_yolo_setup", validate)
+    dialog = yolo_dlg.YoloModelDialog(str(growing), folder)
+    starts = _count_starts(dialog)
+    try:
+        for _ in range(3):
+            dialog._show_selected()
+            _settle(qapp)
+        assert not starts, "the first jobs already answered for this selection"
+        assert len(sizes) == 2, "one sha256 and one check, never restarted"
+        assert dialog._results.get(str(growing), "sha256") == "d" * 64
+        examined = {identity[1] for identity in yolo_dlg._RESULTS}
+        assert examined <= set(sizes), "remembered under the size the job read"
+        assert os.path.getsize(growing) not in examined
+    finally:
+        dialog.shutdown()
+        dialog.deleteLater()
+
+
+def test_a_stable_yolo_model_answers_from_the_session_cache(qapp, tmp_path, monkeypatch):
+    """@brief Review O8, negative: an unchanged file keeps nothing per selection."""
+    folder, dialog = _yolo_dialog(tmp_path, monkeypatch)
+    try:
+        _settle(qapp)
+        assert yolo_dlg._remembered(str(folder / "base.onnx"), "check")
+        assert not dialog._results._settled and not dialog._results._unstored
+    finally:
+        dialog.shutdown()
+        dialog.deleteLater()

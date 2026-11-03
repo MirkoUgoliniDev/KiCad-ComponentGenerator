@@ -16,7 +16,8 @@ Steps, each one stopping the build on failure:
      _internal\licenses);
   4. application icon rendered from kicadgen/gui/assets/app-icon.svg;
   5. PyInstaller one-folder build into dist\KiCadGen;
-  6. smoke test: KiCadGen.exe --check-runtime must exit with 0;
+  6. smoke test: KiCadGen.exe --check-runtime must exit with 0 (its lines
+     go to build\check-runtime.txt, printed when it fails);
   7. (-Package msi) MSI into dist\KiCadGen-<version>.msi.
 
 The caller's current location is restored when the script ends, also on
@@ -145,8 +146,26 @@ if (-not (Test-Path $exe)) { throw "Executable not produced: $exe" }
 
 # -- 6. Smoke test ---------------------------------------------------------------
 Write-Host 'Checking the executable (--check-runtime)...'
-$check = Start-Process -FilePath $exe -ArgumentList '--check-runtime' -Wait -PassThru -NoNewWindow
-if ($check.ExitCode -ne 0) { throw "KiCadGen.exe --check-runtime failed (exit $($check.ExitCode))." }
+# The executable is windowed: its stdout goes nowhere, so the check also
+# writes its lines to a file named by KICADGEN_CHECK_RUNTIME_REPORT (read by
+# main.check_runtime_report_path), printed here when the check fails.
+$checkReport = Join-Path $Root 'build\check-runtime.txt'
+if (Test-Path $checkReport) { Remove-Item -Force $checkReport }
+$env:KICADGEN_CHECK_RUNTIME_REPORT = $checkReport
+try {
+    $check = Start-Process -FilePath $exe -ArgumentList '--check-runtime' -Wait -PassThru -NoNewWindow
+} finally {
+    Remove-Item Env:\KICADGEN_CHECK_RUNTIME_REPORT -ErrorAction SilentlyContinue
+}
+if ($check.ExitCode -ne 0) {
+    if (Test-Path $checkReport) {
+        Write-Host "--check-runtime report ($checkReport):" -ForegroundColor Yellow
+        Get-Content $checkReport | ForEach-Object { Write-Host "  $_" }
+    } else {
+        Write-Host "--check-runtime wrote no report ($checkReport)." -ForegroundColor Yellow
+    }
+    throw "KiCadGen.exe --check-runtime failed (exit $($check.ExitCode))."
+}
 Write-Host "Executable ready: $exe" -ForegroundColor Green
 
 if ($Package -eq 'app-image') { return }

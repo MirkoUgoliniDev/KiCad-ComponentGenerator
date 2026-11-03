@@ -347,3 +347,45 @@ def test_hole_sizes_reach_the_extracted_params():
              through_hole_drill_mm=0.7, contact_style="half_and_through")]))
     side = params.castellated_sides[0]
     assert side["half_hole_diameter_mm"] == 1.0 and side["through_hole_drill_mm"] == 0.7
+
+
+# ── Review S2 (2026-11-03): a partial pin_map without a known grid ───────────
+
+def test_a_partial_pin_map_with_explicit_pads_and_no_rows_keeps_the_answer():
+    """Positive: package_geometry is the footprint, the matrix has cols but no rows, the
+    pin_map is partial: the map is set aside with a note, the paid answer is kept."""
+    data = dict(layout="matrix", cols=4, confidence="high", drawing_unit="mm",
+                contacts_view="top", package_geometry=_soic8(),
+                pin_map=[{"pin": 1, "row": 0, "col": 0}])
+    params = _params_from_tool_arguments(data)
+    assert len(params.package_geometry["pins"]) == 8 and params.pin_map is None
+    assert "pin_map parziale ignorata" in params.notes
+
+
+def test_a_partial_pin_map_on_a_known_grid_is_still_completed_by_convention():
+    """Negative: with rows and cols known the same partial map is completed (or blocked) by
+    the standard conventions as before, never ignored."""
+    params = _params_from_tool_arguments(_matrix(pin_map=[{"pin": 1, "row": 0, "col": 0},
+                                                          {"pin": 8, "row": 1, "col": 0}]))
+    assert "pin_map parziale ignorata" not in params.notes
+    assert params.pin_map or params.pin_map_conflict
+
+
+# ── Review S6 (2026-11-03): a missing drawing unit is said, never silent ─────
+
+def test_a_missing_drawing_unit_is_a_doubt_and_an_undeclared_source():
+    """Positive: without drawing_unit the lengths are taken as mm, with a «DUBBIO» note and
+    ``drawing_unit`` listed as a value without declared provenance."""
+    data = _matrix()
+    data.pop("drawing_unit")
+    params = _params_from_tool_arguments(data)
+    assert params.pitch_mm == pytest.approx(2.54)
+    assert "unita' di misura non dichiarata" in params.notes
+    assert params.value_sources.get("drawing_unit") == "undeclared"
+
+
+def test_a_declared_drawing_unit_is_no_doubt():
+    """Negative: the same answer declaring mm has no unit doubt and no unit provenance entry."""
+    params = _params_from_tool_arguments(_matrix())
+    assert "unita' di misura non dichiarata" not in params.notes
+    assert "drawing_unit" not in (params.value_sources or {})

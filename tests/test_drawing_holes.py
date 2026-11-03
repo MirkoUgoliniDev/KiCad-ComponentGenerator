@@ -611,3 +611,19 @@ def test_real_product_photos_with_quotes_are_not_drawings(relative):
     path = _real(relative)
     result = _check(path, RELAY)
     assert (result.status, result.reason) == ("unverifiable", "not_a_drawing")
+
+
+def test_a_drawing_uploaded_as_gif_is_checked_like_a_png(tmp_path, staggered):
+    """Review S9 (2026-11-03). Positive: the documents panel accepts GIF and OpenCV does not
+    decode it; the same drawing saved as GIF is read through Pillow and confirmed.
+    Negative: a .gif that is not an image stays unreadable (no_image), never a crash."""
+    from PIL import Image
+    gif = tmp_path / "staggered.gif"
+    with Image.open(staggered) as picture:
+        picture.convert("L").save(gif, format="GIF")
+    result = _check(gif, STAGGERED)
+    assert result.status == "confirmed" and result.image == "staggered.gif"
+    broken = tmp_path / "broken.gif"
+    broken.write_bytes(b"GIF89a not really")
+    assert (_check(broken, STAGGERED).status, _check(broken, STAGGERED).reason) == (
+        "unverifiable", "no_image")

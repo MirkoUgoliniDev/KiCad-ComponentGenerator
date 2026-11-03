@@ -203,3 +203,49 @@ def test_a_typed_height_on_a_long_decimal_row_becomes_a_measure():
     dialog.table.cellWidget(0, 6).setValue(2.0)
     edited, = dialog.components()
     assert edited["height_mm"] == 2.0 and not edited.get("_height_estimated")
+
+
+def test_an_untouched_row_keeps_missing_and_none_values_as_they_were():
+    """@brief Negative (review O1): a plain «Applica» invents no height, colour, name or angle.
+
+    The cells must show something (0.6 mm, #303030, «270°»), but what they
+    show only to be readable is not the user's input.
+    """
+    sparse = dict(kind="ic", x_mm=1.0, y_mm=2.0, length_mm=4.0, width_mm=3.0,
+                  rotation_deg=-90.0, marking="")
+    nulls = dict(name=None, kind="ic", x_mm=0.0, y_mm=0.0, length_mm=2.0, width_mm=1.0,
+                 height_mm=None, rotation_deg=None, color_hex=None, marking="")
+    dialog = ComponentEditorDialog([sparse, nulls], COMPONENT_KINDS)
+    first, second = dialog.components()
+    for key in ("height_mm", "color_hex", "name", "_height_source", "_height_estimated"):
+        assert key not in first, key
+    assert first["rotation_deg"] == -90.0
+    assert second["height_mm"] is None and second["color_hex"] is None
+    assert second["name"] is None and second["rotation_deg"] is None
+    assert "_height_source" not in second and "_height_estimated" not in second
+
+
+def test_an_edited_missing_height_becomes_a_measure_and_edited_texts_are_stored():
+    """@brief Positive (review O1): what the user typed is stored, the height as measured."""
+    sparse = dict(kind="ic", x_mm=1.0, y_mm=2.0, length_mm=4.0, width_mm=3.0,
+                  rotation_deg=-90.0, marking="")
+    dialog = ComponentEditorDialog([sparse], COMPONENT_KINDS)
+    dialog.table.cellWidget(0, 6).setValue(1.5)
+    dialog.table.cellWidget(0, 0).setText("U7")
+    dialog.table.cellWidget(0, 8).setText("#101010")
+    rotation = dialog.table.cellWidget(0, 7)
+    rotation.setCurrentIndex(rotation.findData(90.0))
+    edited, = dialog.components()
+    assert edited["height_mm"] == 1.5
+    assert edited["_height_source"] == "user" and edited["_height_estimated"] is False
+    assert edited["name"] == "U7" and edited["color_hex"] == "#101010"
+    assert edited["rotation_deg"] == 90.0
+
+
+def test_an_untouched_minus_ninety_keeps_the_model_choice():
+    """@brief Negative: -90 shown as 270° is the same orientation, not a new rotation."""
+    dialog = ComponentEditorDialog([_body(rotation_deg=-90.0)], COMPONENT_KINDS)
+    edited, = dialog.components()
+    assert edited["rotation_deg"] == -90.0
+    assert edited["model_match"] == {"status": "auto_matched"}
+    assert edited["model_selection"] == {"path": "x.step"}

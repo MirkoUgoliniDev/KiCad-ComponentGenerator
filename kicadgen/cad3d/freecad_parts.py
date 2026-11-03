@@ -1227,6 +1227,11 @@ class _ImportHeartbeat:
         beat is not entrusted to the timer alone: `beat_if_due` is also
         called at the Python points crossed during the import (the copy of
         the assembly's pieces), which beat regardless.
+    @note Verified 2026-11-03 with FreeCAD 1.1: `Part.read` of a 1295-ball
+        BGA model held the GIL for 12.7 s and not one beat went out. The
+        parent therefore also counts the CPU time of the child's Windows job
+        as activity (`process_log.CpuActivity`); this beat stays the evidence
+        where no job exists and the message the user reads.
     """
 
     def __init__(self, path, interval=None):

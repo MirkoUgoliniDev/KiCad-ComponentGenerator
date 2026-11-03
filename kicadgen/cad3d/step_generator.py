@@ -37,7 +37,7 @@ from ..core.output_names import validate_output_name
 from .process_log import NO_WINDOW_FLAGS, ProcessCancelled, heartbeat_interval
 from ..services.messages import CHILD_WARNING, child_warning_text, tx
 from ..fsutil import replace_file
-from ..core.validation import is_finite_number
+from ..core.validation import is_finite_number, positive_number
 from ..kicad_versions import newest_version_first, parse_version
 from .lead_sides import local_lead_sides
 
@@ -56,12 +56,24 @@ FREECAD_SILENCE_TIMEOUT_S = 300
 #: back to rest when the 3D does not complete, and an interruption is an
 #: uncompleted 3D with a different reason, not a second mechanism to maintain
 #: in parallel.
-CAD_ABORT_MESSAGE = tx("Generazione 3D interrotta su richiesta dell'utente.")
+#:
+#: It is the Italian SOURCE text (the catalogue key), translated when the
+#: exception is raised (`Cad3DCancelled`), never at import, where it was
+#: always Italian. It is NOT a detection marker (2026-11-03 second review,
+#: C6): an interruption is recognised with `isinstance(exc, Cad3DCancelled)`.
+CAD_ABORT_MESSAGE = "Generazione 3D interrotta su richiesta dell'utente."
 
 _SCRIPT_PATH = Path(__file__).parent / "freecad_build_body.py"
 
 _CFLAGS = NO_WINDOW_FLAGS
 
+
+#: Shortest golden pad drawn inside the board for a castellated contact, in
+#: mm. It mirrors the validator's own floor (CastellatedModuleParams keeps
+#: every land at least pad_overhang + 0.01 mm long), so for validated
+#: parameters it never lengthens the pad; it only keeps the solid non-empty
+#: for parameters that skipped the validation.
+CASTELLATED_PAD_MIN_INNER_MM = 0.01
 
 #: Minimum distance kept between a component's edge and the module's edge,
 #: when the component is brought back inside (see `place_component`).
@@ -142,7 +154,9 @@ def _rectangle_axes(rotation: float) -> tuple[tuple[float, float], tuple[float, 
     """Local unit axes, exact for the cardinal rotations."""
     angle = rotation % 360
     if angle % 90 == 0:
-        c, s = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))[int(angle / 90)]
+        # Modulo 4: a rotation a hair below zero (-1.4e-14) gives
+        # `angle == 360.0` in floating point, which indexed past the table.
+        c, s = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))[int(round(angle / 90)) % 4]
     else:
         c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
     return (c, s), (-s, c)
@@ -442,15 +456,23 @@ class Cad3DError(Exception):
     """@brief Application error: freecadcmd missing or 3D generation failed or cancelled."""
 
 
-def child_environment() -> dict:
-    """@brief Environment for every freecadcmd child launched by this package.
+class Cad3DCancelled(Cad3DError):
+    """@brief The 3D generation was stopped because the user asked for it.
 
-    @return A copy of os.environ with PYTHONDONTWRITEBYTECODE=1.
-    @note The FreeCAD scripts are imported from the program folder, which is
-        read-only once installed: without this the child would try to write
-        __pycache__ next to them (and leave stale bytecode in a checkout).
+    @note A subclass, so every handler of `Cad3DError` keeps working (the
+        interruption goes through the same exit path as any uncompleted 3D),
+        while a caller that must not call it a fault tests the type instead of
+        looking for a text in the message, which depends on the language.
     """
-    return dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+
+    def __init__(self, message=None):
+        """@brief Carry the interruption text in the active language.
+
+        @param message Text to carry; None = `CAD_ABORT_MESSAGE` translated now.
+        """
+        # The literal (equal to CAD_ABORT_MESSAGE) keeps the catalogue scan able to see it.
+        super().__init__(tx("Generazione 3D interrotta su richiesta dell'utente.")
+                         if message is None else message)
 
 
 def _output_text(value) -> str:
@@ -693,8 +715,11 @@ def castellated_contact_payload(params: CastellatedModuleParams, pin_color_hex: 
         else:
             pad_len = placement.width if placement.edge in ("left", "right") else placement.height
             pad_w = placement.height if placement.edge in ("left", "right") else placement.width
-            # Part of the pad that lies inside the board: it is the visible golden pad.
-            inner_len = max(0.6, pad_len - params.pad_overhang)
+            # Part of the pad that lies inside the board: it is the visible
+            # golden pad, never longer than that part of the footprint land
+            # (2026-11-03 second review, G9: a 0.6 mm floor drew gold where
+            # the land has none). See CASTELLATED_PAD_MIN_INNER_MM.
+            inner_len = max(pad_len - params.pad_overhang, CASTELLATED_PAD_MIN_INNER_MM)
             if placement.edge == "left":
                 centre = (-half_length + inset, placement.y)
                 label = (-half_length + inner_len + label_gap, placement.y)
@@ -949,7 +974,7 @@ def attach_library_models(components, height_notes, notes, report, *,
     @param report Callback for model-matching messages.
     @param model_progress Optional progress callback of the matching.
     @param cancel Optional threading.Event that aborts the work.
-    @throws Cad3DError With CAD_ABORT_MESSAGE when the user cancels.
+    @throws Cad3DCancelled When the user cancels.
     @note The library is an extra, never a requirement: any other error is
         reported and every body is built as an approximate shape. The
         resolution runs here, not inside FreeCAD: measuring a model needs its
@@ -972,7 +997,7 @@ def attach_library_models(components, height_notes, notes, report, *,
         # The give-up is NOT a defect of the 3D library: if it ended in the branch
         # below, it would be announced as «libreria non utilizzabile» (library not
         # usable) and the construction of the solid would start anyway.
-        raise Cad3DError(CAD_ABORT_MESSAGE) from exc
+        raise Cad3DCancelled() from exc
     except Exception as exc:  # noqa: BLE001 - the library is an extra, never a requirement
         report(tx("Libreria 3D KiCad non utilizzabile ({exc}); si usano le forme "
                   "approssimate.",
@@ -1023,7 +1048,7 @@ def resolve_or_reuse_models(reuse, components, height_notes, notes, report, *,
     @param model_progress Optional progress callback of the matching.
     @param cancel Optional threading.Event that aborts the matching.
     @return The payloads to build: the fresh ones, now resolved, or the reused ones.
-    @throws Cad3DError With CAD_ABORT_MESSAGE when the user cancels the matching.
+    @throws Cad3DCancelled When the user cancels the matching.
     @note Both paths produce the same notes: on reuse the model-resolution
         messages saved with the snapshot are reported again, and the height
         notes are filtered by the reused model paths (`reused_height_notes`),
@@ -1159,8 +1184,10 @@ def generate_castellated_3d_model(
     # that knows the height is NOT documented (a placeholder left in the
     # field) declares it with `height_declared = False` on the body, and the
     # block is not built: without a declared or estimated height it would be
-    # an invented volume (project rule). None -- every caller so far -- keeps
-    # the block, always with the note that states it is an estimate. The
+    # an invented volume (project rule). The main window sets it from the
+    # body-height field (False while the field still holds its placeholder);
+    # None -- a caller that does not know, such as a script -- keeps the
+    # block, always with the note that states it is an estimate. The
     # GUI already passes a total height equal to the PCB thickness when the
     # analysis found none, which leaves no block (height 0) on its own.
     height_declared = getattr(body, "height_declared", None)
@@ -1316,6 +1343,10 @@ def generate_single_package_3d_model(
 
     @param package Explicit pad geometry of the part (THT and/or SMD pins).
     @param body Colours and fallback dimensions when the package gives none.
+        An optional attribute `lead_diameter_mm` (not a dataclass field, so
+        the recorded body of existing projects is unchanged) carries the lead
+        diameter quoted by the documents; without it the leads are estimated
+        from the smallest hole (`single_part_lead_diameter`).
     @param output_dir Project directory receiving the `.3dshapes` folder.
     @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
     @param fillets EdgeFilletAnnotation list applied to the body, or None.
@@ -1368,13 +1399,16 @@ def generate_single_package_3d_model(
                 "rotation_deg": pin.rotation_deg,
                 "color_hex": body.pin_color_hex,
             })
+    lead_notes = []
     if leads:
         # One lead diameter for the whole part (the FreeCAD payload has one):
-        # an ESTIMATE from the SMALLEST hole, so a mounting hole never widens
-        # every lead and no lead is wider than its hole. LEAD_OF_DRILL_FRACTION
-        # and LEAD_MAX_DIAMETER_MM are declared in this module.
-        centered = replace(centered, pin_diameter_mm=min(
-            min(drills) * LEAD_OF_DRILL_FRACTION, LEAD_MAX_DIAMETER_MM))
+        # the documents' quoted diameter when it fits the smallest hole, the
+        # declared estimate from that hole otherwise (`single_part_lead_diameter`).
+        diameter, lead_note = single_part_lead_diameter(
+            getattr(body, "lead_diameter_mm", None), drills)
+        centered = replace(centered, pin_diameter_mm=diameter)
+        if lead_note:
+            lead_notes.append(lead_note)
     texts = list(face_texts or [])
     turn = _normal_degrees(package.orientation_deg)
     if body.pin_numbers_3d and leads:
@@ -1393,7 +1427,39 @@ def generate_single_package_3d_model(
     result.setdefault("notes", []).append(tx(
         "Corpo package generico. Terminali THT cilindrici e terminali SMD ricavati dai pad: "
         "verificare quote e forma sui documenti del componente."))
+    result["notes"].extend(lead_notes)
     return result
+
+
+def single_part_lead_diameter(declared, drills) -> tuple:
+    """@brief Diameter of the lead cylinders of a single through-hole part, with its provenance.
+
+    @param declared Lead diameter quoted by the documents, in mm
+        (`lead_diameter_mm` of the extraction), or None.
+    @param drills Drill diameters of the part's through-hole pads, in mm (non-empty).
+    @return (diameter in mm, note or None). The quoted diameter is used as
+        it is when it is a positive finite number smaller than the smallest
+        hole; otherwise the lead is ESTIMATED as `LEAD_OF_DRILL_FRACTION` of
+        the smallest hole, capped at `LEAD_MAX_DIAMETER_MM`, and a quoted
+        value that does not fit the hole is reported in the note.
+    @note 2026-11-03 second review, G6: the quoted diameter was read from the
+        documents but never reached the solid, which always drew the
+        estimate -- 0.8 mm for a power relay or terminal block whose leads
+        are quoted at 1.0-1.5 mm. The smallest hole bounds the quoted value
+        because ONE diameter is drawn for every lead: a lead wider than any
+        hole of the part would not go through it.
+    """
+    smallest = min(float(value) for value in drills)
+    value = positive_number(declared)
+    if value is not None and value < smallest:
+        return value, None
+    estimate = min(smallest * LEAD_OF_DRILL_FRACTION, LEAD_MAX_DIAMETER_MM)
+    if value is None:
+        return estimate, None
+    return estimate, tx(
+        "Diametro dei terminali dichiarato ({lead} mm) non minore del foro piu' piccolo "
+        "({drill} mm): nel modello STEP i terminali hanno il diametro stimato dal foro "
+        "({estimate} mm).", lead=f"{value:g}", drill=f"{smallest:g}", estimate=f"{estimate:.2f}")
 
 
 def _normal_degrees(angle) -> float:
@@ -1423,10 +1489,14 @@ def body_frame_point(x: float, y: float, turn_deg: float) -> tuple[float, float]
 
 #: Lead diameter of a generic through-hole part as a fraction of its hole:
 #: an ESTIMATE (a hole is usually the lead plus 0.2-0.3 mm) used only to draw
-#: the lead cylinders of a part whose documents give no lead size.
+#: the lead cylinders of a part whose documents give no lead size
+#: (`single_part_lead_diameter`); a quoted diameter replaces it.
 LEAD_OF_DRILL_FRACTION = 0.65
-#: Largest lead diameter drawn from a hole, in mm: beyond it the hole is a
-#: mounting hole, not a lead's.
+#: Largest ESTIMATED lead diameter, in mm. DECLARED FALLBACK, not a physical
+#: limit: power relays and terminal blocks have leads of 1.0-1.5 mm, and a
+#: quoted diameter is never capped. It only keeps a guess on the thin side
+#: (a signal lead) when the documents are silent, so an estimated lead never
+#: looks thicker than the real one.
 LEAD_MAX_DIAMETER_MM = 0.8
 #: Thickness, in mm, of the box standing for an SMD terminal on the board.
 SMD_TERMINAL_THICKNESS_MM = 0.04
@@ -1802,7 +1872,7 @@ def _run_freecad(
     (typically `threading.Event`) that whoever started the job sets to ask
     it to stop. The freecadcmd child is killed by the same machinery that
     kills it when it stays silent too long (process_log.run_logged) and the
-    call exits with `Cad3DError(CAD_ABORT_MESSAGE)`, i.e. through the path
+    call exits with `Cad3DCancelled`, a `Cad3DError`, i.e. through the path
     by which the interface already brings the window back to rest.
 
     Every call runs the child through `process_log.run_logged`, also without
@@ -1818,7 +1888,7 @@ def _run_freecad(
     `kicad_models.measure_models`) and kills its own freecadcmd child -- the
     one measuring the candidates not yet in cache -- instead of waiting for
     the batch to finish. A cancellation requested during the matching thus
-    exits immediately, through the same path (`Cad3DError(CAD_ABORT_MESSAGE)`),
+    exits immediately, through the same path (`Cad3DCancelled`, a `Cad3DError`),
     and this function does not even start the child of the solid.
 
     Output contract (see `_discard_outputs`): right before freecadcmd starts,
@@ -1951,7 +2021,7 @@ def _run_freecad(
             if cancel is not None and cancel.is_set():
                 # Give-up already requested during the model matching: do not
                 # start a process that would be killed at its first breath.
-                raise Cad3DError(CAD_ABORT_MESSAGE)
+                raise Cad3DCancelled()
             # From here on the previous outputs are gone: whatever happens to this
             # run, no older STEP/WRL/preview can be mistaken for its result.
             _discard_outputs(published)
@@ -1964,7 +2034,8 @@ def _run_freecad(
             # the OVERALL duration and killed only the direct child (review
             # 2026-10-27, H5, completed 2026-10-27). The child's environment is
             # run_logged's default, the same copy of os.environ with
-            # PYTHONDONTWRITEBYTECODE=1 that `child_environment` builds, and it
+            # PYTHONDONTWRITEBYTECODE=1 that `process_log.child_environment`
+            # builds (the only definition), and it
             # decodes the child's UTF-8 output (reconfigured stdout, JSON
             # warnings) with errors="replace".
             from .process_log import ProcessCancelled, run_logged
@@ -2002,7 +2073,7 @@ def _run_freecad(
                     **({"cancel": cancel} if cancel is not None else {}),
                 )
             except ProcessCancelled as exc:
-                raise Cad3DError(CAD_ABORT_MESSAGE) from exc
+                raise Cad3DCancelled() from exc
             except subprocess.TimeoutExpired as exc:
                 raise _timeout_error(exc) from exc
         finally:

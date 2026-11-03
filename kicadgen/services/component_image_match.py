@@ -30,6 +30,16 @@ _ROTATED = OrderedDict()
 _ROTATED_LOCK = threading.Lock()
 #: Memory bound of _ROTATED (about 2.3 kB per entry), not a tuning value.
 _ROTATED_MAX = 4096
+#: Smallest descriptor similarity (cosine, [0, 1]) of the best vote for a
+#: stored model angle to be transferred (match_orientation). DECLARED
+#: HEURISTIC (review G7, 2026-11-03): set by judgement, not tuned on a
+#: labelled set of crops (none exists in the repository); a benchmark of
+#: accepted crops with known angles would replace it with a measured value.
+ORIENTATION_MIN_SCORE = 0.85
+#: Lead the best vote must have over the best vote for ANOTHER angle (a
+#: symmetric crop scores alike at two angles): below it the angle is
+#: ambiguous and left to the user. Same provenance as ORIENTATION_MIN_SCORE.
+ORIENTATION_MIN_MARGIN = 0.08
 
 
 @dataclass(frozen=True)
@@ -369,7 +379,7 @@ def match_orientation(query_descriptor, examples):
     score, angle, image_id, delta = votes[0]
     conflicting = [v[0] for v in votes if abs((v[1] - angle + 180) % 360 - 180) > 1]
     margin = score - max(conflicting, default=0.0)
-    if score < .85 or margin < .08:
+    if score < ORIENTATION_MIN_SCORE or margin < ORIENTATION_MIN_MARGIN:
         return dict(unresolved, score=score, margin=margin)
     return {"status": "matched", "rotation_deg": angle, "image_id": image_id,
             "relative_rotation_deg": delta, "score": score, "margin": margin}

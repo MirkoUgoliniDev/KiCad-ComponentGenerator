@@ -441,14 +441,15 @@ def test_end_to_end_a_single_part_with_pads_gets_the_second_reading(offline, mon
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["1", "5", "2"], "values": [2.54, 12.7]},
         {"axis": "y", "stops": ["1,2", "5"], "values": [5.08]}]}
-    call = Mock(side_effect=[_single(pads=wrong), second])
+    call = Mock(side_effect=[_single(pads=wrong), second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["top"]})
-    assert call.call_count == 2
+    assert call.call_count == 3
     assert call.call_args_list[1].kwargs["tool"]["function"]["name"] == "report_pad_positions"
+    assert call.call_args_list[2].kwargs["tool"]["function"]["name"] == "report_body_dimensions"
     assert params.pin_map_conflict and "non coincidono" in params.pin_map_conflict
-    call = Mock(side_effect=[_single(pads=wrong), second])
+    call = Mock(side_effect=[_single(pads=wrong), second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["hires"]})
@@ -477,12 +478,13 @@ def test_end_to_end_a_grid_hiding_an_off_grid_pin_is_blocked(offline, monkeypatc
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["11", "A1,A2", "14,12"], "values": [2.0, 12.2]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    call = Mock(side_effect=[main, second])
+    call = Mock(side_effect=[main, second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout"]})
-    assert call.call_count == 2
+    assert call.call_count == 3
     assert call.call_args_list[1].kwargs["tool"]["function"]["name"] == "report_pad_positions"
+    assert call.call_args_list[2].kwargs["tool"]["function"]["name"] == "report_body_dimensions"
     assert params.pin_map_conflict and "NON confermate" in params.pin_map_conflict
 
 
@@ -495,7 +497,7 @@ def test_end_to_end_a_correct_grid_that_leaves_out_an_off_grid_pin_is_blocked(
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["5", "1,2", "3,4"], "values": [2.0, 12.2]},
         {"axis": "y", "stops": ["1,3", "5", "2,4"], "values": [6.0, 6.0]}]}
-    call = Mock(side_effect=[main, second])
+    call = Mock(side_effect=[main, second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout"]})
@@ -510,17 +512,20 @@ def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, 
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["1,2", "3,4"], "values": [12.2]},
         {"axis": "y", "stops": ["1,3", "2,4"], "values": [12.0]}]}
-    call = Mock(side_effect=[main, second])
+    call = Mock(side_effect=[main, second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
                                            document_roles={"quote.png": ["pinout"]})
-    assert call.call_count == 2 and not params.pin_map_conflict
+    assert call.call_count == 3 and not params.pin_map_conflict
     pins = params.package_geometry["pins"]
     xs = sorted({round(float(p["x_mm"]), 3) for p in pins})
     ys = sorted({round(float(p["y_mm"]), 3) for p in pins})
     assert len(pins) == 4 and xs[1] - xs[0] == pytest.approx(12.2)
     assert ys[1] - ys[0] == pytest.approx(12.0)
 
+
+#: Third dedicated call of a single part (user, 2026-11-03): the printed body quotes.
+_BODY_ANSWER = {"drawing_unit": "mm", "body_length": 22.5, "body_width": 16.5, "body_height": 16.9}
 
 _CHAINS_ANSWER = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
     {"axis": "x", "stops": ["1", "5", "2"], "values": [5.08, 12.7]},
@@ -529,25 +534,26 @@ _CHAINS_ANSWER = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
 
 def test_the_pad_positions_are_read_by_the_pad_model(offline, monkeypatch, tmp_path):
     """Profile field 'pad_model' (user, 2026-10-30): only the dedicated reading changes model."""
-    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     logs = []
     ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
                                   component_family="single_tht", pad_model="vendor/reader",
                                   document_roles={"quote.png": ["top"]}, progress=logs.append)
-    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/reader"]
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/reader",
+                                                                "vendor/reader"]
     assert call.call_args_list[1].kwargs["max_tokens"] == ext.PAD_POSITIONS_MAX_TOKENS
     assert any("con vendor/reader" in line for line in logs)
 
 
 @pytest.mark.parametrize("pad_model", [None, "", "   "])
 def test_a_blank_pad_model_follows_the_main_model(offline, monkeypatch, tmp_path, pad_model):
-    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
                                   component_family="single_tht", pad_model=pad_model,
                                   document_roles={"quote.png": ["top"]})
-    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/main"]
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main"] * 3
 
 
 def test_a_pad_model_whose_source_is_not_ready_falls_back_to_the_main_model(
@@ -562,13 +568,13 @@ def test_a_pad_model_whose_source_is_not_ready_falls_back_to_the_main_model(
         return real(models, progress, **kwargs)
 
     monkeypatch.setattr(providers, "ensure_providers_ready", ready)
-    call = Mock(side_effect=[_single(), _CHAINS_ANSWER])
+    call = Mock(side_effect=[_single(), _CHAINS_ANSWER, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     logs = []
     ext.extract_pin_header_params([_drawing(tmp_path)], model="vendor/main",
                                   component_family="single_tht", pad_model="deepseek-api/reader",
                                   document_roles={"quote.png": ["top"]}, progress=logs.append)
-    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main", "vendor/main"]
+    assert [c.kwargs["model"] for c in call.call_args_list] == ["vendor/main"] * 3
     assert any("deepseek-api/reader" in line and "no key" in line for line in logs)
 
 

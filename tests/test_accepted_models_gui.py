@@ -56,7 +56,11 @@ def test_consolidate_dialog_checks_only_rows_with_a_model(window, library):
     dialog.close()
 
 
-def test_archive_dialog_lists_and_deletes_entries(window, library):
+def test_archive_dialog_lists_and_deletes_entries(window, library, monkeypatch):
+    from kicadgen.gui import accepted_models_dialog as amd
+    asked = []
+    monkeypatch.setattr(amd.QMessageBox, "question", lambda *a: asked.append(a) or
+                        amd.QMessageBox.StandardButton.Yes)
     store = am.AcceptedModelStore()
     store.consolidate(_board(library), [library])
     dialog = AcceptedModelsDialog(store)
@@ -68,6 +72,25 @@ def test_archive_dialog_lists_and_deletes_entries(window, library):
     dialog.btn_delete.click()
     assert dialog.table.rowCount() == 0
     assert store.entries() == []
+    # The confirmation named the count and defaulted to «No».
+    assert len(asked) == 1 and "1" in asked[0][2]
+    assert asked[0][4] == amd.QMessageBox.StandardButton.No
+    dialog.close()
+
+
+def test_archive_dialog_keeps_entries_when_the_deletion_is_not_confirmed(
+        window, library, monkeypatch):
+    """@brief Negative: answering «No» deletes nothing."""
+    from kicadgen.gui import accepted_models_dialog as amd
+    monkeypatch.setattr(amd.QMessageBox, "question",
+                        lambda *a: amd.QMessageBox.StandardButton.No)
+    store = am.AcceptedModelStore()
+    store.consolidate(_board(library), [library])
+    dialog = AcceptedModelsDialog(store)
+    dialog.table.selectRow(0)
+    dialog.btn_delete.click()
+    assert dialog.table.rowCount() == 1
+    assert len(store.entries()) == 1
     dialog.close()
 
 

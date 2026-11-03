@@ -75,6 +75,10 @@ class LibraryFootprint:
 
     name: str
     centres: tuple
+    #: Pad numbers the footprint repeats at DISTANT places (mounting tabs
+    #: «MP», shield lugs «S1»): one centre cannot stand for them, so the
+    #: footprint gives no verdict (check_layout).
+    repeated_apart: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -221,12 +225,18 @@ def read_footprint(path: Path) -> Optional[LibraryFootprint]:
         holes and unnumbered pads left out), or None when the file cannot
         be parsed or has fewer than two numbered pads.
     @note A pad number is one terminal, and a drawing reading gives one
-        position per number: pads repeating a number (stacked pads of a
-        custom shape, several exposed pads or shield tabs sharing «EP»/«MP»)
-        are reduced to ONE centre, the mean of their centres, in the order
-        each number first appears (L13). Counting every entry made such a
-        footprint one pad longer than any reading and the witness answered
-        "no_match" for a layout it should confirm.
+        position per number. Pads repeating a number are reduced to ONE
+        centre, the mean of their centres, in the order each number first
+        appears (L13), only when they form one copper island: every pad of
+        the number is reached from the others through pads whose extents
+        touch (centre distance at most half the larger side of one plus half
+        the larger side of the other) -- stacked pads of a custom shape, an
+        exposed pad tiled in parts. A number repeated at DISTANT places
+        (mounting tabs «MP», shield lugs) is several terminals: its mean is
+        a phantom point no reading has, so the number is listed in
+        ``repeated_apart`` and check_layout abstains (review S3,
+        2026-11-03: a phantom MP centre made the witness say "no_match" and
+        block a correct reading).
     """
     from ..cad3d.kicad_models import _children, _field, _numbers, _sexpr
     try:
@@ -237,14 +247,38 @@ def read_footprint(path: Path) -> Optional[LibraryFootprint]:
                 continue
             at = _field(pad, "at")
             x, y = _numbers(at[:2], 2)
-            by_number.setdefault(str(pad[1]).strip(), []).append((x, y))
+            size = _field(pad, "size")
+            # The larger side of the pad's anchor; an unreadable size is 0,
+            # so only pads at the very same centre merge.
+            try:
+                extent = max(_numbers(size[:2], 2)) if len(size) >= 2 else 0.0
+            except ValueError:
+                extent = 0.0
+            by_number.setdefault(str(pad[1]).strip(), []).append((x, y, abs(extent)))
     except (OSError, UnicodeDecodeError, ValueError):
         return None
-    centres = [(sum(x for x, _y in points) / len(points), sum(y for _x, y in points) / len(points))
-               for points in by_number.values()]
+    centres, apart = [], []
+    for number, points in by_number.items():
+        if not _one_island(points):
+            apart.append(number)
+        centres.append((sum(p[0] for p in points) / len(points),
+                        sum(p[1] for p in points) / len(points)))
     if len(centres) < 2:
         return None
-    return LibraryFootprint(name=Path(path).stem, centres=tuple(centres))
+    return LibraryFootprint(name=Path(path).stem, centres=tuple(centres),
+                            repeated_apart=tuple(apart))
+
+
+def _one_island(points: list) -> bool:
+    """Whether pads (x, y, larger side) of one number touch each other into one connected group."""
+    reached, pending = {0}, [0]
+    while pending:
+        ax, ay, asize = points[pending.pop()]
+        for index, (bx, by, bsize) in enumerate(points):
+            if index not in reached and math.hypot(bx - ax, by - ay) <= (asize + bsize) / 2 + 1e-9:
+                reached.add(index)
+                pending.append(index)
+    return len(reached) == len(points)
 
 
 def _rotations(points: list) -> list:
@@ -312,13 +346,18 @@ def check_layout(pads: dict, view: Optional[str], footprints: list,
     @param footprints LibraryFootprint candidates (find_footprints + read_footprint).
     @param tolerance_mm Largest centre distance accepted.
     @return None (no opinion) when there is nothing to compare (no candidate,
-        unknown view) or when the candidates themselves have DIFFERENT
-        geometries: the part number then does not name one layout, and
+        unknown view), when the candidates themselves have DIFFERENT
+        geometries (the part number then does not name one layout, and
         confirming the reading that fits one of them would let a superset or
-        a sibling width confirm a wrong reading. Otherwise "confirmed" when
-        the candidates' common layout has the same pad centres up to a
+        a sibling width confirm a wrong reading), when a candidate repeats a
+        pad number at distant places (``repeated_apart``: no single centre
+        stands for that number), or when the reading has another NUMBER of
+        pads than the candidates' layout (a reading that left a terminal out,
+        or a footprint with extra copper: a count says nothing about which
+        geometry is right, review S3, 2026-11-03). Otherwise "confirmed"
+        when the candidates' common layout has the same pad centres up to a
         translation and a quarter turn, never a mirror; else
-        "not_confirmed" / "no_match".
+        "not_confirmed" / "no_match" (same pad count, other geometry).
     @note Numbers are ignored on purpose: library footprints number pads
         their own way (1..5 for a relay whose drawing prints A1, A2, 11...).
         Geometrically equal duplicates (the same layout in two libraries)
@@ -326,7 +365,11 @@ def check_layout(pads: dict, view: Optional[str], footprints: list,
     """
     if not footprints or view not in ("top", "bottom") or len(pads) < 2:
         return None
+    if any(footprint.repeated_apart for footprint in footprints):
+        return None
     if len(_geometry_classes(footprints, tolerance_mm)) > 1:
+        return None
+    if any(len(footprint.centres) != len(pads) for footprint in footprints):
         return None
     points = [((-x if view == "bottom" else x), y) for x, y in pads.values()]
     for footprint in footprints:

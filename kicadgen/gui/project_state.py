@@ -229,7 +229,9 @@ def read_project_config(project_dir, dropped: list | None = None):
         return None
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        # RecursionError: a hand-edited file nested deeper than the parser's
+        # stack is unreadable like any malformed one, not a crash.
         raise ProjectConfigError(tx("{name} illeggibile: {error}", name=path.name, error=exc)) from exc
     if not isinstance(document, dict) or document.get("format") != PROJECT_CONFIG_FORMAT:
         raise ProjectConfigError(tx("{name} non e' un file di progetto di KiCadGen", name=path.name))
@@ -245,7 +247,11 @@ def read_project_config(project_dir, dropped: list | None = None):
     if not isinstance(state, dict):
         raise ProjectConfigError(tx("{name} senza impostazioni", name=path.name))
     found = []
-    state = _drop_non_finite(state, "", found)
+    try:
+        state = _drop_non_finite(state, "", found)
+    except RecursionError as exc:
+        # Parsed, but nested deeper than the walk's stack: refused, not a crash.
+        raise ProjectConfigError(tx("{name} illeggibile: {error}", name=path.name, error=exc)) from exc
     if dropped is not None:
         dropped.extend(found)
     saved_package_geometry(state.get("package_geometry"))

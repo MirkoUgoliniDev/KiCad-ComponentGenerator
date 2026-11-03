@@ -14,7 +14,7 @@ def test_a_digits_only_label_stays_an_int_and_a_lettered_one_text():
     assert _pin_map_key("A1") == "A1" and _pin_map_key("EP") == "EP"
 
 
-@pytest.mark.parametrize("bad", ["", " ", "A 1", "-1", True, "pin uno"])
+@pytest.mark.parametrize("bad", ["", " ", "A 1", "-1", True, "pin uno", None, 1.0, 2.5])
 def test_a_label_that_is_not_a_pin_is_refused(bad):
     with pytest.raises(ValueError):
         _pin_map_key(bad)

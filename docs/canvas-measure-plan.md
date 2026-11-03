@@ -357,4 +357,9 @@ tools if the click-tools plan unifies them.
   never taken during a running pan or rubber band (C2). With nothing of the
   footprint under the pointer the background menu opens instead.
 - Deliberate tab difference: the symbol editor draws no editable
-  dimensions.
+  dimensions. User decision D2 (2026-11-03): «le quote nel simbolo non hanno
+  senso» (dimensions in the symbol make no sense) — a symbol is a schematic
+  drawing on the 2.54 mm pin grid, not a mechanical one, so editable
+  dimensions exist ONLY in the footprint preview. This is a decision, not a
+  missing parity: the «same UX in every tab» rule does not apply here, and
+  the ruler's measures in the symbol stay read-only.

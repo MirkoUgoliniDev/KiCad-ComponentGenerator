@@ -135,3 +135,47 @@ def test_an_unusable_payload_falls_back_to_the_expired_cache(monkeypatch, cache)
     cache.write_text(json.dumps([GOOD]), encoding="utf-8")
     _serve(monkeypatch, {"data": "garbage"})
     assert [m.id for m in client.list_models(force_refresh=True)] == ["vendor/good"]
+
+
+# ── Review S4 (2026-11-03): a body cut short is a provider error, not a crash ──
+
+class _CutShort(io.BytesIO):
+    """A response body whose read stops with http.client.IncompleteRead."""
+
+    def read(self, size=-1):
+        import http.client
+        raise http.client.IncompleteRead(b"{\"err", 100)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_an_error_body_cut_short_becomes_an_openrouter_error(monkeypatch):
+    """Positive: IncompleteRead while reading the error body keeps the status."""
+    error = urllib.error.HTTPError("https://example.invalid", 503, "error", {}, _CutShort())
+    caught = _call_with(monkeypatch, error)
+    assert "503" in str(caught) and caught.retryable
+
+
+def test_a_whole_error_body_still_gives_its_category(monkeypatch):
+    """Negative: a body read whole still yields the provider's category."""
+    caught = _call_with(monkeypatch, _http_error(429, "Rate limit reached"))
+    assert "rate limit" in str(caught).lower()
+
+
+def test_a_models_list_cut_short_falls_back_to_the_cache(monkeypatch, cache):
+    """Positive: IncompleteRead on /models uses the cache, even expired."""
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps([GOOD]), encoding="utf-8")
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda *a, **k: _CutShort())
+    assert [m.id for m in client.list_models(force_refresh=True)] == ["vendor/good"]
+
+
+def test_a_models_list_cut_short_without_cache_is_an_openrouter_error(monkeypatch, cache):
+    """Negative: with no cache the failure is reported as OpenRouterError, never raw."""
+    monkeypatch.setattr(client.urllib.request, "urlopen", lambda *a, **k: _CutShort())
+    with pytest.raises(client.OpenRouterError):
+        client.list_models(force_refresh=True)

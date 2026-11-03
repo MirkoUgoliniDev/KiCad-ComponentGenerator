@@ -38,10 +38,12 @@ These are the guide's teaching values. Where the KiCad Library Conventions
   larger (0.3 mm in the guide) for soldering and strength.
 - Layers: the exact part outline on **F.Fab** (line 0.10 mm), a slightly
   larger outline on **F.Silkscreen** (line 0.12 mm, drawn 0.11 mm outside the
-  fab line: half of each width), a **F.Courtyard** around everything with
-  **0.25 mm** clearance (`COURTYARD_MARGIN_MM` in `generators/package.py`).
-  The KLC sets other clearances for some families; confirm on the KLC before
-  making that a rule.
+  fab line: half of each width), a **F.Courtyard** around everything.
+  Clearance (user decision 2026-11-03, KLC F5.3): **0.5 mm for pin headers**
+  (connectors, `COURTYARD_MARGIN_MM` in `generators/pin_header.py`),
+  **0.25 mm for packages and castellated modules** (`COURTYARD_MARGIN_MM` in
+  `generators/package.py`). The KLC sets other clearances for some families;
+  confirm on the KLC before making that a rule.
 - Courtyards of neighbouring parts should not intersect.
 
 ## Symbols, footprints and 3D models

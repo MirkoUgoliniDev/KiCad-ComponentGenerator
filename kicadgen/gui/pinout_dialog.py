@@ -5,11 +5,24 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
+
+from ..services.messages import tx
 
 from PyQt6.QtWidgets import (
     QAbstractItemView, QDialog, QDialogButtonBox, QHeaderView, QLabel,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
+
+#: Row key marking a name the dialog's caller PROPOSED (e.g. read from the pad
+#: drawing) rather than one the pinout states. Such a row is drawn italic and
+#: grey, and `edited_pinout` returns it only when the user changed its text.
+PREFILLED_KEY = "_prefilled"
+#: Foreground of a prefilled, still unedited name.
+PREFILLED_COLOR = "#9e9e9e"
+#: Tooltip of a prefilled name (Italian source, translated by the window).
+PREFILLED_TIP = ("Nome proposto dal disegno dei pad, non dalla documentazione: da "
+                 "verificare. Viene applicato solo se lo modifichi.")
 
 
 def pin_sort_key(entry: dict) -> tuple:
@@ -42,7 +55,8 @@ class PinoutDialog(QDialog):
         """@brief Build the dialog.
 
         @param pinout Rows {"pin": ..., "name": ...} as extracted; shown in
-            natural pin order.
+            natural pin order. A row may carry ``PREFILLED_KEY: True`` when its
+            name is only a proposal (see `edited_pinout`).
         @param component_name Shown in the window title.
         @param parent Optional parent widget.
         """
@@ -61,7 +75,10 @@ class PinoutDialog(QDialog):
                 "seleziona i file nel tab \"Progetto\" e premi \"Estrai parametri con AI\"."
             ))
         else:
-            layout.addWidget(QLabel("Corrispondenza estratta dalla documentazione:"))
+            caption = QLabel("Pin del footprint: i nomi vengono dalla documentazione o, se "
+                             "mancano, dal disegno dei pad (da verificare).")
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
             table = QTableWidget(len(pinout), 2)
             table.setHorizontalHeaderLabels(["Pin", "Funzione"])
             table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -74,10 +91,15 @@ class PinoutDialog(QDialog):
                 pin = QTableWidgetItem(str(entry.get("pin", "")))
                 pin.setFlags(pin.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(i, 0, pin)
-                table.setItem(i, 1, QTableWidgetItem(str(entry.get("name", ""))))
+                # A missing or None name is an empty cell, never the text «None».
+                name = QTableWidgetItem(str(entry.get("name") or ""))
+                if entry.get(PREFILLED_KEY):
+                    self._mark_prefilled(name, True)
+                table.setItem(i, 1, name)
             layout.addWidget(table)
             ## @brief The pinout table, exposed for tests and callers.
             self.table = table
+            table.itemChanged.connect(self._restyle_prefilled)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel
@@ -87,13 +109,59 @@ class PinoutDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _shown_name(self, index: int) -> str:
+        """The name text the cell of source row `index` was opened with."""
+        return str(self._entries[index].get("name") or "").strip()
+
+    @staticmethod
+    def _mark_prefilled(item: QTableWidgetItem, prefilled: bool) -> None:
+        """Draw a name cell as a proposal (italic, grey, tooltip) or as a plain name."""
+        font = item.font()
+        font.setItalic(prefilled)
+        item.setFont(font)
+        if prefilled:
+            item.setForeground(QColor(PREFILLED_COLOR))
+            # Translated here: a table item's tooltip is not reached by the
+            # window's retranslation pass.
+            item.setToolTip(tx(PREFILLED_TIP))
+        else:
+            # Back to the table's own text colour and no proposal tooltip.
+            item.setData(Qt.ItemDataRole.ForegroundRole, None)
+            item.setToolTip("")
+
+    def _restyle_prefilled(self, item: QTableWidgetItem) -> None:
+        """Show a prefilled name as the user's own once its text differs."""
+        if item.column() != 1:
+            return
+        index = self._row_indices[item.row()]
+        if not self._entries[index].get(PREFILLED_KEY):
+            return
+        edited = item.text().strip() != self._shown_name(index)
+        # Restyling changes the item again: no second pass through here.
+        blocked = self.table.blockSignals(True)
+        try:
+            self._mark_prefilled(item, not edited)
+        finally:
+            self.table.blockSignals(blocked)
+
     def edited_pinout(self) -> list[dict]:
         """@brief Copy edited functions, preserving original pin IDs, order and metadata.
 
         @return A deep copy of the input rows with each `name` replaced by the
-            stripped text typed in the table.
+            stripped text typed in the table. A row flagged ``PREFILLED_KEY``
+            is returned only when the user changed its text (a proposal left
+            as proposed is not a pinout entry); the flag itself is never
+            returned.
         """
-        result = deepcopy(self._entries)
-        for row, index in enumerate(self._row_indices):
-            result[index]['name'] = self.table.item(row, 1).text().strip()
+        result = []
+        rows = {index: row for row, index in enumerate(self._row_indices)}
+        for index, entry in enumerate(self._entries):
+            row = rows[index]
+            text = self.table.item(row, 1).text().strip()
+            copy = deepcopy(entry)
+            prefilled = bool(copy.pop(PREFILLED_KEY, False))
+            if prefilled and text == self._shown_name(index):
+                continue
+            copy['name'] = text
+            result.append(copy)
         return result

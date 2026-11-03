@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout
 from ..services import yolo_models
 from ..services.messages import tx
 from .theme import SUBTEXT, YELLOW
-from .yolo_model_dialog import _breakable, _JobResults, _size_text
+from .yolo_model_dialog import (_NOT_GIVEN, _breakable, _identity, _JobResults,
+                                _size_text)
 
 
 class _Signals(QObject):
@@ -49,9 +50,16 @@ class _Job(QRunnable):
         super().__init__()
         self.kind, self.path = kind, path
         self.signals = _Signals()
+        #: Identity of the file when the job read it (set by `run`).
+        self.examined = None
 
     def run(self):
-        """@brief QRunnable override: compute and emit (kind, path, result)."""
+        """@brief QRunnable override: compute and emit (kind, path, result).
+
+        @note The file identity is taken before reading it, so the result is
+            remembered for the content examined even if the file changes meanwhile.
+        """
+        self.examined = _identity(self.path)
         try:
             if self.kind == "sha256":
                 result = yolo_models.sha256_of(self.path)
@@ -242,8 +250,11 @@ class SmdModelDialog(QDialog):
         return any(job.kind == kind and self._same(job.path, path) for job in self._jobs)
 
     def _job_ready(self, kind, path, result) -> None:
-        self._jobs = [job for job in self._jobs if not (job.kind == kind and job.path == path)]
-        self._results.store(path, kind, result if kind == "smd_check" else (result or ""))
+        done = [job for job in self._jobs if job.kind == kind and job.path == path]
+        self._jobs = [job for job in self._jobs if job not in done]
+        examined = done[0].examined if done else _NOT_GIVEN
+        self._results.store(path, kind, result if kind == "smd_check" else (result or ""),
+                            examined=examined)
         if self._same(path, self.selected_path()):
             self._show_selected()
 

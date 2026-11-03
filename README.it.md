@@ -423,6 +423,14 @@ annulla/ripeti; **Applica** scrive il `.kicad_mod`, **Annulla** scarta,
 (`.footprint-draft.json` nel progetto). «Aggiorna solo il footprint» riscrive
 il file dalla scelta di montaggio senza chiamare l'AI né ricostruire il 3D.
 
+Nei footprint di un package i due lati del corpo sono **quote modificabili**:
+doppio clic sulla quota, oppure clic destro → «Modifica quota…», e scrivi la
+nuova misura (il corpo resta centrato, le piazzole restano dove sono, un solo
+passo di annulla). Il contorno del corpo si sposta e si ridimensiona anche con
+il mouse: otto maniglie, Maiusc per un ridimensionamento simmetrico, la
+calamita della griglia, Esc per annullare il trascinamento. La tabella del
+pinout elenca ogni piazzola del footprint, anche quelle senza nome.
+
 ### Simbolo elettrico
 
 ![Editor del simbolo elettrico con i 44 pin del modulo e la palette dei glifi](docs/images/it-symbol.png)
@@ -555,6 +563,27 @@ preservati. Prima di cambiare una tabella il programma conserva
 annulla tutto ciò che ha toccato se un passo fallisce. Una tabella non UTF-8
 o una scrittura rifiutata dal sistema viene segnalata con il percorso reale.
 
+Altre domande, fatte solo quando servono e prima di scrivere qualunque cosa:
+
+- **Libreria KiCadGen già registrata**: installando nel progetto, la tabella
+  globale ha già una libreria `KiCadGen` in un'altra posizione. In quel
+  progetto KiCad usa la libreria del progetto e non trova più i footprint
+  della libreria globale con lo stesso nome.
+- **Progetto aperto in KiCad**: i file di blocco di KiCad
+  (`~<nome>.kicad_pro.lck` e simili) dicono che il progetto è aperto. KiCad
+  vede la nuova libreria solo dopo averlo riaperto: chiudilo prima, senza
+  salvare le impostazioni delle librerie.
+- Un KiCad più vecchio della **10.0** non sa leggere i file generati:
+  l'installazione globale viene rifiutata e nulla cambia.
+
+Se un file era tenuto aperto (per esempio da un antivirus), nella
+destinazione può restare una cartella temporanea `.kicadgen-rollback-…`:
+contiene solo copie dei file precedenti e una prossima installazione la
+elimina dopo un giorno (oppure cancellala tu). Uno storico delle esportazioni
+illeggibile (`kicad_exports.json`) viene spostato da parte come
+`kicad_exports.json.corrupt-<data-ora>` e ne viene iniziato uno nuovo, così
+nessuna registrazione si perde in silenzio.
+
 Il **simbolo** non viene registrato in nessuna `sym-lib-table`: esporta il
 `.kicad_sym` e aggiungilo in KiCad con *Gestisci librerie di simboli*, poi
 imposta il Footprint del simbolo su `KiCadGen:<nome>`.
@@ -642,13 +671,15 @@ Il diagramma mostra solo la direzione principale: ogni pacchetto usa anche
 ## Test
 
 ```powershell
-.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
+.venv/Scripts/python.exe tools/run_test_halves.py both -- --basetemp=.venv/claude-test-run
 ```
 
-La suite è ampia (quasi diecimila test; il conteggio aggiornato è in
-`HANDOFF.md`) e in CI gira in due metà
-(`tools/run_test_halves.py`) perché un processo unico può morire con un crash
-nativo Qt/VTK. Usa una directory temporanea nuova per ogni esecuzione.
+La suite è ampia (oltre undicimila test; il conteggio aggiornato è in
+`HANDOFF.md`) e gira in due metà, ciascuna nel proprio processo, sia in
+locale sia in CI, perché un processo unico può morire con un crash nativo
+Qt/VTK. Per i file toccati da una modifica, lanciali direttamente:
+`.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-<argomento> tests/test_<area>.py`.
+Usa una directory temporanea nuova per ogni esecuzione.
 
 ## Licenza
 

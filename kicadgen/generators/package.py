@@ -4,7 +4,9 @@ The geometry comes from core.package_geometry (already normalized to the top
 view and to KiCad's rotation convention); this module only turns it into a
 footprint with the same layer conventions as the other generators: pads,
 silkscreen body outline kept off the copper, fabrication outline, courtyard
-around body and pads, and a pin-1 marker next to the pad numbered "1".
+around body and pads, and a pin-1 marker next to the pad numbered "1" (or
+"A1" of a grid numbering, `core.silk.pin_one`; none, with a note in the
+description, when no pad is pin 1).
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ import math
 from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpLine,
                               FpRect, Pad, courtyard_corners, fab_reference_text)
 from ..core.package_geometry import ROUNDRECT_RRATIO, PackageGeometry, pad_outline
-from ..core.silk import clip_segment, keepout_box, pin_one, pin_one_marker, silk_rectangle
+from ..core.silk import (PIN_ONE_UNMARKED_NOTE, clip_segment, keepout_box, marker_ink_box, pin_one,
+                         pin_one_marker, silk_rectangle)
+from ..services.messages import tx
 
 #: Courtyard clearance around body and pads, mm (KiCad Library Convention
 #: F5.3 default for ordinary SMD/THT parts).
@@ -72,7 +76,8 @@ def _first_pin_origin(pins) -> tuple:
 
 
 def build_package(geometry: PackageGeometry, name: str | None = None, *,
-                  datasheet: str = "", description: str = "", tags: str = "") -> Footprint:
+                  datasheet: str = "", description: str = "", tags: str = "",
+                  courtyard_margin: float | None = None) -> Footprint:
     """@brief Build the footprint of a package described by explicit pad coordinates.
 
     @param geometry Validated package model; pins are normalized to the top
@@ -87,15 +92,33 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         blanks) keeps the package family, as before the keywords were passed
         (review 2026-10-15, R2-M2: the project keywords never reached the
         footprint on the package and host-mounted paths).
+    @param courtyard_margin Courtyard clearance around body, pads and pin-1
+        dot, mm. None (default) takes the geometry's own
+        `courtyard_margin_mm` when it declares one, else COURTYARD_MARGIN_MM
+        (0.25, KLC general). Host lands for pin headers
+        (`host_mounting.HostLandGeometry`) declare the connector clearance,
+        `pin_header.COURTYARD_MARGIN_MM` (0.5 mm, user decision 2026-11-03),
+        so a module on headers gets the same courtyard whether it is built as
+        a PinHeaderParams or as a package.
     @return Footprint whose pads keep the source numbers and relative
         positions; the footprint origin is the (possibly estimated) body
         centre, see PackageGeometry.body_frame_offset. A ``${REFERENCE}``
         text on F.Fab marks the body centre (core.footprint.fab_reference_text);
         Reference/Value anchored bottom-left at the KiCad corner of
         core.footprint.default_text_positions (place_default_texts).
-    @throws ValueError When the geometry does not validate or the pin-1
-        marker cannot be placed off the copper.
+    @throws ValueError When the geometry does not validate, the courtyard
+        margin is not a finite number >= 0, or the pin-1 marker cannot be
+        placed off the copper.
+    @note The courtyard encloses the pin-1 dot's ink too (`marker_ink_box`):
+        the dot sits outside the pad, and at some package angles it used to
+        lie beyond the courtyard (review 2026-11-03, N4).
     """
+    if courtyard_margin is None:
+        declared = getattr(geometry, "courtyard_margin_mm", None)
+        courtyard_margin = COURTYARD_MARGIN_MM if declared is None else declared
+    if (isinstance(courtyard_margin, bool) or not isinstance(courtyard_margin, (int, float))
+            or not math.isfinite(courtyard_margin) or courtyard_margin < 0):
+        raise ValueError(tx("Il margine del courtyard deve essere >= 0."))
     # pins_seen_from_top validates the geometry first: one validation per
     # build, where there used to be three (an explicit validate, this call
     # and preview_grid_origin), each with the O(n^2) pad-overlap scan
@@ -107,6 +130,12 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         # Fixed file language (see FOOTPRINT_TEXT_LANGUAGE): the estimate is
         # recorded in the library itself, not only in the session log.
         description += "; centro del corpo stimato dal campo dei pad"
+    # A mechanical hole is not a pin: it does not get the pin 1 marker.
+    electrical = [pin for pin in pins if pin.pad_type != "np_thru_hole"]
+    first = pin_one(pin.number for pin in electrical)
+    if first is None and any(str(pin.number).strip() for pin in electrical):
+        # No pad is pin 1: no marker is guessed, and the file says why.
+        description += "; " + PIN_ONE_UNMARKED_NOTE
     # The project's keywords when given, like the pin-header and castellated
     # generators; otherwise the family, so a project without keywords keeps a
     # byte-identical file.
@@ -160,8 +189,6 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     for x0, y0, x1, y1 in boxes:
         extent = [min(extent[0], x0), min(extent[1], y0), max(extent[2], x1), max(extent[3], y1)]
 
-    # A mechanical hole is not a pin: it does not get the pin 1 marker.
-    first = pin_one(pin.number for pin in pins if pin.pad_type != "np_thru_hole")
     if first is not None:
         # With several pads numbered like pin 1 the first one listed is used.
         index = next(i for i, p in enumerate(pins)
@@ -178,9 +205,11 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         center = (pin.x_mm + dx / norm * reach, pin.y_mm + dy / norm * reach)
         marker = pin_one_marker(center, marker_keepouts, (dx, dy))
         fp.add_graphic(marker)
+        x0, y0, x1, y1 = marker_ink_box(marker)
+        extent = [min(extent[0], x0), min(extent[1], y0), max(extent[2], x1), max(extent[3], y1)]
 
     if all(math.isfinite(v) for v in extent):
-        m = COURTYARD_MARGIN_MM
+        m = float(courtyard_margin)
         # KLC F5.3: courtyard corners on the 0.01 mm grid, rounded outwards
         # so the clearance is never below the margin.
         courtyard_start, courtyard_end = courtyard_corners((extent[0] - m, extent[1] - m),

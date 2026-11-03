@@ -34,3 +34,44 @@ def test_apply_saves_before_refresh_and_cancel_or_failure_keeps_old_names(window
     window._show_pinout_dialog()
     assert window.pinout[0]['name'] == ('GND' if accepted and saved else 'G')
     assert calls == (['save', '2d', '3d'] if accepted and saved else ['save'] if accepted else [])
+
+
+def test_a_none_name_is_an_empty_cell_not_the_text_none(qapp):
+    """@brief Review O4: a pin without a name is shown and saved empty."""
+    dialog = PinoutDialog([{'pin': 1, 'name': None}, {'pin': 2}])
+    assert dialog.table.item(0, 1).text() == ''
+    assert dialog.table.item(1, 1).text() == ''
+    assert [row['name'] for row in dialog.edited_pinout()] == ['', '']
+    dialog.deleteLater()
+
+
+def test_a_prefilled_name_is_marked_and_returned_only_when_edited(qapp):
+    """@brief Review U8: a proposed name is italic/grey and is no pinout entry until changed."""
+    from kicadgen.gui.pinout_dialog import PREFILLED_KEY
+    rows = [{'pin': 1, 'name': 'GND'},
+            {'pin': 'A1', 'name': 'Coil+', PREFILLED_KEY: True},
+            {'pin': 'A2', 'name': 'Coil-', PREFILLED_KEY: True}]
+    dialog = PinoutDialog(rows)
+    texts = [dialog.table.item(r, 0).text() for r in range(3)]
+    stated = dialog.table.item(texts.index('1'), 1)
+    kept = dialog.table.item(texts.index('A1'), 1)
+    changed = dialog.table.item(texts.index('A2'), 1)
+    # Positive: the proposal looks like one; negative: the stated name does not.
+    assert kept.font().italic() and kept.toolTip()
+    assert not stated.font().italic() and not stated.toolTip()
+    changed.setText('COIL-')
+    assert not changed.font().italic() and not changed.toolTip()
+    edited = dialog.edited_pinout()
+    assert edited == [{'pin': 1, 'name': 'GND'}, {'pin': 'A2', 'name': 'COIL-'}]
+    assert all(PREFILLED_KEY not in row for row in edited)
+    dialog.deleteLater()
+
+
+def test_the_caption_names_both_sources_of_the_names(qapp):
+    """@brief Review U8: the caption no longer says every row comes from the documentation."""
+    from PyQt6.QtWidgets import QLabel
+    dialog = PinoutDialog([{'pin': 1, 'name': 'GND'}])
+    captions = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any('disegno dei pad' in text for text in captions)
+    assert not any(text == 'Corrispondenza estratta dalla documentazione:' for text in captions)
+    dialog.deleteLater()

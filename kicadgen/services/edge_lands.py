@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
 try:
     import cv2
@@ -364,11 +364,16 @@ class CopperRow:
 #: silkscreen labels, traces and mounted bodies sit further in.
 COPPER_STRIP_RINGS = (1, 4)
 #: Fewest consecutive elements on the lattice that make a row. HEURISTIC,
-#: declared as such: with the alignment window set by the measurement bounds
-#: and a straight-line fit of the chain, chance chains on crowded edges stayed
-#: below this on the sample boards (RS485 long edges, which carry no contacts,
-#: at every pitch tried), while a real row gave 18-22 (ESP32 devkit). Declared
-#: limit: a real row of fewer than this many edge contacts is not confirmable
+#: declared as such and FRAGILE: with the alignment window set by the
+#: measurement bounds and a straight-line fit of the chain, chance chains on
+#: the RS485 long edges (no contacts) stayed below this at 2.54 mm, but
+#: reached 5-6 at 1.27 mm (second review 2026-11-03), while a real row gave
+#: 18-22 (ESP32 devkit). So at a fine pitch a blind chain of this length is
+#: NOT proof of a row: a call with declared centres is decided at those
+#: positions (`_declared_position_verdict`), and only calls without them
+#: still rely on this number. What would replace it: a threshold derived
+#: from the expected chance-chain length at the pitch and the edge's own
+#: density of features, measured outside the row. Declared limit: a real row of fewer than this many edge contacts is not confirmable
 #: from copper -- and, for the same reason, its ABSENCE is not provable either:
 #: a chain shorter than this, or a declared row shorter than this, is reported
 #: as unverifiable (`found` None), never as «no copper» (count_edge_copper).
@@ -412,7 +417,9 @@ def _two_colour_classes(colours, iterations: int = 20):
 
 
 def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: float,
-                      declared_count: Optional[int] = None) -> CopperRow:
+                      declared_count: Optional[int] = None,
+                      declared_centres_mm: Optional[Sequence[float]] = None,
+                      centres_assumed: bool = False) -> CopperRow:
     """@brief Count the copper lands lying ON an edge, at the declared pitch, on the calibrated crop.
 
     @param crop Calibrated BGR crop, the board filling the frame.
@@ -422,6 +429,18 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
     @param width_mm Board extent along Y, in mm.
     @param declared_count Contacts declared on this side, when known (None:
         unknown). Only used to tell whether an absence could be proved.
+    @param declared_centres_mm Centres of the DECLARED contacts along the
+        edge, mm from its start (`edge_notches._declared_centres_mm`), when
+        known. With them the copper is read AT the declared positions
+        (`_declared_position_verdict`), which settles presence and absence
+        whatever the row length (second review 2026-11-03: a blind chain
+        search kept the phantom RS485 sides the user had removed, point 164,
+        and found chance chains of 5-6 at 1.27 mm on a contact-free edge).
+    @param centres_assumed True when the centres come from the answer
+        contract, not from a declared quantity (an omitted offset reads as a
+        centred row): copper missing at those positions then says only that
+        the row is not THERE, never that it is absent from the edge, so it
+        gives `found` None (generality audit 2026-11-03, GA3).
     @return CopperRow with the lands found on the lattice (`found` at least
         MIN_ROW_LANDS), `found` 0 when the strip shows no periodic row and a
         row of the declared length would have been confirmable, or `found`
@@ -437,7 +456,10 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
         regular chain at the pitch is None too (generality audit 2026-11-03:
         a declared row of 6 with two lands hidden by a label shows a chain
         of 4); only an edge without any periodic chain at the declared pitch
-        is a measured absence, `found` 0.
+        is a measured absence, `found` 0. This note covers calls WITHOUT
+        declared centres: with them a short row is decided at its positions,
+        and every one of them read bare is a measured absence (0) whatever
+        the row length (second review 2026-11-03).
     @note A straight outline says the contacts are NOT half-holes; it says
         nothing about whether a row of contacts is there (ESP32 devkit,
         2026-10-08: through-holes with the pad reaching a straight edge were
@@ -499,12 +521,19 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
 
     columns = lab.mean(axis=0)
     if float(np.linalg.norm(columns.max(axis=0) - columns.min(axis=0))) <= 0:
-        if short_declared:
+        if short_declared and not declared_centres_mm:
             return _short_declared()
         return CopperRow(edge, 0, reason=tx("nessuna alternanza di colore sul bordo"))
     column_class = _two_colour_classes(columns)
     min_run = max(2, int(round(2 * MIN_HOLE_WALL_MM * along_scale)))
     pitch_px = float(pitch_mm) * along_scale
+    verdict = _declared_position_verdict(
+        edge, column_class, declared_centres_mm, along_scale, pitch_px,
+        MIN_HOLE_WALL_MM * along_scale + 2 * EDGE_UNCERTAINTY_PX)
+    if verdict is not None and verdict.found == 0 and centres_assumed:
+        verdict = CopperRow(edge, None, reason=tx(
+            "nessuna piazzola alle posizioni di una fila centrata, ma l'offset della fila non e' "
+            "dichiarato: la fila puo' stare altrove sul bordo"))
     # How far a measured centre may sit from the straight line of its row:
     # the uncertainty of a run's extent, i.e. one hole wall (the opening and
     # closing of the morphology) plus the pixel uncertainty of two
@@ -621,6 +650,19 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
         return row
 
     best = max((row_of(runs(column_class)), row_of(runs(~column_class))), key=len)
+    if verdict is not None:
+        if len(best) >= MIN_ROW_LANDS:
+            # A long periodic row confirms the contacts unless the declared
+            # positions deny it: then it is a chance alignment of other
+            # features (a crowded edge at a fine pitch), unverifiable.
+            if verdict.found == 0:
+                return CopperRow(edge, None, [round(c / along_scale, 3) for c in best], reason=tx(
+                    "una fila di {n} elementi al passo dichiarato non coincide con le posizioni "
+                    "dichiarate dei contatti", n=len(best)))
+            return CopperRow(edge, len(best), [round(c / along_scale, 3) for c in best])
+        # No long row: the declared positions decide (present, measured
+        # absence, or unverifiable).
+        return verdict
     if len(best) < MIN_ROW_LANDS:
         # Not confirmable is not absent (contract above). A declared row
         # shorter than the confirmable length could never have shown as one;
@@ -643,6 +685,146 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
                                        "per confermare o escludere i contatti", n=len(short)))
         return CopperRow(edge, 0, reason=tx("nessuna fila di piazzole al passo dichiarato sul bordo"))
     return CopperRow(edge, len(best), [round(c / along_scale, 3) for c in best])
+
+
+#: Significance level of the chance test of `_declared_position_verdict`:
+#: the conventional 5 %, not a value tuned on a photo. A full match at the
+#: declared positions confirms the row only when its chance on the edge's own
+#: background is below it. The test never proves an absence: not rejecting
+#: chance says nothing about a row that may be there.
+CHANCE_SIGNIFICANCE = 0.05
+
+
+def _binomial_tail(n: int, k: int, p: float) -> float:
+    """Probability of k or more successes out of n with success probability p."""
+    return float(sum(math.comb(n, i) * p ** i * (1 - p) ** (n - i) for i in range(k, n + 1)))
+
+
+def _background_rate(column_class, span_px, pitch_px: float, half_px: float) -> float:
+    """Rate at which the position test fires on the edge OUTSIDE the declared row.
+
+    Samples half a pitch apart (and at least one window), so two samples do
+    not read the same feature twice, skipping the declared row's span (a real
+    row there would contaminate the background). The rate is the Laplace
+    estimate (fired + 1) / (samples + 2): with few samples it stays near one
+    half, so a short edge never makes a chance match look rare -- no minimum
+    sample count is needed (GA6).
+    """
+    lo, hi = span_px
+    step = max(1.0, 2 * half_px, pitch_px / 2)
+    fired = total = 0
+    position = half_px
+    while position < len(column_class) - half_px:
+        if not (lo <= position <= hi):
+            at = _window_class(column_class, position, half_px)
+            gaps = [g for g in (_window_class(column_class, position - pitch_px / 2, half_px),
+                                _window_class(column_class, position + pitch_px / 2, half_px))
+                    if g is not None]
+            if at is not None and gaps:
+                total += 1
+                fired += all(gap != at for gap in gaps)
+        position += step
+    return (fired + 1) / (total + 2)
+
+
+#: Minimum fraction of a sampling window that must share one colour class
+#: for that window to have a class at all: a STRUCTURAL majority (more than
+#: half), not a tuned value; a window split by a boundary says nothing.
+_WINDOW_MAJORITY = 0.5
+
+
+def _window_class(column_class, centre_px: float, half_px: float):
+    """The colour class (True/False) most columns of [centre - half, centre + half] share, or None (outside or split)."""
+    a0 = int(math.floor(centre_px - half_px))
+    a1 = int(math.ceil(centre_px + half_px)) + 1
+    if a0 < 0 or a1 > len(column_class) or a1 - a0 < 1:
+        return None
+    window = column_class[a0:a1]
+    share = float(np.mean(window))
+    if share > _WINDOW_MAJORITY:
+        return True
+    if 1.0 - share > _WINDOW_MAJORITY:
+        return False
+    return None
+
+
+def _declared_position_verdict(edge, column_class, centres_mm, along_scale: float, pitch_px: float,
+                               window_px: float) -> Optional[CopperRow]:
+    """@brief Presence of the declared contacts read AT their declared positions on the edge strip.
+
+    @param edge Edge name.
+    @param column_class Boolean colour class of each strip column (two-centre clustering).
+    @param centres_mm Declared contact centres along the edge (mm from its start), or None.
+    @param along_scale Pixels per mm along the edge.
+    @param pitch_px Declared pitch in pixels.
+    @param window_px Measurement window of one feature (one hole wall plus two
+        boundary pixels): each sample reads +/- half of it.
+    @return None without declared centres; else a CopperRow: `found` = the
+        declared count when EVERY declared position differs in colour class
+        from the gaps beside it AND all positions share one class (identical
+        lands of one row); `found` 0 when NO position differs from its gaps
+        (a measured absence: the edge shows the same colour at the contacts
+        and between them); `found` None with the count of differing positions
+        otherwise (some lands hidden or a crowded edge: unverifiable).
+    @note Structural, no tuned number: a land is copper touching the edge
+        and the gaps of a row are mask, so at a real row the two alternate at
+        the declared pitch; the gaps are sampled half a pitch from each
+        centre (the middle between two lands), the windows are the existing
+        measurement bound. The first and last contact use the gap that lies
+        on the board only.
+    """
+    if not centres_mm or pitch_px <= 0:
+        return None
+    half = max(1.0, window_px / 2)
+    if pitch_px / 2 < 2 * half:
+        # The gap windows half a pitch away would overlap the land window:
+        # land and gap cannot be read apart at this resolution (GA7).
+        return CopperRow(edge, None, reason=tx(
+            "passo dichiarato troppo fine per la risoluzione della foto: posizioni non leggibili"))
+    readable, differing, classes = 0, [], set()
+    for centre_mm in centres_mm:
+        centre = float(centre_mm) * along_scale
+        at = _window_class(column_class, centre, half)
+        gaps = [g for g in (_window_class(column_class, centre - pitch_px / 2, half),
+                            _window_class(column_class, centre + pitch_px / 2, half)) if g is not None]
+        if at is None or not gaps:
+            continue
+        readable += 1
+        if all(gap != at for gap in gaps):
+            differing.append(round(float(centre_mm), 3))
+            classes.add(at)
+    if readable == 0:
+        return CopperRow(edge, None, reason=tx("posizioni dichiarate non leggibili sul bordo"))
+    total = len(centres_mm)
+    if not differing:
+        # A measured absence needs EVERY declared position read: an unread
+        # position may be the land (generality audit 2026-11-03, GA2).
+        if readable == total:
+            return CopperRow(edge, 0, reason=tx(
+                "nessuna piazzola alle {n} posizioni dichiarate sul bordo", n=total))
+        return CopperRow(edge, None, reason=tx(
+            "nessuna piazzola alle {k} posizioni lette su {n} dichiarate: le altre non sono "
+            "leggibili", k=readable, n=total))
+    if len(differing) == total and len(classes) == 1:
+        # A full match confirms the row only when chance could not produce
+        # it on this edge (GA4): a busy edge whose features happen to fall on
+        # both positions of a phantom 2-contact side is no row.
+        centres_px = [float(c) * along_scale for c in centres_mm]
+        span = (min(centres_px) - pitch_px, max(centres_px) + pitch_px)
+        rate = _background_rate(column_class, span, pitch_px, half)
+        if _binomial_tail(total, total, rate) < CHANCE_SIGNIFICANCE:
+            return CopperRow(edge, total, differing)
+        return CopperRow(edge, None, differing, reason=tx(
+            "rame a tutte le {n} posizioni dichiarate, ma frequente anche sul resto del bordo "
+            "({rate:.0%}): potrebbe essere un caso", n=total, rate=rate))
+    # Some positions differ, some do not: a row with lands hidden (a label,
+    # a mounted connector) or chance on a busy edge. Failing to tell copper
+    # from the background is NOT evidence of absence (generality audit
+    # 2026-11-03, GA1: the chance test used to return 0 here and excluded the
+    # side, a real 4-contact row read at a wrong offset among them):
+    # unverifiable, the side stays flagged for review.
+    return CopperRow(edge, None, differing, reason=tx(
+        "rame a {k} delle {n} posizioni dichiarate", k=len(differing), n=total))
 
 
 @dataclass

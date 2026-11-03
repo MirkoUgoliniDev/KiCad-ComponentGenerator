@@ -256,6 +256,11 @@ class FootprintView(QGraphicsView):
     dimension_context_requested = pyqtSignal(str, QPoint)
     #: Left double click on an editable dimension: its key.
     dimension_edit_requested = pyqtSignal(str)
+    #: Right click on the editable body outline or one of its handles: the
+    #: scene point of the click (px) and the global screen position of the
+    #: menu. The scene point lets the menu offer the drawing origin nearest
+    #: to the click, as the background menu does.
+    body_context_requested = pyqtSignal(QPointF, QPoint)
 
     def __init__(self, scene):
         """@brief A view without a gesture host: pan and zoom only until `attach_host`.
@@ -305,6 +310,8 @@ class FootprintView(QGraphicsView):
         self._hovered_text = ""
         #: Key of the editable dimension shown hovered (None: none).
         self._hovered_dimension = None
+        #: Outline item of the editable package body (None: none drawn).
+        self._body_outline = None
         #: Main grid step divided by this gives the drawing snap step.
         self._fine_divisor = DEFAULT_FINE_GRID_DIVISOR
         #: The shared selection rubber band (Shift+drag), as the symbol editor's.
@@ -382,9 +389,11 @@ class FootprintView(QGraphicsView):
         install_canvas_filters(self, self.key_repeat, self._cancel_filter)
 
     def _on_click_tool_arm(self):
-        """Router hook run before a tool is armed: end a drag and hide the text anchor square."""
+        """Router hook run before a tool is armed: end a drag, hide the text anchor square, the body handles and the dimension highlight."""
         self.cancel_interaction()
         self._report_text_hover("")
+        self._report_body_hover(None)
+        self._hover_dimension(None)
 
     @property
     def _draw_mode(self):
@@ -628,13 +637,38 @@ class FootprintView(QGraphicsView):
         m = HIT_MARGIN_PX
         return self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1))
 
-    def _body_items(self, part=None):
-        """Items of the editable body: the outline ("move") or the handles, or all with `part` None."""
-        scene = self.scene()
-        if scene is None:
-            return []
-        return [item for item in scene.items()
-                if item.data(BODY_PART_ROLE) and (part is None or item.data(BODY_PART_ROLE) == part)]
+    #: Hover-group owner of the body resize handles.
+    BODY_OWNER = ('body',)
+
+    def set_body_editor(self, outline, handles) -> None:
+        """@brief Register the editable body drawn by the host: its outline and its eight handles.
+
+        @param outline The outline polygon item (its stroke moves the body).
+        @param handles The handle items, revealed by the SHARED hover rule
+            with the symbol body's ring (`HoverGroups.add(ring=True)`): only
+            near the outline, never anywhere over the body (second review
+            2026-11-03, as the symbol editor, user 2026-10-12).
+        @note The items are Python-built and die with the next scene clear:
+            the host calls `forget_body_editor` (through `hover.clear()` and
+            this) before every clear.
+        """
+        self._body_outline = outline
+        handles = list(handles)
+        if handles:
+            self.hover.add(handles, outline.sceneBoundingRect(), True, self.BODY_OWNER)
+        # A redraw under a still pointer (the drop of a body drag) shows the
+        # handles at once, as the symbol editor re-applies its visibility.
+        self.refresh_body_hover()
+
+    def forget_body_editor(self) -> None:
+        """@brief Forget the body outline (its items die with the scene clear that follows)."""
+        self._body_outline = None
+
+    def refresh_body_hover(self) -> None:
+        """@brief Re-apply the body handles' visibility for the pointer where it is now."""
+        from PyQt6.QtGui import QCursor
+        pos = self.viewport().mapFromGlobal(QCursor.pos())
+        self._report_body_hover(pos if self.viewport().rect().contains(pos) else None)
 
     def _body_part_at(self, pos):
         """@brief Part of the editable body under a viewport point: a visible handle, "move" on the outline stroke, else None.
@@ -649,32 +683,44 @@ class FootprintView(QGraphicsView):
             part = item.data(BODY_PART_ROLE)
             if part and part != "move" and item.isVisible():
                 return str(part)
-        outline = self._body_items("move")
-        if not outline:
+        from .canvas_gestures import _alive
+        outline = getattr(self, "_body_outline", None)
+        if outline is None or not _alive(outline):
             return None
         point = self.mapToScene(pos)
         scale = max(abs(self.transform().m11()), 1e-9)
-        for item in outline:
-            polygon = item.mapToScene(item.polygon())
-            count = polygon.count()
-            for index in range(count):
-                a, b = polygon.at(index), polygon.at((index + 1) % count)
-                if _segment_distance(point, a, b) * scale <= HIT_MARGIN_PX:
-                    return "move"
+        polygon = outline.mapToScene(outline.polygon())
+        count = polygon.count()
+        for index in range(count):
+            a, b = polygon.at(index), polygon.at((index + 1) % count)
+            if _segment_distance(point, a, b) * scale <= HIT_MARGIN_PX:
+                return "move"
         return None
 
     def _report_body_hover(self, pos) -> None:
-        """Show the body handles while the pointer is near the body outline (or a drag of it runs)."""
-        handles = [item for item in self._body_items() if item.data(BODY_PART_ROLE) != "move"]
-        if not handles:
+        """Show the body handles by the shared ring rule (or while a drag of the body runs); no scene scan."""
+        from .canvas_gestures import _alive
+        groups = [items for items, _base, _ring, owner in self.hover.groups if owner == self.BODY_OWNER]
+        if not groups:
             return
-        outline = self._body_items("move")
-        dragging_body = self._dragging() and self.gestures.target[0] == 'body'
-        near = dragging_body or (pos is not None and any(
-            self._near_scene_rect(item.sceneBoundingRect(), pos) for item in outline))
-        for item in handles:
-            if item.isVisible() != near:
-                item.setVisible(near)
+        dragged = self.BODY_OWNER if (self._dragging() and self.gestures.target[0] == 'body') else None
+        shown = self.hover.revealed(self.mapToScene(pos) if pos is not None else None, dragged)
+        visible = self.BODY_OWNER in shown
+        for items in groups:
+            for item in items:
+                if _alive(item) and item.isVisible() != visible:
+                    item.setVisible(visible)
+
+    def _pad_copper_at(self, pos):
+        """The PACKAGE pad whose copper contains a viewport point exactly, or None (no hit margin)."""
+        for item in self.scene().items(self.mapToScene(pos)):
+            token = item.data(PAD_KEY_ROLE)
+            if token is None:
+                continue
+            parts = str(token).split(":", 2)
+            if parts[0] == "package" and len(parts) == 3:
+                return int(parts[1])
+        return None
 
     def _text_item_at(self, pos):
         """The draggable text group under a viewport point, with its key, or (None, None).
@@ -926,6 +972,13 @@ class FootprintView(QGraphicsView):
                     self.pad_context_requested.emit(str(pad_index))
                     event.accept()
                     return
+            if self._body_part_at(event.pos()) is not None:
+                # The editable body outline (or a handle) has its own menu,
+                # after texts, drawings and pads (approved plan 03/11, point 4).
+                self.body_context_requested.emit(self.mapToScene(event.pos()),
+                                                 event.globalPosition().toPoint())
+                event.accept()
+                return
             dimension = self._dimension_at(event.pos())
             if dimension is not None:
                 # An editable dimension comes after texts, drawings and pads,
@@ -979,8 +1032,15 @@ class FootprintView(QGraphicsView):
                 self._report_text_hover(key)
                 event.accept()
                 return
+            # A body gesture never starts with Ctrl (Ctrl+click selects and
+            # never drags, plan canvas-selection), and a pad whose COPPER is
+            # under the pointer wins over a body handle on the same spot (a
+            # pad on the outline of a QFN or a castellated edge).
+            plain = not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
             body_part = (self._body_part_at(event.pos())
-                         if handle is None and item is None else None)
+                         if handle is None and item is None and plain else None)
+            if body_part not in (None, "move") and self._pad_copper_at(event.pos()) is not None:
+                body_part = None
             if (body_part not in (None, "move")
                     and self._press_gesture(('body', body_part), point)):
                 # A resize handle of the package body (user, 2026-11-03).
@@ -1207,6 +1267,8 @@ class FootprintView(QGraphicsView):
         """
         if self.measure is not None and self.measure.escape(event, self.camera):
             return
+        if self._restep_body_on_shift(event):
+            return
         if self.click_router is not None and self.click_router.key(event):
             return
         if event.key() == Qt.Key.Key_Escape and self.camera.pan_cancel():
@@ -1219,6 +1281,26 @@ class FootprintView(QGraphicsView):
             # Nothing else to cancel: the host clears the selection.
             self.escape_idle.emit()
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        """@brief Qt override: releasing Shift during a body drag re-steps it at once.
+
+        @param event Qt key release event, forwarded to the base class otherwise.
+        """
+        if self._restep_body_on_shift(event):
+            return
+        super().keyReleaseEvent(event)
+
+    def _restep_body_on_shift(self, event) -> bool:
+        """Step a running body drag again when Shift changes, so the symmetric ghost follows the key, not the next move."""
+        if (event.key() != Qt.Key.Key_Shift or not self._dragging()
+                or self.gestures.target[0] != 'body'):
+            return False
+        point = self.gestures.last_point or self.gestures.start_point
+        if point is not None:
+            self.gestures.move(point)
+        event.accept()
+        return True
 
     def hideEvent(self, event):
         """@brief Discard an unfinished camera drag, and cancel a text or handle drag, when the view is hidden.
@@ -1234,6 +1316,8 @@ class FootprintView(QGraphicsView):
         self._background_press = None
         self.cancel_interaction()
         self._report_text_hover("")
+        self._report_body_hover(None)
+        self._hover_dimension(None)
         if self.click_router is not None:
             # The host disarms the tool and cleans its click markers.
             self.click_router.hide(event.spontaneous())

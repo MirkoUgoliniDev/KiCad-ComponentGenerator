@@ -62,8 +62,23 @@ def test_pads_past_the_body_add_a_computed_total_that_is_not_editable(window, qa
     found = _dimensions(window)
     assert ("4.00 mm", "body_x") in found and ("4.00 mm", "body_y") in found
     totals = [entry for entry in found if entry[1] is None]
-    assert len(totals) == 2 and all("7.50" in text or "4.00" in text for text, _key in totals)
-    assert any("7.50" in text for text, _key in totals), "leads from -3.75 to 3.75 mm"
+    # CONTRACT CHANGED 2026-11-03 (second review, U6): the total is drawn per
+    # AXIS where pads stick out; these leads stick out left and right only,
+    # so only the horizontal total (leads from -3.75 to 3.75 mm) appears.
+    assert [text for text, _key in totals] == [window._dim_label("dim.total", 7.5)]
+
+
+def test_the_default_value_text_never_covers_a_body_number(window, qapp, monkeypatch):
+    """U3: the body dimensions are laid out beyond the footprint texts facing them."""
+    from kicadgen.gui.canvas_measure import DIMENSION_EDIT_ROLE
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+    _show(window, qapp, monkeypatch, _package(INSIDE, 22.5, 16.5))
+    labels = [item.sceneBoundingRect() for item in window.preview_scene.items()
+              if isinstance(item, QGraphicsSimpleTextItem) and item.data(DIMENSION_EDIT_ROLE)]
+    texts = [item.sceneBoundingRect() for item in window.preview_scene.items()
+             if item.data(TEXT_KEY_ROLE) is not None and item.parentItem() is None]
+    assert labels and texts
+    assert not any(label.intersects(text) for label in labels for text in texts)
 
 
 def test_a_body_turned_by_45_degrees_keeps_only_the_computed_total(window, qapp, monkeypatch):
@@ -300,3 +315,36 @@ def test_the_pinout_table_lists_every_pad_and_names_from_the_drawing(window, qap
     window.pinout = [{"pin": "11", "name": "Normally open"}]
     rows = {row["pin"]: row["name"] for row in window._pinout_rows_for_dialog()}
     assert rows == {"11": "Normally open", "A1": "Coil+", "A2": ""}
+
+
+def test_applying_a_body_edit_updates_the_body_fields(inside, monkeypatch):
+    """U5: after «Applica» the body fields show the applied body; before it they keep the applied one."""
+    window = inside
+    monkeypatch.setattr(window, "_ask_measure_value", lambda current: 25.0)
+    window.field_body_length.setValue(22.5)
+    window._edit_body_dimension("body_x")
+    assert window.field_body_length.value() == 22.5, "a draft never reaches the fields"
+    assert window.apply_footprint_draft()
+    assert window.field_body_length.value() == 25.0
+
+
+def test_an_untouched_pinout_ok_never_records_drawing_names_as_the_users(window, qapp, monkeypatch):
+    """B3/U2: names prefilled from the pad drawing are applied only when the user changes them."""
+    from PyQt6.QtWidgets import QDialog
+    pins = [PinSpec("11", -6.0, 0.0, 1.3, 1.3, name="NO", pad_type="thru_hole", drill_mm=.8, shape="circle"),
+            PinSpec("A1", 6.0, -6.0, 1.3, 1.3, name="Coil+", pad_type="thru_hole", drill_mm=.8, shape="circle")]
+    _show(window, qapp, monkeypatch, _package(pins, 22.5, 16.5))
+    monkeypatch.setattr(window, "_settle_pad_ids", lambda: ["11", "A1"])
+    window.pinout = [{"pin": "11", "name": "NO"}]
+    window._user_pin_names = {}
+    monkeypatch.setattr(window, "_run_modal", lambda dialog: QDialog.DialogCode.Accepted)
+    window._show_pinout_dialog()
+    assert window._user_pin_names == {} and window.pinout == [{"pin": "11", "name": "NO"}]
+    # Positive twin: a changed proposal is the user's.
+    def edit_and_accept(dialog):
+        row = next(r for r in range(dialog.table.rowCount()) if dialog.table.item(r, 0).text() == "A1")
+        dialog.table.item(row, 1).setText("COIL_P")
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(window, "_run_modal", edit_and_accept)
+    window._show_pinout_dialog()
+    assert window._user_pin_names.get("A1") == "COIL_P"

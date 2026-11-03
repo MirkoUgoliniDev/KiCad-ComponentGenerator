@@ -81,8 +81,11 @@ import numpy as np
 # Declared limits and constants
 # ---------------------------------------------------------------------------
 
-#: Image suffixes read by the check; any other file is skipped.
-IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+#: Image suffixes read by the check; any other file is skipped. GIF is
+#: accepted by the documents panel (document_roles.SUFFIXES) and OpenCV does
+#: not decode it, so _read_image reads it through Pillow (review S9,
+#: 2026-11-03): a drawing uploaded as GIF is checked like any other.
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"})
 
 #: Images whose long side exceeds this are downscaled before the circle
 #: search. 2000 px keeps a 1 mm hole drawn at the usual 8-20 px/mm of a
@@ -438,6 +441,8 @@ def _read_image(path: Path) -> np.ndarray | None:
     """Read an image as BGR, transparent pixels composited on white; None if unreadable.
 
     The bytes are decoded from memory so that non-ASCII Windows paths work.
+    A format OpenCV does not decode (GIF) is read through Pillow, first frame
+    only, as RGBA.
     """
     try:
         data = np.fromfile(str(path), dtype=np.uint8)
@@ -446,6 +451,8 @@ def _read_image(path: Path) -> np.ndarray | None:
         image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     except (OSError, ValueError, cv2.error):
         return None
+    if image is None:
+        image = _read_with_pillow(data)
     if image is None or image.size == 0:
         return None
     if image.dtype != np.uint8:
@@ -463,6 +470,18 @@ def _read_image(path: Path) -> np.ndarray | None:
         rgb = image[:, :, :3].astype(np.float32)
         return (rgb * alpha + 255.0 * (1.0 - alpha)).round().astype(np.uint8)
     return image[:, :, :3]
+
+
+def _read_with_pillow(data: np.ndarray) -> np.ndarray | None:
+    """Decode bytes OpenCV refused (GIF) with Pillow as BGRA; None when Pillow refuses them too."""
+    import io
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data.tobytes())) as picture:
+            rgba = np.asarray(picture.convert("RGBA"))
+    except Exception:  # noqa: BLE001 - any decoder failure means «not readable», as above
+        return None
+    return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
 
 
 def _working_grey(image: np.ndarray) -> np.ndarray:

@@ -315,7 +315,13 @@ def test_a_file_with_several_roles_is_described_for_each(monkeypatch, tmp_path):
         assert name in sheet
     # The same file IS the dimensioned top view: it must not be excluded from it.
     assert "non usarlo per gli ingombri" not in sheet
-    assert "Viste non fornite: Vista laterale" in _request_text(call)
+    # CONTRACT CHANGED (adversarial review 2026-11-03): a sheet declared «Immagine
+    # con quote» may print the profile views too, so the side view is to be
+    # looked for in it, never declared absent (that sentence, with «se nessuna
+    # vista mostra il corpo di profilo, ometti», dropped the T7N height).
+    assert "Viste non fornite: Vista laterale" not in _request_text(call)
+    assert "Viste da cercare nei disegni quotati forniti" in _request_text(call)
+    assert "Vista laterale / altezze" in _request_text(call)
     assert photo.call_args.kwargs["top_photo_index"] == [1]
 
 
@@ -407,3 +413,36 @@ def test_the_role_names_are_the_labels_the_user_sees():
     for key in DOCUMENT_ROLE_KEYS:
         if key in ROLES:
             assert ext._ROLE_PROMPTS[key][0] == ROLES[key], key
+
+
+# ── Height: one printed number, one definition (user, 2026-11-03) ───────────
+
+def test_the_height_is_defined_once_as_a_printed_number_everywhere():
+    """Schema, single prompt and dedicated reading share _HEIGHT_RULE: transcribe, never sum."""
+    schema = ext._EXTRACTION_TOOL["input_schema"]["properties"]["body_height_mm"]["description"]
+    dedicated = ext._BODY_DIMENSIONS_TOOL["input_schema"]["properties"]["body_height"]["description"]
+    for text in (schema, ext.DEFAULT_SINGLE_SYSTEM_PROMPT, ext.DEFAULT_BODY_DIMENSIONS_PROMPT, dedicated):
+        assert "UN SOLO numero STAMPATO" in text
+        assert "NON sommare ne' sottrarre" in text
+    assert ext._HEIGHT_RULE in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert ext._HEIGHT_RULE in schema
+    assert "printed_vertical_quotes" in ext._HEIGHT_RULE
+    assert "printed_vertical_quotes" in ext._single_component_tool()["function"]["parameters"]["properties"]
+    assert "schema elettrico" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert "SCHEMA ELETTRICO" in ext._EXTRACTION_TOOL["input_schema"]["properties"]["pinout"]["description"]
+
+
+def test_the_former_single_prompt_migrates_and_the_current_one_does_not():
+    """The 2026-10-30 single prompt (height by construction) is superseded; the new text is not."""
+    assert ("15a7c81d5ad16c80bb06b91e5d3310faf40882bdb4308a6fc3182caa7ccb6904"
+            in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS)
+    assert component_types.text_digest(ext.DEFAULT_SINGLE_SYSTEM_PROMPT) not in ext.SUPERSEDED_SINGLE_PROMPT_DIGESTS
+
+
+def test_a_side_view_declared_on_a_file_of_its_own_is_neither_missing_nor_searched(monkeypatch, tmp_path):
+    """Negative twin: with the side view declared, no «da cercare» and no «non fornite» for it."""
+    roles = {"sheet.pdf": ["pinout", "top"], "side.png": ["side_view"], "photo.png": ["hires"]}
+    call, _, _ = _run_extraction(monkeypatch, tmp_path, ["sheet.pdf", "side.png", "photo.png"], roles)
+    text = _request_text(call)
+    assert "non fornite: Vista laterale" not in text
+    assert "Viste da cercare nei disegni quotati forniti" not in text

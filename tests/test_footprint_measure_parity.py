@@ -72,12 +72,23 @@ def test_the_dimension_lines_of_the_three_drawers_are_unchanged(window):
     """The factored dimension helper draws exactly the items of the old `_add_dim_h` / `_add_dim_v`.
 
     GOLDEN CHANGED 2026-11-03 (generator review fixes, KLC): the pin-header
-    courtyard margin is 0.25 mm (was 1.0 mm) and a header without a body is
-    framed by its pads plus the silk clearance (0.85 + 0.26 mm around a pin
-    centre) instead of 1.0 mm around the pin centres. The header preview
-    reads its envelope from that courtyard, so only the «header» entries
-    moved by 2.2 px (0.11 mm at 20 px/mm) and its totals read 9.84/4.76 mm;
-    the castellated and package entries are unchanged.
+    courtyard margin is 0.5 mm (KLC connectors, user decision 2026-11-03;
+    packages and castellated modules keep 0.25 mm; it was 1.0 mm and doubled
+    as the frame offset) and a header without a body is framed by its pads
+    plus the silk clearance (0.85 + 0.26 mm around a pin centre) instead of
+    1.0 mm around the pin centres. The preview's totals measure that
+    body/copper frame, never the courtyard, so only the «header» entries
+    moved by 2.2 px (0.11 mm at 20 px/mm) and its totals read 9.84/4.76 mm
+    whatever the courtyard margin; the castellated and package entries are
+    unchanged.
+
+    GOLDEN CHANGED AGAIN 2026-11-03 (second adversarial review): the
+    pin-1 dot of a header is now inside the frame it sits in (its ink counts
+    for the courtyard and the drawn frame), so the «header» totals read
+    10.65/5.57 mm; the package body dimensions are laid out beyond the
+    footprint's Reference/Value texts so a text never covers an editable
+    dimension, so the «package» entries moved (still 15.00/10.00 mm).
+    The castellated entries are unchanged.
     """
     records = {}
     window._draw_preview()

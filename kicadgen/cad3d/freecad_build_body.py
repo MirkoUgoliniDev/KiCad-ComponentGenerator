@@ -78,7 +78,10 @@ class _StepHeartbeat:
     @note The thread never touches FreeCAD: it only formats and prints a
         string. DECLARED LIMIT, as for freecad_parts._ImportHeartbeat: it can
         only run while the C++ call releases the GIL; `beat_if_due` is called
-        from the Python loops of the same steps so they beat regardless.
+        from the Python loops of the same steps so they beat regardless. On
+        Windows the parent also counts the CPU time of the child's job as
+        activity (`process_log.CpuActivity`), which covers the GIL-holding
+        calls this thread cannot.
     """
 
     def __init__(self, step, interval=None):

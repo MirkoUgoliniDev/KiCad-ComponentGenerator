@@ -83,6 +83,7 @@ from PyQt6.QtCore import (
     QPointF, QRectF, QSignalBlocker, QStringListModel, Qt, QTimer, QThread,
     pyqtSignal,
 )
+from PyQt6 import sip
 from PyQt6.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPainterPath, QPen,
                          QPixmap, QPolygonF, QShortcut, QTextDocument)
 from PyQt6.QtWidgets import (
@@ -165,9 +166,19 @@ class _MatchWorker(QThread):
         self.cancel.set()
 
     def _stop_for_quit(self):
-        """Cancel, then wait a BOUNDED time for the thread to leave the matching."""
+        """Cancel, then wait a BOUNDED time for the thread to leave the matching.
+
+        A thread still running when the wait expires is taken away from
+        QApplication and handed to C++ with no owner: destroyed with the
+        application while running, it would abort the process (Qt's
+        «Destroyed while thread is still running»). The process exit ends it
+        (same rule as `component_check_dialog._CheckWorker._stop_for_quit`).
+        """
         self.stop()
-        self.wait(MATCH_QUIT_WAIT_MS)
+        if self.wait(MATCH_QUIT_WAIT_MS):
+            return
+        self.setParent(None)
+        sip.transferto(self, None)
 
     def _release(self):
         """Drop the exit-time hook once the thread has finished."""
@@ -3437,7 +3448,23 @@ class PhotoReviewDialog(QDialog):
             warnings.append(self._tr(
                 "Lati sul confine di una tessera del rilevatore, non misurati: {sides}."
             ).format(sides=", ".join(str(side) for side in clipped)))
+        warnings.extend(self._overlap_doubt_warnings(component))
         return warnings
+
+    def _overlap_doubt_warnings(self, component):
+        """The detector's overlap doubt, as a warning line (both stages).
+
+        `photo_yolo` sets ``_yolo_overlap_doubt_with`` (the proposal id of the
+        confident body) on a box that overlaps that body by no more than the
+        boxes' edge uncertainty: it may be a separate body or one of its pads,
+        and the detector cannot tell. The geometry decides nothing more here;
+        the person looking at the photo does.
+        """
+        if not component.get("_yolo_overlap_doubt_with"):
+            return []
+        return [self._tr(
+            "Si sovrappone a un corpo già trovato entro l'incertezza dei bordi del "
+            "rilevatore: può essere un corpo separato o una sua piazzola. Verifica sulla foto.")]
 
     def _warnings(self, item):
         if self._stage == STAGE_DETECTOR:
@@ -3485,6 +3512,7 @@ class PhotoReviewDialog(QDialog):
                 warnings.append(self._tr("Il file STEP scelto non è disponibile: scegliere nuovamente."))
         if component.get("_uncertain") or str(component.get("confidence", "")).lower() == "low":
             warnings.append(self._tr("Rilevamento incerto / bassa confidenza: verifica manuale richiesta."))
+        warnings.extend(self._overlap_doubt_warnings(component))
         if component.get("warnings"):
             warnings.append(str(component["warnings"]))
         return warnings

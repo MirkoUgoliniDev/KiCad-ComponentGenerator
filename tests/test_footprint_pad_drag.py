@@ -292,9 +292,12 @@ def test_hiding_the_view_cancels_the_drag(fp, qapp):
     window.preview_view.show()
 
 
-def test_pads_show_the_move_cursor_only_when_they_can_move(fp):
+def test_pads_show_the_move_cursor_only_when_they_can_move(fp, monkeypatch):
     window = fp
     assert _pad_item(window, 0).cursor().shape() == Qt.CursorShape.SizeAllCursor
+    # CONTRACT CHANGED (second review 2026-11-03, B1): the header's lands
+    # replace the pads only on a photographed board.
+    monkeypatch.setattr(window, "_photo_inventory_family", lambda: True)
     index = window.combo_mounting.findData("headers")
     window.combo_mounting.blockSignals(True)
     try:
@@ -469,13 +472,21 @@ def test_the_pad_lands_where_it_is_dropped_whatever_the_package_frame(window, qa
 
 # ── What cannot be dragged ──────────────────────────────────────────────
 
-def test_a_part_mounted_on_a_header_refuses_the_pad_drag(fp):
+def test_a_part_mounted_on_a_header_refuses_the_pad_drag(fp, monkeypatch):
+    """Positive: a photographed board on a strip header -> no pad drag.
+
+    Negative (second review 2026-11-03, B1): the same mode left on a project
+    that is not a board leaves the package pads its own, so they move.
+    """
     window = fp
     index = window.combo_mounting.findData("headers")
     assert index >= 0
     window.combo_mounting.blockSignals(True)
     try:
         window.combo_mounting.setCurrentIndex(index)
+        monkeypatch.setattr(window, "_photo_inventory_family", lambda: False)
+        assert window._package_pads_movable()
+        monkeypatch.setattr(window, "_photo_inventory_family", lambda: True)
         assert window.gesture_begin(("pad", 0), QPointF(0, 0)) is None
     finally:
         window.combo_mounting.setCurrentIndex(0)

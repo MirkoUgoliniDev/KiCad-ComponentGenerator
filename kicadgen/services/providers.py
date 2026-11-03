@@ -226,7 +226,8 @@ def _error_detail(exc: urllib.error.HTTPError, key: Optional[str]) -> str:
     status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
     try:
         payload = json.loads(exc.read(_MAX_ERROR_BODY_BYTES).decode("utf-8", "replace"))
-    except (ValueError, OSError, AttributeError):
+    except (ValueError, OSError, AttributeError, HTTPException):
+        # An error body cut short (IncompleteRead) leaves the status only.
         payload = None
     error = payload.get("error") if isinstance(payload, dict) else None
     message = error.get("message") if isinstance(error, dict) else error

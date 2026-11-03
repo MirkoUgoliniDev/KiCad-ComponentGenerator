@@ -156,6 +156,12 @@ class LibraryShadowing:
     @note ``scope`` is the scope of `table_path`: ``"global"`` when the
         install goes to a project, ``"project"`` when it goes to the global
         table. ``uri`` is the raw value of the row (variables unexpanded).
+    @note LIMIT: the check runs only when the caller names the other table
+        (`plan_component_install` ``other_table_path``). The KiCad tab does
+        so for a PROJECT install (the global table is known); for a GLOBAL
+        install it passes none, because a library folder belongs to no
+        project and the projects that will use it are unknown, so a project
+        row hiding the global library is NOT reported there.
     """
 
     table_path: Path
@@ -198,6 +204,15 @@ class InstallPlan:
         receives the install and ``kicad_too_old`` is True when it is older
         than `MINIMUM_KICAD_VERSION` (the install then refuses with
         ``kicad_too_old``).
+    @note ``detected_kicad_version`` is the version of the KiCad found on
+        this computer, given by the caller for a PROJECT install (whose table
+        belongs to no KiCad version), and ``detected_kicad_too_old`` is True
+        when it is older than the minimum. A warning, never a refusal: the
+        project may be opened by a newer KiCad on another computer (review
+        2026-11-03, D2). None/False when the version is unknown.
+    @note ``shadowing`` is not computed, and stays None, when the destination
+        table already maps the nickname to the same place: a re-install
+        (`_destination_row_already_there`, review 2026-11-03, D7).
     """
 
     targets: tuple[Path, ...]
@@ -212,6 +227,8 @@ class InstallPlan:
     open_locks: tuple[Path, ...] = ()
     kicad_version: str | None = None
     kicad_too_old: bool = False
+    detected_kicad_version: str | None = None
+    detected_kicad_too_old: bool = False
 
     @property
     def kicad_open(self) -> bool:
@@ -884,27 +901,75 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+#: Windows file attribute of a junction, symbolic link or other reparse point.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_reparse_point(path: Path | os.DirEntry) -> bool:
+    """@brief Whether `path` is a link of any kind, never followed.
+
+    @param path Path or directory entry to test.
+    @return True for a symbolic link, a Windows junction or any other
+        reparse point; False for a plain file or folder, or a missing path.
+    @note ``is_dir(follow_symlinks=False)`` is True for a junction on
+        Python 3.13 on Windows, so it cannot tell a junction from our own
+        folder; the link tests and the reparse-point attribute can.
+    """
+    try:
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            return True
+        info = path.stat(follow_symlinks=False) if isinstance(path, os.DirEntry) \
+            else os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    return bool(getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _empty_folder_quietly(directory: Path) -> None:
+    """Delete what `directory` holds, removing links themselves and never entering them."""
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return
+    for entry in entries:
+        path = Path(entry.path)
+        try:
+            if _is_reparse_point(entry):
+                # rmdir removes a directory link (junction) without touching
+                # its target; a file link is removed like a file.
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    os.remove(path)
+            elif entry.is_dir(follow_symlinks=False):
+                _empty_folder_quietly(path)
+                os.rmdir(path)
+            else:
+                _remove_clearing_readonly(path)
+        except OSError:
+            # The caller reports the folder as left; nothing else is tried.
+            pass
+
+
 def _remove_tree_quietly(directory: Path) -> bool:
     """@brief Remove a folder of ours (rollback copies), read-only files included.
 
     @param directory Folder created by this module.
-    @return True when the folder is gone.
+    @return True when the folder is gone; False when it is left, including
+        when `directory` is a link (`_is_reparse_point`).
     @note ``shutil.rmtree(ignore_errors=True)`` silently left the folder
         behind when one copy was read-only; files are unlocked first here.
+    @note SAFETY BOUNDARY (review 2026-11-03, D3): a junction, symbolic link
+        or other reparse point in the place of the folder is refused, never
+        followed: walking it emptied the folder it points to, which is not
+        ours. A link found INSIDE is removed itself, never entered
+        (``os.walk`` enters junctions, which are not symbolic links).
     """
+    if _is_reparse_point(directory):
+        return False
     if not directory.exists():
         return True
-    for current, folders, files in os.walk(directory, topdown=False):
-        for name in files:
-            try:
-                _remove_clearing_readonly(Path(current) / name)
-            except OSError:
-                pass
-        for name in folders:
-            try:
-                os.rmdir(Path(current) / name)
-            except OSError:
-                pass
+    _empty_folder_quietly(directory)
     try:
         os.rmdir(directory)
     except OSError:
@@ -1278,6 +1343,52 @@ def _same_uri(first: str | None, second: str) -> bool:
         return value.casefold() if sys.platform == "win32" else value
 
     return normalized(first) == normalized(second)
+
+
+def _same_place(first: str | None, second: str,
+                project_dir: Path | None = None) -> bool:
+    """@brief Whether two table URIs name the same folder on this computer.
+
+    @param first URI of an existing table row (None when the row has none).
+    @param second URI the install would register.
+    @param project_dir Folder that ``${KIPRJMOD}`` stands for; None leaves
+        the variable unexpanded (the URI is then not absolute).
+    @return True when `_same_uri` says so, or when both URIs are absolute
+        once ``${KIPRJMOD}`` is expanded and the file system says they are
+        one folder (``os.path.samefile``, else equal ``Path.resolve``).
+    @note The destination is made absolute with ``os.path.abspath`` and not
+        resolved (see `plan_component_install`), so re-installing through a
+        junction, a SUBST drive or a mapped drive into the folder an earlier
+        install registered under its other spelling was a false
+        ``library_entry_conflict`` and a false shadowing (review 2026-11-03,
+        D1). Only the COMPARISON follows links: the row is kept verbatim and
+        the user's spelling is never rewritten.
+    @note A URI still holding another variable is never resolved: where it
+        points depends on KiCad's environment, so it stays a conflict for the
+        user to decide, as `_same_uri` documents.
+    """
+    if _same_uri(first, second):
+        return True
+    if first is None:
+        return False
+    one = _expand_project_uri(first.strip(), project_dir)
+    other = _expand_project_uri(second.strip(), project_dir)
+    if any(token in text for text in (one, other) for token in ("${", "$(")):
+        return False
+    if not (os.path.isabs(one) and os.path.isabs(other)):
+        return False
+    try:
+        if os.path.samefile(one, other):
+            return True
+    except (OSError, ValueError):
+        # A folder not created yet (or an unreachable drive) has no identity:
+        # the resolved spellings are compared instead.
+        pass
+    try:
+        return (os.path.normcase(str(Path(one).resolve()))
+                == os.path.normcase(str(Path(other).resolve())))
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _replace_entry_child(block: str, field: str, value: str) -> str:
@@ -1660,7 +1771,9 @@ def _updated_fp_lib_table_text(
     if matches:
         start, end, entry = matches[0]
         same_type = (entry.library_type or "").casefold() == "kicad"
-        same_place = same_type and _same_uri(entry.uri, uri)
+        # Same folder under another spelling (junction, SUBST or mapped
+        # drive) is the same place; the row is kept as the user wrote it.
+        same_place = same_type and _same_place(entry.uri, uri)
         if entry.disabled:
             if not replace_entry:
                 raise KiCadLibraryError(
@@ -1915,6 +2028,24 @@ def _dispose_rollback_dir(rollback_dir: Path) -> Path | None:
     return rollback_dir
 
 
+def rollback_left_of(error: BaseException) -> Path | None:
+    """@brief The rollback folder a FAILED install could not remove, if any.
+
+    @param error Exception raised by `install_component_library`.
+    @return The folder in its ``rollback_left`` context (a
+        `KiCadLibraryError` after a COMPLETE rollback whose folder stayed,
+        marked disposable); None for any other error.
+    @note No ``kicad.error.*`` text names this folder (review 2026-11-03,
+        D8): the GUI appends ``kicad.result_rollback_left`` (placeholder
+        ``path``), the text of a successful install, to the error message.
+        ``rollback_incomplete`` keeps its folder in ``rollback_dir`` instead,
+        named by its own message.
+    """
+    context = getattr(error, "context", None)
+    left = context.get("rollback_left") if isinstance(context, dict) else None
+    return Path(left) if left else None
+
+
 def _sweep_stale_rollback_dirs(root: Path, now: float | None = None) -> list[Path]:
     """@brief Remove disposable rollback folders older than `STALE_SCRATCH_AGE_S`.
 
@@ -1938,7 +2069,9 @@ def _sweep_stale_rollback_dirs(root: Path, now: float | None = None) -> list[Pat
         if not _ROLLBACK_DIR_NAME.match(entry.name):
             continue
         try:
-            if not entry.is_dir(follow_symlinks=False):
+            # A junction passes is_dir(follow_symlinks=False): any link named
+            # like ours is skipped, it points to a folder that is not ours.
+            if _is_reparse_point(entry) or not entry.is_dir(follow_symlinks=False):
                 continue
             marker = Path(entry.path) / ROLLBACK_DISPOSABLE_MARKER
             if marker.stat().st_mtime > limit:
@@ -1992,8 +2125,8 @@ def find_shadowing_entry(
         return None
     project = Path(project_dir) if project_dir is not None else None
     same_type = (entry.library_type or "").casefold() == "kicad"
-    if same_type and _same_uri(_expand_project_uri(entry.uri or "", project),
-                               Path(library_location).as_posix()):
+    if same_type and _same_place(entry.uri or "", Path(library_location).as_posix(),
+                                 project):
         return None
     return LibraryShadowing(
         table_path=Path(other_table), scope=other_scope, library=library_name,
@@ -2032,7 +2165,8 @@ def plan_component_install(
         *, library_name: str = "KiCadGen", project_library: bool = True,
         table_path: str | os.PathLike[str] | None = None,
         other_table_path: str | os.PathLike[str] | None = None,
-        kicad_version: str | None = None) -> InstallPlan:
+        kicad_version: str | None = None,
+        detected_kicad_version: str | None = None) -> InstallPlan:
     """@brief Pre-flight of `install_component_library`: what it would touch.
 
     @param artifacts Validated generated artifacts of one component.
@@ -2049,6 +2183,12 @@ def plan_component_install(
     @param kicad_version KiCad settings version that receives the install
         (`GlobalTableLocation.version`); None when unknown. One older than
         `MINIMUM_KICAD_VERSION` sets `InstallPlan.kicad_too_old`.
+    @param detected_kicad_version Version of the KiCad found on this
+        computer (`system_dependencies.check_kicad_version(...).version`),
+        for a project install whose table belongs to no KiCad version; None
+        when unknown. One older than the minimum sets
+        `InstallPlan.detected_kicad_too_old`, a warning only: the project
+        may be opened by a newer KiCad elsewhere.
     @return The targets, the files that would be replaced or removed, the
         linked ones, the table, the clashing row of the other scope, the
         lock files of an open project and the version verdict (see
@@ -2096,7 +2236,9 @@ def plan_component_install(
                    if project_library else pretty_dir.as_posix())
     shadowing: LibraryShadowing | None = None
     shadowing_error: str | None = None
-    if other_table_path is not None:
+    if other_table_path is not None and not _destination_row_already_there(
+            destination_table, library_name, library_uri,
+            root if project_library else None):
         # ${KIPRJMOD} names the project: the destination for a project
         # install, the folder of the project table for a global one.
         project_dir = root if project_library else Path(other_table_path).parent
@@ -2118,7 +2260,39 @@ def plan_component_install(
         shadowing_error=shadowing_error,
         open_locks=project_lock_files(root) if project_library else (),
         kicad_version=kicad_version, kicad_too_old=too_old,
+        detected_kicad_version=detected_kicad_version,
+        detected_kicad_too_old=(detected_kicad_version is not None and
+                                kicad_version_supported(detected_kicad_version) is False),
     )
+
+
+def _destination_row_already_there(
+        table: Path, library_name: str, library_uri: str,
+        project_dir: Path | None) -> bool:
+    """@brief Whether the destination table already maps the nickname to this place.
+
+    @param table Table the install updates.
+    @param library_name Nickname being installed.
+    @param library_uri URI the install registers.
+    @param project_dir Folder ``${KIPRJMOD}`` stands for (project install);
+        None for the global table.
+    @return True when an ENABLED ``KiCad`` row of that nickname already
+        points to the same place (`_same_place`); False otherwise, and when
+        the table is missing or unreadable.
+    @note Used to skip the shadowing check of a RE-install (review
+        2026-11-03, D7): the row is already there, so the clash with the
+        other scope existed, and was asked about, at the first install;
+        repeating the question at every update taught the user to dismiss it.
+        Limit: a row added to the other scope AFTER that first install is
+        not reported on a re-install either.
+    """
+    try:
+        entry = find_library_entry(table, library_name)
+    except (KiCadLibraryError, OSError):
+        return False
+    return (entry is not None and not entry.disabled
+            and (entry.library_type or "").casefold() == "kicad"
+            and _same_place(entry.uri, library_uri, project_dir))
 
 
 def install_component_library(

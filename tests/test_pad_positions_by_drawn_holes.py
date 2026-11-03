@@ -266,10 +266,63 @@ def test_the_hole_check_runs_once_per_layout():
     assert holes.calls == 3
 
 
-def test_a_competitor_failing_only_as_distorted_never_lets_another_reading_win():
-    """A drawing not to scale: the right reading may fail as «distorted»; no choice then."""
+def test_a_chain_reading_confirmed_undistorted_beats_a_competitor_that_fits_only_distorted():
+    """CONTRACT CHANGED (user, 2026-11-03, T7N relay): the chain sums fitting the drawn
+    circles without distortion prove the page to scale with its printed quotes, so a
+    competitor that fits only by distorting that page is wrong and the chains win."""
     data = _main(SHIFTED)
     apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(TRUE, reason="distorted"))
+    assert "_pin_map_conflict" not in data
+    assert _offsets(data) == _true_offsets()
+
+
+def test_a_page_not_to_scale_leaves_the_distorted_chain_reading_unchosen():
+    """Negative twin: the page is not to scale, so the CHAIN reading is the «distorted» one and
+    the main answer (copying the drawn proportions) is confirmed: not a chain reading, no choice."""
+    data = _main(SHIFTED)
+    apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(SHIFTED, reason="distorted"))
+    assert "_pin_map_conflict" in data
+
+
+def test_a_distorted_competitor_still_blocks_a_confirmed_main_answer():
+    """The exception is for chain readings only: a main answer confirmed while the chain reading
+    is «distorted» chooses nothing (same page, the main answer proves no scale)."""
+    data = _main(TRUE)
+    apply_dedicated_pads(data, _reading([
+        {"axis": "x", "stops": ["edge", "1", "2,5", "3,4", "edge"], "values": [2.0, 5.0, 9.0, 4.0]},
+        {"axis": "y", "stops": ["edge", "1,3", "2", "4,5", "edge"], "values": [2.0, 0.5, 6.5, 3.0]},
+    ]), check_layout=FakeHoles(TRUE, reason="distorted"))
+    assert "_pin_map_conflict" in data
+
+
+# ── An answer that left a terminal out ─────────────────────────────────
+
+def test_an_incomplete_main_answer_is_replaced_by_the_confirmed_chain_reading():
+    """User, 2026-11-03 (T7N relay): numbers READ by the main answer, but one pad fewer than the
+    chain reading the holes confirm -> its numbering cannot be the complete one: replaced."""
+    for reason in ("no_match", "distorted"):
+        data = _main({n: p for n, p in SHIFTED.items() if n != "5"})
+        apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(TRUE, reason=reason))
+        assert "_pin_map_conflict" not in data, reason
+        assert sorted(p["number"] for p in data["package_geometry"]["pins"]) == ["1", "2", "3", "4", "5"]
+        assert _offsets(data) == _true_offsets()
+        assert data["package_geometry"]["needs_review"] is True
+        assert "manca un terminale" in data["_numbering_note"]
+
+
+def test_an_incomplete_main_answer_stays_blocked_without_a_confirmed_reading():
+    """Negative twin: the same incomplete answer, but the holes confirm neither reading."""
+    data = _main({n: p for n, p in SHIFTED.items() if n != "5"})
+    apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(
+        dict(TRUE, **{"4": (16.0, 11.0)})))
+    assert "_pin_map_conflict" in data
+    assert sorted(p["number"] for p in data["package_geometry"]["pins"]) == ["1", "2", "3", "4"]
+
+
+def test_a_main_answer_with_more_pads_than_the_reading_is_never_replaced():
+    """Negative twin (audit H1): read numbers and MORE pads than the chain reading -> block."""
+    data = _main(dict(SHIFTED, **{"6": (10.0, 11.0)}))
+    apply_dedicated_pads(data, _reading(), check_layout=FakeHoles(TRUE))
     assert "_pin_map_conflict" in data
 
 

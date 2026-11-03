@@ -22,9 +22,11 @@ from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
 from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, Pad,
-                              courtyard_corners, fab_reference_text, require_kicad_reach)
+                              courtyard_corners, fab_reference_text, require_kicad_reach,
+                              validate_pad_number)
 from ..core.output_names import validate_output_name
-from ..core.silk import SILK_PAD_CLEARANCE_MM, keepout_box, pin_one, pin_one_marker, silk_rectangle
+from ..core.silk import (PIN_ONE_UNMARKED_NOTE, SILK_PAD_CLEARANCE_MM, keepout_box, marker_ink_box,
+                         pin_one, pin_one_marker, silk_rectangle)
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
 
@@ -72,22 +74,27 @@ def pin_key(pin) -> str:
     return str(pin).strip()
 
 
+def automatic_number(pin) -> Optional[int]:
+    """@brief The automatic header number a pin label stands for, or None.
+
+    @param pin A pin number, int or str.
+    @return The int when `pin_key` is a plain decimal number without leading
+        zeros ("1", "12"); None otherwise ("01", "A1", "1.0", a superscript).
+    @note Labels are text, compared as text everywhere (`pin_key`): «01» is
+        not pin 1, because `pin_positions` would look for «01» among the
+        automatic labels «1», «2»... and silently emit nothing (review
+        2026-11-03, N6). One rule for the check and for the layout.
+    """
+    key = pin_key(pin)
+    if key.isascii() and key.isdigit() and str(int(key)) == key:
+        return int(key)
+    return None
+
+
 def _pin_order(pin) -> tuple:
     """Sort key: numeric pins in numeric order, then text pins alphabetically."""
     key = pin_key(pin)
-    return (0, int(key), "") if key.isdigit() else (1, 0, key)
-
-
-def is_pin_one(pin) -> bool:
-    """@brief Tell whether a pin is the pin numbered 1.
-
-    @param pin A pin number, int or str.
-    @return True for 1 and "1" alike, via `pin_key`.
-    @note The square pad and the silk dot follow `square_pad_pin`
-        (`core.silk.pin_one`), which also covers a header without a pin
-        «1» (A1, A2...); this test answers only «is it numbered 1».
-    """
-    return pin_key(pin) == "1"
+    return (0, int(key), "") if key.isascii() and key.isdigit() else (1, 0, key)
 
 
 @dataclass
@@ -205,6 +212,12 @@ class PinHeaderParams:
             raise ValueError(tx("La forma dei pad header deve essere circle o rect."))
         if self.pin_map:
             seen = {}
+            # A blank or a control character inside a number is refused here,
+            # as `core.package_geometry` refuses it: it would pass this check
+            # and fail only when the footprint is built, leaving the preview
+            # blank (review 2026-11-03, N7).
+            for pin in self.pin_map:
+                validate_pad_number(pin_key(pin))
             # Two keys naming the same pin (1 and "1") would place one pin
             # twice: refused on the shared text identity.
             keys = [pin_key(pin) for pin in self.pin_map]
@@ -250,6 +263,8 @@ class PinHeaderParams:
             # key is applied instead of validated and then ignored.
             self.pad_overrides = normalise_pad_overrides(self.pad_overrides)
         if self.populated_pins is not None:
+            for pin in self.populated_pins:
+                validate_pad_number(pin_key(pin))
             # Without a map the numbers are the automatic column-by-column ones,
             # so they lie in 1..rows*columns. With an explicit map the numbering is a
             # convention of the drawing (DIP numbered in a U with empty positions:
@@ -258,11 +273,16 @@ class PinHeaderParams:
             if not self.pin_map:
                 max_pin = self.rows * self.cols
                 for p in self.populated_pins:
-                    # The automatic numbers are integers: a text pin is read
-                    # as its number ("3" is pin 3), anything else is out of
-                    # the automatic range by definition.
-                    key = pin_key(p)
-                    index = int(key) if key.isdigit() else 0
+                    # The automatic numbers are the labels "1".."rows*cols":
+                    # "3" is pin 3, while "03" or "A1" are other labels that
+                    # only a pin map can place (`automatic_number`).
+                    index = automatic_number(p)
+                    if index is None:
+                        raise ValueError(
+                            tx("Pin «{pin}» in populated_pins: senza mappa dei pin i numeri sono "
+                               "1..{max_pin}, scritti senza zeri iniziali; per altre numerazioni "
+                               "serve la mappa dei pin.", pin=pin_key(p), max_pin=max_pin)
+                        )
                     if index < 1 or index > max_pin:
                         raise ValueError(
                             tx("Pin {pin} in populated_pins fuori range (1..{max_pin}).",
@@ -340,7 +360,7 @@ class PinHeaderParams:
         pads = sorted(pin_positions(self), key=lambda item: item[1])
         if not pads:
             return
-        square = square_pad_pin(pad[0] for pad in pads)
+        square = square_pad_pin((pad[0] for pad in pads), self)
         sizes = [float(overrides.get(pin_key(pin), {}).get("size", self.pad_diameter))
                  for pin, _x, _y in pads]
         window = max(sizes) + MIN_PAD_GAP_MM
@@ -385,16 +405,58 @@ class PinHeaderParams:
                         gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
 
 
-def square_pad_pin(pins) -> Optional[str]:
+def marked_pin(params: "PinHeaderParams") -> Optional[str]:
+    """@brief The pin the pin-1 marks belong to, emitted or not; None when the numbering has no pin 1.
+
+    @param params Header parameters (not validated here).
+    @return "1" for the automatic numbering; with a pin map,
+        `core.silk.pin_one` of ALL its keys (the map's "1", or the "A1" of
+        a grid numbering), None otherwise.
+    @note Taken from the numbering, not from the emitted pins: a DC/DC
+        module whose pin 1 is not populated still has its pin 1 position,
+        and the lowest emitted pin (2) must not be marked in its place
+        (review 2026-11-03, N3).
+    """
+    if not params.pin_map:
+        return "1"
+    return pin_one(pin_key(pin) for pin in params.pin_map)
+
+
+def marked_pin_position(params: "PinHeaderParams") -> Optional[Tuple[float, float]]:
+    """@brief Grid position (x, y), mm, of `marked_pin`, populated or not; None without one.
+
+    @param params Header parameters (not validated here).
+    @return The map position of the marked pin, or its place in the
+        automatic column-by-column order (pin n at column (n-1) // rows,
+        row (n-1) % rows), in the frame of `pin_positions`.
+    """
+    marked = marked_pin(params)
+    if marked is None:
+        return None
+    row_spacing = params.effective_row_spacing()
+    if params.pin_map:
+        row, col = next(position for pin, position in params.pin_map.items() if pin_key(pin) == marked)
+    else:
+        col, row = divmod(int(marked) - 1, int(params.rows))
+    return (col * params.pitch, row * row_spacing)
+
+
+def square_pad_pin(pins, params: Optional["PinHeaderParams"] = None) -> Optional[str]:
     """@brief The pin whose pad is square on a round-pad header: the pin-1 marker's pin.
 
     @param pins The emitted pin numbers (int or str).
-    @return `core.silk.pin_one` of their `pin_key`: "1" when present,
-        otherwise the lowest number in natural order (so a header numbered
-        A1, A2... gets a square A1, as its silk dot already said); None
-        without pins.
+    @param params The header whose numbering decides pin 1 (`marked_pin`),
+        or None to judge the emitted pins alone.
+    @return The marked pin when it is one of the emitted pins ("1", or "A1"
+        of a grid numbering), else None: with pin 1 not populated NO pad is
+        square, never the lowest emitted one (review 2026-11-03, N3/G4).
+    @note Without `params` the emitted pins stand for the numbering; they
+        give the same answer except for a numbering that is a letter grid
+        only once its unpopulated labels are left out.
     """
-    return pin_one(pin_key(pin) for pin in pins)
+    emitted = [pin_key(pin) for pin in pins]
+    marked = pin_one(emitted) if params is None else marked_pin(params)
+    return marked if marked is not None and marked in emitted else None
 
 
 def default_pad_shape(params: "PinHeaderParams", pin, square: Optional[str]) -> str:
@@ -525,22 +587,21 @@ def pin_positions(params: PinHeaderParams) -> Iterator[Tuple[int, float, float]]
             pin += 1
 
 
-def _pin_one_marker(start, end, positions, pads):
-    """Silk dot outside the outline corner nearest the pad numbered 1.
+def _pin_one_marker(start, end, marked_position, pads):
+    """Silk dot outside the outline corner nearest pin 1's grid position, or None without a pin 1.
 
-    The corner is chosen from where pin 1 actually is (a pin map can put it
-    anywhere in the grid, e.g. a bottom-view DIP numbering), not assumed to be
-    the top-left one; without pads the top-left corner is kept. The dot sits
-    0.5 mm diagonally outside that corner and is pushed further out along the
-    same diagonal when it would lie on copper; `pads` are the emitted Pad
-    objects, so the copper avoided is each pad's real size.
+    The corner is chosen from where pin 1 is in the grid (a pin map can put
+    it anywhere, e.g. a bottom-view DIP numbering), populated or not, so
+    the dot never points at another pin. The dot sits 0.5 mm diagonally
+    outside that corner and is pushed further out along the same diagonal
+    when it would lie on copper; `pads` are the emitted Pad objects, so the
+    copper avoided is each pad's real size.
     """
-    number = pin_one(pin for pin, _, _ in positions)
+    if marked_position is None:
+        return None
+    px, py = marked_position
     corners = [(start[0], start[1]), (end[0], start[1]), (end[0], end[1]), (start[0], end[1])]
-    corner = corners[0]
-    if number is not None:
-        _, px, py = next(item for item in positions if str(item[0]) == number)
-        corner = min(corners, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+    corner = min(corners, key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
     sx = -1.0 if corner[0] == start[0] else 1.0
     sy = -1.0 if corner[1] == start[1] else 1.0
     keepouts = [keepout_box(pad.at[0] - pad.size[0] / 2, pad.at[1] - pad.size[1] / 2,
@@ -569,6 +630,10 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         # Fixed file language, as the package generator's estimate note: the
         # assumption is recorded in the library itself, not only in a log.
         description += "; " + ROW_SPACING_ASSUMED_NOTE
+    marked_position = marked_pin_position(params)
+    if marked_position is None:
+        # No label of the numbering is pin 1: no mark is guessed (G4).
+        description += "; " + PIN_ONE_UNMARKED_NOTE
 
     fp = Footprint(
         name=params.name,
@@ -580,14 +645,14 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
 
     m = params.margin
     positions = list(pin_positions(params))
-    square = square_pad_pin(pin for pin, _, _ in positions)
+    square = square_pad_pin((pin for pin, _, _ in positions), params)
     pads = []
     for pin, x, y in positions:
         override = (params.pad_overrides or {}).get(pin_key(pin), {})
         # The square pad marks the pin-1 pad by its text identity and by the
         # silk marker's rule (`square_pad_pin`): an int-keyed and a str-keyed
-        # pin map give the same footprint (G4), and an A1-numbered header
-        # gets a square A1.
+        # pin map give the same footprint, an A1-numbered grid gets a square
+        # A1, and an unpopulated pin 1 squares no other pad.
         shape = override.get("shape", default_pad_shape(params, pin, square))
         size = float(override.get("size", params.pad_diameter))
         pads.append(Pad(
@@ -631,7 +696,9 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
                             line_width=SILK_WIDTH_MM) for pad in pads]
     for graphic in silk_rectangle(silk_start, silk_end, keepouts, width=SILK_WIDTH_MM):
         fp.add_graphic(graphic)
-    fp.add_graphic(_pin_one_marker(silk_start, silk_end, positions, pads))
+    marker = _pin_one_marker(silk_start, silk_end, marked_position, pads)
+    if marker is not None:
+        fp.add_graphic(marker)
 
     for pad in pads:
         fp.add_pad(pad)
@@ -645,6 +712,11 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         min_y = min(min_y, pad.at[1] - pad.size[1] / 2)
         max_x = max(max_x, pad.at[0] + pad.size[0] / 2)
         max_y = max(max_y, pad.at[1] + pad.size[1] / 2)
+    if marker is not None:
+        # The dot lies outside the silk corner: the courtyard encloses its
+        # ink as well (review 2026-11-03, N4).
+        x0, y0, x1, y1 = marker_ink_box(marker)
+        min_x, min_y, max_x, max_y = min(min_x, x0), min(min_y, y0), max(max_x, x1), max(max_y, y1)
     if not all(isfinite(v) for v in (min_x - m, min_y - m, max_x + m, max_y + m)):
         raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
     # KLC F5.3: courtyard on the 0.01 mm grid, rounded outwards so the

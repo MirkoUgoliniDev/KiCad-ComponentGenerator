@@ -53,10 +53,17 @@ docs/PACKAGING-WINDOWS-MSI.md   and docs/INSTALLATION-WINDOWS.md
 ## 3. Verify
 
 ```
-.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/test_packaging.py tests/test_app_paths.py
+.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-installer tests/test_packaging.py tests/test_app_paths.py tests/test_fixC_installer.py
 .\scripts\build-windows.ps1 -Package app-image     # includes KiCadGen.exe --check-runtime
 .\scripts\build-windows.ps1                        # + MSI
 ```
+
+The executable is windowed, so `--check-runtime` prints nowhere: it also
+writes its lines to the file named by `--check-runtime-report PATH` or
+`KICADGEN_CHECK_RUNTIME_REPORT`. The build sets the variable to
+`build\check-runtime.txt` and prints that file when the check fails. From
+the sources, `onnxruntime` (optional, `requirements/yolo.txt`) is reported
+but not required; in the executable it is required.
 
 For PowerShell, parse without executing (also done by test_packaging):
 

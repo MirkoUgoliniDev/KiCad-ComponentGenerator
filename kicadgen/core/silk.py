@@ -6,9 +6,10 @@ Two rules every generator must respect, whatever the part:
   pad, and the fabricator clips it anyway, so outlines are split around every
   pad with a clearance (SILK_PAD_CLEARANCE_MM from the copper, measured to the
   edge of the stroke);
-* the pin-1 marker identifies the pad numbered "1" (or the lowest number when
-  there is no "1"), never "the first pad produced", which depends on side
-  order and numbering direction.
+* the pin-1 marker identifies the pad numbered "1" (or "A1" of a row-letter
+  grid numbering, see `pin_one`), never "the first pad produced", which
+  depends on side order and numbering direction; without such a pad there
+  is no marker at all, and the footprint says so (`PIN_ONE_UNMARKED_NOTE`).
 
 All coordinates are footprint millimetres, KiCad axes (X right, Y down).
 """
@@ -114,25 +115,52 @@ def silk_rectangle(start, end, keepouts: Sequence[Box], layer: str = "F.SilkS",
             for piece_start, piece_end in clip_segment(side_start, side_end, keepouts)]
 
 
-def _natural_key(number) -> tuple:
-    """Sort key that orders "2" before "10" and never compares int with str."""
-    parts = re.split(r"(\d+)", str(number))
-    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in parts if p != "")
+#: Note appended to a footprint description (fixed file language, see
+#: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) when no pad can carry the pin-1
+#: marker: the library user learns why the footprint has none.
+PIN_ONE_UNMARKED_NOTE = "pin 1 non marcato: nessun pad 1"
+
+#: A grid-array pad number: row letters followed by a column number written
+#: without leading zeros (A1, B12, AA3).
+_GRID_NUMBER = re.compile(r"([A-Z]+)([1-9][0-9]*)")
 
 
 def pin_one(numbers: Iterable) -> Optional[str]:
-    """@brief The pad number the pin-1 marker must point at.
+    """@brief The pad number the pin-1 marker must point at, or None when no pad is pin 1.
 
     @param numbers Pad numbers of the footprint (any order, str or int).
-    @return "1" when present, otherwise the lowest number in natural order
-        ("A1" before "A2" before "A10"); None when there are no numbered pads.
+    @return "1" when present; "A1" when present, every number is a
+        letters-plus-column number (A1, A2, B1, AA3) AND the numbers span at
+        least two row letters and two columns (a grid); None otherwise (no
+        marker).
+    @note The marker states where pin 1 is: it is never guessed. With no pad
+        "1", a "lowest number" rule used to mark the anode of a K/A diode or
+        terminal 11 of a relay numbered 11/12/14/A1/A2, both arbitrary. The
+        only other numbering whose first pin is declared by the numbering
+        itself is the lettered sequence of area arrays and lettered headers
+        (rows A, B, C..., columns 1, 2, 3...): A1 is its first element and,
+        on a grid, the index corner by convention. It is recognised
+        structurally, never by a part name: EVERY number must have that
+        form, so a mixed numbering (relay 11/12/14/A1/A2) or plain letters
+        (K/A) gets no marker. Labels are text: "01" is not "1".
+        A grid needs two dimensions (generality audit 2026-11-03, GA8): the
+        coil of a relay or a bidirectional TVS numbered {A1, A2} has the form
+        but no rows, and a polarity mark there would be invented. A single
+        lettered row (A1..A10) gets no marker for the same reason: one
+        letter does not make the numbering an area-array index.
     """
-    values = [str(n) for n in numbers if str(n).strip()]
+    values = [str(n).strip() for n in numbers if str(n).strip()]
     if not values:
         return None
     if "1" in values:
         return "1"
-    return min(values, key=_natural_key)
+    matches = [_GRID_NUMBER.fullmatch(value) for value in values]
+    if "A1" in values and all(matches):
+        rows = {match.group(1) for match in matches}
+        columns = {match.group(2) for match in matches}
+        if len(rows) >= 2 and len(columns) >= 2:
+            return "A1"
+    return None
 
 
 def marker_clear_of(center, radius: float, keepouts: Sequence[Box]) -> bool:
@@ -202,3 +230,16 @@ def pin_one_marker(center, keepouts: Sequence[Box], direction,
     ink_radius = radius + width / 2
     return FpCircle(center=push_marker_clear(center, direction, ink_radius, keepouts),
                     radius=radius, layer=layer, width=width, fill=True)
+
+
+def marker_ink_box(marker: FpCircle) -> Box:
+    """@brief Axis-aligned box of the ink of a pin-1 dot, mm.
+
+    @param marker The FpCircle returned by `pin_one_marker`.
+    @return (x0, y0, x1, y1) of the disc grown by half its stroke: the area
+        the courtyard must enclose, since the dot belongs to the footprint
+        (review 2026-11-03, N4: the dot used to lie outside the courtyard).
+    """
+    reach = float(marker.radius) + float(marker.width) / 2
+    cx, cy = marker.center
+    return (cx - reach, cy - reach, cx + reach, cy + reach)

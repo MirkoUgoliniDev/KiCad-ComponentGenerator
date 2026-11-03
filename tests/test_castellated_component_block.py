@@ -54,3 +54,13 @@ def test_a_total_height_equal_to_the_pcb_builds_nothing_and_says_nothing(monkeyp
     """@brief Negative: no height above the PCB (the GUI's «missing» value) -> no block, no note."""
     blocks, notes = _generate(monkeypatch, tmp_path, height=1.0)
     assert blocks == [] and notes == []
+
+
+def test_the_window_records_where_the_total_height_came_from(window):
+    """G2 (second review 2026-11-03): a recorded provenance, saved with the project, not «height != 5 mm»."""
+    window.field_cast_pcb.setValue(1.0)
+    window.field_body_height.setValue(1.6)      # an old PCB thickness left in the field
+    window._cast_height_declared = False
+    assert window._project_state()["cast_height_declared"] is False
+    window._cast_height_declared = True
+    assert window._project_state()["cast_height_declared"] is True

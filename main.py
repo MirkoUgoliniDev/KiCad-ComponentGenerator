@@ -24,9 +24,23 @@ def _project_python(root):
 #: Modules the packaged program cannot run without. The GUI module is last:
 #: importing it proves the whole application imports, not only the libraries.
 RUNTIME_MODULES = ("PyQt6", "PyQt6.QtWidgets", "PIL", "cv2", "numpy",
-                   "pyvista", "pyvistaqt", "onnxruntime", "kicadgen.gui.main_window",
+                   "pyvista", "pyvistaqt", "kicadgen.gui.main_window",
                    # Imported lazily by the window: the smoke test must still prove it.
                    "kicadgen.gui.preview_3d_vtk")
+
+#: Modules the package always ships but a source checkout may lack, because
+#: they come from an optional requirements file (onnxruntime: the local
+#: detectors, requirements/yolo.txt). In the executable they are required like
+#: `RUNTIME_MODULES`; from the sources a missing one is reported as optional
+#: and does not fail the check.
+OPTIONAL_RUNTIME_MODULES = ("onnxruntime",)
+
+#: Command-line option and environment variable naming a file that receives
+#: every line of `--check-runtime`. The executable is windowed (no console),
+#: so its stdout/stderr go nowhere: the build reads this file to show WHY the
+#: smoke test failed.
+CHECK_RUNTIME_REPORT_OPTION = "--check-runtime-report"
+CHECK_RUNTIME_REPORT_ENV = "KICADGEN_CHECK_RUNTIME_REPORT"
 
 #: Qt plugins the program needs, as (folder, library stem) under one of Qt's
 #: library paths. The toolbar icons are SVG files loaded through QIcon, which
@@ -156,7 +170,8 @@ def _qt_plugin_present(library_paths, folder, stem):
 
 
 def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None,
-                  qt_plugins=RUNTIME_QT_PLUGINS, library_paths=None):
+                  qt_plugins=RUNTIME_QT_PLUGINS, library_paths=None,
+                  optional_modules=None, report_file=None):
     """@brief Check that the program's modules import and its resources exist.
 
     Used by ``--check-runtime`` (the build's smoke test of KiCadGen.exe).
@@ -171,34 +186,66 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None,
         under one of ``library_paths``; default ``RUNTIME_QT_PLUGINS``.
     @param library_paths Folders searched for the plugins; default the ones
         Qt itself would search (`_qt_library_paths`).
+    @param optional_modules Modules required only in the executable; from the
+        sources a failed import is printed as optional and does not fail.
+        None means `OPTIONAL_RUNTIME_MODULES` when @p modules is the default
+        list, and none when the caller chose its own modules.
+    @param report_file Path of a text file that receives every printed line
+        (UTF-8, overwritten), or None. A file that cannot be written is
+        reported on stderr and never changes the result.
     @return 0 when everything is present, 1 otherwise (each problem printed,
         then a summary line listing what is missing).
+    @note The windowed executable has no console: without @p report_file its
+        lines are lost, which is why the build passes one.
     """
     import importlib
-    print(f"Python: {sys.executable}")
+    lines = []
+
+    def say(text, error=False):
+        """Print one line (stdout, or stderr for the failure summary) and keep it for the file."""
+        lines.append(text)
+        print(text, file=sys.stderr if error else sys.stdout)
+
+    def finish(status):
+        """Write the collected lines to the report file, then return the status unchanged."""
+        if report_file:
+            try:
+                Path(report_file).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except OSError as exc:
+                print(f"Runtime check report not written ({report_file}): {exc}", file=sys.stderr)
+        return status
+
+    frozen = getattr(sys, "frozen", False)
+    if optional_modules is None:
+        optional_modules = OPTIONAL_RUNTIME_MODULES if modules is RUNTIME_MODULES else ()
+    say(f"Python: {sys.executable}")
     failed_modules = []
-    for name in modules:
+    for name in tuple(modules) + tuple(optional_modules or ()):
+        optional = name not in modules and not frozen
         try:
             importlib.import_module(name)
-            print(f"{name}: OK")
+            say(f"{name}: OK")
         except (ImportError, OSError) as exc:
-            print(f"{name}: {exc}")
-            failed_modules.append(name)
+            if optional:
+                say(f"{name}: not installed (optional from the sources: {exc})")
+            else:
+                say(f"{name}: {exc}")
+                failed_modules.append(name)
     if resource_path is None:
         try:
             from kicadgen.app_paths import resource_path
         except ImportError as exc:
-            print(f"kicadgen.app_paths: {exc}")
-            return 1
+            say(f"kicadgen.app_paths: {exc}", error=True)
+            return finish(1)
     if resources is None:
-        resources = RUNTIME_RESOURCES + (PACKAGE_RESOURCES if getattr(sys, "frozen", False) else ())
+        resources = RUNTIME_RESOURCES + (PACKAGE_RESOURCES if frozen else ())
     missing = []
     for parts in resources:
         path = resource_path(*parts)
         if path.is_file():
-            print(f"{'/'.join(parts)}: OK")
+            say(f"{'/'.join(parts)}: OK")
         else:
-            print(f"{'/'.join(parts)}: MISSING ({path})")
+            say(f"{'/'.join(parts)}: MISSING ({path})")
             missing.append("/".join(parts))
     missing_plugins = []
     if qt_plugins:
@@ -207,18 +254,37 @@ def check_runtime(resource_path=None, modules=RUNTIME_MODULES, resources=None,
         searched = ", ".join(str(path) for path in library_paths) or "no Qt library path"
         for folder, stem in qt_plugins:
             if _qt_plugin_present(library_paths, folder, stem):
-                print(f"Qt plugin {folder}/{stem}: OK")
+                say(f"Qt plugin {folder}/{stem}: OK")
             else:
-                print(f"Qt plugin {folder}/{stem}: MISSING (searched {searched})")
+                say(f"Qt plugin {folder}/{stem}: MISSING (searched {searched})")
                 missing_plugins.append(f"{folder}/{stem}")
     if failed_modules or missing or missing_plugins:
-        print("Runtime check FAILED. Modules not importable: "
-              f"{', '.join(failed_modules) or 'none'}. Resources missing: {', '.join(missing) or 'none'}. "
-              f"Qt plugins missing: {', '.join(missing_plugins) or 'none'}.",
-              file=sys.stderr)
-        return 1
-    print("Runtime check OK.")
-    return 0
+        say("Runtime check FAILED. Modules not importable: "
+            f"{', '.join(failed_modules) or 'none'}. Resources missing: {', '.join(missing) or 'none'}. "
+            f"Qt plugins missing: {', '.join(missing_plugins) or 'none'}.", error=True)
+        return finish(1)
+    say("Runtime check OK.")
+    return finish(0)
+
+
+def check_runtime_report_path(argv=None, environ=None):
+    """@brief The file `--check-runtime` must also write, or None.
+
+    @param argv Command-line arguments after the program name; default
+        ``sys.argv[1:]``.
+    @param environ Environment mapping; default ``os.environ``.
+    @return The path given by ``--check-runtime-report PATH`` (or
+        ``--check-runtime-report=PATH``), else by the
+        ``KICADGEN_CHECK_RUNTIME_REPORT`` variable, else None.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    environ = os.environ if environ is None else environ
+    for index, argument in enumerate(argv):
+        if argument.startswith(CHECK_RUNTIME_REPORT_OPTION + "="):
+            return argument.split("=", 1)[1] or None
+        if argument == CHECK_RUNTIME_REPORT_OPTION and index + 1 < len(argv):
+            return argv[index + 1]
+    return environ.get(CHECK_RUNTIME_REPORT_ENV) or None
 
 
 # The splash lives in kicadgen.splash (stdlib-only at import time); the
@@ -325,7 +391,7 @@ def main():
             print(f"Cannot start project Python: {exc}", file=sys.stderr)
             return 1
     if "--check-runtime" in sys.argv[1:]:
-        return check_runtime()
+        return check_runtime(report_file=check_runtime_report_path())
     if sys.argv[1:2] == [SPLASH_FLAG]:
         # The splash process: paints until the parent closes the pipe.
         return run_splash(sys.argv[2] if len(sys.argv) > 2 else "en")
