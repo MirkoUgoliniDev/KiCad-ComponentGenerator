@@ -134,7 +134,7 @@ def test_end_to_end_positions_measured_on_the_holes_numbered_by_the_reading(monk
     dedicated = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["edge", "A1,A2", "11", "14,12"], "values": [2.05, 2.0, 10.2]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated]))
+    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, {"drawing_unit": "mm"}]))
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
     assert not params.pin_map_conflict
@@ -184,7 +184,7 @@ def test_end_to_end_the_last_user_run_places_the_body_from_the_edge_quote(monkey
     dedicated = {"drawing_unit": "mm", "contacts_view": "unknown", "chains": [
         {"axis": "x", "stops": ["edge", "11", "A1,A2", "14,12"], "values": [2.05, 2.0, 12.2]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated]))
+    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, {"drawing_unit": "mm"}]))
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
     assert not params.pin_map_conflict
@@ -216,7 +216,7 @@ def test_two_pads_off_the_holes_are_not_moved(monkeypatch, tmp_path):
         {"axis": "x", "stops": ["edge", "A1,A2", "11", "14", "12"],
          "values": [2.05, 2.0, 10.2, 3.0]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated]))
+    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, {"drawing_unit": "mm"}]))
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
     assert params.pin_map_conflict

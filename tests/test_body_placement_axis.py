@@ -116,7 +116,7 @@ def test_end_to_end_the_real_drawn_outline_places_x_when_no_edge_is_quoted(monke
     dedicated = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["11", "A1,A2", "14,12"], "values": [2.0, 12.2]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated]))
+    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, {"drawing_unit": "mm"}]))
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
     assert not params.pin_map_conflict

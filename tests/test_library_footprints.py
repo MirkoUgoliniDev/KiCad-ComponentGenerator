@@ -283,7 +283,7 @@ def _extract(monkeypatch, tmp_path, part_number, library_centres, main=CHIRAL_BO
     folder = tmp_path / "footprints"
     _write_footprint(folder, "Relay_THT", "Relay_SPDT_Maker_ZZ1234", library_centres)
     monkeypatch.setattr(lib, "footprints_root", lambda: folder)
-    call = Mock(side_effect=[_main_answer(main), WRONG_CHAINS])
+    call = Mock(side_effect=[_main_answer(main), WRONG_CHAINS, {"drawing_unit": "mm"}])
     monkeypatch.setattr(ext, "call_tool", call)
     logs = []
     params = ext.extract_pin_header_params(

@@ -43,6 +43,78 @@ SUITE FINALE 03/11 notte (codice attuale, NON committato, base b5b6e08, branch A
 non-scheda) poi aggiornati e verdi da soli (file 33/33; la meta' intera NON rilanciata dopo: cambiati solo test).
 Seconda meta' rilanciata dopo il menu del corpo: 4757/4 verde. Database dei profili allineato (4 testi nuovi),
 nessun segreto. COMMITTATO su ADVANCED come b361848 (OK utente 03/11); push e merge NON autorizzati.
+DIFETTO TROVATO DALL'UTENTE 03/11 sera (relè T7NS5D4-12, «si è perso dei pin»): la risposta principale
+(claude-opus-4.1) ha dato 4 pad (1, 11, 12, 14) senza A1/A2 e con geometria sbagliata (i fori disegnati coincidono
+«solo deformando il disegno»); la lettura dedicata (gpt-5.6-sol, catene di quote sommate dal programma) ha dato i 5
+pad giusti (11, 12, 14, A1, A2), CONFERMATI dai fori disegnati (scarto 0.11 mm, tolleranza 0.49). Esito: «nessuna
+delle due scelta», blocco, e l'anteprima mostra i 4 pad SBAGLIATI della risposta principale. Catena di cause:
+(1) _replace_by_confirmed_reading esige numeri «per convenzione» (audit S1): qui la principale ha LETTO i numeri
+(sbagliati e incompleti) -> non eleggibile; (2) _pick_by_holes rifiuta la scelta se la concorrente fallisce come
+«distorted» (una pagina non in scala puo' far fallire cosi' la lettura giusta): qui pero' la lettura per CATENE
+(quote stampate) coincide coi cerchi senza deformare -> la pagina E' in scala con le sue quote, e chi coincide solo
+deformandola e' sbagliato; (3) in _settle_by_holes la regola D-B (una lettura con pad che la risposta non ha ->
+None) blocca anche quando e' la risposta principale a essere INCOMPLETA. PIANO (utente: «rifai un'analisi
+approfondita ... facciamo un passo avanti e due indietro»; release v1.0.6 RIMANDATA finche' non e' corretto e la
+suite verde): (A) _pick_by_holes: se l'unica lettura confermata e' quella per catene (dedicated/chains, testimone
+= disegno), una concorrente «distorted» PERDE (criterio strutturale: il fit delle catene prova la scala della
+pagina); «body_scale» e «unverifiable» restano come oggi; (B) _replace_by_confirmed_reading eleggibile anche quando
+la risposta principale ha MENO pad della lettura confermata (le manca un terminale: la sua numerazione non puo'
+essere quella completa, il testimone non sceglie fra due numerazioni complete); numeri marcati «da verificare»;
+(C) test positivo/negativo per A e B, contratto di test_a_competitor_failing_only_as_distorted... da riscrivere
+(pagina non in scala = lettura per catene «distorted», NON confermata). RISCHIO RESIDUO da dire: una lettura
+dedicata con un foro di fissaggio letto come pad verrebbe adottata (i fori accettano cerchi in piu') -- oggi
+blocca e si inserisce a mano.
+FATTO (03/11 sera, NON committato): A (_pick_by_holes: _CHAIN_READINGS, «distorted» perde contro una lettura per
+catene confermata dal disegno), B (_replace_by_confirmed_reading eleggibile con risposta principale INCOMPLETA,
+why «ha meno pad della lettura confermata: le manca un terminale», testo nel catalogo + DB), C (6 test in
+test_pad_positions_by_drawn_holes: il vecchio test «distorted never lets another win» RISCRITTO col nuovo contratto
+e il suo negativo = pagina non in scala). Verifica: 101 test dei fori + 400 estrattore/documentazione/catalogo
+verdi. REPLAY OFFLINE del relè (scratchpad replay_relay.py: disegno vero Pinout.png, letture del log delle 19:15,
+corpo 22.5 x 16.5 da project_config.json, nessuna chiamata AI): NON bloccato, 5 pad 11/12/14/A1/A2 confermati a
+0.11 mm, nota «le manca un terminale». Con un corpo sbagliato (29 x 12.7) la dedicata risulta «body_scale» e resta il
+blocco: il corpo dichiarato conta. Suite completa in corso (run7). Build MSI locale fatta PRIMA di questa correzione
+(1.0.5, 460.7 MB, solo ICE60): solo verifica, la release si fa dopo commit + suite verde.
+SECONDO DIFETTO 03/11 sera (relè, «non ha generato il modello 3D»): l'analisi delle 19:41 ha adottato i 5 pad
+(regola nuova OK) ma il modello principale NON ha restituito body_height_mm; il disegno Pinout.png la quota nella
+vista laterale «Dimensions»: 22,5 x 16,5, ALTEZZA 16,9, standoff 0,4, pin 3,5. Alle 19:15 aveva dato 18,9 e alle
+08:22 19,3: ENTRAMBE INVENTATE (il STEP «riuscito» aveva un'altezza falsa). Stesso rinvio gia' il 31/10 20:00. Per
+un componente singolo l'altezza arriva SOLO dall'analisi: nessun campo dove scriverla.
+DECISIONE utente 03/11, CORRETTA subito dopo: «non devo inserire a mano l'altezza, la deve desumere dal
+disegno»: NIENTE campo a mano (1 annullata). Si fa SOLO (2): lettura DEDICATA delle quote del corpo (lunghezza, larghezza, altezza, standoff) dal disegno quotato col
+modello delle catene (pad_model), come per i pad: coincidenza entro tolleranza -> confermate; risposta principale
+mancante -> vale la dedicata (segnalata); disaccordo -> blocco del STEP con le due letture nel messaggio. Poi
+suite e release v1.0.6. PIANO scritto PRIMA del codice.
+FATTO (03/11 notte, NON committato): lettura dedicata delle quote del corpo — datasheet_extractor:
+_BODY_DIMENSIONS_TOOL (report_body_dimensions: drawing_unit, body_length/width/height, standoff, lead_length,
+notes), DEFAULT_BODY_DIMENSIONS_PROMPT, read_body_dimensions (best effort, unita' dichiarata, stesso contratto di
+read_pad_positions), apply_dedicated_body (manca nella principale -> adottata, provenienza "read", «da verificare»;
+coincide entro _reading_tolerance -> confermata; disaccordo su quota VERTICALE -> NESSUN valore usato, STEP in
+attesa, avviso con entrambi i valori; disaccordo in pianta -> resta la principale (i fori la vincolano) + avviso;
+unita' principale non dichiarata -> nessun confronto). Chiamata nel ramo dei pad espliciti dopo la lettura dei pad,
+stesso modello (pad_model), nessun campo di profilo nuovo, nessun bump di schema. 10 testi nel catalogo + DB.
+Test: tests/test_body_dimensions_reading.py (10), tests/test_body_dimensions_end_to_end.py (3: altezza mancante
+adottata 16.9; 18.9 inventata contro 16.9 -> None; terza chiamata fallita non perde la principale); i 9 test
+offline con due risposte finte estesi a tre (_BODY_ANSWER); test_confirmed_reading_replacement: il contratto
+«real numbers that are a subset still block» RISCRITTO (risposta incompleta con numeri letti -> sostituita se i
+fori confermano SOLO la lettura completa; negativo: sottoinsieme sugli stessi fori = due confermate -> blocco),
+replay offline esteso alla terza risposta. Suite completa rilanciata (run8) sul codice con pad + quote del corpo;
+generality-auditor lanciato sul diff. ESITO AUDIT (03/11 notte) e correzioni FATTE (171 test mirati verdi):
+(A) «distorted» perde contro lettura per catene confermata: REGGE (docstring estesa: rotazione oltre il limite,
+catene della stessa risposta). (B) risposta incompleta sostituita: FRAGILE, dichiarata — il testimone accetta cerchi
+in piu', non distingue un quinto terminale da un foro di fissaggio/pin di variante letto come pad; nota ora onesta
+(«se il pad in piu' e' davvero un terminale»); criterio robusto futuro: tipo di fermata (terminale/foro) nello
+schema delle catene. (C) quote del corpo: provenienza ora PRIMA del valore (stima dichiarata o non dichiarata ->
+la quota stampata la sostituisce su ogni asse; stima concorde -> diventa "read"); avviso in pianta senza
+pretendere un controllo che la funzione non vede; altezza non trovata dalla lettura con altezza principale
+presente -> avviso «NON verificata» (mai piu' un'altezza inventata in silenzio); stessa definizione di altezza nei
+due prompt (standoff compreso, letto solo come informazione). NON FATTO (segnalato, non autorizzato): passare il
+verdetto dei fori ad apply_dedicated_body per dire se il contorno e' stato controllato; posare il corpo a
+`standoff` sopra il PCB nel STEP; tipo di fermata nello schema dei pad; la terza chiamata parte anche a pad
+bloccati (costo ~0.02 USD). Suite run8 (prima delle correzioni dell'audit): seconda meta' 4757/4 verde; prima meta' 6857/9/19 + 9 rossi =
+8 replay offline con due risposte finte (StopIteration alla terza chiamata: estesi con {"drawing_unit": "mm"},
+neutra) + test_message_localization letto a meta' modifica del catalogo; tutti verdi da soli (78). Suite run9 INTERA sul codice definitivo: VERDE, 11627 passati, 13 saltati, 19 sottotest (meta' 6870/9/19 e 4757/4). In attesa dell'OK dell'utente per il commit, poi release v1.0.6.
+TRAPPOLA: gli heredoc del tool Bash collassano le
+barre rovesciate (una "\n" di sorgente diventa un ritorno a capo vero): gli script di patch si scrivono con Write.
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
 ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1
 -Version 1.0.6 (commit release, tag v1.0.6 permanente, push di ADVANCED e del tag), poi gh run watch.

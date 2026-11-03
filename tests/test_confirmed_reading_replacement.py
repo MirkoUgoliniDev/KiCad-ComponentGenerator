@@ -98,11 +98,21 @@ def test_a_reading_with_fewer_pads_never_replaces_the_answer():
     assert "_pin_map_conflict" in data and len(data["package_geometry"]["pins"]) == 5
 
 
-def test_real_numbers_that_are_a_subset_still_block():
-    """D-B kept: a main answer with real printed numbers that lacks a pin the reading has."""
+def test_an_incomplete_answer_with_real_numbers_is_replaced_only_when_the_holes_deny_it():
+    """CONTRACT CHANGED (user, 2026-11-03, T7N relay: 4 pads read as 1/11/12/14 against
+    11/12/14/A1/A2 confirmed by the holes): a main answer with FEWER pads than the reading
+    left a terminal out, so its numbering cannot be the complete one and the witness is not
+    choosing between two complete numberings. Replaced when the holes confirm the complete
+    reading alone. Negative twin: a subset sitting on the same holes is confirmed too (the
+    check accepts extra circles), two confirmed layouts choose nothing, and the block stays."""
     four = [_pin(n, x, y) for n, (x, y) in T7N.items() if n != "11"]
     data = _data(four)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N))
+    assert "_pin_map_conflict" not in data and _numbers(data) == ["11", "12", "14", "A1", "A2"]
+    assert "manca un terminale" in data["_numbering_note"]
+    subset = {k: v for k, v in T7N.items() if k != "11"}
+    data = _data(four)
+    ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N, subset))
     assert "_pin_map_conflict" in data and _numbers(data) == ["12", "14", "A1", "A2"]
 
 
@@ -220,7 +230,8 @@ def _replay(monkeypatch, tmp_path, main_view, dedicated_view):
     dedicated = {"drawing_unit": "mm", "contacts_view": dedicated_view, "chains": [
         {"axis": "x", "stops": ["edge", "11", "A1,A2", "14,12"], "values": [2.05, 2.0, 12.2]},
         {"axis": "y", "stops": ["A1,14", "11", "A2,12"], "values": [6.0, 6.0]}]}
-    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated]))
+    body = {"drawing_unit": "mm", "body_length": 22.5, "body_width": 16.5, "body_height": 16.9}
+    monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, body]))
     return ext.extract_pin_header_params([image], component_family="single_tht",
                                          document_roles={"Pinout.png": ["pinout"]})
 
