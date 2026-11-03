@@ -402,40 +402,68 @@ def _run_preview_child(command, cancel=None):
     """Run the tessellation child; with a cancellation channel it can be stopped.
 
     @param command Child command line (freecadcmd plus script).
-    @param cancel None: the historical blocking `subprocess.run` (not
-        interruptible). An object with `is_set()` (the dialog's
-        `threading.Event`): the child is polled every
-        `process_log.CANCEL_POLL_INTERVAL_S` and, once the channel is set,
-        killed with its whole process tree (`process_log.kill_process_tree`).
+    @param cancel None: not interruptible (only the whole-run limit applies).
+        An object with `is_set()` (the dialog's `threading.Event`): the child
+        is polled every `process_log.CANCEL_POLL_INTERVAL_S` and, once the
+        channel is set, killed with its whole process tree.
     @return CompletedProcess with the child's stdout.
     @throws PreviewCancelled When @p cancel was set.
     @throws subprocess.TimeoutExpired After PREVIEW_TIMEOUT_S; the tree is killed.
     @throws subprocess.CalledProcessError On a non-zero exit, as `check=True`.
+    @note 2026-11-03 review: the path without a channel used a bare
+        `subprocess.run`, whose timeout killed only the launcher (FreeCAD
+        survived it) and whose environment let the child write __pycache__
+        next to the scripts it imports from the installation folder. Both
+        paths now share one launch: `process_log.child_environment`, a job
+        (`contain_process`) and the tree kill, with or without a channel.
+    @note The limit stays a WHOLE-RUN limit, not the silence watchdog of
+        `run_logged`: the child prints only its result at the very end, so
+        silence would say nothing about it.
     """
+    from ..cad3d.process_log import (CANCEL_POLL_INTERVAL_S, EXIT_DRAIN_GRACE_S,
+                                     child_environment, contain_process,
+                                     kill_process_tree, release_process)
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    if cancel is None:
-        return subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              timeout=PREVIEW_TIMEOUT_S, check=True, text=True,
-                              errors='replace', creationflags=flags)
-    from ..cad3d.process_log import CANCEL_POLL_INTERVAL_S, kill_process_tree
-    if cancel.is_set():
+    if cancel is not None and cancel.is_set():
         raise PreviewCancelled(command)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, errors='replace', creationflags=flags)
-    deadline = time.monotonic() + PREVIEW_TIMEOUT_S
-    while True:
-        try:
-            stdout, _ = process.communicate(timeout=CANCEL_POLL_INTERVAL_S)
-            break
-        except subprocess.TimeoutExpired:
-            stopped, expired = cancel.is_set(), time.monotonic() >= deadline
-            if not (stopped or expired):
+                               text=True, errors='replace', creationflags=flags,
+                               env=child_environment())
+    contain_process(process)
+    try:
+        deadline = time.monotonic() + PREVIEW_TIMEOUT_S
+        exited_at = None
+        while True:
+            try:
+                stdout, _ = process.communicate(timeout=CANCEL_POLL_INTERVAL_S)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            stopped = cancel is not None and cancel.is_set()
+            if process.poll() is not None and not stopped:
+                # Exited, but a descendant still holds the pipe: what the
+                # child wrote is drained for a short grace, then the
+                # survivors are ended and the child's own result is used.
+                exited_at = now if exited_at is None else exited_at
+                if now - exited_at < EXIT_DRAIN_GRACE_S:
+                    continue
+                kill_process_tree(process)
+                stdout, _ = process.communicate()
+                break
+            if not (stopped or now >= deadline):
                 continue
             kill_process_tree(process)
             process.communicate()
             if stopped:
                 raise PreviewCancelled(command) from None
             raise subprocess.TimeoutExpired(command, PREVIEW_TIMEOUT_S) from None
+    except BaseException:
+        if process.poll() is None:
+            kill_process_tree(process)
+        raise
+    finally:
+        release_process(process)
     if process.returncode:
         raise subprocess.CalledProcessError(process.returncode, command, stdout)
     return subprocess.CompletedProcess(command, process.returncode, stdout)

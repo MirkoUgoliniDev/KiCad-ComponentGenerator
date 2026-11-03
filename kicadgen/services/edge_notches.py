@@ -918,6 +918,23 @@ def _deep_as_half_holes(counted: EdgeCount) -> bool:
     apart: depth can. Each depth must clear the floor by its own uncertainty.
     A half-hole whose centre sits inside the board can be shallower (point
     140): it is then left to the warning, never corrected.
+
+    FRAGILE SEPARATION, declared (review 2026-11-03): full-hole pad dents and
+    half-holes are told apart by ONE criterion, the depth, with a thin margin:
+    the floor is MIN_HALF_HOLE_DIAMETER_MM / 2 = 0.20 mm (plus the depth
+    uncertainty) against dents of 0.11-0.16 mm measured on ONE board (ESP32
+    sample), i.e. 0.04-0.09 mm before the uncertainty is added. A deeper dent
+    (a larger pad, a coarser photo) would pass for a half-hole. Independent
+    second criteria that would make it robust, not implemented because the
+    data is not available here: the notch opening against the drill (a
+    half-hole cut across its centre opens as wide as its hole, a pad dent as
+    wide as the pad, drill plus two rings) -- _count_side does not expose
+    the notch widths and the declared side carries no read drill; or the
+    copper ring BEHIND the notch (edge_lands.measure_edge_holes: a full hole
+    shows a closed ring inside the board), which needs the colour crop this
+    function does not receive. The only consequence of a wrong verdict is
+    the style correction of notched_full_hole_sides, which already requires
+    count AND positions to match the declaration.
     """
     floor = MIN_HALF_HOLE_DIAMETER_MM / 2 + (counted.depth_tolerance_mm or 0.0)
     return bool(counted.depths_mm) and min(counted.depths_mm) >= floor
@@ -976,8 +993,26 @@ def notched_full_hole_sides(profiles, crop_shape, length_mm: float, width_mm: fl
         if row_offset_from(declared, measured, counted.tolerance_mm or 0.0, bound) is None:
             continue
         result.append(EdgeCount(edge, counted.found, side["count"], measured,
-                                tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound))
+                                tolerance_mm=counted.tolerance_mm, shift_bound_mm=bound,
+                                depths_mm=list(counted.depths_mm),
+                                depth_tolerance_mm=counted.depth_tolerance_mm))
     return result
+
+
+def half_hole_depth_margin_mm(counted: "EdgeCount") -> Optional[float]:
+    """@brief How far the shallowest notch clears the half-hole depth floor, in mm.
+
+    @param counted An `EdgeCount` with its notch depths.
+    @return min(depth) - (MIN_HALF_HOLE_DIAMETER_MM / 2 + depth uncertainty),
+        or None without depths.
+    @note Reported with every full-hole -> half-hole correction because that
+        correction rests on the depth alone (see `_deep_as_half_holes`): the
+        user sees how thin the separation was (generality audit 2026-11-03).
+    """
+    if not counted.depths_mm:
+        return None
+    floor = MIN_HALF_HOLE_DIAMETER_MM / 2 + (counted.depth_tolerance_mm or 0.0)
+    return round(min(counted.depths_mm) - floor, 3)
 
 
 def check_declared_contacts(profiles, crop_shape, length_mm: float, width_mm: float,

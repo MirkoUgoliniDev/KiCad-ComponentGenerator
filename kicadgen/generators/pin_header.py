@@ -21,9 +21,10 @@ from dataclasses import dataclass, field
 from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
-from ..core.footprint import Footprint, FpRect, Pad, fab_reference_text, require_kicad_reach
+from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, Pad,
+                              courtyard_corners, fab_reference_text, require_kicad_reach)
 from ..core.output_names import validate_output_name
-from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
+from ..core.silk import SILK_PAD_CLEARANCE_MM, keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..services.messages import tx
 from .castellated_module import MIN_HOLE_WALL_MM
 
@@ -37,6 +38,22 @@ from .castellated_module import MIN_HOLE_WALL_MM
 #: that touch or that the DRC flags at once. It is a LOWER BOUND of
 #: manufacturability, not a recommended distance.
 MIN_PAD_GAP_MM = MIN_HOLE_WALL_MM
+
+#: Courtyard clearance around body and pads, mm: the KLC F5.3 value for
+#: CONNECTORS (0.5 mm), the one of KiCad's own pin header footprints. This
+#: generator builds header footprints (connectors and modules mounted on
+#: headers), so the clearance follows the generator, a structural attribute,
+#: not the part's name; packages and castellated modules keep the general
+#: 0.25 mm (`generators.package.COURTYARD_MARGIN_MM`). User decision
+#: 2026-11-03 («adeguiamoci»). It used to be 1.0 mm and doubled as the offset
+#: of the silk frame of a header without a body; the two are separate now
+#: (see `SILK_WIDTH_MM` and `build_pin_header`).
+COURTYARD_MARGIN_MM = 0.5
+
+#: Note recorded (in the footprint description, fixed file language) when
+#: the row spacing of a multi-row header was not declared and the pitch was
+#: used in its place: an estimate, never a measure.
+ROW_SPACING_ASSUMED_NOTE = "distanza fra le righe non dichiarata: assunta uguale al passo (stima)"
 
 
 def pin_key(pin) -> str:
@@ -62,10 +79,13 @@ def _pin_order(pin) -> tuple:
 
 
 def is_pin_one(pin) -> bool:
-    """@brief Tell whether a pin is the pin numbered 1 (the square pad, the silk dot).
+    """@brief Tell whether a pin is the pin numbered 1.
 
     @param pin A pin number, int or str.
     @return True for 1 and "1" alike, via `pin_key`.
+    @note The square pad and the silk dot follow `square_pad_pin`
+        (`core.silk.pin_one`), which also covers a header without a pin
+        «1» (A1, A2...); this test answers only «is it numbered 1».
     """
     return pin_key(pin) == "1"
 
@@ -79,9 +99,10 @@ class PinHeaderParams:
     @param body_offset_x Minimum body X relative to the pin-grid origin.
     @param body_offset_y Minimum body Y relative to the pin-grid origin.
     @note Offsets match Body3DParams, with positive Y downward in KiCad.
-    Without body dimensions, offsets are ignored and the legacy silk remains.
-    margin expands the courtyard beyond the union of body and populated pads;
-    without a body, the legacy silk rectangle serves as the body envelope.
+    Without body dimensions, offsets are ignored, no F.Fab outline is drawn
+    and the silk frames the emitted pads at the silk-to-pad clearance.
+    margin (default COURTYARD_MARGIN_MM, 0.5 mm, KLC connectors) expands the courtyard
+    beyond the union of body (or pad silk frame) and populated pads.
     """
     name: str = "PinHeader"
     description: str = ""
@@ -96,7 +117,8 @@ class PinHeaderParams:
     drill: float = 1.0
     pad_shape: str = "circle"
     pad_overrides: Optional[dict] = field(default=None)
-    margin: float = 1.0
+    #: Courtyard clearance, mm, around the union of body and pads.
+    margin: float = COURTYARD_MARGIN_MM
     populated_pins: Optional[set] = field(default=None)
     # Explicit pin positions: {pin_number: (row, column)}. Needed when the
     # numbering is not the column-by-column one of pin headers, for example
@@ -110,15 +132,44 @@ class PinHeaderParams:
     def effective_row_spacing(self) -> float:
         """@brief Return row spacing in mm, defaulting to the pin pitch.
 
-        @return `row_spacing` when declared, otherwise `pitch` (a single-row
-            header or a square grid).
+        @return `row_spacing` when declared, otherwise `pitch`.
+        @note With one row the fallback has no geometric effect. With more
+            rows and no declared spacing the pitch is an ASSUMPTION (a square
+            grid), which the project invariants allow only when it is
+            reported: `row_spacing_assumed` tells it, `assumption_notes`
+            gives the note, and `build_pin_header` writes it into the
+            footprint description. A caller that needs the true positions
+            (a physical check, not a drawing) must test
+            `row_spacing_assumed` and not trust the result.
         """
         return self.row_spacing if self.row_spacing is not None else self.pitch
+
+    def row_spacing_assumed(self) -> bool:
+        """@brief Tell whether the row spacing is the pitch by assumption, not by evidence.
+
+        @return True when there is more than one row and `row_spacing` is None.
+        """
+        return self.row_spacing is None and self.rows > 1
+
+    def assumption_notes(self) -> list:
+        """@brief The localized notes about values this header assumes instead of reading them.
+
+        @return One note when `row_spacing_assumed`, otherwise [].
+        """
+        if not self.row_spacing_assumed():
+            return []
+        return [tx("Distanza fra le righe non dichiarata: assunta uguale al passo ({pitch} mm). "
+                   "E' una stima, da verificare sul disegno quotato.", pitch=self.pitch)]
 
     def validate(self) -> None:
         """@brief Validate finite geometry and a complete optional body.
 
-        @throws ValueError If dimensions, offsets or pin mapping are invalid.
+        @throws ValueError If dimensions, offsets or pin mapping are invalid,
+            or two `pad_overrides`/`pin_map` keys name the same pin.
+        @note Normalises in place, once: `pad_overrides` keys become their
+            `pin_key` text (the lookups use it, so an int key was validated
+            and then silently ignored) and `pin_map` positions become tuples
+            (a JSON list position was unhashable).
         """
         for name in ("pitch", "row_spacing", "pad_diameter", "drill", "margin",
                      "body_length", "body_width", "body_offset_x", "body_offset_y"):
@@ -161,6 +212,15 @@ class PinHeaderParams:
                 duplicate = next(key for key in keys if keys.count(key) > 1)
                 raise ValueError(tx("Pin {pin} compare due volte nella mappa dei pin (come numero e "
                                     "come testo).", pin=duplicate))
+            # A position read from JSON is a list: a tuple is hashable and
+            # compares equal to the GUI's tuples.
+            normalised = {}
+            for pin, position in self.pin_map.items():
+                if isinstance(position, (str, bytes)) or not hasattr(position, "__len__") \
+                        or len(position) != 2:
+                    raise ValueError(tx("Pin {pin}: posizione non valida nella mappa dei pin.", pin=pin))
+                normalised[pin] = tuple(position)
+            self.pin_map = normalised
             for pin, position in self.pin_map.items():
                 row, col = position
                 if not (0 <= row < self.rows) or not (0 <= col < self.cols):
@@ -186,6 +246,9 @@ class PinHeaderParams:
         if self.pad_overrides:
             validate_pad_overrides(self.pad_overrides,
                                    {pin_key(pin) for pin, _, _ in pin_positions(self)}, self.drill)
+            # Every lookup uses the text key: normalised once here, so an int
+            # key is applied instead of validated and then ignored.
+            self.pad_overrides = normalise_pad_overrides(self.pad_overrides)
         if self.populated_pins is not None:
             # Without a map the numbers are the automatic column-by-column ones,
             # so they lie in 1..rows*columns. With an explicit map the numbering is a
@@ -224,20 +287,23 @@ class PinHeaderParams:
     def _validate_kicad_reach(self) -> None:
         """Refuse a header whose courtyard would leave KiCad's coordinate range.
 
-        The envelope is the one build_pin_header draws: the body (or the
-        legacy silk rectangle around the grid), every emitted pad with its
-        override, plus the courtyard margin (review 2026-10-29, G3)."""
-        row_spacing = self.effective_row_spacing()
+        The envelope is the one build_pin_header draws: the body with the
+        silk frame just outside it (or, without a body, the silk frame around
+        the pads), every emitted pad with its override, plus the courtyard
+        margin (review 2026-10-29, G3)."""
         m = float(self.margin)
         if self.body_length is not None:
             reach = max(abs(self.body_offset_x), abs(self.body_offset_y),
-                        abs(self.body_offset_x + self.body_length), abs(self.body_offset_y + self.body_width))
+                        abs(self.body_offset_x + self.body_length),
+                        abs(self.body_offset_y + self.body_width)) + SILK_OUTSIDE_FAB_MM
+            frame = 0.0
         else:
-            reach = max((self.cols - 1) * self.pitch, (self.rows - 1) * row_spacing) + m
+            reach = 0.0
+            frame = SILK_PAD_CLEARANCE_MM + SILK_WIDTH_MM / 2
         overrides = self.pad_overrides or {}
         for pin, x, y in pin_positions(self):
             size = float(overrides.get(pin_key(pin), {}).get("size", self.pad_diameter))
-            reach = max(reach, abs(x) + size / 2, abs(y) + size / 2)
+            reach = max(reach, abs(x) + size / 2 + frame, abs(y) + size / 2 + frame)
         if not isfinite(reach + m):
             # Finite inputs whose sum overflows (a 1e308 body offset plus its
             # length): the bounds themselves are not numbers, which the
@@ -274,6 +340,7 @@ class PinHeaderParams:
         pads = sorted(pin_positions(self), key=lambda item: item[1])
         if not pads:
             return
+        square = square_pad_pin(pad[0] for pad in pads)
         sizes = [float(overrides.get(pin_key(pin), {}).get("size", self.pad_diameter))
                  for pin, _x, _y in pads]
         window = max(sizes) + MIN_PAD_GAP_MM
@@ -301,11 +368,10 @@ class PinHeaderParams:
                 radius_a, radius_b = sizes[index_a] / 2, sizes[index_b] / 2
                 if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
                     continue
-                # Pin 1 is square whatever the spelling of its number (G4).
-                shape_a = overrides.get(pin_key(pin_a), {}).get(
-                    "shape", "rect" if self.pad_shape == "rect" or is_pin_one(pin_a) else "circle")
-                shape_b = overrides.get(pin_key(pin_b), {}).get(
-                    "shape", "rect" if self.pad_shape == "rect" or is_pin_one(pin_b) else "circle")
+                # The pin-1 pad is square whatever the spelling of its
+                # number (G4), chosen by the silk marker's rule.
+                shape_a = overrides.get(pin_key(pin_a), {}).get("shape", default_pad_shape(self, pin_a, square))
+                shape_b = overrides.get(pin_key(pin_b), {}).get("shape", default_pad_shape(self, pin_b, square))
                 gap = pad_copper_gap(xa, ya, shape_a, radius_a,
                                      xb, yb, shape_b, radius_b)
                 if gap < MIN_PAD_GAP_MM - 1e-9:
@@ -317,6 +383,48 @@ class PinHeaderParams:
                         "pad o controlla passo e distanza tra righe.",
                         a=pin_a, b=pin_b, pad=self.pad_diameter, distance=distance,
                         gap=max(gap, 0.0), minimum=MIN_PAD_GAP_MM))
+
+
+def square_pad_pin(pins) -> Optional[str]:
+    """@brief The pin whose pad is square on a round-pad header: the pin-1 marker's pin.
+
+    @param pins The emitted pin numbers (int or str).
+    @return `core.silk.pin_one` of their `pin_key`: "1" when present,
+        otherwise the lowest number in natural order (so a header numbered
+        A1, A2... gets a square A1, as its silk dot already said); None
+        without pins.
+    """
+    return pin_one(pin_key(pin) for pin in pins)
+
+
+def default_pad_shape(params: "PinHeaderParams", pin, square: Optional[str]) -> str:
+    """@brief Shape of a pad without an override: the header shape, or "rect" for the pin-1 pad.
+
+    @param params Header parameters (`pad_shape`).
+    @param pin Pin number, int or str.
+    @param square `square_pad_pin` of the emitted pins.
+    @return "rect" for a square header or for the pin-1 pad of a round one, else "circle".
+    """
+    if params.pad_shape == "rect" or (square is not None and pin_key(pin) == square):
+        return "rect"
+    return params.pad_shape
+
+
+def normalise_pad_overrides(overrides) -> dict:
+    """@brief Pad overrides keyed by `pin_key`, the key every lookup uses.
+
+    @param overrides {pin number (int or str): override}, or None.
+    @return A new dict with text keys; {} for None or an empty mapping.
+    @throws ValueError When two keys name the same pin (1 and "1").
+    """
+    result = {}
+    for number, override in (overrides or {}).items():
+        key = pin_key(number)
+        if key in result:
+            raise ValueError(tx("Pin {pin} compare due volte negli override dei pad (come numero e "
+                                "come testo).", pin=key))
+        result[key] = override
+    return result
 
 
 def validate_pad_overrides(overrides, numbers, drill: float) -> None:
@@ -453,37 +561,34 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     """
     params.validate()
     row_spacing = params.effective_row_spacing()
+    description = params.description or (
+        f"Header/modulo THT {params.rows}x{params.cols}, passo {params.pitch}mm, "
+        f"distanza righe {row_spacing}mm, generato con kicadgen_tool"
+    )
+    if params.row_spacing_assumed():
+        # Fixed file language, as the package generator's estimate note: the
+        # assumption is recorded in the library itself, not only in a log.
+        description += "; " + ROW_SPACING_ASSUMED_NOTE
 
     fp = Footprint(
         name=params.name,
-        description=params.description or (
-            f"Header/modulo THT {params.rows}x{params.cols}, passo {params.pitch}mm, "
-            f"distanza righe {row_spacing}mm, generato con kicadgen_tool"
-        ),
+        description=description,
         tags=params.tags,
         datasheet=params.datasheet,
         attr="through_hole",
     )
 
-    width = (params.cols - 1) * params.pitch
-    height = (params.rows - 1) * row_spacing
     m = params.margin
-    start, end = (-m, -m), (width + m, height + m)
-    if params.body_length is not None:
-        start = (params.body_offset_x, params.body_offset_y)
-        end = (start[0] + params.body_length, start[1] + params.body_width)
-        fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=0.1))
-    if not all(isfinite(v) for v in (*start, *end)):
-        raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
-
     positions = list(pin_positions(params))
+    square = square_pad_pin(pin for pin, _, _ in positions)
     pads = []
     for pin, x, y in positions:
         override = (params.pad_overrides or {}).get(pin_key(pin), {})
-        # The square pad marks pin 1 by its text identity: an int-keyed and
-        # a str-keyed pin map give the same footprint (G4).
-        shape = override.get("shape", "rect" if is_pin_one(pin) and params.pad_shape == "circle"
-                             else params.pad_shape)
+        # The square pad marks the pin-1 pad by its text identity and by the
+        # silk marker's rule (`square_pad_pin`): an int-keyed and a str-keyed
+        # pin map give the same footprint (G4), and an A1-numbered header
+        # gets a square A1.
+        shape = override.get("shape", default_pad_shape(params, pin, square))
         size = float(override.get("size", params.pad_diameter))
         pads.append(Pad(
             number=pin_key(pin),
@@ -494,14 +599,39 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
             drill=params.drill,
             layers=["*.Cu", "*.Mask"],
         ))
+    if params.body_length is not None:
+        start = (params.body_offset_x, params.body_offset_y)
+        end = (start[0] + params.body_length, start[1] + params.body_width)
+        fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=FAB_WIDTH_MM))
+        # The silk frame lies just outside the assembly outline, never on it.
+        g = SILK_OUTSIDE_FAB_MM
+        silk_start, silk_end = (start[0] - g, start[1] - g), (end[0] + g, end[1] + g)
+    else:
+        # No declared body: no F.Fab outline is invented. The silk frames the
+        # copper actually emitted, at the silk-to-pad clearance plus half the
+        # stroke, so it is never cut by a pad; the envelope comes from the
+        # pads, which are evidence, not from a guessed body. With no
+        # populated pad at all the declared grid is framed instead, so the
+        # (empty) footprint keeps finite outlines.
+        grow = SILK_PAD_CLEARANCE_MM + SILK_WIDTH_MM / 2
+        if pads:
+            boxes = [(pad.at[0] - pad.size[0] / 2, pad.at[1] - pad.size[1] / 2,
+                      pad.at[0] + pad.size[0] / 2, pad.at[1] + pad.size[1] / 2) for pad in pads]
+        else:
+            boxes = [(0.0, 0.0, (params.cols - 1) * params.pitch, (params.rows - 1) * row_spacing)]
+        start = (min(b[0] for b in boxes) - grow, min(b[1] for b in boxes) - grow)
+        end = (max(b[2] for b in boxes) + grow, max(b[3] for b in boxes) + grow)
+        silk_start, silk_end = start, end
+    if not all(isfinite(v) for v in (*start, *end)):
+        raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
     # Silk never covers copper: the keepouts come from the pads actually
     # emitted, so a per-pin size override is avoided as well as the default.
     keepouts = [keepout_box(pad.at[0] - pad.size[0] / 2, pad.at[1] - pad.size[1] / 2,
                             pad.at[0] + pad.size[0] / 2, pad.at[1] + pad.size[1] / 2,
-                            line_width=0.12) for pad in pads]
-    for graphic in silk_rectangle(start, end, keepouts):
+                            line_width=SILK_WIDTH_MM) for pad in pads]
+    for graphic in silk_rectangle(silk_start, silk_end, keepouts, width=SILK_WIDTH_MM):
         fp.add_graphic(graphic)
-    fp.add_graphic(_pin_one_marker(start, end, positions, pads))
+    fp.add_graphic(_pin_one_marker(silk_start, silk_end, positions, pads))
 
     for pad in pads:
         fp.add_pad(pad)
@@ -515,10 +645,11 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
         min_y = min(min_y, pad.at[1] - pad.size[1] / 2)
         max_x = max(max_x, pad.at[0] + pad.size[0] / 2)
         max_y = max(max_y, pad.at[1] + pad.size[1] / 2)
-    courtyard_start = (min_x - m, min_y - m)
-    courtyard_end = (max_x + m, max_y + m)
-    if not all(isfinite(v) for v in (*start, *end, *courtyard_start, *courtyard_end)):
+    if not all(isfinite(v) for v in (min_x - m, min_y - m, max_x + m, max_y + m)):
         raise ValueError(tx("I limiti calcolati del footprint non sono numeri finiti."))
+    # KLC F5.3: courtyard on the 0.01 mm grid, rounded outwards so the
+    # clearance is never below the margin.
+    courtyard_start, courtyard_end = courtyard_corners((min_x - m, min_y - m), (max_x + m, max_y + m))
     fp.add_graphic(FpRect(
         start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05,
     ))

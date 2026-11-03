@@ -84,10 +84,13 @@ def _render(monkeypatch, face_colors, *, import_fails=False):
     monkeypatch.setitem(sys.modules, "freecad_parts",
                         SimpleNamespace(_read_library_parts=read_library_parts))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         exec(compile(Path(command[1]).read_text(encoding="utf-8"), command[1], "exec"), {})
 
-    monkeypatch.setattr(gui.subprocess, "run", run)
+    # CONTRACT CHANGED 2026-11-03 (preview launch): the child no longer
+    # starts through subprocess.run (no tree kill, bytecode written);
+    # the seam faked here is `_run_preview_child`, its single launcher.
+    monkeypatch.setattr(gui, "_run_preview_child", run)
     return gui._thumbnail("model.step", 0.0, None, None, gui.VIEW_PLAN)
 
 
@@ -154,9 +157,9 @@ def test_without_colours_the_file_colours_are_not_even_read(monkeypatch):
     monkeypatch.setitem(sys.modules, "freecad_parts",
                         SimpleNamespace(_read_library_parts=forbidden))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         exec(compile(Path(command[1]).read_text(encoding="utf-8"), command[1], "exec"), {})
 
-    monkeypatch.setattr(gui.subprocess, "run", run)
+    monkeypatch.setattr(gui, "_run_preview_child", run)
     image = gui._thumbnail("model.step", 0.0, None, None, gui.VIEW_PLAN, colors=False)
     assert abs(QColor(image.pixel(90, 170)).hue() - QColor(gui.DEFAULT_BODY_COLOR).hue()) <= 10

@@ -334,6 +334,16 @@ def _load_onnx(path):
     return session, metadata
 
 
+#: Floor of the acceptance threshold of a class, whatever the checkpoint
+#: suggests (the effective threshold is max(this, suggested_threshold)).
+#: Structural, not tuned on a board: at 0.5 or more of the softmax mass the
+#: winning class outweighs every other class TOGETHER, «_other» included, so
+#: an accepted label is never a plurality among near-ties (0.34 / 0.33 /
+#: 0.33). It bounds a checkpoint that suggests a lower threshold (or none,
+#: 0): such a value is the trainer's calibration on its validation set, and
+#: below the majority the label is a coin toss on other boards. A checkpoint
+#: may raise the threshold above it, never lower it.
+MIN_ACCEPTED_CLASS_PROBABILITY = 0.5
 #: Below this many validation samples the declared accuracy says little about
 #: other boards: the model window says so next to the figure. Interface
 #: threshold for an honest note, not a property of any checkpoint.
@@ -346,7 +356,8 @@ def describe_smd_checkpoint(model_path=None) -> dict:
     @param model_path Checkpoint path; None for the default in models/smd.
     @return Dictionary: path, format, arch, img_size, trained (as stored),
         epochs, classes (list), orientations (class -> none/axis/full),
-        threshold (the effective acceptance threshold, max(0.5, suggested)),
+        threshold (the effective acceptance threshold,
+        max(MIN_ACCEPTED_CLASS_PROBABILITY, suggested)),
         catalog_sha256, and validation (samples, accuracy, balanced_accuracy)
         when the checkpoint carries metrics, else None.
     @throws The same exceptions as validate_smd_setup.
@@ -368,7 +379,7 @@ def describe_smd_checkpoint(model_path=None) -> dict:
         "arch": str(checkpoint.get("arch") or ""), "img_size": checkpoint.get("img_size"),
         "trained": str(checkpoint.get("trained") or ""), "epochs": checkpoint.get("epoch"),
         "classes": classes, "orientations": dict(checkpoint["orientations"]),
-        "threshold": max(0.5, float(checkpoint.get("suggested_threshold") or 0)),
+        "threshold": max(MIN_ACCEPTED_CLASS_PROBABILITY, float(checkpoint.get("suggested_threshold") or 0)),
         "catalog_sha256": str(checkpoint.get("catalog_sha256") or ""),
         "validation": validation,
     }
@@ -775,7 +786,8 @@ def classify_photo_boxes(
         `rotation_views_agree` says whether the four rotated views chose the
         same pose, `terminal_count` is the count the class declares
         (CLASS_TERMINAL_COUNTS) or None. `accepted` means a class other than
-        `_other` at or above max(0.5, the checkpoint's suggested threshold).
+        `_other` at or above max(MIN_ACCEPTED_CLASS_PROBABILITY, the
+        checkpoint's suggested threshold).
     @throws ValueError When inputs are invalid or the checkpoint is incompatible.
     @throws RuntimeError When dependencies are unavailable or cancellation is requested.
     @throws OSError When an image or checkpoint cannot be read.
@@ -844,7 +856,7 @@ def classify_photo_boxes(
     path = Path(model_path) if model_path is not None else smd_model_path()
     checkpoint, network = _open_network(path, device)
     classes, orientations = list(checkpoint["classes"]), checkpoint["orientations"]
-    threshold = max(0.5, float(checkpoint.get("suggested_threshold") or 0))
+    threshold = max(MIN_ACCEPTED_CLASS_PROBABILITY, float(checkpoint.get("suggested_threshold") or 0))
     results = []
     for start in range(0, len(crops), batch_size):
         if cancel is not None and cancel.is_set():

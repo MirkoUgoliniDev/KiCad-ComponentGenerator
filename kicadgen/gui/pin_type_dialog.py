@@ -1,5 +1,4 @@
 """@brief Review AI suggestions before adding them to the symbol draft."""
-from html import escape
 from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon
@@ -200,7 +199,9 @@ class PinTypeDialog(QDialog):
                 if column == 0 and known:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     item.setCheckState(Qt.CheckState.Unchecked if row.get('electrical_type_reviewed') else Qt.CheckState.Checked)
-                item.setToolTip('<qt>' + escape(value).replace('\n', '<br>') + '</qt>')
+                # Plain text: tooltips.ToolTipFilter escapes every tooltip and
+                # wraps it itself, so HTML here would show its tags literally.
+                item.setToolTip(value)
                 self.table.setItem(index, column, item)
         self.status.setText(self.tx('Controlla le fonti. I tipi già confermati non sono selezionati automaticamente.'))
         self.table.blockSignals(False)

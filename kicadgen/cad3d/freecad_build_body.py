@@ -1219,8 +1219,13 @@ def main():
     for contact, features in plated:
         try:
             shape = _contact_shape(features, uncut_body)
-            add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
-            label_anchors[f"Pin{contact['number']}"] = features["label"]
+            pin_obj = add(f"Pin{contact['number']}", shape, contact.get("color_hex", pin_color))
+            # Keyed on the name FreeCAD actually gave the object, which is
+            # what the mesh export reads back: FreeCAD rewrites a requested
+            # name that is not a valid identifier ("PinA-1" -> "PinA_1") or
+            # already taken ("Pin1" twice -> "Pin001"), so the requested
+            # string lost the anchor (2026-11-03 review).
+            label_anchors[pin_obj.Name] = features["label"]
         except Exception as exc:  # noqa: BLE001 - one contact less is not fatal
             _warn("contatto {get} non generato: {exc}", get=contact.get('number'), exc=exc)
 

@@ -16,9 +16,13 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
     host = header_footprint_params(dev_kit(), 1.7, 1.0)
     window._draw_preview_package(host)
     items = window.preview_scene.items()
+    from kicadgen.gui.footprint_view import BODY_PART_ROLE
+    # CONTRACT CHANGED 2026-11-03 (user: the body outline is edited with the
+    # mouse): the editable body outline and its eight handles carry tooltips
+    # too; they are not copper.
     copper = [item for item in items if item.toolTip()
               and not isinstance(item, QGraphicsSimpleTextItem)
-              and item.data(TEXT_KEY_ROLE) is None]
+              and item.data(TEXT_KEY_ROLE) is None and not item.data(BODY_PART_ROLE)]
     # CONTRACT CHANGED 2026-11-02 (user: the grid must show inside a hole):
     # a hole is an UNFILLED outline marked HOLE_ROLE, and the copper leaves it
     # unpainted (`hole()`), instead of a disc filled with the background colour.

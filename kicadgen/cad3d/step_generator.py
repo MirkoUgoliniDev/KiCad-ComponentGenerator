@@ -1089,7 +1089,9 @@ def generate_castellated_3d_model(
         components, PCB thickness).
     @param body Body parameters: total height, colours and the
         show_pins_3d/show_markings_3d choices; the height of the PCB itself
-        is `params.pcb_thickness`.
+        is `params.pcb_thickness`. An optional attribute `height_declared`
+        set to False says the total height is not documented: then no
+        estimated «Componenti» block is built when the photo gave no bodies.
     @param output_dir Project directory receiving the `.3dshapes` folder.
     @param freecadcmd_path Explicit freecadcmd executable; None looks it up.
     @param fillets EdgeFilletAnnotation list applied to the board before the
@@ -1150,11 +1152,33 @@ def generate_castellated_3d_model(
         photo_scale_px_per_mm=photo_scale_px_per_mm)
 
     extra_boxes = []
+    block_notes = []
     inset_c = params.component_inset
-    if (not components and component_height > 0
+    # Provenance of the module's TOTAL height (2026-11-03 review). Neither
+    # Body3DParams nor the module parameters record it today, so a caller
+    # that knows the height is NOT documented (a placeholder left in the
+    # field) declares it with `height_declared = False` on the body, and the
+    # block is not built: without a declared or estimated height it would be
+    # an invented volume (project rule). None -- every caller so far -- keeps
+    # the block, always with the note that states it is an estimate. The
+    # GUI already passes a total height equal to the PCB thickness when the
+    # analysis found none, which leaves no block (height 0) on its own.
+    height_declared = getattr(body, "height_declared", None)
+    if not components and component_height > 0 and height_declared is False:
+        block_notes.append(tx(
+            "Blocco «Componenti» non costruito: l'altezza totale del modulo non e' "
+            "dichiarata dai documenti ne' stimata dalla foto."))
+    elif (not components and component_height > 0
             and params.body_length > 2 * inset_c and params.body_width > 2 * inset_c):
         # Without the component list the single block remains: it approximates
-        # the envelope, which is still better than a bare slab.
+        # the envelope, which is still better than a bare slab. It is an
+        # ESTIMATED volume, never a measured one, and the note says so.
+        block_notes.append(tx(
+            "Blocco «Componenti»: volume stimato, non misurato -- la foto non ha fornito "
+            "componenti; ingombro del modulo ridotto di {inset} mm per lato, alto "
+            "{height} mm (altezza totale {total} mm meno lo spessore PCB {pcb} mm).",
+            inset=f"{inset_c:g}", height=f"{component_height:.2f}",
+            total=f"{body.height_mm:g}", pcb=f"{params.pcb_thickness:g}"))
         extra_boxes.append({
             "name": "Componenti",
             "x": -params.body_length / 2 + inset_c,
@@ -1214,7 +1238,8 @@ def generate_castellated_3d_model(
     result["notes"] = ([] if progress else model_notes) + list(result.get("notes", []))
     # The provenance of the edge distance of the through holes is not a
     # detail: when it is an estimate it must reach the user, always.
-    result["notes"] = inset_notes + header_notes + placement_notes + result["notes"]
+    result["notes"] = (inset_notes + header_notes + placement_notes + block_notes
+                       + result["notes"])
     reuse.save(components, result, notes=model_notes)
     return result
 

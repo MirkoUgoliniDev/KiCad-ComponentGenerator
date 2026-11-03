@@ -173,11 +173,20 @@ calls `remove_hovered` first.
   `_preview_framing_rect` and the symbol's scene rect (`_draw`,
   `_settle_after_gesture`, through `bounds_without_measures`) skip items with
   `MEASURE_ITEM_ROLE` (review 2026-10-31, D2).
-- D-M6 Look. Teal `#94e2d5` (Catppuccin Mocha teal: distinct from the yellow
-  dimensions, the blue pads and the green handles, readable on the dark
-  base); cosmetic 1.4 px line, 9 px screen arrowheads at both ends, a
-  screen-constant label (dark box, teal text) centred on the line and
-  offset to its side, z 60 (above pads, texts and drawing markers).
+- D-M6 Look. Teal `#94e2d5` (Catppuccin Mocha teal: distinct from the blue
+  pads and the green handles, readable on the dark base); cosmetic 1.4 px
+  line, 9 px screen arrowheads at both ends, a screen-constant label (dark
+  box, teal text) centred on the line and offset to its side, z 60 (above
+  pads, texts and drawing markers).
+  CHANGED 2026-11-03: the preview's automatic dimensions are no longer
+  yellow. They use the same teal (`canvas_measure.DIMENSION_COLOR =
+  MEASURE_COLOR`), because yellow is almost KiCad's silkscreen colour and
+  read as printed silkscreen (user: «non deve essere stampato sul pcb ... ad
+  uso interno», it must not look printed on the PCB, it is for internal
+  use). Every on-screen-only measurement now shares one colour, which must
+  never equal a KiCad layer colour. Measures and dimensions stay told apart
+  by their shape (arrowheads and boxed label vs. ticks and bare label), not
+  by colour.
 - D-M7 The tool stays armed after each measure (`persistent`);
   a press-move-release measures from the press to the release (C1 rule).
   A double click finishes like any click tool (point, then finish): with
@@ -318,3 +327,34 @@ tools if the click-tools plan unifies them.
   (package pads move freely). The symbol editor's pins sit on the 2.54 mm
   pin grid, where a typed arbitrary distance has no valid result; its
   measures stay read-only until the user decides otherwise.
+
+## Editable dimensions (2026-11-03)
+
+- The two body sides of a package preview (`MainWindow.BODY_DIM_X`, the
+  horizontal side, and `BODY_DIM_Y`, the vertical one) are EDITABLE
+  dimensions: `_add_dim_h` / `_add_dim_v` pass an `edit_key` to the shared
+  `canvas_measure.add_dimension_line`, which tags every item of the
+  dimension with `DIMENSION_EDIT_ROLE` (value: the key). Computed
+  dimensions (pitch, row spacing, margin chains, totals) carry no key and
+  stay read-only.
+- A double click on such a dimension emits
+  `FootprintView.dimension_edit_requested(key)`; a right click emits
+  `dimension_context_requested(key, global_pos)`, which opens the shared
+  element menu (`canvas_menus`) with the same «Modifica quota…» entry as a
+  measure. Both end in `MainWindow._edit_body_dimension`: the typed value
+  becomes that body size, the body stays centred, the pads keep their
+  coordinates, one undo step; a body that no longer builds or a size out
+  of range is refused with a toast and changes nothing. Only orientations
+  of 0/90/180/270 degrees are editable (`_body_dimensions_editable`).
+- Reach and feedback are those of a measure: `editable_dimension_at` uses
+  the measures' screen tolerance (REMOVE_TOLERANCE_PX), and a hovered
+  dimension is painted in MEASURE_HIGHLIGHT_COLOR
+  (`set_dimension_highlight`), so the user sees which teal numbers answer.
+- Priority: the dimension is looked up after the measuring tool (the click
+  router handles a measure first) and, in the event order, after handles,
+  texts, drawings and pads, so a Value text or a pad lying over a body
+  number keeps its own double click and menu (review 2026-11-03, C1); it is
+  never taken during a running pan or rubber band (C2). With nothing of the
+  footprint under the pointer the background menu opens instead.
+- Deliberate tab difference: the symbol editor draws no editable
+  dimensions.

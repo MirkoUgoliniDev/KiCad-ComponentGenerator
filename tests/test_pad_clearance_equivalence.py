@@ -13,13 +13,21 @@ from math import hypot
 
 import pytest
 
+from kicadgen.core.silk import pin_one
 from kicadgen.generators.pin_header import (MIN_PAD_GAP_MM, PinHeaderParams, pad_copper_gap,
                                             pin_positions)
 
 
 def former_scan(params: PinHeaderParams) -> None:
-    """The O(n²) check as it was before pass 4 (the oracle)."""
+    """The O(n²) check as it was before pass 4 (the oracle).
+
+    CONTRACT CHANGED 2026-11-03: the square pad of a round header is the
+    pin-1 marker's pin (`core.silk.pin_one` of the emitted pins: "1", else
+    the lowest number), no longer only a pin numbered 1; the oracle applies
+    the same rule, everything else is verbatim.
+    """
     pads = sorted(pin_positions(params), key=lambda item: item[1])
+    square = pin_one(str(pin) for pin, _x, _y in pads)
     for index, (pin_a, xa, ya) in enumerate(pads):
         for pin_b, xb, yb in pads[index + 1:]:
             size_a = float((params.pad_overrides or {}).get(str(pin_a), {}).get(
@@ -30,9 +38,9 @@ def former_scan(params: PinHeaderParams) -> None:
             if xb - xa >= radius_a + radius_b + MIN_PAD_GAP_MM:
                 continue
             shape_a = (params.pad_overrides or {}).get(str(pin_a), {}).get(
-                "shape", "rect" if params.pad_shape == "rect" or pin_a == 1 else "circle")
+                "shape", "rect" if params.pad_shape == "rect" or str(pin_a) == square else "circle")
             shape_b = (params.pad_overrides or {}).get(str(pin_b), {}).get(
-                "shape", "rect" if params.pad_shape == "rect" or pin_b == 1 else "circle")
+                "shape", "rect" if params.pad_shape == "rect" or str(pin_b) == square else "circle")
             gap = pad_copper_gap(xa, ya, shape_a, radius_a, xb, yb, shape_b, radius_b)
             if gap < MIN_PAD_GAP_MM - 1e-9:
                 distance = hypot(xb - xa, yb - ya)

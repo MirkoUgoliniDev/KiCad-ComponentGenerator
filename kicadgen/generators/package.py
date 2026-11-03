@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import math
 
-from ..core.footprint import Footprint, FpLine, FpRect, Pad, fab_reference_text
-from ..core.package_geometry import PackageGeometry, pad_outline
+from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpLine,
+                              FpRect, Pad, courtyard_corners, fab_reference_text)
+from ..core.package_geometry import ROUNDRECT_RRATIO, PackageGeometry, pad_outline
 from ..core.silk import clip_segment, keepout_box, pin_one, pin_one_marker, silk_rectangle
 
 #: Courtyard clearance around body and pads, mm (KiCad Library Convention
@@ -120,7 +121,7 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
                               pin.pad_width_mm, pin.rotation_deg)
         boxes.append((min(x for x, _ in corners), min(y for _, y in corners),
                       max(x for x, _ in corners), max(y for _, y in corners)))
-    silk_keepouts = [keepout_box(*box, line_width=0.12) for box in boxes]
+    silk_keepouts = [keepout_box(*box, line_width=SILK_WIDTH_MM) for box in boxes]
     marker_keepouts = [keepout_box(*box, line_width=0.0) for box in boxes]
 
     extent = [math.inf, math.inf, -math.inf, -math.inf]
@@ -133,20 +134,29 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
             geometry.orientation_deg)]
         xs, ys = [cx for cx, _ in corners], [cy for _, cy in corners]
         extent = [min(xs), min(ys), max(xs), max(ys)]
+        # The silk outline is the body grown by SILK_OUTSIDE_FAB_MM, turned
+        # like the body: it lies just outside the F.Fab line, never on it,
+        # and is still cut where it would reach a pad.
+        g = SILK_OUTSIDE_FAB_MM
+        silk_corners = [(round(cx, 6) + 0.0, round(cy, 6) + 0.0) for cx, cy in pad_outline(
+            0.0, 0.0, geometry.body_length_mm + 2 * g, geometry.body_width_mm + 2 * g,
+            geometry.orientation_deg)]
         if abs(((geometry.orientation_deg + 45.0) % 90.0) - 45.0) < 1e-9:
-            # Multiple of 90 degrees: still an axis-aligned rectangle (at 0
-            # degrees the output is byte-identical to before).
+            # Multiple of 90 degrees: still an axis-aligned rectangle.
             start, end = (extent[0], extent[1]), (extent[2], extent[3])
-            for graphic in silk_rectangle(start, end, silk_keepouts):
+            silk_xs, silk_ys = [cx for cx, _ in silk_corners], [cy for _, cy in silk_corners]
+            for graphic in silk_rectangle((min(silk_xs), min(silk_ys)), (max(silk_xs), max(silk_ys)),
+                                          silk_keepouts, width=SILK_WIDTH_MM):
                 fp.add_graphic(graphic)
-            fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=0.1))
+            fp.add_graphic(FpRect(start=start, end=end, layer="F.Fab", width=FAB_WIDTH_MM))
         else:
-            sides = [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
-            for side_start, side_end in sides:
-                for piece_start, piece_end in clip_segment(side_start, side_end, silk_keepouts):
+            for i in range(4):
+                for piece_start, piece_end in clip_segment(silk_corners[i], silk_corners[(i + 1) % 4],
+                                                           silk_keepouts):
                     fp.add_graphic(FpLine(start=piece_start, end=piece_end,
-                                          layer="F.SilkS", width=0.12))
-                fp.add_graphic(FpLine(start=side_start, end=side_end, layer="F.Fab", width=0.1))
+                                          layer="F.SilkS", width=SILK_WIDTH_MM))
+                fp.add_graphic(FpLine(start=corners[i], end=corners[(i + 1) % 4], layer="F.Fab",
+                                      width=FAB_WIDTH_MM))
     for x0, y0, x1, y1 in boxes:
         extent = [min(extent[0], x0), min(extent[1], y0), max(extent[2], x1), max(extent[3], y1)]
 
@@ -171,9 +181,11 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
 
     if all(math.isfinite(v) for v in extent):
         m = COURTYARD_MARGIN_MM
-        fp.add_graphic(FpRect(start=(round(extent[0] - m, 6), round(extent[1] - m, 6)),
-                              end=(round(extent[2] + m, 6), round(extent[3] + m, 6)),
-                              layer="F.CrtYd", width=0.05))
+        # KLC F5.3: courtyard corners on the 0.01 mm grid, rounded outwards
+        # so the clearance is never below the margin.
+        courtyard_start, courtyard_end = courtyard_corners((extent[0] - m, extent[1] - m),
+                                                           (extent[2] + m, extent[3] + m))
+        fp.add_graphic(FpRect(start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05))
         # KLC F5.2 reference on F.Fab: centred on the body (the footprint
         # origin) when its size is known, otherwise on the pad field.
         if geometry.body_length_mm and geometry.body_width_mm:
@@ -190,7 +202,7 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
             pad_type=pin.pad_type, shape=pin.shape,
             at=(pin.x_mm, pin.y_mm), size=(pin.pad_length_mm, pin.pad_width_mm),
             layers=PAD_LAYERS[pin.pad_type], rotation=pin.rotation_deg, drill=pin.drill_mm,
-            roundrect_rratio=0.25 if pin.shape == "roundrect" else None,
+            roundrect_rratio=ROUNDRECT_RRATIO if pin.shape == "roundrect" else None,
         ))
     # Decision D1 (user, 2026-10-14): Reference above and Value below the
     # envelope; a user-chosen position is applied afterwards (place_texts).

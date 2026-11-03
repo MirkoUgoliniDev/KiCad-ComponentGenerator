@@ -576,9 +576,15 @@ def pick_model(current_model: Optional[str], parent=None, title: str = "Scegli i
     """
     dialog = ModelPickerDialog(current_model, parent, title=title, capabilities=capabilities,
                                provider=provider)
-    if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_model():
-        return dialog.selected_model()
-    return None
+    try:
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_model():
+            return dialog.selected_model()
+        return None
+    finally:
+        # The picker is a child of `parent`: kept, every call left one alive
+        # until the parent closed. `done` already cut the download's signals,
+        # so a late list reaches nothing once the window is gone.
+        dialog.deleteLater()
 
 
 __all__ = ["ModelPickerDialog", "pick_model"]

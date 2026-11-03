@@ -50,7 +50,8 @@ from ..generators.castellated_module import (
     CastellatedSide, ComponentBox, build_castellated_module, pad_positions,
 )
 from ..generators import castellated_module as _castellated_module
-from ..generators.pin_header import PinHeaderParams, build_pin_header, pin_positions
+from ..generators.pin_header import (PinHeaderParams, build_pin_header, default_pad_shape, pin_key,
+                                       pin_positions, square_pad_pin)
 from ..generators.package import build_package
 from ..generators.package import preview_grid_origin as package_preview_grid_origin
 from ..generators.castellated_module import preview_grid_origin as castellated_preview_grid_origin
@@ -72,6 +73,7 @@ from ..services.kicad_library import (
     discover_component_artifacts,
     install_component_library,
     launch_preview,
+    MINIMUM_KICAD_VERSION,
     plan_component_install,
     resolve_global_fp_lib_table,
 )
@@ -610,6 +612,54 @@ def _pad_origin_key(number: str, occurrence: int = 1) -> str:
     @return The key; pads sharing a number (a split land) stay distinct.
     """
     return f"pad:{number}" if occurrence <= 1 else f"pad:{number}#{occurrence}"
+
+
+def _shifted_drawings(drawings, dx_mm: float, dy_mm: float) -> list:
+    """@brief Copies of footprint drawing records with every point moved by (dx, dy) mm.
+
+    @param drawings Validated drawing records (`points` in mm).
+    @param dx_mm Shift along X (mm).
+    @param dy_mm Shift along Y (mm, down).
+    @return New records; the input is not changed.
+    """
+    shifted = []
+    for record in drawings or ():
+        copy = dict(record)
+        copy["points"] = [[round(float(x) + dx_mm, 6) + 0.0, round(float(y) + dy_mm, 6) + 0.0]
+                          for x, y in record.get("points", ())]
+        shifted.append(copy)
+    return shifted
+
+
+#: A pin label as drawings print it: a letter or digit, then letters, digits
+#: and the separators KiCad pad numbers use («1», «11», «A1», «EP», «B12»).
+_PIN_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,15}")
+
+
+def _pin_map_key(pin):
+    """@brief The key of a pin in `pin_map` and `populated_pins`: an int for a digits-only label, else the stripped text.
+
+    @param pin A pin label (int or text).
+    @return int for «1», «11» (numeric grids keep working as before); the
+        text for «A1», «EP» (review 2026-11-03: alphanumeric pins).
+    @throws ValueError When the label is empty or not a pin label.
+    """
+    text = str(pin).strip()
+    if isinstance(pin, bool) or not _PIN_LABEL_RE.fullmatch(text):
+        raise ValueError(tx("\"{token}\" non e' un numero di pin valido.", token=text))
+    # «01» stays text, as in the extraction: a pad «01» is not pad 1.
+    return int(text) if text.isdigit() and str(int(text)) == text else text
+
+
+def _package_body(package):
+    """@brief (length, width) of a package body in mm, or None without a package or a declared body.
+
+    @param package A `PackageGeometry` or None.
+    @return The body sizes along the package's own axes, as floats.
+    """
+    if package is None or not package.body_length_mm or not package.body_width_mm:
+        return None
+    return (float(package.body_length_mm), float(package.body_width_mm))
 
 
 def _source_frame_delta(package, dx_mm: float, dy_mm: float) -> tuple:
@@ -1786,6 +1836,9 @@ class MainWindow(QMainWindow):
         #: The pad drag in progress: {"members", "items", "press", "delta"}
         #: (see `_begin_pad_drag`), None when no pad is dragged.
         self._fp_pad_drag = None
+        #: The body move/resize in progress: {"part", "press", "rect", "new",
+        #: "package", "ghost", "label"} (see `_begin_body_drag`), or None.
+        self._fp_body_drag = None
         #: «Footprint dirty»: a saved edit is not yet in the .kicad_mod.
         #: Consumed by `_flush_footprint_rewrite` just before its single
         #: attempt (a failed start is logged once, never retried in a loop)
@@ -1794,6 +1847,9 @@ class MainWindow(QMainWindow):
         #: True when a pending edit is a pad edit: those rewrite the
         #: .kicad_mod even when none exists yet (drawings and texts do not).
         self._fp_rewrite_pad_edit: bool = False
+        #: True when a pending edit changed the package body: the rewrite is
+        #: then a full generation, because the STEP body changes too.
+        self._fp_rewrite_body_edit: bool = False
         #: True while one rewrite attempt is queued on the event loop.
         self._fp_rewrite_pending: bool = False
         #: Undo/redo stacks of the footprint edits, like the symbol editor:
@@ -5562,13 +5618,39 @@ class MainWindow(QMainWindow):
         # From here on the "analysis running" state is already exposed to the user:
         # any exception before worker.start() must restore it, not leave the
         # tabs off and the modal stuck.
+        # The previous project's photo state, put back when the worker never
+        # started: nothing ran, so nothing may be lost (review 2026-11-03, L7).
+        photo_state = self._photo_state_snapshot()
         try:
             self._start_extract_worker(doc_paths, document_roles, profile,
                                        photo_detector, yolo_model_path,
                                        chosen_detector=chosen_detector)
         except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
+            worker = getattr(self, "_extract_worker", None)
+            if worker is None or not worker.isRunning():
+                self._restore_photo_state(photo_state)
             self._on_extract_finished()
             self._on_extract_error(str(exc))
+
+    #: Attributes of the in-memory photo state an extraction start resets.
+    _PHOTO_STATE_ATTRS = ("_last_extracted", "_photo_png", "_photo_body_fields",
+                          "_photo_overlay_png", "_photo_source")
+
+    def _photo_state_snapshot(self) -> dict:
+        """@brief The in-memory photo state `_start_extract_worker` resets, by reference.
+
+        @return {attribute: value} for `_PHOTO_STATE_ATTRS`.
+        """
+        return {name: getattr(self, name, None) for name in self._PHOTO_STATE_ATTRS}
+
+    def _restore_photo_state(self, state: dict) -> None:
+        """@brief Put back a photo state taken by `_photo_state_snapshot` and refresh the review buttons.
+
+        @param state The snapshot.
+        """
+        for name, value in state.items():
+            setattr(self, name, value)
+        self._set_review_buttons_enabled(self._photo_png is not None)
 
     def _run_models(self) -> tuple[str, ...]:
         """@brief Every model identifier the next paid run may call.
@@ -8115,6 +8197,8 @@ class MainWindow(QMainWindow):
             package = {**asdict(self.package_geometry), "name": self._component_name()}
             if applied["package_pins"] is not None:
                 package["pins"] = [asdict(pin) for pin in applied["package_pins"]]
+            if applied.get("package_body") is not None:
+                package["body_length_mm"], package["body_width_mm"] = applied["package_body"]
         state = {
             "project_kind": getattr(self, "project_kind", None),
             "widgets": widgets,
@@ -8140,7 +8224,8 @@ class MainWindow(QMainWindow):
             "top_text": self._top_text_3d(),
             "pinout": deepcopy(self.pinout or []),
             "pin_map": (None if not getattr(self, "pin_map", None) else
-                        [[pin, row, col] for pin, (row, col) in sorted(self.pin_map.items())]),
+                        [[pin, row, col] for pin, (row, col) in sorted(
+                            self.pin_map.items(), key=lambda item: pin_sort_key({"pin": item[0]}))]),
             "declared_row_spacing": getattr(self, "_declared_row_spacing", None),
             "board_size_known": bool(getattr(self, "_board_size_known", False)),
             "body_size_declared": bool(getattr(self, "_body_size_declared", False)),
@@ -8323,7 +8408,7 @@ class MainWindow(QMainWindow):
                                 if isinstance(saved_names, dict) else {})
         pin_map = state.get("pin_map")
         try:
-            self.pin_map = ({int(p): (int(r), int(c)) for p, r, c in pin_map}
+            self.pin_map = ({_pin_map_key(p): (int(r), int(c)) for p, r, c in pin_map}
                             if pin_map else None)
         except (TypeError, ValueError):
             self.pin_map = None
@@ -9887,6 +9972,7 @@ class MainWindow(QMainWindow):
             # numbers 1..5 plus the pads 11..A2 made a ten-pin symbol).
             from ..generators.symbol_pins import pinout_on_pads
             placed = pinout_on_pads(candidate, pads)
+            self._name_pads_from_geometry(placed.rows)
             # Only rows that NAME a pad (or carry more than pin and name):
             # an empty pinout still means «no names», and unnamed pads are
             # added by the symbol tab itself (_refresh_symbol_tab).
@@ -10118,10 +10204,9 @@ class MainWindow(QMainWindow):
                     # file name, and a proposal such as «LM358/LM2904» lost the pads.
                     geometry_data["name"] = self._component_name() or "Package"
                     self.package_geometry = package_from_mapping(geometry_data)
-                self._append_log(
-                    f"Geometria package acquisita: {self.package_geometry.family}, "
-                    f"{len(self.package_geometry.pins)} pad espliciti."
-                )
+                self._append_log(tx("Geometria package acquisita: {family}, {n_pins} pad espliciti.",
+                                    family=self.package_geometry.family,
+                                    n_pins=len(self.package_geometry.pins)))
                 # An origin other than the body centre is estimated from the
                 # pad field: the estimate must be stated, never silent.
                 for note in self.package_geometry.frame_notes():
@@ -10203,7 +10288,7 @@ class MainWindow(QMainWindow):
 
         if params.pin_map:
             self.pin_map = {
-                int(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
+                _pin_map_key(e["pin"]): (int(e["row"]), int(e["col"])) for e in params.pin_map
             }
             self._append_log(
                 tx("Posizione dei pin letta dal disegno ({n_pin_map} pin): la numerazione "
@@ -10677,10 +10762,8 @@ class MainWindow(QMainWindow):
             else:
                 origin = tx(", scelto dall'utente")
             label = CONTACT_STYLE_LABELS.get(style, style) if style else CONTACT_STYLE_UNKNOWN_LABEL
-            described.append(
-                f"lato {EDGE_LABELS.get(s['edge'], s['edge'])} "
-                f"{s['count']} contatti a {s['pitch_mm']}mm "
-                f"({label}{origin})")
+            # The shared, translated side summary (review 2026-11-03, L1).
+            described.append(f"{self._side_summary(s)} ({label}{origin})")
         self._append_log(tx("Contatti del modulo: ") + ", ".join(described))
         for line in names:
             self._append_log(tx("Sigle serigrafate {line}", line=line))
@@ -13472,6 +13555,58 @@ class MainWindow(QMainWindow):
             Path(destination), project_library=False, table_path=location.path,
             table_version=location.version, artifacts=artifacts)
 
+    def _other_scope_table(self, project_library: bool):
+        """@brief The fp-lib-table of the OTHER scope, checked for a «KiCadGen» row that would shadow the install.
+
+        @param project_library True for a project installation.
+        @return For a project installation, KiCad's global fp-lib-table
+            (when KiCad is found and its table resolves); for a global one,
+            None: the KiCad project that will use the library is not known
+            here (the destination is a library folder).
+        @note Review 2026-11-03: KiCad reads the project table before the
+            global one, so a «KiCadGen» row in both hides one of them.
+        """
+        if not project_library:
+            return None
+        try:
+            applications = detect_external_applications()
+            if not applications.kicad_cli:
+                return None
+            return resolve_global_fp_lib_table(applications.kicad_cli).path
+        except (KiCadLibraryError, OSError):
+            return None
+
+    def _confirm_install_plan_warnings(self, plan, project_library: bool) -> bool:
+        """@brief Refuse an install into a too old KiCad and ask about a shadowing row or an open project.
+
+        @param plan The `InstallPlan` of `plan_component_install`.
+        @param project_library True for a project installation.
+        @return True to go on; False when refused or declined.
+        """
+        if getattr(plan, "kicad_too_old", False):
+            QMessageBox.warning(
+                self, self.i18n.text("Installazione KiCad non riuscita"),
+                self.i18n.tr("kicad.error.kicad_too_old", version=plan.kicad_version,
+                             minimum=MINIMUM_KICAD_VERSION, path=str(plan.table_path)))
+            return False
+        questions = []
+        shadowing = getattr(plan, "shadowing", None)
+        if shadowing is not None:
+            key = "kicad.plan_shadowing_global" if project_library else "kicad.plan_shadowing_project"
+            questions.append(("Libreria KiCadGen già registrata", self.i18n.tr(
+                key, table=str(shadowing.table_path), library=shadowing.library, uri=shadowing.uri)))
+        if getattr(plan, "kicad_open", False):
+            questions.append(("Progetto aperto in KiCad", self.i18n.tr(
+                "kicad.plan_kicad_open", files="\n".join(map(str, plan.open_locks)))))
+        for title, text in questions:
+            answer = QMessageBox.question(
+                self, self.i18n.text(title), text + "\n\n" + self.i18n.text("Procedere comunque?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        return True
+
     def _install_kicad_library(
             self, destination: Path, *, project_library: bool,
             table_path: Path | None = None, table_version: str | None = None,
@@ -13513,11 +13648,17 @@ class MainWindow(QMainWindow):
         try:
             plan = plan_component_install(
                 artifacts, destination, library_name="KiCadGen",
-                project_library=project_library, table_path=table_path)
-        except KiCadLibraryError as exc:
+                project_library=project_library, table_path=table_path,
+                other_table_path=self._other_scope_table(project_library),
+                kicad_version=table_version)
+        except (KiCadLibraryError, OSError) as exc:
+            # OSError: an unreachable destination fails in resolve()/is_dir()
+            # before any check of the library (review 2026-11-03).
             QMessageBox.warning(
                 self, self.i18n.text("Installazione KiCad non riuscita"),
                 self._kicad_error_text(exc))
+            return
+        if not self._confirm_install_plan_warnings(plan, project_library):
             return
         overwrite = bool(plan.replaced or plan.removed)
         if overwrite or not project_library:
@@ -13542,6 +13683,7 @@ class MainWindow(QMainWindow):
                     artifacts, destination, library_name="KiCadGen",
                     project_library=project_library, table_path=table_path,
                     overwrite=overwrite, replace_library_entry=replace_entry,
+                    kicad_version=table_version,
                 )
                 break
             except KiCadLibraryError as exc:
@@ -13558,6 +13700,10 @@ class MainWindow(QMainWindow):
                     question = ("kicad.confirm_enable_library_entry"
                                 if code == "library_entry_disabled"
                                 else "kicad.confirm_replace_library_entry")
+                    if (getattr(exc, "context", None) or {}).get("type_changes"):
+                        # The row's type becomes «KiCad» and its options are
+                        # cleared: the question says so (review 2026-11-03).
+                        question += "_type"
                     answer = QMessageBox.question(
                         self, self.i18n.text("Libreria KiCadGen già registrata"),
                         self.i18n.tr(question, **dict(getattr(exc, "context", {}) or {})),
@@ -13590,6 +13736,9 @@ class MainWindow(QMainWindow):
         if removed:
             message += "\n\n" + self.i18n.tr(
                 "kicad.result_removed", files="\n".join(map(str, removed)))
+        rollback_left = getattr(result, "rollback_left", None)
+        if rollback_left:
+            message += "\n\n" + self.i18n.tr("kicad.result_rollback_left", path=str(rollback_left))
         # A stable code is persisted, translated only when shown (B2).
         kind = "project_library" if project_library else "global_library"
         if record_kicad_export(component=artifacts.name, kind=kind,
@@ -13867,9 +14016,13 @@ class MainWindow(QMainWindow):
             token = token.strip()
             if not token:
                 continue
-            if not token.isdigit():
-                raise ValueError(tx("\"{token}\" in \"Pin popolati\" non e' un numero valido.", token=token))
-            pins.add(int(token))
+            # A drawing's label («A1») is a pin too (review 2026-11-03);
+            # digits-only labels stay ints, as the automatic numbering.
+            try:
+                pins.add(_pin_map_key(token))
+            except ValueError:
+                raise ValueError(tx("\"{token}\" in \"Pin popolati\" non e' un numero valido.",
+                                    token=token)) from None
         return pins or None
 
     def _current_params(self) -> PinHeaderParams:
@@ -13964,7 +14117,7 @@ class MainWindow(QMainWindow):
             # envelope and offset are derived from there, not from the hand-typed fields.
             # Only sizes, drill and thickness are read: never the photo bodies.
             module = self._current_castellated_params(photo_components=False)
-            return Body3DParams(
+            body = Body3DParams(
                 length_mm=module.body_length,
                 width_mm=module.body_width,
                 height_mm=self.field_body_height.value(),
@@ -13976,6 +14129,12 @@ class MainWindow(QMainWindow):
                 pin_color_hex=self.field_pin_color.text().strip(),
                 **self._pins_3d_kwargs(),
             )
+            # The total height builds the estimated «Componenti» block only
+            # when it is not the placeholder (review 2026-11-03): same declared
+            # heuristic as `_body_size_declared` on project load (a documented
+            # 5 mm reads as undeclared), read by step_generator.
+            body.height_declared = self.field_body_height.value() != PLACEHOLDER_BODY_MM[2]
+            return body
         if not self._matrix_body_declared():
             # CONTRACT CHANGED 2026-10-15 (audit item 4): like the package
             # path above, a pin matrix without documented body dimensions
@@ -14449,7 +14608,11 @@ class MainWindow(QMainWindow):
             return False
         if automatic:
             self._automatic_3d_deferred_reason = ""
-        if footprint_only and not (self._acquisition_completed or self._project_has_footprint()):
+        # The rewrite of an applied edit has the same precondition whatever it
+        # writes: a body edit makes it a full generation, which must not start
+        # where a pad edit would be refused (review 2026-11-03, M3).
+        if ((footprint_only or self._fp_rewrite_flushing)
+                and not (self._acquisition_completed or self._project_has_footprint())):
             self._set_mounting_error(self.i18n.text("Analizza prima i documenti del componente."))
             return False
 
@@ -15051,6 +15214,8 @@ class MainWindow(QMainWindow):
         self.preview_view.pad_context_requested.connect(self._edit_preview_pad)
         self.preview_view.text_context_requested.connect(self._footprint_text_context_menu)
         self.preview_view.background_context_requested.connect(self._footprint_background_context_menu)
+        self.preview_view.dimension_context_requested.connect(self._on_dimension_context)
+        self.preview_view.dimension_edit_requested.connect(self._edit_body_dimension)
         self.preview_view.setMinimumHeight(500)
         # The footprint is drawn at a relatively high scene scale (20 px/mm).
         # Without these hints circles, square-pad corners and small pin labels
@@ -15635,15 +15800,18 @@ class MainWindow(QMainWindow):
     def _footprint_edit_state(self) -> dict:
         """@brief The footprint edits the preview shows now (the draft), by reference.
 
-        @return {"drawings", "texts", "pad_overrides", "package_pins"}; the
-            last is the list of the package pads, or None without a package.
+        @return {"drawings", "texts", "pad_overrides", "package_pins",
+            "package_body"}; "package_pins" is the list of the package pads
+            and "package_body" its (length, width) in mm (`_package_body`),
+            both None without a package.
         @note Not copied: callers that keep it deep-copy it.
         """
         package = getattr(self, "package_geometry", None)
         return {"drawings": self.footprint_drawings,
                 "texts": self.footprint_text_positions,
                 "pad_overrides": self.header_pad_overrides,
-                "package_pins": list(package.pins) if package is not None else None}
+                "package_pins": list(package.pins) if package is not None else None,
+                "package_body": _package_body(package)}
 
     def _sync_footprint_draft_package(self) -> None:
         """@brief Rebase the draft when an analysis replaced the package object.
@@ -15664,15 +15832,23 @@ class MainWindow(QMainWindow):
         if applied is not None:
             dropped = (old_package is not None and applied["package_pins"] is not None
                        and list(old_package.pins) != list(applied["package_pins"]))
+            body_dropped = (old_package is not None and applied.get("package_body") is not None
+                            and _package_body(old_package) != applied.get("package_body"))
             applied["package_pins"] = list(package.pins) if package is not None else None
+            applied["package_body"] = _package_body(package)
+            # Said, never silent: the edits belonged to the package the
+            # analysis replaced, each kind named (review 2026-11-03, L10). The
+            # KiCad tab, the recovery file and the buttons follow on the next
+            # turn (this runs inside state reads, e.g. a project save).
             if dropped:
-                # Said, never silent: the pad edits belonged to the package
-                # the analysis replaced. The KiCad tab, the recovery file and
-                # the buttons follow on the next turn (this runs inside
-                # state reads, e.g. a project save).
                 self._append_log(self.i18n.text(
                     "Footprint: una nuova analisi ha sostituito il package; le modifiche "
                     "ai pad non applicate sono state scartate."))
+            if body_dropped:
+                self._append_log(self.i18n.text(
+                    "Footprint: una nuova analisi ha sostituito il package; la modifica "
+                    "del corpo non applicata è stata scartata."))
+            if dropped or body_dropped:
                 QTimer.singleShot(0, self._after_footprint_package_rebase)
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
         self._refresh_footprint_undo_buttons()
@@ -15722,6 +15898,9 @@ class MainWindow(QMainWindow):
         if (package is not None and pins is not None and list(pins) != list(package.pins)
                 and [p.number for p in pins] == [p.number for p in package.pins]):
             self._rebind_package_pins(pins)
+        body = state.get("package_body")
+        if self.package_geometry is not None and body is not None and body != _package_body(self.package_geometry):
+            self._rebind_package_body(body)
 
     def _rebind_package_pins(self, pins) -> None:
         """@brief Give the package new pads by REBINDING it to a copy, never by mutating it.
@@ -15735,8 +15914,29 @@ class MainWindow(QMainWindow):
             parameters the 2D preview draws), so it is not mistaken for a
             package replaced by an analysis (`_sync_footprint_draft_package`).
         """
+        self._rebind_package(pins=list(pins))
+
+    def _rebind_package_body(self, body) -> None:
+        """@brief Give the package a new body (length, width) in mm by rebinding it to a copy.
+
+        @param body (length, width) in mm, along the package's own axes.
+        @note Same rebinding rule as `_rebind_package_pins`. The pads keep
+            their coordinates: with origin «body_center» they are relative to
+            the body centre, which stays where it is (the body grows or
+            shrinks around it); with another origin the centre is estimated
+            from the pad field (`body_frame_offset`), which does not depend
+            on the body size either.
+        """
+        length, width = body
+        self._rebind_package(body_length_mm=float(length), body_width_mm=float(width))
+
+    def _rebind_package(self, **changes) -> None:
+        """@brief Replace the package by a copy with `changes` wherever the window names the same object.
+
+        @param changes `PackageGeometry` fields to change (pins, body sizes).
+        """
         old = self.package_geometry
-        new = replace(old, pins=list(pins))
+        new = replace(old, **changes)
         self.package_geometry = new
         if getattr(self, "_fp_draft_package", None) is old:
             self._fp_draft_package = new
@@ -15752,7 +15952,8 @@ class MainWindow(QMainWindow):
         """@brief Change fields of the footprint draft, with undo, and show it.
 
         @param changes Subset of the edit-state keys with their new values
-            ("package_pins": the full new pad list of the package).
+            ("package_pins": the full new pad list of the package;
+            "package_body": its new (length, width) in mm).
         @param history "push" records the previous state for undo and clears
             redo; "none" records nothing.
         @return True.
@@ -15775,6 +15976,8 @@ class MainWindow(QMainWindow):
                 self.header_pad_overrides = value
             elif key == "package_pins" and self.package_geometry is not None and value is not None:
                 self._rebind_package_pins(value)
+            elif key == "package_body" and self.package_geometry is not None and value is not None:
+                self._rebind_package_body(value)
         if history == "push":
             self._fp_drawings_undo.append(before)
             self._fp_drawings_redo.clear()
@@ -15863,8 +16066,9 @@ class MainWindow(QMainWindow):
         self._cancel_footprint_drawing()
         applied = self._fp_applied
         current = self._footprint_edit_state()
+        body_edit = current["package_body"] != applied.get("package_body")
         pad_edit = (current["pad_overrides"] != applied["pad_overrides"]
-                    or current["package_pins"] != applied["package_pins"])
+                    or current["package_pins"] != applied["package_pins"] or body_edit)
         self._fp_applied = None
         was_stale = self._fp_file_stale
         if folder is not None:
@@ -15883,7 +16087,7 @@ class MainWindow(QMainWindow):
         self._refresh_footprint_undo_buttons()
         self._refresh_footprint_draft_notice()
         if folder is None:
-            self._schedule_footprint_rewrite(pad_edit=pad_edit)
+            self._schedule_footprint_rewrite(pad_edit=pad_edit, body_edit=body_edit)
         return True
 
     def discard_footprint_draft(self) -> None:
@@ -15961,6 +16165,15 @@ class MainWindow(QMainWindow):
         """
         if not getattr(self, "_fp_rewrite_dirty", False):
             return
+        if getattr(self, "_fp_rewrite_body_edit", False):
+            # Leaving must not wait for a FreeCAD run (review 2026-11-03, M2):
+            # only the footprint is rewritten now; the STEP of the old body is
+            # caught by the body-fingerprint gate of the KiCad tab
+            # (`_step_body_fingerprint`), whose remedy regenerates it.
+            self._fp_rewrite_body_edit = False
+            self._append_log(self.i18n.text(
+                "Footprint: corpo modificato, footprint riscritto; il modello STEP va "
+                "rigenerato alla prossima generazione."))
         self._flush_footprint_rewrite()
         worker = getattr(self, "_worker", None)
         if worker is not None and worker.isRunning():
@@ -15993,6 +16206,9 @@ class MainWindow(QMainWindow):
         self.header_pad_overrides = deepcopy(applied["pad_overrides"])
         if self.package_geometry is not None and applied["package_pins"] is not None:
             self.package_geometry = replace(self.package_geometry, pins=list(applied["package_pins"]))
+        if self.package_geometry is not None and applied.get("package_body") is not None:
+            length, width = applied["package_body"]
+            self.package_geometry = replace(self.package_geometry, body_length_mm=length, body_width_mm=width)
         # The swapped package is not a new package: the draft keeps its own.
         draft_package = self._fp_draft_package
         swapped = self.package_geometry
@@ -16031,6 +16247,16 @@ class MainWindow(QMainWindow):
         from ..services.footprint_draft import KEPT_DRAFTS_FILE
         return self._footprint_recovery_path(KEPT_DRAFTS_FILE)
 
+    def _applied_footprint_json(self) -> dict:
+        """@brief JSON form of the applied footprint state: the baseline that completes old kept drafts.
+
+        @return `_footprint_state_json` of `_applied_footprint_state`.
+        @note A kept draft written before a state key existed lacks it; the
+            baseline fills it, so an unchanged old draft is not offered for
+            recovery for ever (review 2026-11-03, L8).
+        """
+        return self._footprint_state_json(self._applied_footprint_state())
+
     @staticmethod
     def _footprint_state_json(state: dict) -> dict:
         """@brief JSON form of a footprint edit state (lists, pad mappings), for the recovery file.
@@ -16047,6 +16273,8 @@ class MainWindow(QMainWindow):
             "texts": text_positions_json(state["texts"]),
             "pad_overrides": state["pad_overrides"],
             "package_pins": [asdict(pin) for pin in pins] if pins is not None else None,
+            "package_body": (list(state["package_body"]) if state.get("package_body") is not None
+                             else None),
         }, ensure_ascii=False, allow_nan=False))
 
     def _footprint_state_from_json(self, data: dict) -> dict:
@@ -16070,10 +16298,31 @@ class MainWindow(QMainWindow):
                 rebuilt = None
             if rebuilt is not None and [p.number for p in rebuilt.pins] == [p.number for p in package.pins]:
                 pins = list(rebuilt.pins)
+        # A body size read back is kept only when the open package HAS a body
+        # (the editor never gives one to a body-less package: a kept draft of
+        # an earlier analysis must not bring an old body back, review
+        # 2026-11-03 M1), the sizes are within MIN_LENGTH_MM..MAX_LENGTH_MM as
+        # the interactive edit requires, and the package still validates;
+        # else the open package's body stays.
+        body = _package_body(package)
+        raw_body = data.get("package_body")
+        if body is not None and isinstance(raw_body, list) and len(raw_body) == 2:
+            try:
+                sizes = (float(raw_body[0]), float(raw_body[1]))
+                candidate = None
+                if all(MIN_LENGTH_MM <= value <= MAX_LENGTH_MM for value in sizes):
+                    candidate = replace(package, body_length_mm=sizes[0], body_width_mm=sizes[1])
+                    candidate.validate()
+            except (TypeError, ValueError, ArithmeticError):
+                # ArithmeticError: a huge JSON integer overflows float() (L9).
+                candidate = None
+            if candidate is not None:
+                body = _package_body(candidate)
         return {"drawings": validate_footprint_drawings(data.get("drawings")),
                 "texts": self._load_footprint_text_positions(data.get("texts")),
                 "pad_overrides": self._valid_pad_overrides(data.get("pad_overrides")),
-                "package_pins": pins}
+                "package_pins": pins,
+                "package_body": body}
 
     def _keep_offered_footprint_draft(self, extra: dict | None = None) -> bool:
         """@brief Move the offered crash draft (and `extra`) into the kept-drafts file.
@@ -16099,7 +16348,7 @@ class MainWindow(QMainWindow):
             return True
         from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
         try:
-            if not save_kept_drafts(path, drafts + load_kept_drafts(path)):
+            if not save_kept_drafts(path, drafts + load_kept_drafts(path, self._applied_footprint_json())):
                 return False
         except (OSError, TypeError, ValueError) as exc:
             self._append_log(self.i18n.text(
@@ -16177,7 +16426,7 @@ class MainWindow(QMainWindow):
             if main is not None and main != current:
                 self._fp_recoverable, self._fp_recoverable_source = main, "main"
                 return
-            for kept in load_kept_drafts(self._footprint_kept_path()):
+            for kept in load_kept_drafts(self._footprint_kept_path(), self._applied_footprint_json()):
                 if kept != current:
                     self._fp_recoverable, self._fp_recoverable_source = kept, "kept"
                     return
@@ -16210,7 +16459,8 @@ class MainWindow(QMainWindow):
             return True
         from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
         try:
-            return save_kept_drafts(path, [d for d in load_kept_drafts(path) if d != draft])
+            return save_kept_drafts(path, [d for d in load_kept_drafts(path, self._applied_footprint_json())
+                                           if d != draft])
         except (OSError, TypeError, ValueError):
             self._append_log(self.i18n.text(
                 "Bozza non salvata: verifica lo spazio e i permessi della cartella."))
@@ -16295,7 +16545,8 @@ class MainWindow(QMainWindow):
         self._fp_handle_origin = None
         self._fp_text_drag = None
 
-    def _schedule_footprint_rewrite(self, immediate: bool = False, pad_edit: bool = False) -> None:
+    def _schedule_footprint_rewrite(self, immediate: bool = False, pad_edit: bool = False,
+                                    body_edit: bool = False) -> None:
         """@brief Mark the .kicad_mod as stale and rewrite it as soon as nothing else runs.
 
         @param immediate True tries the rewrite now (an edit confirmed in a
@@ -16305,6 +16556,8 @@ class MainWindow(QMainWindow):
             always did (it rewrites the footprint of an acquired component
             even before a .kicad_mod exists); False (drawings, text
             positions) rewrites only a .kicad_mod already in the project.
+        @param body_edit True when the package body size changed: the rewrite
+            is a full generation (footprint AND STEP body), not footprint-only.
 
         @note Every saved edit of the footprint (drawings, text positions,
             pad overrides) calls this. The «footprint dirty» flag is set here
@@ -16321,6 +16574,7 @@ class MainWindow(QMainWindow):
         """
         self._fp_rewrite_dirty = True
         self._fp_rewrite_pad_edit = self._fp_rewrite_pad_edit or pad_edit
+        self._fp_rewrite_body_edit = getattr(self, "_fp_rewrite_body_edit", False) or body_edit
         if immediate:
             self._flush_footprint_rewrite()
         else:
@@ -16330,6 +16584,7 @@ class MainWindow(QMainWindow):
         """@brief Forget the pending .kicad_mod rewrite (covered, attempted or obsolete)."""
         self._fp_rewrite_dirty = False
         self._fp_rewrite_pad_edit = False
+        self._fp_rewrite_body_edit = False
 
     def _retry_footprint_rewrite(self) -> None:
         """@brief Queue one attempt of the pending .kicad_mod rewrite, if any.
@@ -16394,6 +16649,7 @@ class MainWindow(QMainWindow):
             # leaving the project marks it stale (`_can_leave_project`).
             return
         pad_edit = self._fp_rewrite_pad_edit
+        body_edit = getattr(self, "_fp_rewrite_body_edit", False)
         self._clear_footprint_rewrite()
         if not pad_edit and not self._project_has_footprint():
             return
@@ -16401,7 +16657,8 @@ class MainWindow(QMainWindow):
         # about, and not written (`_generate` works on the applied state).
         self._fp_rewrite_flushing = True
         try:
-            started = self._generate(footprint_only=True)
+            # A new body size changes the STEP model as well as the outlines.
+            started = self._generate(footprint_only=not body_edit)
         finally:
             self._fp_rewrite_flushing = False
         if started is False and self._project_has_footprint():
@@ -17655,6 +17912,7 @@ class MainWindow(QMainWindow):
         if view is None:
             return
         view.hover.clear()
+        view.forget_dimension_hover()
         if view.gestures is not None:
             view.gestures.forget_items()
 
@@ -17690,6 +17948,8 @@ class MainWindow(QMainWindow):
             return DragPlan("stepped", cursor=Qt.CursorShape.SizeAllCursor)
         if target[0] == "pad" and len(target) == 2:
             return self._begin_pad_drag(int(target[1]), point)
+        if target[0] == "body" and len(target) == 2:
+            return self._begin_body_drag(str(target[1]), point)
         return None
 
     def gesture_step(self, target: tuple, point: QPointF) -> None:
@@ -17702,6 +17962,8 @@ class MainWindow(QMainWindow):
             self._on_footprint_handle_dragged(int(target[1]), int(target[2]), point.x(), point.y())
         elif target[0] == "pad":
             self._step_pad_drag(point)
+        elif target[0] == "body":
+            self._step_body_drag(point)
 
     def gesture_end(self, target: tuple, last, commit: bool) -> None:
         """@brief GestureHost: the drag ended; commit the drop once, or undo the picture of a cancel.
@@ -17737,6 +17999,252 @@ class MainWindow(QMainWindow):
             return
         if target[0] == "pad":
             self._end_pad_drag(commit)
+        elif target[0] == "body":
+            self._end_body_drag(commit)
+
+    # ── Package body edited with the mouse (user, 2026-11-03) ──────────
+
+    def _body_outline_editable(self, package) -> bool:
+        """@brief Whether the package body outline can be moved and resized with the mouse.
+
+        @param package The drawn `PackageGeometry`.
+        @return True for a declared body square to the screen
+            (`_body_dimensions_editable`), whose origin is the body centre and
+            whose pads are the footprint's own (`_package_pads_movable`).
+        @note With an origin other than «body_center» the body centre is only
+            ESTIMATED from the pad field (`body_frame_offset`): a body moved
+            there could not be stored, so the outline stays still and its
+            tooltip says why.
+        """
+        return (self._body_dimensions_editable(package) and package.origin == "body_center"
+                and self._package_pads_movable())
+
+    def _add_body_handles(self, outline, corners, mm_to_px: float) -> None:
+        """@brief Tag the body outline as movable and add its eight hidden resize handles.
+
+        @param outline The drawn outline polygon item.
+        @param corners Body corners (mm) as drawn.
+        @param mm_to_px Scene px per mm.
+        @note The handles are the drawings' screen-constant squares
+            (`_screen_handle`), shown by the view while the pointer is near
+            the outline (`FootprintView._report_body_hover`).
+        """
+        from .footprint_view import BODY_PART_ROLE
+        outline.setData(BODY_PART_ROLE, "move")
+        outline.setToolTip(self.i18n.text(
+            "Contorno del corpo: trascina il bordo per spostarlo, le maniglie per ridimensionarlo "
+            "(Maiusc durante il trascinamento: simmetrico dal centro)."))
+        left, right = min(x for x, _ in corners), max(x for x, _ in corners)
+        top, bottom = min(y for _, y in corners), max(y for _, y in corners)
+        middle_x, middle_y = (left + right) / 2, (top + bottom) / 2
+        spots = {"nw": (left, top), "n": (middle_x, top), "ne": (right, top), "e": (right, middle_y),
+                 "se": (right, bottom), "s": (middle_x, bottom), "sw": (left, bottom), "w": (left, middle_y)}
+        hint = self.i18n.text("Maniglia del corpo: trascinala per ridimensionarlo.")
+        for part, (x_mm, y_mm) in spots.items():
+            handle = _screen_handle(self.preview_scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
+            # Not a drawing handle: the drawings' hover refresh removes every
+            # item tagged 0x48474F, which would take these away too.
+            handle.setData(0x48474F, None)
+            handle.setData(BODY_PART_ROLE, part)
+            handle.setToolTip(hint)
+            handle.setVisible(False)
+
+    def _begin_body_drag(self, part: str, point: QPointF):
+        """@brief Plan a move or resize of the package body.
+
+        @param part "move" or a compass part of `footprint_view.BODY_HANDLE_PARTS`.
+        @param point Scene position (px) of the press.
+        @return A stepped `DragPlan`, or None to refuse (no editable body).
+        """
+        from .canvas_gestures import DragPlan
+        package = getattr(self, "package_geometry", None)
+        if package is None or not self._body_outline_editable(package):
+            return None
+        length, width = _package_body(package)
+        quarter = round(float(package.orientation_deg or 0.0) / 90.0) % 2
+        screen_l, screen_w = (length, width) if quarter == 0 else (width, length)
+        rect = (-screen_l / 2, -screen_w / 2, screen_l / 2, screen_w / 2)
+        self._fp_body_drag = {"part": part, "press": QPointF(point), "rect": rect, "new": rect,
+                              "package": package, "ghost": None, "label": None}
+        cursor = (Qt.CursorShape.SizeAllCursor if part == "move" else
+                  Qt.CursorShape.SizeVerCursor if part in ("n", "s") else
+                  Qt.CursorShape.SizeHorCursor if part in ("e", "w") else
+                  Qt.CursorShape.SizeFDiagCursor if part in ("nw", "se") else Qt.CursorShape.SizeBDiagCursor)
+        return DragPlan("stepped", cursor=cursor)
+
+    def _magnet_point(self, target: QPointF) -> tuple:
+        """@brief Where the grid magnet puts a dragged point: (point, snap state).
+
+        @param target Scene position (px) the pointer carries the point to.
+        @return The point and "main", "dot" or "free": a node of the visible
+            main grid within PAD_GRID_MAGNET_PX screen px wins, then a visible
+            fine-grid dot, else the point rounded to 0.01 mm (the pads' rule,
+            `_pad_drag_delta`).
+        """
+        from .footprint_view import PAD_GRID_MAGNET_PX
+        node = self.preview_view.snap_to_main_grid(target.x(), target.y())
+        scale = max(abs(self.preview_view.transform().m11()), 1e-9)
+        if node is not None and math.hypot(node[0] - target.x(), node[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
+            return QPointF(node[0], node[1]), "main"
+        if node is not None and self.preview_view.fine_dots_visible():
+            dot = self.preview_view.snap_to_grid(target.x(), target.y(), 0.0)
+            if math.hypot(dot[0] - target.x(), dot[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
+                return QPointF(dot[0], dot[1]), "dot"
+        fine = 0.01 * _FP_PREVIEW_MM_TO_PX
+        free = QPointF(round(target.x() / fine) * fine, round(target.y() / fine) * fine)
+        return free, self._pad_centre_snap(free)
+
+    @staticmethod
+    def _body_drag_rect(rect, part: str, moved: tuple, symmetric: bool) -> tuple:
+        """@brief The body rectangle (mm, screen frame) a drag of `part` gives.
+
+        @param rect (left, top, right, bottom) at the press.
+        @param part "move" or a compass part.
+        @param moved The grabbed feature's new position (x, y) in mm:
+            the body centre for "move", the handle itself otherwise.
+        @param symmetric True (Shift held): the opposite side moves the other
+            way, so the centre stays.
+        @return (left, top, right, bottom), each side at least MIN_LENGTH_MM long.
+        """
+        left, top, right, bottom = rect
+        if part == "move":
+            dx, dy = moved[0] - (left + right) / 2, moved[1] - (top + bottom) / 2
+            return (left + dx, top + dy, right + dx, bottom + dy)
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        if "w" in part:
+            left = min(moved[0], right - MIN_LENGTH_MM)
+            if symmetric:
+                right = max(2 * cx - left, cx + MIN_LENGTH_MM / 2)
+                left = 2 * cx - right
+        if "e" in part:
+            right = max(moved[0], left + MIN_LENGTH_MM)
+            if symmetric:
+                left = min(2 * cx - right, cx - MIN_LENGTH_MM / 2)
+                right = 2 * cx - left
+        if "n" in part:
+            top = min(moved[1], bottom - MIN_LENGTH_MM)
+            if symmetric:
+                bottom = max(2 * cy - top, cy + MIN_LENGTH_MM / 2)
+                top = 2 * cy - bottom
+        if "s" in part:
+            bottom = max(moved[1], top + MIN_LENGTH_MM)
+            if symmetric:
+                top = min(2 * cy - bottom, cy - MIN_LENGTH_MM / 2)
+                bottom = 2 * cy - top
+        return (left, top, right, bottom)
+
+    @staticmethod
+    def _body_part_point(rect, part: str) -> tuple:
+        """The position (mm) of the grabbed feature of `rect`: its centre for "move", the handle otherwise."""
+        left, top, right, bottom = rect
+        if part == "move":
+            # Tested first: the letters of «move» would read as the «e» side.
+            return ((left + right) / 2, (top + bottom) / 2)
+        x = left if "w" in part else right if "e" in part else (left + right) / 2
+        y = top if "n" in part else bottom if "s" in part else (top + bottom) / 2
+        return (x, y)
+
+    def _step_body_drag(self, point: QPointF) -> None:
+        """@brief Follow the pointer with a dashed ghost of the body and its live size.
+
+        @param point Scene position (px) of the pointer.
+        @note The package changes once, at the drop (`_end_body_drag`); the
+            ghost and the size label are view-only items.
+        """
+        drag = getattr(self, "_fp_body_drag", None)
+        if drag is None:
+            return
+        from PyQt6.QtWidgets import QApplication
+        px = _FP_PREVIEW_MM_TO_PX
+        anchor = self._body_part_point(drag["rect"], drag["part"])
+        target = QPointF(anchor[0] * px, anchor[1] * px) + (point - drag["press"])
+        snapped, _snap = self._magnet_point(target)
+        symmetric = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+        drag["new"] = self._body_drag_rect(drag["rect"], drag["part"],
+                                           (snapped.x() / px, snapped.y() / px), symmetric)
+        left, top, right, bottom = drag["new"]
+        from .canvas_gestures import _alive
+        ghost = drag["ghost"]
+        if not _alive(ghost):
+            ghost = self.preview_scene.addRect(QRectF(), _ghost_pen(_layer_color("F.SilkS")))
+            ghost.setZValue(20)
+            drag["ghost"] = ghost
+        ghost.setRect(QRectF(left * px, top * px, (right - left) * px, (bottom - top) * px))
+        label = drag["label"]
+        if not _alive(label):
+            label = self.preview_scene.addSimpleText("")
+            label.setBrush(QBrush(QColor(_layer_color("F.SilkS"))))
+            label.setZValue(20)
+            drag["label"] = label
+        label.setText(f"{right - left:.2f} x {bottom - top:.2f} mm")
+        label.setPos(left * px, top * px - label.boundingRect().height() - 4)
+
+    def _end_body_drag(self, commit: bool) -> None:
+        """@brief A body drag ended: commit the new body once, or drop the ghost.
+
+        @param commit True on a drop, False on a cancel (Escape, Hide).
+        @note The footprint origin stays the body centre: a moved or
+            resized body therefore shifts the pads, the user drawings and the
+            placed texts by minus the centre shift, all in ONE draft step, and
+            the camera follows so nothing but the outline moves on screen.
+        """
+        drag, self._fp_body_drag = getattr(self, "_fp_body_drag", None), None
+        if drag is None:
+            return
+        from .canvas_gestures import _alive
+        for key in ("ghost", "label"):
+            item = drag[key]
+            if _alive(item) and item.scene() is not None:
+                item.scene().removeItem(item)
+        if not commit or self.package_geometry is not drag["package"]:
+            return
+        if all(abs(a - b) < 5e-4 for a, b in zip(drag["new"], drag["rect"])):
+            return
+        self._commit_body_rect(drag["new"])
+
+    def _commit_body_rect(self, rect) -> bool:
+        """@brief Make `rect` (mm, screen frame) the package body as one draft step.
+
+        @param rect (left, top, right, bottom) of the new body on screen.
+        @return True when the draft changed.
+        """
+        package = self.package_geometry
+        left, top, right, bottom = (round(value, 6) for value in rect)
+        screen_l, screen_w = right - left, bottom - top
+        if not (MIN_LENGTH_MM <= screen_l <= MAX_LENGTH_MM and MIN_LENGTH_MM <= screen_w <= MAX_LENGTH_MM):
+            self._draw_feedback_toast(self.i18n.text("Quota scartata."), self.i18n.text(
+                "Il corpo deve misurare fra {low} e {high} mm.").format(low=MIN_LENGTH_MM, high=MAX_LENGTH_MM))
+            return False
+        quarter = round(float(package.orientation_deg or 0.0) / 90.0) % 2
+        body = (screen_l, screen_w) if quarter == 0 else (screen_w, screen_l)
+        cx, cy = (left + right) / 2, (top + bottom) / 2
+        sx, sy = _source_frame_delta(package, -cx, -cy)
+        pins = [replace(pin, x_mm=round(float(pin.x_mm) + sx, 6) + 0.0,
+                        y_mm=round(float(pin.y_mm) + sy, 6) + 0.0) for pin in package.pins]
+        try:
+            build_package(replace(package, pins=pins, body_length_mm=body[0], body_width_mm=body[1]))
+        except (TypeError, ValueError) as exc:
+            self._draw_feedback_toast(self.i18n.text("Quota scartata."), str(exc))
+            return False
+        changes = {"package_body": body}
+        if (round(cx, 6), round(cy, 6)) != (0.0, 0.0):
+            changes = {"package_pins": pins, "package_body": body,
+                       "drawings": _shifted_drawings(self.footprint_drawings, -cx, -cy),
+                       "texts": {key: (round(x - cx, 6) + 0.0, round(y - cy, 6) + 0.0)
+                                 for key, (x, y) in self.footprint_text_positions.items()}}
+        self._append_log(self.i18n.text("Footprint: corpo portato a {length:.2f} x {width:.2f} mm "
+                                        "(quota scritta a mano, pad fermi).").format(
+                                            length=body[0], width=body[1]))
+        changed = self._edit_footprint_draft(changes)
+        if changed and "package_pins" in changes:
+            # The origin follows the body centre: scroll by the pads' shift so
+            # they stay where they were on screen.
+            view = self.preview_view
+            transform = view.transform()
+            hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
+            hbar.setValue(hbar.value() + round(-cx * _FP_PREVIEW_MM_TO_PX * transform.m11()))
+            vbar.setValue(vbar.value() + round(-cy * _FP_PREVIEW_MM_TO_PX * transform.m22()))
+        return changed
 
     def _begin_pad_drag(self, index: int, point: QPointF):
         """@brief Select the pressed package pad and plan the drag of the selected pads.
@@ -17901,20 +18409,9 @@ class MainWindow(QMainWindow):
             is always free. The other selected pads move by the same
             displacement, keeping their relative positions.
         """
-        from .footprint_view import PAD_GRID_MAGNET_PX
         drag = self._fp_pad_drag
-        target = drag["anchor"] + (point - drag["press"])
-        node = self.preview_view.snap_to_main_grid(target.x(), target.y())
-        scale = max(abs(self.preview_view.transform().m11()), 1e-9)
-        if node is not None and math.hypot(node[0] - target.x(), node[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
-            return QPointF(node[0], node[1]) - drag["anchor"], "main"
-        if node is not None and self.preview_view.fine_dots_visible():
-            dot = self.preview_view.snap_to_grid(target.x(), target.y(), 0.0)
-            if math.hypot(dot[0] - target.x(), dot[1] - target.y()) * scale <= PAD_GRID_MAGNET_PX:
-                return QPointF(dot[0], dot[1]) - drag["anchor"], "dot"
-        fine = 0.01 * _FP_PREVIEW_MM_TO_PX
-        free = QPointF(round(target.x() / fine) * fine, round(target.y() / fine) * fine)
-        return free - drag["anchor"], self._pad_centre_snap(free)
+        snapped, snap = self._magnet_point(drag["anchor"] + (point - drag["press"]))
+        return snapped - drag["anchor"], snap
 
     def _step_pad_drag(self, point: QPointF) -> None:
         """@brief The pads follow the pointer; the crosshair turns green on a node, light blue on a dot, orange off the grid.
@@ -18604,13 +19101,78 @@ class MainWindow(QMainWindow):
         self.symbol_tab.set_status(message)
         self._append_log(message)
 
+    def _pad_names_from_geometry(self) -> dict:
+        """@brief Pad names read with the drawn pad geometry, by pad number.
+
+        @return {pad number (stripped text): name} of the package pads that
+            carry a name (`PinSpec.name`, read from the drawing with the pad
+            positions); {} without a package.
+        """
+        package = getattr(self, "package_geometry", None)
+        if package is None:
+            return {}
+        return {_pin_key(pin.number): _pin_name_text(pin.name)
+                for pin in package.pins if _pin_name_text(pin.name)}
+
+    def _name_pads_from_geometry(self, rows, *, log: bool = True) -> list:
+        """@brief Give the rows the pinout left unnamed the name the pad drawing gave their pad.
+
+        @param rows Pinout rows, one per footprint pad (`pinout_on_pads`),
+            modified in place.
+        @param log False to name silently (the pinout table prefills its
+            rows each time it opens; the log speaks when names are applied).
+        @return The pad numbers named this way.
+        @note User, 2026-11-03 («perché solo 3 pin nella tabella?», why only
+            3 pins in the table?): the relay's pinout table named 11, 12 and 14 while
+            the drawing reading had also named A1 «Coil+» and A2 «Coil-»; the
+            symbol got «~». A name of the pinout always wins; only an EMPTY
+            name is filled, and the log says which pads were named this way.
+        """
+        names = self._pad_names_from_geometry()
+        filled = []
+        for row in rows:
+            key = _pin_key(row.get("pin"))
+            if not _pin_name_text(row.get("name")) and names.get(key):
+                row["name"] = names[key]
+                filled.append(key)
+        if filled and log:
+            self._append_log(tx("Nomi dei pin presi dal disegno dei pad (da verificare): {pins}.",
+                                pins=", ".join(f"{pin} {names[pin]}" for pin in filled)))
+        return filled
+
+    def _pinout_rows_for_dialog(self) -> list:
+        """@brief The rows the pinout table shows: one per footprint pad, named or not.
+
+        @return The pinout rows plus a row for every electrical pad the
+            pinout does not name, prefilled from the pad drawing
+            (`_name_pads_from_geometry`) or empty to be typed; without a known
+            pad set, the pinout as it is.
+        @note Review 2026-11-03: the table listed only named rows, so an
+            unnamed pad (A1/A2 of the relay) could not even be named there.
+        """
+        rows = [dict(row) for row in self.pinout or () if isinstance(row, dict)]
+        try:
+            pads = self._settle_pad_ids()
+        except Exception:  # noqa: BLE001 - unreadable pads: the pinout as it is
+            pads = None
+        if not pads:
+            return rows
+        known = {_pin_key(row.get("pin")) for row in rows}
+        extra = [{"pin": pad, "name": ""} for pad in pads if _pin_key(pad) not in known]
+        self._name_pads_from_geometry(extra, log=False)
+        return rows + extra
+
     def _show_pinout_dialog(self) -> None:
         """@brief Edit the pinout table in a modal dialog and apply the accepted rows."""
-        dialog = PinoutDialog(self.pinout, self._component_name(), self)
+        dialog = PinoutDialog(self._pinout_rows_for_dialog(), self._component_name(), self)
         self.i18n.retranslate_widgets(dialog)
         if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
             return
-        edited = dialog.edited_pinout()
+        # A pad row added only for the table and still without a name is not
+        # a pinout entry: «no name» is what the pinout already says for it.
+        known = {_pin_key(row.get("pin")) for row in self.pinout or () if isinstance(row, dict)}
+        edited = [row for row in dialog.edited_pinout()
+                  if _pin_key(row.get("pin")) in known or _pin_name_text(row.get("name"))]
         if edited == self.pinout:
             return
         previous = self.pinout
@@ -20886,15 +21448,18 @@ class MainWindow(QMainWindow):
         # respects the explicit pin map read from the datasheet).
         xs_px, ys_px, label_bounds = [], [], []
         r = (p.pad_diameter / 2) * mm_to_px
-        for pin, x_mm, y_mm in pin_positions(p):
+        positions = list(pin_positions(p))
+        # The square pad is the pin-1 marker's pin, as in the written file
+        # (`pin_header.square_pad_pin`): «A1» on a header numbered A1, A2...
+        square = square_pad_pin([pin for pin, _x, _y in positions])
+        for pin, x_mm, y_mm in positions:
             x, y = x_mm * mm_to_px, y_mm * mm_to_px
             xs_px.append(x)
             ys_px.append(y)
             override = (p.pad_overrides or {}).get(str(pin), {})
             size = float(override.get("size", p.pad_diameter))
             radius = size * mm_to_px / 2
-            pad_shape = override.get("shape", "rect" if pin == 1 or p.pad_shape == "rect"
-                                     else "circle")
+            pad_shape = override.get("shape", default_pad_shape(p, pin, square))
             from .footprint_view import HoledEllipseItem, HoledRectItem, add_hole_outline
             if pad_shape == "rect":
                 item: QGraphicsRectItem | QGraphicsEllipseItem = HoledRectItem(
@@ -20982,6 +21547,116 @@ class MainWindow(QMainWindow):
         self._fit_preview()
         self._sync_footprint_measures(footprint)
 
+    #: Keys of the editable body dimensions of the package preview: the
+    #: horizontal (screen X) and the vertical (screen Y) side of the body.
+    BODY_DIM_X = "body_x"
+    BODY_DIM_Y = "body_y"
+
+    @staticmethod
+    def _body_dimensions_editable(package) -> bool:
+        """@brief Whether the package preview draws its body sides as editable dimensions.
+
+        @param package The drawn `PackageGeometry`.
+        @return True for a declared body turned by a multiple of 90 degrees:
+            its screen sides are then the body length and width. At another
+            angle the screen extent is the turned body's bounding box, not a
+            body side, and stays a computed «totale».
+        """
+        if not package.body_length_mm or not package.body_width_mm:
+            return False
+        turn = float(package.orientation_deg or 0.0) % 90.0
+        return min(turn, 90.0 - turn) < 1e-6
+
+    def _draw_package_dimensions(self, package, extent, body_l: float, body_w: float, mm_to_px: float) -> None:
+        """@brief Draw the outer dimensions of the package preview.
+
+        @param package The drawn `PackageGeometry`.
+        @param extent [left, top, right, bottom] in mm of body and pads together.
+        @param body_l Screen-X size of the drawn body, mm.
+        @param body_w Screen-Y size of the drawn body, mm.
+        @param mm_to_px Scene px per mm.
+        @note User, 2026-11-03: «nel caso ci fossero dei pad esterni facciamo
+            vedere l'ingombro totale come era non editabile, ma calcolato ...
+            in questo caso invece coincide con il perimetro e lasciamolo
+            editabile» (with outer pads show the computed overall size, not
+            editable; when it coincides with the outline keep it editable).
+            A declared body square to the screen gets its two sides as
+            number-only editable dimensions (`BODY_DIM_X`, `BODY_DIM_Y`). The
+            «totale» of body and pads is drawn further out only when a pad
+            reaches past the body (by more than 1e-6 mm); otherwise it would
+            repeat the body numbers. Without an editable body the «totale»
+            stays as before, computed.
+        """
+        left, top, right, bottom = [value * mm_to_px for value in extent]
+        total_h = self._dim_label("dim.total", extent[2] - extent[0])
+        total_v = self._dim_label("dim.total", extent[3] - extent[1])
+        if not self._body_dimensions_editable(package):
+            self._add_dim_h(left, right, bottom + 40, total_h)
+            self._add_dim_v(top, bottom, right + 40, total_v)
+            return
+        half_l, half_w = body_l / 2 * mm_to_px, body_w / 2 * mm_to_px
+        self._add_dim_h(-half_l, half_l, bottom + 40, f"{body_l:.2f} mm", edit_key=self.BODY_DIM_X)
+        self._add_dim_v(-half_w, half_w, right + 40, f"{body_w:.2f} mm", edit_key=self.BODY_DIM_Y)
+        body = (-body_l / 2, -body_w / 2, body_l / 2, body_w / 2)
+        if any(abs(a - b) > 1e-6 for a, b in zip(extent, body)):
+            self._add_dim_h(left, right, bottom + 80, total_h)
+            self._add_dim_v(top, bottom, right + 80, total_v)
+
+    def _on_dimension_context(self, key: str, global_pos) -> None:
+        """@brief Right click on an editable dimension: the shared element menu with «Modifica quota…».
+
+        @param key `BODY_DIM_X` or `BODY_DIM_Y`.
+        @param global_pos Screen position of the menu.
+        """
+        from . import canvas_menus
+        from .canvas_measure import EDIT_MEASURE, EDIT_MEASURE_SOURCE
+        entries = [canvas_menus.MenuEntry(EDIT_MEASURE, self.i18n.text(EDIT_MEASURE_SOURCE))]
+        menu, keys = canvas_menus.build_element_menu(self.preview_view, "", entries)
+        if canvas_menus.exec_element_menu(menu, keys, global_pos) == EDIT_MEASURE:
+            self._edit_body_dimension(key)
+
+    def _edit_body_dimension(self, key: str) -> bool:
+        """@brief «Modifica quota…» of a body side: the typed value becomes that body size, pads unmoved.
+
+        @param key `BODY_DIM_X` (screen horizontal side) or `BODY_DIM_Y` (vertical).
+        @return True when the footprint draft changed (one undo step).
+        @note The screen side is the body length at 0/180 degrees and the
+            width at 90/270 (`_body_dimensions_editable` admits only those).
+            The body stays centred where it is and the pads keep their
+            coordinates (`_rebind_package_body`). A body that no longer
+            builds (e.g. the pin-1 marker cannot be placed off the copper)
+            or a size outside MIN_LENGTH_MM..MAX_LENGTH_MM is refused with a
+            toast and changes nothing. Applied, it rewrites footprint and STEP
+            (`_schedule_footprint_rewrite(body_edit=True)`).
+        """
+        package = getattr(self, "package_geometry", None)
+        if (package is None or key not in (self.BODY_DIM_X, self.BODY_DIM_Y)
+                or not self._body_dimensions_editable(package)):
+            return False
+        length, width = _package_body(package)
+        quarter = round(float(package.orientation_deg or 0.0) / 90.0) % 2
+        # Which body side the screen side is: length along X at 0/180 degrees.
+        edits_length = (key == self.BODY_DIM_X) == (quarter == 0)
+        current = length if edits_length else width
+        value = self._ask_measure_value(current)
+        if value is None or abs(value - current) < 5e-4:
+            return False
+        value = round(float(value), 6)
+        if not MIN_LENGTH_MM <= value <= MAX_LENGTH_MM:
+            self._draw_feedback_toast(self.i18n.text("Quota scartata."), self.i18n.text(
+                "Il corpo deve misurare fra {low} e {high} mm.").format(low=MIN_LENGTH_MM, high=MAX_LENGTH_MM))
+            return False
+        body = (value, width) if edits_length else (length, value)
+        try:
+            build_package(replace(package, body_length_mm=body[0], body_width_mm=body[1]))
+        except (TypeError, ValueError) as exc:
+            self._draw_feedback_toast(self.i18n.text("Quota scartata."), str(exc))
+            return False
+        self._append_log(self.i18n.text("Footprint: corpo portato a {length:.2f} x {width:.2f} mm "
+                                        "(quota scritta a mano, pad fermi).").format(
+                                            length=body[0], width=body[1]))
+        return self._edit_footprint_draft({"package_body": body})
+
     def _draw_preview_package(self, package: PackageGeometry) -> None:
         """@brief Draw package copper shapes and drill openings as exported to KiCad."""
         self._forget_preview_items()
@@ -20998,8 +21673,10 @@ class MainWindow(QMainWindow):
             corners = pad_outline(0.0, 0.0, package.body_length_mm, package.body_width_mm,
                                   package.orientation_deg)
             body_corners = corners
-            self.preview_scene.addPolygon(
+            outline = self.preview_scene.addPolygon(
                 QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in corners]), silk_pen)
+            if self._body_outline_editable(package):
+                self._add_body_handles(outline, corners, mm_to_px)
             body_l = 2 * max(abs(x) for x, _ in corners)
             body_w = 2 * max(abs(y) for _, y in corners)
         else:
@@ -21099,8 +21776,7 @@ class MainWindow(QMainWindow):
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2,
                         origin=package_preview_grid_origin(package))
-        self._add_dim_h(left, right, bottom + 40, self._dim_label("dim.total", extent[2] - extent[0]))
-        self._add_dim_v(top, bottom, right + 40, self._dim_label("dim.total", extent[3] - extent[1]))
+        self._draw_package_dimensions(package, extent, body_l, body_w, mm_to_px)
         self._draw_footprint_texts(mm_to_px, built)
         self._draw_footprint_drawings(mm_to_px)
         self._set_footprint_origin_points(body_corners,
@@ -21146,7 +21822,16 @@ class MainWindow(QMainWindow):
         """Set an individual circular or square land in the header footprint."""
         number = str(number)
         mode = self.combo_mounting.currentData()
-        base_shape = "rect" if mode == "headers_square" or (mode == "headers" and number == "1") else "circle"
+        base_shape = "rect" if mode == "headers_square" else "circle"
+        if mode == "headers":
+            # The same pin-1 rule as the written header (`square_pad_pin`).
+            try:
+                drawn = self._preview_params()
+                pins = [pin for pin, _x, _y in pin_positions(drawn)] if isinstance(drawn, PinHeaderParams) else []
+            except Exception:  # noqa: BLE001 - no readable header: the plain «1» rule
+                pins = []
+            square = square_pad_pin(pins) if pins else "1"
+            base_shape = "rect" if pin_key(number) == square else "circle"
         current = self.header_pad_overrides.get(number, {})
         current_shape = current.get("shape", base_shape)
         # Reference pad and drill of the footprint actually drawn: in direct
@@ -21812,28 +22497,31 @@ class MainWindow(QMainWindow):
         """
         return self.i18n.tr(key, self._DIM_LABEL_FALLBACKS.get(key), value=float(value_mm))
 
-    def _add_dim_h(self, x1: float, x2: float, y: float, text: str) -> None:
+    def _add_dim_h(self, x1: float, x2: float, y: float, text: str, edit_key: str | None = None) -> None:
         """@brief Draw a horizontal dimension line with ticks and centred text.
 
         @param x1 Left end, scene px.
         @param x2 Right end, scene px.
         @param y Height of the line, scene px.
         @param text Translated label.
+        @param edit_key Key of the quantity for an editable dimension
+            (`canvas_measure.DIMENSION_EDIT_ROLE`), None for a computed one.
         @note Drawn by the shared `canvas_measure.add_dimension_line` (the
             measuring tool uses the same function): same items as before the
             factoring (tests/test_footprint_measure_parity.py).
         """
         from .canvas_measure import DIMENSION_STYLE_HORIZONTAL, add_dimension_line
         add_dimension_line(self.preview_scene, (x1, y), (x2, y), text, DIMENSION_STYLE_HORIZONTAL,
-                           normal=(0.0, 1.0))
+                           normal=(0.0, 1.0), edit_key=edit_key)
 
-    def _add_dim_v(self, y1: float, y2: float, x: float, text: str) -> None:
+    def _add_dim_v(self, y1: float, y2: float, x: float, text: str, edit_key: str | None = None) -> None:
         """@brief Draw a vertical dimension line with ticks and rotated text.
 
         @param y1 Top end, scene px.
         @param y2 Bottom end, scene px.
         @param x Abscissa of the line, scene px.
         @param text Translated label.
+        @param edit_key See `_add_dim_h`.
         @note The text runs along the dimension (as in technical drawings):
             written horizontally, the labels of nearby vertical dimensions --
             margin chain and overall dimension -- ended up on top of each
@@ -21841,7 +22529,7 @@ class MainWindow(QMainWindow):
         """
         from .canvas_measure import DIMENSION_STYLE_VERTICAL, add_dimension_line
         add_dimension_line(self.preview_scene, (x, y1), (x, y2), text, DIMENSION_STYLE_VERTICAL,
-                           normal=(1.0, 0.0))
+                           normal=(1.0, 0.0), edit_key=edit_key)
 
     def _sync_3d_pin_functions(self):
         setter = getattr(self.preview_3d, 'set_pin_functions', None)

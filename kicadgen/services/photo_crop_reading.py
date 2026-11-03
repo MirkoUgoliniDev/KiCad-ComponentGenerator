@@ -554,9 +554,9 @@ def soic_fits(leads_per_row, envelope):
     @param leads_per_row Leads in one of the two rows.
     @param envelope (long_mm, short_mm, side_uncertainty_mm) of the body, or None.
     @return True when one side of the envelope lies along the rows between
-        (n - 1) pitches (a body cannot be shorter than its lead row; a
-        body-only box may stop at the row) and (n - 1) pitches plus the
-        largest end margin, +- the photo tolerance, and the other side lies
+        (n - 1) pitches plus the smallest end margin (the shortest registered
+        body: a box, body-only or not, holds at least the body) and (n - 1)
+        pitches plus the largest end margin, +- the photo tolerance, and the other side lies
         across the rows between the narrow BODY width (a body-only box) and
         the wide lead span plus SOIC_SOLDER_ALLOWANCE_MM (a leads-included
         box with fillets), +- the tolerance; False without an envelope. The
@@ -571,7 +571,11 @@ def soic_fits(leads_per_row, envelope):
         return False
     long_mm, short_mm, tolerance = envelope
     pitches = SOIC_PITCH_MM * (leads_per_row - 1)
-    row_min, row_max = pitches, pitches + SOIC_ROW_END_MARGIN_MM[1]
+    # Along the rows even a body-only box holds the BODY, which is the lead
+    # row plus the smallest registered end margin (review 2026-11-03: the
+    # lead row alone let a 4.0 x 4.0 mm body pass as a SOIC-8, whose body is
+    # at least 3.81 + 0.9 = 4.71 mm long).
+    row_min, row_max = pitches + SOIC_ROW_END_MARGIN_MM[0], pitches + SOIC_ROW_END_MARGIN_MM[1]
     span_min, span_max = SOIC_BODY_WIDTH_MM[0], SOIC_SPAN_MM[1] + SOIC_SOLDER_ALLOWANCE_MM
     for along, across in ((long_mm, short_mm), (short_mm, long_mm)):
         if row_min - tolerance <= along <= row_max + tolerance \
@@ -846,8 +850,44 @@ def parse_observation(data):
     return out
 
 
+#: Per-side lead topology (fewer, more leads on the two opposite rows; tab
+#: observed) -> the families of LEADED_SIZES_MM with exactly that topology.
+#: Standard outline data, not a board measurement: the count alone never
+#: names a family (review 2026-11-03: «SOT-23» was written on any 1 + 2 body,
+#: a SC-70 / SOT-323 included); the measured envelope chooses among these.
+_TOPOLOGY_FAMILIES = {
+    (1, 2, False): ('SOT-23', 'SOT-323'),
+    (2, 3, False): ('SOT-23-5',),
+    (3, 3, False): ('SOT-23-6',),
+    (0, 3, True): ('SOT-89', 'SOT-223'),
+}
+
+
+def _topology_family(candidates, envelope, notes):
+    """The one family of `candidates` the measured envelope allows, else ''.
+
+    Same two tiers as leaded_family_from_evidence (strict outline first,
+    then with the solder allowance); several fitting families is an
+    ambiguity left empty, none fitting (or no envelope) a rejection noted as
+    «leaded_rejected:<names>» like soic_rejected.
+    """
+    for strict in (True, False):
+        fitting = [name for name in candidates if leaded_family_fits(name, envelope, strict)]
+        if len(fitting) == 1:
+            return fitting[0]
+        if fitting:
+            return ''
+    notes.append('leaded_rejected:' + '/'.join(candidates))
+    return ''
+
+
 def _leaded_family(leads, tab, envelope, notes):
-    """(class, package family) of a leaded package from a complete per-side count."""
+    """(class, package family) of a leaded package from a complete per-side count.
+
+    The per-side topology restricts the candidate families; the measured
+    envelope chooses one (_topology_family). Without a fitting envelope the
+    family stays empty, as for SOIC (soic_rejected).
+    """
     if any(value is None for value in leads):
         return 'semiconductor_unknown', ''
     left, right, top, bottom = leads
@@ -855,14 +895,12 @@ def _leaded_family(leads, tab, envelope, notes):
         if any(others):
             continue
         low, high = sorted(rows)
-        if (low, high) == (1, 2):
-            return 'semiconductor_unknown', 'SOT-23'
-        if (low, high) == (2, 3):
-            return 'semiconductor_unknown', 'SOT-23-5'
-        if (low, high) == (3, 3):
-            return 'ic', 'SOT-23-6'
-        if (low, high) == (0, 3) and tab:
-            return 'semiconductor_unknown', 'SOT-89'
+        if (low, high) == (0, 3) and not tab:
+            continue
+        candidates = _TOPOLOGY_FAMILIES.get((low, high, bool(tab) if (low, high) == (0, 3) else False))
+        if candidates:
+            cls = 'ic' if (low, high) == (3, 3) else 'semiconductor_unknown'
+            return cls, _topology_family(candidates, envelope, notes)
         if low == high >= 4:
             if soic_fits(low, envelope):
                 return 'ic', f'SOIC-{2 * low}'
@@ -1525,6 +1563,8 @@ def _note_text(note, envelope, kept_package):
     or '' when the row's package is now empty: the text says which.
     """
     kind, _sep, value = note.partition(':')
+    # «leaded_rejected:SOT-23/SOT-323»: the names the lead topology allows,
+    # none confirmed by the envelope; it reads as the generic rejection below.
     if kind == 'soic_rejected':
         family = f'SOIC-{2 * int(value)}'
         if envelope is None:

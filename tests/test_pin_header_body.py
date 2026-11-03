@@ -4,7 +4,7 @@ import pytest
 
 import math
 
-from kicadgen.core.footprint import FpCircle, FpLine, FpRect
+from kicadgen.core.footprint import SILK_OUTSIDE_FAB_MM, FpCircle, FpLine, FpRect
 from kicadgen.generators.pin_header import PinHeaderParams, build_pin_header
 
 
@@ -64,9 +64,14 @@ def test_body_contours_use_absolute_corner_and_leave_pads_unchanged(offset):
     # clearance of a pad (offset (-3.2, -1.1) puts the top edge 0.25 mm from
     # the pad copper, less than clearance + half stroke). Every silk piece
     # still lies on the body contour, and no ink is on copper.
-    end = (offset[0] + 12.5, offset[1] + 8.0)
+    # CONTRACT CHANGED 2026-11-03 (KLC F5.1/F5.2): the silk contour lies
+    # SILK_OUTSIDE_FAB_MM (0.11 mm, half of each stroke) outside the F.Fab
+    # body outline instead of on it.
+    g = SILK_OUTSIDE_FAB_MM
+    end = (offset[0] + 12.5 + g, offset[1] + 8.0 + g)
+    start = (offset[0] - g, offset[1] - g)
     for a, b, _ in _silk_segments(fp):
-        assert _on_outline(a, offset, end) and _on_outline(b, offset, end)
+        assert _on_outline(a, start, end) and _on_outline(b, start, end)
     _assert_silk_clear_of_pads(fp)
     assert fp.pads == original.pads
 
@@ -101,8 +106,13 @@ def test_empty_population_has_finite_courtyard(body):
     fp = build_pin_header(PinHeaderParams(rows=1, cols=1, populated_pins=set(), **extra))
     assert not fp.pads
     rect = _rect(fp, "F.CrtYd")
-    assert rect.start == ((-1.0, -1.0) if body else (-2.0, -2.0))
-    assert rect.end == ((6.0, 4.0) if body else (2.0, 2.0))
+    # CONTRACT CHANGED 2026-11-03: the default courtyard margin is the KLC
+    # connector value 0.5 mm (was 1.0 mm; user decision «adeguiamoci»);
+    # without a body and without pads the silk frames the declared grid at
+    # the silk clearance plus half a stroke (0.26 mm), and the courtyard adds
+    # the margin: 0.76 mm.
+    assert rect.start == ((-0.5, -0.5) if body else (-0.76, -0.76))
+    assert rect.end == ((5.5, 3.5) if body else (0.76, 0.76))
 
 
 def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
@@ -124,9 +134,15 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
         rows=2, cols=3, pitch=2.0, row_spacing=5.0,
         pad_diameter=1.8, margin=0.25, body_offset_x=99.0,
     ))
+    # CONTRACT CHANGED 2026-11-03: the margin is no longer also the offset
+    # of the silk frame of a body-less header. The frame is derived from the
+    # emitted pads (copper envelope + 0.2 mm clearance + half stroke), so it
+    # is whole: one rectangle, never cut, no ink on copper.
+    frame = (-0.9 - 0.26, -0.9 - 0.26), (4.9 + 0.26, 5.9 + 0.26)
+    assert [type(g).__name__ for g in fp.graphics if g.layer == "F.SilkS"].count("FpRect") == 1
     for a, b, _ in _silk_segments(fp):
-        assert _on_outline(a, (-0.25, -0.25), (4.25, 5.25))
-        assert _on_outline(b, (-0.25, -0.25), (4.25, 5.25))
+        assert _on_outline(a, *frame)
+        assert _on_outline(b, *frame)
     _assert_silk_clear_of_pads(fp)
     marker = next(g for g in fp.graphics if isinstance(g, FpCircle))
     pad1 = next(p for p in fp.pads if p.number == "1")
@@ -139,8 +155,9 @@ def test_legacy_silk_and_marker_survive_and_large_pads_fit_courtyard():
     # ${REFERENCE} text on F.Fab; without a body there is still no F.Fab OUTLINE.
     assert not any(g.layer == "F.Fab" for g in fp.graphics if type(g).__name__ != "FpText")
     courtyard = _rect(fp, "F.CrtYd")
-    assert courtyard.start == pytest.approx((-1.15, -1.15))
-    assert courtyard.end == pytest.approx((5.15, 6.15))
+    # CONTRACT CHANGED 2026-11-03: the silk frame (see above) plus the margin.
+    assert courtyard.start == pytest.approx((-1.41, -1.41))
+    assert courtyard.end == pytest.approx((5.41, 6.41))
 
 
 @pytest.mark.parametrize("field", [

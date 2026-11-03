@@ -67,7 +67,7 @@ def test_the_call_sends_the_drawing_alone_with_the_grid_and_validates_the_answer
 
 @pytest.mark.parametrize("answer", [
     "not a dict",
-    _answer([{"pin": "uno", "row": 0, "col": 0}]),          # malformed entry
+    _answer([{"pin": "pin 1", "row": 0, "col": 0}]),        # not a printed label
     # A repeated number or an index out of range can be the reader's slip
     # (two images of one pinout, rows counted from 1): discarded, no block.
     _answer([{"pin": 1, "row": 0, "col": 9}]),             # outside 8 columns

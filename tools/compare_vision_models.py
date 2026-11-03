@@ -11,14 +11,18 @@ Path exercised: `prepare_photo` -> `detect_yolo_components` ->
 `review_global_inventory`, i.e. the production pipeline. There is no second
 "trial" path that then behaves differently from the real one.
 
+Explicit --run-paid opt-in is required: without it the tool only prints the
+requests it would make and stops, before reading the key, the photo or the
+detector.
+
 Examples (from the repository root, with OPENROUTER_API_KEY in the environment):
 
   python tools/compare_vision_models.py foto.png --length 25.5 --width 18 \\
-      --model qwen/qwen3-vl-235b-a22b-instruct
+      --model qwen/qwen3-vl-235b-a22b-instruct --run-paid
 
   python tools/compare_vision_models.py foto.png --length 25.5 --width 18 \\
       --model qwen/qwen3-vl-235b-a22b-instruct \\
-      --against anthropic/claude-opus-5 --output generated/confronto-modelli
+      --against anthropic/claude-opus-5 --output generated/confronto-modelli --run-paid
 
 MIND THE COST: every model named is **one** paid request. With `--against`
 there are two. The local detection costs nothing. The answers are cached
@@ -63,7 +67,28 @@ def parse_arguments(argv=None):
                         help='Cartella per rapporto, cache e audit.')
     parser.add_argument('--instructions', default='',
                         help='Note aggiuntive passate al modello, come nell\'applicazione.')
+    parser.add_argument('--run-paid', action='store_true',
+                        help='Required to send the paid requests; without it the plan is only printed.')
     return parser.parse_args(argv)
+
+
+def paid_plan(arguments):
+    """@brief Describe the requests a run would make, without making any.
+
+    @param arguments Namespace returned by parse_arguments.
+    @return Lines naming each model, its cache folder and the request count.
+    @note Printed instead of running when --run-paid is missing, as
+        tools/experiment_render_match_ai.py refuses paid calls without it.
+        A cached comparison is replayed for free, but whether the cache
+        matches is known only after the local detection, so the opt-in is
+        asked before anything runs.
+    """
+    models = [(label, model) for label, model in (('A', arguments.model), ('B', arguments.against))
+              if model]
+    lines = [f'{label}: {model} -> 1 paid request (cache: {arguments.output / f"cache-{label}"})'
+             for label, model in models]
+    lines.append(f'Total: up to {len(models)} paid request(s); a cached answer is replayed for free.')
+    return lines
 
 
 def require_credentials():
@@ -210,10 +235,17 @@ def main(argv=None):
     @return Process exit code.
     @throws SystemExit When the key is missing, when the photograph cannot be
         calibrated, or when a model reconciles nothing.
+    @note Without --run-paid it only prints `paid_plan` and returns 0.
     @note Every model named costs one request; the cache under the output
         folder avoids paying for the same comparison again.
     """
     arguments = parse_arguments(argv)
+    if not arguments.run_paid:
+        # Nothing runs without the explicit opt-in: no key, no detection, no request.
+        for line in paid_plan(arguments):
+            print(line)
+        print('No request sent; --run-paid required.')
+        return 0
     # First of all: local detection takes minutes, and finding out only afterwards
     # that the key is missing means throwing them away.
     require_credentials()

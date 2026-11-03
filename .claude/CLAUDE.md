@@ -107,7 +107,15 @@ gloss next to them. `tests/test_documentation.py`
 the suite. Write new comments in English from the start; never translate a
 quote or reword English only to satisfy the checker.
 
-Use the project skills in `.claude/skills/` for generation and verification workflows. Use the reviewer agent for read-only audits before publishing a component.
+Use the project skills in `.claude/skills/` for generation and verification workflows;
+`generate-kicad-component` routes each area to its skill (`document-extraction-change`,
+`photo-pipeline-change`, `cad3d-change`, `canvas-shared-change`, `add-ui-text`). Read-only
+agents: `kicad-library-verifier` for one component's generated files before publishing it,
+`kicad-workflow-reviewer` for KiCad tab / packaging changes, `generality-auditor` before
+committing detection, geometry, extraction or validation fixes, `canvas-parity-reviewer` after
+canvas changes, `release-readiness-reviewer` before a release, `adversarial-reviewer` (through
+the `adversarial-review` skill) for full reviews. KiCad 9 guide notes:
+`docs/reference/kicad9-getting-started-notes.md`.
 
 # Strategia del progetto e consegna agli agenti
 
@@ -253,8 +261,15 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11145 passed,
-13 skipped and 19 subtests (2026-11-02 evening, branch `ADVANCED`, halves A 6556/9/19, B 4589/4:
+is 11358 passed,
+13 skipped and 19 subtests (2026-11-03, branch `ADVANCED`, halves A 6723/9/19, B 4635/4: full
+adversarial review by 10 read-only agents and the fix of every finding by 7 fixers on disjoint files,
+then a generality audit of the fixes; pin numbers as text end to end (A1/A2), pinout table with every
+pad, editable body dimensions and a body outline moved and resized with the mouse in the footprint
+preview, dimensions in the measures' teal, KLC layer widths and courtyards (pin header 0.5 mm,
+packages 0.25 mm), FreeCAD children in a Job Object, KiCad install warnings (shadowing, open project,
+too old KiCad), new skills document-extraction-change and cad3d-change; see HANDOFF.md 03/11; before
+that, 11145 passed, 13 skipped and 19 subtests (2026-11-02 evening, halves A 6556/9/19, B 4589/4:
 one grid only in the footprint preview (the old scene-item grid removed), a view-only drawing
 origin — body corner, centre, footprint origin or pad — with marker, grid through it and the
 symbol editor's pointer line measured from it with Y up, pad position typed from it, drill
@@ -376,8 +391,11 @@ commit `692ca95` on `main`; the latest merge of `ADVANCED` into `main` is record
 Eseguire la suite dalla radice del repository:
 
 ```powershell
-.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --basetemp=.venv/claude-test-run
+.venv/Scripts/python.exe tools/run_test_halves.py both -- --basetemp=.venv/claude-test-run
 ```
+
+(two separate processes: a single-process run can die with a native Qt/VTK
+fail-fast, HANDOFF point 113; see the `run-test-suite` skill).
 
 Usare una directory temporanea dedicata libera per ogni esecuzione. Non leggere
 o pubblicare segreti di `.env`; non committare cache, foto private o artefatti

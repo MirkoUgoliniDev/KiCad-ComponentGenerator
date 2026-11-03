@@ -39,6 +39,12 @@ KEPT_DRAFTS_FILE = '.footprint-draft-kept.json'
 #: Keys of a footprint edit state, in the order they are written.
 STATE_KEYS = ('drawings', 'texts', 'pad_overrides', 'package_pins')
 
+#: Keys added after the first recovery files were written (package_body:
+#: the body size edited from the preview's dimensions, 2026-11-03). A file
+#: without them is still a complete state: the missing key takes the
+#: applied value, so a crash draft written by an earlier version is offered.
+OPTIONAL_STATE_KEYS = ('package_body',)
+
 #: Size bound of a recovery file read back (same bound as the symbol's).
 MAX_DRAFT_BYTES = 2000000
 
@@ -81,10 +87,35 @@ def _read_json(path):
 
 
 def _valid_state(draft):
-    """The draft restricted to STATE_KEYS, or None when it is not a complete state mapping."""
+    """The draft restricted to STATE_KEYS and the OPTIONAL_STATE_KEYS it has, or None when it is not a complete state mapping."""
     if not isinstance(draft, dict) or any(key not in draft for key in STATE_KEYS):
         return None
-    return {key: draft[key] for key in STATE_KEYS}
+    return {key: draft[key] for key in STATE_KEYS + OPTIONAL_STATE_KEYS if key in draft}
+
+
+def _without_optional(state):
+    """`state` without the OPTIONAL_STATE_KEYS: the form an earlier version fingerprinted."""
+    return {key: value for key, value in state.items() if key not in OPTIONAL_STATE_KEYS}
+
+
+def complete_state(draft, baseline):
+    """@brief Fill the OPTIONAL_STATE_KEYS a draft lacks with the applied values of `baseline`.
+
+    @param draft A valid draft state (`_valid_state`), changed in place.
+    @param baseline JSON form of the applied footprint state, or None.
+    @return `draft`, for chaining.
+    @note A draft written before an optional key existed never edited it, so
+        the applied value is what it means. The current draft and the kept
+        drafts are completed the same way, so an old draft compares equal to
+        the current state when it holds no other edit (L8: a kept draft
+        without ``package_body`` never equalled the state and was offered
+        forever).
+    """
+    if isinstance(draft, dict) and isinstance(baseline, dict):
+        for key in OPTIONAL_STATE_KEYS:
+            if key not in draft and key in baseline:
+                draft[key] = baseline[key]
+    return draft
 
 
 def save_footprint_draft(path, baseline, draft):
@@ -114,10 +145,13 @@ def load_footprint_draft(path, baseline):
     data = _read_json(path)
     if not isinstance(data, dict) or data.get('version') != 1:
         return None
-    if data.get('baseline') != fingerprint(baseline):
+    if data.get('baseline') not in (fingerprint(baseline), fingerprint(_without_optional(baseline))):
         return None
     draft = _valid_state(data.get('draft'))
-    return None if draft is None or draft == baseline else draft
+    if draft is None:
+        return None
+    complete_state(draft, baseline)
+    return None if draft == baseline else draft
 
 
 def remove_footprint_draft(path):
@@ -129,10 +163,16 @@ def remove_footprint_draft(path):
     Path(path).unlink(missing_ok=True)
 
 
-def load_kept_drafts(path):
+def load_kept_drafts(path, baseline=None):
     """@brief Read the kept (displaced) crash drafts, newest first.
 
     @param path Kept-drafts file (`<project>/KEPT_DRAFTS_FILE`).
+    @param baseline JSON form of the applied footprint state, or None: when
+        given, every draft lacking an OPTIONAL_STATE_KEYS key gets the
+        applied value (`complete_state`), exactly as `load_footprint_draft`
+        does, so a kept draft from an earlier version compares equal to the
+        current state when it holds nothing more. Pass the same baseline to
+        every read that compares drafts (offer and removal alike).
     @return List of draft states (JSON form); malformed entries are dropped,
         an unreadable file gives [].
     @note Not bound to the applied state: each entry is a complete footprint
@@ -143,7 +183,8 @@ def load_kept_drafts(path):
     data = _read_json(path)
     if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('drafts'), list):
         return []
-    return [state for state in (_valid_state(d) for d in data['drafts']) if state is not None]
+    return [complete_state(state, baseline)
+            for state in (_valid_state(d) for d in data['drafts']) if state is not None]
 
 
 def save_kept_drafts(path, drafts):

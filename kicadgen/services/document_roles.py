@@ -248,7 +248,9 @@ class DocumentSet:
                               for name, roles in data['roles'].items()},
                     'original_names': {k: v for k, v in originals.items()
                                        if k in data['roles'] and isinstance(v, str)}}
-        except (ValueError, AttributeError, TypeError) as exc:
+        except (ValueError, AttributeError, TypeError, RecursionError) as exc:
+            # RecursionError: a manifest nested deeply enough exhausts the
+            # JSON parser's recursion (L12); malformed like any other.
             raise DocumentError(tx("Associazioni documenti non valide: {exc}. Il file non è stato "
                                    "modificato.",
                                    exc=exc)) from exc
@@ -267,7 +269,7 @@ class DocumentSet:
                                      or name not in {role + ext for ext in SUFFIXES}):
                 raise ValueError(tx("nome file non valido"))
             if name and row.get('unavailable'):
-                raise ValueError('ruolo ambiguo')
+                raise ValueError(tx("ruolo ambiguo"))
         return data
 
     def _write(self, data):
@@ -313,7 +315,14 @@ class DocumentSet:
                 if img.format != expected[suffix]:
                     raise DocumentError(tx("Estensione e formato dell’immagine non corrispondono."))
                 img.verify()
-        except (OSError, Image.DecompressionBombError) as exc:
+        except DocumentError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any decoder failure is a bad file
+            # Pillow reports a damaged image with whatever its decoder raises:
+            # OSError, DecompressionBombError, but also SyntaxError for a PNG
+            # chunk with a bad CRC, struct.error, ValueError... Every one of
+            # them means «not a usable image» and must reach the GUI as a
+            # DocumentError, never as an uncaught exception in its slot (F).
             raise DocumentError(tx("Immagine non leggibile o troppo grande.")) from exc
 
     def _same_content(self, source, data):

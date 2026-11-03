@@ -1,28 +1,72 @@
 ---
 name: verify-kicad-component
-description: Audit generated KiCad component libraries for pin-map, footprint, 3D-model, file-layout and regression-test correctness without modifying source files.
+description: Read-only audit of a generated KiCad component (symbol, footprint, STEP/WRL) and of its delivery — pin-pad match, KLC findings, geometry against the evidence, model placement, file layout, isolated preview and project/global installation. The single checklist the kicad-library-verifier and kicad-workflow-reviewer agents follow. Use it before publishing a component or after a change to the generators or the KiCad tab.
 ---
 
 # Verify KiCad component
 
-Use this skill for read-only review of generated symbols, footprints and 3D models.
+Read-only: do not edit files, regenerate output, repair a failing component,
+launch an interactive KiCad, change a global KiCad configuration, or commit.
 
-## Checks
+## 1. Files and names
 
-- Confirm the expected `.kicad_sym`, `.kicad_mod`, STEP and VRML outputs exist and use consistent names.
-- Compare pin numbers, names, positions and electrical roles with the source pin map.
-- Check footprint pad count, pad numbering, pitch, row spacing, courtyard and reference/value fields.
-- Check 3D model placement, scale, orientation, body dimensions and visible pin geometry when a model is present.
-- Verify that output paths are portable and do not contain local secrets or machine-specific configuration.
-- Run the relevant pytest tests and report failures with file paths and line numbers.
-- Review the KiCad tab's isolated preview and project/global installation
-  paths. Confirm that preview does not alter `fp-lib-table`, that project model
-  references use `${KIPRJMOD}`, and that global installation preserves other
-  library entries.
+- `<component>.kicad_sym`, `<component>.pretty/<component>.kicad_mod`,
+  `<component>.3dshapes/<component>.step` (and `.wrl`) exist with the names of
+  `kicadgen/core/output_names.py`; the footprint's model reference names the
+  published file.
+- No path, secret or machine-specific setting inside the files.
 
-## Reporting
+## 2. Symbol and footprint against the evidence
 
-Separate confirmed facts, estimates and missing evidence. Report each issue with severity and a concrete suggested correction. Do not edit files, regenerate output or silently repair a failing component during an audit.
+- Symbol pin numbers = electrical pad numbers of the footprint, as text
+  (alphanumeric pads such as «A1» included); no pin without a pad, no pad
+  without a pin. Names match the source pinout; unnamed pins are reported,
+  not guessed.
+- Pad count, numbering, pitch, row spacing, drill, pad size and body size
+  match the documents; estimates are marked as estimates in the notes.
+- F.Fab outline = body, F.SilkS outline outside it, F.CrtYd around
+  everything (0.25 mm general margin), Reference/Value present.
+- KLC: run `kicadgen/services/klc_checks.check_all` (or read the
+  «Controlli KiCad (KLC)» panel) and report each finding with its code.
+  Reference values: `docs/reference/kicad9-getting-started-notes.md`.
 
-Use KiCad CLI only for read-only export/render validation. Check overwrite
-confirmation, backups, rollback cleanup and complete IT/EN/FR/DE translations.
+## 3. Model
+
+- Placement, scale and orientation of the STEP relative to the footprint;
+  body dimensions and visible pins agree with the footprint.
+- `kicadgen/services/kicad_library.step_file_is_complete` on the STEP.
+
+## 4. KiCad CLI, read-only
+
+`kicadgen/services/component_check.verify_component` runs these with
+`kicad-cli` (found by `system_dependencies.find_kicad_cli`) into a scratch
+folder:
+
+- `kicad-cli fp export svg --footprint <name> -o <scratch> <lib>.pretty`
+- `kicad-cli sym export svg -o <scratch> <component>.kicad_sym`
+- `kicad-cli pcb export step --no-board-body -o <scratch>/assembly.step <preview>.kicad_pcb`
+  on an isolated preview board, then check that the export holds solids.
+
+Without KiCad installed, say so: it is an environment limit, not a pass.
+
+## 5. Delivery (KiCad tab)
+
+- The KiCad tab is available to standard users (not only in an expert mode).
+- Actions disabled until both footprint and STEP exist.
+- Isolated preview: no `fp-lib-table` created or modified; the preview board
+  resolves the copied STEP through `${KIPRJMOD}`.
+- Project installation: portable `${KIPRJMOD}` references. Global
+  installation: absolute model paths, only the intended library entry
+  changed, other entries preserved.
+- Explicit overwrite confirmation, table backups, atomic staging, rollback
+  and cleanup of temporary files on failure.
+- Every visible text present in IT, EN, FR and DE; LLM prompts unchanged by
+  packaging work.
+
+## 6. Tests and report
+
+Run the relevant tests (`tests/test_kicad_library.py`,
+`tests/test_klc_checks.py`, `tests/test_symbol_pins_from_pads.py`, the
+generator's tests). Report confirmed defects first, each with file, line,
+severity and a concrete correction; then estimates, missing evidence and
+environment limits. A component that renders is not thereby production-ready.

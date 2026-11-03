@@ -2004,9 +2004,13 @@ class AnalysisOverlay(QWidget):
         @note Records when it went away: the overlay is hidden mid-operation
             while the reviewer edits the detected bodies, and the clock must
             not count that time as waiting for the model.
+        @note Only a hide made by the program counts as a pause: a
+            spontaneous one (the window minimised or covered by the system)
+            does not stop the operation, so its time stays on the clock.
         """
         self.timer.stop()
-        self._hidden_at = monotonic()
+        if not event.spontaneous():
+            self._hidden_at = monotonic()
         super().hideEvent(event)
 
     def showEvent(self, event):

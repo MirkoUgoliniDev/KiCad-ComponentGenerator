@@ -3,12 +3,18 @@
 Written BEFORE the measuring tool against the code of 2026-10-31:
 
 - the overall dimension lines of the three preview drawers (pin header,
-  castellated module, package): every yellow line and label, in stacking
+  castellated module, package): every dimension-coloured line and label, in stacking
   order, with geometry, pen, text, rotation and font. `_add_dim_h` /
   `_add_dim_v` are factored into the shared `canvas_measure.add_dimension_line`;
   this record proves the factoring draws the same items (golden
   `tests/data/measure_golden/footprint_dimensions.json`, regenerated only
-  with `KICADGEN_REGEN_MEASURE_GOLDEN=1`, parsed so line endings never matter);
+  with `KICADGEN_REGEN_MEASURE_GOLDEN=1`, parsed so line endings never matter).
+  CONTRACT CHANGED 2026-11-03 (user: editable body dimensions): the golden was
+  regenerated once and now records the NEW design, not the factoring — the
+  package's two labels lost «totale» («15.00 mm», «10.00 mm», re-centred, so
+  their x/y moved) because its pads lie inside the body; every line kept its
+  geometry. The pads-past-the-body branch (body numbers plus a computed
+  «totale» further out) is checked in tests/test_footprint_body_dimensions.py;
 - the existing preview toolbar buttons keep their relative order;
 - a draw tool still commits its record and Escape with nothing armed still
   reaches `escape_idle`;
@@ -34,16 +40,16 @@ REGEN_ENV = "KICADGEN_REGEN_MEASURE_GOLDEN"
 
 
 def _dimension_items(window):
-    """Every yellow dimension line and label of the preview, bottom to top."""
-    from kicadgen.gui import main_window as gui
-    yellow = QColor(gui.YELLOW)
+    """Every dimension line and label of the preview (DIMENSION_COLOR), bottom to top."""
+    from kicadgen.gui.canvas_measure import DIMENSION_COLOR
+    colour = QColor(DIMENSION_COLOR)
     found = []
     for item in window.preview_scene.items(Qt.SortOrder.AscendingOrder):
-        if isinstance(item, QGraphicsLineItem) and item.pen().color() == yellow:
+        if isinstance(item, QGraphicsLineItem) and item.pen().color() == colour:
             line = item.line()
             found.append(["line", *(round(v, 4) for v in (line.x1(), line.y1(), line.x2(), line.y2())),
                           item.pen().widthF(), item.pen().isCosmetic(), item.zValue(), item.rotation()])
-        elif isinstance(item, QGraphicsSimpleTextItem) and item.brush().color() == yellow:
+        elif isinstance(item, QGraphicsSimpleTextItem) and item.brush().color() == colour:
             found.append(["text", item.text(), round(item.pos().x(), 4), round(item.pos().y(), 4),
                           item.rotation(), item.zValue(), item.font().pointSizeF(), item.font().bold()])
     return found
@@ -63,7 +69,16 @@ def _package():
 
 
 def test_the_dimension_lines_of_the_three_drawers_are_unchanged(window):
-    """The factored dimension helper draws exactly the items of the old `_add_dim_h` / `_add_dim_v`."""
+    """The factored dimension helper draws exactly the items of the old `_add_dim_h` / `_add_dim_v`.
+
+    GOLDEN CHANGED 2026-11-03 (generator review fixes, KLC): the pin-header
+    courtyard margin is 0.25 mm (was 1.0 mm) and a header without a body is
+    framed by its pads plus the silk clearance (0.85 + 0.26 mm around a pin
+    centre) instead of 1.0 mm around the pin centres. The header preview
+    reads its envelope from that courtyard, so only the «header» entries
+    moved by 2.2 px (0.11 mm at 20 px/mm) and its totals read 9.84/4.76 mm;
+    the castellated and package entries are unchanged.
+    """
     records = {}
     window._draw_preview()
     records["header"] = _dimension_items(window)
@@ -86,6 +101,36 @@ def test_a_total_dimension_label_reads_the_overall_size(window):
     texts = [r[1] for r in _dimension_items(window) if r[0] == "text"]
     assert any(t.endswith(" mm") and "." in t for t in texts)
     assert not any("measure" in t.lower() for t in texts)
+
+
+def test_the_dimensions_are_not_drawn_in_a_kicad_layer_colour(window):
+    """The on-screen dimensions never wear a layer colour; the silkscreen outline keeps its own.
+
+    Positive and negative twin (user, 2026-11-03): a yellow dimension read as
+    printed silkscreen. The dimension colour must differ from every KiCad
+    layer colour the preview uses, while the body outline -- which IS
+    written on F.SilkS -- is still drawn in the silkscreen colour.
+    """
+    from kicadgen.gui import main_window as gui
+    from kicadgen.gui.canvas_measure import DIMENSION_COLOR
+    layer_colours = {QColor(c).name() for c in gui.KICAD_LAYER_COLORS.values()}
+    assert QColor(DIMENSION_COLOR).name() not in layer_colours
+    assert QColor(DIMENSION_COLOR) != QColor(gui.YELLOW), "not the warning yellow either"
+    window._draw_preview_package(_package())
+    assert _dimension_items(window), "the dimensions are drawn in DIMENSION_COLOR"
+    silk = QColor(gui.KICAD_LAYER_COLORS["F.SilkS"])
+    assert any(item.pen().color() == silk for item in window.preview_scene.items()
+               if hasattr(item, "pen")), "the silkscreen outline keeps the silkscreen colour"
+
+
+def test_the_written_footprint_carries_no_dimension(window):
+    """The preview's dimensions and the ruler's measures are view-only: none reaches the .kicad_mod."""
+    from kicadgen.generators.package import build_package
+    window._draw_preview_package(_package())
+    text = build_package(_package(), "PARITY").render()
+    assert "(dimension" not in text
+    labels = [r[1] for r in _dimension_items(window) if r[0] == "text"]
+    assert labels and not any(label in text for label in labels)
 
 
 def test_the_existing_preview_toolbar_buttons_keep_their_order(window):

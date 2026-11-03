@@ -45,6 +45,24 @@ PAD_PART_ROLE = 0x504150
 #: Item data role of the outline of a drill hole in the preview (True).
 HOLE_ROLE = 0x484F4C
 
+#: Item data role of the editable package body: "move" on the outline (its
+#: stroke moves the whole body), a compass part ("n", "s", "e", "w", "ne",
+#: "nw", "se", "sw") on its eight resize handles (user, 2026-11-03: «muovere con
+#: il mouse la posizione del contorno ... gli spigoli», move the outline with the mouse ... the corners).
+BODY_PART_ROLE = 0x424F44
+
+#: Resize parts of the body handles, in drawing order.
+BODY_HANDLE_PARTS = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
+
+
+def _segment_distance(point, a, b) -> float:
+    """Distance (scene units) from `point` to the segment a-b."""
+    dx, dy = b.x() - a.x(), b.y() - a.y()
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 <= 0 else max(0.0, min(1.0, ((point.x() - a.x()) * dx + (point.y() - a.y()) * dy) / length2))
+    cx, cy = a.x() + t * dx, a.y() + t * dy
+    return ((point.x() - cx) ** 2 + (point.y() - cy) ** 2) ** 0.5
+
 
 class _HoleCut:
     """@brief Mixin of a copper item that leaves its drill hole unpainted.
@@ -233,6 +251,11 @@ class FootprintView(QGraphicsView):
     pointer_left = pyqtSignal()
     #: Zoom or pan changed (the shared camera's `changed`, as the symbol view).
     camera_changed = pyqtSignal()
+    #: Right click on an editable dimension: its key (`DIMENSION_EDIT_ROLE`)
+    #: and the global screen position of the menu.
+    dimension_context_requested = pyqtSignal(str, QPoint)
+    #: Left double click on an editable dimension: its key.
+    dimension_edit_requested = pyqtSignal(str)
 
     def __init__(self, scene):
         """@brief A view without a gesture host: pan and zoom only until `attach_host`.
@@ -280,6 +303,8 @@ class FootprintView(QGraphicsView):
         self._hover_bounds = None
         #: Key of the text whose anchor square is shown ("" for none).
         self._hovered_text = ""
+        #: Key of the editable dimension shown hovered (None: none).
+        self._hovered_dimension = None
         #: Main grid step divided by this gives the drawing snap step.
         self._fine_divisor = DEFAULT_FINE_GRID_DIVISOR
         #: The shared selection rubber band (Shift+drag), as the symbol editor's.
@@ -603,6 +628,54 @@ class FootprintView(QGraphicsView):
         m = HIT_MARGIN_PX
         return self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1))
 
+    def _body_items(self, part=None):
+        """Items of the editable body: the outline ("move") or the handles, or all with `part` None."""
+        scene = self.scene()
+        if scene is None:
+            return []
+        return [item for item in scene.items()
+                if item.data(BODY_PART_ROLE) and (part is None or item.data(BODY_PART_ROLE) == part)]
+
+    def _body_part_at(self, pos):
+        """@brief Part of the editable body under a viewport point: a visible handle, "move" on the outline stroke, else None.
+
+        @param pos Viewport position (QPoint).
+        @return A compass part of BODY_HANDLE_PARTS, "move", or None.
+        @note Only the STROKE of the outline moves the body, within
+            HIT_MARGIN_PX screen pixels: a press inside the body pans, as on
+            the background, so pads and drawings inside stay easy to reach.
+        """
+        for item in self._items_near(pos):
+            part = item.data(BODY_PART_ROLE)
+            if part and part != "move" and item.isVisible():
+                return str(part)
+        outline = self._body_items("move")
+        if not outline:
+            return None
+        point = self.mapToScene(pos)
+        scale = max(abs(self.transform().m11()), 1e-9)
+        for item in outline:
+            polygon = item.mapToScene(item.polygon())
+            count = polygon.count()
+            for index in range(count):
+                a, b = polygon.at(index), polygon.at((index + 1) % count)
+                if _segment_distance(point, a, b) * scale <= HIT_MARGIN_PX:
+                    return "move"
+        return None
+
+    def _report_body_hover(self, pos) -> None:
+        """Show the body handles while the pointer is near the body outline (or a drag of it runs)."""
+        handles = [item for item in self._body_items() if item.data(BODY_PART_ROLE) != "move"]
+        if not handles:
+            return
+        outline = self._body_items("move")
+        dragging_body = self._dragging() and self.gestures.target[0] == 'body'
+        near = dragging_body or (pos is not None and any(
+            self._near_scene_rect(item.sceneBoundingRect(), pos) for item in outline))
+        for item in handles:
+            if item.isVisible() != near:
+                item.setVisible(near)
+
     def _text_item_at(self, pos):
         """The draggable text group under a viewport point, with its key, or (None, None).
 
@@ -853,6 +926,14 @@ class FootprintView(QGraphicsView):
                     self.pad_context_requested.emit(str(pad_index))
                     event.accept()
                     return
+            dimension = self._dimension_at(event.pos())
+            if dimension is not None:
+                # An editable dimension comes after texts, drawings and pads,
+                # as on a left press (review 2026-11-03, C1): a Value text over
+                # a body number keeps its own menu.
+                self.dimension_context_requested.emit(dimension, event.globalPosition().toPoint())
+                event.accept()
+                return
             # Nothing of the footprint under the pointer: the background menu
             # (the drawing origin, user 2026-11-02).
             self.background_context_requested.emit(self.mapToScene(event.pos()),
@@ -898,6 +979,13 @@ class FootprintView(QGraphicsView):
                 self._report_text_hover(key)
                 event.accept()
                 return
+            body_part = (self._body_part_at(event.pos())
+                         if handle is None and item is None else None)
+            if (body_part not in (None, "move")
+                    and self._press_gesture(('body', body_part), point)):
+                # A resize handle of the package body (user, 2026-11-03).
+                event.accept()
+                return
             pad = self._pad_at(event.pos()) if handle is None and item is None else None
             if pad is not None and self._press_gesture(('pad', pad), point):
                 # The window moves the pad (or the selected pads) on the
@@ -912,6 +1000,10 @@ class FootprintView(QGraphicsView):
             if handle is not None and self._press_gesture(('handle', *handle), point):
                 # The window moves the point (or the whole drawing) on the
                 # grid and redraws the shape at every step.
+                event.accept()
+                return
+            if body_part == "move" and self._press_gesture(('body', 'move'), point):
+                # The outline stroke moves the whole body, last of all.
                 event.accept()
                 return
         if self._dragging() and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
@@ -944,6 +1036,9 @@ class FootprintView(QGraphicsView):
         if self.measure is not None and event.buttons() == Qt.MouseButton.NoButton:
             # Hovering a measure highlights it (Delete / right click remove it).
             self.measure.hover_measure(event.pos())
+        if event.buttons() == Qt.MouseButton.NoButton:
+            # An editable dimension shows it answers a double click.
+            self._hover_dimension(event.pos())
         # The coordinates follow the pointer in every state (drag, pan, tool).
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self._dragging():
@@ -970,6 +1065,7 @@ class FootprintView(QGraphicsView):
             # A text's anchor square shows while the pointer is near the
             # text, same margin as the symbol editor's property anchors.
             self._report_text_hover(self._text_near(event.pos()))
+            self._report_body_hover(event.pos())
             super().mouseMoveEvent(event)
             if self.click_router is not None:
                 self.click_router.settle_cursor(event)
@@ -983,6 +1079,9 @@ class FootprintView(QGraphicsView):
             self.click_router.leave()
         if self.measure is not None:
             self.measure.hover_measure(None)
+        self._hover_dimension(None)
+        if not self._dragging():
+            self._report_body_hover(None)
         if self._handle_drag is None:
             self._report_hover(-1)
         if self._text_drag is None:
@@ -1044,13 +1143,50 @@ class FootprintView(QGraphicsView):
             double click on the last vertex of a line just finishes it.
         """
         if (self.measure is not None and event.button() == Qt.MouseButton.LeftButton
+                and not self.camera.pan_active and not self.band.active
                 and self.measure.edit_at(event.pos())):
             # A double click on a measure edits its value («Modifica quota…»).
             event.accept()
             return
         if self.click_router is not None and self.click_router.double_click(event):
             return
+        if (event.button() == Qt.MouseButton.LeftButton and not self._dragging()
+                and not self.camera.pan_active and not self.band.active
+                and self._handle_at(event.pos()) is None
+                and self._text_item_at(event.pos())[0] is None
+                and self._pad_at(event.pos()) is None and self._drawing_at(event.pos()) < 0):
+            dimension = self._dimension_at(event.pos())
+            if dimension is not None:
+                # The same edit for an editable dimension of the preview, in
+                # the left press's priority order and never over a running pan
+                # or band (review 2026-11-03, C1/C2).
+                self.dimension_edit_requested.emit(dimension)
+                event.accept()
+                return
         super().mouseDoubleClickEvent(event)
+
+    def _dimension_at(self, pos):
+        """@brief Key of the editable dimension under a viewport position, or None.
+
+        @param pos Viewport position (QPoint).
+        @return The `DIMENSION_EDIT_ROLE` value of an item within the
+            measures' screen reach (`canvas_measure.editable_dimension_at`).
+        """
+        from .canvas_measure import editable_dimension_at
+        return editable_dimension_at(self, pos)
+
+    def forget_dimension_hover(self) -> None:
+        """@brief Forget the hovered dimension: its items die with a scene clear, the next hover starts afresh."""
+        self._hovered_dimension = None
+
+    def _hover_dimension(self, pos) -> None:
+        """Highlight the editable dimension under the pointer and restore the one left (C4)."""
+        from .canvas_measure import set_dimension_highlight
+        key = self._dimension_at(pos) if pos is not None else None
+        if key != self._hovered_dimension:
+            set_dimension_highlight(self.scene(), self._hovered_dimension, False)
+            set_dimension_highlight(self.scene(), key, True)
+            self._hovered_dimension = key
 
     def keyPressEvent(self, event):
         """@brief Qt override: in draw mode Esc cancels and Enter closes the shape.

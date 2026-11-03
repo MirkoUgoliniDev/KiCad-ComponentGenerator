@@ -208,7 +208,11 @@ def test_a_change_of_what_the_pin_shows_still_rebuilds_it(qapp, change):
         before = _roots(tab)
         if change == "name":
             row = next(i for i in range(tab.table.rowCount()) if tab.table.item(i, 0).text() == "7")
-            tab.table.item(row, 1).setText("RENAMED")
+            # CONTRACT CHANGED 2026-11-03: pin 7 sits on the BOTTOM side, and
+            # the body now grows to fit top/bottom names (review fix), so a
+            # longer name rightly moves every pin. A name of the same length
+            # keeps the body: only the renamed pin's picture must change.
+            tab.table.item(row, 1).setText("Q7")
         elif change == "hidden":
             assert tab.set_pin_properties("7", hidden=True)
         else:

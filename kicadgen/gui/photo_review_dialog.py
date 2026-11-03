@@ -3600,6 +3600,8 @@ class PhotoReviewDialog(QDialog):
         # width and wraps it, while plain text stays on one line however long
         # it is, and three warnings ran past the screen edge. Everything that
         # comes from the data is escaped: the tooltip interprets HTML.
+        # Only the photo item gets HTML: QGraphicsView shows an item tooltip
+        # through Qt, which honours rich text.
         tooltip = "<b>" + escape(text) + "</b>" + "".join(
             "<br>" + escape(warning) for warning in warnings)
         item.setToolTip(tooltip)
@@ -3607,8 +3609,11 @@ class PhotoReviewDialog(QDialog):
         # the sentence saying what to do must stay reachable also for whoever
         # is reading the list instead of the photo. It is not the fix on its
         # own -- the colour and the marker are seen without pointing at
-        # anything.
-        self.component_list.item(index).setToolTip(tooltip)
+        # anything. The row's tooltip goes through tooltips.ToolTipFilter,
+        # which escapes every tooltip as plain text and bolds the first of
+        # several lines: it gets the name, then one warning per line, never
+        # HTML, or the tags would be read literally (review finding 2026-11-03).
+        self.component_list.item(index).setToolTip("\n".join([text, *warnings]))
         if item.isSelected():
             # A model chosen or a type typed changes what the AI lines say.
             self._show_attributes(item.component)
@@ -3876,8 +3881,15 @@ class PhotoReviewDialog(QDialog):
         crop = self.photo_item.pixmap().copy(
             bounds.adjusted(-margin, -margin, margin, margin).intersected(self.photo_rect).toAlignedRect())
         dialog = ModelCandidatesDialog(item.component, report, photo_crop=crop, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            selection = deepcopy(dialog.selected_selection())
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            selection = deepcopy(dialog.selected_selection()) if accepted else None
+        finally:
+            # One window per search: kept as a child of the review, each one
+            # (with its photo crop and library index) lived until the review
+            # closed. Its late worker results are dropped by its own `done`.
+            dialog.deleteLater()
+        if accepted:
             previous = item.component.get('model_match') or {}
             same_failure = (previous.get('status') == 'import_failed'
                             and selection == item.component.get('model_selection'))

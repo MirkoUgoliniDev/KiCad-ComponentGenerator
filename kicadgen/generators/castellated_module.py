@@ -61,7 +61,8 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import Footprint, FpRect, FpText, Pad, fab_reference_text, require_kicad_reach
+from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, FpText,
+                              Pad, courtyard_corners, fab_reference_text, require_kicad_reach)
 from ..core.output_names import validate_output_name
 from ..core.silk import keepout_box, pin_one, pin_one_marker, silk_rectangle
 from ..core.sexpr import SExpr, sx
@@ -2486,24 +2487,36 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
     keepouts = [keepout_box(*_copper_outline_bbox(params, placement), line_width=0.12)
                 for placement in placements]
 
-    # Body outline: it is the module proper, so it goes both on the
-    # silkscreen (interrupted where the pads pass) and on F.Fab, whole (it
-    # serves the assembly drawing and does not go into production).
-    for graphic in silk_rectangle((-half_length, -half_width), (half_length, half_width), keepouts):
+    # Body outline: it is the module proper, so it goes on F.Fab, whole (it
+    # serves the assembly drawing and does not go into production), with
+    # the KLC F5.2 stroke of 0.10 mm, and on the silkscreen just OUTSIDE it
+    # (interrupted where the pads pass): the silk centre line lies half of
+    # each stroke away (0.05 + 0.06 mm), so the two lines meet and the silk
+    # never covers the assembly outline.
+    silk_gap = SILK_OUTSIDE_FAB_MM
+    for graphic in silk_rectangle((-half_length - silk_gap, -half_width - silk_gap),
+                                  (half_length + silk_gap, half_width + silk_gap), keepouts,
+                                  width=SILK_WIDTH_MM):
         fp.add_graphic(graphic)
     fp.add_graphic(FpRect(
         start=(-half_length, -half_width),
         end=(half_length, half_width),
         layer="F.Fab",
+        width=FAB_WIDTH_MM,
     ))
 
     # Courtyard: real envelope, body plus the pads protruding from the edge.
     lands = placements + [pad for pad in stadiums if pad is not None]
     extent_x = max([half_length] + [abs(p.x) + p.width / 2 for p in lands])
     extent_y = max([half_width] + [abs(p.y) + p.height / 2 for p in lands])
+    # KLC F5.3: courtyard corners on the 0.01 mm grid, rounded outwards so
+    # the clearance is never below the margin.
+    courtyard_start, courtyard_end = courtyard_corners(
+        (-extent_x - params.margin, -extent_y - params.margin),
+        (extent_x + params.margin, extent_y + params.margin))
     fp.add_graphic(FpRect(
-        start=(-extent_x - params.margin, -extent_y - params.margin),
-        end=(extent_x + params.margin, extent_y + params.margin),
+        start=courtyard_start,
+        end=courtyard_end,
         layer="F.CrtYd",
         width=0.05,
     ))

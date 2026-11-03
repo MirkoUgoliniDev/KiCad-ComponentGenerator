@@ -53,9 +53,15 @@ class FakeFreecadProcess:
         until it is killed: that is what the silence watchdog must detect.
     @param kwargs The Popen keyword arguments (env, encoding, ...), kept in
         `self.kwargs` for the assertions.
-    @note `poll()` reports the child as exited, so the real
-        `kill_process_tree` never enumerates the descendants of a fake pid;
-        tests that check the tree kill replace `process_log.kill_process_tree`.
+    @note CONTRACT CHANGED 2026-11-03 (review, run_logged): `poll()` used to
+        report the child as exited from the start, only to keep the real
+        `kill_process_tree` from scanning a fake pid. `run_logged` now ends the
+        run when the child has exited (a descendant may hold the pipe), so a
+        "hanging" double that claims to be gone would be a finished child, not
+        a stuck one. `poll()` now returns the real state: None while alive.
+        The fake pid -1 cannot be opened, so the tree scan selects nothing;
+        tests that check the tree kill still replace
+        `process_log.kill_process_tree`.
     """
 
     def __init__(self, command, lines=(), hang=False, **kwargs):
@@ -77,8 +83,8 @@ class FakeFreecadProcess:
             self.killed.wait(10)
 
     def poll(self):
-        """@brief Report the child as exited, so no real descendant scan runs."""
-        return 0
+        """@brief None while the child is alive, its exit code once it ended."""
+        return self.returncode
 
     def kill(self):
         """@brief End the fake child: its output stops at once."""

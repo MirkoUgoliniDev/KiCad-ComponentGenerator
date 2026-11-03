@@ -1,5 +1,281 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 03/11 — COMMIT (utente: «ok procedi», interpretato come OK al commit su ADVANCED; NON push, NON merge)
+Suite completa (seconda, full-0311d): A 6723/9/19, B 4635/4, 0 falliti = 11358 passati, 13 saltati,
+19 sottotest. Contenuto: revisione completa (10 revisori), correzione di tutti i rilievi (7 correttori +
+coordinatore), verifica di generalita' e sue correzioni, quote del corpo modificabili e contorno col mouse,
+colore quote, pinout con tutti i pad e pin alfanumerici, courtyard pin header 0.5 (decisione utente),
+skill/agenti A-G, note KiCad 9. Commit `5ea9d27` su ADVANCED. Utente «ok» (03/11): push ADVANCED, merge in main, push main, ritorno su ADVANCED.
+Restano da fare/decidere: push e merge (non autorizzati); prova dell'utente nell'app (contorno col mouse,
+tabella pin del rele', quote); rilievo 7 dell'audit (nota interasse assunto solo nella descrizione).
+
+## 03/11 — IN CORSO: correzione di TUTTI i rilievi della revisione (utente: «tutti»)
+Correttori in parallelo su file DISGIUNTI; nessuno tocca i18n.py (riportano i testi nuovi in 4
+lingue, li aggiunge il coordinatore), HANDOFF.md, commit o suite completa.
+F1 GUI dialoghi: component_editor_dialog (H1), yolo/smd_model_dialog (M8, L4), tooltips +
+pin_type_dialog + photo_review_dialog (L2, L5), accepted_models_dialog + model_dialog (L5),
+component_check_dialog (L6), analysis_overlay (L3), project_state (L1).
+F2 Estrazione: datasheet_extractor (M4 + schemi pin interi 553/578/948 = A1/A2, M5, M6, L11, parte
+estrattore di H4: copper None/corto = non verificabile, lato tenuto con avviso), document_roles
+(H2, L12, L1), library_footprints (L13), footprint_draft (L8).
+F3 Foto: edge_lands + tests/test_edge_copper (H4 lato rame: fila corta -> None), photo_crop_reading
+(H5, M15), photo_leads + photo_grounding (M7), photo_yolo (M14), photo_inventory (L30), edge_notches
+(L31 dichiarare), photo_refine (L32).
+F4 Generatori: package_geometry + package (H3, L14), symbol_glyphs (M9, M10, L17), pin_header (M11,
+L15, L18 courtyard, L19), symbol (L16), footprint.py (L14), castellated_module (L18).
+F5 cad3d: process_log (M12), kicad_models (M13, L1), step_generator (L20), freecad_build_body (L21),
+installed_programs (L22), gui/model_candidates_dialog (lancio anteprima via run_logged).
+F6 Consegna KiCad: kicad_library (M17 API, M18, L23, L25-L28, quote via core.sexpr),
+kicad_export_history (L24), system_dependencies (L23), test (L29).
+F7 Packaging: main.py (M16, L35), tools/compare_vision_models (L34), .gitignore (L33),
+docs/canvas-measure-plan.md (C8).
+STATO (in corso): FATTI F1 (8 rilievi), F2 (A-H), F6 (11), F7 (5); coordinatore: M1, M2, M3, L1 (2 righe),
+L7, L9, L10, C1, C2, C3, C4, C6, C7, pinout A1/A2 (nomi dal disegno + tabella con tutti i pad), cablaggio
+F6 (_other_scope_table, _confirm_install_plan_warnings, type_changes, rollback_left, kicad_version),
+seguiti di F2 (_pin_map_key: pin «A1» in pin_map/populated/salvataggio; contact_zones pin_key; kept
+drafts con baseline), catalogo: testi di F1/F2/F6/coordinatore. CONTORNO COL MOUSE FATTO:
+footprint_view BODY_PART_ROLE/_body_part_at/_report_body_hover, main_window _add_body_handles,
+_begin/_step/_end_body_drag, _magnet_point (condiviso coi pad), _body_drag_rect, _commit_body_rect
+(pad, disegni e testi traslati di -centro in UN passo, camera compensata), tests/test_footprint_body_outline_drag.py.
+Difetto trovato e corretto: la parte «move» contiene la «e» e veniva letta come lato est.
+AGGIORNAMENTO: TUTTI i 7 correttori FATTI (F3 9/9, F4 10/10, F5 7/7). Seguiti integrati dal coordinatore:
+testi di F3/F4/F5 nel catalogo; height_declared per il blocco «Componenti» castellated (euristica dichiarata:
+altezza diversa dal segnaposto 5 mm); _pin_field_positions senza interasse dichiarato -> [] (nessun passo
+riusato); pad quadro del pin 1 nell'anteprima header e nella finestra pad con square_pad_pin;
+test_package_preview_drills esclude BODY_PART_ROLE (contratto cambiato); kicad.install_complete in
+SUPERSEDED_DEFAULTS; data/analysis_profiles.sqlite3 sincronizzato (ProfileStore). Golden measure rigenerato
+da F4 (solo «header»: courtyard 0.25). Mirati di integrazione: 103 verdi.
+Da dire all'utente (fragili / non fatti): prospettiva photo_refine con meta' differenza per lato scelta DOPO
+che ESP32 falliva (margine 0.69); associazione viste a IoU 0.5 senza replay offline; fori pieni/mezzi fori
+un solo criterio; nessun F.Fab senza corpo dichiarato; fila dichiarata >= 5 con catena corta ancora tolta;
+non-Windows: processi residui non uccisi.
+generality-auditor sul diff: 8 rilievi, CORRETTI dal coordinatore:
+1 photo_refine: ogni lato tenuto da solo al limite per lato (_edge_lean_px, _side_leans_px), non meta'
+  differenza; test lato singolo inclinato. ESP32 ora a 0.72 del limite (18.6/25.9 px), RS485 0.32.
+3 photo_inventory: soglia fra viste RIPRISTINATA a 0.60 ma dichiarata (VIEW_ASSOCIATION_IOU, motivo e cosa la
+  sostituirebbe); test di F3 riscritto (0.67 unisce, 0.50 no); tests/test_photo_grounding.py riportato a HEAD
+  (F3 vi aveva cambiato solo la coppia di box; i suoi test cache stanno in test_fixD_grounding).
+4 photo_yolo: documentazione di _BOX_UNCERTAINTY_INPUT_PX aggiornata, criterio unico dichiarato fragile.
+5 edge_lands: catena corta al passo = None (non verificabile) qualunque sia la lunghezza dichiarata; solo
+  nessuna catena = 0. Test test_identical_marks... con contratto cambiato e motivato.
+6 edge_notches: half_hole_depth_margin_mm; la nota «corretto in semi-foro» dice il margine (testo nuovo 4 lingue).
+8 «01» resta testo in _pin_label (estrattore) e _pin_map_key (finestra).
+NON corretti, da decidere con l'utente: 2 courtyard pin header 0.25 mm (KLC: 0.5 per i connettori, ma il
+generatore fa matrici di pin generiche: serve sapere se il componente e' un connettore); 7 nota interasse
+assunto solo nella descrizione del footprint (la GUI richiede sempre l'interasse con piu' righe).
+SUITE COMPLETA (full-0311c, codice NON committato): A 6715 passati / 9 saltati / 19 sottotest, 8 falliti + 1
+errore; B 4633 passati / 4 saltati, 2 falliti. Tutti contratti cambiati dalle correzioni, nessun difetto:
+- test_3d_tab_workflow_icons (totale header 9.62 -> dal disegno: courtyard 0.25), test_user_pin_names (la
+  tabella vince sui pin che nomina, gli altri prendono il nome dal disegno dei pad), test_symbol_grid_paint_region
+  (pin 7 in basso: nome lungo ingrandisce il corpo -> nome della stessa lunghezza), 7 golden gesture_golden
+  (Reference x 4.0 -> 3.0: partenza dal courtyard nuovo), camera_golden/footprint_camera.json (inquadratura).
+Rieseguiti i file coinvolti: verdi. NON rieseguita una seconda suite completa.
+DECISIONE utente 03/11 («adeguiamoci tu cosa consigli?» -> consiglio 0.5 -> «ok»): courtyard pin header
+0.5 mm (KLC connettori, come i pin header di KiCad); pacchetti e castellated restano 0.25. Aggiornati
+test_review_1103_generators (contratto: margine >= 0.5 oltre il pad), test_pin_header_body (0.76/0.5),
+test_footprint_gesture_parity (jiggle: direzione che resta nella cella), golden measure/gesture/camera
+rigenerati (cambiano solo le voci header/inquadratura). Mirati: 84 + 120 verdi.
+IN CORSO: seconda suite completa (full-0311d). Utente: «ok procedi» = interpretato come OK al COMMIT su
+ADVANCED se la suite e' verde (NON push, NON merge: da chiedere). Suite non verde -> fermarsi e riferire.
+COORDINATORE: main_window (M1, M2, M3, L1, L7, L9, L10, cablaggio M17/M18, pinout riempito dai nomi
+di package_geometry e tabella con tutti i pad), pinout_dialog, footprint_view + canvas_measure (C1, C2,
+C3, C4 evidenziamento al passaggio, C6 test), test golden (C7), i18n.py. Poi contorno col mouse.
+
+## 03/11 — RAPPORTO revisione completa (10/10 rapporti, fase 1: nessuna correzione al codice)
+Verifica del coordinatore: H1, H2, H3 riprodotti di persona (snippet in scratchpad verify_high.py,
+ced.py); H4 e H5 confermati leggendo il codice. H4 ridimensionato a MEDIO: e' il limite DICHIARATO
+di MIN_ROW_LANDS (il rame non salva una fila corta, si torna alla regola del bordo pulito).
+Suite completa (codice di oggi, NON committato): A 6569/9/19, B 4588/4 con 1 fallito =
+tests/test_preview_review.py::test_host_preview_total_excludes_display_margin: i finti _add_dim_h/_add_dim_v
+del test non accettavano il nuovo parametro edit_key. Contratto invariato (ultima quota = corpo): aggiornate
+solo le firme dei finti; il file rieseguito da solo: 17 passati. Suite completa NON rieseguita dopo.
+Stato: C = confermato dal revisore con riproduzione; L = confermato leggendo; S = sospetto.
+Tutti «segnalati, non autorizzati» finche' l'utente non sceglie.
+
+ALTI
+H1 [C] gui/component_editor_dialog.py:125-225 — «Applica» senza modifiche: spin a 6 decimali
+   arrotonda, ogni riga risulta modificata: perde model_selection/model_match, bbox_basis unknown,
+   altezza stimata marcata misurata (_height_source user, _height_estimated False).
+H2 [C] services/document_roles.py:316 — PNG corrotto: Pillow verify() solleva SyntaxError non
+   catturato -> eccezione nello slot Qt (guided_documents.py:599/627).
+H3 [C] generators/package.py:188 + core/package_geometry.py:87 — pad «circle» con L != W scritto
+   (size L W): KiCad disegna un cerchio di diametro L; controlli di sovrapposizione sul rettangolo;
+   l'estrattore (datasheet_extractor 3072) mette circle di default ai THT senza forma.
+H4 [C] services/edge_lands.py:372/587 + datasheet_extractor 5631 — fila < 5 piazzole = found 0 =
+   «nessun rame»: il lato dichiarato viene CANCELLATO (anche con copper None); test che fissa il
+   contratto sbagliato tests/test_edge_copper.py:55.
+H5 [C] services/photo_crop_reading.py:858 — SOT-23/SOT-89 dal solo numero di terminali, ingombro
+   misurato ignorato (SC-70 -> «SOT-23», SOT-223 -> «SOT-89»).
+MEDI
+M1 [C] gui/main_window.py:16130/16048 + 8132 — (MIO, oggi) bozza recuperata con package_body su
+   package senza corpo: il corpo non applicato arriva a generazione e al file di progetto.
+M2 [S] main_window.py:16005 — (MIO, oggi) uscita/chiusura dopo «Applica» del corpo attende tutta
+   la generazione STEP in un QEventLoop annidato.
+M3 [C] main_window.py:16482/14468 — (MIO, oggi) modifica corpo senza analisi/footprint avvia una
+   generazione completa (il pad no).
+M4 [C] datasheet_extractor.py:948/4268/1053/2811/6335 — numerazione dedicata solo intera: A1 fa
+   scartare TUTTA la lettura (si aggiunge al noto 553/578).
+M5 [C] datasheet_extractor.py:1026/1366 — letture dedicate «best-effort» fuori dal try: file
+   sparito -> ExtractionError -> si perde la risposta principale gia' pagata.
+M6 [C] datasheet_extractor.py:3064 (+2111, 2542, 1827) — number null -> pad «None».
+M7 [C] services/photo_leads.py:115 + photo_grounding.py:543 — risposte vuote/parziali di
+   separazione terminali messe in cache come successi.
+M8 [C] gui/yolo_model_dialog.py:270 / smd_model_dialog.py:241 — file selezionato sparito: ciclo
+   infinito di job (3805-4478 avvii in 2 s), CPU al 100%.
+M9 [C] symbol_glyphs.py:1437/1528/1861 — arco collineare accettato: KiCad legge centro a 5.7e15.
+M10 [C] symbol_glyphs.py:1866/1954 — polilinea vuota: KiCad rifiuta tutta la libreria.
+M11 [L] generators/pin_header.py:110 — row_spacing assente con rows > 1 = pitch, senza nota.
+M12 [C] cad3d/process_log.py:446/175 — figlio uscito ma nipote tiene stdout: blocco, Interrompi
+   inefficace, STEP sano cancellato come timeout.
+M13 [L] cad3d/kicad_models.py:1756 — figlio di misura senza heartbeat e fuori da run_logged:
+   STEP grande ucciso a 300 s e ricordato come «stallo» per sempre.
+M14 [C] photo_yolo.py:1153 — sovrapposizione minima con un box grande declassa il passivo vicino.
+M15 [C] photo_crop_reading.py:573 — SOIC: limite inferiore sulla fila di terminali, non sul corpo.
+M16 [C] main.py:93 — docstring falsa: eccezione in QRunnable/QThread chiude tutto (os._exit).
+M17 [S] main_window 13531 / kicad_library 1781 — libreria «KiCadGen» sia di progetto sia globale:
+   la tabella di progetto nasconde la globale.
+M18 [S] kicad_library 1391 — installazione con KiCad aperto: la riga puo' essere persa.
+BASSI (sintesi)
+L1 main_window 10696/10137, project_state 233, document_roles 270, kicad_models 156/1393/3921/4149:
+   testi non tradotti. L2 tooltip HTML doppiamente escapati (tooltips.py:60). L3 orologio overlay
+   esclude il tempo minimizzato. L4 SMD picker «PyTorch» anche per .onnx. L5 dialoghi figli mai
+   deleteLater. L6 chiusura durante «Verifica componente» fino a 60 s. L7 _start_extract_worker
+   cancella lo stato foto prima di costruire il worker. L8 kept drafts vecchi sempre offerti
+   (footprint_draft.py:163, MIO). L9 OverflowError su package_body enorme (MIO). L10 log «pad»
+   anche per corpo scartato (MIO). L11 drawing_unit assente = mm nelle letture dedicate.
+   L12 RecursionError manifest documenti. L13 testimone libreria con pad ripetuti. L14 numeri pad
+   non normalizzati (" 1"). L15 pad_overrides con chiavi int ignorati. L16 corpo simbolo senza i
+   nomi dei pin sopra/sotto. L17 load_library_glyph solleva. L18 KLC: courtyard pin header 1.0 mm,
+   F.Fab castellated 0.12, serigrafia sul contorno fab, niente F.Fab senza corpo, courtyard non a
+   0.01. L19 pin header alfanumerico: pad quadro solo per «1». L20 blocco «Componenti» stimato senza
+   nota. L21 etichette FreeCAD per nomi non alfanumerici. L22 InstallLocation non assoluta.
+   L23 nessuna versione minima KiCad (KiCad 9 accettato). L24 storico export perso se il file e'
+   troncato. L25 conferma sostituzione riga non dice il cambio di tipo. L26 cartelle rollback non
+   rimosse. L27 rollback cattura solo OSError. L28 resolve() su unita' mappate. L29 test assenza
+   fp-lib-table in .kicad-preview. L30 IoU 0.60/0.3 non dichiarati (photo_inventory 559/676).
+   L31 notch solo per profondita'. L32 commento 12% e prospettiva non controllata. L33 docs/T7NS5D4-12
+   non in .gitignore. L34 compare_vision_models.py senza --run-paid. L35 RUNTIME_RESOURCES incompleto.
+GIA' CORRETTI (file .claude, mio lavoro A-G): regola run_logged con le 2 eccezioni; eccezione
+f-string in kicad_library; component-generator senza handoff/suite/commit e con tools; punto «scheda
+KiCad per utenti standard» rimesso; comando suite in due meta' in CLAUDE.md.
+CANVAS (canvas-parity-reviewer, MIEI di oggi): C1 [C] footprint_view.py:846 la quota modificabile
+vince col tasto destro su testi/disegni/pad, col sinistro no (Value sopra la quota: menu del testo
+irraggiungibile; doppio clic agisce su due bersagli). C2 [C] doppio clic durante un pan col tasto
+centrale apre la modifica (anche per le misure, preesistente). C3 hit-test quota locale (4 px) diverso
+dalle misure (6 px). C4 DECISIONE: nessun evidenziamento al passaggio sulle quote modificabili.
+C6 manca test unitario di add_dimension_line(edit_key). C7 docstring del golden superata; caso pad
+sporgenti non nel golden. C8 docs/canvas-measure-plan.md D-M6 dice ancora «quote gialle».
+
+
+## 03/11 — APPROVATO, DA FARE dopo la revisione: contorno corpo modificabile col mouse
+Utente: «dev'essere possibile anche muovere con il mouse la posizione del contorno ... gli spigoli
+... deve essere un editor avanzato» e poi «ti lascio lavorare ... voglio un software professionale
+... fa in modo che Footprint sia editabile!!» = OK alla proposta:
+1 trascinare il contorno sposta il corpo rispetto ai pad (pad fermi a schermo; nel file l'origine
+resta il centro corpo, quindi cambiano le coordinate dei pad; il 3D segue);
+2 8 maniglie al passaggio (4 spigoli, 4 meta' lato): spigolo = 2 dimensioni con spigolo opposto
+fermo, lato = 1 dimensione con lato opposto fermo, Maiusc = simmetrico dal centro;
+3 quote dal vivo, magnete griglia/puntini come i pad, Esc annulla, 1 passo Ctrl+Z, bozza
+Applica/Annulla, dopo Applica footprint+STEP;
+4 stesso GestureController (canvas_gestures) e stessi menu dei pad/disegni;
+5 solo rotazione multipla di 90 gradi e origine «body_center»; altrimenti disattivato con tooltip
+che spiega il perche'; minimi come la quota (MIN/MAX_LENGTH_MM).
+Inizio SOLO dopo che i 10 revisori hanno finito (leggono main_window.py e canvas_*).
+Progetto tecnico (studiato in sola lettura): footprint_view — contorno del corpo con ruolo dati
+BODY_KEY_ROLE, maniglie con BODY_HANDLE_ROLE (move, n, s, e, w, ne, nw, se, sw) rivelate al
+passaggio come quelle dei disegni; priorita' della pressione sinistra: maniglia disegno > testo >
+maniglia corpo > pad > corpo di un disegno > tratto del contorno corpo > sfondo (l'interno del corpo
+resta sfondo: pan). Bersaglio GestureController ('body', parte), DragPlan «stepped».
+main_window — gesture_begin/step/end per 'body': rettangolo nuovo in mm (schermo) da pressione +
+spostamento, magnete griglia come i pad (_pad_drag_delta), Maiusc simmetrico; fantasma tratteggiato
++ etichette dal vivo; al rilascio UN passo di bozza {"package_pins": pad traslati di -centro
+(via _source_frame_delta), "package_body": (l, w)}, validazione build_package, camera spostata di
+-centro perche' i pad restino fermi a schermo (come _keep_unmoved_pads_on_screen).
+
+## 03/11 — IN CORSO: revisione avversariale completa (utente: «sulla base delle nuove skills e agenti, fai una revisione completa del codice»)
+Base: commit 0281d04 + modifiche NON committate di oggi (colore quote, quote corpo editabili,
+skill/agenti). FASE 1 = SOLO RAPPORTO, nessuna correzione senza OK dell'utente.
+10 revisori in sola lettura su ambiti disgiunti: GUI A (main_window 1-11200), GUI B (main_window
+11201-fine), GUI altro, Canvas (canvas-parity-reviewer), Services (no photo/kicad_library/
+component_check; lente document-extraction-change), Photo (generality-auditor), Generators+core
+(lente generate-kicad-component/KLC), cad3d (lente cad3d-change), Consegna KiCad
+(kicad-workflow-reviewer), Packaging/CI/harness. Limite 15 rilievi ciascuno.
+Suite completa in corso in background al lancio (prima meta' ~55%, 0 falliti).
+
+## 03/11 — FATTO (non committato): audit skill/agenti, piano A-G approvato (utente: «ok procedi»)
+A-G applicati: skill nuove document-extraction-change e cad3d-change; generate-kicad-component
+riscritta (instradamento, mappa moduli, KLC); verify-kicad-component = checklist unica; agenti
+kicad-library-verifier (file) e kicad-workflow-reviewer (flusso) rimandano alla checklist;
+component-generator con regole vincolanti; CLAUDE.md nomina gli agenti. PDF KiCad 9 «Getting
+Started»: NON salvato nel repo (tutorial di 55 pagine, licenza GPLv3/CC-BY 3.0); note con
+attribuzione in docs/reference/kicad9-getting-started-notes.md. CORREZIONE di quanto detto
+all'utente: «50 mil» non e' sbagliato in assoluto — e' il limite di connessione di KiCad; la KLC
+(e il progetto) vuole 100 mil. Divergenza nota: footprint package con origine al centro corpo,
+convenzione KiCad THT = pin 1 in (0,0) (decisione utente 02/11: origine solo di disegno).
+Solo file in `.claude/`, nessun codice. A skill nuova document-extraction-change; B skill nuova
+cad3d-change; C riscrittura generate-kicad-component (mappa moduli, KLC via klc_checks: griglia pin
+100 mil, testi 1.27 mm, courtyard; core/sexpr.py); D verify-kicad-component = checklist unica di
+consegna con comandi kicad-cli read-only; E kicad-library-verifier (file generati) e
+kicad-workflow-reviewer (flusso scheda KiCad) rimandano a D senza ripeterla; F component-generator
+con regole vincolanti e rimandi; G CLAUDE.md nomina l'agente giusto invece di «the reviewer agent».
+Correzioni alla checklist incollata dall'utente: griglia simboli 100 mil (non 50); courtyard 0.25 mm
+e' il valore generale, non universale. Domanda utente: usare il PDF «Getting Started in KiCad 9»
+nelle skill — valutazione in corso.
+
+## 03/11 — IN CORSO: colore delle quote dell'anteprima footprint (utente: «ok procedi»)
+Richiesta: «il colore delle quote ... non deve essere stampato sul pcb ... deve essere ad uso
+interno». Verifica: il .kicad_mod di T7NS5D4-12 NON contiene quote (nessun `dimension`; su
+F.SilkS solo REF**, contorno corpo e cerchietto). Le quote automatiche («totale 22.50 mm») sono
+solo a schermo ma gialle `#f9e2af` (theme.YELLOW), quasi uguali alla serigrafia `#f2eda1`:
+sembrano serigrafia. Le misure del righello sono verde acqua `#94e2d5`, anch'esse solo a schermo.
+Decisione utente: quote automatiche nello stesso verde acqua del righello.
+Piano: costante DIMENSION_COLOR in canvas_measure (= MEASURE_COLOR) usata da
+DIMENSION_STYLE_HORIZONTAL/VERTICAL; test: colore diverso da ogni KICAD_LAYER_COLORS e .kicad_mod
+senza quote; test_footprint_measure_parity filtra per DIMENSION_COLOR invece di YELLOW.
+Freccia rossa dell'utente sull'etichetta verticale: letta come «anche questa e' gialla»; il codice
+la disegna a destra della linea (nessuna sovrapposizione), quindi nessun cambio di posizione.
+STATO: FATTO, NON committato. DIMENSION_COLOR in canvas_measure, import YELLOW tolto; due test nuovi
+in test_footprint_measure_parity (colore != strati KiCad e != YELLOW con contorno serigrafia ancora
+in colore serigrafia; .kicad_mod senza quote ne' etichette). Mirati: 186 verdi (measure parity,
+canvas_measure, camera/grid parity, preview_grid, footprint_drawings, documentation). Suite NON eseguita.
+IN DISCUSSIONE (utente 03/11: «le quote dell'ingombro ... editabili e riflettersi sulle dimensioni
+effettive del componente» + «rimuoverei il total e lascerei solo il valore numerico editabile»).
+Fatto da chiarire: oggi «totale» del pacchetto (main_window ~21021-21103) e' l'ingombro corpo+pad
+sporgenti, non il corpo; per il rele' coincide col corpo.
+DECISIONE utente 03/11 («ti torna ?» -> si'): quote esterne = CORPO, solo numero (niente
+«totale»), modificabili (doppio clic / tasto destro «Modifica quota…»): cambiano lunghezza o
+larghezza del corpo, centrato, pad fermi; valore = misura dichiarata dall'utente; nella bozza
+footprint (Ctrl+Z, Applica/Annulla). Se dei pad sporgono oltre il corpo, si disegna IN PIU' la
+quota dell'ingombro complessivo, calcolata e non modificabile. Corpo che non contiene i pad
+interni / valore non positivo: rifiutato con messaggio. STATO: FATTO, NON committato.
+Correzione del piano: il rifiuto «corpo che non contiene i pad» NON c'e' (pad che sporgono sono
+legittimi: e' proprio il caso della quota totale); si rifiuta fuori da MIN/MAX_LENGTH_MM o un corpo
+che build_package non costruisce. Codice: canvas_measure DIMENSION_EDIT_ROLE + add_dimension_line
+(edit_key); footprint_view segnali dimension_context_requested / dimension_edit_requested,
+_dimension_at (4 px); main_window _package_body, chiave di bozza "package_body" (stato, sync,
+set, applied-in-memory, salvataggio progetto, JSON di recupero), _rebind_package(**changes),
+_draw_package_dimensions / _body_dimensions_editable (solo orientamento multiplo di 90 gradi; a
+45 gradi resta il «totale» calcolato), _edit_body_dimension, _on_dimension_context; dopo Applica
+una modifica del corpo riscrive con generazione COMPLETA (STEP compreso, _fp_rewrite_body_edit),
+i pad restano footprint_only. footprint_draft: OPTIONAL_STATE_KEYS=('package_body',), un file di
+recupero della versione precedente resta offerto. Golden measure_golden/footprint_dimensions.json
+rigenerato: cambiano solo le 2 etichette del package («totale 15.00 mm» -> «15.00 mm»).
+Test nuovi: tests/test_footprint_body_dimensions.py (11). 3 testi nuovi nel catalogo (4 lingue).
+Limiti dichiarati: nessun campo di provenienza per il corpo (il log dice «quota scritta a mano»);
+solo l'anteprima del package, non pin header ne' modulo castellated (li' resta «totale»).
+IN CODA (proposta inviata, OK non ancora dato): pinout T7NS5D4-12 con 3 righe su 5 — A1/A2
+(Coil+/Coil-) persi perche' (1) lo schema AI dichiara `pin` integer (datasheet_extractor.py
+553/578), (2) i nomi di package_geometry.pins non riempiono i pad non nominati, (3) la tabella
+Pinout mostra solo le righe con nome (main_window ~9893). Il .kicad_sym ha A1/A2 con nome «~».
+
+## 02/11 sera — COMMITTATO (utente: «ok committa e pusha e mergia in main poi pusha»)
+Commit `5f1b03b` su ADVANCED (griglia unica, origine di disegno, fori trasparenti, puntini piu'
+chiari, magnete sui puntini), merge `fc12451` in main, entrambi pushati; di nuovo su ADVANCED.
+Suite: A 6556/9/19, B 4589/4, 0 falliti = 11145 passati, 13 saltati, 19 sottotest.
+`docs/T7NS5D4-12/` (PDF/foto utente) escluso. Nessun MSI ricostruito, nessuna release.
+Aperti (segnalati, non richiesti): X/Y e casella origine mancano nella finestra dei pad delle
+strip e dei contatti castellati; la griglia che segue l'origine sposta anche l'aggancio.
+
 ## 02/11 — COMMIT di tutto il lavoro 31/10-02/11 (utente: «ok committa tutto, pusha e mergia ok? poi porta in prog e rifai pacchetto»)
 Suite completa 02/11: A 6533/9/19, B 4584/4, 0 falliti = 11117 passati, 13 saltati, 19 sottotest.
 Branch ADVANCED; commit, push, merge in main, push main, ritorno su ADVANCED («porta in prog»

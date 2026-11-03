@@ -207,6 +207,13 @@ def _view_scale_px_per_mm(region, photo_px, body_length, body_width):
     return min(scales) if len(scales) == 2 else None
 
 
+#: `_height_source` of a height decoded from a vision model's view answer:
+#: an estimate from a top photo, never a measurement. Same value as
+#: datasheet_extractor.AI_ANSWER_HEIGHT_SOURCE (one meaning, one string; not
+#: imported, that module imports this one).
+VIEW_AI_HEIGHT_SOURCE = "ai_answer_visual_estimate_not_measured"
+
+
 def decode_detections(raw, region, body_length, body_width, source, log, photo_px=None):
     """@brief Convert crop boxes to board-normalized boxes and millimetres, discarding unmeasurable entries.
 
@@ -224,6 +231,8 @@ def decode_detections(raw, region, body_length, body_width, source, log, photo_p
         falls back to UNKNOWN_SCALE_ELONGATION_HINGE.
     @return List of component dictionaries with x_mm, y_mm, length_mm, width_mm,
         height_mm, rotation_deg and `_box`; empty when `raw` is not a list.
+        Every height is the model's estimate: `_height_estimated` True and
+        `_height_source` VIEW_AI_HEIGHT_SOURCE.
     @note No exception escapes: the ValueError raised for an invalid entry is
         caught together with KeyError, TypeError and OverflowError, logged,
         and that entry is discarded.
@@ -286,7 +295,11 @@ def decode_detections(raw, region, body_length, body_width, source, log, photo_p
             item.update(x_mm=((x0+x1)/2-.5)*body_length,
                         y_mm=((y0+y1)/2-.5)*body_width,
                         length_mm=length, width_mm=width, height_mm=height,
-                        rotation_deg=angle, _box=(x0,y0,x1,y1), _source=source)
+                        rotation_deg=angle, _box=(x0,y0,x1,y1), _source=source,
+                        # A height from a top view is the model's guess,
+                        # never a measurement (review 2026-11-03): marked so
+                        # no later step can take it for a read value.
+                        _height_estimated=True, _height_source=VIEW_AI_HEIGHT_SOURCE)
             if isinstance(entry.get("pin_count"), int) and not isinstance(entry.get("pin_count"), bool):
                 if entry["pin_count"] > 0:
                     item["pin_count"] = entry["pin_count"]
@@ -556,7 +569,7 @@ def _associate_view(group, previous, containment, tolerance=(1e-9, 1e-9)):
         candidates = []
         for index, existing in enumerate(previous):
             iou, _ = overlap(item, existing)
-            if iou >= .60 or (containment and same_body(item, existing, tolerance)):
+            if iou >= VIEW_ASSOCIATION_IOU or (containment and same_body(item, existing, tolerance)):
                 candidates.append((index, iou))
         edges[current] = [i for i, _ in sorted(candidates, key=lambda pair: (-pair[1], key(previous[pair[0]])))]
 
@@ -581,6 +594,31 @@ def _associate_view(group, previous, containment, tolerance=(1e-9, 1e-9)):
                 pending.clear()
                 break
     return assignments
+
+
+#: IoU above which two detections of DIFFERENT views are one body for the
+#: one-to-one association. HEURISTIC, declared as such (generality audit
+#: 2026-11-03): the value 0.60 predates the review and has no recorded tuning
+#: data. It is deliberately NOT the detector's NMS value (SAME_BODY_IOU, 0.5):
+#: NMS removes duplicates of one detector in one view, while these are boxes
+#: drawn at different crop scales; lowering it to 0.5 would join two equal
+#: bodies side by side whose boxes are shifted by a third of a body. What
+#: would replace it: `same_body` with a MEASURED localisation error of the
+#: model boxes (centres and sizes agreeing within it), as the containment
+#: criterion already does.
+VIEW_ASSOCIATION_IOU = 0.60
+
+
+#: Fraction of the SMALLER box covered by another body's box beyond which
+#: the pair is flagged «sovrapposizione» (overlap) for review after the merge.
+#: HEURISTIC, declared as such: introduced with the first photo localisation
+#: (commit 1590c38) without recorded tuning data. Physically two mounted
+#: bodies cannot overlap in plan view, but model boxes are loose by more than
+#: the measured edge uncertainty (DETECTION_EDGE_UNCERTAINTY_PX is a declared
+#: floor, not the model's error), so an «any overlap» rule would flag every
+#: pair of neighbours. A measured localisation error of the model boxes would
+#: replace it by «overlap deeper than twice that error». Diagnostic only.
+OVERLAP_DOUBT_COVERAGE = 0.3
 
 
 def merge_components(groups, log=lambda message: None, containment=False, summary=None,
@@ -673,7 +711,12 @@ def merge_components(groups, log=lambda message: None, containment=False, summar
                        "foto corpo e piazzole.",
                        value=i + 1,
                        value2=j + 1))
-            if coverage > 0.3:
+            # HEURISTIC, declared as such (review 2026-11-03): an overlap
+            # covering more than OVERLAP_DOUBT_COVERAGE of the smaller box is
+            # flagged for review. It only raises a doubt -- both bodies are
+            # kept, nothing is merged or moved -- so a wrong value costs a
+            # review click, never geometry. See the constant for its origin.
+            if coverage > OVERLAP_DOUBT_COVERAGE:
                 a["_uncertain"] = b["_uncertain"] = True
                 log(warning("Da verificare: sovrapposizione tra #{value} {get} e #{value2} {get2}.",
                        value=i + 1,
@@ -1731,7 +1774,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
         # here it is flagged; the recheck, if any, is done by whoever has the
         # documents.
         from .edge_notches import (_edge_name, check_declared_contacts, count_disagreements,
-                                   notched_full_hole_sides)
+                                   half_hole_depth_margin_mm, notched_full_hole_sides)
         # Full holes declared on an edge the photo shows cut, notch by notch,
         # where the declared contacts are: they are half-holes (user,
         # 2026-10-30). Corrected before the half-hole checks below, so the
@@ -1740,6 +1783,11 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
                                             declared.get("castellated_sides")):
             evidence = tx("{found} semi-fori contati sulla foto, sui contatti dichiarati",
                           found=item.found)
+            margin = half_hole_depth_margin_mm(item)
+            if margin is not None:
+                # One criterion, the depth: its margin is said, never silent.
+                evidence += tx("; tacca meno profonda oltre la soglia di {margin} mm "
+                               "(unico criterio: la profondità)", margin=f"{margin:.2f}")
             for side in declared.get("castellated_sides") or ():
                 if (isinstance(side, dict)
                         and str(side.get("edge") or "").strip().lower() == item.edge):
@@ -1764,7 +1812,7 @@ def extract_inventory(paths, model, length, width, kinds, call, progress=None,
             for item in disagreements:
                 if item.no_notch:
                     copper = count_edge_copper(photo, item.edge, pitches.get(item.edge),
-                                               length, width)
+                                               length, width, declared_count=item.declared)
                     item.copper_found = copper.found
                     item.copper_centres_mm = list(copper.centres_mm)
                     item.copper_reason = copper.reason

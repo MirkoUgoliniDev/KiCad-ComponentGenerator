@@ -476,6 +476,26 @@ def grounding_regions(photo, length_mm, width_mm, model=None):
                fit_to_model(photo[top:bottom, left:right], limits))
 
 
+def _entry_list_key(schema):
+    """Name of the tool's top-level entry array, or None when it has none.
+
+    `components` when the schema declares it; otherwise the ONE top-level
+    property of array type, whatever its name (`terminals` for the lead
+    separation tool): the empty/ID checks of cached_call apply to the entries
+    of every tool, not only to those that call them components (review
+    2026-11-03: an empty `terminals` answer was cached as a success). With
+    several top-level arrays none is assumed to be the entry list.
+    """
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    if not isinstance(properties, dict):
+        return None
+    if "components" in properties:
+        return "components"
+    arrays = [name for name, spec in properties.items()
+              if isinstance(spec, dict) and spec.get("type") == "array"]
+    return arrays[0] if len(arrays) == 1 else None
+
+
 def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     """@brief Content-addressed parsed response cache; never stores API keys/images.
 
@@ -499,8 +519,9 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
         invalidates the cache. Network/API errors are not cached. Corrupt or
         partial cache entries are ignored. Fresh partial responses still
         reach the entry decoders without a retry.
-    @note Empty answers. An empty `components` list is never stored as a
-        success, with one declared exception: the localization tool
+    @note Empty answers. An empty entry list (`components`, or the tool's
+        one top-level array whatever its name, see _entry_list_key) is never
+        stored as a success, with one declared exception: the localization tool
         (`locate_components`), where "no mounted body in this region" is a
         legitimate, complete answer (a detail third of a sparse board) and
         replaying it keeps offline replays identical. Such a record carries
@@ -536,13 +557,15 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
             return False
         return "enum" not in schema or value in schema["enum"]
 
+    schema = kwargs.get("tool",{}).get("function",{}).get("parameters",{})
+    list_key = _entry_list_key(schema)
+
     def reusable(data):
-        schema = kwargs.get("tool",{}).get("function",{}).get("parameters",{})
         if not isinstance(data, dict) or not valid(data, schema):
             return False
-        if "components" not in schema.get("properties", {}):
+        if list_key is None:
             return True
-        entries = data.get("components") if isinstance(data,dict) else None
+        entries = data.get(list_key) if isinstance(data,dict) else None
         if not isinstance(entries, list):
             return False
         for entry in entries:
@@ -571,7 +594,7 @@ def cached_call(call, kwargs, cache_dir, stage, log, expected_ids=None):
     empty_allowed = tool_name == 'locate_components'
 
     def empty(data):
-        return isinstance(data, dict) and data.get("components") == []
+        return isinstance(data, dict) and list_key is not None and data.get(list_key) == []
     if path:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))

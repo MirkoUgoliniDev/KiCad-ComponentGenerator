@@ -234,7 +234,16 @@ def test_the_outline_tooltip_is_rich_text_that_wraps(dialog, app):
     assert "<br>" in tooltip
     assert "<script>" not in tooltip and "&lt;script&gt;" in tooltip and "&amp; altro" in tooltip
     assert "\n" not in tooltip
-    assert dialog.component_list.item(1).toolTip() == tooltip
+    # The list row goes through tooltips.ToolTipFilter, which escapes every
+    # tooltip: it carries plain lines, and what the filter shows has the name
+    # in bold and no literal tag (review finding 2026-11-03).
+    from kicadgen.gui.tooltips import fitted_tooltip
+    row = dialog.component_list.item(1).toolTip()
+    assert row.startswith("2. R1") and "<" + "b>" not in row
+    assert "\n<script>alert(1)</script> & altro" in row
+    shown = fitted_tooltip(row, 800)
+    assert "<b>2. R1" in shown and "&lt;b&gt;" not in shown and "&lt;br&gt;" not in shown
+    assert "<script>" not in shown and "&lt;script&gt;" in shown
 
 
 def test_the_modal_grows_to_show_every_wrapped_line(dialog, app):

@@ -44,6 +44,12 @@ RUNTIME_RESOURCES = (
     ("kicadgen", "cad3d", "freecad_build_body.py"),
     ("kicadgen", "cad3d", "freecad_parts.py"),
     ("kicadgen", "cad3d", "model_size_cache.py"),
+    # Imported by file path inside FreeCAD's embedded interpreter, where the
+    # kicadgen package is not importable (freecad_build_body.py and
+    # freecad_parts.py put their own folder on sys.path).
+    ("kicadgen", "cad3d", "header_geometry.py"),
+    ("kicadgen", "cad3d", "lead_geometry.py"),
+    ("kicadgen", "cad3d", "lead_sides.py"),
     ("kicadgen", "gui", "assets", "app-icon.svg"),
     ("kicadgen", "gui", "assets", "help", "guida.html"),
     ("kicadgen", "gui", "assets", "help", "guida.en.html"),
@@ -90,8 +96,15 @@ def install_crash_reports(exit_process=os._exit):
         in a slot only while `sys.excepthook` is the default one; any other
         hook would let the window keep running on a possibly inconsistent
         state. Until the user decides otherwise, the program stops as it did
-        before, after the report and the usual traceback. Exceptions in
-        worker threads keep ending only their thread, as before.
+        before, after the report and the usual traceback.
+    @note The hook is process-wide, worker threads included: PyQt6 routes an
+        exception that escapes a Python ``QRunnable.run`` or ``QThread.run``
+        to ``sys.excepthook`` as well, so it too writes a report and stops
+        the whole program. A worker that must survive its own failure has to
+        catch the exception inside ``run`` and report it through a signal.
+        Plain ``threading.Thread`` targets go to ``threading.excepthook``
+        instead (`crash_report.install` reports them and chains to the
+        previous hook): only that thread ends.
     @return The installed hook (report, flush, exit), so tests can call it
         directly.
     """

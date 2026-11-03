@@ -1104,7 +1104,9 @@ def _on_body_surface(retained, others, container_confidence):
     @return List of (proposal_id, container proposal_id) pairs; each marked
         row gets ``on_body_of`` = the container's proposal id, and
         ``abuts_body`` True when its centre is outside but its box overlaps
-        the container (a pad or lead on the body's edge).
+        the container (a pad or lead on the body's edge) deeper than the two
+        boxes' edge uncertainty, or is a contact class; a shallower overlap
+        only sets ``overlap_doubt_with`` (two bodies or one, undecided).
     @note Physical fact: two components cannot occupy the same footprint on
         the top side, so a smaller box whose CENTRE lies on a body's box
         describes that body's surface (a shield can, a label, a lead, a
@@ -1157,12 +1159,26 @@ def _on_body_surface(retained, others, container_confidence):
                 # body's own footprint, or a feature straddling its edge.
                 # Two distinct bodies keep a courtyard gap between them
                 # (measured >= 0.35 mm on both boards: 18.7 px ESP32, 8.0 px
-                # RS485), so their boxes do not overlap; a proximity margin
-                # was rejected because on the 23 px/mm RS485 photo the box
-                # uncertainty equals that gap (zero margin). No new number.
-                row["on_body_of"] = container["proposal_id"]
-                row["abuts_body"] = True
-                links.append((row["proposal_id"], container["proposal_id"]))
+                # RS485), but on the 23 px/mm RS485 photo the detector's box
+                # uncertainty equals that gap: an overlap no deeper than the
+                # two facing edges' uncertainty may be two separate bodies
+                # whose boxes grew into each other (review 2026-11-03). Such a
+                # row is only a DOUBT (kept as a body, `overlap_doubt_with`);
+                # it is demoted only when the overlap is deeper than that
+                # uncertainty, or when the detector itself calls it a contact
+                # (_EXCLUDED: pads, pins), which is never a separate body.
+                # No new number: the uncertainty is _BOX_UNCERTAINTY_INPUT_PX
+                # scaled to each box's view.
+                depth = min(min(box[2], x1) - max(box[0], x0), min(box[3], y1) - max(box[1], y0))
+                uncertainty = (float(row.get("edge_uncertainty_px") or 0.0)
+                               + float(container.get("edge_uncertainty_px") or 0.0))
+                contact = row.get("class") in _EXCLUDED or row.get("argmax_class") in _EXCLUDED
+                if contact or depth > uncertainty:
+                    row["on_body_of"] = container["proposal_id"]
+                    row["abuts_body"] = True
+                    links.append((row["proposal_id"], container["proposal_id"]))
+                else:
+                    row.setdefault("overlap_doubt_with", container["proposal_id"])
     return links
 
 
@@ -1182,7 +1198,12 @@ def _on_body_surface(retained, others, container_confidence):
 #: It is NOT the outline uncertainty of a measurement on the photo
 #: (cad3d.measurement_uncertainty.EDGE_UNCERTAINTY_PX, the single source for
 #: that quantity): this one is the regression cell of the DETECTOR, in pixels
-#: of the model input, and only the tile-seam test uses it (review 2026-10-27 F4).
+#: of the model input. Used by the tile-seam test (review 2026-10-27 F4) and,
+#: since 2026-11-03, by the pad-or-body decision of `_on_body_surface`: an
+#: overlap shallower than the two facing edges' uncertainty is a doubt, not a
+#: pad. That decision rests on this ONE criterion (declared fragile: on a
+#: downscaled view the uncertainty grows and small pads not classed as
+#: contacts stay separate bodies flagged as doubts).
 _BOX_UNCERTAINTY_INPUT_PX = 8
 
 
@@ -1285,6 +1306,10 @@ def _proposals(raw, bounds, image_size, transform, view, np, confidence_threshol
                      "class_scores": [float(score) for score in scores[index]],
                      "class_ambiguous": ambiguous_body, "clipped_by_tile": bool(cut),
                      "clipped_sides": clipped_sides,
+                     # Detector edge uncertainty in PHOTO px of this view
+                     # (_BOX_UNCERTAINTY_INPUT_PX scaled back): the overlap
+                     # test of _on_body_surface needs it per box.
+                     "edge_uncertainty_px": _BOX_UNCERTAINTY_INPUT_PX / ratio,
                      "rejection": reason})
     return rows, invalid_count
 
@@ -1737,6 +1762,11 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
         emit(f"YOLO local: {len(on_body)} boxes lie on a body already found (centre inside "
              "a confident whole box, or overlapping its edge like a pad); demoted to "
              "proposals to keep by hand, not deleted.")
+    doubts = [row for row in retained + list(review_proposals)
+              if row.get("overlap_doubt_with") and not row.get("on_body_of")]
+    if doubts:
+        emit(f"YOLO local: {len(doubts)} boxes overlap a body already found by no more than "
+             "the detector's edge uncertainty; kept as bodies, flagged as doubts.")
     rebuilt = [row for row in review_proposals if row.get("recovered_from")]
     weak = [row for row in review_proposals if not row.get("recovered_from")]
     returned = retained + ((rebuilt + weak) if include_review_candidates else [])
@@ -1784,6 +1814,10 @@ def detect_yolo_components(photo, length_mm, width_mm, model_path=None, log=None
             # On the surface of this body (proposal_id): see _on_body_surface.
             **({"_yolo_on_body_of": row["on_body_of"],
                 "_yolo_abuts_body": bool(row.get("abuts_body"))} if row.get("on_body_of") else {}),
+            # Overlaps a confident body by no more than the boxes' edge
+            # uncertainty: maybe a separate body, maybe its pad -- a doubt.
+            **({"_yolo_overlap_doubt_with": row["overlap_doubt_with"]}
+               if row.get("overlap_doubt_with") and not row.get("on_body_of") else {}),
             # Presence attested by a confident fragment, footprint measured by
             # a view that contains it whole but with less confidence.
             "_yolo_geometry_from_weaker_view": bool(row.get("geometry_from_weaker_view")),

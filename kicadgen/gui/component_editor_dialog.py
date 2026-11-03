@@ -70,6 +70,10 @@ class ComponentEditorDialog(QDialog):
         self._originals = []
         #: Full dict of each row (detection metadata travels with the row).
         self._rows_data = []
+        #: Per row, key -> (unrounded source value, value the spin box showed
+        #: after its own rounding). A cell still showing that value was not
+        #: edited and gives back the source value, never the rounded one.
+        self._shown_numbers = []
         layout = QVBoxLayout(self)
         note = QLabel("Origine al centro del modulo, X a destra, Y in basso come nel footprint; "
                       "Lung. = asse lungo del componente, Rot. = come sta sul modulo. "
@@ -117,6 +121,7 @@ class ComponentEditorDialog(QDialog):
             kind.addItem(current, current)
         kind.setCurrentIndex(max(kind.findData(current), 0))
         self.table.setCellWidget(row, 1, kind)
+        shown = {}
         for column, key, minimum in _NUMBERS:
             value = float(component.get(key, NEW_COMPONENT[key]) or 0.0)
             spin = QDoubleSpinBox()
@@ -126,6 +131,7 @@ class ComponentEditorDialog(QDialog):
             spin.setRange(min(minimum, value), max(300.0, value))
             spin.setSingleStep(0.1)
             spin.setValue(value)
+            shown[key] = (value, spin.value())
             if key == "height_mm" and height_is_estimated(component):
                 # Same cell, but it reads as an estimate and not a measurement.
                 spin.setSuffix(" ~")
@@ -149,6 +155,7 @@ class ComponentEditorDialog(QDialog):
         self.table.setCellWidget(row, 9, QLineEdit(str(component.get("marking") or "")))
         # Data not shown (detection metadata) travel with the row.
         self._rows_data.append(component)
+        self._shown_numbers.append(shown)
 
     def _fit_column_to(self, column: int, spin: QDoubleSpinBox) -> None:
         """Widen a numeric column so the cell shows its widest value whole.
@@ -179,6 +186,7 @@ class ComponentEditorDialog(QDialog):
         self.table.removeRow(row)
         del self._originals[row]
         del self._rows_data[row]
+        del self._shown_numbers[row]
 
     def components(self) -> list:
         """@brief The components as the table shows them now, evidence adjusted.
@@ -192,7 +200,13 @@ class ComponentEditorDialog(QDialog):
             entry["name"] = self.table.cellWidget(row, 0).text().strip() or "Componente"
             entry["kind"] = self.table.cellWidget(row, 1).currentData() or "generic"
             for column, key, _minimum in _NUMBERS:
-                entry[key] = self.table.cellWidget(row, column).value()
+                current = self.table.cellWidget(row, column).value()
+                source, shown = self._shown_numbers[row][key]
+                # The spin box rounds to its decimals: a cell nobody edited
+                # still shows the rounded value and must give back the source
+                # value, or every long-decimal row would read as edited and
+                # lose its evidence on a plain «Applica» (Apply).
+                entry[key] = source if current == shown else current
             # The cell showed the component height, or the new component's
             # one if missing: a different value was typed by hand.
             before = (original if original is not None else {}).get(

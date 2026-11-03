@@ -104,6 +104,15 @@ def test_no_known_terminals_means_no_extra_api_call(png):
     call.assert_not_called()
 
 
+def test_a_partial_detail_answer_is_used_but_never_replayed(png,tmp_path):
+    """Negative of the cache test: one of the terminal IDs answered -> asked again."""
+    original = [component()]
+    call = Mock(return_value={'terminals':[dict(id=1,resolved=True,confidence='high',lead_bbox=LEADS[0])]})
+    for _ in range(2):
+        refine_leads(png,original,'m',call,lambda _:None,tmp_path)
+    assert call.call_count == 2
+
+
 def test_affine_mapping_round_trip_does_not_change_shape():
     target = [.103,.204,.902,.807]
     actual = [.1,.2,.91,.81]
@@ -113,7 +122,11 @@ def test_affine_mapping_round_trip_does_not_change_shape():
 
 def test_detail_uses_cache_but_changed_body_invalidates_it(png,tmp_path):
     original = [component()]
-    call = Mock(return_value={'terminals':[dict(id=1,resolved=True,confidence='high',lead_bbox=LEADS[0])]})
+    # Every terminal ID answered once: only a complete answer is a cache hit
+    # (review 2026-11-03, expected_ids); unresolved entries still count.
+    call = Mock(return_value={'terminals':[dict(id=1,resolved=True,confidence='high',lead_bbox=LEADS[0])]
+                              + [dict(id=i,resolved=False,confidence='low',lead_bbox=LEADS[i-1])
+                                 for i in range(2,len(ENVELOPES)+1)]})
     for _ in range(2):
         refine_leads(png,original,'m',call,lambda _:None,tmp_path)
     assert call.call_count == 1

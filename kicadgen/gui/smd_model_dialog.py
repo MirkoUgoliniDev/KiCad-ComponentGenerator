@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout
 from ..services import yolo_models
 from ..services.messages import tx
 from .theme import SUBTEXT, YELLOW
-from .yolo_model_dialog import _breakable, _remember, _remembered, _size_text
+from .yolo_model_dialog import _breakable, _JobResults, _size_text
 
 
 class _Signals(QObject):
@@ -85,6 +85,7 @@ class SmdModelDialog(QDialog):
         self._current = str(current or self._default)
         self._extra = [p for p in (self._current, self._default) if p]
         self._jobs = []
+        self._results = _JobResults()
         self._closed = False
         self.setWindowTitle(self._tr("Scegli la rete SMD"))
         self.setMinimumSize(760, 460)
@@ -96,7 +97,7 @@ class SmdModelDialog(QDialog):
 
         self.model_list = QListWidget()
         self.model_list.setMinimumWidth(260)
-        self.model_list.currentItemChanged.connect(self._show_selected)
+        self.model_list.currentItemChanged.connect(self._selection_changed)
 
         self.details = QLabel()
         self.details.setProperty("i18n_skip", True)
@@ -188,7 +189,9 @@ class SmdModelDialog(QDialog):
             if self._default and self._same(path, self._default):
                 marks.append(self._tr("predefinito"))
             text = path.name + (f"  ({', '.join(marks)})" if marks else "")
-            text += f"\nPyTorch · {_size_text(size)}"
+            # The format follows the suffix, as in the YOLO window: an ONNX
+            # export is not a PyTorch checkpoint.
+            text += f"\n{yolo_models.ModelFile(path, size, None).format} · {_size_text(size)}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setToolTip(str(path))
@@ -240,9 +243,14 @@ class SmdModelDialog(QDialog):
 
     def _job_ready(self, kind, path, result) -> None:
         self._jobs = [job for job in self._jobs if not (job.kind == kind and job.path == path)]
-        _remember(path, kind, result if kind == "smd_check" else (result or ""))
+        self._results.store(path, kind, result if kind == "smd_check" else (result or ""))
         if self._same(path, self.selected_path()):
             self._show_selected()
+
+    def _selection_changed(self, *_):
+        """A really new selection: a file that failed before is examined again."""
+        self._results.forget(self.selected_path())
+        self._show_selected()
 
     def _show_selected(self, *_):
         """Draw the details of the selected file, starting what is still unknown."""
@@ -256,13 +264,13 @@ class SmdModelDialog(QDialog):
             ok_button.setEnabled(False)
             return
         for kind in ("sha256", "smd_check"):
-            if _remembered(path, kind) is None and not self._running(path, kind):
+            if self._results.get(path, kind) is None and not self._running(path, kind):
                 self._start(kind, path)
-        check = _remembered(path, "smd_check")
+        check = self._results.get(path, "smd_check")
         # A network that the classifier rejects cannot be chosen: it would
         # fail at analysis time, after everything else has been prepared.
         ok_button.setEnabled(not (check and not check.get("ok")))
-        self.details.setText(self.details_html(path, _remembered(path, "sha256"), check))
+        self.details.setText(self.details_html(path, self._results.get(path, "sha256"), check))
 
     def details_html(self, path, digest, check) -> str:
         """@brief The details table of `path`: file facts, then what the checkpoint declares.

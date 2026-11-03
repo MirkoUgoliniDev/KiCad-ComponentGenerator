@@ -55,7 +55,10 @@ def tooltip_html(text: str) -> str:
     @note Every tooltip is treated as PLAIN text and escaped, even when Qt's
         heuristic would call it rich: no widget of this application writes
         rich-text tooltips, while a file name such as «<b>x</b>.png» must read
-        as written. A future rich tooltip would show its tags literally.
+        as written. A rich tooltip would show its tags literally, so callers
+        write «name\\nexplanation» lines and let this function bold the name.
+        Only a QGraphicsItem tooltip may be rich text: QGraphicsView shows it
+        through Qt, never through this filter.
     """
     lines = [html.escape(line, quote=False) for line in text.split("\n")]
     if len(lines) > 1 and lines[0]:

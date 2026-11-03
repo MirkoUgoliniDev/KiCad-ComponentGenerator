@@ -158,3 +158,13 @@ def test_the_inventory_corrects_the_style_before_the_other_checks(tmp_path):
     assert "destro" in declared["notes"]
     # Corrected first: the right side is then compared as half-holes, and agrees.
     assert [item.edge for item in seen] == []
+
+
+def test_the_half_hole_depth_margin_is_measured_from_the_floor():
+    """Generality audit 2026-11-03: the depth-only correction says its margin; no depths, no margin."""
+    from kicadgen.services.edge_notches import (MIN_HALF_HOLE_DIAMETER_MM, EdgeCount,
+                                                half_hole_depth_margin_mm)
+    floor = MIN_HALF_HOLE_DIAMETER_MM / 2 + 0.05
+    counted = EdgeCount("top", 4, 4, depths_mm=[floor + 0.12, floor + 0.03], depth_tolerance_mm=0.05)
+    assert half_hole_depth_margin_mm(counted) == pytest.approx(0.03)
+    assert half_hole_depth_margin_mm(EdgeCount("top", 4, 4)) is None

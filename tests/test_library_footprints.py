@@ -322,3 +322,37 @@ def test_end_to_end_without_a_part_number_nothing_is_searched(offline, monkeypat
     params, logs = _extract(monkeypatch, tmp_path, None, _top_view_turned(RELAY_BOTTOM))
     assert params.pin_map_conflict, "two disagreeing readings and nothing else: blocked"
     assert not any("Footprint KiCad con la sigla" in line for line in logs)
+
+
+# -- Pads repeating a number (L13) ---------------------------------------------------
+
+def _write_pads(folder: Path, name: str, pads):
+    """A footprint whose pads are (number, x, y), numbers possibly repeated."""
+    pretty = folder / "Lib.pretty"
+    pretty.mkdir(parents=True, exist_ok=True)
+    body = "".join(f'\n\t(pad "{n}" smd rect (at {x} {y}) (size 1 1) (layers "F.Cu"))'
+                   for n, x, y in pads)
+    (pretty / f"{name}.kicad_mod").write_text(f'(footprint "{name}" (layer "F.Cu"){body}\n)',
+                                              encoding="utf-8")
+    return pretty / f"{name}.kicad_mod"
+
+
+def test_stacked_pads_of_one_number_are_one_centre_and_still_confirm(tmp_path):
+    """Positive: «EP» drawn as four stacked/tiled pads is one terminal at their mean."""
+    path = _write_pads(tmp_path, "QFN_X", [("1", 0, 0), ("2", 4, 0),
+                                            ("EP", 1.5, 1.5), ("EP", 2.5, 1.5),
+                                            ("EP", 1.5, 2.5), ("EP", 2.5, 2.5)])
+    footprint = lib.read_footprint(path)
+    assert footprint.centres == ((0.0, 0.0), (4.0, 0.0), (2.0, 2.0))
+    verdict = lib.check_layout({"1": (0, 0), "2": (4, 0), "EP": (2, 2)}, "top", [footprint], 0.1)
+    assert verdict.status == "confirmed"
+
+
+def test_distinct_numbers_at_distinct_places_stay_distinct(tmp_path):
+    """Negative: without repeated numbers nothing is merged, and a reading missing a pad
+    is still no match."""
+    path = _write_pads(tmp_path, "Row_X", [("1", 0, 0), ("2", 2, 0), ("3", 4, 0)])
+    footprint = lib.read_footprint(path)
+    assert len(footprint.centres) == 3
+    verdict = lib.check_layout({"1": (0, 0), "2": (2, 0)}, "top", [footprint], 0.1)
+    assert verdict.status == "not_confirmed"

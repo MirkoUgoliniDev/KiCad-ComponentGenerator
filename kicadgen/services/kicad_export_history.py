@@ -43,6 +43,52 @@ def load_history(path: Path | None = None) -> list[dict]:
     return [item for item in data if isinstance(item, dict)][:MAX_RECORDS]
 
 
+class _UnreadableHistory(Exception):
+    """The history file exists but its content is not a JSON list."""
+
+
+def _records_for_update(target: Path) -> list[dict]:
+    """@brief Records to keep when a new one is added, refusing to lose any.
+
+    @param target History file.
+    @return Its records ([] when the file does not exist).
+    @throws _UnreadableHistory When the file holds something that is not a
+        JSON list (truncated by a crash, edited by hand).
+    @throws OSError When the file exists but cannot be read: nothing is
+        written then, because the old records could not be kept.
+    """
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        return []
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise _UnreadableHistory(str(exc)) from exc
+    if not isinstance(data, list):
+        raise _UnreadableHistory("not a JSON list")
+    return [item for item in data if isinstance(item, dict)][:MAX_RECORDS]
+
+
+def _set_aside(target: Path) -> Path:
+    """@brief Move an unreadable history next to itself, never deleting it.
+
+    @param target History file that could not be parsed.
+    @return The new name, ``<name>.corrupt-<YYYYMMDD-HHMMSS>`` (a counter is
+        added when that name is taken).
+    @throws OSError When the file cannot be moved; the caller then writes
+        nothing.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = target.with_name(f"{target.name}.corrupt-{stamp}")
+    counter = 1
+    while candidate.exists():
+        candidate = target.with_name(f"{target.name}.corrupt-{stamp}-{counter}")
+        counter += 1
+    os.rename(target, candidate)
+    return candidate
+
+
 def record_export(*, component: str, kind: str, source: str,
                   destination: str, path: Path | None = None) -> bool:
     """@brief Atomically add a successful KiCad export/install event to local history.
@@ -53,6 +99,12 @@ def record_export(*, component: str, kind: str, source: str,
     @param destination Folder or table that received them.
     @param path History file to update; None means `history_path()`.
     @return True when the record was written, False when the write failed.
+    @note A history file that exists but cannot be parsed (truncated by a
+        crash during a write of an older version, edited by hand) is moved
+        aside as ``<name>.corrupt-<timestamp>`` before the new history is
+        written; when it cannot be moved, or cannot even be read, nothing is
+        written and False is returned. Loading it as empty and overwriting it
+        silently discarded every earlier record (review 2026-11-03).
     """
     target = path or history_path()
     record = {
@@ -65,7 +117,12 @@ def record_export(*, component: str, kind: str, source: str,
     temporary = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        data = [record, *load_history(target)][:MAX_RECORDS]
+        try:
+            previous = _records_for_update(target)
+        except _UnreadableHistory:
+            _set_aside(target)
+            previous = []
+        data = [record, *previous][:MAX_RECORDS]
         payload = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
         temporary = Path(name)

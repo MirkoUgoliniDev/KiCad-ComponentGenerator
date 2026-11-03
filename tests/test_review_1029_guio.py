@@ -212,6 +212,9 @@ def test_u3_a_fresh_result_still_reports_candidates_ready(review, search, app, m
         def exec(self):
             return QDialog.DialogCode.Rejected
 
+        def deleteLater(self):  # noqa: N802 - Qt name; the review deletes the window after use
+            pass
+
     monkeypatch.setattr(mcd, "ModelCandidatesDialog", _Chooser)
     dialog = review()
     dialog._select_row(0)

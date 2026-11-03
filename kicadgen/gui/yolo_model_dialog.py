@@ -58,6 +58,58 @@ def _remember(path, key, value) -> None:
         _RESULTS.setdefault(identity, {})[key] = value
 
 
+class _JobResults:
+    """Results of one window's jobs, including those the session cache refuses.
+
+    A file that vanished or became unreadable has no identity, so `_remember`
+    cannot keep its result; without a record of it, every redraw of the
+    details would start the same job again, whose result redraws the details
+    (review finding 2026-11-03: thousands of starts in two seconds). The
+    refused result is kept here, by path, until the selection really changes.
+    """
+
+    def __init__(self) -> None:
+        """@brief Start with no result kept outside the session cache."""
+        self._unstored: dict[tuple, object] = {}
+
+    @staticmethod
+    def _key(path, kind) -> tuple:
+        return (os.path.normcase(os.path.abspath(str(path))), kind)
+
+    def store(self, path, kind, value) -> None:
+        """@brief Keep `value` in the session cache, or here when the file has no identity.
+
+        @param path File the job examined.
+        @param kind Job kind ("sha256", "check", "smd_check").
+        @param value Job result, already normalised by the caller.
+        """
+        if _identity(path) is None:
+            self._unstored[self._key(path, kind)] = value
+        else:
+            self._unstored.pop(self._key(path, kind), None)
+            _remember(path, kind, value)
+
+    def get(self, path, kind):
+        """@brief The known result of `kind` on `path`, or None when still unknown.
+
+        @param path File path.
+        @param kind Job kind.
+        @return The cached result, else the one kept for a vanished file, else None.
+        """
+        found = _remembered(path, kind)
+        return found if found is not None else self._unstored.get(self._key(path, kind))
+
+    def forget(self, path) -> None:
+        """@brief Drop the results kept for `path`: a new selection examines it again.
+
+        @param path File path ("" or None forgets nothing).
+        """
+        if path:
+            name = self._key(path, "")[0]
+            for key in [key for key in self._unstored if key[0] == name]:
+                del self._unstored[key]
+
+
 #: Zero-width space: lets a long path or identifier wrap after a separator
 #: instead of widening the details beyond the window.
 _BREAK = "​"
@@ -138,6 +190,7 @@ class YoloModelDialog(QDialog):
         self._current = str(current or self._default)
         self._extra = [p for p in (self._current, self._default) if p]
         self._jobs = []
+        self._results = _JobResults()
         #: Set by shutdown(): a closed window starts no more jobs.
         self._closed = False
         self.setWindowTitle(self._tr("Scegli il modello YOLO"))
@@ -150,7 +203,7 @@ class YoloModelDialog(QDialog):
 
         self.model_list = QListWidget()
         self.model_list.setMinimumWidth(260)
-        self.model_list.currentItemChanged.connect(self._show_selected)
+        self.model_list.currentItemChanged.connect(self._selection_changed)
 
         self.details = QLabel()
         self.details.setProperty("i18n_skip", True)
@@ -269,19 +322,24 @@ class YoloModelDialog(QDialog):
 
     def _job_ready(self, kind, path, result) -> None:
         self._jobs = [job for job in self._jobs if not (job.kind == kind and job.path == path)]
-        _remember(path, kind, result if kind == "check" else (result or ""))
+        self._results.store(path, kind, result if kind == "check" else (result or ""))
         if self._same(path, self.selected_path()):
             self._show_selected()
 
     def _check_selected(self) -> None:
         """«Verifica compatibilità»: load the selected model on request."""
         path = self.selected_path()
-        if path and _remembered(path, "check") is None and not self._running(path, "check"):
+        if path and self._results.get(path, "check") is None and not self._running(path, "check"):
             self._start("check", path)
             self._show_selected()
 
     def _running(self, path, kind) -> bool:
         return any(job.kind == kind and self._same(job.path, path) for job in self._jobs)
+
+    def _selection_changed(self, *_):
+        """A really new selection: a file that failed before is examined again."""
+        self._results.forget(self.selected_path())
+        self._show_selected()
 
     def _show_selected(self, *_):
         """Draw the details of the selected file, starting what is still unknown."""
@@ -296,10 +354,10 @@ class YoloModelDialog(QDialog):
             ok_button.setEnabled(False)
             return
         facts = yolo_models.describe_file(path)
-        digest = _remembered(path, "sha256")
+        digest = self._results.get(path, "sha256")
         if digest is None and not self._running(path, "sha256"):
             self._start("sha256", path)
-        check = _remembered(path, "check")
+        check = self._results.get(path, "check")
         if (check is None and not facts.runs_code_when_loaded
                 and not self._running(path, "check")):
             self._start("check", path)

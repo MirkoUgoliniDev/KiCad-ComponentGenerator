@@ -61,6 +61,24 @@ def test_without_install_location_the_icon_and_uninstaller_name_the_folder():
     assert installed_programs.install_dir_from_entry(unquoted) == Path(r"E:\Tools\KiCad")
 
 
+@pytest.mark.parametrize("location", [".", "C:", r"KiCad\10.0"])
+def test_a_relative_install_location_falls_through_to_the_icon(location):
+    """Positive (2026-11-03 review): a relative InstallLocation no longer hides an absolute icon."""
+    entry = {"InstallLocation": location, "DisplayIcon": r"E:\Tools\FreeCAD 1.1\bin\FreeCAD.exe",
+             "UninstallString": r'"F:\Other\uninstall.exe" /S'}
+    assert installed_programs.install_dir_from_entry(entry) == Path(r"E:\Tools\FreeCAD 1.1\bin")
+    no_icon = {"InstallLocation": location, "UninstallString": r'"F:\Other\uninstall.exe" /S'}
+    assert installed_programs.install_dir_from_entry(no_icon) == Path(r"F:\Other")
+
+
+@pytest.mark.parametrize("location", [".", "C:"])
+def test_a_relative_install_location_alone_still_declares_no_folder(location):
+    """Negative: with no absolute icon or uninstaller the entry still gives nothing."""
+    entry = {"InstallLocation": location,
+             "UninstallString": "MsiExec.exe /X{1F2E3D4C-0000-1111-2222-333344445555}"}
+    assert installed_programs.install_dir_from_entry(entry) is None
+
+
 def test_an_entry_without_any_path_gives_no_folder():
     assert installed_programs.install_dir_from_entry({"DisplayName": "FreeCAD 1.1"}) is None
 

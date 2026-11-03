@@ -99,9 +99,54 @@ def _legacy_text_anchors(fp):
                    value_at=DEFAULT_TEXT_POSITIONS["Value"], text_justify={})
 
 
+#: CONTRACT CHANGED 2026-11-03 (review fixes, KLC F5.1-F5.3): the F.Fab
+#: body outline is written with the KLC 0.10 mm stroke (it used to take the
+#: FpRect default, 0.12 mm), the silk body outline moved 0.11 mm OUTSIDE it
+#: (half of each stroke) instead of lying on it, and the courtyard corners
+#: are rounded outwards to the 0.01 mm grid. The normaliser folds those three
+#: back, and nothing else: the silk coordinates on the grown outline return
+#: to the body outline, the F.Fab stroke to 0.12 mm, and the courtyard of
+#: these modules is already on the grid. What it hides is verified by
+#: test_the_klc_layer_fold_only_touches_the_outlines below and the rules
+#: themselves by tests/test_review_1103_generators.py.
+def _legacy_klc_layers(fp):
+    import copy
+    from kicadgen.core.footprint import SILK_OUTSIDE_FAB_MM, FpLine, FpRect
+    fp = copy.deepcopy(fp)
+    fab = next((g for g in fp.graphics if isinstance(g, FpRect) and g.layer == "F.Fab"), None)
+    if fab is None:
+        return fp
+    fab.width = 0.12
+    half_x, half_y = abs(fab.end[0]), abs(fab.end[1])
+
+    def back(value, half):
+        if math.isclose(abs(value), half + SILK_OUTSIDE_FAB_MM, abs_tol=1e-9):
+            return math.copysign(half, value)
+        return value
+
+    for graphic in fp.graphics:
+        if graphic.layer == "F.SilkS" and isinstance(graphic, (FpLine, FpRect)):
+            graphic.start = (back(graphic.start[0], half_x), back(graphic.start[1], half_y))
+            graphic.end = (back(graphic.end[0], half_x), back(graphic.end[1], half_y))
+    return fp
+
+
 def _uuidless(fp):
-    text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(fp).render())
+    text = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_text_anchors(_legacy_klc_layers(fp)).render())
     return _DESCRIPTION_PROPERTY.sub('(property "Description" ""', text, count=1)
+
+
+def test_the_klc_layer_fold_only_touches_the_outlines():
+    """@brief The 2026-11-03 fold changes the F.Fab stroke and the silk outline coordinates only."""
+    import difflib
+    fp = build_castellated_module(rs485())
+    plain = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", fp.render()).splitlines()
+    folded = re.sub(r'\(uuid "[^"]*"\)', "(uuid)", _legacy_klc_layers(fp).render()).splitlines()
+    assert len(plain) == len(folded)
+    changed = [(a.strip(), b.strip()) for a, b in zip(plain, folded) if a != b]
+    assert changed
+    for before, after in changed:
+        assert before.split()[0] in ("(start", "(end", "(width"), (before, after)
 
 
 def test_the_text_anchors_are_the_only_d1_change_the_normaliser_hides():

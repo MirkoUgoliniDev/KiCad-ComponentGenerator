@@ -972,3 +972,45 @@ def test_the_smd_network_has_its_own_phase_not_the_detector_one(overlay):
     assert TOOLS["yolo"][2] == "frame" != glyph
     overlay.set_tool("smd", "smd_classifier.pt (v3)")
     assert (overlay.spinner.glyph, overlay.spinner.color) == (glyph, color)
+
+
+class _SpontaneousHide:
+    """Hide event as the window system sends it (window minimised)."""
+
+    @staticmethod
+    def make():
+        from PyQt6.QtGui import QHideEvent
+
+        class _Event(QHideEvent):
+            def spontaneous(self):  # noqa: D401 - Qt accessor
+                return True
+        return _Event()
+
+
+def _clock(monkeypatch):
+    import kicadgen.gui.analysis_overlay as module
+    now = [1000.0]
+    monkeypatch.setattr(module, "monotonic", lambda: now[0])
+    return now
+
+
+def test_a_program_hide_is_left_out_of_the_elapsed_time(overlay, monkeypatch):
+    """@brief Positive: the body review hides the card; that time is not the model's."""
+    from PyQt6.QtGui import QHideEvent, QShowEvent
+    now = _clock(monkeypatch)
+    overlay.started_at = 1000.0
+    overlay.hideEvent(QHideEvent())
+    now[0] += 30.0
+    overlay.showEvent(QShowEvent())
+    assert overlay.started_at == 1030.0
+
+
+def test_a_minimised_window_keeps_counting_the_operation(overlay, monkeypatch):
+    """@brief Negative (review finding 2026-11-03): a spontaneous hide is no pause."""
+    from PyQt6.QtGui import QShowEvent
+    now = _clock(monkeypatch)
+    overlay.started_at = 1000.0
+    overlay.hideEvent(_SpontaneousHide.make())
+    now[0] += 30.0
+    overlay.showEvent(QShowEvent())
+    assert overlay.started_at == 1000.0
