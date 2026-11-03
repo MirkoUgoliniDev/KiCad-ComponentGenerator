@@ -262,7 +262,11 @@ def test_pin_header_marker_follows_a_mapped_pin_one():
     assert _nearest_pad(fp, marker.center) == "1"
     assert marker.center[0] > 7 * 2.54 and marker.center[1] < 0
     plain = build_pin_header(PinHeaderParams(rows=2, cols=8, pitch=2.54, row_spacing=10.16))
-    assert _marker(plain).center == (-1.5, -1.5)        # default grid: unchanged corner
+    # CONTRACT CHANGED 2026-11-03 (KLC courtyard margin 0.25 mm, review
+    # fixes): without a body the silk frames the pads at the silk clearance
+    # (0.85 + 0.2 + 0.06 = 1.11 mm from pin 1) instead of the old 1.0 mm
+    # courtyard margin, so the dot 0.5 mm outside that corner is at -1.61.
+    assert _marker(plain).center == pytest.approx((-1.61, -1.61))   # default grid: pin-1 corner
 
 
 # -- G7: populated pins without a position -----------------------------------------

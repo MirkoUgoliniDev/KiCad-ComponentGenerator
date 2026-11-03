@@ -70,10 +70,13 @@ def _render(monkeypatch, mesh, rotation=0.0, view=gui.VIEW_PLAN, color=None):
     monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
         read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
 
-    monkeypatch.setattr(gui.subprocess, 'run', run)
+    # CONTRACT CHANGED 2026-11-03 (preview launch): the child no longer
+    # starts through subprocess.run (no tree kill, bytecode written);
+    # the seam faked here is `_run_preview_child`, its single launcher.
+    monkeypatch.setattr(gui, '_run_preview_child', run)
     return gui._thumbnail('example.step', rotation, None, color, view)
 
 
@@ -256,7 +259,7 @@ def test_plan_view_keeps_the_declared_body_colour(app, monkeypatch):
 
 
 def test_unknown_view_is_rejected_before_any_cad_run(monkeypatch):
-    monkeypatch.setattr(gui.subprocess, 'run', lambda *a, **k: pytest.fail('CAD launched'))
+    monkeypatch.setattr(gui, '_run_preview_child', lambda *a, **k: pytest.fail('CAD launched'))
     with pytest.raises(ValueError, match='Unknown preview view'):
         gui._thumbnail('example.step', 0.0, None, None, 'perspective')
 

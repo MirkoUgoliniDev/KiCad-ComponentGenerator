@@ -20,6 +20,8 @@ import time
 import uuid
 
 from ..core.footprint import GENERATOR_VERSION, KICAD_VERSION
+from ..core.sexpr import format_number, quote
+from ..kicad_versions import version_at_least
 from ..fsutil import replace_file, retry_transient
 
 
@@ -123,6 +125,12 @@ class LibraryInstallResult:
         overwritten with the new copies, ``removed`` were deleted because the
         source no longer provides them (a WRL the component lost). The GUI
         can word its report with them; both are empty for a first install.
+    @note ``rollback_left`` is the temporary rollback folder of this install
+        when it could not be removed after a successful install (a file in it
+        held open by a scanner); None otherwise. It holds only copies of the
+        files as they were before, is marked disposable and is swept by a
+        later install once older than `STALE_SCRATCH_AGE_S`
+        (`_sweep_stale_rollback_dirs`); the GUI may mention it.
     """
 
     identifier: str
@@ -132,6 +140,29 @@ class LibraryInstallResult:
     table_path: Path
     replaced: tuple[Path, ...] = ()
     removed: tuple[Path, ...] = ()
+    rollback_left: Path | None = None
+
+
+@dataclass(frozen=True)
+class LibraryShadowing:
+    """@brief A row of the OTHER library table under the nickname being installed.
+
+    @details KiCad looks a ``<library>:<footprint>`` reference up in the
+    project table first and falls back to the global one, so the same
+    nickname registered in both scopes with different locations makes one
+    of them invisible inside that project: a project install hides the
+    global library of that name, a global install is hidden by the
+    project's row (review 2026-11-03).
+    @note ``scope`` is the scope of `table_path`: ``"global"`` when the
+        install goes to a project, ``"project"`` when it goes to the global
+        table. ``uri`` is the raw value of the row (variables unexpanded).
+    """
+
+    table_path: Path
+    scope: str
+    library: str
+    uri: str
+    library_type: str
 
 
 @dataclass(frozen=True)
@@ -151,6 +182,22 @@ class InstallPlan:
     @note ``linked`` lists the targets, the table included, that are symbolic
         or hard links: the install writes THROUGH them so the other name sees
         the new content too, and a rollback restores both.
+    @note ``shadowing`` (review 2026-11-03) is the enabled row of the other
+        scope's table registering the same nickname at a different location
+        (`LibraryShadowing`), None when there is none, when no other table
+        was given, or when it cannot be read (an unreadable table of the
+        other scope must not block this install; ``shadowing_error`` then
+        names the reason). The install does not refuse it: the GUI asks.
+    @note ``open_locks`` (review 2026-11-03) are KiCad's lock files of the
+        destination project (``~<name>.kicad_pro.lck``, ``.kicad_pcb``,
+        ``.kicad_sch``): KiCad has that project open and keeps its own copy
+        of the library table in memory, so it neither sees the new row until
+        the project is reopened nor must save its library settings over it.
+        Checked for project installs only: the global table has no lock file.
+    @note ``kicad_version`` is the KiCad settings version the caller says
+        receives the install and ``kicad_too_old`` is True when it is older
+        than `MINIMUM_KICAD_VERSION` (the install then refuses with
+        ``kicad_too_old``).
     """
 
     targets: tuple[Path, ...]
@@ -160,6 +207,19 @@ class InstallPlan:
     table_path: Path
     table_exists: bool
     library_uri: str
+    shadowing: LibraryShadowing | None = None
+    shadowing_error: str | None = None
+    open_locks: tuple[Path, ...] = ()
+    kicad_version: str | None = None
+    kicad_too_old: bool = False
+
+    @property
+    def kicad_open(self) -> bool:
+        """@brief Whether KiCad holds the destination project open.
+
+        @return True when at least one lock file is in `open_locks`.
+        """
+        return bool(self.open_locks)
 
 
 @dataclass(frozen=True)
@@ -177,6 +237,15 @@ class GlobalTableLocation:
     path: Path
     version: str
     version_source: str
+
+    @property
+    def supported(self) -> bool | None:
+        """@brief Whether this KiCad reads the files the generators write.
+
+        @return True/False against `MINIMUM_KICAD_VERSION`; None when
+            `version` is not a dotted number.
+        """
+        return kicad_version_supported(self.version)
 
 
 _SAFE_LIBRARY_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
@@ -309,11 +378,6 @@ def _remove_direct_children(text: str, node_name: str) -> str:
     return text
 
 
-def _quote(value: str) -> str:
-    """@brief Quote a KiCad string atom."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def _append_root_child(text: str, child: str) -> str:
     """@brief Append one child before the root S-expression closing token."""
     closing = text.rstrip().rfind(")")
@@ -363,7 +427,7 @@ def name_footprint(footprint_text: str, name: str) -> str:
     old = _node_arguments(f"(footprint {match.group(2)})")[0]
     if old == name:
         return footprint_text
-    renamed = footprint_text[:match.start(2)] + _quote(name) + footprint_text[match.end(2):]
+    renamed = footprint_text[:match.start(2)] + quote(name) + footprint_text[match.end(2):]
     for start, end in _direct_child_ranges(renamed, "property"):
         block = renamed[start:end]
         arguments = _node_arguments(block)
@@ -371,7 +435,7 @@ def name_footprint(footprint_text: str, name: str) -> str:
             continue
         value = _VALUE_HEAD.match(block)
         if value is not None and len(arguments) > 1 and arguments[1] == old:
-            block = block[:value.start(2)] + _quote(name) + block[value.end(2):]
+            block = block[:value.start(2)] + quote(name) + block[value.end(2):]
             renamed = renamed[:start] + block + renamed[end:]
         break
     return renamed
@@ -388,7 +452,7 @@ def attach_3d_model(footprint_text: str, model_reference: str) -> str:
     """
     without_models = _remove_direct_children(footprint_text, "model")
     model = (
-        f"\t(model {_quote(model_reference)}\n"
+        f"\t(model {quote(model_reference)}\n"
         "\t\t(offset (xyz 0 0 0))\n"
         "\t\t(scale (xyz 1 1 1))\n"
         "\t\t(rotate (xyz 0 0 0))\n"
@@ -406,9 +470,12 @@ def _board_footprint(footprint_text: str, model_reference: str) -> str:
 
 
 def _mm(value: float) -> str:
-    """Board coordinate in mm as KiCad writes it: 1 um resolution, no trailing zeros."""
-    text = f"{round(float(value), 4):.4f}".rstrip("0").rstrip(".")
-    return "0" if text in ("-0", "") else text
+    """Board coordinate in mm as KiCad writes it: 0.1 um resolution, no trailing zeros.
+
+    Rounded to 4 decimals, then written by the shared `format_number` (no
+    ``-0``, a non-finite value refused) like every other KiCad number.
+    """
+    return format_number(round(float(value), 4))
 
 
 #: Name of the preview folder the program creates inside a component folder.
@@ -589,22 +656,25 @@ def create_preview_project(
         )
     outline_uuid = uuid.uuid4()
     layer_rows = "".join(
-        f"\t\t({ordinal} {_quote(name)} {kind}"
-        + (f" {_quote(user_name)}" if user_name else "") + ")\n"
+        f"\t\t({ordinal} {quote(name)} {kind}"
+        + (f" {quote(user_name)}" if user_name else "") + ")\n"
         for ordinal, name, kind, user_name in PREVIEW_BOARD_LAYERS)
+    # Every string atom goes through the shared quoter and every number
+    # through the shared formatter (`kicadgen.core.sexpr`), as in the
+    # generated footprints: no value can break the S-expression.
     board = (
-        f"(kicad_pcb (version {KICAD_VERSION}) (generator \"kicadgen_tool\")\n"
-        f"\t(generator_version \"{GENERATOR_VERSION}\")\n"
-        "\t(general (thickness 1.6))\n"
-        "\t(paper \"A4\")\n"
+        f"(kicad_pcb (version {KICAD_VERSION}) (generator {quote('kicadgen_tool')})\n"
+        f"\t(generator_version {quote(GENERATOR_VERSION)})\n"
+        f"\t(general (thickness {format_number(1.6)}))\n"
+        f"\t(paper {quote('A4')})\n"
         "\t(layers\n"
         f"{layer_rows}"
         "\t)\n"
-        "\t(setup (pad_to_mask_clearance 0))\n"
+        f"\t(setup (pad_to_mask_clearance {format_number(0)}))\n"
         f"{footprint.rstrip()}\n"
         f"\t(gr_rect (start {_mm(x0)} {_mm(y0)}) (end {_mm(x1)} {_mm(y1)})\n"
-        "\t\t(stroke (width 0.05) (type default)) (fill none)\n"
-        f"\t\t(layer \"Edge.Cuts\") (uuid \"{outline_uuid}\"))\n"
+        f"\t\t(stroke (width {format_number(0.05)}) (type default)) (fill none)\n"
+        f"\t\t(layer {quote('Edge.Cuts')}) (uuid {quote(str(outline_uuid))}))\n"
         ")\n"
     )
     # The board text is complete before the first write, so a refusal below
@@ -621,8 +691,14 @@ def create_preview_project(
                 if own.is_file():
                     _clear_readonly(own)
         _atomic_copy(artifacts.step_path, preview_dir / f"{artifacts.name}.step")
+        preview_wrl = preview_dir / f"{artifacts.name}.wrl"
         if artifacts.wrl_path is not None:
-            _atomic_copy(artifacts.wrl_path, preview_dir / f"{artifacts.name}.wrl")
+            _atomic_copy(artifacts.wrl_path, preview_wrl)
+        elif preview_dir.name == PREVIEW_DIR_NAME and preview_wrl.is_file():
+            # The component lost its WRL: the copy of an earlier preview no
+            # longer matches it and must not linger (review 2026-11-03). Only
+            # in the program's own preview folder, where nothing is user content.
+            _remove_clearing_readonly(preview_wrl)
         _atomic_write_text(board_path, board)
         if not project_path.exists():
             _atomic_write_text(project_path, "{}\n")
@@ -1100,11 +1176,16 @@ class LibraryTableEntry:
 
 
 def _library_entry(library_name: str, uri: str) -> str:
-    """@brief Serialize one native KiCad footprint-library table entry."""
+    """@brief Serialize one native KiCad footprint-library table entry.
+
+    @param library_name Nickname of the row.
+    @param uri Library location written in the row.
+    @return The ``(lib ...)`` row, every string quoted by the shared quoter.
+    """
     return (
-        f"(lib (name {_quote(library_name)})(type \"KiCad\")"
-        f"(uri {_quote(uri)})(options \"\")"
-        "(descr \"Generated by KiCadGen-Tool\"))"
+        f"(lib (name {quote(library_name)})(type {quote('KiCad')})"
+        f"(uri {quote(uri)})(options {quote('')})"
+        f"(descr {quote('Generated by KiCadGen-Tool')}))"
     )
 
 
@@ -1201,7 +1282,7 @@ def _same_uri(first: str | None, second: str) -> bool:
 
 def _replace_entry_child(block: str, field: str, value: str) -> str:
     """Replace (or append) one ``(field "value")`` child of a ``lib`` block."""
-    child = f"({field} {_quote(value)})"
+    child = f"({field} {quote(value)})"
     ranges = _direct_child_ranges(block, field)
     if ranges:
         start, end = ranges[0]
@@ -1541,7 +1622,8 @@ def _updated_fp_lib_table_text(
     URI and the ``KiCad`` type is kept verbatim (options, description and
     ``hidden`` flag included). A row pointing elsewhere is a conflict: it is
     repointed only with ``replace_entry``, and even then only its ``type``
-    and ``uri`` children change. A DISABLED row is a conflict whatever it
+    and ``uri`` children change, plus its ``options`` when the type changes
+    (see `_repoint_entry`). A DISABLED row is a conflict whatever it
     points to (review 2026-10-29, L2): with ``replace_entry`` it is repointed
     when needed and its ``(disabled)`` child is removed, every other child
     kept.
@@ -1550,8 +1632,10 @@ def _updated_fp_lib_table_text(
         once, ``library_entry_disabled`` (same context as the next code) when
         the existing row is disabled and ``replace_entry`` is False,
         ``library_entry_conflict`` (context ``library``, ``old_uri``,
-        ``new_uri``, ``old_type``, ``path``) when the existing row points to a
-        different location and ``replace_entry`` is False.
+        ``new_uri``, ``old_type``, ``type_changes``, ``path``) when the
+        existing row points to a different location and ``replace_entry`` is
+        False. ``type_changes`` is True when the row's type is not ``KiCad``:
+        confirming then also clears its options.
     @note Why a disabled row is not kept: KiCad ignores it, so the installed
         footprint could not be placed («library not enabled») while the
         install reported success. Re-enabling a row the user switched off is
@@ -1586,12 +1670,12 @@ def _updated_fp_lib_table_text(
                     f"installing would enable it pointing to {uri!r}.",
                     code="library_entry_disabled", library=library_name,
                     old_uri=entry.uri or "", new_uri=uri,
-                    old_type=entry.library_type or "", path=location,
+                    old_type=entry.library_type or "",
+                    type_changes=not same_type, path=location,
                 )
             block = original[start:end]
             if not same_place:
-                block = _replace_entry_child(block, "type", "KiCad")
-                block = _replace_entry_child(block, "uri", uri)
+                block = _repoint_entry(block, uri, same_type)
             block = _remove_direct_children(block, "disabled")
             return original[:start] + block + original[end:]
         if same_place:
@@ -1603,10 +1687,10 @@ def _updated_fp_lib_table_text(
                 f"repoint it to {uri!r}.",
                 code="library_entry_conflict", library=library_name,
                 old_uri=entry.uri or "", new_uri=uri,
-                old_type=entry.library_type or "", path=location,
+                old_type=entry.library_type or "",
+                type_changes=not same_type, path=location,
             )
-        block = _replace_entry_child(original[start:end], "type", "KiCad")
-        block = _replace_entry_child(block, "uri", uri)
+        block = _repoint_entry(original[start:end], uri, same_type)
         return original[:start] + block + original[end:]
     closing = original.rstrip().rfind(")")
     if closing < 0:
@@ -1621,6 +1705,26 @@ def _updated_fp_lib_table_text(
     newline = "\r\n" if "\r\n" in original else "\n"
     return (original[:closing].rstrip() + newline + "  " + replacement
             + newline + original[closing:])
+
+
+def _repoint_entry(block: str, uri: str, same_type: bool) -> str:
+    """@brief Point one ``lib`` row at `uri` as a native ``KiCad`` library.
+
+    @param block Text of the row.
+    @param uri New location.
+    @param same_type Whether the row already has the ``KiCad`` type.
+    @return The row with ``type`` and ``uri`` set; when the type changes, an
+        existing ``options`` child is emptied, every other child kept.
+    @note Options are plugin-specific (a GitHub or legacy plugin reads keys a
+        KiCad ``.pretty`` folder does not know): kept across a type change
+        they described a library that no longer exists (review 2026-11-03).
+        Under the same type they still apply and are kept.
+    """
+    block = _replace_entry_child(block, "type", "KiCad")
+    block = _replace_entry_child(block, "uri", uri)
+    if not same_type and _direct_child_ranges(block, "options"):
+        block = _replace_entry_child(block, "options", "")
+    return block
 
 
 def _fsync_file(path: Path) -> None:
@@ -1735,13 +1839,19 @@ def _rollback_install(
         when its content differs from the copy taken before the install.
     @note Every step is attempted independently, so a locked file does not
         prevent the other files and the table from being restored.
+    @note A restore can fail with KiCadLibraryError as well as OSError:
+        `_restore_file` resolves the target through `_write_target`, which
+        refuses a link that became dangling (``target_link_unresolved``).
+        Both are recorded as a failed step; catching only OSError let that
+        error escape, skipping the remaining restores and the
+        ``rollback_incomplete`` report (review 2026-11-03).
     """
     failures: list[str] = []
     for target in installed:
         if target in backups:
             try:
                 _restore_file(backups[target], target)
-            except OSError as error:
+            except (OSError, KiCadLibraryError) as error:
                 failures.append(f"{target} <- {backups[target]}: {error}")
             continue
         try:
@@ -1755,7 +1865,7 @@ def _rollback_install(
                 _restore_file(table_backup, table)
         elif not table_existed and table.exists():
             table.unlink()
-    except OSError as error:
+    except (OSError, KiCadLibraryError) as error:
         failures.append(f"{table}: {error}")
     return failures
 
@@ -1773,15 +1883,156 @@ def _same_content(first: Path, second: Path) -> bool:
         return False
 
 
+#: Name prefix of the rollback folder an install creates in its destination;
+#: followed by 32 hex characters.
+ROLLBACK_DIR_PREFIX = ".kicadgen-rollback-"
+#: File written into a rollback folder that could not be removed although it
+#: is no longer needed (successful install, complete rollback). Only folders
+#: holding it are ever swept: a folder kept by ``rollback_incomplete`` holds
+#: the only copies of the user's files and has no marker.
+ROLLBACK_DISPOSABLE_MARKER = "kicadgen-rollback-disposable"
+_ROLLBACK_DIR_NAME = re.compile(re.escape(ROLLBACK_DIR_PREFIX) + r"[0-9a-f]{32}\Z")
+
+
+def _dispose_rollback_dir(rollback_dir: Path) -> Path | None:
+    """@brief Remove a rollback folder that is no longer needed, or mark it.
+
+    @param rollback_dir Rollback folder of an install that succeeded or was
+        completely undone.
+    @return None when the folder is gone; the folder itself when it could not
+        be removed (a copy held open by a scanner), after writing
+        `ROLLBACK_DISPOSABLE_MARKER` into it so a later install sweeps it.
+    @note The result used to be ignored: the folder stayed in the library
+        root forever and nothing said so (review 2026-11-03).
+    """
+    if _remove_tree_quietly(rollback_dir):
+        return None
+    try:
+        (rollback_dir / ROLLBACK_DISPOSABLE_MARKER).write_bytes(b"")
+    except OSError:
+        # Without the marker the folder is never swept: kept, never lost.
+        pass
+    return rollback_dir
+
+
+def _sweep_stale_rollback_dirs(root: Path, now: float | None = None) -> list[Path]:
+    """@brief Remove disposable rollback folders older than `STALE_SCRATCH_AGE_S`.
+
+    @param root Library root that receives ``<library>.pretty``.
+    @param now Current time (tests); None reads the clock.
+    @return The folders removed.
+    @note SAFETY BOUNDARY: only a folder named like ours AND holding
+        `ROLLBACK_DISPOSABLE_MARKER` whose time is older than the limit is
+        removed. A folder without the marker may be the one kept by
+        ``rollback_incomplete`` (the only copies of the user's files) or one
+        left by an older version, which cannot be told apart: it is kept.
+        Failures are ignored, as for `_remove_stale_scratch`.
+    """
+    limit = (time.time() if now is None else now) - STALE_SCRATCH_AGE_S
+    removed: list[Path] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return removed
+    for entry in entries:
+        if not _ROLLBACK_DIR_NAME.match(entry.name):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            marker = Path(entry.path) / ROLLBACK_DISPOSABLE_MARKER
+            if marker.stat().st_mtime > limit:
+                continue
+        except OSError:
+            continue
+        if _remove_tree_quietly(Path(entry.path)):
+            removed.append(Path(entry.path))
+    return removed
+
+
 def _is_link(path: Path) -> bool:
     """Whether `path` is a symbolic link or a hard-linked file (for `InstallPlan.linked`)."""
     return _is_symlink(path) or _hard_linked(path)
 
 
+def _expand_project_uri(uri: str, project_dir: Path | None) -> str:
+    """Replace ``${KIPRJMOD}`` by `project_dir` (when known) for a location comparison."""
+    if project_dir is None:
+        return uri
+    return re.sub(r"\$\{KIPRJMOD\}|\$\(KIPRJMOD\)",
+                  lambda _match: project_dir.as_posix(), uri)
+
+
+def find_shadowing_entry(
+        other_table: str | os.PathLike[str], library_name: str,
+        library_location: str | os.PathLike[str], *, other_scope: str,
+        project_dir: str | os.PathLike[str] | None = None) -> LibraryShadowing | None:
+    """@brief The row of the other scope's table that clashes with an install.
+
+    @param other_table Table of the OTHER scope: the global fp-lib-table for
+        a project install, the project's fp-lib-table for a global install.
+    @param library_name Nickname being installed.
+    @param library_location Absolute folder of the ``.pretty`` the install
+        registers (``${KIPRJMOD}`` already expanded).
+    @param other_scope ``"global"`` or ``"project"``, the scope of `other_table`.
+    @param project_dir Project folder that ``${KIPRJMOD}`` stands for when the
+        other row uses it; None leaves the variable unexpanded.
+    @return A `LibraryShadowing` when the table has an ENABLED row under the
+        same nickname pointing somewhere else (or of another type); None when
+        the table or the row is missing, the row is disabled (KiCad does not
+        load it) or it points to the same folder.
+    @throws KiCadLibraryError ``invalid_table``/``malformed_file``/
+        ``file_not_utf8``/``duplicate_library_entry`` from `find_library_entry`.
+    @throws OSError When the table cannot be read.
+    @note Variables other than ``${KIPRJMOD}`` are not expanded: a row reached
+        through another variable is reported, and the user decides.
+    """
+    entry = find_library_entry(other_table, library_name)
+    if entry is None or entry.disabled:
+        return None
+    project = Path(project_dir) if project_dir is not None else None
+    same_type = (entry.library_type or "").casefold() == "kicad"
+    if same_type and _same_uri(_expand_project_uri(entry.uri or "", project),
+                               Path(library_location).as_posix()):
+        return None
+    return LibraryShadowing(
+        table_path=Path(other_table), scope=other_scope, library=library_name,
+        uri=entry.uri or "", library_type=entry.library_type or "")
+
+
+#: Documents whose KiCad lock file (`kicad_lock_file`) means the project is open.
+_PROJECT_DOCUMENT_SUFFIXES = (".kicad_pro", ".kicad_pcb", ".kicad_sch")
+
+
+def project_lock_files(project_dir: str | os.PathLike[str]) -> tuple[Path, ...]:
+    """@brief KiCad lock files present in one project folder.
+
+    @param project_dir Folder of a KiCad project.
+    @return The ``~<name>.kicad_pro.lck``, ``~<name>.kicad_pcb.lck`` and
+        ``~<name>.kicad_sch.lck`` files found there (`kicad_lock_file`),
+        sorted; empty when there are none or the folder cannot be listed.
+    @note A lock left by a crashed KiCad looks the same as a live one; the
+        result is a warning for the user, never a refusal.
+    """
+    try:
+        entries = list(os.scandir(project_dir))
+    except OSError:
+        return ()
+    locks = []
+    for entry in entries:
+        name = entry.name
+        if (name.startswith("~") and name.endswith(".lck")
+                and name[1:-4].endswith(_PROJECT_DOCUMENT_SUFFIXES)):
+            locks.append(Path(entry.path))
+    return tuple(sorted(locks))
+
+
 def plan_component_install(
         artifacts: ComponentArtifacts, destination_root: str | os.PathLike[str],
         *, library_name: str = "KiCadGen", project_library: bool = True,
-        table_path: str | os.PathLike[str] | None = None) -> InstallPlan:
+        table_path: str | os.PathLike[str] | None = None,
+        other_table_path: str | os.PathLike[str] | None = None,
+        kicad_version: str | None = None) -> InstallPlan:
     """@brief Pre-flight of `install_component_library`: what it would touch.
 
     @param artifacts Validated generated artifacts of one component.
@@ -1790,20 +2041,36 @@ def plan_component_install(
     @param library_name Library nickname registered in the table.
     @param project_library Portable ``${KIPRJMOD}`` library when True.
     @param table_path Table to update; defaults to the project table.
+    @param other_table_path Library table of the OTHER scope, only read, to
+        find a row that this install would shadow or be shadowed by
+        (`InstallPlan.shadowing`): the global fp-lib-table for a project
+        install, the project's fp-lib-table for a global install. None
+        skips the check.
+    @param kicad_version KiCad settings version that receives the install
+        (`GlobalTableLocation.version`); None when unknown. One older than
+        `MINIMUM_KICAD_VERSION` sets `InstallPlan.kicad_too_old`.
     @return The targets, the files that would be replaced or removed, the
-        linked ones and the table (see `InstallPlan`). Nothing is written.
+        linked ones, the table, the clashing row of the other scope, the
+        lock files of an open project and the version verdict (see
+        `InstallPlan`). Nothing is written.
     @throws KiCadLibraryError ``invalid_library_name``,
         ``install_target_is_folder`` (a folder where a file must go).
     @note The install itself calls this, so the confirmation the GUI asks on
         the plan and the install's own checks cannot disagree: a dangling
         link, a hard link or a WRL to remove is the same here and there.
+    @note The destination folder is made absolute with ``os.path.abspath``,
+        not ``Path.resolve``: resolving turned a mapped network drive or a
+        SUBST drive into its UNC or underlying path, which was then written
+        into the global table and the model references although the user
+        never chose it (review 2026-11-03). Links are still followed where
+        it matters, for each written file (`_write_target`).
     """
     if not _SAFE_LIBRARY_NAME.fullmatch(library_name):
         raise KiCadLibraryError(
             "Library name may contain only letters, numbers, '.', '_', '+' and '-'.",
             code="invalid_library_name",
         )
-    root = Path(destination_root).expanduser().resolve()
+    root = Path(os.path.abspath(Path(destination_root).expanduser()))
     pretty_dir = root / f"{library_name}.pretty"
     shapes_dir = root / f"{library_name}.3dshapes"
     target_footprint = pretty_dir / f"{artifacts.name}.kicad_mod"
@@ -1827,10 +2094,30 @@ def plan_component_install(
     linked = tuple(path for path in (*existing, destination_table) if _is_link(path))
     library_uri = (f"${{KIPRJMOD}}/{library_name}.pretty"
                    if project_library else pretty_dir.as_posix())
+    shadowing: LibraryShadowing | None = None
+    shadowing_error: str | None = None
+    if other_table_path is not None:
+        # ${KIPRJMOD} names the project: the destination for a project
+        # install, the folder of the project table for a global one.
+        project_dir = root if project_library else Path(other_table_path).parent
+        try:
+            shadowing = find_shadowing_entry(
+                other_table_path, library_name, pretty_dir,
+                other_scope="global" if project_library else "project",
+                project_dir=project_dir)
+        except (KiCadLibraryError, OSError) as exc:
+            # The other scope's table is only read for a warning: an
+            # unreadable one must not block an install that does not touch it.
+            shadowing_error = str(exc)
+    too_old = (kicad_version is not None
+               and kicad_version_supported(kicad_version) is False)
     return InstallPlan(
         targets=targets, replaced=replaced, removed=removed, linked=linked,
         table_path=destination_table, table_exists=destination_table.is_file(),
-        library_uri=library_uri,
+        library_uri=library_uri, shadowing=shadowing,
+        shadowing_error=shadowing_error,
+        open_locks=project_lock_files(root) if project_library else (),
+        kicad_version=kicad_version, kicad_too_old=too_old,
     )
 
 
@@ -1839,7 +2126,8 @@ def install_component_library(
         *, library_name: str = "KiCadGen", project_library: bool = True,
         table_path: str | os.PathLike[str] | None = None,
         overwrite: bool = False,
-        replace_library_entry: bool = False) -> LibraryInstallResult:
+        replace_library_entry: bool = False,
+        kicad_version: str | None = None) -> LibraryInstallResult:
     """@brief Install one component into a project or global KiCad library.
 
     @param artifacts Validated generated artifacts of one component.
@@ -1853,8 +2141,13 @@ def install_component_library(
     @param replace_library_entry Repoint an existing table row with the same
         nickname but a different URI/type, and enable a disabled one, when
         True (explicit confirmation).
+    @param kicad_version KiCad settings version that receives the install
+        (`GlobalTableLocation.version` for a global install); None when
+        unknown, which skips the check.
     @return Installed paths and the ``library:footprint`` identifier.
-    @throws KiCadLibraryError ``files_exist``, ``global_table_missing``,
+    @throws KiCadLibraryError ``kicad_too_old`` (context ``version``,
+        ``minimum``, ``path``) when `kicad_version` is older than
+        `MINIMUM_KICAD_VERSION`; ``files_exist``, ``global_table_missing``,
         ``library_entry_conflict``, ``library_entry_disabled``,
         ``duplicate_library_entry`` and footprint
         parsing errors are raised before anything is written.
@@ -1888,10 +2181,21 @@ def install_component_library(
         dangling link counts as an existing file for ``files_exist`` and,
         once overwriting is allowed, is refused as ``target_link_unresolved``
         before anything is written. The returned paths are the user's paths.
+    @note A rollback folder that cannot be removed after a successful or a
+        completely undone install is marked disposable
+        (`ROLLBACK_DISPOSABLE_MARKER`) and reported (`rollback_left` of the
+        result, context ``rollback_left`` of the error); every install first
+        sweeps the disposable ones older than `STALE_SCRATCH_AGE_S`
+        (`_sweep_stale_rollback_dirs`). The folder kept by
+        ``rollback_incomplete`` holds the only copies and is never swept.
     """
     plan = plan_component_install(
         artifacts, destination_root, library_name=library_name,
-        project_library=project_library, table_path=table_path)
+        project_library=project_library, table_path=table_path,
+        kicad_version=kicad_version)
+    if plan.kicad_too_old:
+        # Refused before anything is written: KiCad would refuse every file.
+        raise _kicad_too_old(kicad_version or "?", plan.table_path)
     target_footprint, target_step, target_wrl_path = plan.targets
     root = target_footprint.parents[1]
     pretty_dir = target_footprint.parent
@@ -1947,7 +2251,8 @@ def install_component_library(
     # the list fills only once those folders exist; a failure at any step
     # removes exactly the scratch files created so far.
     staged: list[tuple[Path, Path]] = []
-    rollback_dir = root / f".kicadgen-rollback-{uuid.uuid4().hex}"
+    _sweep_stale_rollback_dirs(root)
+    rollback_dir = root / f"{ROLLBACK_DIR_PREFIX}{uuid.uuid4().hex}"
     # Internal path -> the user's file it stands for, so an error never names
     # a scratch file or the rollback folder (review 2026-10-15, L5).
     aliases: dict[Path, Path] = {rollback_dir: root}
@@ -2028,18 +2333,23 @@ def install_component_library(
                 code="rollback_incomplete", rollback_dir=rollback_dir,
                 error=exc, failures="\n".join(failures),
             ) from exc
-        _remove_tree_quietly(rollback_dir)
+        left = _dispose_rollback_dir(rollback_dir)
         _remove_created_directories(created_dirs)
         if isinstance(exc, (PermissionError, IsADirectoryError)):
-            raise _install_write_refused(exc, root, aliases) from exc
+            refused = _install_write_refused(exc, root, aliases)
+            if left is not None:
+                refused.context["rollback_left"] = left
+            raise refused from exc
+        if isinstance(exc, KiCadLibraryError) and left is not None:
+            exc.context.setdefault("rollback_left", left)
         raise
     for temporary, _target in staged:
         _unlink_quietly(temporary)
-    _remove_tree_quietly(rollback_dir)
+    left = _dispose_rollback_dir(rollback_dir)
     return LibraryInstallResult(
         f"{library_name}:{artifacts.name}", target_footprint, target_step,
         target_wrl, destination_table,
-        replaced=plan.replaced, removed=plan.removed,
+        replaced=plan.replaced, removed=plan.removed, rollback_left=left,
     )
 
 
@@ -2104,6 +2414,47 @@ def kicad_settings_version(text: str | None) -> str | None:
             match = re.match(r"v?(\d+)\.(\d+)", line)
             return f"{int(match.group(1))}.{int(match.group(2))}" if match else None
     return None
+
+
+#: Oldest KiCad (``<major>.<minor>``) that reads the files the generators
+#: write. Derived from the format constant `GENERATOR_VERSION`, the release
+#: whose file format (`KICAD_VERSION`) is written, never from a release name
+#: typed here: when the generators move to a newer format, this follows.
+#: An older KiCad refuses a footprint of a newer format version as a whole.
+MINIMUM_KICAD_VERSION = ".".join(GENERATOR_VERSION.split(".")[:2])
+
+
+def kicad_version_supported(version: str | None) -> bool | None:
+    """@brief Whether a KiCad of `version` reads the files the generators write.
+
+    @param version ``<major>.<minor>`` (or longer) KiCad version, e.g. the
+        settings folder of `resolve_global_fp_lib_table` or the output of
+        `kicad_settings_version`.
+    @return True when it is at least `MINIMUM_KICAD_VERSION`, False when
+        older, None when unknown (not a dotted number).
+    @note A development series numbered below the minimum (a ``9.99``
+        nightly) counts as older: whether it already reads the newer format
+        depends on its build date, which the version does not tell.
+    """
+    return version_at_least(version, MINIMUM_KICAD_VERSION)
+
+
+def _kicad_too_old(version: str, table: Path | None = None) -> KiCadLibraryError:
+    """@brief Error for an installation into a KiCad older than the file format.
+
+    @param version KiCad version that would receive the files.
+    @param table Its library table, named in the message when known.
+    @return KiCadLibraryError ``kicad_too_old`` (context ``version``,
+        ``minimum``, ``path``).
+    """
+    where = f" ({table})" if table is not None else ""
+    return KiCadLibraryError(
+        f"KiCad {version}{where} cannot read the generated files: they use "
+        f"the file format of KiCad {MINIMUM_KICAD_VERSION}. Install KiCad "
+        f"{MINIMUM_KICAD_VERSION} or newer. No file was changed.",
+        code="kicad_too_old", version=version, minimum=MINIMUM_KICAD_VERSION,
+        path=table if table is not None else "",
+    )
 
 
 def resolve_global_fp_lib_table(

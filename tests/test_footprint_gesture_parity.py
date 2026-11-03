@@ -316,8 +316,12 @@ def test_f1_a_jiggle_inside_the_defaults_snap_cell_writes_nothing_and_another_no
     origin = QPointF(group.pos())
     cell = window._snapped_draw_point(origin.x(), origin.y())
     assert any(abs(v / PX - round(v / PX)) > 1e-6 for v in (origin.x(), origin.y())), "default anchor off the grid"
-    jig = QPoint(2, 0)
-    assert window._snapped_draw_point(origin.x() + 2, origin.y()) == cell, "precondition: same snap cell"
+    # The jiggle goes the way that stays in the default's cell: where the
+    # default sits near a cell edge depends on the courtyard (2026-11-03,
+    # KLC margins), not on the rule under test.
+    jig = next((QPoint(dx, 0) for dx in (2, -2)
+                if window._snapped_draw_point(origin.x() + dx, origin.y()) == cell), None)
+    assert jig is not None, "precondition: same snap cell"
     start = _glyph_box(window, group).center()
     _press(window, start)
     _move(window, start + jig)

@@ -341,7 +341,8 @@ class CopperRow:
     """@brief Periodic row of elements found along one edge whose outline is straight.
 
     @note `found` is the number of consecutive elements of the chain (None
-        when the strip could not be read, 0 when no row was found);
+        when the strip could not be read or the row is too short to confirm
+        or exclude -- see count_edge_copper -- 0 when no row was found);
         `centres_mm` their centres from the start of the edge (left to right
         for top/bottom, top to bottom for left/right); `reason` why nothing
         could be counted. The elements are the LANDS or the GAPS between
@@ -368,8 +369,14 @@ COPPER_STRIP_RINGS = (1, 4)
 #: below this on the sample boards (RS485 long edges, which carry no contacts,
 #: at every pitch tried), while a real row gave 18-22 (ESP32 devkit). Declared
 #: limit: a real row of fewer than this many edge contacts is not confirmable
-#: from copper and falls back to the clean-edge rule.
+#: from copper -- and, for the same reason, its ABSENCE is not provable either:
+#: a chain shorter than this, or a declared row shorter than this, is reported
+#: as unverifiable (`found` None), never as «no copper» (count_edge_copper).
 MIN_ROW_LANDS = 5
+#: Fewest elements that still form a chain (two points fix a pitch). Only used
+#: to tell «a short row may be there» (unverifiable) from «nothing periodic at
+#: all» (absence); it never confirms a row.
+MIN_CHAIN_LANDS = 2
 
 
 def _colour_classes(colours, k: int = 2, iterations: int = 20):
@@ -404,7 +411,8 @@ def _two_colour_classes(colours, iterations: int = 20):
     return labels == 1
 
 
-def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: float) -> CopperRow:
+def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: float,
+                      declared_count: Optional[int] = None) -> CopperRow:
     """@brief Count the copper lands lying ON an edge, at the declared pitch, on the calibrated crop.
 
     @param crop Calibrated BGR crop, the board filling the frame.
@@ -412,8 +420,24 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
     @param pitch_mm Declared pitch of the row, in mm (None: nothing to count).
     @param length_mm Board extent along X, in mm.
     @param width_mm Board extent along Y, in mm.
-    @return CopperRow with the lands found on the lattice, or `found` None
-        and a reason.
+    @param declared_count Contacts declared on this side, when known (None:
+        unknown). Only used to tell whether an absence could be proved.
+    @return CopperRow with the lands found on the lattice (`found` at least
+        MIN_ROW_LANDS), `found` 0 when the strip shows no periodic row and a
+        row of the declared length would have been confirmable, or `found`
+        None and a reason when nothing can be said.
+    @note Contract (2026-11-03, review): a row SHORTER than MIN_ROW_LANDS is
+        not confirmable, and so its absence is not provable. Hence a regular
+        chain of MIN_CHAIN_LANDS..MIN_ROW_LANDS-1 elements gives `found` None
+        (a short row may be there; the caller keeps the declared side as
+        unverifiable) when the declared length is unknown; when
+        `declared_count` is below MIN_ROW_LANDS even an empty strip gives
+        None: such a row could never have reached the confirmable length, so
+        not seeing one says nothing. Whatever the declared length, a short
+        regular chain at the pitch is None too (generality audit 2026-11-03:
+        a declared row of 6 with two lands hidden by a label shows a chain
+        of 4); only an edge without any periodic chain at the declared pitch
+        is a measured absence, `found` 0.
     @note A straight outline says the contacts are NOT half-holes; it says
         nothing about whether a row of contacts is there (ESP32 devkit,
         2026-10-08: through-holes with the pad reaching a straight edge were
@@ -462,8 +486,21 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
     # from the two most distant columns). No colour is assumed: whichever
     # two colours dominate the strip (mask and copper, usually) become the
     # classes, and a third one (a white label) joins the nearer of them.
+    try:
+        short_declared = declared_count is not None and 0 < int(declared_count) < MIN_ROW_LANDS
+    except (TypeError, ValueError):
+        short_declared, declared_count = False, None
+
+    def _short_declared():
+        # A declared row too short to be confirmed: its absence is not provable.
+        return CopperRow(edge, None, reason=tx(
+            "fila dichiarata di {n} contatti: troppo corta per essere verificata sul rame",
+            n=int(declared_count)))
+
     columns = lab.mean(axis=0)
     if float(np.linalg.norm(columns.max(axis=0) - columns.min(axis=0))) <= 0:
+        if short_declared:
+            return _short_declared()
         return CopperRow(edge, 0, reason=tx("nessuna alternanza di colore sul bordo"))
     column_class = _two_colour_classes(columns)
     min_run = max(2, int(round(2 * MIN_HOLE_WALL_MM * along_scale)))
@@ -513,7 +550,7 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
                 best = chain
         return best
 
-    def regular(chain, pitch):
+    def regular(chain, pitch, minimum=MIN_ROW_LANDS):
         """The chain's centres, if a straight line of the declared pitch fits them.
 
         Least squares of position against lattice index: every residual
@@ -521,7 +558,7 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
         pitch over the whole chain within the window too -- the calibration
         scale error accumulated along the row, not a percentage.
         """
-        while len(chain) >= MIN_ROW_LANDS:
+        while len(chain) >= minimum:
             ks = np.array([k for k, _c in chain], dtype=float)
             cs = np.array([c for _k, c in chain], dtype=float)
             slope, intercept = np.polyfit(ks, cs, 1)
@@ -543,7 +580,7 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
             chain = left if len(left) >= len(right) else right
         return []
 
-    def row_of(spans):
+    def row_of(spans, minimum=MIN_ROW_LANDS):
         # Lands of one row are identical by design: runs whose width differs
         # from the median by more than one hole wall (plus the pixel
         # uncertainty of two boundaries) are not its lands -- a label, a
@@ -565,26 +602,45 @@ def count_edge_copper(crop, edge: str, pitch_mm, length_mm: float, width_mm: flo
             if family.size == 0:
                 continue
             alike = [(a, b) for (a, b), w in zip(spans, widths) if abs(w - np.median(family)) <= window]
-            rows.append(_row_from([(a + b) / 2 for a, b in alike]))
+            rows.append(_row_from([(a + b) / 2 for a, b in alike], minimum))
         return max(rows, key=len) if rows else []
 
-    def _row_from(centres):
+    def _row_from(centres, minimum=MIN_ROW_LANDS):
         # The declared pitch is in millimetres and the photo scale carries
         # its own error (0.3 % on the sample board): the chain found measures
         # the pitch in pixels and a second pass on that pitch collects the
         # ends -- accepted only if `regular` still holds against the DECLARED
         # pitch, so a chain of some other period never passes.
         chain = lattice_chain(centres, pitch_px)
-        row = regular(chain, pitch_px)
+        row = regular(chain, pitch_px, minimum)
         if row:
             measured = (chain[-1][1] - chain[0][1]) / (chain[-1][0] - chain[0][0])
-            refined = regular(lattice_chain(centres, measured), pitch_px)
+            refined = regular(lattice_chain(centres, measured), pitch_px, minimum)
             if len(refined) > len(row):
                 row = refined
         return row
 
     best = max((row_of(runs(column_class)), row_of(runs(~column_class))), key=len)
     if len(best) < MIN_ROW_LANDS:
+        # Not confirmable is not absent (contract above). A declared row
+        # shorter than the confirmable length could never have shown as one;
+        # a declared row long enough would have, and chance chains on crowded
+        # edges reach MIN_ROW_LANDS - 1 (see MIN_ROW_LANDS), so a short chain
+        # does not save it. With no declared length, a short regular chain
+        # may be a short row: unverifiable.
+        if short_declared:
+            return _short_declared()
+        # A short regular chain at the declared pitch is unverifiable whatever
+        # the declared length (generality audit 2026-11-03): a declared row of
+        # 6 with two lands under a label shows a chain of 4, and a chance chain
+        # on a crowded edge cannot be told from it. Only an edge with NO
+        # periodic chain at the pitch is a measured absence (0).
+        short = max((row_of(runs(column_class), MIN_CHAIN_LANDS),
+                     row_of(runs(~column_class), MIN_CHAIN_LANDS)), key=len)
+        if len(short) >= MIN_CHAIN_LANDS:
+            return CopperRow(edge, None, [round(c / along_scale, 3) for c in short],
+                             reason=tx("fila di {n} elementi al passo dichiarato: troppo corta "
+                                       "per confermare o escludere i contatti", n=len(short)))
         return CopperRow(edge, 0, reason=tx("nessuna fila di piazzole al passo dichiarato sul bordo"))
     return CopperRow(edge, len(best), [round(c / along_scale, 3) for c in best])
 

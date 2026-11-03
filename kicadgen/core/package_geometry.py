@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from typing import Optional, Sequence
-from .footprint import require_kicad_reach
+from .footprint import require_kicad_reach, validate_pad_number
 from .output_names import validate_output_name
 from ..services.messages import tx
 
@@ -28,6 +28,11 @@ PAD_TYPES = {"smd", "thru_hole", "np_thru_hole", "connect"}
 # 2026-10-27, G7). `core.footprint.Pad` still writes a trapezoid when given
 # its `rect_delta` explicitly.
 PAD_SHAPES = {"circle", "rect", "oval", "roundrect"}
+
+#: Corner ratio of a "roundrect" pad as `generators.package.build_package`
+#: writes it (`roundrect_rratio`): the corner radius is this fraction of the
+#: smaller pad side. One value for the file and for the overlap check.
+ROUNDRECT_RRATIO = 0.25
 
 #: Declared pad-coordinate origins. Only "body_center" says where the body is;
 #: for the others the body centre is estimated (see PackageGeometry.body_frame_offset).
@@ -63,6 +68,28 @@ class PinSpec:
     rotation_deg: float = 0.0
     drill_mm: Optional[float] = None
 
+    def __post_init__(self) -> None:
+        """@brief Turn a "circle" with two different sides into the "oval" KiCad would need.
+
+        @note KiCad draws a circle pad of diameter equal to its FIRST size
+            and ignores the second one, so `(size 2 1)` on a circle is a
+            2 mm disc, not the 2 x 1 mm land that was measured. The extractor
+            defaults a through-hole pad without a declared shape to "circle"
+            whatever its two measured sides, so refusing the pair would lose
+            measured data: the land with two different sides is an oval (a
+            stadium of those sides), which keeps both measures and is what
+            KiCad then draws. Sides that are not finite numbers are left to
+            `validate`, which refuses them.
+        """
+        if self.shape != "circle":
+            return
+        try:
+            length, width = float(self.pad_length_mm), float(self.pad_width_mm)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if math.isfinite(length) and math.isfinite(width) and length != width:
+            object.__setattr__(self, "shape", "oval")
+
     def validate(self) -> None:
         """@brief Validate the object against its supported contract.
 
@@ -75,9 +102,14 @@ class PinSpec:
         @note An empty number is accepted only for a non-plated hole: KiCad
             writes mechanical holes with number "" (no net), while every
             electrical pad needs a number to be connected.
+        @note A number holding whitespace or a control character is refused
+            (`core.footprint.validate_pad_number`), the rule the symbol
+            applies to its pin numbers: a pad « 1» and a symbol pin «1»
+            would no longer match.
         """
         if not str(self.number).strip() and self.pad_type != "np_thru_hole":
             raise ValueError(tx("il numero del pin non puo' essere vuoto"))
+        validate_pad_number(self.number)
         x = _finite(self.x_mm, "x_mm")
         y = _finite(self.y_mm, "y_mm")
         length = _finite(self.pad_length_mm, "pad_length_mm", True)
@@ -170,25 +202,16 @@ class PackageGeometry:
             if known and name and known.casefold() != name.casefold():
                 raise ValueError(tx("pin duplicato: {number}", number=pin.number))
             names[pin.number] = known or name
-            # Rotated rectangle of the pad (KiCad convention): a check on axis-aligned
-            # rectangles would reject rotated QFN pads that do not touch and accept
-            # rotated pads that do touch.
-            outline = pad_outline(pin.x_mm, pin.y_mm, pin.pad_length_mm,
-                                  pin.pad_width_mm, pin.rotation_deg)
+            # The copper KiCad draws (`pad_copper_shape`): a rotated core
+            # grown by the corner radius, so a circle is a disc, an oval a
+            # stadium and a roundrect keeps its rounded corners. Circular
+            # host-header lands sitting diagonally at a board corner, or a
+            # disc next to a rectangle's corner, are judged on the real
+            # copper, not on bounding squares that would overlap; rotated
+            # rectangles (QFN) keep their rotated outline.
+            outline = pad_copper_shape(pin)
             for other_pin, other in outlines:
-                # Circular host-header lands can sit diagonally at a board
-                # corner: their bounding squares may overlap while the copper
-                # rings remain separated. Use the actual circles for this pair.
-                # Keep the conservative polygon check for all other shapes.
-                circles = all(p.shape == "circle" and
-                              float(p.pad_length_mm) == float(p.pad_width_mm)
-                              for p in (pin, other_pin))
-                separation = (
-                    math.hypot(float(pin.x_mm) - float(other_pin.x_mm),
-                               float(pin.y_mm) - float(other_pin.y_mm))
-                    - (float(pin.pad_length_mm) + float(other_pin.pad_length_mm)) / 2
-                    if circles else polygon_separation(outline, other)
-                )
+                separation = copper_separation(outline, other)
                 if separation <= 1e-6:
                     raise ValueError(
                         tx("pad sovrapposti tra i pin {other_number} e {number}",
@@ -314,6 +337,106 @@ def pad_outline(x: float, y: float, size_x: float, size_y: float,
     return corners
 
 
+def pad_copper_shape(pin: "PinSpec") -> tuple:
+    """@brief The copper of a pad as KiCad draws it: a convex core grown by a radius.
+
+    @param pin Pad whose shape, sizes, rotation and centre are used (mm, KiCad axes).
+    @return (core, radius): `core` is a list of 1 (circle centre), 2 (the
+        axis of an oval) or 4 (rectangle corners, in order) points and
+        `radius` the distance, mm, the copper extends beyond the core.
+    @note "circle" is a disc of diameter `pad_length_mm` (KiCad ignores the
+        second size; `PinSpec.__post_init__` turns an unequal circle into an
+        oval first); "oval" a stadium of the two sides; "roundrect" the
+        rectangle with corners of radius `ROUNDRECT_RRATIO` times the smaller
+        side, as `build_package` writes it; "rect" the plain rectangle.
+    """
+    x, y = float(pin.x_mm), float(pin.y_mm)
+    length, width = float(pin.pad_length_mm), float(pin.pad_width_mm)
+    if pin.shape == "circle":
+        return [(x, y)], length / 2
+    if pin.shape == "oval":
+        radius = min(length, width) / 2
+    elif pin.shape == "roundrect":
+        radius = min(length, width) * ROUNDRECT_RRATIO
+    else:
+        radius = 0.0
+    core = pad_outline(x, y, length - 2 * radius, width - 2 * radius, float(pin.rotation_deg))
+    # A degenerate core (the axis of an oval, the centre of a square oval)
+    # keeps only its distinct points, so every edge used below has a length
+    # or is a single point.
+    unique = []
+    for point in core:
+        if all(math.hypot(point[0] - q[0], point[1] - q[1]) > 1e-12 for q in unique):
+            unique.append(point)
+    return unique, radius
+
+
+def _point_segment_distance(p, s, e) -> float:
+    """Distance, mm, from point p to the segment s-e (a point when s == e)."""
+    dx, dy = e[0] - s[0], e[1] - s[1]
+    length2 = dx * dx + dy * dy
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / length2))
+    return math.hypot(p[0] - s[0] - t * dx, p[1] - s[1] - t * dy)
+
+
+def _segment_distance(a, b, c, d) -> float:
+    """Distance, mm, between segments a-b and c-d (0 when they properly cross)."""
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        return 0.0
+    return min(_point_segment_distance(a, c, d), _point_segment_distance(b, c, d),
+               _point_segment_distance(c, a, b), _point_segment_distance(d, a, b))
+
+
+def _edges(points: Sequence) -> list:
+    """Edges of a convex core: one degenerate edge for a point, one for a segment."""
+    if len(points) <= 2:
+        return [(points[0], points[-1])]
+    return [(points[i], points[(i + 1) % len(points)]) for i in range(len(points))]
+
+
+def _inside_convex(point, polygon: Sequence) -> bool:
+    """True when `point` lies inside or on the convex polygon (3+ corners, any winding)."""
+    signs = set()
+    count = len(polygon)
+    for i in range(count):
+        (ax, ay), (bx, by) = polygon[i], polygon[(i + 1) % count]
+        cross = (bx - ax) * (point[1] - ay) - (by - ay) * (point[0] - ax)
+        if abs(cross) > 1e-12:
+            signs.add(cross > 0)
+    return len(signs) <= 1
+
+
+def copper_separation(first: tuple, second: tuple) -> float:
+    """@brief Free copper between two pads given by `pad_copper_shape`, mm.
+
+    @param first (core, radius) of one pad.
+    @param second (core, radius) of the other pad.
+    @return The distance between the two copper areas: positive when they
+        are apart, zero when they touch, negative when they overlap (its
+        magnitude is then only a lower bound of the penetration).
+    @note Exact for every shape `pad_copper_shape` describes: two disjoint
+        convex cores are closest along a pair of their edges, so the copper
+        gap is that edge distance minus both radii; overlapping cores are
+        found by the separating-axis test (two rectangles) or by a core
+        point lying inside the other rectangle.
+    """
+    (core_a, radius_a), (core_b, radius_b) = first, second
+    if len(core_a) >= 3 and len(core_b) >= 3:
+        gap = polygon_separation(core_a, core_b)
+        if gap <= 0:
+            return gap - radius_a - radius_b
+    for inner, outer in ((core_a, core_b), (core_b, core_a)):
+        if len(outer) >= 3 and _inside_convex(inner[0], outer):
+            return -radius_a - radius_b
+    distance = min(_segment_distance(a, b, c, d)
+                   for a, b in _edges(core_a) for c, d in _edges(core_b))
+    return distance - radius_a - radius_b
+
+
 def pad_reach(x: float, y: float, size_x: float, size_y: float, rotation_deg: float = 0.0) -> float:
     """@brief Largest |x| or |y| reached by the corners of a rotated pad, mm.
 
@@ -370,7 +493,9 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         raise ValueError(tx("geometria package non strutturata"))
     raw_pins = data.get("pins") or []
     pins = [PinSpec(
-        number=str(p["number"]), x_mm=p["x_mm"], y_mm=p["y_mm"],
+        # Surrounding blanks are dropped at the boundary, as the symbol drops
+        # them from a pin number; inner blanks stay and `validate` refuses them.
+        number=str(p["number"]).strip(), x_mm=p["x_mm"], y_mm=p["y_mm"],
         pad_length_mm=p["pad_length_mm"], pad_width_mm=p["pad_width_mm"],
         side=p.get("side"), name=str(p.get("name") or ""),
         pad_type=p.get("pad_type", "smd"), shape=p.get("shape", "roundrect"),

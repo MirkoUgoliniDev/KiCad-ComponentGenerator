@@ -209,6 +209,36 @@ def _tilted_board(scale: float, tilt_deg: float = 0.4):
                           flags=cv2.INTER_LINEAR, borderValue=(235, 235, 235))
 
 
+def _keystone_board(shrink_px: float, scale: float = 20.0):
+    """Scheda vista in prospettiva: lato superiore piu' corto dell'inferiore di `shrink_px`.
+
+    Trapezio simmetrico: `minAreaRect` legge 0 gradi, l'inclinazione da sola
+    non lo distingue da una vista dall'alto.
+    """
+    margin = int(round(8 * scale))
+    board_w, board_h = int(BODY_LENGTH_MM * scale), int(BODY_WIDTH_MM * scale)
+    img = np.full((board_h + 2 * margin, board_w + 2 * margin, 3), 235, dtype="uint8")
+    half = shrink_px / 2
+    corners = np.array([[margin + half, margin], [margin + board_w - half, margin],
+                        [margin + board_w, margin + board_h], [margin, margin + board_h]],
+                       dtype=np.int32)
+    cv2.fillConvexPoly(img, corners, (22, 22, 22))
+    return img
+
+
+def test_a_keystone_perspective_view_is_not_a_board_but_a_rectangle_is():
+    """Revisione 2026-11-03: lati opposti non paralleli = vista in prospettiva, rifiutata.
+
+    Positivo e negativo differiscono per struttura: stesso contorno, lati
+    paralleli (rettangolo) contro lati convergenti (trapezio di 30 px su un
+    lato lungo di 800: 15 px per lato, oltre la deriva ammessa di 8 px per
+    lato, la stessa soglia del controllo d'inclinazione). Il trapezio da
+    30 px passava il solo controllo d'inclinazione di minAreaRect (angolo 0).
+    """
+    assert find_board(_keystone_board(0.0), BODY_LENGTH_MM, BODY_WIDTH_MM) is not None
+    assert find_board(_keystone_board(30.0), BODY_LENGTH_MM, BODY_WIDTH_MM) is None
+
+
 @pytest.mark.parametrize("scale", [6.0, 12.0, 20.0, 34.0])
 def test_find_board_verdict_does_not_depend_on_resolution(scale):
     """Stessa scheda, stessa inclinazione, risoluzioni diverse: stesso esito.
@@ -423,3 +453,23 @@ def test_the_inventory_log_names_an_unexpected_failure(monkeypatch):
         failures = [line for line in logs if "errore inatteso" in str(line)]
         assert len(failures) == expected
         assert all(kind_of(line) == WARNING for line in failures)
+
+
+def _one_side_leaning_board(lean_px: float, scale: float = 20.0):
+    """A board whose right side leans by `lean_px` while the left one stays vertical."""
+    img = np.full((900, 1400, 3), 200, dtype="uint8")
+    w, h = BODY_LENGTH_MM * scale, BODY_WIDTH_MM * scale
+    x0, y0 = 300.0, 250.0
+    corners = np.array([[x0, y0], [x0 + w, y0], [x0 + w + lean_px, y0 + h], [x0, y0 + h]], dtype=np.int32)
+    cv2.fillPoly(img, [corners], (20, 20, 20))
+    return img
+
+
+def test_one_leaning_side_is_held_to_the_per_edge_bound_alone():
+    """Generality audit 2026-11-03: one side leaning twice the bound passed with half the lean difference.
+
+    Same structure, different lean of a single side: within the bound it is a
+    board, beyond it (the other side vertical) it is not.
+    """
+    assert find_board(_one_side_leaning_board(0.0), BODY_LENGTH_MM, BODY_WIDTH_MM) is not None
+    assert find_board(_one_side_leaning_board(15.0), BODY_LENGTH_MM, BODY_WIDTH_MM) is None

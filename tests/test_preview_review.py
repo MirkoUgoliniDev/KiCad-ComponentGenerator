@@ -54,8 +54,8 @@ def test_host_preview_total_excludes_display_margin(window, monkeypatch):
     """Whitespace around a preview is not two extra millimetres of the board."""
     params = header_footprint_params(dev_kit(), 1.7, 1)
     horizontal, vertical = [], []
-    monkeypatch.setattr(window, '_add_dim_h', lambda x1, x2, y, text: horizontal.append((x1, x2, text)))
-    monkeypatch.setattr(window, '_add_dim_v', lambda y1, y2, x, text: vertical.append((y1, y2, text)))
+    monkeypatch.setattr(window, '_add_dim_h', lambda x1, x2, y, text, edit_key=None: horizontal.append((x1, x2, text)))
+    monkeypatch.setattr(window, '_add_dim_v', lambda y1, y2, x, text, edit_key=None: vertical.append((y1, y2, text)))
     window._draw_preview_package(params)
     assert horizontal[-1][1] - horizontal[-1][0] == pytest.approx(params.body_length_mm * 20)
     assert vertical[-1][1] - vertical[-1][0] == pytest.approx(params.body_width_mm * 20)
@@ -68,7 +68,7 @@ def test_package_total_includes_rotated_pad_extent_without_body(window, monkeypa
     pad = PinSpec('1', 5, -3, 2 if shape == 'circle' else 4,
                   2 if shape == 'circle' else 1, shape=shape, rotation_deg=angle)
     widths = []
-    monkeypatch.setattr(window, '_add_dim_h', lambda x1, x2, y, text: widths.append((x2 - x1) / 20))
+    monkeypatch.setattr(window, '_add_dim_h', lambda x1, x2, y, text, edit_key=None: widths.append((x2 - x1) / 20))
     window._draw_preview_package(PackageGeometry(pins=[pad]))
     assert widths[-1] == pytest.approx(expected_width)
 

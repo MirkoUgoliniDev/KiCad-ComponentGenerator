@@ -82,9 +82,9 @@ def install_dir_from_entry(entry: Mapping[str, str | None]) -> Path | None:
 
     @param entry Values of one entry (``InstallLocation``, ``DisplayIcon``,
         ``UninstallString``); missing or empty values are skipped.
-    @return ``InstallLocation`` when declared, otherwise the folder of the
-        ``DisplayIcon`` file, otherwise the folder of the uninstaller; None
-        when the entry declares no path.
+    @return ``InstallLocation`` when declared as an absolute folder, otherwise
+        the folder of the ``DisplayIcon`` file, otherwise the folder of the
+        uninstaller; None when the entry declares no absolute path.
     @note Some installers leave ``InstallLocation`` empty (FreeCAD 1.1 does):
         the icon and the uninstaller still name files inside the installation.
         The returned folder may be a subfolder such as ``bin``; callers look
@@ -98,7 +98,13 @@ def install_dir_from_entry(entry: Mapping[str, str | None]) -> Path | None:
     """
     location = (entry.get("InstallLocation") or "").strip().strip('"')
     if location:
-        return _absolute_folder(location)
+        folder = _absolute_folder(location)
+        if folder is not None:
+            return folder
+        # A relative InstallLocation («.», «C:») declares no usable folder,
+        # but the icon and the uninstaller may still name absolute files
+        # inside the installation: fall through to them (2026-11-03 review)
+        # instead of giving up on the whole entry.
     for name in ("DisplayIcon", "UninstallString"):
         executable = _executable_of(entry.get(name))
         if executable:

@@ -823,3 +823,41 @@ def test_an_analysis_that_replaces_the_package_says_the_pad_draft_is_dropped(pro
     window.has_pending_footprint_edits()
     QApplication.processEvents()
     assert not any("sostituito il package" in line for line in logs)
+
+
+# -- Kept drafts written before an optional key existed (L8) -------------------
+
+def _old_state():
+    """A footprint state as an earlier version wrote it: no package_body."""
+    return {"drawings": [record()], "texts": {}, "pad_overrides": {}, "package_pins": None}
+
+
+def test_an_old_kept_draft_equal_to_the_state_is_not_offered_again(tmp_path):
+    """Positive: completed with the applied package_body, the old draft IS the current state."""
+    from kicadgen.services.footprint_draft import load_kept_drafts, save_kept_drafts
+    path = tmp_path / KEPT_DRAFTS_FILE
+    assert save_kept_drafts(path, [_old_state()])
+    baseline = dict(_old_state(), package_body=[22.5, 16.5])
+    assert load_kept_drafts(path, baseline) == [baseline]
+    # Without a baseline the file is read as written (nothing invented).
+    assert load_kept_drafts(path) == [_old_state()]
+
+
+def test_an_old_kept_draft_with_another_edit_is_still_offered(tmp_path):
+    """Negative: the completion fills only the missing optional key; a real edit stays different."""
+    from kicadgen.services.footprint_draft import load_kept_drafts, save_kept_drafts
+    path = tmp_path / KEPT_DRAFTS_FILE
+    edited = dict(_old_state(), texts={"reference": [1.0, 2.0]})
+    assert save_kept_drafts(path, [edited])
+    baseline = dict(_old_state(), package_body=[22.5, 16.5])
+    [kept] = load_kept_drafts(path, baseline)
+    assert kept != baseline and kept["package_body"] == [22.5, 16.5]
+
+
+def test_a_kept_draft_with_its_own_package_body_keeps_it(tmp_path):
+    """Negative: a key the draft carries is never overwritten by the applied value."""
+    from kicadgen.services.footprint_draft import load_kept_drafts, save_kept_drafts
+    path = tmp_path / KEPT_DRAFTS_FILE
+    own = dict(_old_state(), package_body=[30.0, 20.0])
+    assert save_kept_drafts(path, [own])
+    assert load_kept_drafts(path, dict(_old_state(), package_body=[22.5, 16.5])) == [own]

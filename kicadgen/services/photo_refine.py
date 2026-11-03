@@ -72,7 +72,12 @@ except ImportError:  # pragma: no cover - dipendenza opzionale (opencv-python)
     np = None
 
 #: Maximum allowed gap between the length/width ratio of the board found and
-#: that of the module: beyond it, the photo is not a top view.
+#: that of the module in the FIRST pass of the board search. It is not a
+#: top-view test: a board beyond it is still accepted by the second pass
+#: (`_search_any_aspect`), calibrated axis by axis with the deformation
+#: declared in the log, when it is the only object separated from the
+#: background. A perspective view is rejected by the tilt and keystone
+#: checks of `_board_candidates`, not by this ratio.
 MAX_BOARD_ASPECT_ERROR = 0.12
 #: Maximum edge drift due to rasterisation/irregular contour.
 #: The angular limit avoids accepting real rotations on small images.
@@ -782,8 +787,11 @@ def locate_board(image, body_length: float, body_width: float) -> BoardSearch:
     @note A board is a region that differs from the background estimated on
         the image frame, touches at most one side of the frame, is surrounded
         by background on every free side, is axis-aligned within
-        MAX_BOARD_TILT_DEG, has the declared X/Y proportions IN THE DECLARED
-        ORIENTATION within MAX_BOARD_ASPECT_ERROR, at least
+        MAX_BOARD_TILT_DEG, has opposite edges parallel and of equal length
+        within the edge drift bound (no keystone: `_keystone_px`), has the
+        declared X/Y proportions IN THE DECLARED ORIENTATION within
+        MAX_BOARD_ASPECT_ERROR (first pass; the second pass accepts the only
+        such region with other proportions, `_search_any_aspect`), at least
         MIN_BOARD_SCALE_PX_PER_MM and MIN_BOARD_IMAGE_FRACTION of the photo.
         When nothing qualifies there is no frame: a wrong rectangle is never
         returned in its place.
@@ -849,6 +857,21 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
                               MAX_BOARD_EDGE_DRIFT_RATIO * max(rw, rh))
         if tilt > MAX_BOARD_TILT_DEG or edge_drift > drift_allowance:
             continue
+        # minAreaRect's angle sees a common lean of the sides, not a keystone
+        # (a perspective view whose top edge is shorter than the bottom one).
+        # The bound is PER EDGE (how far one edge's far end may drift, as
+        # edge_drift above) and every side is held to it ON ITS OWN, measured
+        # against the image axes: a common tilt, a symmetric keystone, a
+        # single leaning side and any sum of them are all caught by the one
+        # existing bound (generality audit 2026-11-03: half the lean
+        # DIFFERENCE let one side lean twice the bound). The bound is the
+        # existing one, not chosen here. Margins on the sample photos
+        # (2026-11-03), reported as a check, not a tuning: ESP32 keystone
+        # 36 px on a 2592 px side, about 18 px per edge against a bound of
+        # 25.9 (0.69 of it, the thinnest); RS485 about 2 px against 10.1.
+        # A rejected perspective view yields «board not found», like a tilted one.
+        if _edge_lean_px(contour) > drift_allowance:
+            continue
         bx, by, bw, bh = cv2.boundingRect(contour)
         if mid_step:
             bx, by, bw, bh = _mid_step_box(distance, background, bx, by, bw, bh)
@@ -877,6 +900,77 @@ def _board_candidates(contours, image, body_length, body_width, distance, backgr
             continue
         candidates.append((cv2.contourArea(contour), error, bx, by, w, h))
     return candidates
+
+
+def _edge_lean_px(contour) -> float:
+    """Largest drift, in px, of one side of a contour from the image axis it should follow.
+
+    Same side fits as `_keystone_px` (Theil-Sen on the row ends, away from
+    the corners); each side's own lean over its whole length, the largest of
+    the four, is what one edge's far end drifts.
+    """
+    return max(lean for lean in _side_leans_px(contour))
+
+
+def _keystone_px(contour) -> float:
+    """Largest difference, in px, between the leans of two opposite sides (the keystone of a perspective view)."""
+    lean_lr_low, lean_lr_high, lean_tb_low, lean_tb_high = _side_leans_px(contour, signed=True)
+    return max(abs(lean_lr_high - lean_lr_low), abs(lean_tb_high - lean_tb_low))
+
+
+def _side_leans_px(contour, signed: bool = False) -> tuple:
+    """The four sides' leans, in px over their length: (left, right, top, bottom); absolute unless `signed`.
+
+    The contour is filled on its bounding box; for each row the left and
+    right ends are read (for each column the top and bottom ends), away from
+    the corners (10-90 % of the rows). Each side's lean is the Theil-Sen
+    slope of its ends (median of the pairwise slopes) times the extent: how
+    far that side's far end drifts from the image axis. Two opposite sides
+    leaning alike are a tilt; leaning differently, a keystone.
+
+    Theil-Sen and not a least-squares fit or a median per third: notches
+    (castellations, half-holes) pull the ends inward and a part overhanging
+    the edge pulls them outward, on a group of rows. A pair of rows from the
+    same group, or from neither, has the side's true slope; only the mixed
+    pairs are off, and they are at most half of all pairs (2 p (1 - p) for a
+    fraction p of affected rows), so the median stays on the true slope
+    wherever the notches or the overhang sit along the side.
+    """
+    x, y, w, h = cv2.boundingRect(contour)
+    if w < 10 or h < 10:
+        return (0.0, 0.0, 0.0, 0.0)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(mask, [contour - np.array([[x, y]])], -1, 255, -1)
+
+    def slope(positions, ends):
+        # Theil-Sen on at most 200 evenly spaced rows (40 000 pairs at most).
+        keep = np.isfinite(ends)
+        positions, ends = positions[keep], ends[keep]
+        if positions.size < 3:
+            return None
+        step = max(1, positions.size // 200)
+        positions, ends = positions[::step], ends[::step]
+        i, j = np.triu_indices(positions.size, k=1)
+        return float(np.median((ends[j] - ends[i]) / (positions[j] - positions[i])))
+
+    def leans(filled):
+        # filled: rows x positions; returns how far each end drifts over the rows.
+        rows = filled.shape[0]
+        lows = np.full(rows, np.nan)
+        highs = np.full(rows, np.nan)
+        for index, row in enumerate(filled):
+            where = np.flatnonzero(row)
+            if where.size:
+                lows[index], highs[index] = where[0], where[-1]
+        inner = np.arange(int(rows * 0.10), max(int(rows * 0.90), int(rows * 0.10) + 3))
+        inner = inner[inner < rows]
+        low, high = slope(inner.astype(float), lows[inner]), slope(inner.astype(float), highs[inner])
+        if low is None or high is None:
+            return (0.0, 0.0)
+        return (low * rows, high * rows)
+
+    found = leans(mask > 0) + leans((mask > 0).T)
+    return found if signed else tuple(abs(value) for value in found)
 
 
 def _frame_from(candidates, body_length, body_width):

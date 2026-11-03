@@ -146,7 +146,14 @@ def test_an_explicit_pinout_table_wins_over_pad_names(window, monkeypatch, tmp_p
     prepare(window, monkeypatch, tmp_path, "BUCK")
     run_extraction(window, package_extraction(soic_geometry(names=NAMES), name="BUCK",
                                               pinout=[{"pin": "1", "name": "IN"}]))
-    assert window.pinout == [{"pin": "1", "name": "IN"}]
+    # CONTRACT CHANGED 2026-11-03 (user, relay T7NS5D4-12: «perché solo 3 pin
+    # nella tabella?», why only 3 pins in the table?): the table still WINS on the pins it names (pin 1 is
+    # «IN», not the pad drawing's name); the pads it leaves unnamed now take
+    # the name the pad drawing gave them instead of «~».
+    names = {row["pin"]: row["name"] for row in window.pinout}
+    assert names["1"] == "IN" and names["1"] != NAMES[0]
+    assert {pin: name for pin, name in names.items() if pin != "1"} == {
+        str(index + 1): name for index, name in enumerate(NAMES) if index}
 
 
 def test_unnamed_pads_give_no_pinout(window, monkeypatch, tmp_path):  # noqa: F811

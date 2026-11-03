@@ -21,6 +21,9 @@ from kicadgen.gui import model_candidates_dialog as gui
 @pytest.fixture
 def review(app, tmp_path, monkeypatch):
     pool = QThreadPool.globalInstance()
+    # CONTRACT CHANGED 2026-11-03 (preview launch): the child no longer
+    # starts through subprocess.run (no tree kill, bytecode written);
+    # the seam faked here is `_run_preview_child`, its single launcher.
     monkeypatch.setattr(gui, '_thumbnail', lambda *args, **kwargs: None)
     candidates = []
     for index in range(7):
@@ -500,14 +503,14 @@ def test_auto_thumbnail_delegates_to_actual_cad_importer(monkeypatch, dimensions
     monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
         read=lambda path: Shape(native), makeCompound=lambda shapes: shapes[0]))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         old_path = sys.path[:]
         try:
             exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
         finally:
             sys.path[:] = old_path
 
-    monkeypatch.setattr(gui.subprocess, 'run', run)
+    monkeypatch.setattr(gui, '_run_preview_child', run)
     automatic = gui._thumbnail('example.step', None, dimensions)
     explicit = gui._thumbnail('example.step', angle)
     assert automatic == explicit
@@ -519,7 +522,7 @@ def test_auto_thumbnail_delegates_to_actual_cad_importer(monkeypatch, dimensions
 def test_auto_missing_dimensions_never_silently_previews_zero(monkeypatch, dimensions):
     from kicadgen.cad3d import step_generator
     monkeypatch.setattr(step_generator, 'find_freecadcmd', lambda: 'fake-freecad')
-    monkeypatch.setattr(gui.subprocess, 'run', lambda *a, **k: pytest.fail('Unexpected CAD launch'))
+    monkeypatch.setattr(gui, '_run_preview_child', lambda *a, **k: pytest.fail('Unexpected CAD launch'))
     with pytest.raises(ValueError, match='positive component dimensions'):
         gui._thumbnail('example.step', None, dimensions)
 
@@ -760,13 +763,13 @@ def _render(monkeypatch, vertices, triangles, rotation=0.0, color=None, writer=N
     monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
         read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         if writer is not None:
             writer(Path(command[1]).parent / 'mesh.json')
             return
         exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
 
-    monkeypatch.setattr(gui.subprocess, 'run', run)
+    monkeypatch.setattr(gui, '_run_preview_child', run)
     return gui._thumbnail('example.step', rotation, None, color)
 
 
@@ -1183,7 +1186,7 @@ def test_only_the_automatic_preview_carries_the_chosen_angle(monkeypatch):
     monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
         read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         old_path = sys.path[:]
         try:
             exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
@@ -1191,7 +1194,7 @@ def test_only_the_automatic_preview_carries_the_chosen_angle(monkeypatch):
             sys.path[:] = old_path
         return SimpleNamespace(stdout='KICADGEN_IMPORT_OK:x; parts=1; local_rotation_deg=90\n')
 
-    monkeypatch.setattr(gui.subprocess, 'run', run)
+    monkeypatch.setattr(gui, '_run_preview_child', run)
     automatic = gui._thumbnail('example.step', None, (8, 2))
     explicit = gui._thumbnail('example.step', 90)
     assert gui._image_auto_angle(automatic) == 90.0
@@ -1270,10 +1273,10 @@ def test_the_automatic_preview_gets_the_same_placement_as_the_final_cad(monkeypa
     monkeypatch.setitem(sys.modules, 'Part', SimpleNamespace(
         read=lambda path: Shape(), makeCompound=lambda shapes: shapes[0]))
 
-    def run(command, **kwargs):
+    def run(command, *args, **kwargs):
         exec(compile(Path(command[1]).read_text(encoding='utf-8'), command[1], 'exec'), {})
         return SimpleNamespace(stdout='')
-    monkeypatch.setattr(gui.subprocess, 'run', run)
+    monkeypatch.setattr(gui, '_run_preview_child', run)
     worker = gui._Preview(1, 'x.step', None, (8, 2), placement={
         'landmark_side': 'left', 'model_rotation_delta_deg': 90})
     worker.run()

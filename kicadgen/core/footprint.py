@@ -19,6 +19,7 @@ Minimal example:
 from __future__ import annotations
 
 import math
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
@@ -49,6 +50,69 @@ PAD_TYPES = {"thru_hole", "smd", "np_thru_hole", "connect"}
 # plain rectangle, which is what a silent writer produced before (review
 # 2026-10-27, G7), so `Pad` refuses the shape without the delta.
 PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
+
+#: Silkscreen stroke width, mm (KLC F5.1 recommends 0.12 mm).
+SILK_WIDTH_MM = 0.12
+
+#: Fabrication-layer stroke width, mm (KLC F5.2 recommends 0.10 mm).
+FAB_WIDTH_MM = 0.10
+
+#: Distance, mm, of a silk body outline's centre line outside the F.Fab
+#: body outline: half of each stroke (0.05 + 0.06), so the two lines just
+#: meet and the silk is drawn outside the body, never over the assembly
+#: outline. Shared by every generator that draws both.
+SILK_OUTSIDE_FAB_MM = FAB_WIDTH_MM / 2 + SILK_WIDTH_MM / 2
+
+#: Grid, mm, the courtyard corners are rounded OUTWARDS to (KLC F5.3: the
+#: courtyard lies on a 0.01 mm grid). Rounding outwards keeps the clearance
+#: at least the declared margin.
+COURTYARD_GRID_MM = 0.01
+
+
+def courtyard_round_out(low: float, high: float) -> tuple:
+    """@brief Round a courtyard interval outwards to `COURTYARD_GRID_MM`.
+
+    @param low Smaller coordinate of the interval, mm.
+    @param high Larger coordinate of the interval, mm.
+    @return (low', high') with low' <= low and high' >= high, both whole
+        multiples of 0.01 mm; a value already on the grid (within float
+        noise of 1e-6 mm) is kept.
+    """
+    steps = 1.0 / COURTYARD_GRID_MM
+    return (round(math.floor(low * steps + 1e-6) / steps, 2) + 0.0,
+            round(math.ceil(high * steps - 1e-6) / steps, 2) + 0.0)
+
+
+def courtyard_corners(start: Point, end: Point) -> tuple:
+    """@brief The corners of a courtyard rectangle rounded outwards to the 0.01 mm grid.
+
+    @param start (x, y) of one corner, mm.
+    @param end (x, y) of the opposite corner, mm.
+    @return (start', end') with start' the lower-left and end' the
+        upper-right corner, each coordinate rounded outwards
+        (`courtyard_round_out`).
+    """
+    x0, x1 = courtyard_round_out(min(start[0], end[0]), max(start[0], end[0]))
+    y0, y1 = courtyard_round_out(min(start[1], end[1]), max(start[1], end[1]))
+    return (x0, y0), (x1, y1)
+
+
+def validate_pad_number(number) -> None:
+    """@brief Refuse a pad number KiCad and the symbol would not read as the same text.
+
+    @param number Pad number as it will be written (str; "" for a hole without a net).
+    @throws ValueError When the number holds whitespace anywhere (leading,
+        trailing or inner) or a control character.
+    @note The same rule as the symbol's pin numbers (`generators.symbol`
+        refuses control characters and inner blanks and strips the ends):
+        a pad « 1», or «B3» followed by a newline, would be compared with
+        a symbol pin «1» or «B3» and the pin-pad match would fail without
+        a visible cause.
+    """
+    text = str(number)
+    if any(ch.isspace() or unicodedata.category(ch) in ("Cc", "Cs") for ch in text):
+        raise ValueError(tx("Numero del pad «{number}»: spazi e caratteri di controllo non sono ammessi.",
+                            number=text.strip()))
 
 
 def _uuid() -> str:
@@ -111,7 +175,9 @@ class Pad:
 
     - number: pin name/number (e.g. "1", "A2", "" for mechanical pads without a net)
     - pad_type: "thru_hole" | "smd" | "np_thru_hole"
-    - shape: "circle" | "rect" | "oval" | "roundrect" | "trapezoid"
+    - shape: "circle" | "rect" | "oval" | "roundrect" | "trapezoid"; a
+      "circle" with two different sizes is written as "oval" (KiCad would
+      draw a disc of the first size only)
     - at: (x, y) position in mm relative to the footprint origin
     - size: (width, height) in mm
     - layers: list of KiCad layers, e.g. ["*.Cu", "*.Mask"] for THT or ["F.Cu", "F.Paste", "F.Mask"] for SMD
@@ -147,6 +213,17 @@ class Pad:
             raise ValueError(tx("pad {number!r}: drill obbligatorio per pad_type={pad_type!r}",
                                 number=self.number,
                                 pad_type=self.pad_type))
+        validate_pad_number(self.number)
+        # KiCad draws a circle pad with the diameter of its FIRST size and
+        # ignores the second: two different sides describe an oval, which
+        # is written so the file holds the copper that was measured.
+        if self.shape == "circle":
+            try:
+                first, second = (float(v) for v in self.size)
+            except (TypeError, ValueError):
+                first = second = None
+            if first is not None and first != second:
+                self.shape = "oval"
         self._validate_rect_delta()
 
     def _validate_rect_delta(self) -> None:

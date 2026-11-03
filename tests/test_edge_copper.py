@@ -52,10 +52,31 @@ def test_scattered_features_of_unequal_width_on_the_edge_are_not_a_row():
     assert row.found == 0
 
 
-def test_a_chain_shorter_than_the_declared_minimum_is_not_a_row():
-    """@brief Negativo (limite dichiarato): meno di MIN_ROW_LANDS piazzole non confermano nulla."""
+def test_a_chain_shorter_than_the_minimum_is_unverifiable_not_absent():
+    """@brief Contratto cambiato (revisione 2026-11-03): una fila corta non e' assenza.
+
+    Prima il test fissava `found == 0`, e l'estrattore cancellava un lato
+    dichiarato di 4 contatti. Meno di MIN_ROW_LANDS piazzole non CONFERMANO la
+    fila, ma neppure la escludono: il risultato e' None con un motivo.
+    """
     row = count_edge_copper(board(lands=range(MIN_ROW_LANDS - 1)), "top", 2.54, LENGTH, WIDTH)
-    assert row.found == 0
+    assert row.found is None and row.reason
+    assert len(row.centres_mm) == MIN_ROW_LANDS - 1
+
+
+def test_a_short_declared_row_on_a_bare_edge_is_unverifiable_but_a_long_one_is_absent():
+    """@brief Bordo nudo: assenza provabile solo se la fila dichiarata poteva essere confermata.
+
+    Positivo e negativo differiscono per struttura: una fila dichiarata di
+    MIN_ROW_LANDS contatti avrebbe formato una catena confermabile, quindi il
+    bordo nudo la esclude (0); una di MIN_ROW_LANDS - 1 non avrebbe mai potuto
+    farlo, quindi il bordo nudo non dice nulla (None).
+    """
+    image = board()
+    assert count_edge_copper(image, "top", 2.54, LENGTH, WIDTH,
+                             declared_count=MIN_ROW_LANDS).found == 0
+    short = count_edge_copper(image, "top", 2.54, LENGTH, WIDTH, declared_count=MIN_ROW_LANDS - 1)
+    assert short.found is None and short.reason
 
 
 def test_a_row_is_found_whichever_colour_the_mask_is():
@@ -82,7 +103,14 @@ def test_junk_of_one_other_width_outnumbering_the_lands_does_not_hide_the_row():
 def test_identical_marks_at_another_pitch_are_not_a_row_at_the_declared_one():
     """@brief Negativo (revisione G): 7 segni uguali a 3.0 mm, passo dichiarato 2.8 -> nessuna fila."""
     marks = [(3.0 + k * 3.0, 0.8, 1.0, LABEL) for k in range(7)]
-    assert count_edge_copper(board(features=marks), "top", 2.8, LENGTH, WIDTH).found == 0
+    # CONTRACT CHANGED 2026-11-03 (generality audit): three of the marks fall
+    # on the 2.8 mm lattice within its tolerance, a short regular chain; such
+    # a chain is UNVERIFIABLE whatever the declared length (a declared row of
+    # 6 with two lands under a label looks the same), never a confirmed row
+    # and never a proved absence. The point of this negative stands: marks at
+    # another pitch are not a row of 7 at the declared one.
+    row = count_edge_copper(board(features=marks), "top", 2.8, LENGTH, WIDTH, declared_count=7)
+    assert row.found is None and len(row.centres_mm) < 7
     assert count_edge_copper(board(features=marks), "top", 3.0, LENGTH, WIDTH).found == 7
 
 

@@ -6,7 +6,8 @@ shows a straight outline there, and the sides reached the footprint and the
 3D because only a DIFFERENT count was ever questioned. Rules, from the data
 the photo already measures (edge_notches.EdgeCount):
 
-* a clean edge (`no_notch`) excludes the declared side, with no paid call;
+* a clean edge (`no_notch`) whose copper strip is measured empty excludes the
+  declared side, with no paid call; an unmeasurable strip keeps it, flagged;
 * an edge the photo cannot count is asked again to the model, which may
   answer zero (excluded) or confirm (kept, with a warning that the photo
   could not verify it);
@@ -54,7 +55,10 @@ def _run(data, disagreements, reply=None):
     return changed, calls, logs
 
 
-CLEAN_TOP = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True)
+#: A clean edge whose copper strip was MEASURED empty (copper_found 0): the
+#: only state that excludes a side (H4: None means not measured).
+CLEAN_TOP = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True,
+                      copper_found=0)
 UNCERTAIN_TOP = EdgeCount("top", None, 2, [], reason="tacche poco distinte dal rumore del contorno")
 
 
@@ -224,3 +228,31 @@ def test_a_side_on_a_clean_edge_without_lands_is_still_excluded():
     changed, calls, logs = _run(data, [clean])
     assert changed and calls == []
     assert [side["edge"] for side in data["castellated_sides"]] == ["left", "right"]
+
+
+# ── A clean edge whose copper strip cannot be measured: kept (H4) ────────
+
+def test_a_side_on_a_clean_edge_with_an_unmeasured_strip_is_kept_and_flagged():
+    """@brief Positive: copper_found None (strip too short to confirm) is no evidence -> side kept.
+
+    Told apart from the excluded case by the measurement itself (None = not
+    measured, 0 = measured empty), never by a number tuned to a board.
+    """
+    data = _with_sides(_answer(4), _top())
+    clean = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True,
+                      copper_found=None, copper_reason="fila troppo corta per confermare")
+    changed, calls, logs = _run(data, [clean])
+    assert changed and calls == []
+    assert sorted(side["edge"] for side in data["castellated_sides"]) == ["left", "right", "top"]
+    [warning] = [line for line in logs if kind_of(line) == WARNING]
+    assert "lato tenuto" in warning and "fila troppo corta per confermare" in warning
+    assert "Lati esclusi" not in data["notes"] and "da verificare a mano" in data["notes"]
+
+
+def test_a_boolean_copper_count_is_not_a_measured_absence():
+    """@brief Negative: copper_found False is not the count 0 and cannot exclude the side."""
+    data = _with_sides(_answer(4), _top())
+    clean = EdgeCount("top", 0, 2, [], reason="nessuna tacca visibile sul bordo", no_notch=True,
+                      copper_found=False)
+    _run(data, [clean])
+    assert "top" in [side["edge"] for side in data["castellated_sides"]]

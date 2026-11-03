@@ -720,7 +720,16 @@ def layout_symbol(pins: Iterable[SymbolPin], body=None) -> SymbolLayout:
     lengths = [max((len(p.name) for p in sides[side]), default=0) for side in ('left', 'right')]
     half_width = max(5.08, math.ceil((sum(lengths) * TEXT_SIZE + 5.08) / 5.08) * spacing,
                      math.ceil((max(len(sides['top']), len(sides['bottom'])) + 1) / 2) * spacing)
-    half_height = max(5.08, math.ceil((max(len(sides['left']), len(sides['right'])) + 1) / 2) * spacing)
+    # Top and bottom pin names are written inside the body along the pin,
+    # i.e. vertically: they need body HEIGHT exactly as left/right names need
+    # width, with the same text allowance (they used to be ignored, so a long
+    # top name crossed the opposite edge or met the bottom names). Counted
+    # only for the pins laid out here, which point at the body: a pin with a
+    # custom position may point anywhere, and a hidden pin's name is not drawn.
+    vertical_lengths = [max((len(p.name) for p in sides[side] if p.position is None and not p.hidden),
+                            default=0) for side in ('top', 'bottom')]
+    half_height = max(5.08, math.ceil((max(len(sides['left']), len(sides['right'])) + 1) / 2) * spacing,
+                      math.ceil((sum(vertical_lengths) * TEXT_SIZE + 5.08) / 5.08) * spacing)
     if body is not None:
         if not isinstance(body, (list, tuple)) or len(body) != 2:
             raise SymbolError(_message('Dimensioni del corpo del simbolo non valide.', 'Invalid symbol body dimensions'))

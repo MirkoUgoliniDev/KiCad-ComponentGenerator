@@ -1195,11 +1195,12 @@ def test_a_box_overlapping_the_edge_of_a_confident_body_is_its_pad(setup):
     sicuro e' un suo contatto, retrocesso e mai cancellato.
     """
     session, _ = setup
-    # Modulo 120..520 x 220..420 (input px); piazzola 100..130 con centro a
-    # 115 (fuori) ma 10 px dentro il bordo sinistro; passivo a 60..100,
-    # separato da 20 px di gap: resta un corpo.
-    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([115, 320, 30, 20], 3, .8),
-                    ([80, 320, 40, 20], 3, .7)), _raw(), _raw(), _raw()]
+    # Modulo 120..520 x 220..420 (input px); piazzola 93..143 con centro a
+    # 118 (fuori) ma 23 px dentro il bordo sinistro -- piu' dell'incertezza
+    # dei due bordi affacciati (2 x 8 px di ingresso, revisione 2026-11-03);
+    # passivo a 50..90, separato da 30 px di gap: resta un corpo.
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([118, 320, 50, 20], 3, .8),
+                    ([70, 320, 40, 20], 3, .7)), _raw(), _raw(), _raw()]
     session.raw = lambda index: outputs[index]
     rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
                                        include_review_candidates=True)
@@ -1208,6 +1209,43 @@ def test_a_box_overlapping_the_edge_of_a_confident_body_is_its_pad(setup):
     assert pad['_yolo_on_body_of'] == by_conf[.9]['_yolo_proposal_id'] and pad['_yolo_abuts_body']
     assert yolo.awaiting_user_keep(pad)
     assert not neighbour['_yolo_low_confidence'] and not neighbour.get('_yolo_on_body_of')
+
+
+def test_an_overlap_within_the_box_uncertainty_is_a_doubt_not_a_pad(setup):
+    """@brief Negativo (revisione 2026-11-03): sovrapposizione entro l'incertezza dei riquadri.
+
+    Stessa disposizione del caso positivo, ma il riquadro piccolo entra di
+    soli 6 px di ingresso nel corpo: meno dell'incertezza dei due bordi
+    affacciati (2 x 8 px), quindi puo' essere un corpo separato i cui
+    riquadri si sono allargati l'uno nell'altro. Resta un corpo, con il dubbio.
+    """
+    session, _ = setup
+    outputs = [_raw(([320, 320, 400, 200], 10, .9), ([109, 320, 34, 20], 3, .8)),
+               _raw(), _raw(), _raw()]
+    session.raw = lambda index: outputs[index]
+    rows = yolo.detect_yolo_components(np.zeros((640, 1000, 3), np.uint8), 100, 64,
+                                       include_review_candidates=True)
+    by_conf = {round(row['_yolo_confidence'], 2): row for row in rows}
+    small = by_conf[.8]
+    assert not small.get('_yolo_on_body_of') and not small['_yolo_low_confidence']
+    assert small['_yolo_overlap_doubt_with'] == by_conf[.9]['_yolo_proposal_id']
+
+
+def test_a_contact_class_overlapping_a_body_edge_is_its_pad_however_shallow():
+    """@brief Positivo strutturale: il rilevatore stesso dice «pads»: non e' mai un corpo.
+
+    Stessa sovrapposizione di 6 px (entro l'incertezza 2 x 8 px): un
+    condensatore resta un dubbio, una piazzola e' retrocessa sul corpo.
+    """
+    def row(pid, box, cls, conf):
+        return dict(proposal_id=pid, box=box, confidence=conf, rejection=None, clipped_sides=[],
+                    edge_uncertainty_px=8.0, **{'class': cls, 'argmax_class': cls})
+    for cls, demoted in (('pads', True), ('capacitor', False)):
+        body = row('b', [120, 220, 520, 420], 'ic', .9)
+        small = row('s', [92, 310, 126, 330], cls, .8)
+        links = yolo._on_body_surface([body, small], [], .25)
+        assert bool(links) is demoted
+        assert bool(small.get('overlap_doubt_with')) is not demoted
 
 
 def test_a_box_merely_touching_a_body_box_is_not_its_pad(setup):

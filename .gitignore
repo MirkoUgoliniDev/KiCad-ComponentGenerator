@@ -85,3 +85,23 @@ Claude outputs/
 /tmp/
 /work/
 *.pkl
+
+# Component documents placed by the user in docs/<component>/ (datasheets,
+# drawings, photos) are private material: never on GitHub unless added on
+# purpose. The rule targets the document and image formats, not a part name,
+# so every new component folder is covered; Markdown notes under docs/ stay
+# visible. Ignore rules never untrack a file: the sample folders already
+# tracked (docs/ESP32, docs/RS485, docs/VE12H-K, docs/MFG_TEL-8-2411WI) keep
+# their files, and a new sample is added deliberately with `git add -f`.
+docs/*/**/*.pdf
+docs/*/**/*.png
+docs/*/**/*.jpg
+docs/*/**/*.jpeg
+docs/*/**/*.webp
+docs/*/**/*.bmp
+docs/*/**/*.gif
+docs/*/**/*.tif
+docs/*/**/*.tiff
+docs/*/**/*.heic
+# The README screenshots (tools/make_readme_screenshots.py) are sources.
+!docs/images/*.png

@@ -105,6 +105,35 @@ def test_a_worker_thread_exception_is_reported_without_stopping_the_program(cras
     assert len(list(reports.glob("crash-*.log"))) == 1
 
 
+def test_a_qrunnable_exception_goes_through_the_hook_and_stops_the_program(crash_hooks):
+    """@brief A Python QRunnable.run that raises reaches sys.excepthook: report, then exit.
+
+    @note Documents the real behaviour (review 2026-11-03): unlike a plain
+        threading.Thread, PyQt6 hands an exception escaping a Qt worker's
+        run() to sys.excepthook, so the launcher's hook writes a report and
+        calls exit_process(1). Workers must catch inside run() to survive.
+    """
+    from PyQt6.QtCore import QRunnable, QThreadPool
+    _hook, exits, reports = crash_hooks
+
+    class FailingWorker(QRunnable):
+        """Worker whose run() lets an exception escape."""
+
+        def run(self):
+            """Raise on purpose, outside any try block."""
+            raise RuntimeError("qrunnable failure on purpose")
+
+    pool = QThreadPool()
+    worker = FailingWorker()
+    worker.setAutoDelete(False)
+    pool.start(worker)
+    assert pool.waitForDone(10000)
+    assert exits == [1]
+    files = list(reports.glob("crash-*.log"))
+    assert len(files) == 1
+    assert "qrunnable failure on purpose" in files[0].read_text(encoding="utf-8")
+
+
 # ── Splash screen (user, 2026-10-12: the click must answer at once) ──
 
 def test_startup_language_reads_the_config_without_the_gui(launcher, tmp_path, monkeypatch):

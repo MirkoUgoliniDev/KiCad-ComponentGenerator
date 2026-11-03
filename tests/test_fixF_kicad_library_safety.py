@@ -143,7 +143,14 @@ def test_install_refuses_a_row_pointing_elsewhere_before_writing(tmp_path):
 
 
 def test_explicit_replacement_repoints_only_type_and_uri(tmp_path):
-    """@brief With confirmation the row is repointed, flags and descr kept."""
+    """@brief With confirmation the row is repointed, flags and descr kept.
+
+    @note CONTRACT CHANGED 2026-11-03 (review item 5): the options of a row
+        whose TYPE changes (Legacy -> KiCad) are cleared, because they were
+        read by the old plugin and mean nothing to a KiCad ``.pretty``
+        folder; under the same type they are still kept (see
+        tests/test_kicad_library_review_1103.py).
+    """
     artifacts = _artifacts(tmp_path)
     destination = tmp_path / "Project"
     table = _table(
@@ -157,7 +164,8 @@ def test_explicit_replacement_repoints_only_type_and_uri(tmp_path):
     assert entry.uri == PROJECT_URI and entry.library_type == "KiCad"
     assert entry.hidden
     text = table.read_text(encoding="utf-8")
-    assert '(options "keep=1")' in text and '(descr "Team library")' in text
+    assert '(options "")' in text and "keep=1" not in text
+    assert '(descr "Team library")' in text
     assert find_library_entry(table, "Other").uri == "/o.pretty"
 
 

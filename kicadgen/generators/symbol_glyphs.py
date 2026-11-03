@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ..core.footprint import arc_centre_representable
 from ..core.sexpr import format_number, quote
 from ..services.messages import tx
 
@@ -611,9 +612,15 @@ def load_library_glyph(library: Path, symbol_name: str, key: str = "", label: st
     primitives: list[Primitive] = []
     terminals: list[Terminal] = []
     legacy = text_angles_in_degrees(text)
-    for unit in _children(symbol, "symbol"):
-        primitives.extend(primitives_of(unit, legacy))
-        terminals.extend(terminals_of(unit))
+    # A malformed unit (an `(xy 1)` with one coordinate, a word where a
+    # number belongs) is an unreadable library, as documented: None, never
+    # an IndexError or TypeError out of the palette.
+    try:
+        for unit in _children(symbol, "symbol"):
+            primitives.extend(primitives_of(unit, legacy))
+            terminals.extend(terminals_of(unit))
+    except (IndexError, TypeError, ValueError):
+        return None
     primitives, body_hint = _drop_body_outline(primitives)
     if not primitives:
         return None
@@ -1437,6 +1444,11 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
             if len(set(points)) < 3:
                 return None
             start, end, mid = points
+            # Three collinear points define no circle: KiCad reads such an
+            # arc with a centre around 1e15 mm (the same rule as the
+            # footprint arcs, `core.footprint.arc_centre_representable`).
+            if not arc_centre_representable(start, mid, end):
+                return None
             points = [start, mid, end]
         xs, ys = [x for x, _y in points], [y for _x, y in points]
     ox, oy = round((min(xs) + max(xs)) / 2, 4), round((min(ys) + max(ys)) / 2, 4)
@@ -1525,10 +1537,22 @@ def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
     candidate[position] = [lx, ly]
     if kind == "rectangle" and (candidate[0][0] == candidate[1][0] or candidate[0][1] == candidate[1][1]):
         return False
-    if kind == "arc" and len({tuple(pt) for pt in candidate}) < 3:
+    if kind == "arc" and (len({tuple(pt) for pt in candidate}) < 3
+                          or not _arc_placeable(instance, candidate)):
         return False
     points[position] = [lx, ly]
     return True
+
+
+def _arc_placeable(instance: dict, points) -> bool:
+    """True when the arc through `points` (record frame) has a centre KiCad can hold once placed.
+
+    The points go through the record's placement (`_transform`) first, so
+    the centre is checked where the `.kicad_sym` writes it."""
+    x, y = float(instance.get("x", 0.0)), float(instance.get("y", 0.0))
+    rotation, mirror = int(instance.get("rotation", 0)), bool(instance.get("mirror", False))
+    start, mid, end = (_transform(_point_xy(pt), x, y, rotation, mirror) for pt in points)
+    return arc_centre_representable(start, mid, end)
 
 
 def instance_bounds(instance: dict, graphics: Optional[Iterable[dict]] = None,
@@ -1778,7 +1802,9 @@ def validate_instances(instances) -> list[dict]:
         finite `x`/`y`, an int `angle` and a finite `length`; when a primitive
         has an unknown `kind`, the wrong number of points for its kind, a
         non-finite or negative `width`, a non-finite `radius` or a circle
-        whose radius is not positive.
+        whose radius is not positive; when a polyline has fewer than two
+        points or an arc's three points are collinear (no centre KiCad can
+        hold, `core.footprint.arc_centre_representable`).
     @note An unknown `fill` or `style` is not refused: both are normalised
         when the primitive is built (`primitive_from_record`).
     """
@@ -1813,6 +1839,11 @@ def validate_instances(instances) -> list[dict]:
             for point in points:
                 _validate_point(point)
             _validate_primitive_shape(primitive, len(points))
+            # An arc through three collinear points (or so nearly collinear
+            # that its centre leaves KiCad's range) has no circle: KiCad
+            # reads its centre around 1e15 mm.
+            if primitive.get("kind") == "arc" and not _arc_placeable(record, points):
+                raise ValueError(tx("Elementi grafici del simbolo non validi."))
             if primitive.get("kind") == "text":
                 if not isinstance(primitive.get("text"), str) or not primitive["text"].strip() \
                         or len(primitive.get("points", ())) != 1:
@@ -1867,6 +1898,10 @@ def _validate_primitive_shape(primitive: dict, point_count: int) -> None:
     if kind not in PRIMITIVE_KINDS:
         raise ValueError(tx("Elementi grafici del simbolo non validi."))
     if kind in _POINT_COUNTS and point_count != _POINT_COUNTS[kind]:
+        raise ValueError(tx("Elementi grafici del simbolo non validi."))
+    # A polyline needs two vertices: KiCad refuses the WHOLE library when
+    # one `(polyline (pts))` is empty, not only that drawing.
+    if kind == "polyline" and point_count < 2:
         raise ValueError(tx("Elementi grafici del simbolo non validi."))
     width = primitive.get("width", 0.0)
     _finite_or_raise(width)
@@ -1951,6 +1986,11 @@ def serialize_graphics(instances: Iterable[dict], indent: str = "      ",
                              f"{text_angle_to_file(p.angle)}) "
                              f"(effects (font (size {_num(p.size)} {_num(p.size)})){justify}))")
             elif p.kind == "polyline":
+                if len(p.points) < 2:
+                    # Validation refuses such a record; a wire resolved to
+                    # fewer points is skipped, since KiCad would refuse the
+                    # whole library for one empty polyline.
+                    continue
                 pts = " ".join(f"(xy {_num(x)} {_num(y)})" for x, y in p.points)
                 lines.append(f"{indent}(polyline (pts {pts}) {stroke} {fill})")
             elif p.kind == "circle":

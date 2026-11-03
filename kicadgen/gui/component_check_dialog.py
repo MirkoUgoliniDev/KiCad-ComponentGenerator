@@ -7,7 +7,15 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
                              QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout,
                              QToolButton, QHBoxLayout, QGroupBox)
+from PyQt6 import sip
 from ..services.component_check import verify_component, Check
+
+#: Longest wait, at application exit, for the verification to leave after a
+#: stop request, in milliseconds. `verify_component` has no cancellation
+#: channel: the stop is seen only between two KiCad commands, and one command
+#: may run for its whole 60 s limit. Same bound and reasoning as
+#: photo_review_dialog.MATCH_QUIT_WAIT_MS: a quit must never look like a hang.
+CHECK_QUIT_WAIT_MS = 5000
 
 
 class _CheckAborted(BaseException):
@@ -53,8 +61,8 @@ class _CheckWorker(QThread):
         self.aborted = False
         if application is not None:
             # Quitting while a KiCad command is in flight would destroy the
-            # running thread: stop it after the current command and wait.
-            # The wait is bounded by the 60 s limit of that ONE command.
+            # running thread: stop it after the current command and wait at
+            # most CHECK_QUIT_WAIT_MS (see `_stop_for_quit`).
             application.aboutToQuit.connect(self._stop_for_quit)
         self.finished.connect(self._release)
 
@@ -69,9 +77,18 @@ class _CheckWorker(QThread):
         self.cancel.set()
 
     def _stop_for_quit(self):
-        """Stop after the current command, then wait for the thread to leave."""
+        """Stop after the current command, waiting a BOUNDED time for the thread.
+
+        A thread still inside a KiCad command when the wait expires is taken
+        away from QApplication and handed to C++ with no owner: destroyed with
+        the application while running, it would abort the process (Qt's
+        «Destroyed while thread is still running»). The process exit ends it.
+        """
         self.stop()
-        self.wait()
+        if self.wait(CHECK_QUIT_WAIT_MS):
+            return
+        self.setParent(None)
+        sip.transferto(self, None)
 
     def _emit(self, result):
         """Forward one check, then leave the verification if a stop was asked."""

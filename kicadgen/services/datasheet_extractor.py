@@ -395,7 +395,7 @@ _EXTRACTION_TOOL = {
             },
             "populated_pins": {
                 "type": "array",
-                "items": {"type": "integer"},
+                "items": {"type": "string"},
                 "description": (
                     "SOLO se il pinout del datasheet mostra che non tutte le posizioni "
                     "della matrice rows x cols hanno un pin fisico (pinout parziale, "
@@ -550,7 +550,9 @@ _EXTRACTION_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "pin": {"type": "integer", "description": "Numero del pin"},
+                        "pin": {"type": "string", "description": (
+                            "Numero del pin COME E' STAMPATO nel disegno o nella "
+                            "tabella, come testo: 1, 11, A1, B12, EP.")},
                         "row": {
                             "type": "integer",
                             "description": "Indice riga, 0 = prima fila (y=0), 1 = fila successiva",
@@ -575,7 +577,9 @@ _EXTRACTION_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "pin": {"type": "integer", "description": "Numero del pin"},
+                        "pin": {"type": "string", "description": (
+                            "Numero del pin COME E' STAMPATO nel disegno o nella "
+                            "tabella, come testo: 1, 11, A1, B12, EP.")},
                         "name": {
                             "type": "string",
                             "description": (
@@ -945,7 +949,9 @@ _PIN_NUMBERING_TOOL = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "pin": {"type": "integer", "description": "Numero stampato accanto alla posizione."},
+                        "pin": {"type": "string", "description": (
+                            "Numero stampato accanto alla posizione, come testo e come "
+                            "appare: 1, 11, A1, B12, EP.")},
                         "row": {"type": "integer", "description": "Indice riga: 0 = fila piu' in alto nel disegno."},
                         "col": {"type": "integer", "description": "Indice colonna: 0 = posizione piu' a sinistra nel disegno."},
                     },
@@ -1018,6 +1024,8 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
         of `apply_dedicated_numbering` names the real outcome. A discard
         because more distinct printed numbers were read than the grid has
         positions also carries "contradicts_grid": True and "grid".
+    @throws ExtractionCancelled When the user cancels during the call; every
+        other failure (call, unreadable drawing) is returned as "failed".
     @note Best-effort by design: a failure of this paid call must never lose
         the main answer. The result is in DRAWING coordinates, mirrored later
         by `_pin_map_seen_from_top` with the declared view, like pin_map.
@@ -1027,19 +1035,24 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
     #: Output budget sized on the grid: about 30 tokens per entry when every
     #: position carries a printed number, plus room for the view and notes.
     max_tokens = int(min(8192, max(1024, 512 + 30 * int(rows) * int(cols))))
-    blocks = []
-    for index, path in enumerate(documents):
-        blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
-        blocks.append(_file_to_content_block(path, model))
-    blocks.append({"type": "text", "text": (
-        f"La griglia dei pin ha {int(rows)} file (righe) e {int(cols)} posizioni per fila "
-        f"(colonne) a passo costante. Riporta la posizione di ogni numero di pin stampato "
-        f"nel disegno e chiama lo strumento.")})
     try:
+        # The documents are read inside the try: a drawing that vanished or
+        # is locked since the main call raises ExtractionError, and this
+        # best-effort reading must never lose the paid main answer (M5).
+        blocks = []
+        for index, path in enumerate(documents):
+            blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+            blocks.append(_file_to_content_block(path, model))
+        blocks.append({"type": "text", "text": (
+            f"La griglia dei pin ha {int(rows)} file (righe) e {int(cols)} posizioni per fila "
+            f"(colonne) a passo costante. Riporta la posizione di ogni numero di pin stampato "
+            f"nel disegno, come testo e come appare (1, 11, A1, EP), e chiama lo strumento.")})
         data = call(model=model, system_prompt=prompt or DEFAULT_PIN_NUMBERING_PROMPT,
                     content_blocks=blocks, tool=_pin_numbering_tool(),
                     max_tokens=max_tokens, has_pdf=False)
-    except (OpenRouterError, ToolArgumentsError) as exc:
+    except ExtractionCancelled:
+        raise
+    except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
         if progress:
             progress(tx("Lettura dedicata della numerazione non riuscita ({exc}): resta la "
                         "numerazione della risposta principale.", exc=exc))
@@ -1050,8 +1063,9 @@ def read_pin_numbering(documents, *, rows, cols, model, call, prompt=None,
     view = data.get("contacts_view")
     view = view if view in ("top", "bottom", "unknown") else "unknown"
     raw_pins = data.get("pins") if isinstance(data.get("pins"), (list, tuple)) else []
-    printed = {_optional_number(e.get("pin"), integer=True) for e in raw_pins if isinstance(e, dict)}
+    printed = {_pin_label(e.get("pin")) for e in raw_pins if isinstance(e, dict)}
     printed.discard(None)
+    printed = {_pin_text(pin) for pin in printed}
     if len(printed) > int(rows) * int(cols):
         # More DISTINCT printed numbers than the grid has positions: whatever
         # the reader did with rows and columns, the grid cannot hold them.
@@ -1357,6 +1371,9 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None) ->
         "notes"} plus the chain results of pads_from_chains ("problems",
         "spans", "edges", "unplaced"), or "failed"/"discarded" with the reason
         and empty "pads".
+    @throws ExtractionCancelled When the user cancels during the call; every
+        other failure (call, unreadable drawing) is returned as "failed", and
+        an answer without a declared drawing unit as "discarded".
     @note Best-effort: a failure never loses the main answer. The model
         transcribes the chains; the program converts the declared unit and
         adds them up (pads_from_chains). The origin is arbitrary and is never
@@ -1364,18 +1381,23 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None) ->
     """
     if not documents:
         return None
-    blocks = []
-    for index, path in enumerate(documents):
-        blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
-        blocks.append(_file_to_content_block(path, model))
-    blocks.append({"type": "text", "text": (
-        "Trascrivi le catene di quote dei fori o delle piazzole numerate del disegno e chiama "
-        "lo strumento.")})
     try:
+        # The documents are read inside the try: a drawing that vanished or
+        # is locked since the main call raises ExtractionError, and this
+        # best-effort reading must never lose the paid main answer (M5).
+        blocks = []
+        for index, path in enumerate(documents):
+            blocks.append({"type": "text", "text": f"FILE {index}: {path.name}"})
+            blocks.append(_file_to_content_block(path, model))
+        blocks.append({"type": "text", "text": (
+            "Trascrivi le catene di quote dei fori o delle piazzole numerate del disegno e chiama "
+            "lo strumento.")})
         data = call(model=model, system_prompt=prompt or DEFAULT_PAD_POSITIONS_PROMPT,
                     content_blocks=blocks, tool=_pad_positions_tool(),
                     max_tokens=PAD_POSITIONS_MAX_TOKENS, has_pdf=False)
-    except (OpenRouterError, ToolArgumentsError) as exc:
+    except ExtractionCancelled:
+        raise
+    except (OpenRouterError, ToolArgumentsError, ExtractionError) as exc:
         if progress:
             progress(tx("Lettura dedicata delle posizioni dei pad non riuscita ({exc}).", exc=exc))
         return {"view": "unknown", "pads": {}, "notes": "", "failed": str(exc)}
@@ -1383,7 +1405,15 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None) ->
         return {"view": "unknown", "pads": {}, "notes": "", "discarded": tx("risposta non strutturata")}
     view = data.get("contacts_view")
     view = view if view in ("top", "bottom", "unknown") else "unknown"
-    solved = pads_from_chains(data.get("chains"), _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0))
+    factor = _declared_unit_factor(data)
+    if factor is None:
+        # Chains without a declared unit cannot be put in mm: unverifiable,
+        # never read as millimetres (L11).
+        reason = _undeclared_unit_reason()
+        if progress:
+            progress(tx("Lettura dedicata delle posizioni dei pad scartata ({exc}).", exc=reason))
+        return {"view": view, "pads": {}, "notes": "", "discarded": reason}
+    solved = pads_from_chains(data.get("chains"), factor)
     notes = data.get("notes")
     return dict(solved, view=view, notes=notes if isinstance(notes, str) else "")
 
@@ -1824,7 +1854,7 @@ def _settle_by_holes(data: dict, pins: list, readings: list, holes, factor: floa
     """
     if holes.views_differ:
         return None
-    numbers = {str(pin.get("number", "")).strip() for pin in pins if isinstance(pin, dict)}
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
     # A pad any reading found and the answer lacks is a terminal the answer
     # left out: its pins cannot be written whole, whatever the holes say
     # (final generality audit D-B: a 4-pad answer was confirmed by four of
@@ -1900,7 +1930,7 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
     """
     if holes.measure is None or holes.views_differ:
         return None
-    numbers = {str(pin.get("number", "")).strip() for pin in pins if isinstance(pin, dict)}
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
     measured = []
     for key, pads, spans, centred in readings:
         if set(pads) != numbers:
@@ -2108,7 +2138,7 @@ def _main_pads(pins, factor: float):
             continue
         x = _optional_number(pin.get("x_mm"))
         y = _optional_number(pin.get("y_mm"))
-        number = str(pin.get("number", "")).strip()
+        number = _pad_number_text(pin.get("number"))
         if number in seen:
             repeated.add(number)
         seen.add(number)
@@ -2196,7 +2226,13 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
     if not isinstance(pins, (list, tuple)) or not pins:
         return
-    factor = _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0)
+    factor = _declared_unit_factor(data)
+    if factor is None:
+        # The main answer's coordinates have no declared unit: nothing can
+        # be compared in mm or confirmed, so the positions block (L11).
+        _block(data, tx("Posizioni dei pad NON confermate ({why}).",
+                        why=_undeclared_unit_reason()), progress)
+        return
     main, repeated = _main_pads(pins, factor)
     # Pads sharing a number collapse into one entry: no hole check on them,
     # never an adoption (adversarial review, 2026-10-31).
@@ -2349,6 +2385,17 @@ def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark) -> 
 _UNIFORM_PAD_FIELDS = ("pad_type", "drill_mm", "pad_length_mm", "pad_width_mm", "shape")
 
 
+def _pad_number_text(value) -> str:
+    """@brief A pad number as stripped text; a missing or null number is the empty text.
+
+    @param value The ``number`` of a pad entry, as the model gave it.
+    @return ``""`` for None (M6: ``str(None)`` named a pad «None», which then
+        passed the validation as a real pad number), else ``str(value).strip()``.
+        The validation rejects the empty number.
+    """
+    return "" if value is None else str(value).strip()
+
+
 def _pad_number_key(number: str):
     """Natural order of pad numbers: 1, 2, 10, then A1, A2 ('1' < '10', digits first)."""
     parts = re.findall(r"\d+|\D+", number)
@@ -2409,7 +2456,7 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
         and the note asks to check them on the drawing.
     """
     dedicated = reading["pads"]
-    numbers = {str(pin.get("number", "")).strip() for pin in pins if isinstance(pin, dict)}
+    numbers = {_pad_number_text(pin.get("number")) for pin in pins if isinstance(pin, dict)}
     convention = bool(data.get("_numbers_by_convention"))
     if views_differ or reading.get("unplaced") or len(dedicated) < 2:
         return False
@@ -2533,16 +2580,19 @@ def _require_declared_view(data: dict, progress=None) -> None:
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
     if not isinstance(pins, (list, tuple)):
         return
-    factor = _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0)
+    factor = _declared_unit_factor(data)
     pads = []
     for pin in pins:
         x = _optional_number(pin.get("x_mm")) if isinstance(pin, dict) else None
         y = _optional_number(pin.get("y_mm")) if isinstance(pin, dict) else None
         if x is not None and y is not None:
-            pads.append((str(pin.get("number", "")).strip(), (x * factor, y * factor)))
+            scale = factor if factor is not None else 1.0
+            pads.append((_pad_number_text(pin.get("number")), (x * scale, y * scale)))
     if len(pads) < 2:
         return
-    if _mirror_equivalent(pads, PAD_READING_TOLERANCE_MM):
+    # Without a declared unit the mm tolerance means nothing: no symmetry
+    # shortcut, the view is asked (L11).
+    if factor is not None and _mirror_equivalent(pads, PAD_READING_TOLERANCE_MM):
         data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
             "Vista dei terminali non dichiarata: la disposizione numerata dei pad e' uguale alla "
             "sua immagine speculare, il footprint e' lo stesso da sopra e da sotto.")).strip()
@@ -2750,7 +2800,7 @@ def _chain_contradictions(geometry: dict, reading: dict, factor: float) -> tuple
 def _numbering_summary(entries) -> str:
     """'1@(0,0), 7@(0,6)' for the log and the conflict message."""
     return ", ".join(f"{e['pin']}@({e['row']},{e['col']})"
-                     for e in sorted(entries, key=lambda e: int(e["pin"])))
+                     for e in sorted(entries, key=lambda e: _pin_sort_key(e["pin"])))
 
 
 def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None) -> None:
@@ -2808,15 +2858,20 @@ def apply_dedicated_numbering(data: dict, reading: Optional[dict], progress=None
         if progress:
             progress(data["_numbering_note"])
         return
-    dedicated = {int(e["pin"]): (int(e["row"]), int(e["col"])) for e in reading["pins"]}
+    # Pins are compared as printed labels («1», «A1»), never as ints: an int
+    # conversion would drop or crash on an alphanumeric pad (T7NS5D4-12).
+    dedicated = {_pin_text(e["pin"]): (int(e["row"]), int(e["col"])) for e in reading["pins"]}
     main_entries = data.get("pin_map") if isinstance(data.get("pin_map"), (list, tuple)) else []
     main = {}
     for entry in main_entries:
         if isinstance(entry, dict):
+            label = _pin_label(entry.get("pin"))
             try:
-                main[int(entry["pin"])] = (int(entry["row"]), int(entry["col"]))
+                position = (int(entry["row"]), int(entry["col"]))
             except (KeyError, TypeError, ValueError):
                 continue
+            if label is not None:
+                main[_pin_text(label)] = position
     main_view = data.get("contacts_view")
     views_differ = (main_view in ("top", "bottom") and reading["view"] in ("top", "bottom")
                     and main_view != reading["view"])
@@ -3061,7 +3116,7 @@ def single_answer_to_data(answer: dict) -> dict:
     for entry in pads:
         if not isinstance(entry, dict):
             continue
-        pin = {"number": str(entry.get("number", "")).strip(), "x_mm": entry.get("x_mm"),
+        pin = {"number": _pad_number_text(entry.get("number")), "x_mm": entry.get("x_mm"),
                "y_mm": entry.get("y_mm"), "pad_length_mm": entry.get("pad_length_mm"),
                "pad_width_mm": entry.get("pad_width_mm"),
                "pad_type": entry.get("pad_type", "thru_hole")}
@@ -3184,7 +3239,14 @@ def _place_pins_from_chains(data: dict, chains) -> None:
         return
     geometry = data["package_geometry"]
     pins = geometry["pins"]
-    factor = _UNIT_TO_MM.get(data.get("drawing_unit"), 1.0)
+    factor = _declared_unit_factor(data)
+    if factor is None:
+        # Chain sums need the unit to become mm: without it the model's own
+        # coordinates stay, and the note says why (L11).
+        note = tx("Coordinate dei pad prese dalle somme del modello, non dalle catene di quote "
+                  "({reasons}).", reasons=_undeclared_unit_reason())
+        data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+        return
     solved = pads_from_chains(chains, factor)
     numbers = [pin["number"] for pin in pins]
     missing = sorted(set(numbers) - set(solved["pads"]))
@@ -3418,7 +3480,7 @@ class ExtractedParams:
     photo_overlay_png: Optional[bytes] = None
     photo_png: Optional[bytes] = None
     photo_source: str = ""
-    populated_pins: Optional[Sequence[int]] = None
+    populated_pins: Optional[Sequence] = None
     body_length_mm: Optional[float] = None
     body_width_mm: Optional[float] = None
     body_height_mm: Optional[float] = None
@@ -4226,6 +4288,55 @@ def _file_to_content_block(path: Path, model: Optional[str] = None) -> dict:
     return {"type": "image_url", "image_url": {"url": data_url}}
 
 
+#: Pin labels accepted from a drawing reading: a letter or digit followed by
+#: letters, digits and the separators KiCad pad numbers commonly carry
+#: («1», «11», «A1», «B12», «EP», «MP-2»). Spaces, punctuation and longer
+#: texts are a sentence or a slip, not a printed pad number.
+_PIN_LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,15}")
+
+
+def _pin_label(value):
+    """@brief A pin number as printed on the drawing: «1», «11», «A1», «EP».
+
+    @param value The ``pin`` of a reading: text (the schemas declare it a
+        string since 2026-11-03), or an integer from older answers and tests.
+    @return An int >= 1 for a label made of ASCII digits only (its historical
+        type, so numeric grids keep comparing with populated_pins and the
+        numbering conventions); the stripped text for any other label; None
+        for a malformed value (booleans, fractions, numbers below 1, empty
+        or non-label text).
+    @note Pin numbers are TEXT (T7NS5D4-12 relay, 2026-11-03: a schema
+        declaring ``pin`` an integer made the model drop pads A1 and A2).
+        Mixed int/str values are compared through `_pin_text`, never as ints.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not _PIN_LABEL_RE.fullmatch(text):
+            return None
+        if text.isascii() and text.isdigit():
+            number = int(text)
+            if number < 1:
+                return None
+            # «01» stays text: the drawing printed it so, and a pad «01» is
+            # not pad 1 (generality audit 2026-11-03).
+            return number if str(number) == text else text
+        return text
+    number = _optional_number(value, integer=True)
+    return number if number is not None and number >= 1 else None
+
+
+def _pin_text(pin) -> str:
+    """The identity of a pin for comparisons: its label as stripped text (1 and "1" alike)."""
+    return str(pin).strip()
+
+
+def _pin_sort_key(pin) -> tuple:
+    """Sort key for mixed labels: numeric pins in numeric order, then text labels alphabetically."""
+    text = _pin_text(pin)
+    return (0, int(text), "") if text.isascii() and text.isdigit() else (1, 0, text)
+
 
 def _pin_map_seen_from_top(
     pin_map: Optional[Sequence[dict]], cols: int, view: Optional[str],
@@ -4251,8 +4362,9 @@ def _pin_map_seen_from_top(
         validate the entries; None skips that check.
     @return The entries seen from above, or None when `pin_map` is empty.
 
-    @throws ExtractionError When an entry is not an object with integral
-        pin >= 1, row >= 0 and col >= 0 (booleans and fractions rejected),
+    @throws ExtractionError When an entry is not an object with a printed
+        pin label (`_pin_label`: «1», «A1», «EP»; numbers below 1, booleans
+        and fractions rejected) and integral row >= 0 and col >= 0,
         lies outside the rows x cols matrix (rows checked when given), or
         repeats a pin number or a position. The map is a numbering convention
         as a whole, so one bad entry invalidates it.
@@ -4266,23 +4378,24 @@ def _pin_map_seen_from_top(
     for index, raw in enumerate(pin_map, 1):
         values = {}
         if isinstance(raw, dict):
-            values = {key: _optional_number(raw.get(key), integer=True)
-                      for key in ("pin", "row", "col")}
+            values = {key: _optional_number(raw.get(key), integer=True) for key in ("row", "col")}
+            values["pin"] = _pin_label(raw.get("pin"))
         if (not values or any(v is None for v in values.values())
-                or values["pin"] < 1 or values["row"] < 0 or values["col"] < 0):
-            raise ExtractionError(tx("pin_map, voce {index}: servono pin, row e col interi "
-                                     "(pin da 1, row e col da 0).", index=index))
+                or values["row"] < 0 or values["col"] < 0):
+            raise ExtractionError(tx("pin_map, voce {index}: servono il numero del pin come "
+                                     "stampato (1, 11, A1, EP) e row e col interi da 0.",
+                                     index=index))
         pin, row, col = values["pin"], values["row"], values["col"]
         if col >= cols or (rows is not None and row >= rows):
             raise ExtractionError(tx("pin_map: pin {pin} in riga {row}, colonna {col}, fuori "
                                      "dalla matrice {rows}x{cols}.", pin=pin, row=row, col=col,
                                      rows=rows if rows is not None else "?", cols=cols))
-        if pin in pins:
+        if _pin_text(pin) in pins:
             raise ExtractionError(tx("pin_map: il pin {pin} compare piu' volte.", pin=pin))
         if (row, col) in positions:
             raise ExtractionError(tx("pin_map: i pin {pin} e {other} occupano la stessa "
                                      "posizione.", pin=pin, other=positions[(row, col)]))
-        pins[pin] = True
+        pins[_pin_text(pin)] = True
         positions[(row, col)] = pin
         entries.append({"pin": pin, "row": row, "col": col})
     if view == "bottom":
@@ -4321,6 +4434,26 @@ def _offset_x_seen_from_top(offset, length, cols, pitch, view):
 #: Millimetres per unit, for the drawing units the schema accepts
 #: (`drawing_unit`). Exact by definition: 1 inch = 25.4 mm, 1 mil = 0.001 inch.
 _UNIT_TO_MM = {"mm": 1.0, "inch": 25.4, "mil": 0.0254}
+
+
+def _declared_unit_factor(data) -> Optional[float]:
+    """@brief Millimetres per drawing unit as the answer DECLARES it, never assumed.
+
+    @param data A model answer carrying ``drawing_unit``.
+    @return The factor of a declared, known unit; None when the unit is
+        missing or unknown (L11: a missing unit silently meant mm, so a
+        drawing in inches would have been written 25.4 times too small).
+    @note The dedicated position readings treat None as unverifiable: the
+        reading is discarded or the positions blocked, with the reason
+        `_undeclared_unit_reason`.
+    """
+    unit = data.get("drawing_unit") if isinstance(data, dict) else None
+    return _UNIT_TO_MM.get(unit) if isinstance(unit, str) else None
+
+
+def _undeclared_unit_reason() -> str:
+    """The reason of a reading set aside because its drawing unit is not declared."""
+    return tx("unita' non dichiarata")
 
 _PACKAGE_LENGTH_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
 _PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm")
@@ -5602,14 +5735,59 @@ def _keep_clean_sides_with_copper(data, items, say) -> bool:
     return changed
 
 
+def _copper_count(item) -> Optional[int]:
+    """The copper lands counted along a clean edge: an int >= 0, or None when not measured.
+
+    A boolean or a non-integral value is not a count and reads as None, so
+    it can never exclude a side.
+    """
+    value = getattr(item, "copper_found", None)
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral) or value < 0:
+        return None
+    return int(value)
+
+
+def _keep_clean_sides_unmeasured(data, items, say) -> bool:
+    """@brief Keep the declared sides of a clean edge whose copper strip could not be measured.
+
+    @param data Validated main answer, updated in place (notes only).
+    @param items EdgeCount list of clean edges with `copper_found` None.
+    @param say Progress callback; each kept side is reported as a WARNING.
+    @return True when at least one declared side was flagged.
+    @note A straight outline alone is not proof of absence (a shallow
+        half-hole shows no notch), and an unmeasurable copper strip is no
+        evidence either way (H4): excluding the side would drop real
+        contacts on missing data. Only a measured empty strip
+        (`copper_found` == 0) excludes; here the side stays as declared and
+        a person checks it, told why the photo could not decide.
+    """
+    from .messages import as_warning
+    changed = False
+    for item in items:
+        for entry in data.get("castellated_sides") or ():
+            if _side_edge(entry) != item.edge:
+                continue
+            message = tx("Lato {label}: la foto non mostra tacche sul bordo e il rame lungo il "
+                         "bordo non si puo' misurare ({reason}): lato tenuto con i {declared} "
+                         "contatti dichiarati, da verificare a mano.",
+                         label=EDGE_LABELS.get(item.edge, item.edge),
+                         reason=item.copper_reason or tx("striscia del bordo non misurabile"),
+                         declared=entry.get("count"))
+            say(as_warning(message))
+            data["notes"] = (str(data.get("notes") or "") + "\n" + message).strip()
+            changed = True
+    return changed
+
+
 def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call, model,
                            system_prompt, has_pdf, say) -> bool:
     """Body of _recount_sides_from_photo; `data` is changed only at the very end.
 
     Three kinds of EdgeCount arrive (edge_notches.count_disagreements):
-    * a CLEAN edge (`no_notch`): the declared side is excluded here, with no
-      paid call -- the photo is the geometric reference of the project, and
-      a straight outline on a photo able to show a notch is a measurement;
+    * a CLEAN edge (`no_notch`): with no paid call, the declared side is
+      excluded when the copper strip along it was measured empty
+      (`copper_found` == 0), kept when a periodic row of lands is there, and
+      kept flagged for review when the strip could not be measured (None);
     * an edge the photo cannot count (`found` None): the model is asked to
       look at the enlargement of THAT edge and to answer count 0 (or leave
       the side out) when it sees no plated hole cut by the edge; 0 excludes
@@ -5626,16 +5804,20 @@ def _recount_sides_attempt(data, disagreements, content_blocks, diagnostic_call,
     # barrel hides the background shows no notch (ESP32 devkit, 2026-10-08:
     # 22 contacts per edge dropped as «no notch»). A periodic row of lands
     # on the edge is presence: such a side stays, flagged; the others go.
-    # copper_found None (strip not measurable) is not «no copper»: the side
-    # goes as before, and the reason is said with the exclusion.
-    absent = [item for item in clean if not item.copper_found]
+    # Only a MEASURED absence excludes a side: copper_found == 0 is a strip
+    # read and found empty. None means the strip could not be measured (a
+    # row too short to confirm, a strip off the photo): that is no evidence
+    # either way, so the declared side stays, flagged for review (H4).
+    absent = [item for item in clean if _copper_count(item) == 0]
+    unmeasured = [item for item in clean if _copper_count(item) is None]
     for item in absent:
         if item.copper_reason:
             say(tx("Lato {label}: rame sul bordo: {reason}.",
                    label=EDGE_LABELS.get(item.edge, item.edge), reason=item.copper_reason))
     changed = _exclude_declared_sides(data, absent, say) if absent else False
     changed = _keep_clean_sides_with_copper(
-        data, [item for item in clean if item.copper_found], say) or changed
+        data, [item for item in clean if (_copper_count(item) or 0) > 0], say) or changed
+    changed = _keep_clean_sides_unmeasured(data, unmeasured, say) or changed
     if not disagreements and not unverifiable:
         return changed
     facts = "; ".join(
@@ -6330,9 +6512,17 @@ def _pin_field_positions(params) -> list:
     drawn. Empty when the grid is not usable.
     """
     from ..generators.pin_header import PinHeaderParams, pin_positions
+    if int(params.rows) > 1 and not params.row_spacing_mm:
+        # Without a declared row spacing the rows would sit one pitch apart:
+        # a guess, and `fit_body_to_pin_field` must not correct the body from
+        # it (review 2026-11-03, pitch never reused as row spacing).
+        return []
     mapping = None
     if params.pin_map:
-        mapping = {int(entry["pin"]): (int(entry["row"]), int(entry["col"]))
+        # Keyed on the printed label: pin_header compares pins as text, so
+        # «A1» and 1 are both valid keys (an int() here dropped every
+        # alphanumeric map).
+        mapping = {entry["pin"]: (int(entry["row"]), int(entry["col"]))
                    for entry in params.pin_map}
     grid = PinHeaderParams(
         # With one column every pin is at x = 0 whatever the pitch, and a single
@@ -7119,11 +7309,12 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
     else:
         complete = False
     if pin_map and complete:
-        populated = _validated_populated_pins(raw_populated, max_pin, notes, mapped=sorted(mapped))
+        populated = _validated_populated_pins(raw_populated, max_pin, notes,
+                                              mapped=sorted(mapped, key=_pin_sort_key))
         if populated:
-            extra = sorted(pin for pin in mapped if pin not in populated)
+            extra = sorted((pin for pin in mapped if pin not in populated), key=_pin_sort_key)
             if extra and dedicated:
-                populated = sorted(set(populated) | set(extra))
+                populated = sorted(set(populated) | set(extra), key=_pin_sort_key)
                 notes.append(tx("pin_map: i pin {pins} hanno un numero stampato nel disegno ma "
                                 "mancavano da populated_pins: aggiunti ai pin presenti. "
                                 "Verificare sul disegno.", pins=", ".join(str(p) for p in extra)))
@@ -7142,13 +7333,15 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
     anchors = {entry["pin"]: (entry["row"], entry["col"]) for entry in pin_map}
     fitting = [name for name, convention in _numbering_conventions(int(rows), int(cols)).items()
                if all(convention.get(pin) == position for pin, position in anchors.items())]
-    summary = ", ".join(f"{pin}@({r},{c})" for pin, (r, c) in sorted(anchors.items()))
+    summary = ", ".join(f"{pin}@({r},{c})" for pin, (r, c)
+                        in sorted(anchors.items(), key=lambda item: _pin_sort_key(item[0])))
     if len(fitting) == 1:
         convention = _numbering_conventions(int(rows), int(cols))[fitting[0]]
         completed = [{"pin": pin, "row": row, "col": col}
                      for pin, (row, col) in sorted(convention.items())]
         if populated:
-            missing = sorted(pin for pin in populated if pin not in convention)
+            missing = sorted((pin for pin in populated if pin not in convention),
+                             key=_pin_sort_key)
             if missing:
                 return None, populated, tx(
                     "Numerazione letta per {read} pin su {expected} ({anchors}); la convenzione "
@@ -7173,8 +7366,13 @@ def _resolve_pin_numbering(pin_map, raw_populated, rows, cols, max_pin, *, dedic
 
 
 def _validated_populated_pins(raw, max_pin: Optional[int], notes: list,
-                              mapped: Optional[Sequence[int]] = None) -> Optional[list]:
+                              mapped: Optional[Sequence] = None) -> Optional[list]:
     """Optional populated_pins: keep the valid, in-range pin numbers once each.
+
+    Each entry is a printed label (`_pin_label`): «3» and 3 are pin 3, «A1»
+    is pin A1. A text label is in range only when the map places it, or when
+    neither a map nor a grid bounds the numbers: the automatic
+    column-by-column numbering knows only 1..rows x cols.
 
     Invalid entries (booleans, fractions, non-numbers, out of range) are
     dropped and reported in `notes`, like repeated numbers; the valid ones are
@@ -7192,15 +7390,16 @@ def _validated_populated_pins(raw, max_pin: Optional[int], notes: list,
     if not isinstance(raw, (list, tuple)):
         notes.append(tx("populated_pins scartato: valore non valido ({value!r}).", value=raw))
         return None
-    allowed = set(mapped) if mapped else None
+    allowed = {_pin_text(pin) for pin in mapped} if mapped else None
     kept, rejected, repeated = [], [], []
     for item in raw:
-        number = _optional_number(item, positive=True, integer=True)
+        number = _pin_label(item)
         if number is None:
             rejected.append(item)
-        elif allowed is not None and number not in allowed:
+        elif allowed is not None and _pin_text(number) not in allowed:
             rejected.append(item)
-        elif allowed is None and max_pin is not None and number > max_pin:
+        elif allowed is None and max_pin is not None and (
+                not isinstance(number, int) or number > max_pin):
             rejected.append(item)
         elif number in kept:
             repeated.append(number)

@@ -126,3 +126,34 @@ def test_the_key_is_demanded_before_the_local_detection_burns_minutes():
         assert compare.require_credentials() is None
     finally:
         openrouter.api_key = original
+
+
+def test_without_run_paid_nothing_runs_and_the_plan_is_printed(monkeypatch, capsys, tmp_path):
+    """@brief Negative case: no --run-paid, no key read, no detection, no request."""
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('must not run without --run-paid')
+
+    monkeypatch.setattr(compare, 'require_credentials', forbidden)
+    monkeypatch.setattr(compare, 'inventory_with', forbidden)
+    code = compare.main(['foto.png', '--length', '25.5', '--width', '18', '--model', 'm/a',
+                         '--against', 'm/b', '--output', str(tmp_path / 'out')])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert 'm/a' in out and 'm/b' in out and 'up to 2 paid request' in out
+    assert '--run-paid required' in out
+    assert not (tmp_path / 'out').exists()
+
+
+def test_with_run_paid_the_credentials_are_demanded_first(monkeypatch):
+    """@brief Positive case: --run-paid goes on, and the key check comes before any work."""
+    calls = []
+
+    def stop(*_args, **_kwargs):
+        calls.append('credentials')
+        raise SystemExit('stop here')
+
+    monkeypatch.setattr(compare, 'require_credentials', stop)
+    with pytest.raises(SystemExit, match='stop here'):
+        compare.main(['foto.png', '--length', '25.5', '--width', '18', '--model', 'm/a',
+                      '--run-paid'])
+    assert calls == ['credentials']

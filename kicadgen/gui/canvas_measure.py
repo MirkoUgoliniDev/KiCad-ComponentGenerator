@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineI
 from ..core.package_geometry import _rotate_kicad, pad_outline
 from . import canvas_menus
 from .canvas_clicktools import ToolSpec
-from .theme import BASE, YELLOW
+from .theme import BASE
 
 # ── Constants ──────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ EDGE_PX = 10.0
 REMOVE_TOLERANCE_PX = 6.0
 
 #: Colour of the measures: Catppuccin Mocha teal, distinct from the yellow
-#: dimensions and drawing markers, the blue pads and the green handles, and
+#: drawing markers, the blue pads and the green handles, and
 #: readable on the dark base of both canvases.
 MEASURE_COLOR = "#94e2d5"
 #: Brighter variant of a hovered measure and of the hovered target outline.
@@ -827,12 +827,69 @@ class DimensionStyle:
     z: Optional[float] = None
 
 
+#: Colour of the preview's automatic dimensions: the measures' teal, so every
+#: on-screen-only measurement shares one colour. They were yellow, almost the
+#: KiCad silkscreen colour (#f2eda1), and read as printed silkscreen (user,
+#: 2026-11-03: «non deve essere stampato sul pcb ... ad uso interno»). It must
+#: never equal a KiCad layer colour: nothing drawn in it is written to the file.
+DIMENSION_COLOR = MEASURE_COLOR
+
 #: Styles of the footprint preview's overall dimensions («totale 22.50 mm»,
 #: pitch, row spacing, margin chains), drawn through `MainWindow._add_dim_h` /
-#: `_add_dim_v`: yellow, 1 px, 5 px ticks, label above (horizontal) or along
-#: (vertical) the line, scene-sized text.
-DIMENSION_STYLE_HORIZONTAL = DimensionStyle(YELLOW, width=1.0, tick=5.0, label=LABEL_ABOVE, label_gap=18.0)
-DIMENSION_STYLE_VERTICAL = DimensionStyle(YELLOW, width=1.0, tick=5.0, label=LABEL_ALONG)
+#: `_add_dim_v`: DIMENSION_COLOR, 1 px, 5 px ticks, label above (horizontal) or
+#: along (vertical) the line, scene-sized text.
+DIMENSION_STYLE_HORIZONTAL = DimensionStyle(DIMENSION_COLOR, width=1.0, tick=5.0, label=LABEL_ABOVE,
+                                            label_gap=18.0)
+DIMENSION_STYLE_VERTICAL = DimensionStyle(DIMENSION_COLOR, width=1.0, tick=5.0, label=LABEL_ALONG)
+
+#: Item data role carried by every item of an EDITABLE preview dimension
+#: (`add_dimension_line(edit_key=...)`): its value is the host's key of the
+#: quantity the dimension shows (e.g. "body_x"). The view finds it under the
+#: pointer for «Modifica quota…» and the double click.
+DIMENSION_EDIT_ROLE = 0x44494D
+
+
+def editable_dimension_at(view, pos, tolerance_px: float = REMOVE_TOLERANCE_PX):
+    """@brief Key of the editable dimension under a viewport position of `view`, or None.
+
+    @param view The QGraphicsView showing the dimensions.
+    @param pos Viewport position (QPoint).
+    @param tolerance_px Screen reach in pixels: the same as a measure's
+        (REMOVE_TOLERANCE_PX), since both are teal lines of one scene unit
+        that an exact hit would need pixel aim to find.
+    @return The `DIMENSION_EDIT_ROLE` value of the first item within reach.
+    """
+    from PyQt6.QtCore import QRect
+    reach = int(math.ceil(tolerance_px))
+    area = QRect(pos.x() - reach, pos.y() - reach, 2 * reach + 1, 2 * reach + 1)
+    for item in view.items(area):
+        key = item.data(DIMENSION_EDIT_ROLE)
+        if key:
+            return str(key)
+    return None
+
+
+def set_dimension_highlight(scene, key, on: bool) -> None:
+    """@brief Show the editable dimension `key` hovered (brighter) or at rest.
+
+    @param scene The scene holding the dimension.
+    @param key Its `DIMENSION_EDIT_ROLE` value; None or "" does nothing.
+    @param on True paints it in MEASURE_HIGHLIGHT_COLOR, False in DIMENSION_COLOR.
+    @note Same feedback as a hovered measure (plan D-M11): the user sees
+        which teal numbers answer a double click (review 2026-11-03, C4).
+    """
+    if not key:
+        return
+    colour = QColor(MEASURE_HIGHLIGHT_COLOR if on else DIMENSION_COLOR)
+    for item in scene.items():
+        if item.data(DIMENSION_EDIT_ROLE) != key:
+            continue
+        if isinstance(item, QGraphicsSimpleTextItem):
+            item.setBrush(QBrush(colour))
+        elif isinstance(item, QGraphicsLineItem):
+            pen = item.pen()
+            pen.setColor(colour)
+            item.setPen(pen)
 
 #: Style of the measures (plan D-M6).
 MEASURE_STYLE = DimensionStyle(MEASURE_COLOR, width=1.4, cosmetic=True, tick=0.0, arrow_px=9.0,
@@ -906,7 +963,8 @@ def _screen_label(scene, text, mid, direction, color, z):
     return box
 
 
-def add_dimension_line(scene, p1, p2, text: str, style: DimensionStyle, *, normal=None) -> list:
+def add_dimension_line(scene, p1, p2, text: str, style: DimensionStyle, *, normal=None,
+                       edit_key: Optional[str] = None) -> list:
     """@brief Draw a dimension line between two scene points with its label.
 
     @param scene The QGraphicsScene.
@@ -917,6 +975,9 @@ def add_dimension_line(scene, p1, p2, text: str, style: DimensionStyle, *, norma
     @param normal Unit vector of the end ticks; None takes the perpendicular
         of p1 -> p2 (the preview's horizontal / vertical wrappers pass
         (0, 1) / (1, 0), so a zero-length dimension still has its ticks).
+    @param edit_key The host's key of the quantity, set as DIMENSION_EDIT_ROLE
+        on every item, for an editable dimension; None (computed, read-only
+        dimensions) sets nothing.
     @return The top-level items added, in drawing order: end ticks (p1 then
         p2), the line, the arrowheads, the label.
     @note The footprint preview's overall dimensions («totale 22.50 mm»)
@@ -961,6 +1022,9 @@ def add_dimension_line(scene, p1, p2, text: str, style: DimensionStyle, *, norma
     if style.label == LABEL_SCREEN:
         items.append(_screen_label(scene, text, ((x1 + x2) / 2, (y1 + y2) / 2), direction,
                                    style.color, style.z))
+        if edit_key is not None:
+            for item in items:
+                item.setData(DIMENSION_EDIT_ROLE, edit_key)
         return items
     label = QGraphicsSimpleTextItem(text)
     scene.addItem(label)
@@ -976,6 +1040,9 @@ def add_dimension_line(scene, p1, p2, text: str, style: DimensionStyle, *, norma
     if style.z is not None:
         label.setZValue(style.z)
     items.append(label)
+    if edit_key is not None:
+        for item in items:
+            item.setData(DIMENSION_EDIT_ROLE, edit_key)
     return items
 
 

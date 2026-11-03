@@ -125,6 +125,49 @@ def find_pcbnew(kicad_cli: str | None = None) -> str | None:
     return _find_installed("pcbnew")
 
 
+@dataclass(frozen=True)
+class KiCadVersionCheck:
+    """@brief Verdict on whether an installed kicad-cli reads the generated files.
+
+    @note ``version`` is the ``<major>.<minor>`` printed by ``kicad-cli
+        version`` (None when the command gave nothing usable), ``minimum``
+        the oldest KiCad that reads the file format the generators write
+        (`kicad_library.MINIMUM_KICAD_VERSION`) and ``supported`` the
+        comparison: None when the version is unknown, so the caller can say
+        «not verified» instead of a pass or a refusal.
+    """
+
+    version: str | None
+    minimum: str
+    supported: bool | None
+
+
+def check_kicad_version(kicad_cli: str | os.PathLike[str],
+                        *, version_runner=None) -> KiCadVersionCheck:
+    """@brief Compare the version of a kicad-cli with the generated file format.
+
+    @param kicad_cli Path of kicad-cli (from `find_kicad_cli`).
+    @param version_runner Callable taking the executable Path and returning
+        the stdout of ``kicad-cli version`` or None; defaults to running the
+        command (read-only, cached per executable). Injected by tests.
+    @return The version found, the minimum and the verdict (`KiCadVersionCheck`).
+    @note Detection (`find_kicad_cli`) prefers the newest installation but
+        returns a KiCad 9 when it is the only one; the files are written in
+        a newer format that it refuses. This check is what tells, so a
+        verification or an installation does not report KiCad as usable
+        (review 2026-11-03).
+    """
+    # Imported here: kicad_library pulls in the footprint serializer, which
+    # the start-up detection of FreeCAD and KiCad does not need.
+    from . import kicad_library
+    runner = (kicad_library._run_kicad_cli_version
+              if version_runner is None else version_runner)
+    version = kicad_library.kicad_settings_version(runner(Path(kicad_cli)))
+    return KiCadVersionCheck(
+        version=version, minimum=kicad_library.MINIMUM_KICAD_VERSION,
+        supported=kicad_library.kicad_version_supported(version))
+
+
 def detect_external_applications() -> ExternalApplications:
     """@brief Detect KiCad and FreeCAD without starting either application.
 

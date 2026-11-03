@@ -60,6 +60,40 @@ def test_an_empty_classification_is_never_cached(tmp_path):
     assert len(calls) == 2 and not list(tmp_path.glob("*.json"))
 
 
+def _separation_kwargs():
+    from kicadgen.services.photo_leads import separation_tool
+    return dict(model="offline", system_prompt="p", content_blocks=[],
+                tool=separation_tool(), max_tokens=10, has_pdf=False)
+
+
+def test_an_empty_terminals_answer_is_never_a_cache_hit(tmp_path):
+    """Review 2026-11-03: the separation tool's array is `terminals`, not
+    `components`; an empty or partial list was cached as a success."""
+    calls = []
+    call = lambda **kw: calls.append(1) or {"terminals": []}
+    for _ in range(2):
+        grounding.cached_call(call, _separation_kwargs(), tmp_path, "reofori", lambda m: None,
+                              expected_ids=[1, 2])
+    assert len(calls) == 2 and not list(tmp_path.glob("*.json"))
+    # Partial: one of two expected IDs -> returned, but not stored.
+    entry = {"id": 1, "resolved": True, "confidence": "high", "lead_bbox": [.1, .1, .2, .2]}
+    partial = lambda **kw: {"terminals": [entry]}
+    assert grounding.cached_call(partial, _separation_kwargs(), tmp_path, "reofori",
+                                 lambda m: None, expected_ids=[1, 2]) == {"terminals": [entry]}
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_a_complete_terminals_answer_is_replayed_from_the_cache(tmp_path):
+    """Positive: every expected ID once -> stored and replayed without a call."""
+    entries = [{"id": i, "resolved": True, "confidence": "high", "lead_bbox": [.1, .1, .2, .2]}
+               for i in (1, 2)]
+    grounding.cached_call(lambda **kw: {"terminals": entries}, _separation_kwargs(), tmp_path,
+                          "reofori", lambda m: None, expected_ids=[1, 2])
+    again = grounding.cached_call(lambda **kw: pytest.fail("must replay"), _separation_kwargs(),
+                                  tmp_path, "reofori", lambda m: None, expected_ids=[1, 2])
+    assert again == {"terminals": entries}
+
+
 # ── D6: enums and numeric types before copying ─────────────────────────────
 
 def _component():

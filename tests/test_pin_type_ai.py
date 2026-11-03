@@ -69,8 +69,15 @@ def test_ai_evidence_tooltip_does_not_interpret_markup(qapp, tmp_path):
     p = proposal()
     p['reason'] = '<img src="https://example.invalid/pixel">'
     dialog._done([p])
-    assert '<img' not in dialog.table.item(0, 5).toolTip()
-    assert '&lt;img' in dialog.table.item(0, 5).toolTip()
+    # The cell stores plain text; the application tooltip filter escapes it
+    # when shown, so the markup is read, never interpreted, and no wrapper
+    # tag appears literally (review finding 2026-11-03).
+    from kicadgen.gui.tooltips import fitted_tooltip
+    stored = dialog.table.item(0, 5).toolTip()
+    assert stored == 'sheet.pdf: <img src="https://example.invalid/pixel">'
+    shown = fitted_tooltip(stored, 800)
+    assert '<img' not in shown and '&lt;img' in shown
+    assert '&lt;qt&gt;' not in shown and '&lt;br&gt;' not in shown
     dialog.close()
 
 @pytest.mark.parametrize('field,value', [('reason', None), ('reason', {}), ('source', ['sheet.pdf']), ('pin', 1)])

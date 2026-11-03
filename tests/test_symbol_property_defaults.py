@@ -283,9 +283,16 @@ def test_layout_symbol_names_inside_the_body_change_nothing(pins):
     # names (line and number only), and the file is byte-identical to one
     # written with them. The bottom name longer than the body is a body-size
     # problem and is deliberately not counted (see `_pin_drawing_top`).
+    # CONTRACT CHANGED 2026-11-03 (review fix 7): top and bottom names now
+    # size the body height, as left/right names size its width, so a long
+    # vertical name makes a taller body (tests/test_review_1103_generators.py).
+    # What this test pins is unchanged: at the SAME body, names drawn inside
+    # it do not move the properties, so the nameless reference is laid out
+    # on the body the names produced.
     layout = layout_symbol(pins)
     nameless = layout_symbol([SymbolPin(p.number, '', p.electrical_type, p.side, length=p.length,
-                                        text_size=p.text_size) for p in pins])
+                                        text_size=p.text_size) for p in pins],
+                             body=(layout.width, layout.height))
     expected = default_property_positions(nameless)
     assert default_property_positions(layout) == expected
     if not any(p.side == 'top' for p in pins):

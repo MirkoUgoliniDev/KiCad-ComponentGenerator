@@ -43,7 +43,7 @@
       ],
       "texts": {
         "Reference": [
-          4.0,
+          3.0,
           -1.0
         ],
         "anchor": "left_bottom"
@@ -52,7 +52,7 @@
     "redo": 0,
     "texts": {
       "Reference": [
-        4.0,
+        3.0,
         -1.0
       ]
     },
@@ -70,7 +70,7 @@
       "drawings": [],
       "texts": {
         "Reference": [
-          4.0,
+          3.0,
           -1.0
         ],
         "anchor": "left_bottom"
@@ -79,7 +79,7 @@
     "redo": 0,
     "texts": {
       "Reference": [
-        4.0,
+        3.0,
         -1.0
       ]
     },

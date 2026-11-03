@@ -112,6 +112,31 @@ def test_different_classifications_same_box_merge_but_are_flagged():
     assert merged[0]["_uncertain"]
 
 
+def test_cross_view_association_keeps_its_declared_threshold():
+    """Generality audit 2026-11-03: the cross-view IoU is a DECLARED heuristic, not the NMS value.
+
+    Lowering it to the detector's 0.5 would join two equal neighbouring
+    bodies whose boxes are shifted by a third of a body (IoU 0.5); kept at
+    the declared VIEW_ASSOCIATION_IOU. Positive: the same box drawn slightly
+    shifted (IoU 0.67) joins; negative: a box shifted by a third (IoU 0.5)
+    stays a separate body.
+    """
+    a = decode([detection()])
+    # Shift along X of a 0.2-wide box: IoU = (0.2 - d) / (0.2 + d).
+    same = decode([detection(bbox=[.14,.2,.34,.4])], source="B")      # IoU 0.67
+    third = decode([detection(bbox=[.1667,.2,.3667,.4])], source="B")  # IoU 0.50
+    assert inv.overlap(a[0], same[0])[0] >= inv.VIEW_ASSOCIATION_IOU > inv.overlap(a[0], third[0])[0]
+    assert len(inv.merge_components([a, same])) == 1
+    assert len(inv.merge_components([decode([detection()]), third])) == 2
+
+
+def test_decoded_heights_are_marked_as_estimates():
+    """A height from a top-view answer is never a measurement."""
+    [item] = decode([detection(height_mm=1.7)])
+    assert item["height_mm"] == 1.7 and item["_height_estimated"] is True
+    assert item["_height_source"] == inv.VIEW_AI_HEIGHT_SOURCE
+
+
 def test_small_component_inside_large_box_is_not_absorbed():
     big = decode([detection(bbox=[.1,.1,.8,.8], kind="module")])
     small = decode([detection(bbox=[.2,.2,.25,.25])], source="B")

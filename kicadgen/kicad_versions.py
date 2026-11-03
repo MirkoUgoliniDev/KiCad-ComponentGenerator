@@ -52,3 +52,21 @@ def newest_version_first(items: Iterable[T],
     numeric.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
     other.sort(key=lambda entry: entry[0], reverse=True)
     return [entry[-1] for entry in numeric] + [entry[-1] for entry in other]
+
+
+def version_at_least(version: str | None, minimum: str) -> Optional[bool]:
+    """@brief Compare a dotted version with a minimum, numerically.
+
+    @param version Version to check (``"9.0"``, ``"10.0.1"``, ``"10.99"``);
+        None or a non-numeric text gives None.
+    @param minimum Smallest accepted version, dotted (``"10.0"``).
+    @return True when `version` >= `minimum` (missing trailing parts count as
+        zero, so ``"10"`` equals ``"10.0"``); False when older; None when
+        either cannot be parsed, so the caller decides what unknown means.
+    """
+    current = parse_version(version or "")
+    floor = parse_version(minimum)
+    if current is None or floor is None:
+        return None
+    width = max(len(current), len(floor))
+    return current + (0,) * (width - len(current)) >= floor + (0,) * (width - len(floor))

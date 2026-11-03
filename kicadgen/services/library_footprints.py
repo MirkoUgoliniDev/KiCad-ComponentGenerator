@@ -217,22 +217,31 @@ def read_footprint(path: Path) -> Optional[LibraryFootprint]:
     """@brief The numbered copper pad centres of one ``.kicad_mod``, or None when unreadable.
 
     @param path Footprint file.
-    @return LibraryFootprint with one centre per numbered pad (non-plated
+    @return LibraryFootprint with one centre per pad NUMBER (non-plated
         holes and unnumbered pads left out), or None when the file cannot
-        be parsed or has fewer than two such pads.
+        be parsed or has fewer than two numbered pads.
+    @note A pad number is one terminal, and a drawing reading gives one
+        position per number: pads repeating a number (stacked pads of a
+        custom shape, several exposed pads or shield tabs sharing «EP»/«MP»)
+        are reduced to ONE centre, the mean of their centres, in the order
+        each number first appears (L13). Counting every entry made such a
+        footprint one pad longer than any reading and the witness answered
+        "no_match" for a layout it should confirm.
     """
     from ..cad3d.kicad_models import _children, _field, _numbers, _sexpr
     try:
         tree = _sexpr(Path(path).read_text(encoding="utf-8"))
-        centres = []
+        by_number = {}
         for pad in _children(tree, "pad"):
             if len(pad) < 3 or pad[2] == "np_thru_hole" or not str(pad[1]).strip():
                 continue
             at = _field(pad, "at")
             x, y = _numbers(at[:2], 2)
-            centres.append((x, y))
+            by_number.setdefault(str(pad[1]).strip(), []).append((x, y))
     except (OSError, UnicodeDecodeError, ValueError):
         return None
+    centres = [(sum(x for x, _y in points) / len(points), sum(y for _x, y in points) / len(points))
+               for points in by_number.values()]
     if len(centres) < 2:
         return None
     return LibraryFootprint(name=Path(path).stem, centres=tuple(centres))

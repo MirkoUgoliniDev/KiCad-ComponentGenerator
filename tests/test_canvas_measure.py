@@ -410,3 +410,35 @@ def test_the_guide_index_skips_a_run_of_excluded_coordinates():
     index = cm.GuideIndex(cm.SnapTargets(centres=centres))
     assert index.nearest_x(-0.5, 2.0, exclude=0.0)[2] == "X"
     assert index.nearest_x(-0.5, 1.0, exclude=0.0) is None
+
+
+def test_an_editable_dimension_carries_its_key_and_a_computed_one_none(qapp):
+    """`add_dimension_line(edit_key=...)` tags every item in both label branches; None tags nothing."""
+    scene = QGraphicsScene()
+    tagged = cm.add_dimension_line(scene, (0.0, 0.0), (100.0, 0.0), "5.00 mm",
+                                   cm.DIMENSION_STYLE_HORIZONTAL, edit_key="body_x")
+    screen = cm.add_dimension_line(scene, (0.0, 50.0), (100.0, 50.0), "5.00 mm",
+                                   cm.MEASURE_STYLE, edit_key="body_y")
+    plain = cm.add_dimension_line(scene, (0.0, 90.0), (100.0, 90.0), "totale 5.00 mm",
+                                  cm.DIMENSION_STYLE_HORIZONTAL)
+    assert all(item.data(cm.DIMENSION_EDIT_ROLE) == "body_x" for item in tagged)
+    assert all(item.data(cm.DIMENSION_EDIT_ROLE) == "body_y" for item in screen)
+    assert all(item.data(cm.DIMENSION_EDIT_ROLE) is None for item in plain)
+
+
+def test_a_hovered_editable_dimension_brightens_and_comes_back(qapp):
+    """Hover feedback of an editable dimension; a computed one is never touched."""
+    from PyQt6.QtGui import QColor
+    from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+    scene = QGraphicsScene()
+    items = cm.add_dimension_line(scene, (0.0, 0.0), (100.0, 0.0), "5.00 mm",
+                                  cm.DIMENSION_STYLE_HORIZONTAL, edit_key="body_x")
+    other = cm.add_dimension_line(scene, (0.0, 90.0), (100.0, 90.0), "totale",
+                                  cm.DIMENSION_STYLE_HORIZONTAL)
+    label = next(i for i in items if isinstance(i, QGraphicsSimpleTextItem))
+    cm.set_dimension_highlight(scene, "body_x", True)
+    assert label.brush().color() == QColor(cm.MEASURE_HIGHLIGHT_COLOR)
+    assert all(i.pen().color() == QColor(cm.DIMENSION_COLOR) for i in other
+               if isinstance(i, QGraphicsLineItem)), "a computed dimension is never highlighted"
+    cm.set_dimension_highlight(scene, "body_x", False)
+    assert label.brush().color() == QColor(cm.DIMENSION_COLOR)

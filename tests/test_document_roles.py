@@ -283,3 +283,36 @@ def test_role_helpers_accept_the_single_strings_of_version_1():
     paths = [Path('a.png'), Path('b.png')]
     assert photo_paths(paths, {'a.png': 'hires', 'b.png': ['top']}) == [Path('a.png')]
     assert photo_paths(paths, None) == []
+
+
+def test_a_png_with_a_bad_crc_is_refused_as_a_document_error(tmp_path):
+    """F: Pillow raises SyntaxError on a corrupted chunk; the GUI must get a DocumentError."""
+    source = picture(tmp_path / 'broken.png')
+    raw = bytearray(source.read_bytes())
+    # Flip one byte of the IDAT data: the header still opens, verify() then
+    # raises SyntaxError («bad header checksum»), not an OSError.
+    raw[raw.index(b'IDAT') + 6] ^= 0xFF
+    source.write_bytes(bytes(raw))
+    from PIL import Image
+    with pytest.raises(SyntaxError):
+        with Image.open(source) as img:
+            img.verify()
+    with pytest.raises(DocumentError):
+        DocumentSet(tmp_path / 'docs').import_file('top', source)
+
+
+def test_a_valid_png_is_still_accepted(tmp_path):
+    """Negative: the broad catch does not refuse a sound image."""
+    target = DocumentSet(tmp_path / 'docs').import_file('top', picture(tmp_path / 'ok.png'))
+    assert target.is_file()
+
+
+def test_a_manifest_nested_too_deeply_is_a_document_error(tmp_path):
+    """L12: RecursionError from the JSON parser is a malformed manifest, file untouched."""
+    store = DocumentSet(tmp_path / 'docs')
+    store.directory.mkdir()
+    text = '[' * 200000 + ']' * 200000
+    store.path.write_text(text)
+    with pytest.raises(DocumentError):
+        store.read()
+    assert store.path.read_text() == text

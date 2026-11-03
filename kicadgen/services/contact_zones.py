@@ -403,15 +403,17 @@ def _matrix_positions(data, length_mm, width_mm):
             and pitch is not None and (spacing is not None or rows == 1)
             and offset_x is not None and offset_y is not None):
         return []
-    from ..generators.pin_header import PinHeaderParams, pin_positions
+    from ..generators.pin_header import PinHeaderParams, pin_key, pin_positions
     try:
         mapping = None
         if data.get('pin_map'):
-            mapping = {int(entry['pin']): (int(entry['row']), int(entry['col']))
+            # Pins keyed as text (`pin_key`): «A1» is a pin label as much
+            # as «1» (review 2026-11-03), never an int() failure.
+            mapping = {pin_key(entry['pin']): (int(entry['row']), int(entry['col']))
                        for entry in data['pin_map']}
         populated = data.get('populated_pins')
         grid = PinHeaderParams(rows=rows, cols=cols, pitch=pitch, row_spacing=spacing,
-                               populated_pins=set(int(p) for p in populated) if populated else None,
+                               populated_pins=set(pin_key(p) for p in populated) if populated else None,
                                pin_map=mapping)
         grid.validate()
         pins = [(x, y) for _, x, y in pin_positions(grid)]

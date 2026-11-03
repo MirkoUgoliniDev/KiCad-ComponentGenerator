@@ -114,7 +114,8 @@ def refine_leads(photo_png, components, model, call, log, cache_dir=None, system
             log(label + tx(": geometria esistente bloccata; dettagli ambigui conservati."))
             data = cached_call(call,dict(model=model,system_prompt=(system_prompt or '').strip() or PROMPT,
                 content_blocks=[{'type':'text','text':json.dumps(reference)},image_block(crop)],
-                tool=separation_tool(),max_tokens=8192,has_pdf=False),cache_dir,label,log)
+                tool=separation_tool(),max_tokens=8192,has_pdf=False),cache_dir,label,log,
+                expected_ids=range(1,len(terminals)+1))
             entries = data.get('terminals') if isinstance(data,dict) else None
             if not isinstance(entries,list):
                 raise ValueError(tx("risposta reofori non valida"))

@@ -156,3 +156,50 @@ def test_an_untouched_row_keeps_the_network_identity():
     edited, = ComponentEditorDialog([_network_body()], COMPONENT_KINDS).components()
     assert edited["_smd_accepted"] is True and edited["_smd_rotation_deg"] == 180
     assert "_smd_superseded" not in edited
+
+
+def _long_decimal_body():
+    """A body whose numbers have more decimals than the six the cells show."""
+    return _body(x_mm=3.14159265358979, y_mm=-1.000000123, length_mm=5.123456789,
+                 width_mm=2.718281828, height_mm=1.23456789, _height_estimated=True,
+                 _height_source="estimated", terminal_geometry={"pitch": 1.27},
+                 model_selection={"path": "x.step", "status": "confirmed"})
+
+
+def test_an_untouched_long_decimal_row_keeps_values_and_evidence():
+    """@brief Negative: the cells' six-decimal rounding is not an edit.
+
+    Review finding 1 (2026-11-03): «Applica» (Apply) with nothing edited marked
+    every long-decimal row changed and dropped its evidence.
+    """
+    original = _long_decimal_body()
+    edited, = ComponentEditorDialog([original], COMPONENT_KINDS).components()
+    for key in ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm"):
+        assert edited[key] == original[key], key
+    for key in ("model_selection", "model_match", "package_evidence",
+                "terminal_geometry", "bbox_basis"):
+        assert edited[key] == original[key], key
+    assert edited["_height_estimated"] is True
+    assert edited["_height_source"] == "estimated"
+
+
+def test_an_edited_long_decimal_cell_still_invalidates_only_what_it_touches():
+    """@brief Positive: a really typed length drops the geometry evidence, the
+    untouched cells keep their unrounded source values and the height stays an
+    estimate."""
+    original = _long_decimal_body()
+    dialog = ComponentEditorDialog([original], COMPONENT_KINDS)
+    dialog.table.cellWidget(0, 4).setValue(6.0)
+    edited, = dialog.components()
+    assert edited["length_mm"] == 6.0 and edited["bbox_basis"] == "unknown"
+    assert "model_selection" not in edited and "terminal_geometry" not in edited
+    assert edited["x_mm"] == original["x_mm"] and edited["width_mm"] == original["width_mm"]
+    assert edited["_height_estimated"] is True
+
+
+def test_a_typed_height_on_a_long_decimal_row_becomes_a_measure():
+    """@brief Positive: changing the estimated height marks it as typed by hand."""
+    dialog = ComponentEditorDialog([_long_decimal_body()], COMPONENT_KINDS)
+    dialog.table.cellWidget(0, 6).setValue(2.0)
+    edited, = dialog.components()
+    assert edited["height_mm"] == 2.0 and not edited.get("_height_estimated")

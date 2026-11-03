@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -88,7 +90,8 @@ def _windows_creation_time(pid: int):
         kernel32.CloseHandle(handle)
 
 
-def select_descendants(pid: int, children: dict, creation_time) -> list:
+def select_descendants(pid: int, children: dict, creation_time, root_born=None,
+                       root_exited=None) -> list:
     """@brief Processes genuinely started, directly or not, by `pid`, deepest first.
 
     @param pid Root of the tree (the child this program launched and still owns).
@@ -96,6 +99,13 @@ def select_descendants(pid: int, children: dict, creation_time) -> list:
         system reports it (Windows: the Toolhelp snapshot).
     @param creation_time Callable pid -> comparable creation stamp, or None
         when the process cannot be inspected.
+    @param root_born Creation stamp of the root read from the handle this
+        program still holds; None = ask @p creation_time (live root only).
+    @param root_exited Exit stamp of the root when it has already exited, or
+        None while it runs. With it, a direct child is kept only if it was
+        created BEFORE the root exited: once the root is gone its pid can be
+        reused, and the children of the new holder of that pid are born after
+        the root's exit, so they can never pass (2026-11-03 review).
     @return Pids to terminate, deepest first, so a launcher dies after the
         program it started.
     @note SAFETY BOUNDARY (2026-10-27 review, H1). Windows stores the parent
@@ -115,7 +125,8 @@ def select_descendants(pid: int, children: dict, creation_time) -> list:
         child is killed by the caller, as before the tree kill existed.
     """
     found = []
-    root_born = creation_time(pid)
+    if root_born is None:
+        root_born = creation_time(pid)
     if root_born is None:
         return []
     frontier = [(pid, root_born)]
@@ -130,15 +141,199 @@ def select_descendants(pid: int, children: dict, creation_time) -> list:
                     # Unverifiable, or older than its claimed parent: a
                     # pid-reuse orphan that is not ours. Never killed.
                     continue
+                if parent == pid and root_exited is not None and born > root_exited:
+                    # Born after our root died: a child of whatever process
+                    # reused the root's pid, not ours. Never killed.
+                    continue
                 found.append(child)
                 nxt.append((child, born))
         frontier = nxt
     return list(reversed(found))
 
 
-def _windows_descendants(pid: int) -> list:
-    """Process ids started, directly or not, by `pid`, deepest first, verified by creation time."""
-    return select_descendants(pid, _windows_children_map(), _windows_creation_time)
+def _windows_handle_times(handle):
+    """(creation, exit) FILETIME integers of a process handle, or None.
+
+    The handle is the one `subprocess.Popen` keeps open for its child: it
+    stays valid after the child exits, so the root's stamps survive the root.
+    The exit stamp is None while the process runs (GetProcessTimes reports 0).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    creation, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+    ok = kernel32.GetProcessTimes(wintypes.HANDLE(int(handle)), ctypes.byref(creation),
+                                  ctypes.byref(exited), ctypes.byref(kernel),
+                                  ctypes.byref(user))
+    if not ok:
+        return None
+    born = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+    died = (exited.dwHighDateTime << 32) | exited.dwLowDateTime
+    return born, (died or None)
+
+
+def _windows_descendants(pid: int, handle=None) -> list:
+    """Process ids started, directly or not, by `pid`, deepest first, verified by creation time.
+
+    With the root's own handle the tree is found even after the root exited
+    (its orphans still name its pid as parent), bounded by the root's exit.
+    Best effort only: a descendant whose own parent also exited is no longer
+    linked to the root by the snapshot; the job of `contain_process` is what
+    reaches it.
+    """
+    times = _windows_handle_times(handle) if handle is not None else None
+    if times is None or times[1] is None:
+        # A live root (or no handle): its pid is still its own, so the
+        # stamp read by pid is the root's, exactly as before.
+        return select_descendants(pid, _windows_children_map(), _windows_creation_time)
+    return select_descendants(pid, _windows_children_map(), _windows_creation_time,
+                              root_born=times[0], root_exited=times[1])
+
+
+class _JobLimits:
+    """Lazily built ctypes layout of JOBOBJECT_EXTENDED_LIMIT_INFORMATION."""
+
+    _type = None
+
+    @classmethod
+    def type(cls):
+        """Return the structure type, built on first use (Windows only)."""
+        if cls._type is None:
+            import ctypes
+            from ctypes import wintypes
+
+            class Basic(ctypes.Structure):
+                _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                            ("PerJobUserTimeLimit", ctypes.c_int64),
+                            ("LimitFlags", wintypes.DWORD),
+                            ("MinimumWorkingSetSize", ctypes.c_size_t),
+                            ("MaximumWorkingSetSize", ctypes.c_size_t),
+                            ("ActiveProcessLimit", wintypes.DWORD),
+                            ("Affinity", ctypes.c_size_t),
+                            ("PriorityClass", wintypes.DWORD),
+                            ("SchedulingClass", wintypes.DWORD)]
+
+            class IoCounters(ctypes.Structure):
+                _fields_ = [(name, ctypes.c_uint64) for name in (
+                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+            class Extended(ctypes.Structure):
+                _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", IoCounters),
+                            ("ProcessMemoryLimit", ctypes.c_size_t),
+                            ("JobMemoryLimit", ctypes.c_size_t),
+                            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                            ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+            cls._type = Extended
+        return cls._type
+
+
+#: Attribute under which `contain_process` stores the job handle on the Popen.
+_JOB_ATTRIBUTE = "_kicadgen_job"
+
+
+def contain_process(process, platform: str = sys.platform):
+    """@brief Put a just-started child in a Windows Job Object that dies with it.
+
+    @param process `subprocess.Popen` just returned (a test double without a
+        real Windows handle is left alone).
+    @param platform Platform name (tests pass another one).
+    @return The job handle, or None when no job could be made (another
+        platform, a double, the system refused): the caller then relies on
+        `kill_process_tree`'s snapshot, as before.
+    @note Why (2026-11-03 review): the snapshot can only find descendants
+        while their links can be proved, and a grandchild that outlived the
+        child kept the output pipe open, so nothing ended the run. Every
+        process the child starts after this call is a member of the job,
+        whatever happens to its parent, and `TerminateJobObject` ends them
+        all. The job is created with KILL_ON_JOB_CLOSE, so closing it
+        (`release_process`, or this program dying) ends whatever is left.
+    @note DECLARED LIMIT: a process the child started BEFORE the assignment
+        (a few microseconds after creation) is not in the job; the snapshot
+        kill still covers it.
+    """
+    handle = getattr(process, "_handle", None)
+    if platform != "win32" or handle is None:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        limits = _JobLimits.type()()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = (kernel32.SetInformationJobObject(wintypes.HANDLE(job), 9,  # extended limits
+                                               ctypes.byref(limits), ctypes.sizeof(limits))
+              and kernel32.AssignProcessToJobObject(wintypes.HANDLE(job),
+                                                    wintypes.HANDLE(int(handle))))
+        if not ok:
+            kernel32.CloseHandle(wintypes.HANDLE(job))
+            return None
+    except (OSError, AttributeError, ValueError, TypeError):
+        return None
+    try:
+        setattr(process, _JOB_ATTRIBUTE, job)
+    except AttributeError:
+        pass
+    return job
+
+
+def _terminate_job(process) -> bool:
+    """End every process of the child's job; True when a job existed and was told to end."""
+    job = getattr(process, _JOB_ATTRIBUTE, None)
+    if not job:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        return bool(kernel32.TerminateJobObject(wintypes.HANDLE(job), 1))
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def release_process(process) -> None:
+    """@brief Close the child's job handle: with KILL_ON_JOB_CLOSE, any process left in it ends.
+
+    @param process `subprocess.Popen` passed to `contain_process` (idempotent;
+        a process without a job is a no-op).
+    @note Called when the caller is done with the child. A descendant that
+        outlived a finished FreeCAD child is a leftover of that job, never a
+        process the user started, so ending it is the intended effect.
+    """
+    job = getattr(process, _JOB_ATTRIBUTE, None)
+    if not job:
+        return
+    try:
+        setattr(process, _JOB_ATTRIBUTE, None)
+    except AttributeError:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(wintypes.HANDLE(job))
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def child_environment(extra=None) -> dict:
+    """@brief Environment of every FreeCAD child: os.environ plus PYTHONDONTWRITEBYTECODE=1.
+
+    @param extra Optional mapping of further variables for this child.
+    @return A new dict; os.environ is not modified.
+    @note The child imports scripts from the installation folder, which is
+        read-only for an installed program: no __pycache__ may be written next
+        to them. One definition for `run_logged` and the other launchers.
+    """
+    environment = dict(os.environ)
+    environment.update(extra or {})
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
 
 
 def _windows_terminate(pid: int) -> None:
@@ -166,17 +361,24 @@ def kill_process_tree(process, platform: str = sys.platform) -> None:
         ended deepest first, through the Windows API: no helper process is
         started (an external `taskkill` was itself a child to account for).
         Elsewhere only the direct child is killed, as before.
-    @note Never raises for a process that already exited. The descendants
-        are collected while the child is still alive, and each one is kept
-        only when its creation time proves it was started by its claimed
+    @note Never raises for a process that already exited. Each descendant is
+        kept only when its creation time proves it was started by its claimed
         parent (`select_descendants`): a pid reused by an unrelated program
         is never terminated.
+    @note 2026-11-03 review: a child that already exited no longer means
+        "nothing to kill". Its job (`contain_process`) is terminated whatever
+        the child's state, and without a job the descendants are still
+        looked for through the handle Popen keeps, bounded by the child's
+        exit time, so a grandchild holding the output pipe is ended.
     """
-    if platform == "win32" and process.poll() is None:
+    if platform == "win32":
+        _terminate_job(process)
         try:
-            for pid in _windows_descendants(process.pid):
-                _windows_terminate(pid)
-        except (OSError, AttributeError, ValueError):
+            handle = getattr(process, "_handle", None)
+            if process.poll() is None or handle is not None:
+                for pid in _windows_descendants(process.pid, handle):
+                    _windows_terminate(pid)
+        except (OSError, AttributeError, ValueError, TypeError):
             pass
     try:
         process.kill()
@@ -220,6 +422,17 @@ CANCEL_POLL_INTERVAL_S = 0.1
 #: (2026-10-27 review, H9; 2026-10-29 review, H2). A bound on the reaping,
 #: not on the work.
 KILL_REAP_GRACE_S = 5.0
+
+#: Seconds the output of a child that has ALREADY exited is still read while
+#: the pipe stays open (2026-11-03 review). Only a descendant that inherited
+#: the pipe can keep it open after the child's exit; what the child itself
+#: wrote is already in the pipe buffer and arrives at once, so the grace only
+#: pays for scheduling, and it restarts at every line that still arrives. It
+#: is not a timeout of the work and not tuned on a run: without it the read
+#: never ended (the watchdog cannot fire for a process that is gone), and a
+#: later forced end reported a «no output» timeout for a child that had
+#: finished, so `_run_freecad` threw away a healthy STEP.
+EXIT_DRAIN_GRACE_S = 2.0
 
 #: Size above which a run log is trimmed when a new run starts, and the tail
 #: kept (2026-10-29 review, H9). `<project>/freecad.log` is appended to by
@@ -354,9 +567,9 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
     @param cancel Cancellation channel: an object with `is_set()` and
         `wait(seconds)` (typically `threading.Event`) that the caller sets to
         ask for the job to end. None = nobody can stop it.
-    @param env Environment of the child; None means a copy of os.environ with
-        PYTHONDONTWRITEBYTECODE=1, so the FreeCAD child never writes
-        __pycache__ next to scripts installed read-only.
+    @param env Environment of the child; None means `child_environment()`, a
+        copy of os.environ with PYTHONDONTWRITEBYTECODE=1, so the FreeCAD
+        child never writes __pycache__ next to scripts installed read-only.
     @return CompletedProcess with merged stdout/stderr.
     @throws subprocess.TimeoutExpired After killing and reaping a hung child.
     @throws ProcessCancelled After killing the child because @p cancel was set.
@@ -387,10 +600,19 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
         silence means "stuck" again.
     @note There is no absolute cap: a job that makes progress is not
         interrupted for having progressed for a long time.
+    @note The run ends with the CHILD, not with the pipe (2026-11-03 review):
+        a descendant holding the inherited pipe used to block the reading
+        forever, then let the watchdog raise a timeout for a child that had
+        exited with its success marker. Now, once the child has exited and
+        `EXIT_DRAIN_GRACE_S` passed without output, the reading stops, the
+        survivors are ended (`contain_process` job, then the tree) and the
+        child's own exit code is returned. Watchdog and cancel are checked
+        by this thread every `CANCEL_POLL_INTERVAL_S`, whatever the pipe does.
     """
     lines = []
     timed_out = threading.Event()
     cancelled = threading.Event()
+    stragglers = False
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     cap_log(log_path)
@@ -404,65 +626,94 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace",
                                    creationflags=creationflags, bufsize=1,
-                                   env=(dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-                                        if env is None else env))
+                                   env=child_environment() if env is None else env)
+        # Every process the child starts from now on dies with it.
+        contain_process(process)
 
         def kill_child():
             """The only place where the child process is killed: by the watchdog and on cancellation."""
             kill_process_tree(process)
 
-        def expire():
-            timed_out.set()
-            kill_child()
+        # The pipe is read by a helper thread, never by this one (2026-11-03
+        # review): a descendant that inherited the pipe keeps it open after
+        # the child exits, and a blocking read here would then never return
+        # -- no watchdog, no cancel. This thread only waits on the queue with
+        # a bound, so it always sees the child's exit, the silence and the
+        # give-up.
+        incoming = queue.Queue()
+        end_of_output = object()
 
-        # The watcher thread exists only if someone can really
-        # ask to stop, and it dies with the reading: it is tied to the
-        # lifetime of this call, not of the program.
-        reading_over = threading.Event()
+        def pump():
+            try:
+                for text in process.stdout:
+                    incoming.put(text)
+            except (OSError, ValueError):
+                pass
+            finally:
+                incoming.put(end_of_output)
 
-        def watch_cancel():
-            while not reading_over.is_set():
-                if cancel.wait(CANCEL_POLL_INTERVAL_S):
-                    cancelled.set()
-                    kill_child()
-                    return
-
-        watcher = None
-        timer = None
+        reader = threading.Thread(target=pump, daemon=True, name="kicadgen-child-output")
+        reader.start()
         try:
-            if cancel is not None:
-                if cancel.is_set():
-                    # Give-up arrived BEFORE reading the first line (the
-                    # caller had already started): kill right away instead of
-                    # waiting for the watcher's first round.
+            if cancel is not None and cancel.is_set():
+                # Give-up arrived BEFORE reading the first line (the caller
+                # had already started): kill right away.
+                cancelled.set()
+                kill_child()
+            deadline = time.monotonic() + timeout
+            exited_at = None
+            while not (cancelled.is_set() or timed_out.is_set()):
+                try:
+                    line = incoming.get(timeout=CANCEL_POLL_INTERVAL_S)
+                except queue.Empty:
+                    line = None
+                if line is end_of_output:
+                    break
+                now = time.monotonic()
+                if line is not None:
+                    # Every line is proof that the process is working: the
+                    # silence count restarts from zero.
+                    deadline = now + timeout
+                    if exited_at is not None:
+                        exited_at = now
+                    lines.append(line)
+                    handle.write(line)
+                    handle.flush()
+                    if progress and line.strip():
+                        # The child's warnings arrive as template + values:
+                        # they are translated here (see messages.render_child_line).
+                        progress("FreeCAD: " + render_child_line(line.rstrip()))
+                if cancel is not None and cancel.is_set():
                     cancelled.set()
                     kill_child()
-                else:
-                    watcher = threading.Thread(target=watch_cancel, daemon=True)
-                    watcher.start()
-            timer = threading.Timer(timeout, expire)
-            timer.daemon = True
-            timer.start()
-            for line in process.stdout:
-                # Every line is proof that the process is working: the
-                # silence count restarts from zero.
-                timer.cancel()
-                lines.append(line)
-                handle.write(line)
-                handle.flush()
-                if progress and line.strip():
-                    # The child's warnings arrive as template + values:
-                    # they are translated here (see messages.render_child_line).
-                    progress("FreeCAD: " + render_child_line(line.rstrip()))
-                if timed_out.is_set() or cancelled.is_set():
                     break
-                timer = threading.Timer(timeout, expire)
-                timer.daemon = True
-                timer.start()
+                if line is not None:
+                    continue
+                if process.poll() is not None:
+                    # The child is gone but the pipe is still open: only a
+                    # descendant can hold it. What the child wrote is drained
+                    # for a short grace, then the reading stops -- the run is
+                    # over and its verdict is the child's own exit, never a
+                    # «no output» timeout.
+                    if exited_at is None:
+                        exited_at = now
+                    elif now - exited_at >= EXIT_DRAIN_GRACE_S:
+                        stragglers = True
+                        break
+                    continue
+                if now >= deadline:
+                    timed_out.set()
+                    kill_child()
             if timed_out.is_set() or cancelled.is_set():
                 # Killed: reaped with a bound and abandoned if the kill was
                 # refused (logged by the reaper), never waited for forever.
                 reap_killed_child(process)
+            elif stragglers:
+                # The descendants left holding the pipe belong to this run:
+                # they are ended (job, then the tree bounded by the child's
+                # exit), so the reader thread sees the end of the pipe.
+                kill_child()
+                process.wait()
             else:
                 process.wait()
         except BaseException:
@@ -473,17 +724,17 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
             reap_killed_child(process)
             raise
         finally:
-            if timer is not None:
-                timer.cancel()
-            # Wake the watcher even when the reading ends on its
-            # own: otherwise it would stay asleep on an already dead process.
-            reading_over.set()
-            if watcher is not None:
-                watcher.join(timeout=2 * CANCEL_POLL_INTERVAL_S)
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
+            release_process(process)
+            reader.join(timeout=2 * CANCEL_POLL_INTERVAL_S)
+            if not reader.is_alive():
+                # Closing a stream another thread is still reading would wait
+                # on its lock: a pipe still held by a survivor (another
+                # platform, a refused kill) is left to the daemon reader,
+                # which ends with it.
+                try:
+                    process.stdout.close()
+                except (OSError, ValueError):
+                    pass
         output = "".join(lines)
         handle.write(f"[{datetime.now().astimezone().isoformat(timespec='seconds')}] "
                      f"FreeCAD exit={process.returncode}, timeout={timed_out.is_set()}"
@@ -497,6 +748,8 @@ def run_logged(command, log_path: Path, progress=None, timeout=120, creationflag
                         if timed_out.is_set() and not cancelled.is_set() else "")
                      + (tx(" (interrotto su richiesta dell'utente)")
                         if cancelled.is_set() else "")
+                     + (tx(" (uscita con l'output ancora aperto da processi discendenti, "
+                           "terminati)") if stragglers else "")
                      + "\n")
         handle.flush()
         # The give-up comes BEFORE the watchdog: if the silence fired

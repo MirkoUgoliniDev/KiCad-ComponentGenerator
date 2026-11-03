@@ -48,7 +48,8 @@ from typing import Iterable, Optional
 
 from .model_measurement import normalize_model_measurement
 from .process_log import (CANCEL_POLL_INTERVAL_S, KILL_REAP_GRACE_S, NO_WINDOW_FLAGS,
-                          ProcessCancelled, kill_process_tree)
+                          ProcessCancelled, cap_log, child_environment, contain_process,
+                          heartbeat_interval, kill_process_tree, release_process)
 from . import model_size_cache
 from ..services.messages import tx
 from ..kicad_versions import newest_version_first
@@ -153,8 +154,11 @@ def _archive_prepass(components, library, note, cancel):
         results[id(component)] = found
         component['consolidated_match'] = record
         records.append(record)
-        note(f"Consolidati — {record['name']}: {record['reason']}"
-             + (f" Modello: {record['model']}." if record.get('model') else '')
+        # Through tx (2026-11-03 review): the note reaches the log in the
+        # interface language; the stored reason is localised when shown.
+        note(tx("Consolidati — {name}: {reason}", name=record['name'],
+                reason=localized_reason(record['reason']))
+             + (tx(" Modello: {model}.", model=record['model']) if record.get('model') else '')
              + (' ' + ' '.join(record.get('conflicts', []))))
         notify()
     return results
@@ -236,6 +240,16 @@ STALL_FILENAME = ".kicadgen-model-stalls-v1.json"
 #: declared stalled (see `measure_models`). Single source: the stall memo
 #: compares against this number to decide whether a retry is worth paying.
 MEASURE_SILENCE_TIMEOUT_S = 300
+
+#: Persistent log of the measuring children, in the user cache folder
+#: (2026-11-03 review): the child's own output file lives in a temporary
+#: exchange folder that is removed after every batch, so without this copy a
+#: stalled or crashed measurement left no trace to diagnose.
+MEASURE_LOG_FILENAME = "freecad-measure.log"
+
+#: Bytes of the child's output copied into the persistent log per batch: the
+#: tail is where a crash or a stall shows; a disk budget, not a measurement.
+MEASURE_LOG_TAIL_BYTES = 64 * 1024
 
 #: Seconds a killed measuring child is waited for before giving up on it is
 #: `process_log.KILL_REAP_GRACE_S` (imported above): one bound for every
@@ -1390,7 +1404,7 @@ def footprint_sizes(paths, library: Optional[Path] = None, log=None, *, cancel=N
                 result[wanted[linked]].append({"size": size, "source": str(footprint)})
     except OSError as exc:
         if log:
-            log(f"Lettura footprint KiCad incompleta: {exc}")
+            log(tx("Lettura footprint KiCad incompleta: {exc}", exc=exc))
     if log:
         log(tx("Footprint KiCad: {sum} letture collegate; {rejected} footprint "
                "pertinenti senza ingombro utilizzabile.",
@@ -1442,12 +1456,39 @@ class MatchingCancelled(ProcessCancelled):
 #:                     measure, written and flushed at once;
 #:   out.json       -> the whole map, written only if the batch reaches the end.
 _MEASURE_SCRIPT = """
-import json, os
+import json, os, sys, threading, time
 import FreeCAD
 import Part
 folder = os.environ["KICADGEN_MEASURE_DIR"]
 with open(os.path.join(folder, "in.json"), encoding="utf-8") as handle:
     paths = json.load(handle)
+
+# Heartbeat (2026-11-03 review): Part.read of a large STEP prints nothing for
+# minutes, and the parent's silence watchdog killed healthy reads. The period
+# comes from the parent (process_log.heartbeat_interval of its timeout), never
+# from a number written here. The thread only prints: FreeCAD is not
+# thread-safe. DECLARED LIMIT, as for freecad_parts._ImportHeartbeat: a beat
+# goes out only while the reader releases the GIL.
+_beat_lock = threading.Lock()
+_current = [None, 0.0]
+
+
+def _heartbeat(interval):
+    while True:
+        time.sleep(interval)
+        with _beat_lock:
+            name, since = _current
+            if name is not None:
+                print("KICADGEN_MEASURE_ALIVE %s %.0f s" % (name, time.monotonic() - since),
+                      flush=True)
+
+
+try:
+    _interval = float(os.environ.get("KICADGEN_HEARTBEAT_S", "0"))
+except ValueError:
+    _interval = 0.0
+if _interval > 0:
+    threading.Thread(target=_heartbeat, args=(_interval,), daemon=True).start()
 
 
 def measure(path):
@@ -1485,12 +1526,16 @@ sizes = {}
 # survives and reaches the cache instead of being redone on the next run.
 with open(os.path.join(folder, "progress.jsonl"), "w", encoding="utf-8") as done:
     for path in paths:
+        with _beat_lock:
+            _current[:] = [os.path.basename(path), time.monotonic()]
+        print("KICADGEN_MEASURE_START " + os.path.basename(path), flush=True)
         try:
             sizes[path] = measure(path)
         except Exception:
             sizes[path] = None
         done.write(json.dumps({"path": path, "size": sizes[path]}) + "\\n")
         done.flush()
+        print("KICADGEN_MEASURE_DONE " + os.path.basename(path), flush=True)
 with open(os.path.join(folder, "out.json"), "w", encoding="utf-8") as handle:
     json.dump(sizes, handle)
 """
@@ -1719,15 +1764,17 @@ def _measure_in(base: Path, freecad, paths, timeout, cancel):
     (base / "in.json").write_text(json.dumps(paths), encoding="utf-8")
     script = base / "measure.py"
     script.write_text(_MEASURE_SCRIPT, encoding="utf-8")
-    # PYTHONDONTWRITEBYTECODE: the child must not leave __pycache__
-    # next to the modules, which in the installation are read-only.
-    environment = dict(os.environ, KICADGEN_MEASURE_DIR=str(base),
-                       PYTHONDONTWRITEBYTECODE="1")
+    # PYTHONDONTWRITEBYTECODE (in `child_environment`): the child must not
+    # leave __pycache__ next to the modules, which in the installation are
+    # read-only. The heartbeat period is derived from THIS watchdog's timeout,
+    # the only place where the two numbers are linked.
+    environment = child_environment({
+        "KICADGEN_MEASURE_DIR": str(base),
+        "KICADGEN_HEARTBEAT_S": str(heartbeat_interval(timeout))})
     command = [freecad, str(script)]
     # The output goes to a file and not to a pipe because nobody reads it:
     # a full pipe would block the child.
     log_path = base / "freecad.out"
-    outcome, stopped = "failed", None
     try:
         # Same flags as the solid's child: no console window flashing
         # for every measuring batch on Windows. The parent's handle of the
@@ -1737,6 +1784,70 @@ def _measure_in(base: Path, freecad, paths, timeout, cancel):
                                        env=environment, creationflags=NO_WINDOW_FLAGS)
     except (OSError, ValueError, subprocess.SubprocessError):
         return "failed", _partial_measurements(progress_path), None
+    # Every process the child starts dies with it (see process_log).
+    contain_process(process)
+    outcome = "raised"
+    try:
+        outcome, partial, stopped = _watch_measuring_child(
+            process, base, command, timeout, cancel)
+    finally:
+        release_process(process)
+        _keep_measure_log(log_path, command, outcome)
+    return outcome, partial, stopped
+
+
+def _measure_log_path():
+    """Persistent log of the measuring children, in the preferred user cache folder, or None."""
+    try:
+        folders = model_size_cache.user_cache_dirs()
+    except (OSError, ValueError):
+        return None
+    return Path(folders[0]) / MEASURE_LOG_FILENAME if folders else None
+
+
+def _keep_measure_log(output_path: Path, command, outcome) -> None:
+    """Append the tail of one batch's child output to the persistent measuring log.
+
+    Never raises: the log is a diagnosis aid, and failing to write it must
+    not turn a measured batch into an error. Trimmed by `process_log.cap_log`
+    like the generation log.
+    """
+    target = _measure_log_path()
+    if target is None:
+        return
+    try:
+        with output_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - MEASURE_LOG_TAIL_BYTES))
+            tail = handle.read().decode("utf-8", errors="replace").replace("\r\n", "\n")
+    except OSError:
+        tail = ""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cap_log(target)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with target.open("a", encoding="utf-8") as log:
+            log.write(f"\n[{stamp}] measure start: {' '.join(map(str, command))}\n")
+            log.write(tail if tail.endswith("\n") or not tail else tail + "\n")
+            log.write(f"[{stamp}] measure outcome={outcome}\n")
+    except OSError as exc:
+        logging.getLogger(__name__).warning("measuring log %s not written: %s", target, exc)
+
+
+def _watch_measuring_child(process, base: Path, command, timeout, cancel):
+    """Silence watchdog and cancel channel of one measuring child (see `_measure_batch`).
+
+    Activity is EITHER a finished measurement (a line in `progress.jsonl`)
+    OR any output of the child (its heartbeat while a slow `Part.read`
+    works, written to `freecad.out`): 2026-11-03 review, a healthy read
+    longer than the timeout used to be killed and remembered as stalled.
+    """
+    import subprocess
+
+    progress_path = base / "progress.jsonl"
+    log_path = base / "freecad.out"
+    outcome, stopped = "failed", None
 
     def kill_child():
         """The only place where the measurement child process is killed (with its own children)."""
@@ -1746,10 +1857,13 @@ def _measure_in(base: Path, freecad, paths, timeout, cancel):
         _reap_killed_child(process)
 
     def progress_size():
-        try:
-            return progress_path.stat().st_size
-        except OSError:
-            return 0
+        sizes = []
+        for watched in (progress_path, log_path):
+            try:
+                sizes.append(watched.stat().st_size)
+            except OSError:
+                sizes.append(0)
+        return tuple(sizes)
 
     try:
         seen = progress_size()
@@ -1774,8 +1888,8 @@ def _measure_in(base: Path, freecad, paths, timeout, cancel):
                 break
             size = progress_size()
             if size != seen:
-                # A finished measure: the child is alive, the silence
-                # count restarts for the next model.
+                # A finished measure or a heartbeat: the child is alive,
+                # the silence count restarts.
                 seen, deadline = size, time.monotonic() + timeout
             elif time.monotonic() >= deadline:
                 kill_child()
@@ -3918,7 +4032,8 @@ def _library_search(component: dict, result: dict, *, limit, roots, root, note, 
                            "({alternatives}): verificala.",
                            alternatives=", ".join(provisional["tie_alternatives"])))
                 result.update(status="provisional_matched", selected_path=choice["path"])
-        note(f"{package}: {len(result['candidates'])} dimensional candidates; {result['status']}; identity not verified.")
+        note(tx("{package}: {count} candidati dimensionali; {status}; identità non verificata.",
+                package=package, count=len(result['candidates']), status=result['status']))
     return result
 
 
@@ -4146,24 +4261,29 @@ def _attach_models(components, log=None, library: Optional[Path] = None, progres
                     previous_model_rotation if preserve_manual_base else accepted_rotation)
                 if preserve_manual_base:
                     report["orientation_manual_delta_preserved"] = True
-                    note(f"{component.get('name', '')}: orientamento manuale mantenuto "
-                         f"sullo stesso modello: base {previous_model_rotation:g} gradi, "
-                         f"correzione {manual_delta:g} gradi.")
+                    note(tx("{name}: orientamento manuale mantenuto sullo stesso modello: "
+                            "base {base} gradi, correzione {delta} gradi.",
+                            name=component.get('name', ''),
+                            base=f"{previous_model_rotation:g}", delta=f"{manual_delta:g}"))
                 else:
-                    note(f"{component.get('name', '')}: orientamento da ritaglio consolidato "
-                         f"#{orientation.get('image_id')}: {accepted_rotation:g} gradi; "
-                         f"rotazione relativa {orientation.get('relative_rotation_deg', 0):g} gradi.")
+                    note(tx("{name}: orientamento da ritaglio consolidato #{image}: "
+                            "{angle} gradi; rotazione relativa {relative} gradi.",
+                            name=component.get('name', ''), image=orientation.get('image_id'),
+                            angle=f"{accepted_rotation:g}",
+                            relative=f"{orientation.get('relative_rotation_deg', 0):g}"))
             elif report.get("discovery") == "accepted_library":
-                report["orientation_unverified"] = "Orientamento da verificare: nessun ritaglio con angolo individuale e confronto univoco."
+                report["orientation_unverified"] = tx(
+                    "Orientamento da verificare: nessun ritaglio con angolo individuale "
+                    "e confronto univoco.")
             if component.get("landmark_side"):
                 report["orientation_landmark"] = {
                     "feature": component.get("landmark_feature"),
                     "side": component["landmark_side"],
                     "confidence": component.get("landmark_confidence")}
             elif orientation.get("status") != "matched" and not report.get("orientation_unverified"):
-                report["orientation_unverified"] = (
-                    "No asymmetric landmark observed: an outline alone cannot tell "
-                    "one end from the other, so the model keeps its inferred axis.")
+                report["orientation_unverified"] = tx(
+                    "Nessun riferimento asimmetrico osservato: il solo contorno non distingue "
+                    "un'estremità dall'altra, quindi il modello mantiene l'asse dedotto.")
             resolved += 1
         else:
             if report["status"] == "unresolved":

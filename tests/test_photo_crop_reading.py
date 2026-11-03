@@ -716,7 +716,11 @@ def test_a_band_on_a_resistor_or_capacitor_is_a_contradiction_when_both_readings
 
 def test_a_contradicted_row_is_flagged_with_both_classes_and_kept():
     from kicadgen.services.messages import tx
-    component = _chip_row(**{'class': 'diode', 'kind': 'diode'}, package='SMA', lead_count=2)
+    # A SOT-23-sized body (3.0 x 1.5 mm, the _derive default envelope): the
+    # 2 + 1 lead topology is named only when the envelope fits the family
+    # (review 2026-11-03), so the row must have that family's size.
+    component = _chip_row(3.0, 1.5, **{'class': 'diode', 'kind': 'diode'}, package='SMA',
+                          lead_count=2)
     answer = _obs(2, 1, 0, 0, marking='2A')
     summary, _ = _read([component], Script(answer, dict(answer)))
     assert component['_crop_reading'] == 'inconclusive' and summary.inconclusive == 1
@@ -780,6 +784,38 @@ def test_the_package_family_of_a_leaded_body_comes_from_a_complete_per_side_coun
     reading = _derive(_obs(*sides, tab=tab), envelope=envelope)
     assert (reading['class'], reading['package']) == expected
     assert reading['leads'] == sides
+
+
+def test_a_lead_topology_names_a_family_only_when_the_envelope_fits_it():
+    """@brief Revisione 2026-11-03: il conteggio per lato non basta a dare il nome.
+
+    Stessa topologia 1 + 2 senza linguetta, involucri diversi: 3.0 x 1.5 mm e'
+    un SOT-23, 2.1 x 2.0 mm (SC-70) no -- il registro dice SOT-323. Con la
+    linguetta e 3 piedini, 4.5 x 4.2 mm e' SOT-89, 7.0 x 6.5 mm no (SOT-223).
+    Un involucro che nessuna famiglia della topologia ammette lascia vuoto e
+    lo annota, come soic_rejected.
+    """
+    assert _derive(_obs(2, 1, 0, 0), envelope=(3.0, 1.5, 0.1))['package'] == 'SOT-23'
+    sc70 = _derive(_obs(2, 1, 0, 0), envelope=(2.1, 2.0, 0.1))
+    assert sc70['package'] != 'SOT-23' and sc70['package'] == 'SOT-323'
+    assert _derive(_obs(3, 0, 0, 0, tab=True), envelope=(4.5, 4.2, 0.1))['package'] == 'SOT-89'
+    big = _derive(_obs(3, 0, 0, 0, tab=True), envelope=(7.0, 6.5, 0.1))
+    assert big['package'] != 'SOT-89' and big['package'] == 'SOT-223'
+    nothing = _derive(_obs(2, 3, 0, 0), envelope=(6.0, 5.0, 0.1))
+    assert nothing['package'] == '' and nothing['notes'] == ['leaded_rejected:SOT-23-5']
+    assert _derive(_obs(2, 1, 0, 0), envelope=None)['package'] == ''
+
+
+def test_a_soic_body_is_at_least_its_lead_row_plus_the_smallest_end_margin():
+    """@brief Revisione 2026-11-03: 4 + 4 piedini su 4.0 x 4.0 mm non e' un SOIC-8.
+
+    Il corpo lungo le file e' la fila di piedini (3 x 1.27 = 3.81 mm) piu'
+    almeno il margine minimo registrato (0.9 mm): 4.71 mm. 4.0 mm sta sotto
+    anche con la tolleranza della foto; 4.9 mm (corpo nominale) passa.
+    """
+    square = _derive(_obs(4, 4, 0, 0), envelope=(4.0, 4.0, 0.17))
+    assert square['package'] == '' and square['notes'] == ['soic_rejected:4']
+    assert _derive(_obs(4, 4, 0, 0), envelope=(4.9, 3.9, 0.17))['package'] == 'SOIC-8'
 
 
 def test_three_contacts_with_incomplete_sides_derive_no_package():

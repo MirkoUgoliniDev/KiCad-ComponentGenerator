@@ -179,7 +179,12 @@ class ConsolidateDialog(QDialog):
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(preview.reject)
         layout.addWidget(close)
-        preview.exec()
+        try:
+            preview.exec()
+        finally:
+            # A child of this window: without this, every crop opened stayed
+            # alive, with its pixmaps, until the archive window closed.
+            preview.deleteLater()
 
     def selected_components(self) -> list[dict]:
         """@brief Checked components, in table order.
@@ -441,7 +446,12 @@ class AcceptedModelsDialog(QDialog):
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(preview.reject)
         layout.addWidget(close)
-        preview.exec()
+        try:
+            preview.exec()
+        finally:
+            # A child of this window: without this, every crop opened stayed
+            # alive, with its pixmaps, until the archive window closed.
+            preview.deleteLater()
 
     def _delete_selected(self) -> None:
         ids = self._selected_ids()
