@@ -145,3 +145,41 @@ def test_end_to_end_the_tie_break_uses_the_main_model_on_the_enlarged_drawing(of
     assert sum(1 for b in call.call_args_list[3].kwargs["content_blocks"] if b.get("type") == "image_url") == 5
     assert params.body_height_mm == pytest.approx(16.9)
     assert any("Spareggio sull'altezza" in line for line in logs)
+
+
+# ── Unsettled without a tie (HLK module, 2026-11-04) ────────────────────
+#
+# Main «18» printed in its own list only (one point); dedicated «23» equal
+# to the plan width, excluded from both lists (no point). Not a tie, but
+# nothing printed twice either: the third reading decides.
+
+def _hlk_main():
+    data = _main(body_length_mm=38.0, body_width_mm=23.0, body_height_mm=18.0)
+    data["printed_vertical_quotes"] = [5.0, 18.0, 23.0, 5.0]
+    return data
+
+
+def test_one_point_against_none_calls_the_third_reading_and_a_second_print_wins():
+    """Positive: the enlarged reading prints 18 too -> 18 read twice, the plan width discarded."""
+    third = Mock(return_value={"values": {"body_height": 18.0}, "printed": [5.0, 18.0, 23.0],
+                               "notes": ""})
+    data = _hlk_main()
+    apply_dedicated_body(data, _dedicated(23.0, (23.0, 5.0, 5.0)), tie_break=third)
+    assert third.call_count == 1
+    assert data["body_height_mm"] == pytest.approx(18.0) and "_body_conflict" not in data
+
+
+def test_one_point_against_none_stays_a_conflict_when_the_third_list_prints_neither():
+    """Negative: a third list without 18 leaves one point: no value, the conflict said."""
+    third = Mock(return_value={"values": {"body_height": 23.0}, "printed": [23.0, 5.0], "notes": ""})
+    data = _hlk_main()
+    apply_dedicated_body(data, _dedicated(23.0, (23.0, 5.0, 5.0)), tie_break=third)
+    assert third.call_count == 1 and data["body_height_mm"] is None and "_body_conflict" in data
+
+
+def test_a_value_already_printed_twice_never_pays_the_third_reading():
+    """Negative twin of the trigger: 2 points against 0 is settled without a call."""
+    data = _hlk_main()
+    third = Mock()
+    apply_dedicated_body(data, _dedicated(18.0, (18.0, 5.0)), tie_break=third)
+    assert third.call_count == 0 and data["body_height_mm"] == pytest.approx(18.0)

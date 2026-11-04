@@ -112,14 +112,18 @@ _TOOL_NAME = "report_pin_header_params"
 _HEIGHT_RULE = (
     "body_height_mm e' UN SOLO numero STAMPATO: nella vista frontale o laterale del disegno "
     "quotato (gruppo \"Dimensions\", \"Outline\" o simile, anche sullo stesso foglio del pinout) "
-    "e' la quota verticale che misura il corpo, dalla sua sommita' al suo fondo (o al piano di "
-    "appoggio sul PCB, se il disegno la quota cosi'). Trascrivila come e' scritta: NON sommare "
-    "ne' sottrarre altre quote (un distanziale o la sporgenza dei terminali quotati a parte non "
-    "si aggiungono), non ricavarla dalle proporzioni del disegno e non riusare un numero letto in "
-    "pianta. In printed_vertical_quotes elenca TUTTE le quote verticali stampate nella vista di "
-    "profilo, nell'ordine in cui compaiono: il programma vi cerca l'altezza. Se nessuna vista "
-    "stampa una quota verticale del corpo, ometti body_height_mm: un'altezza calcolata da altre "
-    "quote e' \"derived\", mai \"read\"."
+    "e' la quota che misura il corpo NELLA DIREZIONE DEI TERMINALI (perpendicolare al piano di "
+    "appoggio sul PCB), dalla sua sommita' al suo fondo (o al piano di appoggio, se il disegno "
+    "la quota cosi'). Di solito e' verticale sulla pagina; se la vista e' ruotata e i terminali "
+    "sono disegnati verso sinistra o destra, l'altezza e' la quota ORIZZONTALE e la quota "
+    "verticale e' una misura in pianta: segui i terminali, non la pagina. Trascrivila come e' "
+    "scritta: NON sommare ne' sottrarre altre quote (un distanziale o la sporgenza dei terminali "
+    "quotati a parte non si aggiungono), non ricavarla dalle proporzioni del disegno e non "
+    "riusare un numero letto in pianta. In printed_vertical_quotes elenca TUTTE le quote "
+    "stampate nella vista di profilo lungo la direzione dei terminali, nell'ordine in cui "
+    "compaiono: il programma vi cerca l'altezza. Se nessuna vista stampa una quota del corpo in "
+    "quella direzione, ometti body_height_mm: un'altezza calcolata da altre quote e' "
+    "\"derived\", mai \"read\"."
 )
 
 #: Length fields of the answer, per level: every one is a length in the
@@ -1131,7 +1135,12 @@ DEFAULT_PAD_POSITIONS_PROMPT = (
     "virgola; scrivi \"edge\" per il contorno del corpo, solo come prima o ultima fermata. "
     "Includi le quote fra parentesi (di riferimento) e quelle verso il contorno del corpo. "
     "Ogni foro numerato deve comparire in almeno una catena x e una catena y. Non saltare "
-    "nessuna quota della catena e non sommarne due. Dichiara in drawing_unit l'unita' delle "
+    "nessuna quota della catena e non sommarne due. LINEA D'ASSE: se su un asse un foro non ha "
+    "una quota ma sta su una linea d'asse (tratto-punto) disegnata a meta' fra due fermate "
+    "(due fori, o i due bordi del corpo), dichiaralo in midpoints con l'asse, il foro e le due "
+    "fermate: la media la fa il programma. Non inventare una quota che non e' stampata e non "
+    "scrivere catene con una sola fermata: un foro senza quota e senza linea d'asse su un asse "
+    "resta fuori da quell'asse. Dichiara in drawing_unit l'unita' delle "
     "quote e in contacts_view se il disegno e' una vista dal basso (BOTTOM VIEW, lato "
     "saldature) o dall'alto. Non specchiare e non ruotare nulla. Se un foro non ha un numero e "
     "non si riconosce dalla vista del pinout, non includerlo. Rispondi SOLO chiamando lo "
@@ -1174,6 +1183,21 @@ _PAD_POSITIONS_TOOL = {
                                "description": "Quote stampate fra fermate consecutive, nello stesso ordine."},
                 }, "required": ["axis", "stops", "values"]},
             },
+            "midpoints": {
+                "type": "array",
+                "description": ("Fori che su un asse NON hanno una quota ma stanno su una LINEA "
+                                "D'ASSE disegnata a meta' fra due fermate: il programma fa la media. "
+                                "Niente calcoli e niente quote inventate."),
+                "items": {"type": "object", "properties": {
+                    "axis": {"type": "string", "enum": ["x", "y"],
+                             "description": "Asse su cui il foro sta sulla linea d'asse."},
+                    "pad": {"type": "string", "description": "Numero del foro sulla linea d'asse."},
+                    "between": {"type": "array", "items": {"type": "string"},
+                                "description": ("Le due fermate fra cui passa la linea d'asse, in "
+                                                "ordine crescente sulla pagina: numeri di foro, "
+                                                "oppure \"edge\" per il contorno del corpo.")},
+                }, "required": ["axis", "pad", "between"]},
+            },
             "notes": {"type": "string"},
         },
         "required": ["drawing_unit", "contacts_view", "chains"],
@@ -1208,9 +1232,11 @@ _BODY_DIMENSIONS_TOOL = {
                             "description": "Sporgenza quotata dei terminali sotto il corpo."},
             "printed_vertical_quotes": {
                 "type": "array", "items": {"type": "number"},
-                "description": ("TUTTE le quote verticali STAMPATE nella vista frontale o laterale, "
-                                "nell'ordine in cui compaiono, senza sommarle: fra queste ci sono "
-                                "body_height e, se quotati, standoff e lead_length.")},
+                "description": ("TUTTE le quote STAMPATE nella vista frontale o laterale lungo la "
+                                "direzione dei terminali (verticali sulla pagina, oppure orizzontali "
+                                "se la vista e' ruotata), nell'ordine in cui compaiono, senza "
+                                "sommarle: fra queste ci sono body_height e, se quotati, standoff e "
+                                "lead_length.")},
             "notes": {"type": "string",
                       "description": "Quale vista hai usato per ogni valore; dubbi."},
         },
@@ -1347,12 +1373,15 @@ def _reading_tolerance(factor: Optional[float]) -> float:
     return _sum_tolerance(1, factor if factor is not None else 1.0)
 
 
-def _axis_from_chains(chains, axis: str, factor: float, problems: list, malformed: list) -> tuple:
+def _axis_from_chains(chains, axis: str, factor: float, problems: list, malformed: list,
+                      midpoints=None) -> tuple:
     """Solve one axis: (positions in mm, quotes summed to reach each node) of the main component.
 
     Nodes are pad numbers plus the two outline stops; a chain gives
     position(next) - position(previous) = value, and the pads of one stop
-    share a position. A chain that cannot be read (stops and values that do
+    share a position; `midpoints` (validated entries of this axis, see
+    `_midpoints_by_axis`) place a pad half way between two solved stops
+    (`_place_midpoints`). A chain that cannot be read (stops and values that do
     not match, an outline stop in the middle, a non-positive value) goes to
     `malformed`: a transcription slip, not a fact about the drawing. Two
     paths giving one distance differently go to `problems`: the drawing, as
@@ -1426,14 +1455,141 @@ def _axis_from_chains(chains, axis: str, factor: float, problems: list, malforme
                         "via, {other:.2f} mm", a=_chain_node_name(node), b=_chain_node_name(other),
                         axis=axis, direct=abs(step), other=abs(positions[other] - positions[node])))
         components.append(component)
+    by_midpoint = _place_midpoints(midpoints or (), axis, positions, quotes, components, problems,
+                                   malformed, factor)
+    for pad, low, high in midpoints or ():
+        # Page order is the contract; between two pads it is observable.
+        if (low in positions and high in positions and positions[low] > positions[high]
+                and _owner_of(components, low) == _owner_of(components, high)):
+            malformed.append(tx("linea d'asse del pad {pad}: fermate {a} e {b} non in ordine "
+                                "sulla pagina", pad=pad, a=_chain_node_name(low),
+                                b=_chain_node_name(high)))
     if not components:
         return {}, {}
+    # Chosen on chain-placed pads only: a centreline is an interpretation
+    # and must not decide which group of chains survives.
     main = max(components,
-               key=lambda nodes: sum(1 for n in nodes if n not in (_CHAIN_LOW, _CHAIN_HIGH)))
+               key=lambda nodes: sum(1 for n in nodes
+                                     if n not in (_CHAIN_LOW, _CHAIN_HIGH, *by_midpoint)))
     return {node: positions[node] for node in main}, {node: quotes[node] for node in main}
 
 
-def pads_from_chains(chains, factor: float = 1.0) -> dict:
+def _owner_of(components: list, node: str):
+    """Index of the chain component holding `node`, or None (private helper)."""
+    for index, nodes in enumerate(components):
+        if node in nodes:
+            return index
+    return None
+
+
+def _place_midpoints(midpoints, axis: str, positions: dict, quotes: dict, components: list,
+                     problems: list, malformed: list, factor: float) -> set:
+    """Place the pads declared on a drawn centreline half way between two solved stops.
+
+    A drawing often leaves a hole without a quote on one axis because it
+    lies on a dash-dot centreline (the symmetry axis of two rows, or of the
+    body): a drafting convention, not a missing quote. The model DECLARES
+    the centreline it sees (`midpoints`: pad, the two stops it runs
+    between); the mean is the program's, like every chain sum. Iterated to
+    a fixed point (a centreline may run through another centreline pad);
+    a stop still unsolved on this axis leaves the pad unplaced, never
+    guessed. The two stops must belong to one chain component: a centreline
+    cannot tie two groups of pads no quote connects. Two stops solved at
+    one position are no centreline (a hole on the LINE of a row is another
+    claim, which the schema does not express): reported in `malformed`,
+    the pad left unplaced. A pad a chain already places in the SAME
+    component is CHECKED against the mean (a difference is a contradiction
+    of the transcription, `problems`, as between two chains); a pad placed
+    in ANOTHER component (quoted only to pads the stops' chains do not
+    reach) is a constraint, not a contradiction: its whole component is
+    moved so the pad sits at the mean and merged (generality audit
+    2026-11-04). The tolerance is the rounding of the quotes summed: the
+    mean of two sums carries half their roundings, plus the pad's own.
+
+    @return The pads placed by a centreline (not by a chain), so the main
+        component is chosen on chain-placed pads only.
+    """
+    owner = {node: index for index, nodes in enumerate(components) for node in nodes}
+    pending, by_midpoint = list(midpoints), set()
+    placed = True
+    while pending and placed:
+        placed, remaining = False, []
+        for pad, low, high in pending:
+            if (low not in positions or high not in positions
+                    or owner.get(low) != owner.get(high)):
+                remaining.append((pad, low, high))
+                continue
+            mean = (positions[low] + positions[high]) / 2
+            # Half the roundings of the two stops' sums, rounded up.
+            summed = (quotes[low] + quotes[high] + 1) // 2
+            if abs(positions[high] - positions[low]) <= _sum_tolerance(summed, factor):
+                malformed.append(tx(
+                    "lungo {axis} le fermate {a} e {b} della linea d'asse del pad {pad} "
+                    "coincidono", axis=axis, a=_chain_node_name(low), b=_chain_node_name(high),
+                    pad=pad))
+                continue
+            if pad in positions and owner[pad] == owner[low]:
+                if abs(positions[pad] - mean) > _sum_tolerance(summed + quotes[pad], factor):
+                    problems.append(tx(
+                        "lungo {axis} il pad {pad} dista {off:.2f} mm dalla linea d'asse "
+                        "dichiarata fra {a} e {b}", axis=axis, pad=pad,
+                        off=abs(positions[pad] - mean), a=_chain_node_name(low),
+                        b=_chain_node_name(high)))
+                continue
+            if pad in positions:
+                # Another component hangs on this pad: move it onto the mean.
+                shift, source = mean - positions[pad], owner[pad]
+                for node in components[source]:
+                    positions[node] += shift
+                    quotes[node] += summed
+                    owner[node] = owner[low]
+                components[owner[low]].extend(components[source])
+                components[source] = []
+            else:
+                positions[pad], quotes[pad] = mean, summed
+                components[owner[low]].append(pad)
+                owner[pad] = owner[low]
+            by_midpoint.add(pad)
+            placed = True
+        pending = remaining
+    return by_midpoint
+
+
+def _midpoints_by_axis(midpoints, malformed: list) -> dict:
+    """Validate the declared centrelines: {axis: [(pad, low stop, high stop)]} and the malformed ones.
+
+    A valid entry names an axis, one pad number and exactly two DIFFERENT
+    stops in page order, each a pad number or the outline (CHAIN_EDGE: the
+    first one is the low outline stop, the second the high one, the same
+    convention as the chains' stops). Anything else is a transcription
+    slip reported in `malformed`, never read as a position.
+
+    @note Declared limit: between a pad and the outline the SIDE of the
+        outline rests on the page order the prompt asks for, which the
+        program cannot verify (a mean is symmetric). Two pad stops written
+        in the wrong order are caught where observable: `_place_midpoints`
+        sees their solved positions, and `_axis_from_chains` reports the
+        pair as a slip.
+    """
+    valid = {"x": [], "y": []}
+    for index, entry in enumerate(midpoints if isinstance(midpoints, list) else [], start=1):
+        axis = entry.get("axis") if isinstance(entry, dict) else None
+        pad = _pad_number_text(entry.get("pad")) if isinstance(entry, dict) else ""
+        between = entry.get("between") if isinstance(entry, dict) else None
+        stops = ([name.strip() for name in between if isinstance(name, str)]
+                 if isinstance(between, list) else [])
+        if (axis not in valid or not pad or pad.lower() == CHAIN_EDGE or len(stops) != 2
+                or len(stops) != len(between) or not all(stops) or pad in stops
+                or stops[0].lower() == stops[1].lower() != CHAIN_EDGE):
+            malformed.append(tx("linea d'asse n. {index}: voce non valida", index=index))
+            continue
+        low = _CHAIN_LOW if stops[0].lower() == CHAIN_EDGE else stops[0]
+        high = _CHAIN_HIGH if stops[1].lower() == CHAIN_EDGE else stops[1]
+        valid[axis].append((pad, low, high))
+    return valid
+
+
+def pads_from_chains(chains, factor: float = 1.0, midpoints=None) -> dict:
     """@brief Pad centres added up from the dimension chains the model transcribed.
 
     @param chains `chains` of the report_pad_positions answer: per chain an
@@ -1442,31 +1598,44 @@ def pads_from_chains(chains, factor: float = 1.0) -> dict:
         CHAIN_EDGE for the body outline at either end) and the printed
         values between consecutive stops.
     @param factor Drawing unit to millimetres.
+    @param midpoints `midpoints` of the answer, or None: pads that one axis
+        does not quote because they lie on a drawn centreline half way
+        between two stops ({"axis", "pad", "between": [low, high]}, stops as
+        in the chains). The mean is computed here (`_place_midpoints`), the
+        model only declares the centreline it sees.
     @return {"pads": {number: (x, y)} in mm from an arbitrary origin,
-        "problems": [contradictions], "malformed": [unreadable chains],
-        "spans": {"x": mm or None, "y": mm or None}, "span_quotes": {axis:
-        quotes summed for the span}, "unplaced": [number]}.
+        "problems": [contradictions], "malformed": [unreadable chains and
+        centreline entries], "spans": {"x": mm or None, "y": mm or None},
+        "span_quotes": {axis: quotes summed for the span}, "unplaced":
+        [number]}.
     @note The sums are the program's, never the model's: a model that adds a
         chain up wrong (a quote dropped while summing) cannot pass that error
         on. What remains is the transcription; it is checked where the
-        drawing allows it: two chains reaching one pad must agree, and a
+        drawing allows it: two chains reaching one pad must agree, a
+        centreline pad a chain also places must sit at the mean, and a
         chain from outline to outline gives a span to compare with the body
-        (apply_dedicated_pads). A pad that no chain ties to the others on
-        both axes is listed in "unplaced", never guessed.
+        (apply_dedicated_pads). A pad that no chain or centreline ties to the
+        others on both axes is listed in "unplaced", never guessed.
     @note Limits, declared: these checks see only what changes a SUM. Two
         quotes transposed, two pad labels swapped or a whole axis read in
         reverse keep every distance sum and every span, so the result is
         never trusted over another reading on their strength (see
-        apply_dedicated_pads). Stops are pad centres or the body outline: a
-        datum that is neither (a centreline, an unnumbered post), quotes to a
-        pad's EDGE (common in SMD land patterns) and ordinate dimensioning
-        cannot be expressed; such pads stay unplaced or fail a check.
+        apply_dedicated_pads). Stops are pad centres or the body outline, a
+        centreline only as the midpoint of two of them: a datum that is
+        none of these (an unnumbered post, an off-centre datum line), quotes
+        to a pad's EDGE (common in SMD land patterns) and ordinate
+        dimensioning cannot be expressed; such pads stay unplaced or fail a
+        check. A centreline the model declares wrongly between two stops it
+        does not run between is caught only when a chain also reaches that
+        pad, or by the drawn holes (apply_dedicated_pads).
     """
     problems, malformed = [], []
     chains = chains if isinstance(chains, list) else []
+    centred = _midpoints_by_axis(midpoints, malformed)
     solved, spans, span_quotes = {}, {}, {}
     for axis in ("x", "y"):
-        solved[axis], quotes = _axis_from_chains(chains, axis, factor, problems, malformed)
+        solved[axis], quotes = _axis_from_chains(chains, axis, factor, problems, malformed,
+                                                 centred[axis])
         ends = (solved[axis].get(_CHAIN_LOW), solved[axis].get(_CHAIN_HIGH))
         spans[axis] = ends[1] - ends[0] if None not in ends else None
         # Upper bound: the span runs through the BFS root at worst.
@@ -1485,6 +1654,8 @@ def pads_from_chains(chains, factor: float = 1.0) -> dict:
             for stop in chain["stops"]:
                 mentioned.update(name for name in _chain_stop_names(stop)
                                  if name.lower() != CHAIN_EDGE)
+    for entries in centred.values():
+        mentioned.update(pad for pad, _low, _high in entries)
     pads = {name: (solved["x"][name], solved["y"][name]) for name in names
             if name in solved["x"] and name in solved["y"]}
     if pads:
@@ -1556,7 +1727,7 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None) ->
         if progress:
             progress(tx("Lettura dedicata delle posizioni dei pad scartata ({exc}).", exc=reason))
         return {"view": view, "pads": {}, "notes": "", "discarded": reason}
-    solved = pads_from_chains(data.get("chains"), factor)
+    solved = pads_from_chains(data.get("chains"), factor, data.get("midpoints"))
     notes = data.get("notes")
     return dict(solved, view=view, notes=notes if isinstance(notes, str) else "")
 
@@ -1648,11 +1819,14 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
     @param progress Optional log callback.
     @param tie_break Optional zero-argument callable returning a THIRD
         `read_body_dimensions` result (the drawing enlarged, another model),
-        called at most once, only when the two printed lists give the two
-        values the same score (user, 2026-11-03: the main model listed its
-        misread «19,3» as printed, the dedicated reading «16,9», one point
-        each). The third list adds its points; the value ahead wins,
-        another tie stays a conflict. None: no tie-break.
+        called at most once, only when the two printed lists do not settle
+        the value: the same score (user, 2026-11-03: the main model listed
+        its misread «19,3» as printed, the dedicated reading «16,9», one
+        point each) or no value printed twice (2026-11-04, HLK module: the
+        main «18» printed in its own list only, the dedicated «23» excluded
+        as the plan width). The third list adds its points; the value ahead
+        with at least two wins, anything else stays a conflict. None: no
+        tie-break.
     @note Per quote of `_BODY_READING_KEYS`, in millimetres, within
         `_reading_tolerance` of the main answer's unit:
         - the main answer has no value: the reading's is ADOPTED (written in
@@ -1789,9 +1963,14 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
             else:
                 main_mm = main * factor
                 main_points = support(main_mm, main_list, field) + support(main_mm, dedicated_list, field)
-                if main_points == dedicated_points and tie_break is not None:
-                    # One list each (or two each): a third reading of the
-                    # enlarged drawing adds its points, see @param tie_break.
+                settled = (max(main_points, dedicated_points) >= 2
+                           and main_points != dedicated_points)
+                if not settled and tie_break is not None:
+                    # A tie, or no value printed twice (one list each, or a
+                    # value excluded as a plan quote: HLK module, 2026-11-04,
+                    # 18 printed once, 23 equal to the width): a third
+                    # reading of the enlarged drawing adds its points, see
+                    # @param tie_break.
                     extra = third_list()
                     if extra:
                         main_points += support(main_mm, extra, field)
@@ -3467,7 +3646,10 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "pagina (numeri dei terminali sulla stessa linea di quota separati da virgola, \"edge\" "
     "per il contorno del corpo solo come prima o ultima fermata), values con le quote fra "
     "fermate consecutive; le coordinate le ricava il programma sommandole, quindi non saltare "
-    "e non accorpare quote. Usa grid SOLO se TUTTI i "
+    "e non accorpare quote. Un terminale che su un asse non ha una quota ma sta su una LINEA "
+    "D'ASSE (tratto-punto) disegnata a meta' fra due fermate va dichiarato in pad_midpoints "
+    "(asse, terminale, le due fermate): la media la fa il programma, non inventare la quota. "
+    "Usa grid SOLO se TUTTI i "
     "terminali stanno su una griglia a passo costante e lo dichiari: rows e cols sono le "
     "posizioni della griglia intera, vuote comprese, e populated_pins elenca quelle "
     "occupate. Distanze fra terminali che non sono multipli di un passo unico significano "
@@ -3512,6 +3694,17 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # 2026-11-03, same night: pin functions drawn as a circuit symbol beside
     # the pinout (relay coil and contact) were not asked, only a table.
     "c1b754dacbb00291e9f836783780f67e03faddca05f7659a6667bebc716038c0",
+    # 2026-11-04: a terminal on a drawn centreline without a quote on that
+    # axis (SRD relay, pin 4 half way between the two rows) could not be
+    # transcribed: the main model invented its coordinate and the dedicated
+    # reading left it out. Now pad_midpoints declares the centreline.
+    "d026856a4ad691c28eddabc25feddefde585e17e48196d2336d6614bc1830206",
+    # 2026-11-04, same day (never released): _HEIGHT_RULE said «the
+    # vertical quote»; a side view drawn with the leads pointing sideways
+    # (HLK module: height 18 printed horizontal, plan width 23 vertical)
+    # made the reader take the plan width for the height. Now the height
+    # is the quote along the direction of the leads.
+    "a105917ea0ea1ad524f612244e6274fbb4b848f061940f260f5cc8a3b7867c48",
 })
 #: Digests of former pin-numbering defaults (none yet: first version).
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
@@ -3572,6 +3765,7 @@ def _single_component_tool() -> dict:
         "pad_chains": dict(_PAD_POSITIONS_TOOL["input_schema"]["properties"]["chains"],
                            description=("Catene di quote dei terminali come stampate nel disegno, "
                                         "nell'unita' di drawing_unit: il programma le somma.")),
+        "pad_midpoints": _PAD_POSITIONS_TOOL["input_schema"]["properties"]["midpoints"],
         "grid": grid,
         "body_length_mm": main["body_length_mm"], "body_width_mm": main["body_width_mm"],
         "body_height_mm": main["body_height_mm"], "pin_length_3d_mm": main["pin_length_3d_mm"],
@@ -3580,10 +3774,11 @@ def _single_component_tool() -> dict:
         "edge_fillets": main["edge_fillets"], "pinout": main["pinout"],
         "printed_vertical_quotes": {
             "type": "array", "items": {"type": "number"},
-            "description": ("TUTTE le quote verticali STAMPATE nella vista frontale o laterale del "
-                            "disegno quotato, nell'ordine in cui compaiono, nell'unita' di "
-                            "drawing_unit, senza sommarle; vuoto se nessuna vista di profilo e' "
-                            "quotata.")},
+            "description": ("TUTTE le quote STAMPATE nella vista frontale o laterale del disegno "
+                            "quotato lungo la direzione dei terminali (verticali sulla pagina, "
+                            "oppure orizzontali se la vista e' ruotata), nell'ordine in cui "
+                            "compaiono, nell'unita' di drawing_unit, senza sommarle; vuoto se "
+                            "nessuna vista di profilo e' quotata.")},
         "value_sources": main["value_sources"],
         "confidence": main["confidence"], "notes": main["notes"],
     }
@@ -3684,7 +3879,7 @@ def single_answer_to_data(answer: dict) -> dict:
     for key in ("body_length_mm", "body_width_mm", "body_height_mm"):
         if answer.get(key) is not None:
             data["package_geometry"][key] = answer[key]
-    _place_pins_from_chains(data, answer.get("pad_chains"))
+    _place_pins_from_chains(data, answer.get("pad_chains"), answer.get("pad_midpoints"))
     return data
 
 
@@ -3765,11 +3960,12 @@ def _grid_as_pads(grid: dict, answer: dict) -> tuple:
     return pins, ("body_center" if centred else "pin1"), note, bool(pins) and not mapped
 
 
-def _place_pins_from_chains(data: dict, chains) -> None:
+def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
     """Check the model's own pad coordinates against its dimension chains, summed by the program.
 
     User, 2026-10-30: the model transcribes the dimension chains beside its
-    coordinates (pad_chains); the program adds them up (pads_from_chains).
+    coordinates (pad_chains) and, since 2026-11-04, the drawn centrelines
+    (pad_midpoints); the program adds them up (pads_from_chains).
     The chains count only when they place EVERY pin, contradict nothing and
     no two pins share a number (they would merge into one stop); otherwise
     the model's coordinates stay and a note says why. Then:
@@ -3794,7 +3990,7 @@ def _place_pins_from_chains(data: dict, chains) -> None:
                   "({reasons}).", reasons=_undeclared_unit_reason())
         data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
         return
-    solved = pads_from_chains(chains, factor)
+    solved = pads_from_chains(chains, factor, midpoints)
     _normalise_pin_numbers(pins)
     numbers = [pin.get("number") for pin in pins]
     missing = sorted(set(numbers) - set(solved["pads"]))
