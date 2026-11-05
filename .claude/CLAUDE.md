@@ -261,7 +261,13 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11649 passed,
+is 11829 passed,
+13 skipped and 19 subtests (2026-11-05, branch `RELAY` merged into `main` as `53c3507`, released as v1.0.7,
+halves 7029/9/19 and 4800/4: every finding of the 2026-11-04 single-part review fixed by four fixers and the
+coordinator — declared attributes in the schemas, structured questions with saved answers, drawn-hole witness
+with slots and references, redacted AI log, partial re-reading — plus the generality audit of that diff; the
+relay symbol composed from DECLARED pin functions and contact labels, coil + contacts as KiCad's Relay_SPDT,
+hidden pin names, «Simbolo funzionale» toggle, see HANDOFF.md 05/11; before that, 11649 passed,
 13 skipped and 19 subtests (2026-11-04 night, branch `ADVANCED`, halves 6892/9/19 and 4757/4: second
 adversarial review by 12 read-only agents and the fix of every finding by 7 fixers plus the coordinator;
 castellated sides read at the declared positions, a measured absence only when every position is read bare

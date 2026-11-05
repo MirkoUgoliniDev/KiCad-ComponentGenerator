@@ -1,6 +1,17 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 05/11 — IN CORSO: «sfida» del relè, simbolo con bobina e contatti (ramo RELAY da ADVANCED 6dec4f7)
+## 05/11 — RILASCIO v1.0.7 (main 05350d5 «release: v1.0.7», tag v1.0.7 pushato, workflow release.yml in corso)
+Ramo RELAY allineato a main (merge). Baseline: 11829 passati, 13 saltati, 19 sottotest (r3 + perf P2 corretto),
+GitHub «Tests» verde su 53c3507. Esito del workflow di rilascio (suite + MSI + Release) da riportare qui sotto.
+FINE SESSIONE 05/11 (utente: «ok per oggi»): il workflow release.yml era ANCORA IN CORSO
+(https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/actions/runs/42002566265). CHI RIPRENDE: controllare
+con `gh run view 42002566265` e `gh release view v1.0.7`; se la corsa e' rossa, NON toccare il tag (permanente):
+leggere il log, correggere, e pubblicare la 1.0.8. Questo commit della documentazione e' su RELAY (e ha il
+commit di versione di main); main e' a 05350d5.
+ADVANCED e' rimasto a 6dec4f7: RELAY/main lo contengono; da riallineare (merge main -> ADVANCED) se si riprende
+il lavoro su ADVANCED.
+
+## 05/11 — FATTO: «sfida» del relè, simbolo con bobina e contatti (ramo RELAY da ADVANCED 6dec4f7)
 Codice precedente AL SICURO: ADVANCED 6dec4f7 pushato, main 052e168 (merge) pushato; ramo RELAY creato e pushato
 (utente: «prima metti al sicuro il codice attuale»). Suite r2 su 6dec4f7 ancora in corso (prima meta' al 53%,
 nessun rosso): esito da riportare qui.
@@ -106,6 +117,9 @@ con 1 rosso, lo STESSO: test_perf_p2_symbol_drag::test_one_redraw_copies_the_dra
 SymbolTab._draw chiamava draft_rows() una seconda volta per il flag dei nomi nascosti) -> corretto: la copia
 unica del draft viene fatta prima e serve anche al flag; 112 test mirati verdi. Nuovo commit su RELAY + merge in
 main; pubblicazione appena la corsa GitHub del nuovo commit main e' verde.
+SUITE r3 FINITA: prima meta' 7028 passati, 9 saltati, 19 sottotest, 1 rosso (il perf P2 poi corretto in 5c59032:
+verde da solo), seconda meta' 4800 passati, 4 saltati. BASELINE del ramo RELAY/main 53c3507: 11829 passati, 13
+saltati, 19 sottotest (= r3 + la correzione del perf test). In attesa della corsa GitHub «Tests» su 53c3507.
 
 ## 04/11 — IN CORSO: pin su LINEA D'ASSE non quotato (relè SRD 5 pin, «verifica perché non funziona, migliora il prompt»)
 DIFETTO (utente 04/11, disegno del relè SRD-xxVDC-SL-C, 5 pin, main deepseek-api/deepseek-flash, dedicata gpt-5.6-sol):
