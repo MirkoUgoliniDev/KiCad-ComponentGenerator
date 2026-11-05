@@ -5839,7 +5839,12 @@ class SymbolTab(QWidget):
         """Redraw the scene for `symbol`; `rows` is a private copy of the draft (`draft_rows` when None)."""
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
             p.pin.number == self._selected_pin for p in symbol.pins))
-        self._names_hidden = symbol_pin_names_hidden(rows if rows is not None else self.draft_rows())
+        # One copy of the draft serves the whole redraw (hidden names here,
+        # properties and elements below): each `draft_rows` deep-copies
+        # every row, and a redraw must read it ONCE (perf test P2).
+        if rows is None:
+            rows = self.draft_rows()
+        self._names_hidden = symbol_pin_names_hidden(rows)
         self.align_button.defaultAction().setEnabled(len(self._selection_ids()) >= 2)
         self._update_readout()
         scene = self.view.scene()
@@ -5891,10 +5896,6 @@ class SymbolTab(QWidget):
             body.setPen(pen)
             body.setBrush(QColor(theme['body_fill']))
             self._body_item = (body_key, body)
-        # One copy of the draft serves the whole redraw (properties, elements
-        # and their selection): each `draft_rows` deep-copies every row.
-        if rows is None:
-            rows = self.draft_rows()
         self._draw_graphics(scene, scale, rows)
         if self._wire_points:
             from PyQt6.QtGui import QPainterPath
