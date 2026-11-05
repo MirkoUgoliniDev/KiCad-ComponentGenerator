@@ -1,5 +1,313 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 04/11 — IN CORSO: pin su LINEA D'ASSE non quotato (relè SRD 5 pin, «verifica perché non funziona, migliora il prompt»)
+DIFETTO (utente 04/11, disegno del relè SRD-xxVDC-SL-C, 5 pin, main deepseek-api/deepseek-flash, dedicata gpt-5.6-sol):
+«Generazione automatica non avviata»: risposta principale (top) 1@(-6.10,-6.00) 2@(6.10,-6.00) 3@(6.10,6.00)
+4@(-6.10,0.00) 5@(-6.10,6.00) = pin 4 messo sulla COLONNA del pin 1 (nel disegno e' 2 mm piu' esterno); lettura
+dedicata (bottom) 1@(3.40,0) 2@(15.60,0) 3@(15.60,12) 5@(3.40,12) = pin 4 ASSENTE; nota «catena y n. 3: 1 fermate e
+0 quote». Fori disegnati: la principale non coincide; la dedicata e' incompleta -> nessuna scelta -> blocco (regola
+voluta: nessuna lettura non confermata genera). CATENA DI CAUSE: nel disegno il pin 4 e' quotato in X (bordo -1.4-
+4 -2- 1 -12.2- 2) ma in Y NON ha una quota: sta sulla LINEA D'ASSE tratto-punto a meta' fra la riga 1-2 e la riga
+5-3 (convenzione di disegno: simmetria). Lo schema delle catene (report_pad_positions / pad_chains) sa esprimere
+solo fermate = centri di pad o contorno; la docstring di pads_from_chains lo dichiarava gia' come limite («a
+centreline ... cannot be expressed; such pads stay unplaced»). Il modello dedicato ha provato a dirlo con una
+catena y di una sola fermata (malformata) e il pin 4 e' rimasto «unplaced» -> lettura incompleta. Il modello
+principale (flash) ha invece INVENTATO la X del pin 4. Non e' un difetto del confronto: senza un modo di
+trascrivere la linea d'asse NESSUN prompt puo' far tornare la lettura.
+PIANO (scritto PRIMA del codice): (1) schema: campo `midpoints` nello strumento dedicato e `pad_midpoints` in
+report_single_component: [{axis, pad, between:[a,b]}] = «il pad sta sulla linea d'asse disegnata a meta' fra le
+due fermate a e b su quell'asse» (a/b = numeri di pad o "edge"); il modello DICHIARA cio' che vede (la linea
+d'asse), il programma fa la media (pads_from_chains): nessun calcolo al modello, come per le catene. Criterio
+generale (convenzione di disegno), nessun nome/soglia. (2) pads_from_chains(chains, factor, midpoints): media a
+punto fisso (un midpoint puo' dipendere da un altro); un pad gia' posto da una catena che contraddice la media ->
+«problems» (blocco come oggi); between non risolti -> resta unplaced (mai indovinato); voce malformata -> nota
+«malformed». Tolleranza della media: somma delle quote dei due estremi. (3) prompt dedicato E prompt singolo:
+frase sulla linea d'asse (dichiararla in midpoints, non inventare una quota; un foro senza quota e senza linea
+d'asse su un asse resta fuori da quell'asse); digest del prompt singolo attuale in SUPERSEDED, DB riseminato.
+(4) test positivo (pad su linea d'asse fra due fermate / fra i due bordi -> posto) e negativo (estremi non posti ->
+unplaced; media che contraddice una catena -> problem; voce rotta -> malformed; strict mode DeepSeek ancora
+lossless). (5) testi nuovi nel catalogo (4 lingue), documentazione, suite, generality-auditor. NON tocco il
+confronto fra letture ne' i fori disegnati. Atteso sul rele': dedicata completa (4 a (1.4, 6.0)) confermata dai
+fori -> adottata contro la principale sbagliata (_settle_by_holes); se la principale trascrive anche lei le
+catene+midpoint, il conflitto interno la mette in attesa della dedicata.
+FATTO (04/11 pomeriggio): schema `midpoints` (dedicato) e `pad_midpoints` (singolo), frasi nei due prompt,
+digest d026856a... del prompt singolo in SUPERSEDED, DB riseminato; pads_from_chains(chains, factor, midpoints)
+con _midpoints_by_axis (validazione) e _place_midpoints (media a punto fisso); 2 testi nel catalogo; test in
+tests/test_pad_dimension_chains.py (sezione «Pads on a drawn centreline»). AUDIT DI GENERALITA' (generality-auditor)
+e CORREZIONI: (1) ALTO: un pad incatenato SOLO al pin sulla linea d'asse (altro gruppo di catene, origine
+arbitraria) dava una falsa contraddizione e buttava tutta la lettura -> ora il gruppo viene TRASLATO sulla media e
+fuso (test positivo pad 6 quotato dal pin 5; negativo stesso gruppo 3 vs 5 mm -> problem); (2) lato del bordo da
+ordine di lista: tra due PAD l'ordine di pagina e' osservabile e viene segnalato («non in ordine sulla pagina»,
+pad comunque posto perche' la media e' simmetrica), tra pad e bordo resta la convenzione dichiarata (limite nella
+docstring); (3) fermate identiche -> voce non valida; fermate coincidenti (stessa riga) -> nota «coincidono», pad
+non posto (una colinearita' non e' una linea d'asse); (4) tolleranza = meta' delle quote delle due fermate + quelle
+del pad (test al confine in pollici 0.24 passa / 0.30 segnala); (5) gruppo principale scelto sui soli pad posti
+dalle catene; piu' test: doppia dichiarazione -> problem, pad su due linee d'asse senza catene, catene vuote,
+negativo del percorso singolo (coordinata del modello diversa dalla media -> _pin_map_conflict). 2 testi in piu' nel
+catalogo (4 lingue). Totale test catene 61 (prima 36). Helper _owner_of privato (test documentazione).
+ANALISI REALE utente 18:06 (gpt-5.5 principale questa sessione, gpt-5.6-sol dedicato, 0.35 USD): GENERATA,
+5 pad, corpo 19.1 x 15.5 x 15.3 confermato, colore blu dalla foto (ruolo «Foto ad alta risoluzione»), funzioni dei
+pin dal simbolo. PERO' NON per la via prevista: la lettura dedicata ha lasciato ANCORA fuori il pin 4 (4 pad,
+vista unknown; il log non registra gli argomenti: non si sa se ha usato midpoints), la principale ha messo il pin 4
+giusto (0, 6) ma il pin 5 a (0, 12) invece di (2, 12); le due non coincidono e i fori disegnati hanno MISURATO le
+posizioni coi numeri della principale (_settle_by_measure: pad 5 spostato sull'unico foro libero, «ESTIMATED, da
+verificare»). Esito giusto, ma col percorso di riserva: DA CAPIRE alla prossima analisi perche' il lettore dedicato
+non dichiara la linea d'asse (serve il testo degli argomenti nel log AI: ai_diagnostics non li scrive per contratto,
+punto aperto gia' segnalato il 03/11). Avviso residuo: origine «custom», centro del corpo stimato sul campo dei pad.
+UTENTE 04/11 ~18:15: «ok, molto meglio, committa tutto e pusha; i numeri dei pin [nel visualizzatore STEP] sono un
+po' troppo piccoli» -> FATTO: altezza delle etichette dei pin nel visualizzatore (preview_3d_vtk._pin_label_height)
+= (0.65/2.54) x distanza minima fra due ancore (l'header 2.54 resta a 0.65 come prima), fra 0.65 e 2.0 mm (euristica
+dichiarata nel commento); tests/test_preview_pin_label_height.py (4). Suite completa: run1 lanciata PRIMA delle
+correzioni dell'audit e delle etichette (in corso); test mirati verdi sul codice finale (catene 61, documentazione,
+catalogo, prompt, provider, etichette). Commit + push autorizzati dall'utente; suite completa da RILANCIARE sul
+codice committato e conteggi da riallineare.
+SECONDO DIFETTO 04/11 18:22 (utente: «non ha fatto il 3D!!!»): e' il progetto HLK-5M05B (modulo AC-DC Hi-Link,
+38 x 23 x 18 mm), non il rele'. Footprint generato (4 pad scelti dai fori disegnati), STEP RINVIATO: «altezza: le
+due letture non coincidono (18 principale, 23 dedicata) e le quote stampate non decidono (principale 5, 18, 23, 5;
+dedicata 23, 5, 5)». CATENA DI CAUSE, verificata sul disegno pinout.jpeg: la vista laterale e' RUOTATA (terminali
+disegnati verso sinistra): l'altezza 18 e' la quota ORIZZONTALE, la 23 verticale e' la larghezza in pianta. (a) Il
+lettore dedicato (gpt-5.6-sol) ha seguito _HEIGHT_RULE alla lettera («quota verticale») e ha preso 23; (b) il voto:
+23 e' esclusa da ENTRAMBE le liste perche' uguale alla larghezza (regola F3, giusta), 18 e' stampata solo nella
+lista principale -> 1 a 0: NON un pareggio, quindi niente terza lettura sui riquadri, e nessuno a 2 punti -> conflitto.
+CORREZIONI (04/11, 151 test mirati verdi): (A) la terza lettura parte quando le due liste NON DECIDONO (nessun
+valore con >= 2 punti in vantaggio), non solo a pareggio; chi arriva a 2 vince, altrimenti conflitto; test positivo
+(1-0, terza lista stampa 18 -> 18), negativo (terza lista senza 18 -> conflitto), e 2-0 non paga la terza chiamata.
+(B) _HEIGHT_RULE: l'altezza e' la quota NELLA DIREZIONE DEI TERMINALI (perpendicolare al piano di appoggio), di
+solito verticale, ORIZZONTALE se la vista e' ruotata («segui i terminali, non la pagina»); stessa frase per
+printed_vertical_quotes nei due strumenti; digest a105917e... (prompt singolo con midpoints, mai rilasciato) in
+SUPERSEDED, DB riseminato. FRAGILITA' DICHIARATA: un corpo a sezione quadrata (altezza = larghezza in pianta) non
+puo' mai essere confermato dalle liste (F3 esclude la quota) -> conflitto onesto, altezza da chiarire; da risolvere
+con il testimone geometrico (rettangolo della vista laterale) gia' in coda. PER L'UTENTE: riavviare l'app e
+rifare l'analisi dell'HLK: attesa altezza 18 (terza lettura sui riquadri col modello principale, ~0.01 USD con
+deepseek-flash) e STEP generato.
+UTENTE 04/11 ~18:50: «ora HA FUNZIONATO, ma non voglio che per ogni componente nuovo si faccia un ritocco finche'
+non funziona: voglio che il software sia elastico e risolva i problemi da solo; scatena agenti esperti in modalita'
+avversaria». REGOLA RIBADITA (vincolante): niente correzioni per il pezzo in lavorazione; il percorso del componente
+singolo deve reggere disegni mai visti. IN CORSO: revisione avversariale PARZIALE, fase 1 = SOLO RAPPORTO, base
+b621063 + modifiche non committate di oggi (midpoints, etichette, terza lettura, _HEIGHT_RULE). 4 agenti in sola
+lettura, ambiti disgiunti: (R1) adversarial-reviewer lens services: datasheet_extractor.py 1-4200 (prompt, schemi,
+letture dedicate, voto delle quote) + document_roles.py; (R2) adversarial-reviewer lens services:
+datasheet_extractor.py 4200-fine (validazione, canonicalizzazione, richiesta, settle) + drawing_holes.py; (R3)
+generality-auditor: tutto il percorso singolo, elenco di ogni regola tarata su un pezzo (VE12H-K, T7N, SRD, HLK) e
+della classe che rompe; (R4) adversarial-reviewer lens gui: main_window.py 8000-8300, 10300-10500, 12600-12800,
+14150-14350, 14800-14900, 19850-19950 (come blocchi/rinvii arrivano all'utente e cosa il programma potrebbe
+risolvere da solo) + ai_diagnostics.py (argomenti delle risposte non loggati). Domanda centrale a tutti: perche'
+ogni componente nuovo richiede un ritocco, e quali meccanismi renderebbero il percorso auto-correttivo
+(ri-lettura con altro modello/ritagli, domanda UNICA all'utente invece del blocco, testimoni locali sul
+disegno). Nessuna modifica finche' l'utente non sceglie cosa correggere.
+RAPPORTO CONSOLIDATO (04/11 sera, 4/4 rapporti; C = riprodotto dal coordinatore, R = riprodotto dal revisore,
+L = per lettura). Base: codice di oggi non committato. Nessuna correzione fatta.
+ALTI:
+ H1 [C] altezza = quota in pianta (corpo a sezione quadrata): F3 la esclude da OGNI lista, tre letture concordi a 10 ->
+    conflitto; e sul percorso di ADOZIONE (principale senza altezza) la dedicata viene scritta anche se uguale alla
+    larghezza (HLK con principale muta -> STEP 23 alto). datasheet_extractor 1273-1302, 1897-1906, 1952-2008.
+ H2 [C] quote ordinate (tutte da un riferimento: 0, 5, 10, 15) sommate come catena -> pad a 0, 5, 15, 30, nessun
+    problem; stessa meccanica per le quote al BORDO del pad (land pattern SMD). 1397-1430, prompt 1126-1143.
+ H3 [C] corpo a gradini: l'altezza vera 12.5 = 9.5 + 3.0 e' vetata come «somma di due quote» in ogni lista ->
+    conflitto, terza lettura pagata e inutile. 1297-1302 (veto tarato su T7N 16.9 + 0.4).
+ H4 [C] _settle_by_measure sposta un pad LETTO GIUSTO su un foro di fissaggio quando il suo foro e' un'asola (non
+    e' un anello -> no_match) e il foro di fissaggio e' «l'unico libero»: scritto 9 mm fuori, generazione NON
+    bloccata (nota «STIMATA»). 2569-2661 + drawing_holes 1862-1876.
+ H5 [C] pagina NON in scala con 3 pad allineati + 1: l'anisotropia non e' osservabile, la misura sovrascrive la
+    quota stampata giusta (32 -> 29.6). drawing_holes 1406-1447 (_affine_observable), 2569-2661.
+ H6 [C] due letture che sbagliano lo STESSO pad vengono scritte anche se i fori le contraddicono (solo «Attenzione»);
+    e il lettore dedicato ricade in silenzio sul modello principale quando il provider non e' pronto -> «due letture»
+    = una. 2981-3020, 3429-3460.
+ H7 [L] GUI: conflitto d'altezza su un package = vicolo cieco (nessun controllo per scegliere fra 18 e 23; i
+    candidati vivono solo nella prosa); conflitto sui pad = modale con solo OK, scelta non ricordata; il meccanismo
+    giusto esiste gia' per i dubbi geometrici (_ask_geometry_doubt + geometry_doubt_answers in project_config).
+    main_window 14199-14208, 19897-19913, 14288-14332, 9841-9888.
+MEDI:
+ M1 [C] midpoints con fermate a virgola («1,2») come nelle catene: non risolte, pad non posto, NESSUNA nota ->
+    causa probabile del pin 4 ancora assente nell'analisi 18:06. 1558-1589.
+ M2 [R] stop di catena che e' un foro di fissaggio/riferimento diventa un «pad» -> «la dedicata trova pad che la
+    principale non ha» -> blocco. 1409-1420, 2982-2990.
+ M3 [R] catena chiusa su flangia/contorno diverso dal corpo -> «le quote non tornano» -> dedicata scartata anche se
+    i pad concordano. 3471-3504.
+ M4 [R] due letture che prendono entrambe la larghezza in pianta per altezza (vista ruotata) -> «confermate»,
+    F3 mai consultata. 1958-1961.
+ M5 [R] senza printed_vertical_quotes (campo opzionale, modello pigro) niente terza lettura: entrambi i valori
+    scartati. 1945, schemi 1233/3775.
+ M6 [L] prompt e schema del singolo OBBLIGANO il modello a calcolare x_mm/y_mm (required) e insieme a trascrivere le
+    catene senza calcolare: contraddizione che produce proprio i pin inventati visti. 3640-3652, 3739.
+ M7 [L] prompt del corpo: «larghezze delle viste frontale e laterale» = in pianta, ma su vista ruotata e' l'altezza
+    (origine di H1/M4). 1250-1252. Due definizioni della sporgenza dei terminali (sotto il piano / sotto il corpo).
+ M8 [R] vista adottata da UNA lettura quando l'altra tace (specchio deciso da un solo criterio); e quando i fori
+    scelgono la dedicata con vista unknown resta la vista della principale confutata. 2999-3002, 2550-2551, 2664.
+ M9 [R] pagina con pianta + land pattern (o top + bottom) affiancate: lo specchio coincide sempre -> mai scelta
+    anche se una sola lettura coincide e la vista e' dichiarata. 2418-2427.
+ M10 [R] candidati della misura confrontati in coordinate ASSOLUTE (origini diverse) -> mai concordi. 2622-2625.
+ M11 [R] asole (pad ovali) invisibili al testimone -> no_match su letture giuste; land pattern SMD mai testimoniati.
+    drawing_holes 842-933, 1511-1573, 1650-1675.
+ M12 [R] _require_declared_view BLOCCA per un bit (top/bottom) che l'utente vede in un secondo: va chiesto, non
+    rifiutato (regola CLAUDE.md). 3268-3314.
+ M13 [L] spareggio = rilettura dello STESSO modello principale (docstring dice «altro modello»: falsa); e viene
+    pagato anche a 0-0 (puo' arrivare al massimo a 1: inutile). 7158-7172, 1966-1968.
+ M14 [L] tolleranza delle somme legata all'UNITA', non ai decimali stampati (HLK a mm interi: arrotondamento 0.5,
+    tolleranza 0.2 -> falsi problem; JEDEC a 0.01: 10x di lasco). 1355-1361.
+ M15 [L] _HEIGHT_RULE «direzione dei terminali» sbaglia per SMD gull-wing (direzione orizzontale): il criterio vero
+    e' «perpendicolare al piano di appoggio»; nessun test single_smd nel percorso. 112-127.
+ M16 [L] GUI: resoconto finale/overlay dicono «mancano le quote» mentre il log dice «conflitto»; alla riapertura del
+    progetto il motivo del rinvio e' perso; conflitto solo altezza butta anche lunghezza/larghezza confermate
+    (percorso matrice, has_3d_body); nessuna ri-esecuzione parziale (ogni chiarimento = tutta l'analisi pagata).
+    main_window 14845-14849, 15047-15051, 19905-19913, 10317-10322; workers 907-946.
+ M17 [R] log AI: gli argomenti delle risposte RIUSCITE non sono mai scritti (solo i conteggi) -> una lettura ben
+    formata ma sbagliata non e' verificabile (oggi: non si sa se midpoints e' stato usato). ai_diagnostics 24-49, 417.
+ M18 [L] 3 pad o allineati: no_match non distingue «sbagliato» da «non in scala» e _pick_by_holes lo usa come
+    verdetto perdente. drawing_holes 109-117, 1427-1434; extractor 2412-2417.
+BASSI: numeri di pad case-sensitive fra catene (A1/a1); veto delle somme con arrotondamento mm anche in pollici;
+ ruolo «Quote» dice «visto dall'alto»; ridondanze dei rimedi nel dialogo; nessun «Riprova» dopo errore di
+ estrazione; stime mai segnalate nei campi; specchio testato solo in X nel guard; budget token della numerazione
+ (8192/1024) asimmetrico rispetto ai pad (16384); valori a pixel scritti senza provenienza per pad; 2-3 pin senza
+ rete di sicurezza non detto all'utente; PAD_READING_TOLERANCE_MM usata per 5 confronti diversi.
+RISPOSTA DI FONDO (concorde nei 4 rapporti): ogni pezzo ha rotto una regola che codifica una COINCIDENZA NUMERICA o
+una CONVENZIONE dove lo schema dovrebbe portare un ATTRIBUTO DICHIARATO dal lettore: ruolo di ogni quota stampata
+(corpo/pianta/distanziale/terminale), tipo di fermata (terminale/foro di fissaggio/asola/riferimento), tipo di
+catena (consecutiva/ordinata), lato del bordo, qualificatore della quota del corpo (nominale/max), decimali
+stampati, vista per catena. E la riconciliazione ha solo due uscite (scrivi / blocca): manca la terza, UNA domanda
+strutturata all'utente con i candidati mostrati (o una rilettura mirata del solo dato in dubbio), ricordata nel
+progetto come gia' avviene per i dubbi geometrici. PIANO PROPOSTO (da autorizzare): blocco A «attributi dichiarati»
+negli schemi + programma che li usa (H1-H3, M1-M5, M7, M14, M15); blocco B «terza uscita» = domanda strutturata
+(_question nel risultato -> dialogo unico -> risposta in project_config) per vista, altezza, pad (H7, M8, M9, M12,
+M16); blocco C testimone dei fori: tipo di foro, asole, osservabilita' affine prima di misurare, misura mai
+sopra una quota stampata senza conferma (H4-H6, M10, M11, M18); blocco D log degli argomenti con redazione e
+ri-esecuzione parziale (M17, M16-parziale, M13).
+SUITE run1 (codice PRIMA delle correzioni dell'audit midpoints): prima meta' 6905 passati, 9 saltati, 19 sottotest,
+3 falliti = test_documentation x2 (helper owner_of poi reso privato) + test_message_localization (catalogo letto a
+meta' modifica): tutti e tre VERDI da soli sul codice finale; seconda meta' in corso.
+UTENTE 04/11 sera: «tutti» = correggere TUTTI i rilievi (blocchi A-D). PIANO (scritto PRIMA del codice):
+0) commit + push del lavoro di oggi (autorizzati alle 18:15) appena finisce la seconda meta' della suite. FATTO: commit 4c0f5bb su ADVANCED, pushato (prima meta' verde a meno dei 3 test poi verdi; seconda meta' FINITA dopo il commit: 4756 passati, 4 saltati, 1 rosso = test_rename_symbol::test_stale_preview_files_are_removed_unless_kicad_holds_them, VERDE da solo (6/6): instabile nella corsa intera, non legato ai file di oggi; da tenere d'occhio). Totale run1 sul codice 4c0f5bb meno le 3 correzioni gia' verdi: 11661 passati, 13 saltati, 19 sottotest.) Correttori Fa/Fb/Fc/Fd LANCIATI alle ~19:40.
+1) CONTRATTO COMUNE fra correttori (deciso dal coordinatore, vincolante):
+   - ExtractedParams.questions: list di dict {"key": str stabile derivata dai candidati, "field":
+     "contacts_view" | "body_height_mm" | "pad_layout", "text": italiano via tx(), "options": [{"label",
+     "value"}], "evidence": {"document": nome file, "crop": (x0,y0,x1,y1) px} | None}. Il risultato porta
+     ANCHE i dati per applicare la risposta senza ripagare: data["_candidates"] = {key: {value: payload}}.
+   - datasheet_extractor.apply_answers(params, answers: dict[key -> value]) -> ExtractedParams: applica
+     localmente (specchio della vista, altezza scelta con provenienza "user", lista di pad scelta con
+     needs_review) e rimuove le domande risposte; extract_pin_header_params(..., answers=...) riceve le risposte
+     gia' salvate e NON ripropone domande con chiave nota.
+   - GUI: dopo l'estrazione, per ogni domanda un solo dialogo (_ask_geometry_doubt generalizzato), risposta in
+     project_config["extraction_answers"][key]; poi apply_answers e generazione. Il blocco resta SOLO quando
+     nessuna domanda puo' chiudere il caso.
+   - ai_diagnostics: AI_CALL_RESULT con gli argomenti redatti (stringhe lunghe/dati -> sha+len), opt-in come
+     log_prompt; ai_diagnostics NON cambia il contratto «niente senza opt-in».
+2) CORRETTORI in parallelo su file DISGIUNTI (nessuno tocca i18n.py, HANDOFF.md, CLAUDE.md):
+   Fa datasheet_extractor.py + suoi test: blocco A (attributi dichiarati: ruolo delle quote stampate, tipo di
+      fermata terminale/foro/asola/riferimento, catena consecutiva/ordinata + quota al bordo del pad, lato del
+      bordo nei midpoints, fermate a virgola, qualificatore nominale/max, decimali -> tolleranza, vista per
+      catena, x_mm/y_mm opzionali con catene, una sola definizione di sporgenza, _HEIGHT_RULE «perpendicolare al
+      piano di appoggio», printed quotes obbligatorie, F3 per ruolo e mai bypassata in adozione, veto delle
+      somme solo su addendi dichiarati), lato estrattore di B (questions/_candidates/apply_answers/answers=),
+      lato estrattore di C (letture concordi contro i fori -> misura/domanda, mai scrittura; fallback silenzioso
+      sul modello principale = una lettura; candidati della misura per scostamenti; vista mai da una lettura
+      confutata; specchio con vista dichiarata; no_match non osservabile = «non decidibile»), M13 (spareggio con
+      modello diverso, mai a 0-0), API reread_body_height/reread_pad_positions per la ri-esecuzione parziale.
+   Fb drawing_holes.py + suoi test: blocco C lato testimone (asole/obround come fori con centro, tipo di foro
+      dichiarato in ingresso, osservabilita' affine dell'insieme ancorato PRIMA di misurare, specchio testato in
+      modo coerente, pad letto su inchiostro chiuso = non verificabile, terzo stato «cannot tell»).
+   Fc main_window.py + test GUI: blocco B lato GUI (dialogo unico per domanda, memoria in project_config,
+      candidati altezza/pad applicati con apply_answers, _rebind_package con body_height_mm), M16 (un solo
+      motivo di rinvio per log/resoconto/overlay/scheda STEP, persistito; quote del corpo applicate campo per
+      campo; Riprova dopo errore; stime bordate come i KLC), cablaggio della ri-esecuzione parziale.
+   Fd ai_diagnostics.py + workers.py + loro test: blocco D (AI_CALL_RESULT redatto con opt-in, conteggio
+      generico dei campi lista; worker di ri-esecuzione parziale modellato su ReconcileWorker che chiama le API
+      di Fa, costo e cancellazione come oggi).
+   Coordinatore: testi nel catalogo (4 lingue) raccolti dai rapporti dei correttori, DB riseminato, digest dei
+      prompt superati, integrazione, generality-auditor sul diff, suite in due meta', handoff, commit con OK.
+3) Ogni correzione: test positivo + negativo per ragioni strutturali, mai sui numeri del pezzo; nessuna soglia
+   nuova; euristiche residue dichiarate nel commento.
+UTENTE 04/11 ~19:05 (durante il giro): «scrivi meglio questa cosa dei ruoli delle immagini» (scheda di avanzamento:
+riga «pinout.jpeg — Pinout + Quote + Piazzole + Side view / hei…» troncata). FATTO dal coordinatore in
+kicadgen/gui/analysis_overlay.py (file fuori dagli ambiti dei correttori): `role_rows` = primo ruolo accanto al nome,
+gli altri su righe proprie rientrate («    + Immagine con quote»); separatore « + » dichiarato come i due gia'
+esistenti (fragile, sulla forma); log non ricomposto. Test in tests/test_overlay_file_list.py sezione 3 (positivo,
+negativo, log). 186 test overlay+documentazione verdi.
+UTENTE 04/11 19:04 «di nuovo non ha fatto il 3D»: analisi del rele' con gpt-5.5 (app riavviata A META' GIRO: il log
+mostra gia' le righe AI_CALL_RESULT di Fd). Causa dal log: ENTRAMBE le letture con contacts_view «unknown» ->
+_require_declared_view BLOCCA per lo specchio (rilievo M12, in correzione: domanda); e il lettore dedicato ha
+scritto midpoints con fermate a virgola between ["1,2","5,3"] -> pin 4 non posto (rilievo M1 CONFERMATO dal log,
+in correzione). Detto all'utente di NON rifare analisi finche' il giro non e' integrato (0.31 USD a corsa).
+RIPRESA 05/11 (nuova sessione, «dove eri rimasto?»): la sessione del 04/11 si e' interrotta DOPO i correttori
+Fa/Fb/Fc/Fd e PRIMA dell'integrazione del coordinatore. Stato trovato nel checkout (ADVANCED, ultimo commit
+4c0f5bb, 21 file modificati + 4 test nuovi NON committati: test_drawing_holes_kinds, test_extraction_declared_attributes,
+test_extraction_questions_gui, test_reread_worker): i moduli compilano; test mirati dei file toccati = 504 verdi,
+1 saltato, 2 ROSSI: (1) test_pad_positions_by_drawn_holes::test_the_hole_check_runs_once_per_layout (il controllo
+dei fori gira 4 volte invece di 3: nuovo check_layout aggiunto da Fa in apply_dedicated_pads, contratto del test
+da capire, non allentare); (2) test_message_localization: 69 testi nuovi dei correttori (main_window,
+datasheet_extractor) SENZA le quattro traduzioni nel catalogo (compito del coordinatore, mai fatto). NON FATTO:
+testi nel catalogo + DB riseminato, digest dei prompt superati, generality-auditor sul diff, suite in due meta',
+commit (serve OK). Nessuna modifica al codice in questa ripresa finche' l'utente non conferma di proseguire.
+UTENTE 05/11: «si, procedi» -> integrazione del coordinatore IN CORSO, in quest'ordine: (1) capire il test rosso dei
+fori (4 controlli invece di 3) e correggere la causa o il contratto; (2) 69 testi nel catalogo (4 lingue) + DB
+riseminato; (3) digest dei prompt superati se i prompt sono cambiati; (4) generality-auditor sul diff; (5) suite in
+due meta'; (6) handoff e conteggi; commit solo con OK esplicito.
+FATTO 05/11 (coordinatore): (1) il 4o controllo dei fori e' VOLUTO (Fb/Fa: _mirror_layouts condivide
+drawing_holes.mirror_variants, specchio provato su X E su Y; rilievo basso «specchio testato solo in X»): contratto
+del test riscritto con la ragione + negativo sul memo (nessun insieme di punti controllato due volte); (2) 67 testi
+dei servizi + 15 testi della GUI (Fc) aggiunti al catalogo in 4 lingue (i18n.py, CRLF riparato a byte); DB
+riseminato (translations 15104 -> 15452, nessun segreto); (3) digest del prompt singolo 76622f74... gia' in
+SUPERSEDED (Fa), gli altri prompt in DB invariati; test localizzazione/i18n/documentazione 80 verdi. IN CORSO:
+suite completa run r1 in due meta' (scratchpad suite_r1.log) e generality-auditor sul diff, in parallelo.
+ESITO AUDIT DI GENERALITA' (05/11, sul diff dei correttori): ALTI: (A1) _block_or_ask offre la domanda «pad_layout»
+anche quando i fori disegnati smentiscono ENTRAMBE le disposizioni (verdetto no_match osservabile): la scelta
+sostituisce un blocco che deve restare e viene pure ricordata nel progetto; (A2) la rilettura parziale
+dell'altezza (workers._reread_model) usa il modello PRINCIPALE = stesso lettore della lista principale salvata,
+apply_dedicated_body non sa di same_model -> due liste dello stesso modello contano come indipendenti (H6 risolto
+per i pad e lo spareggio, non per la rilettura). MEDI: (M3) _height_candidate: «declared» e' per LISTA, una quota
+con ruolo other in una lista mista salta l'esclusione delle quote in pianta; (M4) arrotondamento di una quota
+intera = +-0.5 mm (quote_rounding) indebolisce 10x il controllo catene/corpo (convenzione delle cifre
+significative, non pratica di disegno: ISO 2768-m +-0.2); (M5) fermate ref:/edge: calcolate (references) ma MAI
+passate al testimone (check_pad_layout/measured_layout senza hole_kinds/reference_holes_mm): attributo dichiarato
+e ignorato; (M6) leads_point dichiarato nei due schemi e usato solo per decorare un testo: con due letture
+«left» e ruolo body_height su una quota uguale alla pianta -> confermata senza domanda (caso H1/M4); (M7) risposta
+salvata contacts_view con chiave sui soli NUMERI dei pad -> riapplicata a un altro disegno dello stesso progetto.
+BASSI: mirror_fits scritto e mai letto; lato scelto da UN solo lettore non bordato in GUI; log degli argomenti
+sempre attivo in pratica (ogni chiamante passa log_prompt=True); apply_answers(contacts_view) non scrive
+contacts_view; tolleranza senza pavimento con testi a due decimali. REGGONO: ruoli delle quote, tipi di fermata e
+catena, quote al bordo, qualificatore nominale/max, stesso modello = una lettura nell'estrazione, spareggio mai col
+principale, H6/M18, asole e specchio in drawing_holes, M10/M12/M16, nessun nome/marca, una sola definizione di
+altezza e sporgenza, strict mode DeepSeek lossless sui tre strumenti, redazione del log.
+PIANO CORREZIONI (coordinatore, PRIMA del codice): A1 filtrare i candidati di _block_or_ask con _losing_verdict
+(no_match osservabile) -> meno di due superstiti = blocco; test P (fori non verificabili -> domanda) e N (entrambe
+smentite -> blocco). A2 reread_body_height con il lettore dedicato (_pad_reading_model) e same_model=True al
+ripiego, apply_dedicated_body(same_model) tratta le due liste come una (adozione solo «da verificare», mai 2
+punti); test P/N. M3 regola del ruolo per QUOTA. M4 arrotondamento del testo stampato limitato dal pavimento
+_sum_tolerance (mai sotto la tolleranza generale: un testo piu' preciso puo' solo stringere); test N (slip di 1 mm
+su quote intere resta un problema). M5 _layout_checker/_layout_measurer ricevono references e tipi di fermata.
+M6 leads_point left/right -> altezza uguale a una quota in pianta chiede sempre, anche con ruolo body_height.
+M7 chiave della risposta contacts_view con digest della disposizione. Bassi: mirror_fits rimosso,
+apply_answers scrive anche contacts_view, log degli argomenti dichiarato nell'handoff, pavimento della tolleranza
+anche con testi (M4). Poi test mirati, suite r2 sul codice finale.
+FATTO (05/11, coordinatore, test mirati 320 verdi): A1 _block_or_ask scarta i candidati con no_match osservabile
+(_losing_verdict); <2 superstiti = blocco con «Disposizioni escluse ... smentite dai fori»; 3 test P/N in
+test_pad_positions_by_drawn_holes; CONTRATTO CAMBIATO test_two_pads_off_the_holes_are_not_moved (entrambe smentite
+sulla pagina vera del T7N -> blocco, non domanda). A2 workers._reread_model usa _pad_reading_model per ENTRAMBI i
+campi e passa same_model=(model == main_model); reread_body_height(same_model) -> apply_dedicated_body(same_model):
+helper points() = min(punti, 1) con lo stesso modello + nota «lette dallo stesso modello»; test
+test_reread_worker (contratto riscritto + negativo del ripiego) e test_two_body_lists_of_one_model_give_one_point_at_most.
+M3 _height_candidate: esclusione per valore applicata alla QUOTA con ruolo other, non alla lista; test P/N.
+M4 _Rounding.tolerance = max(PAD_READING_TOLERANCE_MM, min(somma arrotondamenti del testo, _sum_tolerance)) e
+stessa regola nella tolleranza dello span (_chain_contradictions); CONTRATTI RISCRITTI: «12»+«11» con 12.4/11.4 su
+corpo 23 e' un problema (valori nominali, ISO 2768), l'anello «10» vs 5+5=10.4 e' un problema; positivo: testo in
+pollici a 0.001" stringe fino al pavimento. M5 _HoleVerdicts.attach(pads, references)/context(pads), _call_witness
+passa references= solo se la firma lo accetta (doppi di test con (pads, body) intatti), _layout_checker/
+_layout_measurer inoltrano reference_holes_mm a drawing_holes; LIMITE DICHIARATO: hole_kinds per pad non esistono
+nello schema (solo ref:/edge:), quindi non inoltrati. M6 (rotated or not declared_as) -> con leads_point
+left/right la domanda sezione quadrata/vista ruotata si fa anche con ruolo body_height. M7 chiave della domanda
+contacts_view = numeri + _layout_digest. Bassi: mirror_fits rimosso (ramo vuoto -> commento su _withdraw_view);
+NON FATTI (dichiarati): lato scelto da un solo lettore non bordato in GUI; log degli argomenti di fatto sempre
+attivo perche' ogni chiamante passa log_prompt=True (contratto della libreria intatto, nessuna fuga fuori dalla
+macchina); apply_answers(contacts_view) scrive solo source_view (ExtractedParams non ha contacts_view).
+2 testi nel catalogo + DB riseminato. Suite r1 (codice PRIMA delle correzioni dell'audit) ancora in corso: va
+RILANCIATA (r2) sul codice finale e i conteggi presi da r2.
+Suite r1 FERMATA a meta' (codice superato). Suite r2 LANCIATA sul codice finale (scratchpad suite_r2.log, due meta').
+Commenti italiani della sezione 3 di tests/test_overlay_file_list.py (miei del 04/11) tradotti. Diff senza segreti.
+Al verde di r2: conteggi in CLAUDE.md/HANDOFF, poi commit su ADVANCED SOLO con OK esplicito dell'utente.
+UTENTE 05/11: «committa e pusha, mergia in main e poi ritorna qui» (prima di una «sfida» che annuncera' dopo) ->
+commit su ADVANCED, push, merge in main, push, ritorno su ADVANCED FATTI con la suite r2 al 49% della prima meta'
+(nessun rosso fino a li'; test mirati delle aree toccate verdi). L'esito completo di r2 va riportato qui e i
+conteggi in CLAUDE.md riallineati quando finisce; se r2 trova rossi, correzione in un commit successivo.
+
 ## 03/11 notte — IN CORSO: correzione di TUTTI i rilievi della seconda revisione (utente: «ok»)
 Piano approvato: le parti delicate le fa il COORDINATORE in sequenza, con test che riproduce prima il difetto:
 (1) pin come testo: A1, A4, ordine pin_map/settle, N6; (2) editor del corpo: U1/V1 (anche pad), V2/B5, V3/B4/U4
@@ -246,6 +554,24 @@ poi torna qui e quando hai finito spegni il PC». Sequenza: suite run12 verde ->
 push ADVANCED -> merge in main (--no-ff) + push main -> scripts/publish-release.ps1 -Version 1.0.6 da main
 (esige la suite GitHub verde sul commit) -> gh run watch della release -> rapporto nell'handoff -> shutdown.
 L'analisi reale del rele' con lo spareggio NON e' stata fatta prima della release (utente assente): da fare.
+RELEASE v1.0.6 (04/11 00:28): merge ADVANCED -> main 59feefd (Tests GitHub verdi, run 41736733117),
+publish-release.ps1 da main: commit «release: v1.0.6» bfc1710, tag v1.0.6 pushato, workflow «Windows MSI
+release» run 41739407782 in corso; ADVANCED portato a bfc1710 (ff) e pushato. Esito nel punto seguente.
+ESITO (04/11 ~01:15): workflow VERDE, Release pubblicata
+https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.6 con KiCadGen-1.0.6.msi
+(485.6 MB, non prerelease). Build locale di verifica fatta prima (1.0.5, 460.7 MB, solo ICE60). PC spento su
+richiesta dell'utente a fine lavoro.
+APERTO per la prossima sessione (in ordine): (1) analisi REALE del rele' T7NS5D4-12 nell'app con lo spareggio
+(~0.4 USD): verificare altezza 16.9, STEP generato, funzioni dei pin dal simbolo; se la terza lettura sui
+riquadri legge ancora «19,3», passare al testimone geometrico (rettangolo della vista frontale: rapporto h/l
+dentro UN rettangolo, mai la scala dei fori; sul foglio 16.9 passa per 2 px, 19.3 fallisce per 16 px);
+(2) E: riquadri ingranditi anche per la chiamata PRINCIPALE e per la lettura dei pad, «detail: high» per i
+modelli OpenAI, dimensioni in pixel nel log AI, compositing RGBA su bianco senza ingrandimento, PDF rasterizzati
+per le letture dedicate; (3) standoff usato dal STEP (corpo posato a 0.4 mm); (4) tipo di fermata
+(terminale/foro) nello schema delle catene (fragilita' dichiarata della sostituzione dei pad); (5) pin_length
+None lascia il campo GUI vecchio; (6) banco di prova del modello principale su piu' disegni (~1 USD) per
+decidere se sostituire claude-opus-4.1; (7) tools/run_test_halves.py non stampa nulla quando una meta' muore
+senza riepilogo; (8) D1: editor del corpo del simbolo col mouse come nel footprint (da chiedere).
 SUITE run12 VERDE (04/11 00:30): 11649 passati, 13 saltati, 19 sottotest (meta' 6892/9/19 e 4757/4). COMMITTATO su ADVANCED come d982feb; push, merge in main e release v1.0.6 in corso (autorizzati).
 RELEASE IN CORSO (utente 03/11: «crea il pacchetto di installazione e pubblica», poi scelta esplicita «v1.0.6 da
 ADVANCED», main non toccato): build locale -IncludeYoloModel come verifica, poi scripts/publish-release.ps1

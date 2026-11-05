@@ -206,9 +206,44 @@ class _MeshPrepareJob(QRunnable):
         self.signals.finished.emit(self.token, self.key, scene, error)
 
 
+#: Pin label height, mm. The former fixed height (0.65) was tuned on the
+#: 2.54 mm pin header: the fraction keeps that ratio, so headers draw as
+#: before and sparser parts (a relay with pins 6 mm apart, unreadable at
+#: 0.65; user, 2026-11-04) scale up with the room between their anchors.
+#: Floor and cap are heuristics, declared: below the floor nothing is
+#: legible, above the cap the label looks like a marking of the part.
+_LABEL_HEIGHT_MIN_MM = 0.65
+_LABEL_HEIGHT_MAX_MM = 2.0
+_LABEL_HEIGHT_OF_GAP = _LABEL_HEIGHT_MIN_MM / 2.54
+
+
+def _pin_label_height(points) -> float:
+    """@brief Pin label height, mm, from the room between the nearest two anchors.
+
+    @param points Anchor positions (N x 3, mm).
+    @return `_LABEL_HEIGHT_OF_GAP` times the smallest anchor distance,
+        clamped to [_LABEL_HEIGHT_MIN_MM, _LABEL_HEIGHT_MAX_MM]; the floor
+        alone with fewer than two anchors.
+    @note A view-only size: the label must stay readable on a sparse part
+        (a relay) without touching its neighbour on a dense one (a header, a
+        fine-pitch grid, which keeps the former fixed height).
+    """
+    if len(points) < 2:
+        return _LABEL_HEIGHT_MIN_MM
+    xy = np.asarray(points, dtype=float)[:, :2]
+    deltas = xy[:, None, :] - xy[None, :, :]
+    distances = np.sqrt((deltas ** 2).sum(axis=2))
+    distances[np.arange(len(xy)), np.arange(len(xy))] = np.inf
+    nearest = float(distances.min())
+    if not np.isfinite(nearest):
+        return _LABEL_HEIGHT_MIN_MM
+    return min(_LABEL_HEIGHT_MAX_MM, max(_LABEL_HEIGHT_MIN_MM, _LABEL_HEIGHT_OF_GAP * nearest))
+
+
 def _pin_text_mesh(points, labels):
     """View-only planar text, with one shared reading direction on the pin face."""
     import pyvista as pv
+    height = _pin_label_height(points)
     span = np.ptp(points[:, :2], axis=0)
     along_x = span[0] >= span[1]
     # Text normal faces -Z, so names read correctly from the underside.
@@ -221,7 +256,7 @@ def _pin_text_mesh(points, labels):
     max_width = max(1.0, across * .42 - gap)
     pieces = []
     for point, label in zip(points, labels):
-        text = pv.Text3D(label, depth=0, height=.65)
+        text = pv.Text3D(label, depth=0, height=height)
         coords = text.points.copy()
         coords -= (coords.min(axis=0) + coords.max(axis=0)) / 2
         width = np.ptp(coords[:, 0])

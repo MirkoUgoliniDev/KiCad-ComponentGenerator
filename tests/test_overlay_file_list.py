@@ -383,3 +383,41 @@ def test_a_long_term_with_a_description_over_half_the_row_keeps_the_head(qapp):
     shown, description = _elide_row(f"{term} — ruolo", width, regular, bold, True)
     assert description == "ruolo"
     assert shown.startswith("nome-") and shown.endswith(".png") and "…" in shown
+
+
+# ── 3. One role per row (user, 2026-11-04) ────────────────────────────
+#
+# «scrivi meglio questa cosa dei ruoli delle immagini» (write the image roles
+# better): a document with four roles ended on one truncated row («Side view
+# / hei…»). Now the first role sits beside the name and the others on their
+# own indented rows.
+
+def test_a_document_with_several_roles_shows_one_role_per_row(make_overlay):
+    """@brief Positive: four roles = four rows, all whole and visible; the name is bold once."""
+    overlay, _, app = make_overlay(900, 650)
+    overlay.set_status(_files_sent_message(
+        [Path('d') / 'SRD.jpg', Path('d') / 'pinout.jpeg'],
+        {'SRD.jpg': ('hires',), 'pinout.jpeg': ('pinout', 'top', 'land_pattern', 'side_view')}))
+    assert _lines(overlay)[1:] == ['SRD.jpg — Foto ad alta risoluzione',
+                                   'pinout.jpeg — Pinout / disposizione contatti',
+                                   '    + Immagine con quote',
+                                   '    + Piazzole consigliate',
+                                   '    + Vista laterale / altezze.']
+    assert _bold_runs(overlay.status) == ['SRD.jpg', 'pinout.jpeg']
+    _assert_fully_visible(overlay, app)
+
+
+def test_a_single_role_and_a_plain_item_stay_on_one_row():
+    """@brief Negative: a single role does not expand; an item without a role term that
+    contains « + » is a sentence, not a list of roles."""
+    from kicadgen.gui.analysis_overlay import role_rows
+    lines = ['Invio a AI 2 documenti: ', 'a.png — Immagine con quote',
+             'component J2: merged + split boxes']
+    assert role_rows(lines) == [(lines[0], False), (lines[1], True), (lines[2], True)]
+
+
+def test_the_log_line_of_a_multi_role_document_is_not_reflowed():
+    """@brief The log line stays ONE line: the expansion is presentation only."""
+    message = _files_sent_message([Path('d') / 'pinout.jpeg'],
+                                  {'pinout.jpeg': ('pinout', 'top', 'side_view')})
+    assert "\n" not in message and " + " in message

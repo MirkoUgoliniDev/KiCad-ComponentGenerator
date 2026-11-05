@@ -17,6 +17,7 @@ from kicadgen.services import datasheet_extractor as ext
 from kicadgen.services.datasheet_extractor import (
     DEFAULT_PIN_NUMBERING_PROMPT, DEFAULT_SINGLE_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT,
     ExtractionError, SINGLE_COMPONENT_FAMILIES, single_answer_to_data)
+from test_pad_dimension_chains import unresolved  # noqa: E402
 
 PADS = [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "pad_type": "thru_hole", "drill_mm": 1.0,
          "pad_length_mm": 1.8, "pad_width_mm": 1.8},
@@ -393,7 +394,7 @@ def test_a_different_distance_blocks_without_choosing_a_reading():
     wrong = dict(RELAY, **{"1": (5.08, 0.0), "5": (2.54, 0.0), "4": (0.0, 0.0)})
     data = _main_with_pads(wrong)
     apply_dedicated_pads(data, _pad_reading(RELAY))
-    assert "non coincidono" in data["_pin_map_conflict"] and "1-4" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data) and "1-4" in unresolved(data)
     assert data["package_geometry"]["pins"][0]["x_mm"] == 5.08, "the main pads stay"
 
 
@@ -408,16 +409,16 @@ def test_a_subset_or_a_different_view_is_said():
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"], "4": RELAY["4"], "2": RELAY["2"]}))
     # Since 2026-10-30 (user) a partial confirmation blocks: two pads unchecked.
-    assert "solo 3 pad su 5" in data["_pin_map_conflict"]
+    assert "solo 3 pad su 5" in unresolved(data)
     data = _main_with_pads(RELAY, view="top")
     apply_dedicated_pads(data, _pad_reading(RELAY, view="bottom"))
-    assert "viste diverse" in data["_pin_map_conflict"]
+    assert "viste diverse" in unresolved(data)
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, _pad_reading({"1": RELAY["1"]}))
-    assert "meno di due" in data["_pin_map_conflict"]
+    assert "meno di due" in unresolved(data)
     data = _main_with_pads(RELAY)
     apply_dedicated_pads(data, {"view": "unknown", "pads": {}, "notes": "", "failed": "boom"})
-    assert "chiamata non riuscita: boom" in data["_pin_map_conflict"]
+    assert "chiamata non riuscita: boom" in unresolved(data)
 
 
 def test_the_reader_converts_the_declared_unit_and_drops_unusable_chains(tmp_path):
@@ -448,7 +449,12 @@ def test_end_to_end_a_single_part_with_pads_gets_the_second_reading(offline, mon
     assert call.call_count == 3
     assert call.call_args_list[1].kwargs["tool"]["function"]["name"] == "report_pad_positions"
     assert call.call_args_list[2].kwargs["tool"]["function"]["name"] == "report_body_dimensions"
-    assert params.pin_map_conflict and "non coincidono" in params.pin_map_conflict
+    # CONTRACT CHANGED (review 2026-11-04, B3): two complete layouts that
+    # disagree are a structured question, not a hard block.
+    assert params.pin_map_conflict is None and "non coincidono" in params.notes
+    question, = [q for q in params.questions if q["field"] == "pad_layout"]
+    assert len(question["options"]) == 2 and question["evidence"]["document"] == "quote.png"
+    assert set(params.candidates[question["key"]]) == {o["value"] for o in question["options"]}
     call = Mock(side_effect=[_single(pads=wrong), second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
@@ -506,8 +512,13 @@ def test_end_to_end_a_correct_grid_that_leaves_out_an_off_grid_pin_is_blocked(
 
 def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, monkeypatch,
                                                                        tmp_path):
-    """Positive: a real regular grid, read the same way by the dedicated
-    reading, is confirmed and builds the footprint at the grid positions."""
+    """Positive: a real regular grid, read the same way by a DIFFERENT dedicated
+    reader, is confirmed and builds the footprint at the grid positions.
+
+    CONTRACT CHANGED (review 2026-11-04, H6): the same model reading twice is
+    one reading; the agreement confirms only between two models (negative
+    twin below, blocked without a witness and said so).
+    """
     main = _grid_answer(2, 2, 12.2, 12.0)
     second = {"drawing_unit": "mm", "contacts_view": "bottom", "chains": [
         {"axis": "x", "stops": ["1,2", "3,4"], "values": [12.2]},
@@ -515,6 +526,7 @@ def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, 
     call = Mock(side_effect=[main, second, _BODY_ANSWER])
     monkeypatch.setattr(ext, "call_tool", call)
     params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           pad_model="vendor/reader",
                                            document_roles={"quote.png": ["pinout"]})
     assert call.call_count == 3 and not params.pin_map_conflict
     pins = params.package_geometry["pins"]
@@ -522,6 +534,11 @@ def test_end_to_end_a_grid_the_dedicated_reading_confirms_is_generated(offline, 
     ys = sorted({round(float(p["y_mm"]), 3) for p in pins})
     assert len(pins) == 4 and xs[1] - xs[0] == pytest.approx(12.2)
     assert ys[1] - ys[0] == pytest.approx(12.0)
+    call = Mock(side_effect=[_grid_answer(2, 2, 12.2, 12.0), second, _BODY_ANSWER])
+    monkeypatch.setattr(ext, "call_tool", call)
+    params = ext.extract_pin_header_params([_drawing(tmp_path)], component_family="single_tht",
+                                           document_roles={"quote.png": ["pinout"]})
+    assert params.pin_map_conflict and "stesso modello" in params.pin_map_conflict
 
 
 #: Third dedicated call of a single part (user, 2026-11-03): the printed body quotes.

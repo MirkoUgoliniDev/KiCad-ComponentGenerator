@@ -97,7 +97,13 @@ def test_a_disagreeing_height_is_dropped_because_no_witness_sees_it():
     apply_dedicated_body(data, {"values": {"body_height": 16.9}, "notes": ""}, logs.append)
     assert data["body_height_mm"] is None
     assert "body_height_mm" not in data["package_geometry"]
-    assert any("18.90 mm contro 16.90 mm" in line and "quota verticale" in line for line in logs)
+    # CONTRACT CHANGED (review 2026-11-04, B3): a height conflict is no dead
+    # end; the two values are offered as a structured question.
+    assert any("18.90 mm" in line and "16.90 mm" in line and "non coincidono" in line for line in logs)
+    assert "18.90 mm" in data["_body_conflict"]
+    question, = data["_questions"]
+    assert question["field"] == "body_height_mm"
+    assert [option["value"] for option in question["options"]] == [18.9, 16.9]
 
 
 def test_a_disagreeing_plan_quote_keeps_the_main_value_with_a_warning():

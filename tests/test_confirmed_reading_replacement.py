@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from kicadgen.services import datasheet_extractor as ext
+from test_pad_dimension_chains import unresolved  # noqa: E402
 
 #: The T7N layout as the dedicated chains sum it (page orientation, mm).
 T7N = {"11": (0.0, 6.0), "A1": (2.0, 0.0), "A2": (2.0, 12.0),
@@ -86,7 +87,7 @@ def test_real_numbers_of_another_scheme_are_not_replaced():
     so nobody decides (contrast: the same numbers by convention are replaced)."""
     data = _data([dict(p) for p in GRID])
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
 def test_a_reading_with_fewer_pads_never_replaces_the_answer():
@@ -95,7 +96,7 @@ def test_a_reading_with_fewer_pads_never_replaces_the_answer():
     four = {k: v for k, v in T7N.items() if k != "11"}
     data = _data([dict(p) for p in GRID], convention=True)
     ext.apply_dedicated_pads(data, _reading(four), check_layout=_witness(four))
-    assert "_pin_map_conflict" in data and len(data["package_geometry"]["pins"]) == 5
+    assert unresolved(data) and len(data["package_geometry"]["pins"]) == 5
 
 
 def test_an_incomplete_answer_with_real_numbers_is_replaced_only_when_the_holes_deny_it():
@@ -113,7 +114,7 @@ def test_an_incomplete_answer_with_real_numbers_is_replaced_only_when_the_holes_
     subset = {k: v for k, v in T7N.items() if k != "11"}
     data = _data(four)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N, subset))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["12", "14", "A1", "A2"]
+    assert unresolved(data) and _numbers(data) == ["12", "14", "A1", "A2"]
 
 
 def test_real_numbers_contradicted_on_shared_pads_are_not_a_replacement():
@@ -126,7 +127,7 @@ def test_real_numbers_contradicted_on_shared_pads_are_not_a_replacement():
     swapped = dict(T7N, **{"A1": T7N["14"], "14": T7N["A1"]})
     data = _data([_pin(n, x, y) for n, (x, y) in swapped.items()])
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness())
-    assert "_pin_map_conflict" in data
+    assert unresolved(data)
     pins = {p["number"]: (p["x_mm"], p["y_mm"]) for p in data["package_geometry"]["pins"]}
     assert pins["A1"] == T7N["14"]
     data = _data([_pin(n, x, y) for n, (x, y) in swapped.items()])
@@ -138,7 +139,7 @@ def test_two_confirmed_readings_are_never_a_replacement():
     main = {p["number"]: (p["x_mm"], p["y_mm"]) for p in GRID}
     data = _data([dict(p) for p in GRID], convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N, main))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
 def _shape_witness(layout):
@@ -166,32 +167,48 @@ def test_read_numbers_of_another_scheme_on_the_same_layout_still_block():
     printed = [_pin(str(i), x + 3.0, y + 1.0) for i, (x, y) in enumerate(T7N.values(), 1)]
     data = _data(printed)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_shape_witness(T7N))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
 def test_an_unconfirmed_reading_is_never_a_replacement():
     data = _data([dict(p) for p in GRID], convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness())
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
-def test_a_mirror_fitting_as_well_is_never_a_replacement():
+def test_a_mirror_fitting_as_well_follows_the_declared_side():
+    """CONTRACT CHANGED (review 2026-11-04, M9): the mirror fitting too no longer refuses the
+    reading that declares its side; a reading silent on its side is replaced for its geometry
+    and the side of the refuted grid is withdrawn (asked later)."""
     mirrored = {n: (-x, y) for n, (x, y) in T7N.items()}
     data = _data([dict(p) for p in GRID], convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N, mirrored))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert not unresolved_or_none(data) and _numbers(data) == ["11", "12", "14", "A1", "A2"]
+    assert data["package_geometry"]["source_view"] == "bottom"
+    data = _data([dict(p) for p in GRID], convention=True)
+    ext.apply_dedicated_pads(data, _reading(T7N, view="unknown"), check_layout=_witness(T7N, mirrored))
+    assert _numbers(data) == ["11", "12", "14", "A1", "A2"]
+    assert data["contacts_view"] == "unknown" and "ritirata" in data["notes"]
+
+
+def unresolved_or_none(data):
+    """`unresolved` for a result that may be resolved (None then)."""
+    try:
+        return unresolved(data)
+    except AssertionError:
+        return None
 
 
 def test_declared_views_that_differ_are_never_a_replacement():
     data = _data([dict(p) for p in GRID], convention=True, view="top")
     ext.apply_dedicated_pads(data, _reading(T7N, view="bottom"), check_layout=_witness(T7N))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
 def test_a_reading_with_unplaced_pads_is_never_a_replacement():
     data = _data([dict(p) for p in GRID], convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N, unplaced=["13"]), check_layout=_witness(T7N))
-    assert "_pin_map_conflict" in data and _numbers(data) == ["1", "2", "3", "4", "5"]
+    assert unresolved(data) and _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
 def test_non_uniform_pad_attributes_block_with_their_names():
@@ -199,7 +216,7 @@ def test_non_uniform_pad_attributes_block_with_their_names():
     pins[0]["drill_mm"] = 1.0
     data = _data(pins, convention=True)
     ext.apply_dedicated_pads(data, _reading(T7N), check_layout=_witness(T7N))
-    assert "_pin_map_conflict" in data and "drill_mm" in data["_pin_map_conflict"]
+    assert unresolved(data) and "drill_mm" in unresolved(data)
     assert _numbers(data) == ["1", "2", "3", "4", "5"]
 
 
@@ -251,7 +268,11 @@ def test_end_to_end_an_unknown_view_in_both_readings_blocks_the_chiral_t7n(monke
                                                                          tmp_path):
     """Negative of the above: same drawing, no reading declares the view."""
     params = _replay(monkeypatch, tmp_path, "unknown", "unknown")
-    assert params.pin_map_conflict and "SPECCHIATO" in params.pin_map_conflict
+    # CONTRACT CHANGED (review 2026-11-04, M12): the side is asked, the pads are confirmed.
+    assert params.pin_map_conflict is None
+    assert [q["field"] for q in params.questions] == ["contacts_view"]
+    bottom = ext.apply_answers(params, {params.questions[0]["key"]: "bottom"})
+    assert bottom.questions == [] and bottom.package_geometry["source_view"] == "bottom"
 
 
 # -- TASK 2: an unknown view of a chiral layout -----------------------------------------
@@ -281,10 +302,20 @@ def _single(layout, view):
     return _data([_pin(n, x, y) for n, (x, y) in layout.items()], view=view)
 
 
-def test_an_unknown_view_of_a_chiral_layout_blocks():
+def test_an_unknown_view_of_a_chiral_layout_is_asked():
+    """CONTRACT CHANGED (review 2026-11-04, M12): one bit the user sees is asked, not blocked."""
     data = _single(T7N, "unknown")
     ext._require_declared_view(data)
-    assert "SPECCHIATO" in data["_pin_map_conflict"]
+    assert "_pin_map_conflict" not in data
+    question, = data["_questions"]
+    assert question["field"] == "contacts_view" and "SPECCHIATO" in question["text"]
+    assert [o["value"] for o in question["options"]] == ["top", "bottom"]
+    assert data["contacts_view"] == "unknown"
+    # A saved answer with the same key settles it without a question.
+    data = _single(T7N, "unknown")
+    data["_answers"] = {question["key"]: "bottom"}
+    ext._require_declared_view(data)
+    assert not data.get("_questions") and data["package_geometry"]["source_view"] == "bottom"
 
 
 @pytest.mark.parametrize("view", ["top", "bottom"])
@@ -304,5 +335,6 @@ def test_an_existing_block_keeps_its_reason_and_adds_the_view():
     data = _single(T7N, "unknown")
     data["_pin_map_conflict"] = "earlier reason"
     ext._require_declared_view(data)
-    assert data["_pin_map_conflict"].startswith("earlier reason") \
-        and "SPECCHIATO" in data["_pin_map_conflict"]
+    # The block keeps its own reason; the side is a question beside it (B3).
+    assert data["_pin_map_conflict"] == "earlier reason"
+    assert data["_questions"][0]["field"] == "contacts_view"

@@ -38,14 +38,36 @@ reading is reported NOT CONFIRMED only when the image holds at least as many
 circles drawn like holes (centre or extension line through them, or standing
 alone on paper) as the reading has pads. Otherwise the image cannot tell a
 wrong reading from a page whose circles are letters, and the answer is
-"unverifiable" with reason "too_few_circles".
+"unverifiable" with reason "too_few_circles", or "no_round_holes" when no
+circle at all is drawn like a hole (an SMD land pattern, a page of text).
+
+Slots and lands (2026-11-04, review H4/M11): a closed non-circular contour
+of hole size -- an obround (two semicircles joined by two parallel
+segments) or an outlined rectangle -- is found as well (see
+:func:`_find_regions`). An obround is a drawn hole: its centre takes part
+in the matching like a circle's, with ``kind`` "obround" beside the rings.
+A pad whose reading lands inside such a contour is unverifiable for that
+pad, never a miss that contradicts the reading. The reading may declare
+each pad's hole kind (terminal, mounting, slot) and the positions of its
+non-pad holes (``hole_kinds``, ``reference_holes_mm``): a declared pad is
+matched only to a hole of its kind, and a declared reference hole is never
+taken for a pad.
+
+Scale observability (2026-11-04, review H5/M18): the stretch and shear
+test can be run only on AFFINE_MIN_PADS pads not nearly collinear
+(:func:`_affine_observable`); ``scale_observable`` says whether it was, a
+failed fit of a reading that cannot show the page's scale is reported
+"no_match_unobservable" (not the losing "no_match"), and no pad is ever
+moved from an anchoring that cannot show the scale or shows a stretch.
 
 A second entry point, :func:`measured_layout`, deduces the position of ONE
-misplaced pad of a reading: when every other pad (at least MIN_PADS) sits on
-its drawn hole and exactly one hole drawn like a hole is left free near the
-misplaced pad's reading, that pad is moved onto it. Any ambiguity (several
-candidate holes, several fitting anchorings, a mirrored reading moving the
-pad elsewhere) refuses the deduction.
+misplaced pad of a reading: when every other pad (at least MIN_PADS, able
+to show the page's scale) sits on its drawn hole and exactly one hole drawn
+like a hole, of the pad's kind, is left free near the misplaced pad's
+reading, that pad is moved onto it. Any ambiguity (several candidate
+holes, several fitting anchorings, a mirrored reading -- see
+:func:`mirror_variants` -- moving the pad elsewhere) refuses the
+deduction; :func:`measured_layout_outcome` names the refusal.
 
 @note :func:`check_pad_layout` is a CHECK, never a measurement: no
     millimetre value is produced from pixels to replace the quotes. It
@@ -291,10 +313,49 @@ MAX_RING_PROBES = 3000
 #: readings against the same few images.
 ANALYSIS_CACHE_SIZE = 8
 
+#: Longest closed contour taken for a slot or a land, as a multiple of the
+#: largest circle radius searched (R_MAX_FRACTION): its short side obeys the
+#: circle bound, its long side this one. Declared heuristic: a closed
+#: outline longer than four hole radii is a cut-out or a body, not a hole;
+#: a slot length declared by the reading would make it unnecessary.
+SLOT_LENGTH_RADII = 4.0
+
+#: Growth factor of the straight-run lengths removed before the closed
+#: contours are searched again (see :func:`_find_regions`): a slot crossed
+#: by its centre lines is whole only once the lines, longer than its sides,
+#: are removed and its sides, shorter, are kept. Same step as the line-free
+#: masks of the circle search (15 %), coarser: a slot's sides and its
+#: centre lines differ in length by at least the slot's end arcs plus the
+#: two diameters a centre line runs on outside (see :func:`_hole_evidence`).
+REGION_LINE_STEP = 1.3
+
+#: Mirror layouts tested against a confirmed or measured fit: the X flip
+#: (the other face of the part seen through the page) and the Y flip (the
+#: same, with the page turned). ONE definition for the measure of this
+#: module and for the extractor's guard (:func:`mirror_variants`).
+MIRROR_FLIPS = ((-1.0, 1.0), (1.0, -1.0))
+
+#: Circle kind of each hole kind a reading may declare (``hole_kinds`` of
+#: :func:`check_pad_layout`): terminal and mounting holes are drawn as rings,
+#: slots as obrounds. An unknown kind binds nothing.
+HOLE_KIND_CIRCLES = {"terminal": "ring", "mounting": "ring", "slot": "obround"}
+
 #: Status values of :class:`LayoutCheck`.
 CONFIRMED = "confirmed"
 NOT_CONFIRMED = "not_confirmed"
 UNVERIFIABLE = "unverifiable"
+
+#: Reason of a failed fit whose pads cannot show whether the page is drawn
+#: to scale (fewer than AFFINE_MIN_PADS pads, or nearly collinear ones): the
+#: image could not tell "wrong" from "not to scale on one axis", so this is
+#: NOT the losing verdict "no_match" is (review M18, 2026-11-04).
+NO_MATCH_UNOBSERVABLE = "no_match_unobservable"
+
+#: Reason of a line drawing with no circle drawn like a hole at all (an SMD
+#: land pattern of rectangles, a page of text): nothing round to check
+#: against (review M11, 2026-11-04). "too_few_circles" keeps meaning fewer
+#: such circles than pads.
+NO_ROUND_HOLES = "no_round_holes"
 
 # Order of the not-confirmed stages: a later stage means the reading got
 # further through the checks, so its reason is the more informative one.
@@ -310,14 +371,22 @@ class LayoutCheck:
 
     @note ``status`` is "confirmed", "not_confirmed" or "unverifiable";
         ``reason`` is a machine code ("confirmed", "too_few_pads",
-        "too_many_pads", "no_image", "not_a_drawing", "too_few_circles",
-        "low_resolution", "search_limit", "no_match", "distorted",
-        "body_scale"); ``image`` is the file name of
-        the image that decided, None when none did; ``max_error_mm`` and
-        ``tolerance_mm`` come from the best fit, None when no fit was made;
-        ``circles`` is the number of circles found in the deciding image (all
-        of them, glyph-like ones included; for "too_few_circles" it may exceed
-        the pad count when too few of them are drawn like holes).
+        "too_many_pads", "no_image", "not_a_drawing", "no_round_holes",
+        "too_few_circles", "low_resolution", "search_limit", "no_match",
+        "no_match_unobservable", "distorted", "body_scale"); ``image`` is
+        the file name of the image that decided, None when none did;
+        ``max_error_mm`` and ``tolerance_mm`` come from the best fit, None
+        when no fit was made; ``circles`` is the number of circles found in
+        the deciding image (all of them, glyph-like ones and slot centres
+        included; for "too_few_circles" it may exceed the pad count when
+        too few of them are drawn like holes).
+    @note ``scale_observable`` (2026-11-04) says whether the stretch and
+        shear test of the fit could be run on this reading: at least
+        AFFINE_MIN_PADS pads not nearly collinear (see
+        :func:`_affine_observable`). When False, a confirmation does not
+        cover the page's scale along either axis and a failure is reported
+        as "no_match_unobservable": the caller must not take it for
+        "wrong".
     """
 
     status: str
@@ -326,11 +395,18 @@ class LayoutCheck:
     max_error_mm: float | None
     tolerance_mm: float | None
     circles: int
+    scale_observable: bool = False
 
 
 @dataclass(frozen=True)
 class _Circle:
-    """A drawn circle in working-image pixels."""
+    """A drawn circle in working-image pixels, or the centre of a drawn slot.
+
+    ``kind`` is "ring" for a circle and "obround" for a slot (two
+    semicircles of radius ``r`` joined by two parallel segments of length
+    2 ``half_length`` along the unit axis (``ux``, ``uy``)); a slot takes
+    part in the matching through its centre like a circle does.
+    """
 
     x: float
     y: float
@@ -339,6 +415,42 @@ class _Circle:
     #: Drawn like a hole (centre line through it, or isolated on paper), see
     #: :func:`_hole_evidence`; only such circles can contradict a reading.
     evidence: bool = False
+    kind: str = "ring"
+    half_length: float = 0.0
+    ux: float = 1.0
+    uy: float = 0.0
+
+
+@dataclass(frozen=True)
+class _Region:
+    """A closed non-circular contour drawn on the page: a slot ("obround") or an outlined land ("rectangle").
+
+    Working-image pixels: centre (``x``, ``y``), unit long axis (``ux``,
+    ``uy``), ``half_length`` along it (an obround: half its straight part;
+    a rectangle: half its long side) and ``half_width`` across it (an
+    obround: the radius of its end arcs). ``contour`` is the boundary of
+    the enclosed paper, for point-in-region tests; ``evidence`` as for
+    :class:`_Circle`.
+    """
+
+    kind: str
+    x: float
+    y: float
+    ux: float
+    uy: float
+    half_length: float
+    half_width: float
+    contour: np.ndarray
+    evidence: bool = False
+
+    def contains(self, x: float, y: float) -> bool:
+        """True when the point (px) lies inside or on the enclosed contour."""
+        return cv2.pointPolygonTest(self.contour, (float(x), float(y)), False) >= 0
+
+    def as_circle(self) -> _Circle:
+        """The slot as a matching circle: its centre, the radius of its end arcs, its axis."""
+        return _Circle(self.x, self.y, self.half_width, 1.0, self.evidence, self.kind,
+                       self.half_length, self.ux, self.uy)
 
 
 @dataclass(frozen=True)
@@ -352,12 +464,17 @@ class _Fit:
 
 @dataclass(frozen=True)
 class _ImageResult:
-    """Per-image outcome used to choose the overall answer."""
+    """Per-image outcome used to choose the overall answer.
+
+    ``hole_like`` counts the circles drawn like holes (evidence), which
+    tells "no_round_holes" (none at all) from "too_few_circles".
+    """
 
     name: str
     drawing: bool
     circles: int
     fit: _Fit | None
+    hole_like: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -365,36 +482,57 @@ class _ImageResult:
 # ---------------------------------------------------------------------------
 
 def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
-                     body_mm: Sequence[float] | None = None) -> LayoutCheck:
+                     body_mm: Sequence[float] | None = None, *,
+                     hole_kinds: Mapping[object, str] | None = None,
+                     reference_holes_mm: Sequence[Sequence[float]] | None = None) -> LayoutCheck:
     """@brief Tell whether a reading of pad centres fits the hole circles drawn in an image.
 
     @param images Candidate drawing images; files with other suffixes than
         png/jpg/jpeg/webp/bmp and unreadable files are skipped.
     @param pads_mm Pad number -> (x, y) in mm AS SEEN ON THE PAGE: X to the
         right, Y down, arbitrary origin. The reading is never mirrored: a
-        mirrored fit does not confirm.
+        mirrored fit does not confirm (see :func:`mirror_variants` for the
+        layouts a caller tests the other face with).
     @param body_mm Optional (length along page X, width along page Y) in mm.
         When given and an outline rectangle enclosing the matched holes is
         found, its width and height at the fitted scale must agree with
         the body within two tolerances plus BODY_ALLOWANCE_MM.
+    @param hole_kinds Optional pad number -> "terminal" | "mounting" | "slot",
+        what the reading DECLARED each pad's hole to be (the extractor
+        passes the kinds of the chain reading's stops). A declared pad is
+        matched only to a drawn hole of that kind (HOLE_KIND_CIRCLES: rings
+        for terminals and mounting holes, obround slots for slots); pads
+        without a declared kind, unknown kinds and numbers not in
+        ``pads_mm`` bind nothing.
+    @param reference_holes_mm Optional (x, y) mm, in the frame of ``pads_mm``,
+        of holes the reading declared that are NOT pads (mounting or
+        reference holes it placed): an assignment putting a pad on the
+        drawn hole of such a position does not count.
     @return A :class:`LayoutCheck`: "confirmed" if any image confirms; else
         "not_confirmed" if at least one line drawing had at least as many
-        circles drawn like holes as the reading has pads; else
-        "unverifiable" with the most informative reason ("too_few_pads" below
-        MIN_PADS pads, "too_many_pads" above MAX_PADS, then
-        "search_limit" > "low_resolution" > "too_few_circles" >
-        "not_a_drawing" > "no_image").
-    @throws ValueError When a pad coordinate or a body size is not a finite
-        number (a positive one for the body).
+        circles drawn like holes as the reading has pads (reason
+        "no_match", or "no_match_unobservable" when the reading cannot show
+        the page's scale, see ``scale_observable``); else "unverifiable"
+        with the most informative reason ("too_few_pads" below MIN_PADS
+        pads, "too_many_pads" above MAX_PADS, then "search_limit" >
+        "low_resolution" > "too_few_circles" > "no_round_holes" >
+        "not_a_drawing" > "no_image"). A pad whose reading lands inside a
+        closed non-circular contour (a slot, an outlined land) is
+        unverifiable, never a miss that contradicts.
+    @throws ValueError When a pad coordinate, a body size or a reference
+        hole is not a finite number (a positive one for the body).
     @note Deterministic and local: no AI, no network, no millimetres derived
         from pixels.
     """
     points = _validated_points(pads_mm)
     body = _validated_body(body_mm)
+    kinds = _required_kinds(list(pads_mm.keys()), hole_kinds)
+    references = _validated_references(reference_holes_mm)
+    observable = _affine_observable(points) if len(points) else False
     if len(points) < MIN_PADS:
-        return LayoutCheck(UNVERIFIABLE, "too_few_pads", None, None, None, 0)
+        return LayoutCheck(UNVERIFIABLE, "too_few_pads", None, None, None, 0, observable)
     if len(points) > MAX_PADS:
-        return LayoutCheck(UNVERIFIABLE, "too_many_pads", None, None, None, 0)
+        return LayoutCheck(UNVERIFIABLE, "too_many_pads", None, None, None, 0, observable)
 
     results: list[_ImageResult] = []
     for path in images:
@@ -404,12 +542,27 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         analysis = _analyse(path)
         if analysis is None:
             continue
-        result = _check_image(path.name, analysis, points, body)
+        result = _check_image(path.name, analysis, points, body, kinds, references)
         if result.fit is not None and result.fit.stage == "confirmed":
             return LayoutCheck(CONFIRMED, "confirmed", result.name, round(result.fit.max_error_mm, 4),
-                               round(result.fit.tolerance_mm, 4), result.circles)
+                               round(result.fit.tolerance_mm, 4), result.circles, observable)
         results.append(result)
-    return _summarise(results)
+    return _summarise(results, observable)
+
+
+def mirror_variants(pads_mm: Mapping[object, Sequence[float]]) -> list[dict]:
+    """@brief The mirror layouts of a reading: its X flip, then its Y flip (MIRROR_FLIPS).
+
+    @param pads_mm Pad number -> (x, y) mm, page orientation.
+    @return One dict per flip, same keys, coordinates as floats.
+    @note The ONE definition of «the mirror» used by :func:`measured_layout`
+        (a mirror that also fits refuses a move) and offered to the
+        extractor's guard, so both test the same layouts (review low
+        «mirror tested only in X», 2026-11-04). The first entry is the X
+        flip the guard tested before.
+    """
+    return [{key: (float(value[0]) * fx, float(value[1]) * fy) for key, value in pads_mm.items()}
+            for fx, fy in MIRROR_FLIPS]
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +578,29 @@ def _validated_points(pads_mm: Mapping[object, Sequence[float]]) -> np.ndarray:
             raise ValueError(f"pad {key!r}: non-finite coordinate {value!r}")
         rows.append((x, y))
     return np.array(rows, float).reshape(-1, 2)
+
+
+def _validated_references(reference_holes_mm: Sequence[Sequence[float]] | None) -> np.ndarray:
+    """Return the declared reference holes as an (m, 2) float array (m may be 0); reject non-finite values."""
+    rows = []
+    for value in reference_holes_mm or ():
+        x, y = (float(v) for v in value)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError(f"reference hole: non-finite coordinate {value!r}")
+        rows.append((x, y))
+    return np.array(rows, float).reshape(-1, 2)
+
+
+def _required_kinds(keys: Sequence[object], hole_kinds: Mapping[object, str] | None) -> list[str | None]:
+    """Circle kind each pad is bound to by the declared hole kinds (None = any), in pad order.
+
+    Keys are compared as given and as text, so "5" and 5 declare the same
+    pad; unknown kinds bind nothing (see HOLE_KIND_CIRCLES).
+    """
+    if not hole_kinds:
+        return [None] * len(keys)
+    declared = {str(key): HOLE_KIND_CIRCLES.get(str(kind)) for key, kind in hole_kinds.items()}
+    return [declared.get(str(key)) for key in keys]
 
 
 def _validated_body(body_mm: Sequence[float] | None) -> tuple[float, float] | None:
@@ -1027,27 +1203,256 @@ def _hole_evidence(circle: _Circle, ink: np.ndarray, sw: float) -> bool:
     to 2 % of its samples. What would make it unnecessary: text recognition
     of the page, or vector drawings whose holes are explicit circles.
     """
-    height, width = ink.shape
     r = circle.r
     if _crossing_lines(circle.x, circle.y, r, ink, sw, first_only=True):
         return True
+    return _isolated(ink, circle.x, circle.y, 1.0, 0.0, 0.0, r, sw)
 
-    def inked(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
-        """Ink at rounded sample positions; outside the image counts as paper."""
+
+def _capsule_samples(x: float, y: float, ux: float, uy: float, half_length: float, rho: float,
+                     count: int) -> tuple[np.ndarray, np.ndarray]:
+    """``count`` points at distance ``rho`` from the segment of half-length ``half_length`` along (ux, uy) through (x, y).
+
+    The offset curve of a slot: two semicircles of radius ``rho`` around the
+    segment's ends joined by two parallel lines. With ``half_length`` 0 it
+    is the circle of radius ``rho``, so one sampler serves rings and slots.
+    """
+    perimeter = 2 * math.pi * rho + 4 * half_length
+    s = np.linspace(0, perimeter, count, endpoint=False)
+    # Walk the perimeter: top side, far arc, bottom side, near arc.
+    side, arc = 2 * half_length, math.pi * rho
+    local_s = np.empty_like(s)
+    local_t = np.empty_like(s)
+    on_top = s < side
+    local_s[on_top], local_t[on_top] = -half_length + s[on_top], -rho
+    on_far = (s >= side) & (s < side + arc)
+    angle = (s[on_far] - side) / rho - math.pi / 2
+    local_s[on_far], local_t[on_far] = half_length + rho * np.cos(angle), rho * np.sin(angle)
+    on_bottom = (s >= side + arc) & (s < 2 * side + arc)
+    local_s[on_bottom], local_t[on_bottom] = half_length - (s[on_bottom] - side - arc), rho
+    on_near = s >= 2 * side + arc
+    angle = (s[on_near] - 2 * side - arc) / rho + math.pi / 2
+    local_s[on_near], local_t[on_near] = -half_length + rho * np.cos(angle), rho * np.sin(angle)
+    xs = x + local_s * ux - local_t * uy
+    ys = y + local_s * uy + local_t * ux
+    return xs, ys
+
+
+def _isolated(ink: np.ndarray, x: float, y: float, ux: float, uy: float, half_length: float,
+              r: float, sw: float) -> bool:
+    """True when nothing is inked from one stroke outside a ring or slot out to one diameter further.
+
+    Offsets r + sw + 1.5 to 3 r in 1 px steps, 72 samples per offset (a
+    circle) or proportionally more along a slot's longer offset curves;
+    2 % of the samples tolerate isolated JPEG specks. The isolation half of
+    :func:`_hole_evidence`, shared with slots.
+    """
+    height, width = ink.shape
+    offsets = np.arange(r + sw + 1.5, 3 * r + 1e-9, 1.0)
+    if offsets.size == 0:
+        return False
+    hits = []
+    for rho in offsets:
+        count = int(round(72 * (2 * math.pi * rho + 4 * half_length) / (2 * math.pi * rho)))
+        xs, ys = _capsule_samples(x, y, ux, uy, half_length, rho, count)
         xi, yi = np.round(xs).astype(int), np.round(ys).astype(int)
         ok = (xi >= 0) & (xi < width) & (yi >= 0) & (yi < height)
         out = np.zeros(xi.shape, bool)
         out[ok] = ink[yi[ok], xi[ok]]
-        return out
+        hits.append(out)
+    return float(np.concatenate(hits).mean()) <= 0.02
 
-    angles = np.linspace(0, 2 * math.pi, 72, endpoint=False)
-    radii = np.arange(r + sw + 1.5, 3 * r + 1e-9, 1.0)
-    if radii.size == 0:
-        return False
-    xs = circle.x + np.outer(np.cos(angles), radii)
-    ys = circle.y + np.outer(np.sin(angles), radii)
-    # 2 % of the samples tolerate isolated JPEG specks.
-    return float(inked(xs, ys).mean()) <= 0.02
+
+# ---------------------------------------------------------------------------
+# Closed non-circular contours: slots and outlined lands
+# ---------------------------------------------------------------------------
+
+def _shape_region(cell: np.ndarray, x0: int, y0: int, sw: float) -> _Region | None:
+    """Model the enclosed paper ``cell`` (bool crop at offset x0, y0) as an obround or a rectangle, or None.
+
+    The cell's long axis comes from its principal directions; its extents
+    along and across the axis give the two candidate models: a capsule of
+    end radius r = half the short extent and a straight part of the long
+    extent minus the short one, and the rectangle of the two extents. The
+    model whose boundary the cell's contour follows more closely (RMS
+    distance) is chosen, and must follow it within ROUND_TOLERANCE of the
+    half-width (the detector's own roundness criterion; a one-pixel floor
+    for the contour's quantisation). A cell the detector would take for
+    round (radial spread within ROUND_TOLERANCE) is left to the circle
+    search. Half a stroke is added to both extents so that, like a circle's
+    radius, they measure the drawn line's centre, not the paper inside it.
+    The dashes and dots of centre lines drawn through the hole, no wider
+    than a stroke, are closed before the contour is modelled.
+    """
+    raw = cell.astype(np.uint8)
+    contours, hierarchy = cv2.findContours(raw, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    outer = [i for i in range(len(contours)) if hierarchy[0][i][3] < 0]
+    index = max(outer, key=lambda i: cv2.contourArea(contours[i]))
+    # Enclosed paper with ink drawn inside it is a frame around something
+    # -- a body outline, a land around its hole -- not a hole: a hole's
+    # interior is empty paper apart from the dashes, dots and crossings of
+    # its centre lines: pieces no thicker than a stroke that enclose no
+    # paper themselves (a ring does), which are let through.
+    child = hierarchy[0][index][2]
+    while child >= 0:
+        if hierarchy[0][child][2] >= 0:
+            return None
+        bx, by, bw, bh = cv2.boundingRect(contours[child])
+        filled = np.zeros((bh + 2, bw + 2), np.uint8)
+        cv2.drawContours(filled, [contours[child] - np.array([bx - 1, by - 1])], -1, 1, -1)
+        # The contour of a paper hole runs on the paper around the ink:
+        # the island's thickness is measured on the ink inside it.
+        ink_crop = np.pad(1 - raw, 1)[by:by + bh + 2, bx:bx + bw + 2]
+        island = (filled & ink_crop).astype(np.uint8)
+        if float(cv2.distanceTransform(island, cv2.DIST_L2, 3).max()) > sw / 2 + 1:
+            return None
+        child = hierarchy[0][child][0]
+    # Close the thin ink pieces (islands, and dashes attached to the
+    # outline) so that the contour follows the drawn outline, not them.
+    k = int(math.ceil(sw)) + 2
+    padded = np.pad(raw, k)
+    closed = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8))[k:-k, k:-k]
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 8:
+        return None
+    pts = contour.reshape(-1, 2).astype(float)
+    centred = pts - pts.mean(axis=0)
+    _, _, vt = np.linalg.svd(centred, full_matrices=False)
+    ux, uy = float(vt[0, 0]), float(vt[0, 1])
+    s = centred @ np.array([ux, uy])
+    t = centred @ np.array([-uy, ux])
+    long_extent, short_extent = float(np.ptp(s)), float(np.ptp(t))
+    if short_extent <= 0 or long_extent <= 0:
+        return None
+    s_mid, t_mid = (s.max() + s.min()) / 2, (t.max() + t.min()) / 2
+    s, t = s - s_mid, t - t_mid
+    cx = pts[:, 0].mean() + s_mid * ux - t_mid * uy
+    cy = pts[:, 1].mean() + s_mid * uy + t_mid * ux
+    # Roundness, as the circle detector measures it: spread of the boundary
+    # radius over the directions relative to its mean.
+    radius = np.hypot(s, t)
+    if float(radius.std() / max(radius.mean(), 1e-9)) <= ROUND_TOLERANCE:
+        return None
+    half_short, half_long = short_extent / 2, long_extent / 2
+    straight = max(half_long - half_short, 0.0)
+    capsule = np.abs(np.hypot(np.maximum(np.abs(s) - straight, 0.0), t) - half_short)
+    rectangle = np.minimum(np.abs(half_long - np.abs(s)), np.abs(half_short - np.abs(t)))
+    rms_capsule = float(np.sqrt((capsule ** 2).mean()))
+    rms_rectangle = float(np.sqrt((rectangle ** 2).mean()))
+    kind = "obround" if rms_capsule <= rms_rectangle else "rectangle"
+    if min(rms_capsule, rms_rectangle) > max(ROUND_TOLERANCE * half_short, 1.0):
+        return None
+    half_width = half_short + sw / 2
+    half_length = straight if kind == "obround" else half_long + sw / 2
+    shifted = (contour.reshape(-1, 2) + np.array([x0, y0])).astype(np.int32).reshape(-1, 1, 2)
+    return _Region(kind, float(cx + x0), float(cy + y0), ux, uy, half_length, half_width, shifted)
+
+
+def _find_regions(mask: np.ndarray, circles: Sequence[_Circle], sw: float) -> list[_Region]:
+    """Closed non-circular contours of hole size: slots (obrounds) and outlined lands (rectangles).
+
+    An enclosed paper area (a component of the paper that does not reach
+    the page border) bounded like a hole (short side within the circle
+    bound 2 R_MAX, long side within SLOT_LENGTH_RADII radii) is modelled by
+    :func:`_shape_region`. The search is repeated on the mask with its
+    straight horizontal and vertical runs of growing length removed (see
+    REGION_LINE_STEP): a slot crossed by centre lines is split into cells
+    on the plain mask and is whole once the lines, longer than its sides,
+    are gone. A contour found on an earlier pass keeps the cells of later
+    passes out (their centres lie inside it); a contour lying within a
+    detected circle (a cell of a crossed hole), a contour enclosing drawn
+    ink (a frame, see :func:`_shape_region`) and a contour that is a glyph
+    (see :func:`_is_glyph`, with the contour's half-length as radius) are
+    dropped. ``evidence`` is drawn-like-a-hole as for circles: a centre
+    line through it, or isolation. A circle whose centre lies inside a
+    kept contour is resolved by :func:`_without_composites`.
+
+    @note Only outlined contours are seen: a filled land (solid or hatched)
+        has no enclosed paper. Capped at MAX_CIRCLES contours.
+    """
+    height, width = mask.shape
+    r_max = max(R_MIN_PX + 1, R_MAX_FRACTION * min(height, width))
+    long_max = SLOT_LENGTH_RADII * r_max
+    ink = mask > 0
+    lengths: list[int | None] = [None]
+    length = 6
+    while length <= long_max + 4:
+        lengths.append(length)
+        length = int(math.ceil(length * REGION_LINE_STEP))
+    found: list[_Region] = []
+    # A removed line leaves a gap, as wide as the removal (3 px across the
+    # line), in every contour it crossed; a closing two pixels wider
+    # restores the contour, and only where a line was removed (the
+    # closing must not solidify a dashed line elsewhere).
+    restore = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    for length in lengths:
+        if length is None:
+            work = mask
+        else:
+            removed = _remove_hv_lines(mask, length)
+            band = cv2.dilate(mask & cv2.bitwise_not(removed), np.ones((3, 3), np.uint8))
+            work = removed | (cv2.morphologyEx(removed, cv2.MORPH_CLOSE, restore) & band)
+        paper = (work == 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(paper, connectivity=4)
+        for index in range(1, count):
+            bx, by, bw, bh, _area = (int(v) for v in stats[index])
+            if bx <= 0 or by <= 0 or bx + bw >= width or by + bh >= height:
+                continue
+            if min(bw, bh) < 2 * R_MIN_PX or min(bw, bh) > 2 * r_max + 4 or max(bw, bh) > long_max + 4:
+                continue
+            region = _shape_region(labels[by:by + bh, bx:bx + bw] == index, bx, by, sw)
+            if region is None:
+                continue
+            if any(k.contains(region.x, region.y) for k in found):
+                continue
+            if any(_within_circle(region, c) for c in circles):
+                continue
+            found.append(region)
+            if len(found) >= MAX_CIRCLES:
+                break
+        if len(found) >= MAX_CIRCLES:
+            break
+    kept = [r for r in found
+            if not _is_glyph(_Circle(r.x, r.y, r.half_length + r.half_width, 1.0), ink, circles)]
+    return [replace(r, evidence=_region_evidence(r, ink, sw)) for r in kept]
+
+
+def _within_circle(region: _Region, circle: _Circle) -> bool:
+    """True when the whole contour lies inside the circle (a cell between a hole's outline and its centre lines)."""
+    pts = region.contour.reshape(-1, 2).astype(float)
+    return bool((np.hypot(pts[:, 0] - circle.x, pts[:, 1] - circle.y) <= circle.r + 1.0).all())
+
+
+def _without_composites(circles: Sequence[_Circle], regions: Sequence[_Region]) -> list[_Circle]:
+    """The circles whose centre lies inside no closed contour.
+
+    An enclosed paper contour of hole size with nothing drawn inside it is
+    a closed witness of ONE hole; a circle centred inside it is a
+    composite of the contour's strokes and the lines crossing them (a slot
+    crossed by centre lines gives rings of its arcs, sides and lines), as
+    two drawn holes never overlap (see :func:`_find_circles`).
+    """
+    return [c for c in circles if not any(r.contains(c.x, c.y) for r in regions)]
+
+
+def _region_evidence(region: _Region, ink: np.ndarray, sw: float) -> bool:
+    """True when the contour is drawn the way a hole is: a centre line through it, or isolated on paper.
+
+    The crossing-line test of :func:`_hole_evidence` is run with the
+    contour's half-length plus half-width as radius (the line must run on
+    outside the whole contour); the isolation test samples the contour's
+    offset curves (see :func:`_isolated`).
+    """
+    reach = region.half_length + region.half_width
+    if _crossing_lines(region.x, region.y, reach, ink, sw, first_only=True):
+        return True
+    return _isolated(ink, region.x, region.y, region.ux, region.uy, region.half_length,
+                     region.half_width, sw)
 
 
 # ---------------------------------------------------------------------------
@@ -1152,12 +1557,17 @@ def _outline_rect(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float, 
     lines = cv2.dilate(h_solid | h_dashed | v_solid | v_dashed, grow)
     holes = np.zeros_like(mask)
     for c in circles:
+        if c.half_length > 0:
+            # A slot: its whole capsule is hole, not clutter.
+            p0 = (int(round(c.x - c.half_length * c.ux)), int(round(c.y - c.half_length * c.uy)))
+            p1 = (int(round(c.x + c.half_length * c.ux)), int(round(c.y + c.half_length * c.uy)))
+            cv2.line(holes, p0, p1, 255, 2 * int(math.ceil(c.r + 2)))
         cv2.circle(holes, (int(round(c.x)), int(round(c.y))), int(math.ceil(c.r + 2)), 255, -1)
     clutter = (mask > 0) & (lines == 0) & (holes == 0)
-    left_edge = min(c.x - c.r for c in circles)
-    right_edge = max(c.x + c.r for c in circles)
-    top_edge = min(c.y - c.r for c in circles)
-    bottom_edge = max(c.y + c.r for c in circles)
+    left_edge = min(c.x - c.r - c.half_length for c in circles)
+    right_edge = max(c.x + c.r + c.half_length for c in circles)
+    top_edge = min(c.y - c.r - c.half_length for c in circles)
+    bottom_edge = max(c.y + c.r + c.half_length for c in circles)
 
     def centre(band: tuple[int, int]) -> float:
         """Centre of a band of rows or columns."""
@@ -1222,7 +1632,8 @@ def _outline_around(mask: np.ndarray, circles: Sequence[_Circle]) -> tuple[float
 
 def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
                             max_misses: int = 0,
-                            gate_fraction: float = HYPOTHESIS_TOL_SPAN) -> list[np.ndarray]:
+                            gate_fraction: float = HYPOTHESIS_TOL_SPAN,
+                            kinds: Sequence[str | None] | None = None) -> list[np.ndarray]:
     """Circle assignments (one distinct circle per pad, -1 = none) proposed by similarity hypotheses.
 
     Each of the BASELINES longest pad pairs is mapped onto every ordered pair
@@ -1231,18 +1642,40 @@ def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
     only while at most ``max_misses`` pads project farther than the gate
     distance from every circle; pads are tested farthest-from-the-baseline
     first, so most hypotheses are dropped after a few pads. Cost:
-    O(BASELINES * C^2 + surviving * n * C). Assignments with fewer misses
-    come first. ``gate_fraction`` scales the gate with the pad's distance
-    from the nearer baseline pad.
+    O(BASELINES * C^2 + surviving * n * C); with ``max_misses`` > 0 the
+    BASELINES longest pairs leaving each pad out are baselines too (up to
+    n * BASELINES baselines), so that a misread pad taking part in every
+    longest pair does not hide the anchoring of the others. Assignments with fewer
+    misses come first. ``gate_fraction`` scales the gate with the pad's
+    distance from the nearer baseline pad. ``kinds`` (one circle kind or None per
+    pad, see :func:`_required_kinds`) restricts a pad to circles of its
+    declared kind: a declared slot is never put on a ring, nor a declared
+    terminal on a slot.
     """
     n = len(points)
     q = points[:, 0] + 1j * points[:, 1]
     centres = np.array([c.x + 1j * c.y for c in circles])
     radii = np.array([c.r for c in circles])
+    circle_kinds = np.array([c.kind for c in circles])
+    allowed = np.ones((n, len(circles)), bool)
+    for p, kind in enumerate(kinds or ()):
+        if kind is not None:
+            allowed[p] = circle_kinds == kind
     pair_i, pair_j = np.triu_indices(n, 1)
     lengths = np.abs(q[pair_j] - q[pair_i])
     min_spacing = float(lengths.min())
-    baselines = np.argsort(-lengths, kind="stable")[:BASELINES]
+    by_length = np.argsort(-lengths, kind="stable")
+    baselines = list(by_length[:BASELINES])
+    if max_misses > 0:
+        # An anchoring that leaves pad p out must be reachable from a
+        # baseline without p: when the misread pad takes part in every
+        # longest pair (a pad below a short row), the BASELINES longest
+        # pairs that leave each pad out are added (at most n * BASELINES
+        # baselines; a page not to scale rotates every baseline off its
+        # axes, so one pair per pad is not enough).
+        for p in range(n):
+            without = [int(k) for k in by_length if pair_i[k] != p and pair_j[k] != p][:BASELINES]
+            baselines += [k for k in without if k not in baselines]
     a_idx, b_idx = np.nonzero(~np.eye(len(circles), dtype=bool))
     found: dict[tuple[int, ...], np.ndarray] = {}
     for k in baselines:
@@ -1253,6 +1686,7 @@ def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
         # Two pads closer than two tolerances could share one circle's
         # neighbourhood: such a scale cannot tell pads apart.
         keep &= np.abs(z) * min_spacing >= 2 * TOLERANCE_PX
+        keep &= allowed[i][a_idx] & allowed[j][b_idx]
         za, origin = z[keep], centres[a_idx[keep]]
         if za.size == 0:
             continue
@@ -1268,6 +1702,7 @@ def _hypothesis_assignments(points: np.ndarray, circles: Sequence[_Circle],
         for p in order:
             projected = origin[alive] + za[alive] * (q[p] - q[i])
             distance = np.abs(projected[:, None] - centres[None, :])
+            distance = np.where(allowed[p][None, :], distance, np.inf)
             gate = np.maximum(HYPOTHESIS_TOL_PX, gate_fraction * np.abs(za[alive]) * anchor[p])
             rows = np.arange(alive.size)
             # Prefer a circle of about the baseline holes' size (declared
@@ -1509,8 +1944,9 @@ def _ring_at(mask: np.ndarray, x: float, y: float, r: float, search: float, budg
 
 
 def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
-                          mask: np.ndarray, budget: _Budget) -> bool:
-    """True when the pads that do not fit sit on rings the detector did not keep.
+                          mask: np.ndarray, budget: _Budget,
+                          regions: Sequence[_Region] = ()) -> bool:
+    """True when the pads that do not fit sit on rings the detector did not keep, or inside closed contours.
 
     Detection fails on small, low-resolution or crowded holes (a hole missed,
     or its centre pulled by a crossing leader line). Before a reading is
@@ -1518,10 +1954,13 @@ def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign
     the longest assigned pad pairs, the one with the smallest median
     residual kept, its inliers refitted twice. When the inliers are a strict
     majority (and at least MIN_PADS), the rotation is within the limit and
-    EVERY other pad lands on a closed ring of the matched holes' size, the
-    image cannot contradict the reading. A wrong pad lands on paper or on a
-    centre line, which is not a closed ring, or on a circle that WAS
-    detected (another pad's hole), which is not a missed hole.
+    EVERY other pad lands on a closed ring of the matched holes' size, or
+    inside a closed non-circular contour (a slot, an outlined land: see
+    :func:`_find_regions`; review H4/M11, 2026-11-04), the image cannot
+    contradict the reading. A wrong pad lands on paper or on a centre line,
+    which is neither a closed ring nor inside a closed contour, or on a
+    circle that WAS detected (another pad's hole), which is not a missed
+    hole.
     """
     n = len(points)
     # Only circles drawn like holes may excuse a reading, as only they may
@@ -1570,7 +2009,8 @@ def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign
     if np.any(np.linalg.norm(projected[:, None, :] - centres[None, :, :], axis=2) <= search):
         return False
     radius = float(np.median([circles[assign[p]].r for p in inliers]))
-    return all(_ring_at(mask, x, y, radius, search, budget) for x, y in projected)
+    return all(any(region.contains(x, y) for region in regions)
+               or _ring_at(mask, x, y, radius, search, budget) for x, y in projected)
 
 
 # ---------------------------------------------------------------------------
@@ -1579,11 +2019,17 @@ def _missed_hole_explains(points: np.ndarray, circles: Sequence[_Circle], assign
 
 @dataclass(frozen=True)
 class _Analysis:
-    """What the check needs from one image: the photo gate, the ink mask and the circles."""
+    """What the check needs from one image: the photo gate, the ink mask, the circles and the closed contours.
+
+    ``circles`` holds the rings AND the slots (kind "obround", see
+    :class:`_Circle`); ``regions`` the closed non-circular contours (the
+    same slots, and outlined rectangular lands), see :func:`_find_regions`.
+    """
 
     drawing: bool
     mask: np.ndarray | None
     circles: tuple[_Circle, ...]
+    regions: tuple[_Region, ...] = ()
 
 
 _ANALYSES: OrderedDict[tuple[str, int, int], _Analysis | None] = OrderedDict()
@@ -1613,7 +2059,11 @@ def _analyse(path: Path) -> _Analysis | None:
         grey = _working_grey(image)
         mask, paper = _ink_mask(grey)
         if _is_line_drawing(grey, mask, paper):
-            analysis = _Analysis(True, mask, tuple(_find_circles(grey, mask)))
+            circles = _find_circles(grey, mask)
+            regions = _find_regions(mask, circles, _stroke_width(mask))
+            circles = _without_composites(circles, regions)
+            slots = [r.as_circle() for r in regions if r.kind == "obround"]
+            analysis = _Analysis(True, mask, tuple(circles + slots), tuple(regions))
         else:
             analysis = _Analysis(False, None, ())
     with _ANALYSES_LOCK:
@@ -1641,61 +2091,94 @@ def _better(fit: _Fit, best: _Fit | None) -> bool:
         (_STAGES.index(best.stage), -best.max_error_mm)
 
 
+def _on_reference(points: np.ndarray, circles: Sequence[_Circle], assign: np.ndarray,
+                  references: np.ndarray) -> bool:
+    """True when a pad of the assignment sits on the drawn hole of a declared reference position.
+
+    The references (mm, reading frame) are projected by the similarity
+    fitted on the assigned pads; an assigned circle within the fit's
+    tolerance of a projected reference is that reference's hole, not a
+    pad's, so the assignment does not count.
+    """
+    if references.size == 0:
+        return False
+    assigned = np.nonzero(assign >= 0)[0]
+    if len(assigned) < 2:
+        return False
+    targets = _centres(circles, assign[assigned])
+    sim = _fit_similarity(points[assigned], targets)
+    projected = sim.project(references)
+    limit = _tolerance_mm(sim.scale) * sim.scale
+    return bool((np.linalg.norm(targets[:, None, :] - projected[None, :, :], axis=2) <= limit).any())
+
+
 def _check_image(name: str, analysis: _Analysis, points: np.ndarray,
-                 body: tuple[float, float] | None) -> _ImageResult:
+                 body: tuple[float, float] | None, kinds: Sequence[str | None] | None = None,
+                 references: np.ndarray | None = None) -> _ImageResult:
     """Run the matching of one reading on one analysed image."""
     if not analysis.drawing:
         return _ImageResult(name, False, 0, None)
     circles, mask = list(analysis.circles), analysis.mask
+    hole_like = sum(c.evidence for c in circles)
+    references = np.zeros((0, 2)) if references is None else references
     if len(circles) < len(points):
-        return _ImageResult(name, True, len(circles), None)
+        return _ImageResult(name, True, len(circles), None, hole_like)
     best: _Fit | None = None
-    for assign in _hypothesis_assignments(points, circles)[:MAX_ASSIGNMENTS]:
+    for assign in _hypothesis_assignments(points, circles, kinds=kinds)[:MAX_ASSIGNMENTS]:
+        if _on_reference(points, circles, assign, references):
+            continue
         fit = _fit_assignment(points, circles, assign, mask, body)
         if _better(fit, best):
             best = fit
         if best.stage == "confirmed":
-            return _ImageResult(name, True, len(circles), best)
+            return _ImageResult(name, True, len(circles), best, hole_like)
     if best is None or best.stage == "no_match":
         # Second pass with a wide gate: a reading that fits only after a
         # stretch (drawing not to scale, a whole axis read wrong) is
         # reported "distorted", which is a stronger statement than
         # "no_match" and must not be lost to the narrow confirmation gate.
-        for assign in _hypothesis_assignments(points, circles,
-                                              gate_fraction=DISTORTION_GATE)[:MAX_ASSIGNMENTS]:
+        for assign in _hypothesis_assignments(points, circles, gate_fraction=DISTORTION_GATE,
+                                              kinds=kinds)[:MAX_ASSIGNMENTS]:
+            if _on_reference(points, circles, assign, references):
+                continue
             fit = _fit_assignment(points, circles, assign, mask, body)
             if fit.stage != "confirmed" and _better(fit, best):
                 best = fit
     if best is not None and best.stage == "low_resolution":
-        return _ImageResult(name, True, len(circles), best)
+        return _ImageResult(name, True, len(circles), best, hole_like)
     # Every circle may confirm (a hole drawn with a label close by is still a
     # hole), but only circles drawn like holes may contradict: a page whose
     # circles are glyph counters says nothing against the reading.
-    if sum(c.evidence for c in circles) < len(points):
-        return _ImageResult(name, True, len(circles), None)
+    if hole_like < len(points):
+        return _ImageResult(name, True, len(circles), None, hole_like)
     if best is None or best.stage == "no_match":
         # Nothing fits: before calling the reading wrong, check whether a hole
-        # the detector missed explains it. When every pad did meet a circle
+        # the detector missed, or a closed contour that is not a circle (a
+        # slot, a land), explains it. When every pad did meet a circle
         # (distorted, body_scale) a missed hole is not the explanation.
         budget = _Budget(MAX_RING_PROBES)
         try:
-            for assign in _hypothesis_assignments(points, circles, max_misses=1)[:MAX_ASSIGNMENTS]:
-                if _missed_hole_explains(points, circles, assign, mask, budget):
-                    return _ImageResult(name, True, len(circles), None)
+            for assign in _hypothesis_assignments(points, circles, max_misses=1,
+                                                  kinds=kinds)[:MAX_ASSIGNMENTS]:
+                if _missed_hole_explains(points, circles, assign, mask, budget, analysis.regions):
+                    return _ImageResult(name, True, len(circles), None, hole_like)
         except _BudgetExceeded:
-            return _ImageResult(name, True, len(circles), _Fit("search_limit", math.nan, math.nan))
+            return _ImageResult(name, True, len(circles), _Fit("search_limit", math.nan, math.nan),
+                                hole_like)
     if best is None:
         best = _Fit("no_match", math.inf, math.nan)
-    return _ImageResult(name, True, len(circles), best)
+    return _ImageResult(name, True, len(circles), best, hole_like)
 
 
-def _summarise(results: Sequence[_ImageResult]) -> LayoutCheck:
+def _summarise(results: Sequence[_ImageResult], observable: bool = False) -> LayoutCheck:
     """Choose the overall non-confirmed answer from the per-image results.
 
     "not_confirmed" needs an image whose reading reached a contradicting
-    stage (no_match, distorted, body_scale); otherwise the most informative
-    unverifiable reason wins: search_limit > low_resolution >
-    too_few_circles > not_a_drawing > no_image.
+    stage (no_match, distorted, body_scale); a "no_match" of a reading that
+    cannot show the page's scale (``observable`` False) is reported as
+    "no_match_unobservable". Otherwise the most informative unverifiable
+    reason wins: search_limit > low_resolution > too_few_circles >
+    no_round_holes > not_a_drawing > no_image.
     """
     def rounded(value: float) -> float | None:
         """Finite values rounded to 0.1 um, others None."""
@@ -1705,21 +2188,23 @@ def _summarise(results: Sequence[_ImageResult]) -> LayoutCheck:
     if contradicting:
         decisive = max(contradicting, key=lambda r: (_STAGES.index(r.fit.stage), -r.fit.max_error_mm))
         fit = decisive.fit
-        return LayoutCheck(NOT_CONFIRMED, fit.stage, decisive.name, rounded(fit.max_error_mm),
-                           rounded(fit.tolerance_mm), decisive.circles)
+        reason = NO_MATCH_UNOBSERVABLE if fit.stage == "no_match" and not observable else fit.stage
+        return LayoutCheck(NOT_CONFIRMED, reason, decisive.name, rounded(fit.max_error_mm),
+                           rounded(fit.tolerance_mm), decisive.circles, observable)
     for reason in ("search_limit", "low_resolution"):
         flagged = [r for r in results if r.fit is not None and r.fit.stage == reason]
         if flagged:
             decisive = flagged[0]
             return LayoutCheck(UNVERIFIABLE, reason, decisive.name, rounded(decisive.fit.max_error_mm),
-                               rounded(decisive.fit.tolerance_mm), decisive.circles)
+                               rounded(decisive.fit.tolerance_mm), decisive.circles, observable)
     drawings = [r for r in results if r.drawing]
     if drawings:
-        decisive = max(drawings, key=lambda r: r.circles)
-        return LayoutCheck(UNVERIFIABLE, "too_few_circles", decisive.name, None, None, decisive.circles)
+        decisive = max(drawings, key=lambda r: (r.hole_like, r.circles))
+        reason = "too_few_circles" if decisive.hole_like else NO_ROUND_HOLES
+        return LayoutCheck(UNVERIFIABLE, reason, decisive.name, None, None, decisive.circles, observable)
     if results:
-        return LayoutCheck(UNVERIFIABLE, "not_a_drawing", None, None, None, 0)
-    return LayoutCheck(UNVERIFIABLE, "no_image", None, None, None, 0)
+        return LayoutCheck(UNVERIFIABLE, "not_a_drawing", None, None, None, 0, observable)
+    return LayoutCheck(UNVERIFIABLE, "no_image", None, None, None, 0, observable)
 
 
 # ---------------------------------------------------------------------------
@@ -1742,6 +2227,10 @@ class MeasuredLayout:
         name of the drawing that decided. Measured positions are rounded to
         0.01 mm; their real uncertainty is about one pixel of the drawing
         (``tolerance_mm`` is three pixels or 0.15 mm, whichever is larger).
+    @note ``scale_observable`` (2026-11-04) says whether the anchored pads
+        could show the page's stretch and shear (see
+        :func:`_affine_observable`); a pad is moved only when they could
+        and showed none.
     """
 
     positions_mm: dict
@@ -1751,14 +2240,51 @@ class MeasuredLayout:
     max_error_mm: float
     tolerance_mm: float
     image: str
+    scale_observable: bool = False
+
+
+@dataclass(frozen=True)
+class MeasureOutcome:
+    """@brief Outcome of :func:`measured_layout_outcome`: the measured layout, or why none was given.
+
+    @note ``layout`` is the :class:`MeasuredLayout` (then ``refused`` is
+        None), or None with ``refused`` a machine code: "too_few_pads",
+        "too_many_pads", "no_drawing" (no readable line drawing),
+        "no_fit" (no anchoring of at least MIN_PADS pads fits), "ambiguous"
+        (several anchorings, or several free holes for the missing pad),
+        "scale_unobservable" (the anchored pads cannot show the page's
+        stretch: fewer than AFFINE_MIN_PADS or nearly collinear),
+        "distorted" (the anchored pads fit only with a stretch, shear or
+        rotation beyond the limit: the page is not to scale), "hole_kind"
+        (the only free hole is of another kind than the pad's declared kind
+        or than the anchored pads' holes), "not_a_hole" (the only free
+        circle is not drawn like a hole), "no_free_hole" (no free circle of
+        the anchored holes' size within reach), "mirror" (a mirror of the
+        reading also fits, see :func:`mirror_variants`), "body_scale" /
+        "low_resolution" / "no_match" (the completed layout fails the whole
+        check with that stage), "images_disagree" (two drawings give
+        different answers). ``image`` names the drawing the code refers to,
+        None when none decided.
+    """
+
+    layout: MeasuredLayout | None
+    refused: str | None
+    image: str | None = None
 
 
 # Marker of an anchoring whose missing pad could go onto several free holes.
 _AMBIGUOUS = "ambiguous"
 
+# Refusal codes of one image, most informative first: the code of the
+# anchoring that got furthest is reported when nothing is measured.
+_REFUSALS = ("mirror", "body_scale", "low_resolution", "no_match", "ambiguous", "hole_kind",
+             "not_a_hole", "no_free_hole", "distorted", "scale_unobservable", "no_fit")
+
 
 def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
-                    body_mm: Sequence[float] | None = None) -> MeasuredLayout | None:
+                    body_mm: Sequence[float] | None = None, *,
+                    hole_kinds: Mapping[object, str] | None = None,
+                    reference_holes_mm: Sequence[Sequence[float]] | None = None) -> MeasuredLayout | None:
     """@brief Deduce pad positions from the drawn holes when at most one pad of a reading is off.
 
     A similarity fit (uniform scale, rotation within MAX_ROTATION_DEG,
@@ -1769,15 +2295,21 @@ def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[fl
     resolution). When one pad misses, the free hole it should take is looked
     for around the place where the fit puts its reading: a detected circle
     of about the anchored holes' size (SIMILAR_RADIUS), assigned to no other
-    pad, no farther than the distance from that pad's reading to its nearest
-    anchored pad. Exactly one such circle must exist and it must be drawn
-    like a hole (centre line or isolation, see :func:`_hole_evidence`); the
-    pad is moved onto it.
+    pad and to no declared reference hole, of the pad's kind, no farther
+    than the distance from that pad's reading to its nearest anchored pad.
+    Exactly one such circle must exist and it must be drawn like a hole
+    (centre line or isolation, see :func:`_hole_evidence`); the pad is
+    moved onto it.
 
     Why the deduction is safe: n - 1 anchored pads (at least MIN_PADS) fix
     scale, rotation and translation without the missing pad, so its
     position is the only unknown, and a single free hole leaves a single
-    answer. Every way the answer could be one of several is refused.
+    answer. Every way the answer could be one of several is refused. The
+    anchored pads must also be able to SHOW that the page is to scale
+    (review H5, 2026-11-04): at least AFFINE_MIN_PADS of them, not nearly
+    collinear (:func:`_affine_observable`), fitting without the stretch an
+    affine map would add; otherwise a page drawn not to scale on the axis
+    of the move would put a printed quote wrong, and the move is refused.
 
     @param images Candidate drawing images, as for :func:`check_pad_layout`.
     @param pads_mm Pad key -> (x, y) mm AS SEEN ON THE PAGE (X right, Y
@@ -1785,17 +2317,28 @@ def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[fl
     @param body_mm Optional (length along page X, width along page Y) mm;
         when given and an outline is found around the holes, the final
         layout must agree with it as in :func:`check_pad_layout`.
+    @param hole_kinds Optional declared hole kind per pad, as for
+        :func:`check_pad_layout`: the free hole taken must be of the moved
+        pad's declared kind; without a declaration, of the one kind of the
+        anchored pads' holes when they share one (a terminal row never
+        takes a slot, a slot never takes a ring).
+    @param reference_holes_mm Optional declared non-pad holes (mm, reading
+        frame), as for :func:`check_pad_layout`: their drawn holes are never
+        free candidates for the moved pad.
     @return A :class:`MeasuredLayout`, or None when the answer is not unique
         or not deducible: fewer than MIN_PADS anchored pads (a move needs at
-        least MIN_PADS + 1 pads), more than one pad off its hole, no free hole
-        or several candidate holes for the missing pad, the only candidate
-        not drawn like a hole, several different anchorings fitting, the
-        reading mirrored about either page axis also fitting (checked when a
+        least MIN_PADS + 1 pads), an anchoring that cannot show the page's
+        scale or shows a stretch, more than one pad off its hole, no free
+        hole or several candidate holes for the missing pad, the only
+        candidate not drawn like a hole or of another kind, several
+        different anchorings fitting, the reading mirrored about either
+        page axis (:func:`mirror_variants`) also fitting (checked when a
         pad is moved), the body outline disagreeing, or two images giving
         different answers. With every pad on its hole the reading is
-        returned unchanged (moved None).
-    @throws ValueError When a pad coordinate or a body size is not a finite
-        number (a positive one for the body).
+        returned unchanged (moved None). :func:`measured_layout_outcome`
+        tells which.
+    @throws ValueError When a pad coordinate, a body size or a reference
+        hole is not a finite number (a positive one for the body).
     @note POSITIONS ONLY: pad numbers always come from the reading, never
         from the holes, and only the moved pad gets a position measured in
         pixels; the others keep their quoted values.
@@ -1808,12 +2351,36 @@ def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[fl
         second independent reading of the misplaced pad, or a vector drawing
         with explicit hole numbers, would make it unnecessary.
     """
+    return measured_layout_outcome(images, pads_mm, body_mm, hole_kinds=hole_kinds,
+                                   reference_holes_mm=reference_holes_mm).layout
+
+
+def measured_layout_outcome(images: Sequence[Path], pads_mm: Mapping[object, Sequence[float]],
+                            body_mm: Sequence[float] | None = None, *,
+                            hole_kinds: Mapping[object, str] | None = None,
+                            reference_holes_mm: Sequence[Sequence[float]] | None = None
+                            ) -> MeasureOutcome:
+    """@brief :func:`measured_layout` with the reason of a refusal.
+
+    @param images, pads_mm, body_mm, hole_kinds, reference_holes_mm As for
+        :func:`measured_layout`.
+    @return A :class:`MeasureOutcome`: the layout, or None and the code of
+        the refusal (see the class). When several drawings refuse, the code
+        of the one whose anchoring got furthest is given (``_REFUSALS``
+        order).
+    @throws ValueError As :func:`measured_layout`.
+    """
     points = _validated_points(pads_mm)
     body = _validated_body(body_mm)
     keys = list(pads_mm.keys())
-    if len(points) < MIN_PADS or len(points) > MAX_PADS:
-        return None
+    kinds = _required_kinds(keys, hole_kinds)
+    references = _validated_references(reference_holes_mm)
+    if len(points) < MIN_PADS:
+        return MeasureOutcome(None, "too_few_pads")
+    if len(points) > MAX_PADS:
+        return MeasureOutcome(None, "too_many_pads")
     answer: MeasuredLayout | None = None
+    refusals: list[tuple[str, str]] = []
     for path in images:
         path = Path(path)
         if path.suffix.lower() not in IMAGE_SUFFIXES:
@@ -1821,33 +2388,49 @@ def measured_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[fl
         analysis = _analyse(path)
         if analysis is None or not analysis.drawing:
             continue
-        result = _measure_image(path.name, analysis, points, keys, body)
+        result, refused = _measure_image(path.name, analysis, points, keys, body, kinds, references)
         if result is None:
+            refusals.append((refused or "no_fit", path.name))
             continue
         if answer is not None and (result.positions_mm != answer.positions_mm
                                    or result.moved != answer.moved):
-            return None
+            return MeasureOutcome(None, "images_disagree", path.name)
         answer = answer or result
-    return answer
+    if answer is not None:
+        return MeasureOutcome(answer, None, answer.image)
+    if refusals:
+        code, name = min(refusals, key=lambda item: _REFUSALS.index(item[0])
+                         if item[0] in _REFUSALS else len(_REFUSALS))
+        return MeasureOutcome(None, code, name)
+    return MeasureOutcome(None, "no_drawing")
 
 
-def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle],
-                       mask: np.ndarray) -> tuple[set, set]:
+def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle], mask: np.ndarray,
+                       kinds: Sequence[str | None] | None = None,
+                       references: np.ndarray | None = None) -> tuple[set, set, set]:
     """Distinct complete assignments (all pads on holes) and one-pad-moved ones of a reading.
 
-    Returns (full, moved): ``full`` holds assignment tuples whose fit is
-    confirmed as drawn; ``moved`` holds (assignment, moved pad) pairs, or an
-    (_AMBIGUOUS, anchoring) entry when an anchoring leaves several free
-    holes for its missing pad, so that the ambiguity counts as a second
-    answer.
+    Returns (full, moved, refusals): ``full`` holds assignment tuples whose
+    fit is confirmed as drawn; ``moved`` holds (assignment, moved pad)
+    pairs, or an (_AMBIGUOUS, anchoring) entry when an anchoring leaves
+    several free holes for its missing pad, so that the ambiguity counts as
+    a second answer; ``refusals`` the codes of the anchorings that gave no
+    move (see :class:`MeasureOutcome`). A move needs an anchoring that can
+    show the page's scale (:func:`_affine_observable`) and fits without
+    stretch; its free hole must be of the moved pad's declared kind, or of
+    the anchored holes' one kind, and not the hole of a declared reference.
     """
     full: set = set()
     moved: set = set()
+    refusals: set = set()
     if len(circles) < len(points) - 1:
-        return full, moved
+        return full, moved, refusals
     radii = np.array([c.r for c in circles])
     centres = np.array([(c.x, c.y) for c in circles], float)
-    for assign in _hypothesis_assignments(points, circles, max_misses=1)[:MAX_ASSIGNMENTS]:
+    references = np.zeros((0, 2)) if references is None else references
+    for assign in _hypothesis_assignments(points, circles, max_misses=1, kinds=kinds)[:MAX_ASSIGNMENTS]:
+        if _on_reference(points, circles, assign, references):
+            continue
         missing = np.nonzero(assign < 0)[0]
         if missing.size == 0:
             if _fit_assignment(points, circles, assign, mask, None).stage == "confirmed":
@@ -1857,24 +2440,77 @@ def _layout_candidates(points: np.ndarray, circles: Sequence[_Circle],
         anchored = np.nonzero(assign >= 0)[0]
         if len(anchored) < MIN_PADS:
             continue
-        if _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage != "confirmed":
+        stage = _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage
+        if stage != "confirmed":
+            refusals.add(stage if stage in _REFUSALS else "no_fit")
+            continue
+        if not _affine_observable(points[anchored]):
+            refusals.add("scale_unobservable")
             continue
         sim = _fit_similarity(points[anchored], centres[assign[anchored]])
         read_px = sim.project(points[pad:pad + 1])[0]
         reach_px = float(np.linalg.norm(points[anchored] - points[pad], axis=1).min()) * sim.scale
         used = {int(v) for v in assign[anchored]}
+        if references.size:
+            limit = _tolerance_mm(sim.scale) * sim.scale
+            projected = sim.project(references)
+            used |= {int(k) for k in np.nonzero(
+                (np.linalg.norm(centres[:, None, :] - projected[None, :, :], axis=2) <= limit).any(axis=1))[0]}
         ratio = radii / float(np.median(radii[assign[anchored]]))
         near = np.linalg.norm(centres - read_px, axis=1) <= reach_px
         similar = (ratio >= 1 / SIMILAR_RADIUS) & (ratio <= SIMILAR_RADIUS)
         free = [int(k) for k in np.nonzero(near & similar)[0] if int(k) not in used]
+        # A declared kind chooses among the free holes (a declared slot pad
+        # takes the slot beside a ring). Undeclared, every free hole counts
+        # for the ambiguity -- the drawing offers each as an explanation and
+        # no declaration picks one -- and a lone free hole of another kind
+        # than the one kind the anchored pads' holes share is refused: a
+        # row of terminals never takes a slot.
+        declared = kinds[pad] if kinds and kinds[pad] else None
+        of_kind = [k for k in free if declared is None or circles[k].kind == declared]
         anchoring = tuple(int(v) for v in assign)
-        if len(free) > 1:
+        if len(of_kind) > 1:
             moved.add((_AMBIGUOUS, anchoring))
-        elif len(free) == 1 and circles[free[0]].evidence:
-            complete = list(anchoring)
-            complete[pad] = free[0]
-            moved.add((tuple(complete), pad))
-    return full, moved
+            continue
+        if not of_kind:
+            refusals.add("hole_kind" if free else "no_free_hole")
+            continue
+        anchored_kinds = {circles[int(k)].kind for k in assign[anchored]}
+        if declared is None and len(anchored_kinds) == 1 and circles[of_kind[0]].kind not in anchored_kinds:
+            refusals.add("hole_kind")
+            continue
+        if not circles[of_kind[0]].evidence:
+            refusals.add("not_a_hole")
+            continue
+        complete = list(anchoring)
+        complete[pad] = of_kind[0]
+        moved.add((tuple(complete), pad))
+    if not full and not moved and not refusals:
+        refusals |= _stretched_anchorings(points, circles, mask, kinds)
+    return full, moved, refusals
+
+
+def _stretched_anchorings(points: np.ndarray, circles: Sequence[_Circle], mask: np.ndarray,
+                          kinds: Sequence[str | None] | None) -> set:
+    """{"distorted"} when some anchoring of all pads but at most one fits only after a stretch, else empty.
+
+    Run when nothing anchored within the confirmation gate: with the wide
+    gate of the "distorted" pass (DISTORTION_GATE) the pads reach their
+    holes on a page not drawn to scale, and the anchorings leaving each pad
+    out (the misread pad is assigned too under a wide gate) are fitted.
+    Never a move: the wide gate only names the refusal, so that the caller
+    can tell "the page is not to scale" from "nothing fits".
+    """
+    for assign in _hypothesis_assignments(points, circles, max_misses=1,
+                                          gate_fraction=DISTORTION_GATE, kinds=kinds)[:MAX_ASSIGNMENTS]:
+        assigned = np.nonzero(assign >= 0)[0]
+        subsets = [assigned] + [assigned[assigned != p] for p in assigned]
+        for anchored in subsets:
+            if len(anchored) < MIN_PADS or not _affine_observable(points[anchored]):
+                continue
+            if _fit_assignment(points[anchored], circles, assign[anchored], mask, None).stage == "distorted":
+                return {"distorted"}
+    return set()
 
 
 def _centres(circles: Sequence[_Circle], assign: np.ndarray) -> np.ndarray:
@@ -1893,48 +2529,56 @@ def _measured_points(points: np.ndarray, circles: Sequence[_Circle], assign: np.
 
 
 def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: list,
-                   body: tuple[float, float] | None) -> MeasuredLayout | None:
-    """Unique measured layout of one reading on one analysed drawing, or None."""
+                   body: tuple[float, float] | None, kinds: Sequence[str | None] | None = None,
+                   references: np.ndarray | None = None) -> tuple[MeasuredLayout | None, str | None]:
+    """Unique measured layout of one reading on one analysed drawing, or (None, refusal code)."""
     circles, mask = list(analysis.circles), analysis.mask
-    full, moved = _layout_candidates(points, circles, mask)
+    full, moved, refusals = _layout_candidates(points, circles, mask, kinds, references)
     if full:
         # The reading fits as it is: nothing to deduce, unless it fits in
         # two different ways.
         if len(full) != 1:
-            return None
+            return None, "ambiguous"
         assign, pad = np.array(next(iter(full))), None
     else:
-        if len(moved) != 1:
-            return None
+        if len(moved) > 1:
+            return None, "ambiguous"
+        if not moved:
+            best = min(refusals, key=_REFUSALS.index) if refusals else "no_fit"
+            return None, best
         complete, pad = next(iter(moved))
         if complete == _AMBIGUOUS:
-            return None
+            return None, "ambiguous"
         assign = np.array(complete)
     measured = _measured_points(points, circles, assign, pad)
     anchored = [p for p in range(len(points)) if p != pad]
     anchored_fit = _fit_assignment(points[anchored], circles, assign[anchored], mask, None)
     if pad is not None:
-        # A reading of the other face (mirrored about a page axis) that also
-        # fits is a second explanation. It is harmless only when it moves
-        # the same pad to the same place (a layout symmetric about that
-        # axis with the pad on the axis); a full fit of the mirror, or a
-        # move elsewhere, leaves two answers: refuse.
-        for flip in (np.array([-1.0, 1.0]), np.array([1.0, -1.0])):
-            other_full, other_moved = _layout_candidates(points * flip, circles, mask)
+        # A reading of the other face (mirrored about a page axis, the same
+        # flips as mirror_variants) that also fits is a second explanation.
+        # It is harmless only when it moves the same pad to the same place
+        # (a layout symmetric about that axis with the pad on the axis); a
+        # full fit of the mirror, or a move elsewhere, leaves two answers:
+        # refuse.
+        for flip in (np.array(f, float) for f in MIRROR_FLIPS):
+            other_full, other_moved, _ = _layout_candidates(points * flip, circles, mask, kinds,
+                                                            None if references is None
+                                                            else references * flip)
             if other_full:
-                return None
+                return None, "mirror"
             for other_assign, other_pad in other_moved:
                 if other_assign == _AMBIGUOUS or other_pad != pad:
-                    return None
+                    return None, "mirror"
                 other = _measured_points(points * flip, circles, np.array(other_assign), pad)[pad] * flip
                 if np.linalg.norm(other - measured[pad]) > anchored_fit.tolerance_mm:
-                    return None
+                    return None, "mirror"
     final = points.copy()
     if pad is not None:
         final[pad] = measured[pad]
     # The completed layout must pass the whole check, body outline included.
-    if _fit_assignment(final, circles, assign, mask, body).stage != "confirmed":
-        return None
+    stage = _fit_assignment(final, circles, assign, mask, body).stage
+    if stage != "confirmed":
+        return None, stage if stage in _REFUSALS else "no_fit"
 
     def pair(row: np.ndarray) -> tuple[float, float]:
         """Point rounded to 0.01 mm, without negative zero."""
@@ -1949,7 +2593,8 @@ def _measure_image(name: str, analysis: _Analysis, points: np.ndarray, keys: lis
         max_error_mm=round(anchored_fit.max_error_mm, 4),
         tolerance_mm=round(anchored_fit.tolerance_mm, 4),
         image=name,
-    )
+        scale_observable=_affine_observable(points[anchored]),
+    ), None
 
 
 # ---------------------------------------------------------------------------

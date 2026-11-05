@@ -27,6 +27,20 @@ CHAINS = [
 TRUE = {"1": (2.0, 2.5), "2": (5.5, 2.5), "3": (5.5, 6.5), "4": (13.0, 6.5)}
 
 
+def unresolved(data) -> str:
+    """The reason an unresolved pad layout carries: the hard block, or the note of the pending question.
+
+    CONTRACT CHANGED (review 2026-11-04, B3): a choice between two or more
+    complete layouts is ASKED (structured question "pad_layout",
+    `_pin_map_conflict` lifted, note in `_numbering_note`); the hard block
+    stays only when no question can close the case. Both are «unresolved».
+    """
+    if "_pin_map_conflict" in data:
+        return data["_pin_map_conflict"]
+    assert any(q["field"] == "pad_layout" for q in data.get("_questions", ())), "resolved"
+    return data["_numbering_note"]
+
+
 def _main(pads, length=15.0, width=9.0, view="bottom"):
     return {"drawing_unit": "mm", "contacts_view": view, "package_geometry": {
         "origin": "custom", "body_length_mm": length, "body_width_mm": width,
@@ -93,7 +107,7 @@ def test_chains_too_broken_to_place_a_pad_say_why():
     broken = [dict(CHAINS[0], values=[2.0, 3.5, 2.0]), CHAINS[1]]
     data = _main(TRUE)
     apply_dedicated_pads(data, _reading(broken))
-    assert "catena x n. 1" in data["_pin_map_conflict"]
+    assert "catena x n. 1" in unresolved(data)
 
 
 # ── The comparison with the main answer ──────────────────────────────────
@@ -104,8 +118,8 @@ def test_two_readings_wrong_the_same_way_are_blocked_by_the_closure():
     reading = _reading(wrong)
     data = _main(reading["pads"])
     apply_dedicated_pads(data, reading)
-    assert "sommano 11.50 mm" in data["_pin_map_conflict"]
-    assert "15.00 mm" in data["_pin_map_conflict"]
+    assert "sommano 11.50 mm" in unresolved(data)
+    assert "15.00 mm" in unresolved(data)
 
 
 @pytest.mark.parametrize("x_chain", [
@@ -118,7 +132,7 @@ def test_a_closed_chain_reading_never_overrides_a_main_answer_that_differs(x_cha
     """Negative (adversarial review): a closure checks a SUM, so it cannot pick a reading."""
     data = _main(TRUE)
     apply_dedicated_pads(data, _reading([x_chain, CHAINS[1]]))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
     pins = {p["number"]: (p["x_mm"], p["y_mm"]) for p in data["package_geometry"]["pins"]}
     assert pins == TRUE and data["package_geometry"]["origin"] == "custom"
 
@@ -128,7 +142,7 @@ def test_without_a_closure_on_both_axes_a_difference_still_blocks():
     open_y = [CHAINS[0], {"axis": "y", "stops": ["1,2", "3,4"], "values": [4.0]}]
     data = _main(dict(TRUE, **{"4": (9.5, 6.5)}))
     apply_dedicated_pads(data, _reading(open_y))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
 
 
 def test_body_sizes_read_in_another_frame_are_reported_not_blocked():
@@ -144,7 +158,7 @@ def test_body_sizes_read_in_another_frame_are_reported_not_blocked():
     # Negative: a span matching neither size still blocks.
     data = _main(TRUE, length=9.0, width=16.0)
     apply_dedicated_pads(data, _reading(CHAINS))
-    assert "sommano" in data["_pin_map_conflict"]
+    assert "sommano" in unresolved(data)
 
 
 def test_the_tolerance_grows_with_the_quotes_summed():
@@ -160,7 +174,7 @@ def test_the_tolerance_grows_with_the_quotes_summed():
     # Negative: a whole quote lost is far beyond any rounding.
     data = _main(pads, length=15.0 + 1.54, width=4.0)
     apply_dedicated_pads(data, _reading([x, y]))
-    assert "sommano" in data["_pin_map_conflict"]
+    assert "sommano" in unresolved(data)
 
 
 def test_pads_sharing_a_number_skip_the_chain_checks():
@@ -173,9 +187,9 @@ def test_pads_sharing_a_number_skip_the_chain_checks():
     apply_dedicated_pads(data, _reading(chains))
     # No false contradiction from the merged stop; the tabs have no y chain,
     # so the reading confirms 4 pads of 5 and, since 2026-10-30, blocks.
-    assert "stesso numero (S)" in data["_pin_map_conflict"]
+    assert "stesso numero (S)" in unresolved(data)
     assert "non tornano" not in data["_pin_map_conflict"]
-    assert "solo 4 pad su 5" in data["_pin_map_conflict"]
+    assert "solo 4 pad su 5" in unresolved(data)
 
 
 def test_a_malformed_redundant_chain_is_a_remark_not_a_block():
@@ -189,7 +203,7 @@ def test_a_malformed_redundant_chain_is_a_remark_not_a_block():
 def test_a_closed_reading_with_another_view_still_blocks():
     data = _main(dict(TRUE, **{"4": (9.5, 6.5)}), view="top")
     apply_dedicated_pads(data, _reading(CHAINS, view="bottom"))
-    assert "viste diverse" in data["_pin_map_conflict"]
+    assert "viste diverse" in unresolved(data)
 
 
 def test_agreeing_readings_closed_on_the_body_are_confirmed():
@@ -238,7 +252,7 @@ def test_a_wrong_model_sum_is_a_conflict_until_the_dedicated_reading_sides_with_
     """Positive: the model summed wrong; its chains and the dedicated chains describe one layout."""
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
-    assert "non coincidono con le sue catene" in data["_pin_map_conflict"]
+    assert "non coincidono con le sue catene" in unresolved(data)
     assert _pins(data) == SUMMED_WRONG, "nothing chosen before an independent reading"
     apply_dedicated_pads(data, _reading(CHAINS))
     assert "_pin_map_conflict" not in data and "prese dalle catene" in data["_numbering_note"]
@@ -260,7 +274,7 @@ def test_a_slip_in_the_main_chains_is_never_adopted_over_agreeing_coordinates(x_
     the model's coordinates, which stay; the main chains are discarded."""
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     data = single_answer_to_data(_single(TRUE, [x_chain, CHAINS[1]]))
-    assert "_pin_map_conflict" in data and _pins(data) == TRUE
+    assert unresolved(data) and _pins(data) == TRUE
     apply_dedicated_pads(data, _reading(CHAINS))
     assert "_pin_map_conflict" not in data and "scartate" in data["_numbering_note"]
     assert _pins(data) == TRUE
@@ -270,7 +284,7 @@ def test_without_a_dedicated_reading_the_main_answers_own_conflict_stands():
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
     apply_dedicated_pads(data, None)
-    assert "non coincidono con le sue catene" in data["_pin_map_conflict"]
+    assert "non coincidono con le sue catene" in unresolved(data)
     assert _pins(data) == SUMMED_WRONG
 
 
@@ -278,18 +292,34 @@ def test_a_dedicated_reading_siding_with_neither_keeps_the_block():
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
     apply_dedicated_pads(data, _reading([MIRRORED_X, CHAINS[1]]))
-    assert "ne' con le coordinate" in data["_pin_map_conflict"] and _pins(data) == SUMMED_WRONG
+    assert "ne' con le coordinate" in unresolved(data) and _pins(data) == SUMMED_WRONG
 
 
-def test_a_pin_without_coordinates_keeps_the_model_answer_and_never_crashes():
-    """Adversarial review: a null coordinate used to store a candidate and raise later."""
+def test_a_pin_without_coordinates_takes_the_chain_sums_when_they_place_it():
+    """CONTRACT CHANGED (review 2026-11-04, M6/A4): x_mm/y_mm are optional beside the chains.
+    Positive: pin 4 without coordinates is placed by the chains, said so, needs_review."""
     from kicadgen.services.datasheet_extractor import single_answer_to_data
     answer = _single(TRUE, CHAINS)
     answer["pads"][3]["x_mm"] = None
     data = single_answer_to_data(answer)
-    assert "_pin_map_conflict" not in data and "senza coordinate: 4" in data["notes"]
+    assert "_pin_map_conflict" not in data
+    assert "terminali 4 prese dalle catene" in data["notes"]
+    assert data["package_geometry"]["needs_review"] is True
+    assert _distances(_pins(data)) == pytest.approx(_distances(TRUE))
     apply_dedicated_pads(data, _reading([MIRRORED_X, CHAINS[1]]))
-    assert "_pin_map_conflict" in data, "the mirrored dedicated reading still disagrees"
+    assert unresolved(data) or data.get("_questions"), \
+        "the mirrored dedicated reading still disagrees"
+
+
+def test_a_pin_without_coordinates_and_without_a_chain_stays_without_and_never_crashes():
+    """Negative twin: chains that do not reach pin 4 cannot fill its coordinates in."""
+    from kicadgen.services.datasheet_extractor import single_answer_to_data
+    answer = _single(TRUE, [{"axis": "x", "stops": ["edge", "1", "2,3", "edge"],
+                             "values": [2.0, 3.5, 9.5]}, CHAINS[1]])
+    answer["pads"][3]["x_mm"] = None
+    data = single_answer_to_data(answer)
+    assert "_pin_map_conflict" not in data and "senza coordinate: 4" in data["notes"]
+    assert data["package_geometry"]["pins"][3]["x_mm"] is None
 
 
 def test_an_unclosed_dedicated_reading_cannot_outvote_closed_chains():
@@ -300,7 +330,7 @@ def test_an_unclosed_dedicated_reading_cannot_outvote_closed_chains():
     open_wrong = [{"axis": "x", "stops": ["1", "2,3", "4"], "values": [3.5, 4.0]},
                   {"axis": "y", "stops": ["1,2", "3,4"], "values": [4.0]}]
     apply_dedicated_pads(data, _reading(open_wrong))
-    assert "non e' chiusa" in data["_pin_map_conflict"] and _pins(data) == SUMMED_WRONG
+    assert "non e' chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
     # Positive twin: the same agreeing reading, closed on the body, decides.
     data = single_answer_to_data(_single(SUMMED_WRONG, CHAINS))
     closed_wrong = [{"axis": "x", "stops": ["edge", "1", "2,3", "4", "edge"],
@@ -321,7 +351,7 @@ def test_a_closed_span_without_a_body_size_to_check_it_is_not_a_closure(dropped)
     closed_wrong = [{"axis": "x", "stops": ["edge", "1", "2,3", "4", "edge"],
                      "values": [2.0, 3.5, 4.0, 5.5]}, CHAINS[1]]
     apply_dedicated_pads(data, _reading(closed_wrong))
-    assert "non e' chiusa" in data["_pin_map_conflict"] and _pins(data) == SUMMED_WRONG
+    assert "non e' chiusa" in unresolved(data) and _pins(data) == SUMMED_WRONG
 
 
 def test_an_incomplete_dedicated_reading_is_said_to_be_incomplete():
@@ -330,14 +360,14 @@ def test_an_incomplete_dedicated_reading_is_said_to_be_incomplete():
     partial = [{"axis": "x", "stops": ["edge", "1", "2,3", "edge"], "values": [2.0, 3.5, 9.5]},
                CHAINS[1]]
     apply_dedicated_pads(data, _reading(partial))
-    assert "Incompleta" in data["_pin_map_conflict"] and "ne' con" not in data["_pin_map_conflict"]
+    assert "Incompleta" in unresolved(data) and "ne' con" not in unresolved(data)
 
 
 def test_a_mirrored_dedicated_reading_no_longer_confirms():
     """Negative for the old distance comparison: same distances, opposite signs."""
     data = _main(TRUE)
     apply_dedicated_pads(data, _reading([MIRRORED_X, CHAINS[1]]))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
 
 
 def test_two_labels_swapped_on_a_symmetric_layout_are_told_apart():
@@ -347,7 +377,7 @@ def test_two_labels_swapped_on_a_symmetric_layout_are_told_apart():
                {"axis": "y", "stops": ["edge", "1,2", "3,4", "edge"], "values": [1.0, 5.0, 1.0]}]
     data = _main(square, length=7.0, width=7.0)
     apply_dedicated_pads(data, _reading(swapped))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
 
 
 @pytest.mark.parametrize("chains, reason", [
@@ -379,7 +409,7 @@ def test_integer_pin_numbers_in_a_disagreeing_reading_still_block():
     """Negative: text keys do not turn a different layout into an agreement."""
     data = _main({int(n): xy for n, xy in SUMMED_WRONG.items()})
     apply_dedicated_pads(data, _reading(CHAINS))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
 
 
 # ── Review G10 (2026-11-03): the reading tolerance follows the drawing's unit ──
@@ -410,4 +440,222 @@ def test_a_millimetre_drawing_keeps_its_tighter_tolerance():
     slipped = dict(TRUE, **{"4": (TRUE["4"][0] + _INCH_SLIP_MM, TRUE["4"][1])})
     data = _main(slipped)
     apply_dedicated_pads(data, _reading(CHAINS))
-    assert "non coincidono" in data["_pin_map_conflict"]
+    assert "non coincidono" in unresolved(data)
+
+
+# ── Pads on a drawn centreline (user, 2026-11-04) ────────────────────────
+#
+# A relay drawing quoted its fifth pin in X only: in Y it sits on the
+# dash-dot centreline half way between the two rows, which no chain could
+# express, so the dedicated reading was incomplete and the main model
+# invented the coordinate. The model now declares the centreline it sees
+# and the program takes the mean; nothing is guessed. The drawing here is
+# invented: two rows of two holes and a fifth hole on their centreline.
+
+#: x: outline, 5, 1, 2, outline; y: outline, {1, 2}, {3, 4}, outline. Pad 5
+#: has no y quote: it is on the centreline between the rows.
+ROWS = [
+    {"axis": "x", "stops": ["edge", "5", "1", "2", "edge"], "values": [1.0, 2.0, 12.0, 1.0]},
+    {"axis": "x", "stops": ["edge", "3,1", "4,2", "edge"], "values": [3.0, 12.0, 1.0]},
+    {"axis": "y", "stops": ["edge", "1,2", "3,4", "edge"], "values": [2.0, 10.0, 2.0]},
+]
+ON_ROWS_CENTRELINE = [{"axis": "y", "pad": "5", "between": ["1", "3"]}]
+
+
+def test_a_pad_on_the_centreline_between_two_stops_is_placed_at_their_mean():
+    """Positive: the y of pad 5 is the mean of the two rows; the body spans are untouched."""
+    result = pads_from_chains(ROWS, 1.0, ON_ROWS_CENTRELINE)
+    assert result["unplaced"] == [] and result["problems"] == [] and result["malformed"] == []
+    assert result["pads"]["5"] == pytest.approx((1.0, 7.0))
+    assert result["pads"]["1"] == pytest.approx((3.0, 2.0))
+    assert result["spans"]["y"] == pytest.approx(14.0)
+
+
+def test_a_pad_on_the_body_centreline_is_placed_between_the_two_outline_stops():
+    """Positive: «edge, edge» means the middle of the body on that axis."""
+    chains = [ROWS[0], ROWS[1], {"axis": "y", "stops": ["edge", "1,2", "3,4", "edge"],
+                                 "values": [2.0, 10.0, 2.5]}]
+    result = pads_from_chains(chains, 1.0, [{"axis": "y", "pad": "5", "between": ["edge", "edge"]}])
+    assert result["pads"]["5"][1] == pytest.approx(14.5 / 2)
+
+
+def test_a_centreline_through_another_centreline_pad_is_resolved_in_order():
+    """Positive: pad 6 half way between pad 5 (itself a midpoint) and row 3-4."""
+    chains = ROWS + [{"axis": "x", "stops": ["5", "6"], "values": [0.5]}]
+    midpoints = [{"axis": "y", "pad": "6", "between": ["5", "3"]}] + ON_ROWS_CENTRELINE
+    result = pads_from_chains(chains, 1.0, midpoints)
+    assert result["pads"]["6"] == pytest.approx((1.5, 9.5)) and result["unplaced"] == []
+
+
+def test_a_centreline_between_unsolved_stops_leaves_the_pad_unplaced_never_guessed():
+    """Negative: a stop no chain places on that axis cannot anchor a mean."""
+    result = pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["1", "9"]}])
+    assert "5" not in result["pads"] and result["unplaced"] == ["5"]
+    assert result["problems"] == [] and result["malformed"] == []
+
+
+def test_a_centreline_that_contradicts_a_chain_is_a_problem():
+    """Negative: pad 5 quoted 3 mm below row 1 cannot also be on the centreline (7 mm)."""
+    chains = ROWS + [{"axis": "y", "stops": ["1", "5"], "values": [3.0]}]
+    result = pads_from_chains(chains, 1.0, ON_ROWS_CENTRELINE)
+    assert len(result["problems"]) == 1 and "linea d'asse" in result["problems"][0]
+    assert "5" in result["pads"]
+
+
+def test_a_centreline_agreeing_with_a_chain_within_the_rounding_is_no_problem():
+    """Positive: the same pad quoted 5.05 mm below row 1 (one rounding) agrees with the mean."""
+    chains = ROWS + [{"axis": "y", "stops": ["1", "5"], "values": [5.05]}]
+    result = pads_from_chains(chains, 1.0, ON_ROWS_CENTRELINE)
+    assert result["problems"] == []
+
+
+@pytest.mark.parametrize("entry", [
+    {"axis": "z", "pad": "5", "between": ["1", "3"]},
+    {"axis": "y", "pad": "", "between": ["1", "3"]},
+    {"axis": "y", "pad": "edge", "between": ["1", "3"]},
+    {"axis": "y", "pad": "5", "between": ["1"]},
+    {"axis": "y", "pad": "5", "between": ["1", "3", "4"]},
+    {"axis": "y", "pad": "5", "between": ["1", 3]},
+    {"axis": "y", "pad": "5", "between": ["5", "3"]},
+    "5 between 1 and 3",
+])
+def test_a_malformed_centreline_entry_is_reported_not_read(entry):
+    """Negative: every slip is named in `malformed`; the pad stays unplaced."""
+    result = pads_from_chains(ROWS, 1.0, [entry])
+    assert result["malformed"] == ["linea d'asse n. 1: voce non valida"]
+    assert "5" not in result["pads"] and result["unplaced"] == ["5"]
+
+
+def test_the_reader_passes_the_declared_centrelines_to_the_sums(tmp_path):
+    """read_pad_positions hands `midpoints` to pads_from_chains, in the declared unit."""
+    from unittest.mock import Mock
+    from kicadgen.services.datasheet_extractor import read_pad_positions
+    from tests.test_extraction_prompts import _TINY_PNG
+    drawing = tmp_path / "pinout.png"
+    drawing.write_bytes(_TINY_PNG)
+    inches = [dict(chain, values=[v / 25.4 for v in chain["values"]]) for chain in ROWS]
+    answer = {"drawing_unit": "inch", "contacts_view": "bottom", "chains": inches,
+              "midpoints": ON_ROWS_CENTRELINE}
+    reading = read_pad_positions([drawing], model="m", call=Mock(return_value=answer))
+    assert reading["unplaced"] == [] and reading["pads"]["5"] == pytest.approx((1.0, 7.0))
+
+
+def test_the_single_answer_carries_its_centrelines_into_the_chain_sums():
+    """A main answer with pads on the centreline and matching pad_midpoints takes the sums."""
+    from kicadgen.services.datasheet_extractor import single_answer_to_data
+    pads = {"1": (3.0, 2.0), "2": (15.0, 2.0), "3": (3.0, 12.0), "4": (15.0, 12.0),
+            "5": (1.0, 7.0)}
+    answer = {"drawing_unit": "mm", "contacts_view": "bottom", "confidence": "high",
+              "pads_origin": "custom", "pad_chains": ROWS, "pad_midpoints": ON_ROWS_CENTRELINE,
+              "pads": [{"number": n, "x_mm": x, "y_mm": y, "pad_type": "thru_hole",
+                        "drill_mm": 1.0, "pad_length_mm": 2.0, "pad_width_mm": 2.0}
+                       for n, (x, y) in pads.items()]}
+    data = single_answer_to_data(answer)
+    assert "_pin_map_conflict" not in data
+    assert "catene di quote" not in str(data.get("notes") or "")
+
+
+# ── Generality audit of the centreline rule (2026-11-04) ─────────────────
+
+def test_a_pad_chained_only_to_the_centreline_pad_is_placed_through_it():
+    """Positive (audit 1): pad 6 is quoted from pad 5 only; its group is moved onto the mean."""
+    chains = ROWS + [{"axis": "x", "stops": ["5", "6"], "values": [0.5]},
+                     {"axis": "y", "stops": ["5", "6"], "values": [2.0]}]
+    result = pads_from_chains(chains, 1.0, ON_ROWS_CENTRELINE)
+    assert result["problems"] == [] and result["unplaced"] == []
+    assert result["pads"]["5"] == pytest.approx((1.0, 7.0))
+    assert result["pads"]["6"] == pytest.approx((1.5, 9.0))
+
+
+def test_a_chain_in_the_same_group_that_disagrees_with_the_centreline_still_contradicts():
+    """Negative (audit 1): a quote from row 1 to pad 5 of 3 mm against a mean of 5 mm."""
+    chains = ROWS + [{"axis": "y", "stops": ["1", "5"], "values": [3.0]}]
+    result = pads_from_chains(chains, 1.0, ON_ROWS_CENTRELINE)
+    assert len(result["problems"]) == 1
+
+
+def test_two_pad_stops_written_against_the_page_order_are_a_reported_slip():
+    """Negative (audit 2): the mean is symmetric, so the slip is reported, the pad still placed."""
+    result = pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["3", "1"]}])
+    assert result["pads"]["5"] == pytest.approx((1.0, 7.0))
+    assert any("non in ordine" in note for note in result["malformed"])
+    assert pads_from_chains(ROWS, 1.0, ON_ROWS_CENTRELINE)["malformed"] == []
+
+
+def test_identical_stops_are_malformed_and_coincident_stops_leave_the_pad_unplaced():
+    """Negative (audit 3): «1, 1» is no entry; «1, 2» on one row is no centreline."""
+    same = pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["1", "1"]}])
+    assert same["malformed"] == ["linea d'asse n. 1: voce non valida"] and "5" not in same["pads"]
+    row = pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["1", "2"]}])
+    assert "5" not in row["pads"] and row["unplaced"] == ["5"] and row["problems"] == []
+    assert any("coincidono" in note for note in row["malformed"])
+    # «edge, edge» stays the body centreline (positive).
+    assert pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["edge", "edge"]}])[
+        "pads"]["5"][1] == pytest.approx(7.0)
+
+
+def test_the_centreline_tolerance_is_half_the_stops_roundings_plus_the_pads_own():
+    """Audit 4, inch drawing: 1 quote to each stop, 1 to the pad -> 2 roundings (0.254 mm), not 3."""
+    inches = [dict(chain, values=[v / 25.4 for v in chain["values"]]) for chain in ROWS]
+    for offset, flagged in ((0.24, False), (0.30, True)):
+        chains = inches + [{"axis": "y", "stops": ["1", "5"], "values": [(5.0 + offset) / 25.4]}]
+        result = pads_from_chains(chains, 25.4, ON_ROWS_CENTRELINE)
+        assert bool(result["problems"]) is flagged, offset
+
+
+def test_the_main_group_is_chosen_on_chain_placed_pads_only():
+    """Audit 5: two disconnected groups of two pads; a centreline pad does not tip the choice."""
+    chains = [{"axis": "x", "stops": ["1", "2"], "values": [4.0]},
+              {"axis": "x", "stops": ["3", "4", "7"], "values": [4.0, 1.0]},
+              {"axis": "y", "stops": ["1", "2", "3", "4", "7"], "values": [1.0, 1.0, 1.0, 1.0]}]
+    result = pads_from_chains(chains, 1.0, [{"axis": "x", "pad": "5", "between": ["1", "2"]}])
+    assert set(result["pads"]) == {"3", "4", "7"}
+
+
+def test_a_pad_declared_twice_with_different_stops_is_a_contradiction():
+    # Review 2026-11-04 (A2): a bare outline stop of a centreline DECLARES
+    # its side (edge_side), the page order no longer decides it.
+    doubled = ON_ROWS_CENTRELINE + [{"axis": "y", "pad": "5", "between": ["1", "edge"],
+                                     "edge_side": "high"}]
+    result = pads_from_chains(ROWS, 1.0, doubled)
+    assert len(result["problems"]) == 1
+
+
+def test_a_bare_outline_stop_of_a_centreline_needs_its_declared_side():
+    """Negative twin (review 2026-11-04, A2): without edge_side the entry is a slip, never read
+    by page order; with it the pad is placed half way between pad 1 and that outline."""
+    bare = pads_from_chains(ROWS, 1.0, [{"axis": "y", "pad": "5", "between": ["1", "edge"]}])
+    assert bare["malformed"] == ["linea d'asse n. 1: voce non valida"] and "5" not in bare["pads"]
+    chains = [ROWS[0], {"axis": "y", "stops": ["edge", "1,2", "3,4", "edge"],
+                        "values": [2.0, 10.0, 2.5]}]
+    low = pads_from_chains(chains, 1.0, [{"axis": "y", "pad": "5", "between": ["edge", "1"],
+                                         "edge_side": "low"}])
+    assert low["pads"]["5"][1] == pytest.approx(1.0)
+    high = pads_from_chains(chains, 1.0, [{"axis": "y", "pad": "5", "between": ["1", "edge"],
+                                          "edge_side": "high"}])
+    assert high["pads"]["5"][1] == pytest.approx((2.0 + 14.5) / 2)
+    # A comma group is identified by any of its names.
+    group = pads_from_chains(chains, 1.0, [{"axis": "y", "pad": "5", "between": ["1,2", "3,4"]}])
+    assert group["pads"]["5"][1] == pytest.approx(7.0)
+
+
+def test_a_pad_on_both_centrelines_needs_no_chain_and_empty_chains_never_crash():
+    both = [{"axis": "x", "pad": "9", "between": ["1", "2"]},
+            {"axis": "y", "pad": "9", "between": ["1", "3"]}]
+    assert pads_from_chains(ROWS, 1.0, both)["pads"]["9"] == pytest.approx((9.0, 7.0))
+    empty = pads_from_chains([], 1.0, ON_ROWS_CENTRELINE)
+    assert empty["pads"] == {} and empty["unplaced"] == ["5"]
+
+
+def test_a_single_answer_whose_coordinate_differs_from_its_centreline_waits_for_the_dedicated_reading():
+    """Negative of the single-answer path: the model's y for pad 5 is not the mean -> conflict."""
+    from kicadgen.services.datasheet_extractor import single_answer_to_data
+    pads = {"1": (3.0, 2.0), "2": (15.0, 2.0), "3": (3.0, 12.0), "4": (15.0, 12.0),
+            "5": (1.0, 2.0)}
+    answer = {"drawing_unit": "mm", "contacts_view": "bottom", "confidence": "high",
+              "pads_origin": "custom", "pad_chains": ROWS, "pad_midpoints": ON_ROWS_CENTRELINE,
+              "pads": [{"number": n, "x_mm": x, "y_mm": y, "pad_type": "thru_hole",
+                        "drill_mm": 1.0, "pad_length_mm": 2.0, "pad_width_mm": 2.0}
+                       for n, (x, y) in pads.items()]}
+    data = single_answer_to_data(answer)
+    assert unresolved(data) and data["_chain_candidate"]["pads"]["5"][1] == pytest.approx(7.0)

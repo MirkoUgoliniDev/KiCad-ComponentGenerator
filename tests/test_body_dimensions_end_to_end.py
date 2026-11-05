@@ -38,8 +38,10 @@ def test_a_missing_height_is_taken_from_the_printed_side_view(offline, monkeypat
     assert params.body_height_mm == pytest.approx(16.9)
     assert params.pin_length_3d_mm == pytest.approx(3.5)
     assert params.body_length_mm == pytest.approx(20.5)
-    assert any("Quote del corpo confermate" in line and "lunghezza" in line for line in logs)
-    assert any("assenti nella risposta principale" in line and "altezza" in line for line in logs)
+    # Review 2026-11-04 (A1): both lists print 16.9, so the adopted height is
+    # a quote read twice -- confirmed, not «unconfirmed by a second reading».
+    assert any("Quote del corpo confermate" in line and "lunghezza" in line
+               and "altezza 16.90 mm" in line for line in logs)
 
 
 def test_an_invented_height_outside_the_printed_quotes_yields_to_the_printed_one(offline, monkeypatch,
@@ -54,7 +56,7 @@ def test_an_invented_height_outside_the_printed_quotes_yields_to_the_printed_one
     assert params.body_length_mm == pytest.approx(20.5)
     assert any("18.90 mm) non e' una quota stampata letta da entrambe" in line for line in logs)
     assert any("Quote del corpo nella risposta principale" in line and "18.9 (read)" in line
-               and "16.9, 0.4, 3.5" in line for line in logs)
+               and "16.9 (other), 0.4 (other), 3.5 (other)" in line for line in logs)
 
 
 def test_two_printed_candidates_reach_the_result_as_a_body_conflict(offline, monkeypatch, tmp_path):

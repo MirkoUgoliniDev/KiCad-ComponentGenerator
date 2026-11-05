@@ -188,7 +188,15 @@ def test_end_to_end_the_last_user_run_places_the_body_from_the_edge_quote(monkey
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
     assert not params.pin_map_conflict
-    geometry = package_from_mapping(dict(params.package_geometry, name="T7N"))
+    # CONTRACT CHANGED (review 2026-11-04, C3): the chosen reading did not
+    # declare its side, and the main reading's «bottom» was refuted by the
+    # holes: the side is withdrawn and asked, the pads stay in the page frame.
+    assert [q["field"] for q in params.questions] == ["contacts_view"]
+    assert params.package_geometry["source_view"] == "top" and "ritirata" in params.notes
+    page = {p["number"]: p["x_mm"] for p in params.package_geometry["pins"]}
+    assert page["11"] - (-11.25) == pytest.approx(2.05), "11 is 2.05 mm from the left edge on the page"
+    answered = ext.apply_answers(params, {params.questions[0]["key"]: "bottom"})
+    geometry = package_from_mapping(dict(answered.package_geometry, name="T7N"))
     assert geometry.origin == "body_center"
     top = {p.number: p.x_mm for p in geometry.pins_seen_from_top()}
     # Seen from above, 11 is 2.05 mm from the right edge of the 22.5 mm body,
@@ -198,7 +206,14 @@ def test_end_to_end_the_last_user_run_places_the_body_from_the_edge_quote(monkey
 
 
 def test_two_pads_off_the_holes_are_not_moved(monkeypatch, tmp_path):
-    """Negative: with two pads off, nothing anchors a unique move, the block stays."""
+    """Negative: with two pads off, nothing anchors a unique move, the block stays.
+
+    CONTRACT CHANGED AGAIN (generality audit 2026-11-05, A1): the drawn
+    holes refute BOTH layouts on an observable page, so neither can be
+    offered to the user as a candidate -- a question between two wrong
+    answers would replace the block and be remembered in the project. The
+    hard block stays and names the refuted readings.
+    """
     import shutil
     from unittest.mock import Mock
     image = tmp_path / "Pinout.png"
@@ -219,7 +234,12 @@ def test_two_pads_off_the_holes_are_not_moved(monkeypatch, tmp_path):
     monkeypatch.setattr(ext, "call_tool", Mock(side_effect=[main, dedicated, {"drawing_unit": "mm"}]))
     params = ext.extract_pin_header_params([image], component_family="single_tht",
                                            document_roles={"Pinout.png": ["pinout"]})
-    assert params.pin_map_conflict
+    assert params.pin_map_conflict is not None
+    assert "smentite dai fori" in params.pin_map_conflict
+    assert not any(q["field"] == "pad_layout" for q in params.questions)
+    pads = {p["number"]: (p["x_mm"], p["y_mm"]) for p in params.package_geometry["pins"]}
+    assert pads["11"] == (14.25, 0) and pads["A2"] == (0, 6), "the main pads stay as read"
+    assert not any("source" in p for p in params.package_geometry["pins"])
 
 
 # -- measured positions never undo a refusal (final generality audit D-A, D-B) --------
