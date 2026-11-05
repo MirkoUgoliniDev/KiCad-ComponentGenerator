@@ -209,14 +209,22 @@ def test_one_free_hole_is_taken_and_two_free_holes_are_refused(tmp_path):
     assert measured_layout([two], reading) is None
 
 
-def test_a_move_needs_three_anchored_pads(tmp_path):
+def test_a_move_needs_an_anchoring_that_can_show_the_page_scale(tmp_path):
     # Three pads, one off: the two anchored pads fix the fit exactly, any
     # two circles in the right direction would anchor them.
     path = _draw_holes(tmp_path / "three.png", [TRAPEZOID[1], TRAPEZOID[2], TRAPEZOID[5]])
     assert measured_layout([path], {1: (0.0, 0.0), 2: (12.0, 0.0), 5: (5.0, 4.0)}) is None
+    # Four pads, one off: three anchored pads fit a similarity, but an
+    # affine map fits any three points exactly, so a page not to scale on
+    # the axis of the move could not be told from a misread pad (review H5,
+    # 2026-11-04): refused, with the reason. With four anchored pads not
+    # in a line (TRAPEZOID) the move is made: see
+    # test_one_free_hole_is_taken_and_two_free_holes_are_refused.
     four = _draw_holes(tmp_path / "four.png", [TRAPEZOID[k] for k in (1, 2, 3, 5)])
-    result = measured_layout([four], {1: (0.0, 0.0), 2: (12.0, 0.0), 3: (9.0, 8.0), 5: (5.0, 4.0)})
-    assert result is not None and result.moved == 5
+    reading = {1: (0.0, 0.0), 2: (12.0, 0.0), 3: (9.0, 8.0), 5: (5.0, 4.0)}
+    assert measured_layout([four], reading) is None
+    outcome = drawing_holes.measured_layout_outcome([four], reading)
+    assert outcome.layout is None and outcome.refused == "scale_unobservable", outcome
 
 
 def test_a_photo_or_no_image_gives_nothing(tmp_path):

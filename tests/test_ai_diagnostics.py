@@ -352,3 +352,120 @@ def test_cancel_without_progress_still_wraps():
     assert wrapped(model="m", tool={}) == "ok"
     original = lambda **kw: "ok"
     assert diagnostics.make_logged_call(original, None) is original
+
+
+# -- M17: redacted arguments of successful answers, opt-in only -----------------
+
+def _secret_free(joined: str) -> bool:
+    """Whether no private marker of the M17 fixtures leaked into the log."""
+    return all(marker not in joined for marker in ("PRIVATE_", "sk-live-"))
+
+
+def _result_lines(events):
+    """The AI_CALL_RESULT lines among the logged events."""
+    return [event for event in events if event.startswith("AI_CALL_RESULT ")]
+
+
+def test_log_result_writes_one_redacted_line_of_a_successful_answer():
+    """@brief Positive: with the opt-in on, the arguments are in the log, redacted and hashed."""
+    import hashlib
+    import json
+    events = []
+    long_text = "x" * (diagnostics.RESULT_STRING_MAX_CHARS + 1)
+    result = {"pads": [{"number": "A1", "x_mm": 1.5, "y_mm": -2.0,
+                        "note": "Bearer sk-live-PRIVATE_TOKEN"}],
+              "transcript": long_text,
+              "image_data": "PRIVATE_BASE64",
+              "ok": True, "height_mm": None,
+              "opaque": object()}
+    wrapped = diagnostics.make_logged_call(lambda **_kw: result, events.append, log_result=True)
+    assert wrapped(model="provider/model", tool={"name": "report_pads"}) is result
+    lines = _result_lines(events)
+    assert len(lines) == 1
+    line = lines[0]
+    assert line.startswith("AI_CALL_RESULT id=1 model=provider/model tool=report_pads sha256=")
+    header, _, payload = line.partition(" chars=")
+    chars, _, text = payload.partition(" ")
+    logged = json.loads(text)
+    assert int(chars) == len(text)
+    assert header.split("sha256=")[1] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # The arguments a reader compares are there, verbatim.
+    assert logged["pads"][0]["number"] == "A1" and logged["pads"][0]["x_mm"] == 1.5
+    assert logged["ok"] is True and logged["height_mm"] is None
+    # Long strings and payload keys become digest + length, secrets are
+    # redacted, opaque objects are named, never stringified.
+    assert logged["transcript"] == {"sha256": hashlib.sha256(long_text.encode()).hexdigest(),
+                                    "length": len(long_text)}
+    assert set(logged["image_data"]) == {"sha256", "length"}
+    assert "[redacted]" in logged["pads"][0]["note"]
+    assert logged["opaque"] == {"type": "object"}
+    assert _secret_free("\n".join(events))
+    # The shallow summary counts the list field whatever its name.
+    end = [e for e in events if e.startswith("AI_CALL_END ")][0]
+    assert "result=object fields=6 pads=1" in end
+    # Order of the lines: END first, then the one RESULT line.
+    assert events.index(end) < events.index(line)
+
+
+def test_log_result_follows_log_prompt_and_is_off_by_default():
+    """@brief Negative: without the opt-in nothing of the result is written; log_prompt turns it on."""
+    result = {"pads": [{"number": "PRIVATE_NUMBER"}]}
+    for kwargs, expected in (({}, False), ({"log_prompt": True}, True),
+                             ({"log_prompt": True, "log_result": False}, False),
+                             ({"log_result": True}, True)):
+        events = []
+        wrapped = diagnostics.make_logged_call(lambda **_kw: result, events.append, **kwargs)
+        wrapped(model="provider/model", tool={"name": "report_pads"})
+        joined = "\n".join(events)
+        assert ("AI_CALL_RESULT" in joined) is expected, kwargs
+        assert ("PRIVATE_NUMBER" in joined) is expected, kwargs
+
+
+def test_log_result_never_writes_exceptions_or_scalars():
+    """@brief Negative: a failed call and a scalar answer leave no AI_CALL_RESULT line."""
+    events = []
+
+    def fail(**_kw):
+        raise RuntimeError("PRIVATE_MESSAGE")
+
+    wrapped = diagnostics.make_logged_call(fail, events.append, log_result=True)
+    with pytest.raises(RuntimeError):
+        wrapped(model="provider/model", tool={"name": "report_pads"})
+    scalar = diagnostics.make_logged_call(lambda **_kw: "PRIVATE_SCALAR", events.append,
+                                          log_result=True)
+    scalar(model="provider/model", tool={"name": "report_pads"})
+    joined = "\n".join(events)
+    assert not _result_lines(events) and _secret_free(joined)
+
+
+def test_log_result_is_bounded_for_huge_and_cyclic_answers():
+    """@brief Positive: the line is cut at the shared cap and a cycle does not recurse for ever."""
+    from kicadgen.services import datasheet_extractor
+    assert diagnostics.RESULT_LOG_MAX_CHARS == datasheet_extractor._REJECTED_RESPONSE_MAX_CHARS
+    huge = {"items": [{"n": i} for i in range(60000)]}
+    events = []
+    wrapped = diagnostics.make_logged_call(lambda: huge, events.append, log_result=True)
+    assert wrapped() is huge
+    line = _result_lines(events)[0]
+    assert line.endswith(" …[truncated]")
+    assert len(line) < diagnostics.RESULT_LOG_MAX_CHARS + 200
+    chars = int(line.partition(" chars=")[2].partition(" ")[0])
+    assert chars > diagnostics.RESULT_LOG_MAX_CHARS
+    # A cycle is cut where it closes; the rest of the answer is still there.
+    cyclic = {"a": {"b": 1}}
+    cyclic["a"]["self"] = cyclic
+    events = []
+    diagnostics.make_logged_call(lambda: cyclic, events.append, log_result=True)()
+    line = _result_lines(events)[0]
+    assert '{"a":{"b":1,"self":"[cut]"}}' in line and not line.endswith("[truncated]")
+
+
+def test_result_summary_counts_every_list_field_and_validates_its_name():
+    """@brief Positive/negative: any list field is counted; an unsafe key is not echoed."""
+    result = {"holes": [1, 2, 3], "readings": (1,), "sk-PRIVATE": [1], "n": 4,
+              "a key with spaces": [1, 2]}
+    events = []
+    diagnostics.make_logged_call(lambda: result, events.append)()
+    end = events[-1]
+    assert "holes=3 readings=1 [unavailable]=1 [unavailable]=2" in end
+    assert "PRIVATE" not in end and "spaces" not in end

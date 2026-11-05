@@ -1078,6 +1078,24 @@ def _positive_frame(length, width):
     return values if all(math.isfinite(v) and v > 0 for v in values) else None
 
 
+def _is_positive_length(value) -> bool:
+    """@brief True when `value` is a finite positive number (mm), never a bool.
+
+    @param value Candidate quote, any type.
+    @return True for a usable length; False for None, bools, NaN, zero or
+        negative values and anything that is not a number.
+    """
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+#: Answer of an extraction question meaning «Torna indietro»: nothing is
+#: decided on the data and the automatic generation is held back
+#: (`MainWindow._ask_extraction_question`). An object, not a string: the
+#: options of a question carry arbitrary values.
+QUESTION_BACK = object()
+
+
 #: Scene px per footprint mm of the 2D footprint preview (every drawer of
 #: the preview, the drawing snap and the handles use this scale).
 _FP_PREVIEW_MM_TO_PX = 20.0
@@ -1733,6 +1751,13 @@ class MainWindow(QMainWindow):
         self._cad3d_worker: Cad3DWorker | None = None
         self._terminal_worker: TerminalDetailWorker | None = None
         self._reconcile_worker: ReconcileWorker | None = None
+        #: The partial re-read of one datum (`RereadWorker`, review 2026-11-04
+        #: M16): a worker slot of its own, abortable like the others.
+        self._reread_worker = None
+        #: The main answer of the last extraction as saved with the project
+        #: (`ExtractedParams.raw_main`): the input of a partial re-read after
+        #: a reopen, when the extraction object is gone.
+        self._stored_main_answer: dict | None = None
         self._last_params: PinHeaderParams | CastellatedModuleParams | PackageGeometry | None = None
         #: Last extraction result applied to the fields. It serves to
         #: re-run the inventory on the saved proposals: the dimensions the
@@ -1937,6 +1962,25 @@ class MainWindow(QMainWindow):
         #: same doubt on the same analysed data is never asked twice. Saved
         #: with the project (`geometry_doubt_answers`).
         self._geometry_doubt_answers: dict = {}
+        #: Answers to the structured questions of an extraction
+        #: (`_review_extraction_questions`), {question key: chosen value}.
+        #: Saved with the project (`extraction_answers`) and handed to the
+        #: next extraction (`answers=`), so a question with a known key is
+        #: never asked twice (review 2026-11-04, H7).
+        self._extraction_answers: dict = {}
+        #: Questions of the last extraction still without an answer, as the
+        #: extractor returned them (`ExtractedParams.questions`); saved with
+        #: the project so «Rigenera modello STEP» can still ask them.
+        self._extraction_questions: list = []
+        #: Why the last generation deferred the STEP model, None when it did
+        #: not: {"code": "conflict" | "missing", "conflict": text | None,
+        #: "fields": [field keys]}. Saved with the project (`step_deferral`)
+        #: so a reopened project shows the real reason (review 2026-11-04, M16).
+        self._step_deferral: dict | None = None
+        #: True when the body HEIGHT of a pin matrix was declared by the
+        #: analysis (M16: length and width are applied even when the height
+        #: is in conflict, so the outline is drawn and only the 3D waits).
+        self._body_height_declared: bool = False
         #: Small cache of pad records built from parameters, keyed by the
         #: parameters' repr: the gate runs on every metadata keystroke.
         self._pad_records_cache: dict = {}
@@ -2202,6 +2246,23 @@ class MainWindow(QMainWindow):
             lambda: webbrowser.open(user_data_dir().as_uri()))
         self.action_open_config = tools_menu.addAction(
             self.i18n.text("Apri config.json"), self._open_config_file)
+        tools_menu.addSeparator()
+        # The recorded answers to the questions of an analysis (H7): the
+        # user can make the program ask them again for this project.
+        self.action_forget_answers = tools_menu.addAction(
+            self.i18n.text("Dimentica le risposte"), self._forget_extraction_answers)
+        # Partial re-reads (M16): one datum re-read without paying the whole
+        # analysis. Shown only when the installed workers module has the
+        # worker; enabled only with a saved main answer of a single part.
+        self.action_reread_height = tools_menu.addAction(
+            self.i18n.text("Rileggi solo le quote del corpo"),
+            lambda: self._start_reread("body_height_mm"))
+        self.action_reread_pads = tools_menu.addAction(
+            self.i18n.text("Rileggi solo le posizioni dei pad"),
+            lambda: self._start_reread("pad_layout"))
+        for action in (self.action_reread_height, self.action_reread_pads):
+            action.setVisible(self._reread_worker_class() is not None)
+        tools_menu.aboutToShow.connect(self._refresh_reread_actions)
 
         help_menu = self.menu_help = self.menuBar().addMenu(self.i18n.tr("app.help"))
         # «Apri cartella progetto tool» (open tool project folder) removed by the
@@ -2392,7 +2453,7 @@ class MainWindow(QMainWindow):
             return True
         return any(worker is not None and worker.isRunning() for worker in
                    (self._worker, self._extract_worker, self._cad3d_worker, self._terminal_worker,
-                    self._reconcile_worker))
+                    self._reconcile_worker, getattr(self, "_reread_worker", None)))
 
     def showEvent(self, event):  # noqa: N802 - firma Qt
         """@brief Centre the window on its screen the first time it is shown.
@@ -3538,6 +3599,9 @@ class MainWindow(QMainWindow):
         self.action_install_global.setText(self.i18n.text("Installa come libreria globale..."))
         self.action_open_tool_dir.setText(self.i18n.text("Apri cartella progetto tool"))
         self.action_open_config.setText(self.i18n.text("Apri config.json"))
+        self.action_forget_answers.setText(self.i18n.text("Dimentica le risposte"))
+        self.action_reread_height.setText(self.i18n.text("Rileggi solo le quote del corpo"))
+        self.action_reread_pads.setText(self.i18n.text("Rileggi solo le posizioni dei pad"))
         self.action_exit.setText(self.i18n.text("Esci"))
         # File menu entries added on 2026-09-24: before they stayed in the
         # start-up language (the user's «testi cablati» (hard-wired texts) check).
@@ -5779,6 +5843,11 @@ class MainWindow(QMainWindow):
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
         self._last_extracted = None
+        # The reason the previous generation deferred the STEP and the open
+        # questions describe the previous analysis: the new one states its
+        # own (M16); the ANSWERS stay, they are this project's decisions.
+        self._step_deferral = None
+        self._extraction_questions = []
         # The photos are reset BEFORE recomputing the buttons: the edit of the
         # review depends on the photo in memory, and turning it off while the
         # old photo is still there would leave it on over data just
@@ -5884,7 +5953,16 @@ class MainWindow(QMainWindow):
             part_number=self._part_number_for_analysis(),
             extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
             include_nc_pins=self._include_nc_pins(),
+            # The answers already given to this project's questions (H7):
+            # forwarded only when the extractor takes them, through a worker
+            # that declares the keyword (both change separately from here).
+            **(accepted_kwargs(ExtractWorker.__init__, answers=dict(self._extraction_answers))
+               if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers")
+               else {}),
         )
+        if self._extraction_answers and accepts_keyword(extract_pin_header_params, "answers"):
+            # Also as an attribute, for a worker that reads it at run time.
+            self._extract_worker.answers = dict(self._extraction_answers)
         # Cached answers and evidence in the project folder (user,
         # 2026-09-24). Here the name is always there: without a name nothing is extracted.
         self._extract_worker.photo_cache_dir = self._photo_cache_dir()
@@ -7101,6 +7179,7 @@ class MainWindow(QMainWindow):
         ("cad", "_cad3d_worker", "Rigenerazione del modello STEP"),
         ("ai", "_extract_worker", "Analisi AI dei documenti"),
         ("ai", "_reconcile_worker", "Rilancio dell'inventario"),
+        ("ai", "_reread_worker", "Rilettura parziale dei documenti"),
     )
     #: Name of the operation when the YOLO-only pretest runs in the extraction
     #: slot (see _abortable_operation).
@@ -8282,6 +8361,27 @@ class MainWindow(QMainWindow):
             state["metadata_applied"] = dict(self._applied_metadata)
         if getattr(self, "_geometry_doubt_answers", None):
             state["geometry_doubt_answers"] = dict(self._geometry_doubt_answers)
+        # Only when some exist: older projects stay byte-identical (H7, M16).
+        if getattr(self, "_extraction_answers", None):
+            state["extraction_answers"] = dict(self._extraction_answers)
+        if getattr(self, "_extraction_questions", None):
+            state["extraction_questions"] = deepcopy(self._extraction_questions)
+        if getattr(self, "_step_deferral", None):
+            state["step_deferral"] = dict(self._step_deferral)
+        main_answer = self._main_answer_for_reread()
+        if main_answer is not None:
+            # The input of a partial re-read (M16): only when JSON-able, and
+            # only when some analysis gave one.
+            try:
+                json.dumps(main_answer)
+            except (TypeError, ValueError):
+                pass
+            else:
+                state["main_answer"] = deepcopy(main_answer)
+        if getattr(self, "_body_height_declared", False) != bool(getattr(self, "_body_size_declared", False)):
+            # Written only when it differs from the length/width flag: a
+            # project where the three quotes came together reads as before.
+            state["body_height_declared"] = bool(self._body_height_declared)
         if getattr(self, "_user_pin_names", None):
             # Only when some exist: older projects stay byte-identical.
             state["user_pin_names"] = dict(self._user_pin_names)
@@ -8429,6 +8529,21 @@ class MainWindow(QMainWindow):
             {key: value for key, value in saved_answers.items()
              if isinstance(key, str) and value in self.GEOMETRY_DOUBT_ANSWERS}
             if isinstance(saved_answers, dict) else {})
+        saved_extraction = state.get("extraction_answers")
+        self._extraction_answers = (
+            {key: value for key, value in saved_extraction.items() if isinstance(key, str)}
+            if isinstance(saved_extraction, dict) else {})
+        self._extraction_questions = self._valid_extraction_questions(
+            state.get("extraction_questions"))
+        saved_deferral = state.get("step_deferral")
+        self._step_deferral = (
+            {"code": saved_deferral.get("code"),
+             "conflict": saved_deferral.get("conflict"),
+             "fields": [f for f in saved_deferral.get("fields") or () if isinstance(f, str)]}
+            if isinstance(saved_deferral, dict)
+            and saved_deferral.get("code") in self.STEP_DEFERRAL_CODES else None)
+        saved_main = state.get("main_answer")
+        self._stored_main_answer = dict(saved_main) if isinstance(saved_main, dict) and saved_main else None
         saved_analysis = state.get("analysis_pin_names")
         self._analysis_pin_names = ({_pin_key(pin): _pin_name_text(name)
                                      for pin, name in saved_analysis.items()
@@ -8462,6 +8577,11 @@ class MainWindow(QMainWindow):
             (self.field_body_length.value(), self.field_body_width.value(),
              self.field_body_height.value()) != PLACEHOLDER_BODY_MM
             or self._legacy_body_evidence(state))
+        body_height = state.get("body_height_declared")
+        # Projects saved before the per-field flag (2026-11-04): the three
+        # quotes were declared together, so the height follows the length.
+        self._body_height_declared = (body_height if isinstance(body_height, bool)
+                                      else self._body_size_declared)
         height_declared = state.get("cast_height_declared")
         # Projects saved before the flag (2026-11-03): DECLARED HEURISTIC, the
         # old rule (a height other than the placeholder and other than the
@@ -8665,12 +8785,20 @@ class MainWindow(QMainWindow):
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
         self._last_extracted = None
+        # The answers, questions and deferral come back from the file of the
+        # open project (`_apply_project_state`); the closed project's do not.
+        self._extraction_answers = {}
+        self._extraction_questions = []
+        self._step_deferral = None
+        self._stored_main_answer = None
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
         self._photo_source = ""
         self.package_geometry = None
         self._extracted_pcb_thickness = None
+        # The estimate borders describe the closed project's analysis.
+        self._mark_estimated_fields(None)
         # The thickness provenance comes back from the file of the open project
         # (_apply_project_state); the closed project's one does not remain here.
         self._pcb_thickness_source = "standard"
@@ -9943,6 +10071,543 @@ class MainWindow(QMainWindow):
             return self.GEOMETRY_DOUBT_J_LEAD
         return self.GEOMETRY_DOUBT_KEEP if clicked is confirm else self.GEOMETRY_DOUBT_BACK
 
+    # ── Structured questions of an extraction (review 2026-11-04, H7) ──
+    #
+    # The extractor no longer has only two exits (write / block): when two
+    # readings disagree it returns `ExtractedParams.questions`, each with
+    # the candidates as options and, when it has one, the crop of the
+    # document that shows them. The window asks each question ONCE, in one
+    # dialog shaped like the geometry doubts, records the answer in the
+    # project (`extraction_answers`) and applies it locally through
+    # `datasheet_extractor.apply_answers`: no paid call, and the next
+    # extraction receives the answers so a known key is never asked again.
+
+    #: Fields a question may be about; others are shown but not applied here.
+    EXTRACTION_QUESTION_FIELDS = ("contacts_view", "body_height_mm", "pad_layout",
+                                  "height_equals_plan")
+    #: Largest side of the evidence crop shown in the question dialog (px).
+    EVIDENCE_PIXMAP_MAX_PX = 480
+
+    @classmethod
+    def _valid_extraction_questions(cls, raw) -> list:
+        """@brief The well-formed questions of `raw`, as plain dicts.
+
+        @param raw `ExtractedParams.questions` or the saved list, any type.
+        @return Dicts with a non-empty `key`, a known `field`, a `text` and
+            at least one option carrying a `label` and a `value`; malformed
+            entries are left out (an older or partial extractor never breaks
+            the apply). `evidence` is kept only as {"document", "crop"}.
+        """
+        questions = []
+        for entry in raw if isinstance(raw, (list, tuple)) else ():
+            if not isinstance(entry, dict):
+                continue
+            key, field, text = entry.get("key"), entry.get("field"), entry.get("text")
+            options = [dict(label=str(o["label"]), value=o["value"])
+                       for o in entry.get("options") or ()
+                       if isinstance(o, dict) and "label" in o and "value" in o]
+            if (not isinstance(key, str) or not key or field not in cls.EXTRACTION_QUESTION_FIELDS
+                    or not isinstance(text, str) or not options):
+                continue
+            evidence = entry.get("evidence")
+            crop = evidence.get("crop") if isinstance(evidence, dict) else None
+            evidence = ({"document": str(evidence.get("document") or ""),
+                         "crop": [float(c) for c in crop] if isinstance(crop, (list, tuple))
+                         and len(crop) == 4 and all(isinstance(c, (int, float))
+                                                    and not isinstance(c, bool) for c in crop)
+                         else None}
+                        if isinstance(evidence, dict) else None)
+            questions.append({"key": key, "field": field, "text": text,
+                              "options": options, "evidence": evidence})
+        return questions
+
+    def _review_extraction_questions(self, params):
+        """@brief Ask the questions of an extraction, apply the answers, remember them.
+
+        @param params The extraction being applied (`questions` read when present).
+        @return (params, held_back): the extraction with the answers applied
+            (`_apply_extraction_answers`), and True when the user chose
+            «Torna indietro» on a question: the automatic generation must
+            not start (the fields are still applied, as for a geometry doubt).
+        @note A question whose key already has an answer in the project is
+            not asked again (the answer is applied); a «back» records
+            nothing, so the question comes back next time. The questions
+            left open are kept (`_extraction_questions`) so «Rigenera
+            modello STEP» can ask a height question later.
+        """
+        questions = self._valid_extraction_questions(getattr(params, "questions", None))
+        self._extraction_questions = []
+        if not questions:
+            return params, False
+        answers, held_back, open_questions = {}, False, []
+        for question in questions:
+            key = question["key"]
+            if key in self._extraction_answers:
+                answers[key] = self._extraction_answers[key]
+                self._append_log(tx("Domanda già risolta per questo progetto: {text}",
+                                    text=question["text"]))
+                continue
+            answer = self._ask_extraction_question(question)
+            if answer is QUESTION_BACK:
+                held_back = True
+                open_questions.append(question)
+                continue
+            self._extraction_answers[key] = answer
+            answers[key] = answer
+            label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
+            self._append_log(tx("Risposta dell'utente: {text} -> {label}",
+                                text=question["text"], label=label))
+        self._extraction_questions = open_questions
+        if answers:
+            params = self._apply_extraction_answers(params, answers)
+        return params, held_back
+
+    def _apply_extraction_answers(self, params, answers: dict):
+        """@brief Apply `answers` to `params` locally, without a paid call.
+
+        @param params The extraction.
+        @param answers {question key: chosen value}.
+        @return The extraction with the answers applied: the extractor's
+            `apply_answers` when the installed service has it; otherwise the
+            one answer the window can apply alone, a body height (the value
+            becomes the height, the conflict is closed, the provenance is the
+            user's), the others stay as they are and are said in the log.
+        @note Defensive by contract: the extractor side is written
+            separately, and the window must keep working without it.
+        """
+        from ..services import datasheet_extractor
+        apply = getattr(datasheet_extractor, "apply_answers", None)
+        if callable(apply):
+            try:
+                applied = apply(params, dict(answers))
+            except Exception as exc:  # noqa: BLE001 - the result is still usable as read
+                self._append_log(tx("ATTENZIONE: risposte non applicate all'estrazione: {exc}", exc=exc))
+                return params
+            if applied is not None:
+                params = applied
+        questions = {q["key"]: q for q in self._valid_extraction_questions(
+            getattr(params, "questions", None))}
+        for key, value in answers.items():
+            question = questions.get(key)
+            if question is None:
+                continue   # applied and removed by the extractor
+            if question["field"] == "body_height_mm" and _is_positive_length(value):
+                self._set_extracted_body_height(params, float(value))
+            else:
+                self._append_log(tx("Risposta registrata ma non applicabile da sola: {text}",
+                                    text=question["text"]))
+        remaining = [q for q in getattr(params, "questions", None) or ()
+                     if not (isinstance(q, dict) and q.get("key") in answers)]
+        if hasattr(params, "questions"):
+            try:
+                params.questions = remaining or None
+            except (AttributeError, TypeError):
+                pass
+        return params
+
+    def _set_extracted_body_height(self, params, height: float) -> None:
+        """@brief Write a user-chosen body height into an extraction and close its conflict.
+
+        @param params The extraction (mutated: `body_height_mm`,
+            `body_conflict`, `value_sources`, the package mapping's height).
+        @param height Chosen height in mm (> 0).
+        """
+        params.body_height_mm = height
+        if getattr(params, "body_conflict", None) is not None:
+            params.body_conflict = None
+        sources = getattr(params, "value_sources", None)
+        if isinstance(sources, dict):
+            sources["body_height_mm"] = "user"
+        package = getattr(params, "package_geometry", None)
+        if isinstance(package, dict):
+            package["body_height_mm"] = height
+        if getattr(self, "package_geometry", None) is not None:
+            self._rebind_package(body_height_mm=height)
+        self._append_log(tx("Altezza del corpo scelta dall'utente: {height} mm.", height=f"{height:g}"))
+
+    def _document_path_by_name(self, name: str) -> Path | None:
+        """@brief The document of the open project called `name`, or None.
+
+        @param name File name (as the extractor names its evidence).
+        @return The path among the selected documents, else the first file
+            with that name under the documents folder; None when there is
+            none or the folder cannot be read.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return None
+        wanted = Path(name).name
+        try:
+            doc_paths, _roles = self._selected_documents()
+        except (OSError, ValueError):
+            doc_paths = []
+        for path in doc_paths or ():
+            if Path(path).name == wanted:
+                return Path(path)
+        try:
+            root = self._docs_dir()
+            direct = root / wanted
+            if direct.is_file():
+                return direct
+            return next((p for p in root.rglob(wanted) if p.is_file()), None)
+        except (OSError, ValueError):
+            return None
+
+    def _evidence_pixmap(self, evidence) -> QPixmap | None:
+        """@brief The crop of the document a question points at, scaled for the dialog.
+
+        @param evidence {"document": file name, "crop": [x0, y0, x1, y1] px} or None.
+        @return A QPixmap no larger than EVIDENCE_PIXMAP_MAX_PX on its
+            longest side, or None when the document is missing, is not an
+            image Qt can read (a PDF), or the crop is empty.
+        """
+        if not isinstance(evidence, dict):
+            return None
+        path = self._document_path_by_name(evidence.get("document"))
+        if path is None:
+            return None
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            return None
+        crop = evidence.get("crop")
+        if isinstance(crop, (list, tuple)) and len(crop) == 4:
+            x0, y0, x1, y1 = (int(round(c)) for c in crop)
+            rect = QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)).toRect()
+            rect = rect.intersected(pixmap.rect())
+            if rect.isEmpty():
+                return None
+            pixmap = pixmap.copy(rect)
+        limit = self.EVIDENCE_PIXMAP_MAX_PX
+        if pixmap.width() > limit or pixmap.height() > limit:
+            pixmap = pixmap.scaled(limit, limit, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+        return pixmap
+
+    def _ask_extraction_question(self, question: dict):
+        """@brief Show one question of the extraction with its candidates and the evidence crop.
+
+        @param question A dict of `_valid_extraction_questions`.
+        @return The `value` of the chosen option, or QUESTION_BACK for
+            «Torna indietro» (also Esc: nothing is decided, nothing generated).
+        @note A separate method so tests answer it without opening a window,
+            exactly like `_ask_geometry_doubt`. The evidence is shown as the
+            dialog's icon pixmap (`_evidence_pixmap`); the dialog itself
+            never changes the data: the caller applies the answer.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(self.i18n.text("Domanda sull'analisi"))
+        box.setText(str(question.get("text") or question.get("key")))
+        box.setInformativeText(self.i18n.text(
+            "Scegli il valore che vedi nel documento: la risposta viene ricordata per questo "
+            "progetto e non richiede una nuova analisi."))
+        pixmap = self._evidence_pixmap(question.get("evidence"))
+        if pixmap is not None:
+            box.setIconPixmap(pixmap)
+        buttons = []
+        for option in question.get("options") or ():
+            buttons.append((box.addButton(str(option["label"]), QMessageBox.ButtonRole.AcceptRole),
+                            option["value"]))
+        back = box.addButton(self.i18n.text("Torna indietro"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(back)
+        box.setEscapeButton(back)
+        self._run_modal(box)
+        clicked = box.clickedButton()
+        for button, value in buttons:
+            if clicked is button:
+                return value
+        return QUESTION_BACK
+
+    def _forget_extraction_answers(self) -> None:
+        """@brief «Dimentica le risposte» (Strumenti): drop the project's recorded answers.
+
+        @note The questions come back at the next extraction (or at the next
+            «Rigenera modello STEP» for a stored height question); the fields
+            already filled from the old answers are not touched. Nothing to
+            forget: said, not silently ignored.
+        """
+        if not self._extraction_answers and not self._geometry_doubt_answers:
+            QMessageBox.information(self, self.i18n.text("Dimentica le risposte"),
+                                    self.i18n.text("Nessuna risposta registrata per questo progetto."))
+            return
+        count = len(self._extraction_answers) + len(self._geometry_doubt_answers)
+        self._extraction_answers = {}
+        self._geometry_doubt_answers = {}
+        self._save_project_config()
+        self._append_log(tx("Risposte dimenticate per questo progetto: {count}. Le domande verranno "
+                            "riproposte alla prossima analisi.", count=count))
+
+    def _stored_body_height_question(self) -> dict | None:
+        """@brief The open question about the body height, or None.
+
+        @return The first question of field `body_height_mm` left without an
+            answer by the last extraction (`_extraction_questions`).
+        """
+        return next((q for q in getattr(self, "_extraction_questions", None) or ()
+                     if isinstance(q, dict) and q.get("field") == "body_height_mm"), None)
+
+    def _resolve_stored_body_height_question(self) -> bool:
+        """@brief Ask the stored height question before a STEP regeneration, apply the answer.
+
+        @return True when a height is now declared (answered now or no open
+            question); False when the user went back (nothing regenerated).
+        @note «Rigenera modello STEP» with a deferred STEP (H7, point 2): the
+            height candidates are not parsed from the conflict prose, they
+            are the options of the question the extractor stored.
+        """
+        question = self._stored_body_height_question()
+        if question is None:
+            return True
+        answer = self._ask_extraction_question(question)
+        if answer is QUESTION_BACK or not _is_positive_length(answer):
+            return False
+        self._extraction_answers[question["key"]] = answer
+        self._extraction_questions = [q for q in self._extraction_questions if q is not question]
+        extracted = getattr(self, "_last_extracted", None)
+        if extracted is not None:
+            self._apply_extraction_answers(extracted, {question["key"]: answer})
+            if getattr(extracted, "body_height_mm", None) != float(answer):
+                self._set_extracted_body_height(extracted, float(answer))
+        elif self.package_geometry is not None:
+            self._rebind_package(body_height_mm=float(answer))
+        self.field_body_height.setValue(float(answer))
+        self._body_height_declared = True
+        self._step_deferral = None
+        self._save_project_config()
+        self._refresh_regen_3d_availability()
+        return True
+
+    # ── Partial re-read of one datum (review 2026-11-04, M16) ──
+    #
+    # Every clarification used to cost the whole analysis again. The workers
+    # module may provide `RereadWorker`, which calls the extractor's
+    # `reread_body_height` / `reread_pad_positions` on the main answer kept
+    # with the project (`ExtractedParams.raw_main`): one paid reading, the
+    # result rejoins the normal apply path (`_on_extracted`) with its
+    # questions, answers and automatic generation.
+
+    #: Field re-read by each «Strumenti» entry, with its log title.
+    REREAD_FIELDS = {"body_height_mm": "Rilettura delle quote del corpo",
+                     "pad_layout": "Rilettura delle posizioni dei pad"}
+
+    @staticmethod
+    def _reread_worker_class():
+        """@brief The `RereadWorker` class of the workers module, None when it has none.
+
+        @return The class, looked up at call time (the module and the window
+            change separately; the entries stay hidden without it).
+        """
+        from . import workers
+        return getattr(workers, "RereadWorker", None)
+
+    def _main_answer_for_reread(self) -> dict | None:
+        """@brief The main answer a partial re-read starts from, or None.
+
+        @return `raw_main` of the last extraction when it has one, else the
+            answer saved with the project (`_stored_main_answer`).
+        """
+        extracted = getattr(self, "_last_extracted", None)
+        raw = getattr(extracted, "raw_main", None)
+        if isinstance(raw, dict) and raw:
+            return raw
+        stored = getattr(self, "_stored_main_answer", None)
+        return stored if isinstance(stored, dict) and stored else None
+
+    def _reread_block_reason(self) -> str:
+        """@brief Why a partial re-read cannot start now, '' when it can.
+
+        @return Translated reason: no worker, not a single-component
+            project, no saved main answer, or work already running.
+        """
+        if self._reread_worker_class() is None:
+            return self.i18n.text("Rilettura parziale non disponibile in questa versione.")
+        if not self._is_single_component_project():
+            return self.i18n.text("La rilettura parziale vale solo per un componente singolo.")
+        if self._main_answer_for_reread() is None:
+            return self.i18n.text("Nessuna risposta principale salvata: analizza prima i documenti.")
+        if self._background_work_running() or self._automatic_generation_active:
+            return self.i18n.text("Operazione in corso: attendi la fine.")
+        return ""
+
+    def _refresh_reread_actions(self) -> None:
+        """@brief Enable the re-read entries only when a re-read can start (menu about to open)."""
+        actions = (getattr(self, "action_reread_height", None), getattr(self, "action_reread_pads", None))
+        if any(action is None for action in actions):
+            return
+        reason = self._reread_block_reason()
+        for action in actions:
+            action.setVisible(self._reread_worker_class() is not None)
+            action.setEnabled(not reason)
+            action.setToolTip(reason)
+
+    def _start_reread(self, field: str) -> None:
+        """@brief Start the partial re-read of `field` on the saved main answer.
+
+        @param field "body_height_mm" or "pad_layout" (REREAD_FIELDS).
+        @note Modelled on the inventory re-run: the worker lives in its own
+            slot (`_reread_worker`), is stamped with the analysis revision,
+            is abortable, and ends in `_on_reread_done` / `_on_extract_error`
+            / `_on_extract_finished` like an extraction. The paid call is
+            announced in the log BEFORE it starts, with the model.
+        """
+        if field not in self.REREAD_FIELDS:
+            return
+        reason = self._reread_block_reason()
+        if reason:
+            QMessageBox.information(self, self.i18n.text("Rilettura parziale"), reason)
+            return
+        if not self._ensure_api_key():
+            self.group_ai_tools.setExpanded(True)
+            return
+        try:
+            doc_paths, document_roles = self._selected_documents()
+        except (OSError, ValueError) as exc:
+            QMessageBox.information(self, self.i18n.text("Completa la documentazione"), str(exc))
+            return
+        try:
+            profile = self.profile_store.snapshot(self._profile_key())
+        except (ProfileError, sqlite3.Error, OSError) as exc:
+            QMessageBox.warning(self, self.i18n.text('Profilo AI non disponibile'), str(exc))
+            return
+        worker_class = self._reread_worker_class()
+        stored = self._main_answer_for_reread()
+        model = self._session_model or profile['model']
+        if hasattr(self, "ai_account"):
+            self.ai_account.start_analysis(self._project_dir_or_none())
+        self._begin_ai_run(self.REREAD_FIELDS[field])
+        announcement = tx("Rilettura parziale ({what}) sulla risposta principale salvata: una sola "
+                          "lettura a pagamento, nessuna nuova analisi completa. Modello principale "
+                          "{model}.", what=self.i18n.text(self.REREAD_FIELDS[field]), model=model)
+        self._on_ai_progress(announcement)
+        try:
+            worker = worker_class(
+                stored, doc_paths, document_roles, field=field, model=model,
+                pad_model=profile.get('pad_model') or None,
+                component_family=self._selected_family(),
+                system_prompt=profile.get('system_prompt_single') or None,
+                extra_instructions=self.field_component_prompt.toPlainText().strip() or None,
+                part_number=self._part_number_for_analysis())
+            self._reread_worker = worker
+            worker.done.connect(self._on_reread_done)
+            worker.error.connect(self._on_extract_error)
+            worker.progress.connect(self._on_ai_progress)
+            worker.phase.connect(self._on_phase)
+            worker.finished.connect(self._on_extract_finished)
+            worker._analysis_revision = self._analysis_revision
+            self._extraction_applied_revision = None
+            self._analysis_tabs_enabled = self.tabs.isEnabled()
+            self.tabs.setEnabled(False)
+            self.analysis_overlay.start(self.REREAD_FIELDS[field], announcement, abortable=True)
+            worker.start()
+            self._track_background_work(worker)
+        except Exception as exc:  # noqa: BLE001 - any failure brings the UI back to rest
+            worker = getattr(self, "_reread_worker", None)
+            if worker is None or not worker.isRunning():
+                self._reread_worker = None
+            self._on_extract_finished()
+            self._on_extract_error(str(exc))
+
+    def _on_reread_done(self, params) -> None:
+        """@brief A partial re-read returned: rejoin the path of a normal extraction.
+
+        @param params ExtractedParams built from the saved main answer with
+            the re-read datum confronted (`reread_body_height` /
+            `reread_pad_positions`).
+        @note The result keeps the saved main answer (`raw_main`) so a
+            further re-read starts from the same answer; from here on it is
+            `_on_extracted`: questions, answers, fields and -- when allowed --
+            the automatic generation.
+        """
+        if not self._analysis_result_is_current():
+            self._append_log(tx("Risultato di una rilettura interrotta dall'utente: scartato, i "
+                                "campi restano come sono."))
+            return
+        if getattr(params, "raw_main", None) is None and hasattr(params, "raw_main"):
+            params.raw_main = deepcopy(self._main_answer_for_reread())
+        self._on_extracted(params)
+
+    # ── One reason for a deferred STEP model (review 2026-11-04, M16) ──
+
+    #: Codes of `_step_deferral_reason`: two printed heights that disagree,
+    #: or body quotes the documents do not give.
+    STEP_DEFERRAL_CODES = ("conflict", "missing")
+    #: Body quote keys in field order, with their Italian labels.
+    BODY_QUOTE_LABELS = (("body_length_mm", "lunghezza"), ("body_width_mm", "larghezza"),
+                         ("body_height_mm", "altezza"))
+
+    def _missing_body_quotes(self) -> list[str]:
+        """@brief The body quote keys no document declared, for the current component.
+
+        @return Keys of BODY_QUOTE_LABELS; empty when every quote is there,
+            for a castellated module (its body is the module PCB) and while
+            the window is still being built.
+        """
+        if not hasattr(self, "package_geometry") or not hasattr(self, "group_3d"):
+            return []
+        if self._is_castellated():
+            return []
+        package = self.package_geometry
+        if package is not None:
+            values = (package.body_length_mm, package.body_width_mm, package.body_height_mm)
+            return [key for (key, _label), value in zip(self.BODY_QUOTE_LABELS, values)
+                    if not _is_positive_length(value)]
+        if not self._matrix_body_declared():
+            return [key for key, _label in self.BODY_QUOTE_LABELS]
+        return [] if self._matrix_height_declared() else ["body_height_mm"]
+
+    def _matrix_height_declared(self) -> bool:
+        """@brief True when the pin-matrix height field holds a documented measure.
+
+        @return `_body_height_declared` for a pin matrix; True for a
+            photographed board, whose 3D height comes from the PCB thickness
+            and the components, not from the field.
+        """
+        if self._photo_inventory_family() is True:
+            return True
+        return bool(getattr(self, "_body_height_declared", False))
+
+    def _step_deferral_reason(self) -> tuple[str, str]:
+        """@brief Why the STEP model cannot be built now: (code, short reason) or ("", "").
+
+        @return ("conflict", the extractor's conflict sentence) when two
+            printed heights disagree; ("missing", «mancano le quote
+            documentate del corpo (...)») when a quote is absent; ("", "")
+            when a body can be built, the 3D group is off or the component
+            is castellated.
+        @note ONE source for the log line, the final account, the STEP tab
+            (`_missing_body_reason`) and the saved project (`step_deferral`,
+            read back when the extraction object is gone after a reopen):
+            before, the log said «conflitto» while the account and the
+            overlay said «mancano le quote».
+        """
+        if not hasattr(self, "group_3d") or not self.group_3d.isChecked():
+            return "", ""
+        missing = self._missing_body_quotes()
+        if not missing:
+            return "", ""
+        conflict = getattr(getattr(self, "_last_extracted", None), "body_conflict", None)
+        if not isinstance(conflict, str) or not conflict.strip():
+            saved = getattr(self, "_step_deferral", None)
+            if isinstance(saved, dict) and saved.get("code") == "conflict":
+                conflict = saved.get("conflict")
+        if isinstance(conflict, str) and conflict.strip():
+            return "conflict", conflict.strip()
+        labels = ", ".join(self.i18n.text(label) for key, label in self.BODY_QUOTE_LABELS
+                           if key in missing)
+        return "missing", self.i18n.text(
+            "mancano le quote documentate del corpo ({fields}).").format(fields=labels)
+
+    def _record_step_deferral(self) -> tuple[str, str]:
+        """@brief Remember the current deferral reason in the project and return it.
+
+        @return `_step_deferral_reason()`.
+        @note Called where the generation decides to write the footprint
+            without the STEP: the record outlives the extraction object.
+        """
+        code, text = self._step_deferral_reason()
+        self._step_deferral = ({"code": code, "conflict": text if code == "conflict" else None,
+                                "fields": self._missing_body_quotes()} if code else None)
+        return code, text
+
     #: Answers of the user-pin-names question (`_ask_user_pin_names`).
     USER_PIN_NAMES_KEEP = "keep"
     USER_PIN_NAMES_REPLACE = "replace"
@@ -10155,6 +10820,10 @@ class MainWindow(QMainWindow):
 
     def _apply_extracted_result(self, params: ExtractedParams) -> None:
         self._hide_analysis_overlay()
+        # The structured questions of the analysis (view, height, pads) are
+        # asked FIRST and their answers applied to the result before any
+        # field reads it (H7): what follows sees one settled extraction.
+        params, questions_held_back = self._review_extraction_questions(params)
         validated_package_geometry = None
         if self._selected_family() == "single_smd" and params.package_geometry:
             # Without pad geometry the result is still applied and shown: the
@@ -10260,7 +10929,7 @@ class MainWindow(QMainWindow):
                 self._append_log(tx("ATTENZIONE geometria package ignorata: {exc}", exc=exc))
         # Structural doubts (body over the pads, clockwise numbering, bottom
         # view also mirrored): asked, never repaired silently (item 3).
-        geometry_held_back = self._review_geometry_doubts(params)
+        geometry_held_back = self._review_geometry_doubts(params) or questions_held_back
         self._set_regen_busy(False)
 
         # The two layouts fill different groups of fields; everything
@@ -10314,12 +10983,23 @@ class MainWindow(QMainWindow):
             # analysis without body quotes leaves the fields as they were,
             # and those values (placeholder, or another analysis's) must not
             # build a body (audit 2026-10-15, item 4).
-            self._body_size_declared = bool(params.has_3d_body())
-        if params.has_3d_body() and not params.is_castellated():
+            # Field by field (M16): the outline needs length and width, the
+            # 3D also the height; a height in conflict no longer throws away
+            # the confirmed plan sizes.
+            self._body_size_declared = _positive_frame(
+                params.body_length_mm, params.body_width_mm) is not None
+            self._body_height_declared = self._body_size_declared and _is_positive_length(
+                params.body_height_mm)
+        if not params.is_castellated() and (
+                self._body_size_declared or params.has_3d_body()):
             self._enable_3d_group_from_extraction()
-            self.field_body_length.setValue(params.body_length_mm)
-            self.field_body_width.setValue(params.body_width_mm)
-            self.field_body_height.setValue(params.body_height_mm)
+            # Only what the documents gave: a missing quote leaves its field
+            # as it was, and its flag says it is not a measure.
+            for widget, value in ((self.field_body_length, params.body_length_mm),
+                                  (self.field_body_width, params.body_width_mm),
+                                  (self.field_body_height, params.body_height_mm)):
+                if _is_positive_length(value):
+                    widget.setValue(value)
             if params.body_offset_x_mm is not None:
                 self.field_body_offset_x.setValue(params.body_offset_x_mm)
             if params.body_offset_y_mm is not None:
@@ -10358,6 +11038,7 @@ class MainWindow(QMainWindow):
         for warning in self._plausibility_warnings(params):
             self._append_log(tx("ATTENZIONE: ") + warning)
         self._log_values_to_review(params)
+        self._mark_estimated_fields(params)
 
         # Defence in depth: the extraction cleans the fillets upstream, but
         # one malformed entry (not an object, a missing key, a radius that
@@ -10382,7 +11063,11 @@ class MainWindow(QMainWindow):
             # «Torna indietro» on a geometry doubt: the fields are applied and
             # saved so the user can look at them, but nothing is generated.
             self._auto_generation_params = None if geometry_held_back else params
-            if geometry_held_back:
+            if questions_held_back:
+                self._append_log(tx("Generazione automatica non avviata: una domanda dell'analisi "
+                                    "è rimasta senza risposta. Ripeti l'analisi o rispondi da "
+                                    "«Rigenera modello STEP», poi genera."))
+            elif geometry_held_back:
                 self._append_log(tx("Generazione automatica non avviata: un dubbio sulla geometria "
                                     "del package è da verificare sul disegno. Correggi i dati o "
                                     "ripeti l'analisi, poi genera."))
@@ -10575,6 +11260,16 @@ class MainWindow(QMainWindow):
         if keys:
             self._append_log(tx("Valori stimati o non dichiarati nei documenti, da verificare: "
                                 "{keys}.", keys=", ".join(str(key) for key in keys)))
+        # Per-pad provenance of a package (`source` of each pad mapping,
+        # written by the extractor since 2026-11-04): a pad estimated or
+        # measured on the drawing pixels is not a quote and must be said.
+        package = getattr(params, "package_geometry", None)
+        pins = package.get("pins") if isinstance(package, dict) else None
+        unread = [str(pin.get("number")) for pin in pins or ()
+                  if isinstance(pin, dict) and pin.get("source") in ("estimated", "measured_pixels")]
+        if unread:
+            self._append_log(tx("Pad con posizione stimata o misurata sui pixel del disegno, "
+                                "da verificare: {pads}.", pads=", ".join(unread)))
 
     def _plausibility_warnings(self, params) -> list:
         """@brief Warnings for extracted values that are possible but unusual.
@@ -10848,7 +11543,28 @@ class MainWindow(QMainWindow):
         # was nothing.
         self._refresh_reopen_review_button()
         self._on_ai_progress(tx("Estrazione fallita: {message}", message=message))
-        QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message)
+        if self._ask_extraction_retry(message):
+            # Re-entered from the event loop, once the window is at rest:
+            # the same documents, settings and recorded answers.
+            QTimer.singleShot(0, self._extract_with_ai)
+
+    def _ask_extraction_retry(self, message: str) -> bool:
+        """@brief Show the extraction error with a «Riprova» button.
+
+        @param message Error text, as it arrives from the worker.
+        @return True when the user chose «Riprova» (the analysis is started
+            again with the same settings); False for «Chiudi» or Esc.
+        @note A separate method so tests answer it without a window
+            (review 2026-11-04, low findings: no retry after an error). The
+            static `QMessageBox.warning` with Qt's own Retry/Close buttons
+            (translated by Qt in the chosen language) keeps the dialog the
+            tests already replace; a replaced call that returns nothing
+            reads as «Chiudi».
+        """
+        buttons = QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close
+        answer = QMessageBox.warning(self, self.i18n.text("Estrazione fallita"), message,
+                                     buttons, QMessageBox.StandardButton.Close)
+        return answer == QMessageBox.StandardButton.Retry
 
     # ── Footprint and 3D body parameters (data, no widget) ──
 
@@ -12133,21 +12849,86 @@ class MainWindow(QMainWindow):
         """
         from ..services.klc_checks import field_findings
         grouped = field_findings(findings)
+        for key, field in self._metadata_fields().items():
+            severity, messages = grouped.get(key, ("", []))
+            self._set_field_finding(key, field, severity, messages)
+        self.field_datasheet.setPlaceholderText(self.i18n.text(DATASHEET_HINT))
+
+    def _set_field_finding(self, key: str, field, severity: str, messages) -> None:
+        """@brief Border one field with `severity` and put the reasons in its tooltip.
+
+        @param key Stable key of the field (`_metadata_tooltip_sources`).
+        @param field The editor: a QLineEdit, or a spin box whose inner line
+            edit gets the same property (the style sheet borders QLineEdit).
+        @param severity 'error', 'warning' or '' (no border, tooltip restored).
+        @param messages Reasons, already translated, one per line.
+        @note The field's own tooltip source is kept so a language switch
+            or a cleared finding restores it exactly. Shared by the KLC
+            findings and the estimated values (review 2026-11-04).
+        """
         sources = getattr(self, "_metadata_tooltip_sources", None)
         if sources is None:
             sources = self._metadata_tooltip_sources = {}
-        for key, field in self._metadata_fields().items():
-            if key not in sources:
-                sources[key] = self.i18n.source_of(field.toolTip()) or field.toolTip()
-            severity, messages = grouped.get(key, ("", []))
-            if field.property("klc") != severity:
-                field.setProperty("klc", severity)
-                field.style().unpolish(field)
-                field.style().polish(field)
-            base = self.i18n.text(sources[key])
-            prefix = "⛔ " if severity == "error" else "⚠ "
-            field.setToolTip("\n\n".join([base] + [prefix + message for message in messages]))
-        self.field_datasheet.setPlaceholderText(self.i18n.text(DATASHEET_HINT))
+        if key not in sources:
+            sources[key] = self.i18n.source_of(field.toolTip()) or field.toolTip()
+        line_edit = field.lineEdit() if hasattr(field, "lineEdit") else None
+        for widget in (field, line_edit):
+            if widget is not None and widget.property("klc") != severity:
+                widget.setProperty("klc", severity)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+        base = self.i18n.text(sources[key]) if sources[key] else ""
+        prefix = "⛔ " if severity == "error" else "⚠ "
+        lines = ([base] if base else []) + [prefix + message for message in messages]
+        field.setToolTip("\n\n".join(lines))
+
+    #: Extracted value keys (`ExtractedParams.value_sources`) shown in a field.
+    #: Only the quotes that have a visible editor: the pad and drill of the
+    #: «Piazzole del componente THT» box and the board thickness. The body
+    #: quotes are drawn as measures in the footprint preview and the matrix
+    #: fields are data objects without a widget (no border possible there).
+    ESTIMATE_FIELD_KEYS = (("pad_diameter_mm", "spin_single_tht_pad"),
+                           ("drill_mm", "spin_single_tht_drill"),
+                           ("pcb_thickness_mm", "spin_pcb_thickness"))
+
+    def _estimated_value_reasons(self, params) -> dict:
+        """@brief Why each shown field holds an estimate, by field attribute name.
+
+        @param params The extraction, or None (nothing is estimated).
+        @return {field attribute: [reasons]}: values whose provenance is
+            "estimated" or "undeclared" (`value_sources`).
+        """
+        reasons: dict = {}
+        if params is None:
+            return reasons
+        sources = getattr(params, "value_sources", None)
+        if isinstance(sources, dict):
+            for key, attribute in self.ESTIMATE_FIELD_KEYS:
+                source = sources.get(key)
+                if source in ("estimated", "undeclared"):
+                    reasons.setdefault(attribute, []).append(
+                        self.i18n.text("Valore stimato, non letto dai documenti: da verificare.")
+                        if source == "estimated" else
+                        self.i18n.text("Valore non dichiarato dai documenti: da verificare."))
+        return reasons
+
+    def _mark_estimated_fields(self, params) -> None:
+        """@brief Border the fields that hold an estimate, like the KLC fields, with the reason.
+
+        @param params The extraction just applied, or None to clear every mark.
+        @note Low finding of the review 2026-11-04: estimates were said in the
+            log only. The per-pad provenance of a package (`source` of each
+            pad: estimated, measured on the photo) and the estimated body
+            centre have no field of their own and are written in the log by
+            `_log_values_to_review` and the package frame notes.
+        """
+        reasons = self._estimated_value_reasons(params)
+        for attribute in dict.fromkeys(a for _k, a in self.ESTIMATE_FIELD_KEYS):
+            field = getattr(self, attribute, None)
+            if field is None or not hasattr(field, "setToolTip"):
+                continue
+            messages = reasons.get(attribute, [])
+            self._set_field_finding(attribute, field, "warning" if messages else "", messages)
 
     # ── Required metadata block of the installation (user, 2026-10-15) ──
 
@@ -14246,10 +15027,12 @@ class MainWindow(QMainWindow):
             # provenance), read by step_generator.
             body.height_declared = bool(getattr(self, "_cast_height_declared", False))
             return body
-        if not self._matrix_body_declared():
+        if not self._matrix_body_declared() or not self._matrix_height_declared():
             # CONTRACT CHANGED 2026-10-15 (audit item 4): like the package
             # path above, a pin matrix without documented body dimensions
             # gets NO body, never the placeholder 10 x 10 x 5 mm block.
+            # Since 2026-11-04 (M16) the height has its own flag: confirmed
+            # plan sizes draw the outline, a height in conflict builds no 3D.
             return None
         return Body3DParams(
             length_mm=self.field_body_length.value(),
@@ -14286,11 +15069,19 @@ class MainWindow(QMainWindow):
         return {"show_pins_3d": self._show_pins_3d()}
 
     def _automatic_generation_blocked(self, message):
+        """@brief Say that the automatic generation did not start, with ONE remedy.
+
+        @param message The reason, as the validation raised it.
+        @note The remedy is the window's, written once after the reason
+            (review 2026-11-04, low findings): the reason names what is
+            wrong, the family of the component says where to fix it, and
+            neither is repeated.
+        """
         if self._selected_family() == "single_tht":
-            text = message + "\n\n" + self.i18n.text(
-                "Correggi i valori nella sezione Piazzole del componente THT, poi usa "
-                "«Rigenera footprint»."
-            )
+            text = (message + "\n\n" + self.i18n.text("Nessun file generato.") + " "
+                    + self.i18n.text(
+                        "Correggi i valori nella sezione Piazzole del componente THT, poi usa "
+                        "«Rigenera footprint»."))
         else:
             text = self.i18n.tr("generation.blocked", reason=message)
         if self._project_has_footprint():
@@ -14331,9 +15122,9 @@ class MainWindow(QMainWindow):
             # the VE12H-K run of 16:47 generated despite the disagreement.
             raise ValueError(conflict)
         if self._selected_family() == "single_smd" and not params.package_geometry:
-            raise ValueError(tx(
-                "Componente SMD: manca la geometria esplicita delle piazzole. "
-                "Completa il datasheet e ripeti l'analisi."))
+            # Reason only: the remedy is written once by the dialog
+            # (`_automatic_generation_blocked`, review 2026-11-04).
+            raise ValueError(tx("Componente SMD: manca la geometria esplicita delle piazzole."))
         if params.package_geometry:
             # Explicit package pads use the same validated geometry for both
             # the footprint and the direct FreeCAD path. Never fall back to
@@ -14347,7 +15138,7 @@ class MainWindow(QMainWindow):
                 package_from_mapping(geometry_data)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(
-                    tx("Geometria a pad espliciti non valida: nessun file generato.")) from exc
+                    tx("Geometria a pad espliciti non valida.")) from exc
             return
         if require_body_dimensions:
             required_dimensions = ('body_length_mm', 'body_width_mm')
@@ -14828,30 +15619,36 @@ class MainWindow(QMainWindow):
             fields = {"body_length_mm": self.field_body_length,
                       "body_width_mm": self.field_body_width,
                       "body_height_mm": self.field_body_height}
+            declared = {"body_length_mm": self._matrix_body_declared(),
+                        "body_width_mm": self._matrix_body_declared(),
+                        "body_height_mm": self._matrix_height_declared()}
             missing = []
             for field, label in required_labels:
                 if extracted is not None:
                     value = getattr(extracted, field, None)
-                elif self._matrix_body_declared():
+                elif declared[field]:
                     value = fields[field].value()
                 else:
                     # The fields hold the placeholder, not a measure (item 4).
                     value = None
-                if (isinstance(value, bool) or not isinstance(value, (int, float))
-                        or not math.isfinite(value) or value <= 0):
+                if not _is_positive_length(value):
                     missing.append(label)
             if missing:
+                # ONE deferral reason (M16), recorded in the project: the
+                # final account, the overlay and the STEP tab read the same.
+                code, reason = self._record_step_deferral()
                 if automatic:
-                    self._automatic_3d_deferred_reason = ", ".join(missing)
-                conflict = getattr(extracted, "body_conflict", None)
-                if conflict:
+                    self._automatic_3d_deferred_reason = reason or ", ".join(missing)
+                if code == "conflict":
                     self._append_log(tx("Modello STEP rinviato: {conflict} Il footprint viene "
-                                        "comunque generato.", conflict=conflict))
+                                        "comunque generato.", conflict=reason))
                 else:
                     self._append_log(tx(
                         "Modello STEP rinviato: mancano le quote documentate del corpo ({fields}). "
                         "Il footprint viene comunque generato. Aggiungi un disegno quotato e ripeti "
                         "l'analisi per completare il modello STEP.", fields=", ".join(missing)))
+            else:
+                self._step_deferral = None
 
         self._last_params = params
         self._worker = GenerateWorker(
@@ -15045,8 +15842,17 @@ class MainWindow(QMainWindow):
             self._hold_completed_overlay("Completato: footprint e modello STEP generati.")
         else:
             if getattr(self, "_automatic_3d_deferred_reason", ""):
-                message = tx("Footprint generato; modello STEP rinviato: mancano le quote del corpo ({fields}).",
-                             fields=self._automatic_3d_deferred_reason)
+                # The same reason the log line gave (M16): a conflict is a
+                # conflict here too, not «mancano le quote».
+                record = self._step_deferral if isinstance(self._step_deferral, dict) else {}
+                if record.get("code") == "conflict":
+                    message = tx("Footprint generato; modello STEP rinviato: {reason}",
+                                 reason=record.get("conflict") or self._automatic_3d_deferred_reason)
+                else:
+                    labels = ", ".join(self.i18n.text(label) for key, label in self.BODY_QUOTE_LABELS
+                                       if key in (record.get("fields") or ()))
+                    message = tx("Footprint generato; modello STEP rinviato: mancano le quote del corpo ({fields}).",
+                                 fields=labels or self._automatic_3d_deferred_reason)
                 self._on_ai_progress(message)
                 self._hold_completed_overlay("Footprint generato; modello STEP da completare.")
             else:
@@ -15147,6 +15953,8 @@ class MainWindow(QMainWindow):
             return
         if self._automatic_generation_active:
             self._automatic_3d_done = True
+        # A STEP written is no STEP deferred (M16).
+        self._step_deferral = None
         self._append_log(f"OK (3D) -> {path}")
         self._set_3d_status(
             self.i18n.tr("status.step_updated", path=path), STATUS_INFO)
@@ -19890,27 +20698,21 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "group_3d") or not hasattr(self, "package_geometry"):
             return ""   # window still being built
-        if not self.group_3d.isChecked() or self._is_castellated():
+        # One reason everywhere (M16): the same code the log line and the
+        # final account used, also after a reopen (`_step_deferral`).
+        code, reason = self._step_deferral_reason()
+        if not code:
             return ""
-        labels = (self.i18n.text("lunghezza"), self.i18n.text("larghezza"),
-                  self.i18n.text("altezza"))
-        package = self.package_geometry
-        if package is not None:
-            values = (package.body_length_mm, package.body_width_mm, package.body_height_mm)
-            missing = [label for label, value in zip(labels, values) if value is None]
-        else:
-            missing = [] if self._matrix_body_declared() else list(labels)
-        if not missing:
-            return ""
-        conflict = getattr(getattr(self, "_last_extracted", None), "body_conflict", None)
-        if conflict:
+        if code == "conflict":
             # The drawing has the quote, twice: say that, not «add a drawing».
             return self.i18n.text(
-                "Modello STEP non disponibile: {conflict}").format(conflict=conflict)
+                "Modello STEP non disponibile: {conflict}").format(conflict=reason)
+        labels = ", ".join(self.i18n.text(label) for key, label in self.BODY_QUOTE_LABELS
+                           if key in self._missing_body_quotes())
         return self.i18n.text(
             "Modello STEP non disponibile: mancano le quote documentate del corpo ({fields}). "
             "Il programma non costruisce un corpo con misure inventate: aggiungi un disegno "
-            "quotato del corpo e ripeti l'analisi.").format(fields=", ".join(missing))
+            "quotato del corpo e ripeti l'analisi.").format(fields=labels)
 
     def _legacy_body_evidence(self, state: dict) -> bool:
         """@brief Evidence that a project saved before `body_size_declared` had its body built on purpose.
@@ -19943,6 +20745,24 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError, AttributeError):
             return False
         return (body.get("length_mm"), body.get("width_mm"), body.get("height_mm")) == fields
+
+    @property
+    def _body_size_declared(self) -> bool:
+        """@brief True when the pin-matrix body LENGTH and WIDTH are documented measures.
+
+        @return The flag set by the analysis, the project file or a caller.
+        @note A property since 2026-11-04 (M16): assigning it also declares
+            the height, as every caller that sets it by hand means «the whole
+            body is documented» (that was the only meaning before the
+            per-field flags). The analysis sets `_body_height_declared`
+            AFTER it, from the height it really got.
+        """
+        return bool(self.__dict__.get("_body_size_declared_flag", False))
+
+    @_body_size_declared.setter
+    def _body_size_declared(self, value) -> None:
+        self.__dict__["_body_size_declared_flag"] = bool(value)
+        self._body_height_declared = bool(value)
 
     def _matrix_body_declared(self) -> bool:
         """@brief True when the pin-matrix body fields may build a body (outline and 3D).
@@ -19981,11 +20801,15 @@ class MainWindow(QMainWindow):
             idle = button.property("workflow_detail_source") or ""
             button.setProperty("workflow_idle_detail_source", idle)
         reason = self._missing_body_reason()
-        button.setEnabled(not reason)
+        # A stored height question keeps the command reachable: pressing it
+        # asks the question instead of refusing (H7, point 2).
+        askable = self._stored_body_height_question() is not None
+        button.setEnabled(not reason or askable)
         # The catalogue source, not the composed sentence: the tooltip must
         # follow a later language switch (`_refresh_workflow_tooltips`); the
         # dialog of a direct call names the missing dimensions.
-        self._set_workflow_detail(button, self.REGEN_3D_NO_BODY_TOOLTIP if reason else idle)
+        self._set_workflow_detail(button, self.REGEN_3D_NO_BODY_TOOLTIP if reason and not askable
+                                  else idle)
 
     def _set_translated_tooltip(self, widget, source: str) -> None:
         """@brief Set a translated tooltip that later language switches keep translating.
@@ -20398,6 +21222,13 @@ class MainWindow(QMainWindow):
                 STATUS_WARNING)
             return
 
+        if (self._current_body_params() is None and not getattr(self, "_regen_3d_automatic", False)
+                and self._stored_body_height_question() is not None):
+            # A height the analysis could not settle (H7, point 2): the
+            # stored question is asked now, with its candidates, instead of
+            # the dead end «mancano le quote».
+            if not self._resolve_stored_body_height_question():
+                return
         body = self._current_body_params()
         if body is None:
             # Missing documented body dimensions are named (audit item 4):

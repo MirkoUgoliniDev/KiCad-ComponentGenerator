@@ -280,6 +280,27 @@ _LIST_SEPARATOR = " · "
 #: reached the card as structured data instead of as a string.
 _TERM_SEPARATOR = " — "
 
+#: Separator between the ROLES of one document inside its description:
+#: «pinout.jpeg — Pinout / disposizione contatti + Immagine con quote + …».
+#: One row cannot hold four roles: the card used to cut them («Side view /
+#: hei…»; user, 2026-11-04: «scrivi meglio questa cosa dei ruoli delle
+#: immagini» -- write the roles of the images better). A description that
+#: lists several roles is laid out as a definition with CONTINUATION rows:
+#: the first role beside the name, every other role on an indented row of
+#: its own (`role_rows`), so every role is whole and the name stays aligned.
+#:
+#: Same nature as the two signs above: a rule on the SHAPE of the item, not
+#: on the documents message; the source writes the sign on purpose
+#: (`datasheet_extractor._files_sent_message` joins the role labels with
+#: it). SEPARATION DECLARED FRAGILE, like `_TERM_SEPARATOR`: the sign is not
+#: reserved, a third-party description carrying " + " would be split into
+#: rows (all the text stays, only the layout changes). It would become
+#: unnecessary if the status reached the card as structured data.
+_ROLE_SEPARATOR = " + "
+#: Indent of a continuation row, in characters of the status font: the row
+#: starts under the description, visibly inside the item above it.
+_ROLE_INDENT = "    + "
+
 #: Text lines reserved for the status. The card is sized on this number, not
 #: on the sentence passing at that moment: a card that changes height at
 #: every message is more annoying than a card that is a little taller.
@@ -407,6 +428,38 @@ def enumeration_term(item):
     if not separator or not term or not description:
         return None
     return term, description
+
+
+def role_rows(lines):
+    """@brief Expand enumeration lines into card rows, one role per row.
+
+    @param lines Lead-in and items, as `enumeration_lines` returns them.
+    @return [(text, is_item)]: the lead-in (not an item), then for each item
+        either the item itself, or -- when its description lists several
+        parts separated by `_ROLE_SEPARATOR` -- the item with its FIRST part
+        beside the term followed by one continuation row per remaining
+        part, prefixed by `_ROLE_INDENT` and never treated as an item (no
+        term, no bold). A trailing full stop of the last part stays where
+        the source put it.
+    @note Only items that declare a term (`enumeration_term`) are expanded:
+        a plain item carrying " + " in its text is a sentence, not a list of
+        roles, and stays one row. A description with a single part is left
+        exactly as before.
+    """
+    rows = []
+    for index, line in enumerate(lines):
+        parts = enumeration_term(line) if index > 0 else None
+        if parts is None:
+            rows.append((line, index > 0))
+            continue
+        term, description = parts
+        roles = [role.strip() for role in description.split(_ROLE_SEPARATOR) if role.strip()]
+        if len(roles) < 2:
+            rows.append((line, True))
+            continue
+        rows.append((f"{term}{_TERM_SEPARATOR}{roles[0]}", True))
+        rows.extend((f"{_ROLE_INDENT}{role}", False) for role in roles[1:])
+    return rows
 
 
 def _elide_row(line, width, regular, bold, is_item):
@@ -1925,11 +1978,14 @@ class AnalysisOverlay(QWidget):
             from different columns on every row, that is exactly the defect
             («più chiaro») the list must remove. Non-list lines stay centred
             as before.
+        @note An item whose description lists several roles takes one row
+            per role (`role_rows`): the count of rows is still exact, it is
+            the count of roles that sets it, so no role is ever cut.
         """
         metrics = self.status.fontMetrics()
         width = self._status_text_width()
-        shown = [_fit_row(line, width, self.status.font(), index > 0)
-                 for index, line in enumerate(lines)]
+        shown = [_fit_row(line, width, self.status.font(), is_item)
+                 for line, is_item in role_rows(lines)]
         room = self._status_height_room()
         if room < 2 * metrics.lineSpacing() + metrics.descent():
             return False

@@ -123,12 +123,16 @@ def test_the_enlarged_reading_sends_the_tiles_and_the_body_tool(tmp_path):
     blocks = call.call_args.kwargs["content_blocks"]
     assert sum(1 for b in blocks if b.get("type") == "image_url") == 5
     assert call.call_args.kwargs["tool"]["function"]["name"] == "report_body_dimensions"
-    assert reading["printed"] == [16.9]
+    # Review 2026-11-04 (A1): every printed quote carries the role the reader
+    # declared; a bare number of an older answer is "other".
+    assert reading["printed"] == [{"value": 16.9, "measures": "other"}]
 
 
 # ── End to end: the fourth call happens only on a tie ───────────────────
 
-def test_end_to_end_the_tie_break_uses_the_main_model_on_the_enlarged_drawing(offline, monkeypatch, tmp_path):
+def test_end_to_end_the_tie_break_uses_the_other_model_on_the_enlarged_drawing(offline, monkeypatch, tmp_path):
+    """CONTRACT CHANGED (review 2026-11-04, M13): the third witness is a model OTHER than the
+    main one -- the dedicated reader -- never the main model reading itself again."""
     logs = []
     main = _single(body_height_mm=19.3, value_sources={"body_length_mm": "read", "body_height_mm": "read"},
                    printed_vertical_quotes=[19.3, 0.4, 3.5])
@@ -141,10 +145,33 @@ def test_end_to_end_the_tie_break_uses_the_main_model_on_the_enlarged_drawing(of
         [_drawing(tmp_path)], model="vendor/main", component_family="single_tht",
         pad_model="vendor/reader", document_roles={"quote.png": ["top"]}, progress=logs.append)
     assert call.call_count == 4
-    assert call.call_args_list[3].kwargs["model"] == "vendor/main"
+    assert call.call_args_list[3].kwargs["model"] == "vendor/reader"
     assert sum(1 for b in call.call_args_list[3].kwargs["content_blocks"] if b.get("type") == "image_url") == 5
     assert params.body_height_mm == pytest.approx(16.9)
     assert any("Spareggio sull'altezza" in line for line in logs)
+
+
+def test_end_to_end_no_tie_break_when_the_reader_is_the_main_model(offline, monkeypatch, tmp_path):
+    """Negative twin: one model only -> no paid third call, the conflict becomes a question."""
+    logs = []
+    main = _single(body_height_mm=19.3, value_sources={"body_length_mm": "read", "body_height_mm": "read"},
+                   printed_vertical_quotes=[19.3, 0.4, 3.5])
+    body = {"drawing_unit": "mm", "body_length": 20.5, "body_width": 10.5, "body_height": 16.9,
+            "printed_vertical_quotes": [16.9, 0.4, 3.5]}
+    call = Mock(side_effect=[main, _CHAINS_ANSWER, body])
+    monkeypatch.setattr(ext, "call_tool", call)
+    params = ext.extract_pin_header_params(
+        [_drawing(tmp_path)], model="vendor/main", component_family="single_tht",
+        document_roles={"quote.png": ["top"]}, progress=logs.append)
+    assert call.call_count == 3
+    assert any("Spareggio sull'altezza non disponibile" in line for line in logs)
+    assert params.body_height_mm is None and params.body_conflict
+    question, = [q for q in params.questions if q["field"] == "body_height_mm"]
+    assert [o["value"] for o in question["options"]] == [19.3, 16.9]
+    chosen = ext.apply_answers(params, {question["key"]: 16.9})
+    assert chosen.body_height_mm == pytest.approx(16.9) and chosen.body_conflict is None
+    assert chosen.value_sources["body_height_mm"] == ext.USER_SOURCE
+    assert all(q["field"] != "body_height_mm" for q in chosen.questions)
 
 
 # ── Unsettled without a tie (HLK module, 2026-11-04) ────────────────────

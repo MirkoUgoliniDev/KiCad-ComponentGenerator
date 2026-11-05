@@ -176,7 +176,7 @@ SUITE run1 (codice PRIMA delle correzioni dell'audit midpoints): prima meta' 690
 3 falliti = test_documentation x2 (helper owner_of poi reso privato) + test_message_localization (catalogo letto a
 meta' modifica): tutti e tre VERDI da soli sul codice finale; seconda meta' in corso.
 UTENTE 04/11 sera: «tutti» = correggere TUTTI i rilievi (blocchi A-D). PIANO (scritto PRIMA del codice):
-0) commit + push del lavoro di oggi (autorizzati alle 18:15) appena finisce la seconda meta' della suite.
+0) commit + push del lavoro di oggi (autorizzati alle 18:15) appena finisce la seconda meta' della suite. FATTO: commit 4c0f5bb su ADVANCED, pushato (prima meta' verde a meno dei 3 test poi verdi; seconda meta' FINITA dopo il commit: 4756 passati, 4 saltati, 1 rosso = test_rename_symbol::test_stale_preview_files_are_removed_unless_kicad_holds_them, VERDE da solo (6/6): instabile nella corsa intera, non legato ai file di oggi; da tenere d'occhio). Totale run1 sul codice 4c0f5bb meno le 3 correzioni gia' verdi: 11661 passati, 13 saltati, 19 sottotest.) Correttori Fa/Fb/Fc/Fd LANCIATI alle ~19:40.
 1) CONTRATTO COMUNE fra correttori (deciso dal coordinatore, vincolante):
    - ExtractedParams.questions: list di dict {"key": str stabile derivata dai candidati, "field":
      "contacts_view" | "body_height_mm" | "pad_layout", "text": italiano via tx(), "options": [{"label",
@@ -216,6 +216,97 @@ UTENTE 04/11 sera: «tutti» = correggere TUTTI i rilievi (blocchi A-D). PIANO (
       prompt superati, integrazione, generality-auditor sul diff, suite in due meta', handoff, commit con OK.
 3) Ogni correzione: test positivo + negativo per ragioni strutturali, mai sui numeri del pezzo; nessuna soglia
    nuova; euristiche residue dichiarate nel commento.
+UTENTE 04/11 ~19:05 (durante il giro): «scrivi meglio questa cosa dei ruoli delle immagini» (scheda di avanzamento:
+riga «pinout.jpeg — Pinout + Quote + Piazzole + Side view / hei…» troncata). FATTO dal coordinatore in
+kicadgen/gui/analysis_overlay.py (file fuori dagli ambiti dei correttori): `role_rows` = primo ruolo accanto al nome,
+gli altri su righe proprie rientrate («    + Immagine con quote»); separatore « + » dichiarato come i due gia'
+esistenti (fragile, sulla forma); log non ricomposto. Test in tests/test_overlay_file_list.py sezione 3 (positivo,
+negativo, log). 186 test overlay+documentazione verdi.
+UTENTE 04/11 19:04 «di nuovo non ha fatto il 3D»: analisi del rele' con gpt-5.5 (app riavviata A META' GIRO: il log
+mostra gia' le righe AI_CALL_RESULT di Fd). Causa dal log: ENTRAMBE le letture con contacts_view «unknown» ->
+_require_declared_view BLOCCA per lo specchio (rilievo M12, in correzione: domanda); e il lettore dedicato ha
+scritto midpoints con fermate a virgola between ["1,2","5,3"] -> pin 4 non posto (rilievo M1 CONFERMATO dal log,
+in correzione). Detto all'utente di NON rifare analisi finche' il giro non e' integrato (0.31 USD a corsa).
+RIPRESA 05/11 (nuova sessione, «dove eri rimasto?»): la sessione del 04/11 si e' interrotta DOPO i correttori
+Fa/Fb/Fc/Fd e PRIMA dell'integrazione del coordinatore. Stato trovato nel checkout (ADVANCED, ultimo commit
+4c0f5bb, 21 file modificati + 4 test nuovi NON committati: test_drawing_holes_kinds, test_extraction_declared_attributes,
+test_extraction_questions_gui, test_reread_worker): i moduli compilano; test mirati dei file toccati = 504 verdi,
+1 saltato, 2 ROSSI: (1) test_pad_positions_by_drawn_holes::test_the_hole_check_runs_once_per_layout (il controllo
+dei fori gira 4 volte invece di 3: nuovo check_layout aggiunto da Fa in apply_dedicated_pads, contratto del test
+da capire, non allentare); (2) test_message_localization: 69 testi nuovi dei correttori (main_window,
+datasheet_extractor) SENZA le quattro traduzioni nel catalogo (compito del coordinatore, mai fatto). NON FATTO:
+testi nel catalogo + DB riseminato, digest dei prompt superati, generality-auditor sul diff, suite in due meta',
+commit (serve OK). Nessuna modifica al codice in questa ripresa finche' l'utente non conferma di proseguire.
+UTENTE 05/11: «si, procedi» -> integrazione del coordinatore IN CORSO, in quest'ordine: (1) capire il test rosso dei
+fori (4 controlli invece di 3) e correggere la causa o il contratto; (2) 69 testi nel catalogo (4 lingue) + DB
+riseminato; (3) digest dei prompt superati se i prompt sono cambiati; (4) generality-auditor sul diff; (5) suite in
+due meta'; (6) handoff e conteggi; commit solo con OK esplicito.
+FATTO 05/11 (coordinatore): (1) il 4o controllo dei fori e' VOLUTO (Fb/Fa: _mirror_layouts condivide
+drawing_holes.mirror_variants, specchio provato su X E su Y; rilievo basso «specchio testato solo in X»): contratto
+del test riscritto con la ragione + negativo sul memo (nessun insieme di punti controllato due volte); (2) 67 testi
+dei servizi + 15 testi della GUI (Fc) aggiunti al catalogo in 4 lingue (i18n.py, CRLF riparato a byte); DB
+riseminato (translations 15104 -> 15452, nessun segreto); (3) digest del prompt singolo 76622f74... gia' in
+SUPERSEDED (Fa), gli altri prompt in DB invariati; test localizzazione/i18n/documentazione 80 verdi. IN CORSO:
+suite completa run r1 in due meta' (scratchpad suite_r1.log) e generality-auditor sul diff, in parallelo.
+ESITO AUDIT DI GENERALITA' (05/11, sul diff dei correttori): ALTI: (A1) _block_or_ask offre la domanda «pad_layout»
+anche quando i fori disegnati smentiscono ENTRAMBE le disposizioni (verdetto no_match osservabile): la scelta
+sostituisce un blocco che deve restare e viene pure ricordata nel progetto; (A2) la rilettura parziale
+dell'altezza (workers._reread_model) usa il modello PRINCIPALE = stesso lettore della lista principale salvata,
+apply_dedicated_body non sa di same_model -> due liste dello stesso modello contano come indipendenti (H6 risolto
+per i pad e lo spareggio, non per la rilettura). MEDI: (M3) _height_candidate: «declared» e' per LISTA, una quota
+con ruolo other in una lista mista salta l'esclusione delle quote in pianta; (M4) arrotondamento di una quota
+intera = +-0.5 mm (quote_rounding) indebolisce 10x il controllo catene/corpo (convenzione delle cifre
+significative, non pratica di disegno: ISO 2768-m +-0.2); (M5) fermate ref:/edge: calcolate (references) ma MAI
+passate al testimone (check_pad_layout/measured_layout senza hole_kinds/reference_holes_mm): attributo dichiarato
+e ignorato; (M6) leads_point dichiarato nei due schemi e usato solo per decorare un testo: con due letture
+«left» e ruolo body_height su una quota uguale alla pianta -> confermata senza domanda (caso H1/M4); (M7) risposta
+salvata contacts_view con chiave sui soli NUMERI dei pad -> riapplicata a un altro disegno dello stesso progetto.
+BASSI: mirror_fits scritto e mai letto; lato scelto da UN solo lettore non bordato in GUI; log degli argomenti
+sempre attivo in pratica (ogni chiamante passa log_prompt=True); apply_answers(contacts_view) non scrive
+contacts_view; tolleranza senza pavimento con testi a due decimali. REGGONO: ruoli delle quote, tipi di fermata e
+catena, quote al bordo, qualificatore nominale/max, stesso modello = una lettura nell'estrazione, spareggio mai col
+principale, H6/M18, asole e specchio in drawing_holes, M10/M12/M16, nessun nome/marca, una sola definizione di
+altezza e sporgenza, strict mode DeepSeek lossless sui tre strumenti, redazione del log.
+PIANO CORREZIONI (coordinatore, PRIMA del codice): A1 filtrare i candidati di _block_or_ask con _losing_verdict
+(no_match osservabile) -> meno di due superstiti = blocco; test P (fori non verificabili -> domanda) e N (entrambe
+smentite -> blocco). A2 reread_body_height con il lettore dedicato (_pad_reading_model) e same_model=True al
+ripiego, apply_dedicated_body(same_model) tratta le due liste come una (adozione solo «da verificare», mai 2
+punti); test P/N. M3 regola del ruolo per QUOTA. M4 arrotondamento del testo stampato limitato dal pavimento
+_sum_tolerance (mai sotto la tolleranza generale: un testo piu' preciso puo' solo stringere); test N (slip di 1 mm
+su quote intere resta un problema). M5 _layout_checker/_layout_measurer ricevono references e tipi di fermata.
+M6 leads_point left/right -> altezza uguale a una quota in pianta chiede sempre, anche con ruolo body_height.
+M7 chiave della risposta contacts_view con digest della disposizione. Bassi: mirror_fits rimosso,
+apply_answers scrive anche contacts_view, log degli argomenti dichiarato nell'handoff, pavimento della tolleranza
+anche con testi (M4). Poi test mirati, suite r2 sul codice finale.
+FATTO (05/11, coordinatore, test mirati 320 verdi): A1 _block_or_ask scarta i candidati con no_match osservabile
+(_losing_verdict); <2 superstiti = blocco con «Disposizioni escluse ... smentite dai fori»; 3 test P/N in
+test_pad_positions_by_drawn_holes; CONTRATTO CAMBIATO test_two_pads_off_the_holes_are_not_moved (entrambe smentite
+sulla pagina vera del T7N -> blocco, non domanda). A2 workers._reread_model usa _pad_reading_model per ENTRAMBI i
+campi e passa same_model=(model == main_model); reread_body_height(same_model) -> apply_dedicated_body(same_model):
+helper points() = min(punti, 1) con lo stesso modello + nota «lette dallo stesso modello»; test
+test_reread_worker (contratto riscritto + negativo del ripiego) e test_two_body_lists_of_one_model_give_one_point_at_most.
+M3 _height_candidate: esclusione per valore applicata alla QUOTA con ruolo other, non alla lista; test P/N.
+M4 _Rounding.tolerance = max(PAD_READING_TOLERANCE_MM, min(somma arrotondamenti del testo, _sum_tolerance)) e
+stessa regola nella tolleranza dello span (_chain_contradictions); CONTRATTI RISCRITTI: «12»+«11» con 12.4/11.4 su
+corpo 23 e' un problema (valori nominali, ISO 2768), l'anello «10» vs 5+5=10.4 e' un problema; positivo: testo in
+pollici a 0.001" stringe fino al pavimento. M5 _HoleVerdicts.attach(pads, references)/context(pads), _call_witness
+passa references= solo se la firma lo accetta (doppi di test con (pads, body) intatti), _layout_checker/
+_layout_measurer inoltrano reference_holes_mm a drawing_holes; LIMITE DICHIARATO: hole_kinds per pad non esistono
+nello schema (solo ref:/edge:), quindi non inoltrati. M6 (rotated or not declared_as) -> con leads_point
+left/right la domanda sezione quadrata/vista ruotata si fa anche con ruolo body_height. M7 chiave della domanda
+contacts_view = numeri + _layout_digest. Bassi: mirror_fits rimosso (ramo vuoto -> commento su _withdraw_view);
+NON FATTI (dichiarati): lato scelto da un solo lettore non bordato in GUI; log degli argomenti di fatto sempre
+attivo perche' ogni chiamante passa log_prompt=True (contratto della libreria intatto, nessuna fuga fuori dalla
+macchina); apply_answers(contacts_view) scrive solo source_view (ExtractedParams non ha contacts_view).
+2 testi nel catalogo + DB riseminato. Suite r1 (codice PRIMA delle correzioni dell'audit) ancora in corso: va
+RILANCIATA (r2) sul codice finale e i conteggi presi da r2.
+Suite r1 FERMATA a meta' (codice superato). Suite r2 LANCIATA sul codice finale (scratchpad suite_r2.log, due meta').
+Commenti italiani della sezione 3 di tests/test_overlay_file_list.py (miei del 04/11) tradotti. Diff senza segreti.
+Al verde di r2: conteggi in CLAUDE.md/HANDOFF, poi commit su ADVANCED SOLO con OK esplicito dell'utente.
+UTENTE 05/11: «committa e pusha, mergia in main e poi ritorna qui» (prima di una «sfida» che annuncera' dopo) ->
+commit su ADVANCED, push, merge in main, push, ritorno su ADVANCED FATTI con la suite r2 al 49% della prima meta'
+(nessun rosso fino a li'; test mirati delle aree toccate verdi). L'esito completo di r2 va riportato qui e i
+conteggi in CLAUDE.md riallineati quando finisce; se r2 trova rossi, correzione in un commit successivo.
 
 ## 03/11 notte — IN CORSO: correzione di TUTTI i rilievi della seconda revisione (utente: «ok»)
 Piano approvato: le parti delicate le fa il COORDINATORE in sequenza, con test che riproduce prima il difetto:

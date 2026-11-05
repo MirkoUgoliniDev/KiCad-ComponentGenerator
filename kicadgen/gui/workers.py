@@ -33,6 +33,7 @@ from ..cad3d.step_generator import Cad3DCancelled, Cad3DError
 from ..core.package_geometry import PackageGeometry
 from ..generators.castellated_module import CastellatedModuleParams
 from ..generators.pin_header import PinHeaderParams
+from ..services.ai_diagnostics import CallCancelled
 from ..services.datasheet_extractor import ExtractionError
 from ..services.messages import tx
 
@@ -1163,3 +1164,179 @@ class ReconcileWorker(QThread):
             self.done.emit(report)
         except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
             self.error.emit(tx("Rilancio dell'inventario fallito: {exc}", exc=exc))
+
+
+#: Field of an extraction question (ExtractedParams.questions[*]["field"]) ->
+#: name of the datasheet_extractor function that re-reads ONLY that datum
+#: from the stored main answer. Resolved at run time: a missing function is
+#: reported through `error`, never raised (the GUI must not crash when the
+#: extractor is older than the interface).
+REREAD_FUNCTIONS = {
+    "body_height_mm": "reread_body_height",
+    "pad_layout": "reread_pad_positions",
+}
+
+
+class RereadWorker(QThread):
+    """@brief Re-read ONE datum of a single-part extraction without paying the whole analysis.
+
+    The partial re-run of review 2026-11-04 (M16: «nessuna ri-esecuzione
+    parziale» = every clarification repaid the whole extraction). It is the
+    tail of ExtractWorker for one field: it receives the stored main answer
+    (the dict the extraction kept with the project), the documents and
+    their roles, and calls the extractor's `reread_body_height` or
+    `reread_pad_positions` with the same logged call, cancellation and cost
+    accounting as ReconcileWorker. The model of the re-read is chosen
+    exactly as the full extraction chooses it (`model` for the height,
+    `_pad_reading_model` for the pads) and written to the log before the
+    call, so that the AI log says which model answered (M13).
+
+    Signals:
+        done(ExtractedParams) -- the parameters updated by the re-read
+        error(str)            -- readable error message (also for a missing API)
+        progress(object)      -- see ExtractWorker.progress
+        phase(str, str, int, int) -- see GenerateWorker.phase
+    """
+
+    done = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(object)   # see ExtractWorker.progress
+    phase = pyqtSignal(str, str, int, int)
+
+    def __init__(self, stored: dict, doc_paths: list[Path], document_roles: dict | None,
+                 *, field: str, model: str | None = None, pad_model: str | None = None,
+                 component_family: str | None = None, system_prompt: str | None = None,
+                 extra_instructions: str | None = None, part_number: str | None = None):
+        """@brief Snapshot the stored answer and the settings before leaving the GUI thread.
+
+        @param stored Main answer of the extraction as kept with the project
+            (the dict of the tool arguments, `_candidates` included); copied.
+        @param doc_paths Documents of the extraction, as for ExtractWorker.
+        @param document_roles Roles of every document, copied like ExtractWorker.
+        @param field Question field to re-read: a key of REREAD_FUNCTIONS
+            («body_height_mm» or «pad_layout»); any other value is reported
+            through `error` when the worker runs.
+        @param model Main datasheet model, as ExtractWorker receives it; None
+            = the extractor's DEFAULT_MODEL.
+        @param pad_model Model of the dedicated pad-position reading (profile
+            field 'pad_model'); None or blank = `model`. Resolved by the
+            extractor's own rule, so the re-read never uses a model the full
+            extraction would not have used.
+        @param component_family Selected geometry family (the pad model is
+            only ever chosen for a single part).
+        @param system_prompt Optional datasheet system prompt, forwarded
+            when the re-read function accepts it.
+        @param extra_instructions Optional user notes, forwarded likewise.
+        @param part_number Part number (field «Sigla»), forwarded likewise.
+        """
+        super().__init__()
+        self.stored = deepcopy(stored) if isinstance(stored, dict) else {}
+        self.doc_paths = list(doc_paths or [])
+        self.document_roles = ({name: (list(roles) if isinstance(roles, (list, tuple)) else roles)
+                                for name, roles in document_roles.items()}
+                               if document_roles is not None else None)
+        self.field = str(field or "")
+        self.model = model
+        self.pad_model = pad_model
+        self.component_family = component_family
+        self.system_prompt = system_prompt
+        self.extra_instructions = extra_instructions
+        self.part_number = part_number
+        # Like ExtractWorker.cancel_event: raised by «Interrompi» (stop).
+        self.cancel_event = threading.Event()
+
+    def _forward_phase(self, tool: str, detail: str = "", done: int = 0, total: int = 0) -> None:
+        """@brief Forward to the modal the phase declared by the service.
+
+        @param tool Key in analysis_overlay.TOOLS.
+        @param detail Free text next to the tool name.
+        @param done Items done in the phase.
+        @param total Items expected; 0 = no count.
+        @note Same contract as ExtractWorker._forward_phase.
+        """
+        self.phase.emit(str(tool or ""), str(detail or ""), int(done or 0), int(total or 0))
+
+    def _raise_if_cancelled(self) -> None:
+        """@brief Checker for make_logged_call: stop before a paid call once «Interrompi» was pressed.
+
+        @throws CallCancelled when the cancel event is set, so that no further
+            paid request starts after the interruption.
+        """
+        if self.cancel_event.is_set():
+            from ..services.ai_diagnostics import CallCancelled
+            raise CallCancelled(tx("Rilettura interrotta dall'utente: nessuna nuova richiesta."))
+
+    def _reread_model(self, extractor, main_model: str) -> str:
+        """@brief The model of this re-read, chosen by the extractor's own rule.
+
+        @param extractor The datasheet_extractor module.
+        @param main_model Effective main model (default already applied).
+        @return For both the pads and the body height the model
+            `_pad_reading_model` picks (the dedicated reader when its
+            provider is ready, else the main one, with the reason in the
+            log), or `main_model` when the extractor has no such rule. The
+            height is re-read by the dedicated reader as in the full
+            extraction: the stored main list came from the main model, and
+            two lists of one model are one witness (generality audit
+            2026-11-05, A2); when the choice falls back to the main model,
+            `run` says so with `same_model=True`.
+        """
+        choose = getattr(extractor, "_pad_reading_model", None)
+        if choose is None:
+            return (self.pad_model or "").strip() or main_model
+        return choose(self.pad_model, main_model, self.component_family,
+                      self.progress.emit, None)
+
+    def run(self) -> None:
+        """@brief Run the one re-read with the same logged call as the extraction."""
+        try:
+            # Imported inside the guard: a failed import must reach the error
+            # signal, not sys.excepthook (which ends the process).
+            from ..services import datasheet_extractor as extractor
+            from ..services.openrouter import DEFAULT_MODEL, call_tool
+            from ..services.ai_diagnostics import make_logged_call
+            from ..services import providers
+            name = REREAD_FUNCTIONS.get(self.field)
+            if name is None:
+                self.error.emit(tx("Rilettura non prevista per il campo {field}.", field=self.field))
+                return
+            # getattr at run time: the extractor's API and this worker may
+            # not be at the same version (parallel fixes); the GUI reports it.
+            reread = getattr(extractor, name, None)
+            if reread is None:
+                self.error.emit(tx("Ri-esecuzione parziale non disponibile: funzione {name} "
+                                   "assente nell'estrattore.", name=name))
+                return
+            main_model = self.model or DEFAULT_MODEL
+            model = self._reread_model(extractor, main_model)
+            # Key and credit of every DIRECT provider the re-read uses, as
+            # ReconcileWorker does (OpenRouter is verified by _ensure_api_key).
+            direct = [m for m in (model,) if providers.provider_of(m) == providers.PROVIDER_DEEPSEEK]
+            if direct:
+                providers.ensure_providers_ready(direct, self.progress.emit)
+            # M13: the log says which model re-reads which datum.
+            self.progress.emit(tx("Rilettura di {field} con il modello {model}.",
+                                  field=self.field, model=model))
+            self.phase.emit('llm', model, 0, 0)
+            self._raise_if_cancelled()
+            params = reread(
+                self.stored, self.doc_paths, model=model,
+                call=make_logged_call(call_tool, self.progress.emit, log_prompt=True,
+                                      **accepted_kwargs(make_logged_call,
+                                                        cancel=self._raise_if_cancelled)),
+                progress=self.progress.emit,
+                **accepted_kwargs(reread, same_model=(model == main_model),
+                                  document_roles=self.document_roles,
+                                  component_family=self.component_family,
+                                  system_prompt=self.system_prompt,
+                                  extra_instructions=self.extra_instructions,
+                                  part_number=self.part_number,
+                                  cancel=self.cancel_event),
+                **phase_kwargs(reread, self._forward_phase))
+            self.done.emit(params)
+        except CallCancelled as exc:
+            self.error.emit(str(exc))
+        except ExtractionError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001 - network/API errors are reported in the UI
+            self.error.emit(tx("Rilettura fallita: {exc}", exc=exc))

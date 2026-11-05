@@ -1,9 +1,12 @@
-"""@brief Emit AI-call lifecycle diagnostics, with opt-in prompt auditing.
+"""@brief Emit AI-call lifecycle diagnostics, with opt-in prompt and result auditing.
 
 Only validated model/tool identifiers, elapsed time, exception class and shallow
 result counts are logged by default.  The application can explicitly enable
 prompt auditing: textual prompts and tool schemas are then written verbatim,
-while binary/data-URL image payloads and credentials remain excluded.
+while binary/data-URL image payloads and credentials remain excluded.  The
+same switch (or `log_result`) also writes the arguments of every SUCCESSFUL
+tool answer, redacted (review 2026-11-04, M17): without them a well-formed but
+wrong reading could not be checked against the log.
 """
 
 from functools import wraps
@@ -21,7 +24,24 @@ from typing import Callable, Optional
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}\Z")
 _SENSITIVE = re.compile(r"sk-|api.?key|secret|password|bearer|authorization|credential|://", re.I)
-_COUNT_FIELDS = ("components", "pins", "terminals", "detections", "items", "results")
+#: Upper bound of the list fields counted on the AI_CALL_END line: the line
+#: must stay readable (and bounded) whatever the shape of the answer.
+_MAX_COUNTED_FIELDS = 24
+#: Maximum characters of one logged result (AI_CALL_RESULT). Same value as
+#: datasheet_extractor._REJECTED_RESPONSE_MAX_CHARS, the cap of the rejected
+#: answers written to the same log: that module imports this one, so the
+#: constant cannot be imported here without a cycle (a test keeps them equal).
+RESULT_LOG_MAX_CHARS = 200_000
+#: A string longer than this (2 kB) inside a logged result is replaced by its
+#: SHA-256 and length: it is a document, an image or a transcript, not an
+#: argument anyone compares by eye.
+RESULT_STRING_MAX_CHARS = 2048
+#: Result keys whose string values are payloads (encoded files, URLs, images)
+#: and are therefore always replaced by SHA-256 and length, whatever their size.
+_PAYLOAD_KEY = re.compile(r"data|url|image|file|base64", re.I)
+#: Nesting depth beyond which a logged result is cut: a tool answer is a
+#: few levels deep; deeper structures are cycles or garbage.
+_RESULT_MAX_DEPTH = 32
 
 
 def _identifier(value):
@@ -32,13 +52,25 @@ def _identifier(value):
 
 
 def _result_summary(result):
-    """Count only builtin containers; never traverse or stringify result values."""
+    """Count only builtin containers; never traverse or stringify result values.
+
+    Every top-level list field of an object is counted, whatever its name:
+    the old fixed list of names (components, pins ...) was a per-case rule
+    that left the lists of newer tools uncounted (review 2026-11-04, M17).
+    Keys are validated like identifiers so that the line cannot carry
+    arbitrary text, and at most _MAX_COUNTED_FIELDS are written.
+    """
     if type(result) is dict:
         summary = f"object fields={len(result)}"
-        for key in _COUNT_FIELDS:
-            value = result.get(key)
-            if type(value) in (list, tuple):
-                summary += f" {key}={len(value)}"
+        counted = 0
+        for key, value in result.items():
+            if type(value) not in (list, tuple):
+                continue
+            if counted >= _MAX_COUNTED_FIELDS:
+                summary += " …"
+                break
+            summary += f" {_identifier(key)}={len(value)}"
+            counted += 1
         return summary
     if type(result) in (list, tuple):
         return f"array items={len(result)}"
@@ -55,6 +87,57 @@ def _redact_secret_text(value: str) -> str:
     value = re.sub(r"(?i)(api[_-]?key\s*[:=]\s*)[^\s,;]+", r"\1[redacted]", value)
     value = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted]", value)
     return value
+
+
+def _digest_stub(value: str) -> dict:
+    """SHA-256 and length standing in for a string that is not logged verbatim."""
+    return {"sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(), "length": len(value)}
+
+
+def _redacted_result(value, key=None, depth=0, seen=None):
+    """@brief Copy of a tool answer that is safe to write to the AI log.
+
+    @param value Builtin container or scalar of the answer.
+    @param key Name under which `value` sits in its parent object, or None.
+    @param depth Current nesting depth (cut at _RESULT_MAX_DEPTH).
+    @param seen Ids of the containers on the current path (cycle guard).
+    @return A JSON-serialisable copy: strings pass through
+        _redact_secret_text; a string longer than RESULT_STRING_MAX_CHARS, or
+        under a key matching _PAYLOAD_KEY, becomes {"sha256", "length"};
+        objects that are not builtin containers or scalars become
+        {"type": <class name>} and are never stringified or measured.
+    """
+    if isinstance(value, bool) or value is None or type(value) in (int, float):
+        return value
+    if type(value) is str:
+        if len(value) > RESULT_STRING_MAX_CHARS or (type(key) is str and _PAYLOAD_KEY.search(key)):
+            return _digest_stub(value)
+        return _redact_secret_text(value)
+    if type(value) in (dict, list, tuple):
+        if depth >= _RESULT_MAX_DEPTH or (seen is not None and id(value) in seen):
+            return "[cut]"
+        seen = (seen or set()) | {id(value)}
+        if type(value) is dict:
+            return {str(k): _redacted_result(v, str(k), depth + 1, seen) for k, v in value.items()}
+        return [_redacted_result(v, key, depth + 1, seen) for v in value]
+    return {"type": type(value).__name__}
+
+
+def _result_snapshot(result) -> tuple[str, int, str]:
+    """@brief Serialise a dict/list result for the AI_CALL_RESULT line.
+
+    @param result The answer (dict, list or tuple) a successful call returned.
+    @return (sha256 of the complete redacted JSON, its length in characters,
+        the JSON cut at RESULT_LOG_MAX_CHARS with a «…[truncated]» marker
+        when it was longer).
+    """
+    encoded = json.dumps(_redacted_result(result), ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    text = encoded
+    if len(text) > RESULT_LOG_MAX_CHARS:
+        text = text[:RESULT_LOG_MAX_CHARS] + " …[truncated]"
+    return digest, len(encoded), text
 
 
 def _prompt_snapshot(arguments: dict) -> tuple[str, list[str]]:
@@ -257,7 +340,8 @@ def retry_delay(attempt: int, retry_after=None) -> float:
 
 def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], None]], *,
                      log_prompt: bool = False,
-                     cancel: Optional[Callable[[], None]] = None) -> Callable:
+                     cancel: Optional[Callable[[], None]] = None,
+                     log_result: Optional[bool] = None) -> Callable:
     """@brief Wrap a synchronous AI call with lifecycle and optional prompt diagnostics.
 
     @param call_tool Callable receiving the original positional and keyword arguments.
@@ -265,6 +349,16 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
     @param log_prompt When true, log the exact textual request components and a
         hash/size summary for binary blocks.  Disabled by default for callers
         that do not explicitly opt into an audit trail.
+    @param log_result When true, write after AI_CALL_END one line
+        `AI_CALL_RESULT {context} sha256=<digest> chars=<n> <json>` with the
+        arguments of a successful dict/list answer, redacted by
+        _redacted_result (credentials removed, long strings and payload keys
+        replaced by SHA-256 and length) and cut at RESULT_LOG_MAX_CHARS;
+        `sha256` and `chars` describe the complete redacted JSON. Scalar or
+        opaque results and exceptions are never written. None (default) =
+        the value of `log_prompt`: the switch that writes the prompts
+        verbatim writes the answers too. With both off, nothing of the
+        result but its shallow counts reaches the log.
     @param cancel Optional checker called before EVERY paid attempt (retries
         included), during backoff waits and, from a watcher thread, every
         _CANCEL_POLL_S while an attempt is in flight; it aborts the chain by
@@ -291,6 +385,8 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
     """
     if progress is None and cancel is None:
         return call_tool
+    if log_result is None:
+        log_result = bool(log_prompt)
     try:
         signature = inspect.signature(call_tool)
     except (TypeError, ValueError):
@@ -416,6 +512,13 @@ def make_logged_call(call_tool: Callable, progress: Optional[Callable[[str], Non
         elapsed = perf_counter() - started
         emit(f"AI_CALL_END {context} elapsed={elapsed:.3f}s result={_result_summary(result)}"
              + _usage_delta(before))
+        if log_result and type(result) in (dict, list, tuple):
+            # Opt-in only: the redacted arguments of the answer that was
+            # accepted, so that a well-formed but wrong reading can be
+            # checked afterwards (review 2026-11-04, M17). An exception never
+            # reaches this point and a scalar carries no arguments.
+            digest, chars, text = _result_snapshot(result)
+            emit(f"AI_CALL_RESULT {context} sha256={digest} chars={chars} {text}")
         return result
 
     return logged_call

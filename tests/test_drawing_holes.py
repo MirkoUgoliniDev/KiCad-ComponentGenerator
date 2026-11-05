@@ -447,7 +447,10 @@ def test_photo_like_image_is_not_a_drawing(tmp_path):
     assert result.image is None and result.circles == 0
 
 
-def test_text_only_page_has_too_few_circles(tmp_path):
+def test_text_only_page_has_no_round_holes(tmp_path):
+    # Hundreds of glyph circles, none drawn like a hole: the page holds
+    # nothing round to check against ("no_round_holes", 2026-11-04; before,
+    # "too_few_circles", which now means fewer hole-like circles than pads).
     img = np.full((700, 1000, 3), 255, np.uint8)
     for row in range(12):
         _text(img, f"{row}.80  6.09  0.68  9.60  R0.8  Q86  B9  e6  2.54  {row * 1.27:.2f}",
@@ -455,8 +458,9 @@ def test_text_only_page_has_too_few_circles(tmp_path):
     path = tmp_path / "text.png"
     cv2.imwrite(str(path), img)
     result = _check(path, STAGGERED)
-    assert (result.status, result.reason) == ("unverifiable", "too_few_circles"), result
+    assert (result.status, result.reason) == ("unverifiable", "no_round_holes"), result
     assert result.image == "text.png"
+    assert result.circles > len(STAGGERED)
 
 
 def test_unreadable_and_foreign_files_are_skipped(tmp_path):

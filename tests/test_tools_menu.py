@@ -24,7 +24,11 @@ def test_the_menu_bar_order_and_the_tools_entries(window):  # noqa: F811
     texts = [a.text() for a in window.menu_tools.actions() if not a.isSeparator()]
     assert texts == ["Apri cartella componente", "Prova in KiCad...",
                      "Installa nel progetto KiCad...", "Installa come libreria globale...",
-                     "Apri cartella progetto tool", "Apri config.json"]
+                     "Apri cartella progetto tool", "Apri config.json",
+                     # Recorded answers of the analysis questions (2026-11-04, H7)
+                     # and the partial re-reads (M16), visible with RereadWorker.
+                     "Dimentica le risposte", "Rileggi solo le quote del corpo",
+                     "Rileggi solo le posizioni dei pad"]
 
 
 def test_kicad_entries_are_off_with_the_reason_until_footprint_and_step_exist(window):  # noqa: F811
