@@ -101,6 +101,11 @@ UTENTE 05/11 (dopo la prova: «stupendo»): «committa, pusha, mergia in main e 
 qui» -> commit su RELAY + push + merge in main + push FATTI SUBITO (suite r3 al 50% della prima meta', test mirati
 verdi); la PUBBLICAZIONE (v1.0.7, scripts/publish-release.ps1, tag permanente che avvia la suite su GitHub) parte
 appena r3 e' verde, per non bruciare un numero di versione; se r3 trova rossi, prima la correzione.
+COMMIT 88cd077 (RELAY) + merge fffb71d (main) pushati. GitHub «Tests» su fffb71d ROSSO e r3 prima meta' 7028/9/19
+con 1 rosso, lo STESSO: test_perf_p2_symbol_drag::test_one_redraw_copies_the_draft_once (la mia riga in
+SymbolTab._draw chiamava draft_rows() una seconda volta per il flag dei nomi nascosti) -> corretto: la copia
+unica del draft viene fatta prima e serve anche al flag; 112 test mirati verdi. Nuovo commit su RELAY + merge in
+main; pubblicazione appena la corsa GitHub del nuovo commit main e' verde.
 
 ## 04/11 — IN CORSO: pin su LINEA D'ASSE non quotato (relè SRD 5 pin, «verifica perché non funziona, migliora il prompt»)
 DIFETTO (utente 04/11, disegno del relè SRD-xxVDC-SL-C, 5 pin, main deepseek-api/deepseek-flash, dedicata gpt-5.6-sol):
