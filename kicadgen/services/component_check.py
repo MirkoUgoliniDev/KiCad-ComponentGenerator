@@ -277,8 +277,10 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
 
         try:
             pins, body = symbol_inputs(rows)
+            from ..generators.symbol import symbol_pin_names_hidden
             symbol = serialize_symbol(name, pins, footprint=f'KiCadGen:{name}', body=body,
-                                      properties=symbol_property_positions(rows))
+                                      properties=symbol_property_positions(rows),
+                                      pin_names_hidden=symbol_pin_names_hidden(rows))
             ids = {str(p.number) for p in pins}
             if pad_ids is None:
                 add('SKIP', tx('Corrispondenza pin-pad'), tx('Footprint non leggibile.'))

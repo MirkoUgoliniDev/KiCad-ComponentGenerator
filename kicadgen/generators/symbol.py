@@ -386,6 +386,22 @@ PROPERTY_KEYS = ('Reference', 'Value')
 #: Row key carrying the chosen property positions, mm, symbol coordinates
 #: (y up), as {"Value": [x, y], ...}; identical on every row like `symbol_body`.
 PROPERTIES_KEY = 'symbol_properties'
+#: Row key (shared like `symbol_body`) saying the pin NAMES are not drawn:
+#: KiCad's `(pin_names (hide yes))`, the form of its relay symbols, whose
+#: drawing (coil, contacts) says what each pin is (`symbol_relay`). The
+#: names stay in the rows and in the file: only their display is off.
+PIN_NAMES_HIDDEN_KEY = 'symbol_pin_names_hidden'
+
+
+def symbol_pin_names_hidden(rows) -> bool:
+    """@brief Whether the rows ask for hidden pin names (`PIN_NAMES_HIDDEN_KEY` true on any row).
+
+    @param rows Project pin rows.
+    @return True when at least one row carries the key set; the key is
+        written on every row like `symbol_body`, so one is enough and a
+        row that lacks it (older draft) does not cancel it.
+    """
+    return any(bool(row.get(PIN_NAMES_HIDDEN_KEY)) for row in rows if isinstance(row, dict))
 
 
 #: Grid the default property positions snap to, mm: KiCad's 50 mil text grid.
@@ -820,7 +836,8 @@ _num = format_number
 
 def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
                      footprint: str = '', reference: str = 'U', body=None, graphics=None,
-                     metadata: SymbolMetadata | None = None, properties=None) -> str:
+                     metadata: SymbolMetadata | None = None, properties=None,
+                     pin_names_hidden: bool = False) -> str:
     """@brief Return a KiCad 10 symbol library (format 20251024) with one single-unit symbol.
 
     @param name Symbol name, also the Value property; no library separator.
@@ -841,6 +858,9 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
         out takes its `default_property_positions` place. A
         `PropertyPositions` states whether its points are bottom-left
         anchors or text centres; a plain mapping holds centres. None for none.
+    @param pin_names_hidden True writes `(pin_names (offset 0.508) (hide yes))`:
+        the names are kept on the pins but not drawn, as KiCad's relay
+        symbols do (`symbol_pin_names_hidden` of the rows).
     @return The `.kicad_sym` text, newline-terminated.
     @note A Reference or Value the user placed is written with
         `(justify left bottom)` at its bottom-left anchor (`property_anchors`;
@@ -882,7 +902,8 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
              f'  (symbol {_quote(name)}',
              '    (exclude_from_sim no) (in_bom yes) (on_board yes) (in_pos_files yes)',
              '    (duplicate_pin_numbers_are_jumpers no)',
-             '    (pin_names (offset 0.508))']
+             '    (pin_names (offset 0.508) (hide yes))' if pin_names_hidden
+             else '    (pin_names (offset 0.508))']
     chosen = PropertyPositions(anchor=getattr(properties, 'anchor', PROPERTY_ANCHOR_CENTRE))
     for key, value in (properties or {}).items():
         if key not in PROPERTY_KEYS:
@@ -932,7 +953,8 @@ def serialize_symbol(name: str, pins: Iterable[SymbolPin], *,
 
 def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
                   footprint: str = '', reference: str = 'U', body=None, graphics=None,
-                  metadata: SymbolMetadata | None = None, properties=None) -> Path:
+                  metadata: SymbolMetadata | None = None, properties=None,
+                  pin_names_hidden: bool = False) -> Path:
     """@brief Validate before touching disk and atomically replace an explicitly chosen file.
 
     @param path Destination .kicad_sym path; parent folders are created.
@@ -944,12 +966,14 @@ def export_symbol(path: str | Path, name: str, pins: Iterable[SymbolPin], *,
     @param graphics Placed glyph records, see `serialize_symbol`.
     @param metadata Library metadata, see `serialize_symbol`.
     @param properties Chosen positions of the visible properties, see `serialize_symbol`.
+    @param pin_names_hidden Pin names kept but not drawn, see `serialize_symbol`.
     @return The written path.
     @throws ValueError When the symbol does not validate; the file is untouched.
     @throws OSError When the temporary file cannot be written or moved in place.
     """
     text = serialize_symbol(name, pins, footprint=footprint, reference=reference, body=body,
-                            graphics=graphics, metadata=metadata, properties=properties)
+                            graphics=graphics, metadata=metadata, properties=properties,
+                            pin_names_hidden=pin_names_hidden)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + target.name + '.', suffix='.tmp', dir=target.parent)

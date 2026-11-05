@@ -15,7 +15,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRectF, QPointF, QItemSe
 from PyQt6.QtGui import (QPalette, QAction, QColor, QContextMenuEvent, QFont, QPainter, QPen, QIcon)
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
-from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PROPERTIES_KEY, PROPERTY_KEYS,
+from ..generators.symbol import (ELECTRICAL_TYPES, PIN_GRID_MM, PIN_NAMES_HIDDEN_KEY, PROPERTIES_KEY, PROPERTY_KEYS,
+                                 symbol_pin_names_hidden,
                                  PROPERTY_ANCHOR_BOTTOM_LEFT, PROPERTY_ANCHOR_FIELD, property_anchors,
                                  normalize_pins, property_texts, symbol_inputs, layout_symbol,
                                  symbol_property_positions)
@@ -1110,6 +1111,9 @@ class SymbolTab(QWidget):
     The owner persists edits_applied and performs export_requested.
     """
     edits_applied = pyqtSignal(list)
+    #: «Simbolo funzionale» toggled by the user: True = compose coil and
+    #: contacts from the declared pin functions, False = the plain box.
+    functional_symbol_toggled = pyqtSignal(bool)
     pin_types_ai_requested = pyqtSignal()
     export_requested = pyqtSignal()
     export_enabled_changed = pyqtSignal(bool)
@@ -1201,6 +1205,8 @@ class SymbolTab(QWidget):
         self._pin_items = {}
         #: The drawn body outline kept between redraws: (key, item) or None.
         self._body_item = None
+        #: Whether the current draft hides the pin names (read in `_draw`).
+        self._names_hidden = False
         #: (pins, body, layout) `_accept_geometry` validated, read once by the
         #: `_changed` it calls (`_changed` lays out again on any difference).
         self._accepted_layout = None
@@ -1409,6 +1415,13 @@ class SymbolTab(QWidget):
         self.glyph_combo.hide()
         self._fill_glyph_combo()
         self.glyph_insert_button = icon_button('tool-draw.svg', 'Inserisci elemento grafico', self._start_placing)
+        # Functional symbol (user, 2026-11-05): a relay drawn as coil and
+        # contacts from the pin functions the analysis DECLARED; enabled only
+        # when the rows carry such functions (`set_functional_symbol`).
+        self.functional_button = icon_button('symbol-relay.svg', 'Simbolo funzionale: bobina e contatti dalle funzioni dichiarate dei pin (spento: riquadro con i nomi)')
+        self.functional_button.defaultAction().setCheckable(True)
+        self.functional_button.defaultAction().setEnabled(False)
+        self.functional_button.defaultAction().toggled.connect(self._functional_toggled)
         # Wires (user, 2026-10-10): polylines from a pin's inner end to an
         # element terminal, or between any grid points.
         self.wire_button = icon_button('wf-contact.svg', 'Filo: clic sui punti, doppio clic o tasto destro per chiudere, Esc per annullare', self.start_wire)
@@ -2035,7 +2048,7 @@ class SymbolTab(QWidget):
         result silently).
         """
         missing = object()
-        shared = ('symbol_body', 'symbol_graphics', PROPERTIES_KEY)
+        shared = ('symbol_body', 'symbol_graphics', PROPERTIES_KEY, PIN_NAMES_HIDDEN_KEY, 'symbol_composed')
         old_by = {str(row.get('pin', '')): row for row in old_baseline}
         draft_by = {str(row.get('pin', '')): row for row in draft}
         result = deepcopy(new_baseline)
@@ -2543,6 +2556,23 @@ class SymbolTab(QWidget):
                 row['electrical_type_reviewed'] = True
                 row['electrical_type_evidence'] = {'source': proposal['source'], 'reason': proposal['reason']}
         self._populate(rows)
+
+    def set_functional_symbol(self, available: bool, active: bool) -> None:
+        """@brief Show the state of the «Simbolo funzionale» toggle without emitting it.
+
+        @param available True when the project's pins declare functions a
+            functional symbol can be composed from (the button is enabled).
+        @param active True when the composed symbol is in use.
+        """
+        action = self.functional_button.defaultAction()
+        blocked = action.blockSignals(True)
+        action.setEnabled(bool(available))
+        action.setChecked(bool(available) and bool(active))
+        action.blockSignals(blocked)
+
+    def _functional_toggled(self, checked: bool) -> None:
+        """Forward the user's toggle to the owner, who recomposes or strips the layout."""
+        self.functional_symbol_toggled.emit(bool(checked))
 
     def _fill_glyph_combo(self):
         """Fill the palette selector from the catalogue, keeping the chosen entry."""
@@ -5687,9 +5717,10 @@ class SymbolTab(QWidget):
                 pin_length_of(pin, pin_length), pin_text_size_of(pin), pin.hidden, selected, style)
 
     def _pin_style(self):
-        """Everything outside the pin itself that changes how a pin is drawn: colours and base font."""
+        """Everything outside the pin itself that changes how a pin is drawn: colours, base font, hidden names."""
         theme = self.theme
-        return (theme['pin'], theme['selected'], theme['pin_name'], theme['pin_number'], self.font().key())
+        return (theme['pin'], theme['selected'], theme['pin_name'], theme['pin_number'], self.font().key(),
+                self._names_hidden)
 
     def _draw_pin(self, scene, placed, pin_length, selected):
         """Draw one pin (line, end circle, grab line, number and name) under a root item of its own.
@@ -5755,13 +5786,17 @@ class SymbolTab(QWidget):
         # inner end (both drawn by `kicad_text_item`).
         gap = PIN_NUMBER_GAP_MM * scale
         offset = PIN_NAME_OFFSET * scale
+        # Hidden names (`symbol_pin_names_hidden`, KiCad's relay form): the
+        # number is drawn, the name is not, exactly as KiCad shows the symbol.
         if vx:
             label(pin.number, (x + end_x) / 2, y - gap, text_size, 'center', 'bottom', True)
-            label(pin.name or '~', end_x + vx * offset, y, text_size, 'left' if vx > 0 else 'right')
+            if not self._names_hidden:
+                label(pin.name or '~', end_x + vx * offset, y, text_size, 'left' if vx > 0 else 'right')
         else:
             label(pin.number, x - gap, (y + end_y) / 2, text_size, 'center', 'bottom', True, True)
-            label(pin.name or '~', x, end_y + vy * offset, text_size, 'right' if vy > 0 else 'left',
-                  rotate=True)
+            if not self._names_hidden:
+                label(pin.name or '~', x, end_y + vy * offset, text_size, 'right' if vy > 0 else 'left',
+                      rotate=True)
         return root, bounds
 
     def _draw_pins(self, scene, symbol, keys):
@@ -5804,6 +5839,7 @@ class SymbolTab(QWidget):
         """Redraw the scene for `symbol`; `rows` is a private copy of the draft (`draft_rows` when None)."""
         self.properties_button.defaultAction().setEnabled(symbol is not None and any(
             p.pin.number == self._selected_pin for p in symbol.pins))
+        self._names_hidden = symbol_pin_names_hidden(rows if rows is not None else self.draft_rows())
         self.align_button.defaultAction().setEnabled(len(self._selection_ids()) >= 2)
         self._update_readout()
         scene = self.view.scene()

@@ -282,7 +282,12 @@ def test_terminal_worker_run_uses_snapshot_and_emits_result_or_error(
     closed = [i for i, m in enumerate(progress) if m.startswith(closing)]
     assert len(started) == 1 and len(closed) == 1 and started[0] < closed[0]
     assert started[0] == 1, "il ciclo di vita apre subito dopo il progresso applicativo"
-    assert closed[0] == len(progress) - 1, "nulla dopo la chiusura della chiamata"
+    # CONTRACT CHANGED (review 2026-11-04, block D): the redacted arguments of
+    # a successful answer follow the closing line as AI_CALL_RESULT of the
+    # SAME call; nothing else may come after the closure.
+    trailing = progress[closed[0] + 1:]
+    assert all(m.startswith("AI_CALL_RESULT id=1 ") for m in trailing), "nulla dopo la chiusura della chiamata"
+    assert fails or len(trailing) == 1, "una sola riga di risultato per chiamata riuscita"
     assert all(m.startswith("AI_CALL_") for m in progress[started[0]:closed[0]])
     assert worker.components == expected_snapshot
     if fails:
