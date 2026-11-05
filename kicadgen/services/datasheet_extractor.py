@@ -237,6 +237,12 @@ def _value_sources_schema(keys, where: str) -> dict:
         "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)} for key in keys},
     }
 
+#: Closed electrical roles a pinout entry may declare in ``function`` (the
+#: relay roles the symbol composer reads, `generators.symbol_relay`): the
+#: program never derives them from the free-text ``name``.
+PINOUT_FUNCTIONS = ("coil", "common", "nc", "no", "other")
+
+
 _EXTRACTION_TOOL = {
     "name": _TOOL_NAME,
     "description": (
@@ -665,6 +671,27 @@ _EXTRACTION_TOOL = {
                             "description": (
                                 "Funzione del pin come la scrive il documento (NC se "
                                 "non collegato)."
+                            ),
+                        },
+                        "function": {
+                            "type": "string", "enum": list(PINOUT_FUNCTIONS),
+                            "description": (
+                                "Ruolo ELETTRICO del terminale SOLO se il documento lo mostra "
+                                "(tabella o schema elettrico accanto al pinout): coil = "
+                                "terminale della bobina di un rele'; common = comune di un "
+                                "contatto; nc = contatto normalmente CHIUSO (NON «non "
+                                "collegato»: un pin non collegato e' other); no = contatto "
+                                "normalmente aperto; other = qualunque altro ruolo o ruolo non "
+                                "mostrato. Mai dedotto dal nome del componente."
+                            ),
+                        },
+                        "contact": {
+                            "type": "string",
+                            "description": (
+                                "SOLO per common/nc/no di un rele' con PIU' contatti: l'etichetta "
+                                "del contatto come la stampa il documento (1, 2, A, B, ...), la "
+                                "stessa per il comune e per i suoi nc/no. Con un solo contatto "
+                                "ometti. Mai inventata: senza etichetta stampata ometti."
                             ),
                         },
                     },
@@ -4765,8 +4792,11 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "text_color_hex ed edge_fillets. Compila pinout con la funzione di ogni terminale se il "
     "documento la riporta in una tabella o la mostra in uno schema elettrico accanto al pinout "
     "(bobina, comune, NC, NA, anodo, catodo...): una funzione ricavata dal simbolo va scritta e "
-    "segnalata in notes come ricavata. Scrivi in notes dubbi e incongruenze. Rispondi SOLO "
-    "chiamando lo strumento."
+    "segnalata in notes come ricavata. Quando il documento mostra il ruolo elettrico di un "
+    "terminale, dichiaralo in pinout[].function (coil, common, nc, no; other per il resto) e, "
+    "se il rele' ha piu' contatti, in pinout[].contact l'etichetta stampata del contatto: il "
+    "programma disegna bobina e contatti da quei ruoli, mai dal nome del componente. Scrivi in "
+    "notes dubbi e incongruenze. Rispondi SOLO chiamando lo strumento."
 )
 
 #: Digests of former single-component defaults, replaced in the profile
@@ -4811,6 +4841,11 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # required beside the chains. Now every one of these is a declared
     # attribute of the schema.
     "76622f74e9bfaad1d004bace9005009b41d2f63bdcefb527f364088e81155a44",
+    # 2026-11-05 (user: «un simbolo più adeguato, mettendo la bobina e i
+    # contatti»): the pinout entries declare a closed electrical role
+    # (pinout[].function) so the program composes the relay symbol from
+    # declared roles, never from the part name or the free-text pin names.
+    "4702f97841dd1cf611b58004043f0a1d525599a0c7c13b53090c22a2b698e567",
 })
 #: Digests of former pin-numbering defaults (none yet: first version).
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
@@ -9999,12 +10034,15 @@ def _validated_edge_fillets(raw, notes: list) -> Optional[list[dict]]:
 
 
 def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
-    """@brief Optional pinout: only ``{"pin": <number or label>, "name": <text>}`` entries.
+    """@brief Optional pinout: ``{"pin": <number or label>, "name": <text>[, "function": <role>]}`` entries.
 
     @param raw The ``pinout`` value of the model's answer.
     @param notes Extraction notes; every dropped or repaired entry adds one.
-    @return The kept entries, each with only the two keys the schema
-        declares, in the source order; None when none is kept.
+    @return The kept entries, each with the keys the schema declares (the
+        ``function`` only when it is one of PINOUT_FUNCTIONS: any other
+        value is dropped with a note, never mapped; the ``contact`` label
+        only as non-blank text), in the source order; None when none is
+        kept.
     @note ``pin`` is a nonnegative integer (an integral float such as 3.0
         included; 0 is a real pad number on some packages and the symbol
         and pinout tables accept any pin text -- `_pin_label` accepts it
@@ -10039,7 +10077,22 @@ def _validated_pinout(raw, notes: list) -> Optional[list[dict]]:
             notes.append(tx("{key} scartato: valore non valido ({value!r}).",
                             key=f"pinout[{index}].name", value=name))
             name = ""
-        valid.append({"pin": pin, "name": name})
+        entry_out = {"pin": pin, "name": name}
+        function = entry.get("function")
+        if function is not None:
+            if isinstance(function, str) and function.strip().lower() in PINOUT_FUNCTIONS:
+                entry_out["function"] = function.strip().lower()
+            else:
+                notes.append(tx("{key} scartato: valore non valido ({value!r}).",
+                                key=f"pinout[{index}].function", value=function))
+        contact = entry.get("contact")
+        if contact is not None:
+            if isinstance(contact, str) and contact.strip():
+                entry_out["contact"] = contact.strip()
+            else:
+                notes.append(tx("{key} scartato: valore non valido ({value!r}).",
+                                key=f"pinout[{index}].contact", value=contact))
+        valid.append(entry_out)
     return valid or None
 
 

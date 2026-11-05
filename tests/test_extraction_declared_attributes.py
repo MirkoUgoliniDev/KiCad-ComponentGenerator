@@ -558,3 +558,31 @@ def test_declared_reference_holes_reach_the_witness_with_the_layout_they_belong_
     data = _answer(SHIFTED)
     apply_dedicated_pads(data, _reading(chains), check_layout=lambda pads, body: plain.append(1))
     assert plain
+
+
+# ── relay symbol (user, 2026-11-05): the pinout declares a closed pin function ──
+
+def test_a_pinout_entry_keeps_a_declared_function_and_drops_any_other_text():
+    """Positive: «coil» (any case, blanks) is kept normalised; negative: a free word such as «bobina»
+    is NOT mapped to a role but dropped with a note naming the field; the pin itself stays."""
+    notes = []
+    kept = ext._validated_pinout([{"pin": "1", "name": "Bobina", "function": " Coil "},
+                                  {"pin": "2", "name": "Bobina", "function": "bobina"},
+                                  {"pin": "3", "name": "NC", "function": "common", "contact": " A "},
+                                  {"pin": "4", "name": "NC", "function": "nc", "contact": ""}], notes)
+    assert kept == [{"pin": "1", "name": "Bobina", "function": "coil"},
+                    {"pin": "2", "name": "Bobina"},
+                    {"pin": "3", "name": "NC", "function": "common", "contact": "A"},
+                    {"pin": "4", "name": "NC", "function": "nc"}]
+    assert len(notes) == 2 and "pinout[1].function" in notes[0] and "pinout[3].contact" in notes[1]
+
+
+def test_the_single_tool_with_the_pin_function_stays_strict_lossless():
+    from kicadgen.services.openrouter import strict_tool
+    tool = ext._single_component_tool()
+    item = tool["function"]["parameters"]["properties"]["pinout"]["items"]["properties"]
+    assert item["function"]["enum"] == list(ext.PINOUT_FUNCTIONS)
+    assert "function" not in tool["function"]["parameters"]["properties"]["pinout"]["items"]["required"]
+    assert strict_tool(tool) is not None and strict_tool(ext._openai_tool()) is not None
+    assert "pinout[].function" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT and "pinout[].contact" in ext.DEFAULT_SINGLE_SYSTEM_PROMPT
+    assert "contact" in item and "contact" not in tool["function"]["parameters"]["properties"]["pinout"]["items"]["required"]

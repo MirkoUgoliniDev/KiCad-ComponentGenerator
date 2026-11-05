@@ -241,7 +241,7 @@ EXTRACT_REENABLE_DELAY_MS = 300
 CONTENT_MARGIN_PX = 10
 #: Options of Configurazione -> Opzioni di generazione (generation options) that follow the project.
 PROJECT_OPTIONS = ("include_nc_pins", "silk_pin_labels", "pause_after_inventory",
-                   "show_pins_3d", "pin_numbers_3d")
+                   "show_pins_3d", "pin_numbers_3d", "functional_symbol")
 #: How often, in milliseconds, the program checks whether the project changed. A
 #: choice: often enough not to lose anything on an abrupt close, rarely enough
 #: not to write on every keystroke. A file is written only if the state is
@@ -2379,6 +2379,134 @@ class MainWindow(QMainWindow):
     def _include_nc_pins(self) -> bool:
         """@brief Tell whether the physically present NC pins are generated (default yes)."""
         return bool(self._project_option("include_nc_pins", True))
+
+    def _functional_symbol(self) -> bool:
+        """@brief Whether a relay's symbol is composed from the declared pin functions (default yes)."""
+        return bool(self._project_option("functional_symbol", True))
+
+    #: Log text of each reason `symbol_relay.relay_plan` refuses with (Italian source, tx()).
+    _RELAY_REASON_TEXTS = {
+        "no_pin_number": "una riga del pinout non ha il numero del pin",
+        "no_function": "il pin {pin} non ha una funzione dichiarata (bobina, comune, NC, NO)",
+        "role_twice": "due pin {function} nel contatto del comune {pin}",
+        "contact_group_missing": "il pin {pin} non dichiara a quale contatto appartiene (etichetta del contatto)",
+        "contact_group_unknown": "il pin {pin} dichiara il contatto {label}, che nessun comune dichiara",
+        "pads_without_function": "pad del footprint senza una funzione dichiarata nel pinout: {pads}",
+        "coil_pins": "{count} pin di bobina dichiarati, una bobina ne ha due",
+        "no_common": "nessun pin comune dichiarato",
+        "common_without_contact": "il comune {pin} non ha un contatto NC o NO",
+        "duplicate_pin": "due righe del pinout hanno lo stesso numero",
+    }
+
+    def _relay_reason_text(self, reason) -> str:
+        """The translated log text of a `relay_plan` refusal."""
+        code, values = (reason[0], reason[1]) if isinstance(reason, tuple) and len(reason) == 2 else ("", {})
+        template = self._RELAY_REASON_TEXTS.get(code)
+        return tx(template, **values) if template else str(code)
+
+    def _relay_composition(self, rows):
+        """@brief The relay plan of `rows` on the footprint's pads, or None with the reason.
+
+        @param rows Pinout rows (dicts).
+        @return `symbol_relay.relay_plan(rows)`, refused with
+            ("pads_without_function", {"pads"}) when the footprint has pads
+            the pinout does not list: no function is declared for them.
+        """
+        from ..generators.symbol_relay import relay_plan
+        plan, reason = relay_plan(rows) if rows else (None, ("no_common", {}))
+        pads = self._settle_pad_ids()
+        if plan is not None and pads is not None:
+            listed = {_pin_key(row.get("pin")) for row in rows}
+            unlisted = sorted((pad for pad in set(pads) - listed), key=lambda pin: pin_sort_key({"pin": pin}))
+            if unlisted:
+                return None, ("pads_without_function", {"pads": ", ".join(unlisted)})
+        return plan, reason
+
+    def _compose_functional_symbol(self, *, replace_layout: bool = False) -> bool:
+        """@brief Turn the pinout into the composed relay symbol when its pin functions allow it.
+
+        @param replace_layout True drops a custom symbol layout first (the
+            user asked for the functional symbol); False keeps any custom
+            layout (a user's or an earlier composition) untouched.
+        @return True when `self.pinout` was replaced by the composed rows.
+        @note Composition is `symbol_relay.relay_symbol_rows`: counted
+            DECLARED functions, never names, on the PADS of the footprint: a
+            pad the pinout does not name (so no function is declared for it)
+            refuses the composition (`pads_without_function`), since the
+            symbol must have every pad as a pin (generality audit 2026-11-05,
+            MEDIUM-2). A refusal is logged only when some pin declares a
+            function (a part without any says nothing). A layout the program
+            composed earlier (`symbol_composed`) is derived data and is
+            recomposed; only a layout the user made is kept (MEDIUM-3). The
+            symbol tab's toggle shows whether a composition is possible and
+            whether the rows ARE a composition (LOW-5).
+        """
+        from ..generators.symbol_relay import (is_composed_layout, pin_function, relay_parts_summary,
+                                               relay_symbol_rows)
+        rows = [dict(row) for row in self.pinout or () if isinstance(row, dict)]
+        plan, reason = self._relay_composition(rows)
+        available = plan is not None
+
+        def show():
+            if hasattr(self, "symbol_tab"):
+                self.symbol_tab.set_functional_symbol(available, is_composed_layout(self.pinout or ()))
+
+        if not available:
+            if any(pin_function(row) for row in rows):
+                self._append_log(tx("Simbolo funzionale non componibile: {reason}. Resta il riquadro.",
+                                    reason=self._relay_reason_text(reason)))
+            show()
+            return False
+        if not self._functional_symbol():
+            show()
+            return False
+        prefix = self.SYMBOL_LAYOUT_PREFIX
+        custom = (any(key.startswith(prefix) and key != "symbol_side" for row in rows for key in row)
+                  and not is_composed_layout(rows))
+        if custom and not replace_layout:
+            show()
+            return False
+        composed, reason = relay_symbol_rows(rows)
+        if composed is None:
+            self._append_log(tx("Simbolo funzionale non componibile: {reason}. Resta il riquadro.",
+                                reason=self._relay_reason_text(reason)))
+            show()
+            return False
+        self.pinout = composed
+        self._append_log(tx("Simbolo del rele' composto dalle funzioni dichiarate dei pin: {parts}.",
+                            parts=relay_parts_summary(plan)))
+        show()
+        return True
+
+    def _toggle_functional_symbol(self, checked: bool) -> None:
+        """@brief «Simbolo funzionale» toggled in the symbol tab: recompose, or back to the box.
+
+        @param checked True composes coil and contacts (replacing a custom
+            layout: the user asked for it), False strips every `symbol_*`
+            key so the automatic box with the pin names comes back.
+        """
+        self._set_project_option("functional_symbol", checked)
+        rows = [dict(row) for row in self.pinout or () if isinstance(row, dict)]
+        if checked:
+            if not self._compose_functional_symbol(replace_layout=True):
+                # Nothing composed: the option goes back with the button
+                # (generality audit 2026-11-05, LOW-6), the symbol is unchanged.
+                self._set_project_option("functional_symbol", False)
+                if hasattr(self, "symbol_tab"):
+                    self.symbol_tab.set_functional_symbol(False, False)
+                self._save_config_safely()
+                return
+        else:
+            prefix = self.SYMBOL_LAYOUT_PREFIX
+            drawn = any(row.get("symbol_graphics") for row in rows)
+            self.pinout = [{key: value for key, value in row.items() if not key.startswith(prefix)}
+                           for row in rows]
+            self._append_log(tx("Simbolo funzionale disattivato: riquadro con i nomi dei pin.")
+                             + (" " + tx("I disegni e i fili del simbolo composto sono stati tolti.")
+                                if drawn else ""))
+        self._save_project_config(force=True)
+        self._save_config_safely()
+        self._refresh_symbol_tab(force=True)
 
     def _inventory_pause_enabled(self) -> bool:
         """@brief Tell whether the run stops to review the paid inventory after it.
@@ -8347,6 +8475,7 @@ class MainWindow(QMainWindow):
                 "analysis": (list(self._analysis_pcb_thickness)
                              if getattr(self, "_analysis_pcb_thickness", None) else None)},
             "options": {"include_nc_pins": self._include_nc_pins(),
+                        "functional_symbol": self._functional_symbol(),
                         "silk_pin_labels": self._silk_pin_labels(),
                         "show_pins_3d": self._show_pins_3d(),
                         "pin_numbers_3d": self._pin_numbers_3d(),
@@ -10651,6 +10780,19 @@ class MainWindow(QMainWindow):
             return None
 
     def _settle_extracted_pinout(self, candidate) -> None:
+        """@brief Settle the pinout of a new analysis (`_settle_pinout_rows`), then compose the relay symbol.
+
+        @param candidate Rows the analysis proposes, [] for «no names», None
+            to keep the current pinout.
+        @note The composition (`_compose_functional_symbol`) runs after the
+            names are settled and only when no custom layout was kept: the
+            user's own symbol layout is never replaced by an analysis.
+        """
+        self._settle_pinout_rows(candidate)
+        if candidate is not None:
+            self._compose_functional_symbol()
+
+    def _settle_pinout_rows(self, candidate) -> None:
         """@brief Make the pinout of a new analysis current without losing the user's names silently.
 
         @param candidate Rows the analysis proposes, [] for «no names»
@@ -10749,7 +10891,12 @@ class MainWindow(QMainWindow):
             return target
 
         old = {_pin_key(row.get("pin")): row for row in previous}
-        custom = any(key.startswith(prefix) and key != "symbol_side" for row in previous for key in row)
+        # A layout the program composed is derived from the declared pin
+        # functions: a new analysis recomposes it, never carries it over
+        # (generality audit 2026-11-05, MEDIUM-3: stale contacts in silence).
+        from ..generators.symbol_relay import is_composed_layout
+        custom = (any(key.startswith(prefix) and key != "symbol_side" for row in previous for key in row)
+                  and not is_composed_layout(previous))
         if not custom:
             return strip(rows)
         target = set(pads) if pads is not None else {_pin_key(row.get("pin")) for row in rows}
@@ -19842,6 +19989,7 @@ class MainWindow(QMainWindow):
         from .symbol_tab import SymbolTab
         self.symbol_tab = SymbolTab(tx=self.i18n.text)
         self.symbol_tab.edits_applied.connect(self._apply_symbol_pinout)
+        self.symbol_tab.functional_symbol_toggled.connect(self._toggle_functional_symbol)
         # The footprint selection highlight borrows the symbol's `selected` colour.
         self.symbol_tab.theme_changed.connect(self._refresh_drawing_selection)
         self.symbol_tab.export_requested.connect(self._export_electrical_symbol)
@@ -19938,6 +20086,13 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'symbol_tab'):
             return
         self._symbol_synced = self._symbol_sync_token()
+        # The toggle reflects the project opened or refreshed: enabled when
+        # the pins declare relay functions, checked when the rows ARE the
+        # composed layout (never the option alone, LOW-5).
+        from ..generators.symbol_relay import is_composed_layout
+        rows = [row for row in self.pinout or () if isinstance(row, dict)]
+        available = bool(rows) and self._relay_composition(rows)[0] is not None
+        self.symbol_tab.set_functional_symbol(available, is_composed_layout(rows))
         # The Reference text of the editor («U?») follows the designator the
         # files get (user, 2026-10-13: both visible properties are drawn
         # where KiCad will draw them, and can be moved).
@@ -20073,9 +20228,11 @@ class MainWindow(QMainWindow):
         if mismatch:
             raise ValueError(mismatch)
         pins, body = symbol_inputs(rows)
+        from ..generators.symbol import symbol_pin_names_hidden
         return self._component_name(), pins, dict(
             footprint=self.symbol_tab.footprint(), body=body, graphics=self._logged_symbol_graphics(rows),
-            metadata=self._symbol_metadata(), properties=symbol_property_positions(rows))
+            metadata=self._symbol_metadata(), properties=symbol_property_positions(rows),
+            pin_names_hidden=symbol_pin_names_hidden(rows))
 
     def _save_applied_electrical_symbol(self, path=None, *, quiet=False):
         """@brief Write the applied electrical symbol beside the component artifacts.

@@ -322,8 +322,14 @@ def test_end_to_end_a_library_footprint_of_another_layout_settles_nothing(offlin
 
 
 def test_end_to_end_without_a_part_number_nothing_is_searched(offline, monkeypatch, tmp_path):
+    """No part number: no library search. CONTRACT CHANGED (review 2026-11-04, B3; generality audit
+    2026-11-05, A1): two complete readings that disagree with NO witness able to refute either are
+    offered to the user as the «pad_layout» question instead of a hard block; the main pads stay,
+    marked to review, until the answer."""
     params, logs = _extract(monkeypatch, tmp_path, None, _top_view_turned(RELAY_BOTTOM))
-    assert params.pin_map_conflict, "two disagreeing readings and nothing else: blocked"
+    assert params.pin_map_conflict is None
+    assert [q["field"] for q in params.questions or ()] == ["pad_layout"]
+    assert params.package_geometry["needs_review"]
     assert not any("Footprint KiCad con la sigla" in line for line in logs)
 
 

@@ -1,5 +1,107 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 05/11 — IN CORSO: «sfida» del relè, simbolo con bobina e contatti (ramo RELAY da ADVANCED 6dec4f7)
+Codice precedente AL SICURO: ADVANCED 6dec4f7 pushato, main 052e168 (merge) pushato; ramo RELAY creato e pushato
+(utente: «prima metti al sicuro il codice attuale»). Suite r2 su 6dec4f7 ancora in corso (prima meta' al 53%,
+nessun rosso): esito da riportare qui.
+INTENTO (confermato dall'utente «ok»): per un rele' il simbolo generato non e' il riquadro coi nomi, ma il simbolo
+elettrico come Relay_SPDT di KiCad: bobina (2 pin), tratteggio, contatto in scambio (Comune, NC, NO), numeri dei
+pin dal pinout. PIANO (scritto PRIMA del codice):
+(1) datasheet_extractor: nel pinout ogni voce ha anche `function` CHIUSO: coil | common | nc | no | other
+    (nullable per strict mode DeepSeek); prompt: la funzione si dichiara SOLO se il documento la mostra (tabella o
+    schema elettrico), mai dedotta dal nome del pezzo; digest del prompt singolo attuale in SUPERSEDED, DB
+    riseminato. NESSUNA regola sui testi liberi («Bobina», «Coil») ne' sulle sigle: regola di generalita'.
+(2) generators: composizione dal CONTEGGIO delle funzioni dichiarate (modulo nuovo, es. symbol_relay.py):
+    2 coil + {common, nc, no} -> bobina + scambio; common+no -> contatto NA; common+nc -> contatto NC; piu'
+    gruppi di contatti -> contatti affiancati (il gruppo e' il pin common: NC/NO che seguono nel pinout); altro o
+    campo assente (analisi vecchia/cache) -> riquadro di oggi. Pezzi = relay_part_glyphs() (gia' in palette,
+    geometria di Relay_SPDT), pin spostati sui terminali dei glifi, corpo/riquadro assente.
+(3) GUI scheda simbolo: interruttore «Simbolo funzionale / Riquadro» (testo nel catalogo, 4 lingue), bozza
+    modificabile come oggi (Applica/Annulla).
+(4) test P/N strutturali (SPDT, SPST-NA, SPST-NC, DPDT, funzioni incomplete -> riquadro, campo assente ->
+    riquadro, strict mode lossless), documentazione, suite, generality-auditor, commit con OK.
+NON si fa: tipi elettrici oltre passive, simboli multi-unita', altri componenti. Serve una nuova analisi del rele'
+(~0.3 USD): il progetto attuale ha solo i nomi liberi.
+FATTO (05/11, ramo RELAY, NON committato; 420 test mirati verdi): kicadgen/generators/symbol_relay.py
+(relay_plan dal conteggio delle funzioni dichiarate con codici di rifiuto RELAY_REASONS, relay_symbol_rows =
+righe con pin sui terminali dei glifi relay_part_glyphs, corpo n x 10.16 x 10.16 come Relay_SPDT di KiCad,
+collegamento tratteggiato fra le parti, symbol_graphics condivisa, symbol_pin_names_hidden); symbol.py:
+PIN_NAMES_HIDDEN_KEY + symbol_pin_names_hidden(rows), serialize_symbol/export_symbol(pin_names_hidden) ->
+«(pin_names (offset 0.508) (hide yes))» (forma dei rele' di KiCad 10, verificata con kicad-cli sym export svg);
+component_check e export della finestra inoltrano il flag; symbol_tab: chiave condivisa, nomi non disegnati
+quando nascosti (nello stile del pin per il memo), pulsante «Simbolo funzionale» (symbol-relay.svg, checkable,
+abilitato solo se componibile) con segnale functional_symbol_toggled; datasheet_extractor: PINOUT_FUNCTIONS
+(coil, common, nc, no, other) in pinout[].function (enum, non richiesto, strict lossless), _validated_pinout tiene
+solo valori dell'enum (altro testo scartato con nota, MAI mappato), frase nel prompt singolo, digest 4702f978...
+in SUPERSEDED, DB riseminato; main_window: opzione di progetto functional_symbol (default True),
+_compose_functional_symbol (dopo _settle_extracted_pinout, mai sopra un layout personalizzato; con
+replace_layout dal pulsante), _toggle_functional_symbol (spento = via tutte le chiavi symbol_*, riquadro),
+_RELAY_REASON_TEXTS tradotti; 12 testi nel catalogo. Test: tests/test_symbol_relay.py (piano P/N per struttura,
+nomi liberi mai decisivi, geometria KiCad, 2 contatti, file con nomi nascosti, kicad-cli, editor senza nomi),
+tests/test_relay_symbol_gui.py (analisi -> composto; soli nomi -> niente; toggle; layout personalizzato
+rispettato), 2 test estrattore. LIMITI DICHIARATI (docstring del modulo): una sola bobina; raggruppamento
+NC/NO per ordine del documento (comune prima dei suoi contatti); pin «other» o senza funzione -> riquadro.
+NOTA: un'analisi nuova senza conflitti di nome azzera il layout personalizzato del simbolo (comportamento
+PREESISTENTE di _settle_pinout_rows, non toccato). IN CORSO: generality-auditor sul diff; suite r2 (su 6dec4f7)
+ancora in corsa; poi suite r3 sul ramo RELAY, commit con OK.
+SUITE r2 (codice 6dec4f7, albero poi modificato dal lavoro RELAY durante la corsa): prima meta' 7024 passati,
+9 saltati, 19 sottotest, 3 rossi: (1) test_message_localization (catalogo letto A META' delle mie modifiche:
+verde da solo); (2) test_kicad_text_markup_b_layout::test_desktop_fonts_in_a_separate_process (13 errori nel
+processo figlio sotto carico: verde da solo, instabile con altri pytest in parallelo, da tenere d'occhio);
+(3) test_library_footprints::test_end_to_end_without_a_part_number_nothing_is_searched: contratto VECCHIO
+(due letture discordi senza testimone = blocco) non aggiornato dai correttori del 04/11: ora e' la domanda
+«pad_layout» (B3 + A1) -> test riscritto con la ragione, 34 verdi. Seconda meta' in corsa.
+AUDIT DI GENERALITA' sul RELAY (05/11): ALTO-1 raggruppamento NC/NO col «comune precedente nell'ordine» = dato
+non deducibile (DPDT con tabella ordinata per numero -> contatti scambiati IN SILENZIO, nomi nascosti); MEDIO-2 la
+composizione ignora i pad del footprint (pinout con meno pin dei pad -> simbolo non salvabile, il riquadro
+avrebbe funzionato); MEDIO-3 un layout composto e' indistinguibile da uno fatto a mano: _keep_symbol_layout lo
+conserva su una nuova analisi con funzioni diverse (composizione STANTIA silenziosa) e il pulsante segue l'opzione,
+non le righe (BASSO-5); BASSO-4 «nc» ambiguo con «NC = non collegato» usato dallo stesso schema per name;
+BASSO-6 toggle off toglie anche fili/testi dell'utente senza avviso, toggle on con rifiuto lascia l'opzione
+accesa; BASSO-7 frase del prompt contraddittoria («per ogni pin ... SOLO quando»); sospetto: _RELAY_REASON_TEXTS
+duplica le sorgenti del catalogo. REGGONO: nessuna regola su nomi/testo, nessuna soglia, rifiuti strutturali,
+progetti vecchi -> riquadro, strict lossless, opzione coerente, catalogo completo.
+PIANO CORREZIONI (PRIMA del codice): A1 attributo DICHIARATO pinout[].contact (etichetta del contatto come
+stampata: 1, 2, A, B; nullable); con UN solo comune il gruppo e' univoco senza etichetta; con piu' comuni ogni
+common/nc/no deve portare l'etichetta e si raggruppa per etichetta, l'ordine non conta; etichette mancanti ->
+rifiuto «contact_group_missing»; test P (DPDT in ordine qualunque con etichette) / N (DPDT senza etichette ->
+rifiuto; prima: simbolo scambiato). M2 composizione sui pad del footprint: pad senza riga/funzione -> rifiuto
+«pads_without_function» con i numeri; test GUI negativo 7 righe su 8 pad. M3/L5 chiave condivisa
+symbol_composed=True: _keep_symbol_layout scarta un layout composto (dato derivato, non scelta dell'utente),
+_compose_functional_symbol ricompone sopra un layout composto e rispetta solo quelli a mano, pulsante attivo =
+righe composte. L4 descrizione dell'enum: nc = normalmente CHIUSO, un pin non collegato e' other. L6 toggle on
+con rifiuto -> opzione ripristinata e pulsante spento; toggle off -> log dice che i disegni sul simbolo
+composto vengono tolti. L7 frase del prompt riscritta. Sospetto i18n: test che ogni template di
+_RELAY_REASON_TEXTS sia una chiave del catalogo. Poi test mirati, suite r3 sul ramo.
+FATTO (05/11, 567+51 test mirati verdi): A1 pinout[].contact (etichetta stampata, nullable, tenuta solo come
+testo non vuoto) e relay_plan raggruppa per etichetta con piu' comuni (un solo comune: nessuna etichetta, ordine
+libero); rifiuti contact_group_missing / contact_group_unknown; contatti ordinati per etichetta (numeriche
+prima); contact_before_common eliminato (con un comune l'ordine non conta). M2 _relay_composition(rows) =
+piano + controllo dei pad di _settle_pad_ids: pad non elencati -> pads_without_function, usato sia dalla
+composizione sia dallo stato del pulsante. M3/L5 COMPOSED_KEY «symbol_composed» (chiave condivisa anche in
+symbol_tab): _keep_symbol_layout scarta un layout composto, _compose_functional_symbol ricompone sopra un
+composto, pulsante checked = is_composed_layout(righe). L4 descrizione enum: nc = normalmente CHIUSO, non
+collegato = other. L6 toggle on rifiutato -> opzione e pulsante spenti; toggle off con disegni -> frase nel log.
+L7 prompt riscritto («quando il documento mostra ... dichiaralo»), digest 4702f978 (mai rilasciato) gia' in
+SUPERSEDED, nuovo digest ed685f00... corrente; DB riseminato; 4 testi nuovi nel catalogo (uno tolto). Test:
+P/N etichette (tabella ordinata per numero accoppiata giusta; senza etichette rifiutata, prima simbolo scambiato
+in silenzio), pad mancante -> riquadro con log, ricomposizione su analisi con funzioni scambiate, pulsante
+segue le righe, toggle rifiutato, ogni template dei motivi e' chiave del catalogo con i segnaposto.
+NON FATTO (dichiarato): precondizione sul tipo di componente dichiarato (una morsettiera con COIL/COM/NO
+stampati avrebbe il simbolo di rele': le funzioni sono comunque dichiarate dal documento). Suite r2 seconda
+meta' al 73%; poi suite r3 sul ramo RELAY (codice finale), commit con OK.
+SUITE r2 FINITA (albero modificato DURANTE la corsa dal lavoro RELAY): seconda meta' 4748 passati, 4 saltati,
+22 rossi -> rilanciati i 12 file sul codice finale: 249 verdi, 1 rosso reale:
+test_terminal_metadata_flow::test_terminal_worker_run_uses_snapshot... (contratto «nulla dopo AI_CALL_END»
+del 2026-09 contro la riga AI_CALL_RESULT del blocco D del 04/11, scritta per contratto DOPO la chiusura; i
+correttori non l'avevano aggiornato) -> test riscritto: dopo la chiusura solo AI_CALL_RESULT della stessa
+chiamata, una sola riga; 15 verdi. r2 non vale come baseline. SUITE r3 LANCIATA sul codice finale del ramo
+RELAY (scratchpad suite_r3.log): i conteggi di CLAUDE.md/HANDOFF vanno presi da r3.
+UTENTE 05/11 (dopo la prova: «stupendo»): «committa, pusha, mergia in main e pubblica nuova versione, poi torna
+qui» -> commit su RELAY + push + merge in main + push FATTI SUBITO (suite r3 al 50% della prima meta', test mirati
+verdi); la PUBBLICAZIONE (v1.0.7, scripts/publish-release.ps1, tag permanente che avvia la suite su GitHub) parte
+appena r3 e' verde, per non bruciare un numero di versione; se r3 trova rossi, prima la correzione.
+
 ## 04/11 — IN CORSO: pin su LINEA D'ASSE non quotato (relè SRD 5 pin, «verifica perché non funziona, migliora il prompt»)
 DIFETTO (utente 04/11, disegno del relè SRD-xxVDC-SL-C, 5 pin, main deepseek-api/deepseek-flash, dedicata gpt-5.6-sol):
 «Generazione automatica non avviata»: risposta principale (top) 1@(-6.10,-6.00) 2@(6.10,-6.00) 3@(6.10,6.00)
