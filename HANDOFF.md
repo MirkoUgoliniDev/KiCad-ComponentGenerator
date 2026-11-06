@@ -1,5 +1,8 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 06/11 — Release vecchie eliminate da GitHub (utente: «ok»)
+Cancellate le Release v1.0.0 e v1.0.2-v1.0.6 (solo pagina e MSI; i tag restano, protetti dal ruleset). Restano v1.0.7 (latest) e «models» (pesi ONNX usati dal build del setup: NON cancellarla). Pacchetto locale ricostruito da main 31d725c come KiCadGen-1.0.7.msi (stesso numero della release ma con le novita' della scheda Footprint: la 1.0.8 solo su richiesta esplicita).
+
 ## 06/11 — FATTO, committato `e67d2df`+docs `8c3bd22`, pushato e mergiato in main (ff, main=8c3bd22, utente: «fai tutto come al solito»): scheda Footprint, priorità 1 (utente: «ok fallo ma attento a non rompere nulla»)
 Stato: punti 1-7 realizzati. Test mirati verdi: test_footprint_slot_attributes (nuovo, 20), test_package_pad_dialog (3 vecchi aggiornati al nuovo contratto + 6 nuovi), test_component_metadata_gui (+3), test_klc_checks (+1), preview/drills, i18n, documentazione. Difetto trovato e corretto durante il lavoro: i metodi degli attributi erano stati inseriti PRIMA del `return group` di _build_metadata_group (gruppo mai restituito, finestra non costruibile). In corso: suite completa in due meta' e audit di generalita' (agente read-only) sul diff; esito qui sotto.
 AUDIT DI GENERALITA' (agente read-only, 06/11): 3 difetti confermati, tutti corretti; 1 medio corretto; bassi corretti o dichiarati.
