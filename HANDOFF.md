@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 06/11 — IN CORSO A, poi B e C di seguito (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
+## 06/11 — A FATTO e committato `3c5b9bc` (pushato, mergiato in main); B IN CORSO, poi C (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
 Tre funzioni, ciascuna chiusa da sola (commit separati possibili):
 A. POLIGONO. Lo strumento linea del footprint chiude il poligono con un clic sul primo punto a 4+ punti, come
    gia' fa il simbolo (canvas_clicktools, «polygon close-on-first»): parita' fra le due schede. Nuovo kind
@@ -45,7 +45,7 @@ CANVAS-PARITY-REVIEWER su A: 2 difetti + 3 rifiniture + 3 asimmetrie, tutti gest
   test_a_line_back_onto_its_first_point_closes_a_polygon_only_from_four_points (golden nuovo
   footprint_line_close.json); docstring aggiornate con FpPoly.
 Suite completa VERDE: meta' A 7100 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11900
-passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). A attende l'OK al commit.
+passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). Commit 3c5b9bc (utente: «ok»).
 RELEASE 1.0.8 NON PUBBLICATA: la corsa «Tests» di GitHub su main a671bf8 e' verde, ma l'esecuzione di
 scripts/publish-release.ps1 -Version 1.0.8 e' stata NEGATA dal classificatore dei permessi dello strumento
 («Create Public Surface»); non aggirata. Da fare dall'utente (o con un permesso esplicito) da un albero
