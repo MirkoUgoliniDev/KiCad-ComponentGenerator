@@ -261,7 +261,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11829 passed,
+is 11863 passed,
+13 skipped and 19 subtests (2026-11-06, branch `FOOTPRINT-ADVANCE` from `main` d4a8ecd, commit `e67d2df`,
+halves 7063/9/19 and 4800/4: footprint tab priority 1 — slots `(drill oval w h)`, pad type and top-view
+rotation in the pad dialog, «Attributi» flags in the metadata group written after the mounting type,
+generality audit fixes, see HANDOFF.md 06/11; before that, 11829 passed,
 13 skipped and 19 subtests (2026-11-05, branch `RELAY` merged into `main` as `53c3507`, released as v1.0.7,
 halves 7029/9/19 and 4800/4: every finding of the 2026-11-04 single-part review fixed by four fixers and the
 coordinator — declared attributes in the schemas, structured questions with saved answers, drawn-hole witness
