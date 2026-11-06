@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 06/11 — A `3c5b9bc` e B `40b2f1d` FATTI, committati, pushati e mergiati in main; C IN CORSO
+## 06-07/11 — PRIORITA' 3 CHIUSA: A `3c5b9bc`, B `40b2f1d`, C `4e977b1`, committati, pushati e mergiati in main
 TRAPPOLA (06/11 notte): il commit 40b2f1d ha portato con se' tre sorgenti KiCad (pcb_dimension9.cpp, util.h,
 vector2d9.h) scaricati nella RADICE del repo dall'agente di audit; rimossi col commit successivo. Prima di
 `git add -A` dopo una revisione con agenti, guardare `git status --short` per file estranei nella radice.
@@ -35,7 +35,7 @@ AUDIT + REVISIONE GUI su C (06/11 notte): tutto corretto.
   (dots per metre, es. scansione 300 dpi) propone la propria scala asse per asse (`_image_scale_from_metadata`,
   escluso il placeholder Qt 96 dpi).
 - `_project_dir_or_none` nel dialog; commento sulla guardia del pulsante assente.
-Test: tests/test_footprint_reference_image.py (10). Suite completa VERDE: meta' A 7118 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11918 passati, 13 saltati, 19 sottotest (07/11, codice fermo). C attende l'OK al commit. data/analysis_profiles.sqlite3 modificato dal catalogo (traduzioni nuove): controllo segreti vuoto, va nel commit. (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
+Test: tests/test_footprint_reference_image.py (10). Suite completa VERDE: meta' A 7118 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11918 passati, 13 saltati, 19 sottotest (07/11, codice fermo). Commit 4e977b1 (utente: «ok»). data/analysis_profiles.sqlite3 modificato dal catalogo (traduzioni nuove): controllo segreti vuoto, va nel commit. (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
 Tre funzioni, ciascuna chiusa da sola (commit separati possibili):
 A. POLIGONO. Lo strumento linea del footprint chiude il poligono con un clic sul primo punto a 4+ punti, come
    gia' fa il simbolo (canvas_clicktools, «polygon close-on-first»): parita' fra le due schede. Nuovo kind

@@ -261,7 +261,10 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11909 passed,
+is 11918 passed,
+13 skipped and 19 subtests (2026-11-07, branch `FOOTPRINT-ADVANCE`, commit `4e977b1`, halves 7118/9/19 and 4800/4:
+reference image under the footprint preview — calibrated photo centred on the body, image file with scale, offset,
+opacity, two-click calibration, relative paths; footprint priority 3 closed; before that, 11909 passed,
 13 skipped and 19 subtests (2026-11-06 night, branch `FOOTPRINT-ADVANCE`, commit `40b2f1d`, halves 7109/9/19 and
 4800/4: exportable dimensions — «Quota» tool, aligned and orthogonal KiCad `dimension` writer whose side was
 verified with kicad-cli, «Esporta come quota» from measures, one ink and label model shared by writer, checks and
