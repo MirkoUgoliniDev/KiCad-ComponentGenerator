@@ -1,6 +1,12 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
 ## 06-07/11 — PRIORITA' 3 CHIUSA: A `3c5b9bc`, B `40b2f1d`, C `4e977b1`, committati, pushati e mergiati in main
+PACCHETTO LOCALE dopo la priorita' 3 (06/11 sera, utente: «il pacchetto e' partito?»): build-windows.ps1 -IncludeYoloModel
+da main b531523, dist/KiCadGen-1.0.7.msi 461 MB (483 302 132 byte, 20:00), --check-runtime OK, avvisi soliti (ICE60, ICE03,
+pyvista.trame, onnx). Numero ancora 1.0.7: cambia solo con la release 1.0.8, da lanciare a mano dall'utente.
+Locale non committato: data/analysis_profiles.sqlite3 modificato dall'uso dell'app (va nel prossimo commit, dopo il
+controllo dei segreti). Domanda aperta: togliere ADVANCED dal ruleset per cancellare origin/ADVANCED.
+
 TRAPPOLA (06/11 notte): il commit 40b2f1d ha portato con se' tre sorgenti KiCad (pcb_dimension9.cpp, util.h,
 vector2d9.h) scaricati nella RADICE del repo dall'agente di audit; rimossi col commit successivo. Prima di
 `git add -A` dopo una revisione con agenti, guardare `git status --short` per file estranei nella radice.
