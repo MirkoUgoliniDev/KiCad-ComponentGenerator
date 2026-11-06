@@ -1452,7 +1452,10 @@ def footprint_pad_records(footprint) -> list[tuple]:
     """
     records = []
     for pad in footprint.pads:
-        drill = () if pad.drill is None else (float(pad.drill),)
+        # A slot gives (w, h), as `read_footprint_pad_records` reads the
+        # numbers of `(drill oval w h)` back: one record form for both.
+        slot = getattr(pad, "drill_slot", None)
+        drill = (() if pad.drill is None else (float(pad.drill),)) if slot is None else tuple(float(v) for v in slot)
         offset = tuple(float(v) for v in getattr(pad, "drill_offset", (0.0, 0.0)))
         records.append((str(pad.number), str(pad.pad_type), float(pad.at[0]), float(pad.at[1]),
                         float(pad.rotation or 0.0) % 360.0, float(pad.size[0]),
@@ -12544,6 +12547,24 @@ class MainWindow(QMainWindow):
             "(ki_fp_filters).")
         self.field_fp_filters.textChanged.connect(lambda _text: self._refresh_klc_findings())
         form.addRow("Filtri footprint:", self._metadata_field_row(self.field_fp_filters, "fp_filters"))
+        # KiCad's footprint attribute flags («Footprint Properties» >
+        # Attributes), written after the mounting type in `(attr ...)`.
+        # «Not in schematic» (board_only) is left out: a component made here
+        # always has a symbol.
+        attributes = QWidget()
+        #: The column of attribute checkboxes (the «field» of the row).
+        self.field_attributes_box = attributes
+        attributes_layout = QVBoxLayout(attributes)
+        attributes_layout.setContentsMargins(0, 0, 0, 0)
+        attributes_layout.setSpacing(2)
+        self.field_attributes: dict[str, QCheckBox] = {}
+        for flag, label, tip in self.FOOTPRINT_ATTRIBUTE_CHECKS:
+            box = QCheckBox(label)
+            box.setToolTip(tip)
+            box.toggled.connect(lambda _checked: self._refresh_klc_findings())
+            attributes_layout.addWidget(box)
+            self.field_attributes[flag] = box
+        form.addRow("Attributi:", self._metadata_field_row(attributes, "attributes", top=True))
         self.btn_apply_metadata = self._workflow_tool_button(
             "confirm-use.svg", "Applica ai file",
             "Salva il progetto, rigenera il footprint e riesporta il simbolo se esiste già")
@@ -12571,11 +12592,48 @@ class MainWindow(QMainWindow):
         QWidget.setTabOrder(self.field_meta_description, self.field_meta_keywords)
         QWidget.setTabOrder(self.field_meta_keywords, self.field_datasheet)
         QWidget.setTabOrder(self.field_datasheet, self.field_fp_filters)
-        QWidget.setTabOrder(self.field_fp_filters, self.btn_apply_metadata)
+        previous = self.field_fp_filters
+        for box in self.field_attributes.values():
+            QWidget.setTabOrder(previous, box)
+            previous = box
+        QWidget.setTabOrder(previous, self.btn_apply_metadata)
         self._align_form(form, "kicad")
         self.group_metadata = group
         group.setEnabled(False)
         return group
+
+    #: (KiCad attr flag, checkbox label, tooltip) of the «Attributi» row of
+    #: the metadata group, in KiCad's dialog order.
+    FOOTPRINT_ATTRIBUTE_CHECKS = (
+        ("exclude_from_pos_files", "Escludi dai file di posizione",
+         "Il componente non compare nei file di posizione per l'assemblaggio (pick and place)."),
+        ("exclude_from_bom", "Escludi dalla distinta (BOM)",
+         "Il componente non compare nella distinta dei materiali: fori di fissaggio, fiduciali, loghi."),
+        ("allow_missing_courtyard", "Esente dal courtyard",
+         "Il controllo delle regole (DRC) non segnala l'assenza del courtyard."),
+        ("dnp", "Non montare (DNP)",
+         "Do Not Populate: il footprint resta sulla scheda ma il componente non viene montato."),
+    )
+
+    def _footprint_attributes(self) -> tuple:
+        """@brief The attribute flags ticked in «Attributi», in KiCad's order.
+
+        @return Tuple of flag names (`core.footprint.FOOTPRINT_ATTRIBUTE_FLAGS`
+            subset); () without the metadata form or with nothing ticked.
+        """
+        boxes = getattr(self, "field_attributes", None) or {}
+        return tuple(flag for flag, _label, _tip in self.FOOTPRINT_ATTRIBUTE_CHECKS
+                     if flag in boxes and boxes[flag].isChecked())
+
+    def _set_footprint_attributes(self, flags) -> None:
+        """@brief Tick exactly the given flags in «Attributi»; unknown names are ignored.
+
+        @param flags Iterable of flag names, or anything else for «none».
+        """
+        boxes = getattr(self, "field_attributes", None) or {}
+        wanted = {str(flag) for flag in flags} if isinstance(flags, (list, tuple, set)) else set()
+        for flag, box in boxes.items():
+            box.setChecked(flag in wanted)
 
     #: Help topics of «Metadati del componente», in row order: key -> source
     #: of the dialog title. The texts live in `_metadata_help_content`.
@@ -12585,6 +12643,7 @@ class MainWindow(QMainWindow):
         "keywords": "Parole chiave",
         "datasheet": "Datasheet (URL o file)",
         "fp_filters": "Filtri footprint",
+        "attributes": "Attributi",
         "klc": "Controlli KiCad (KLC)",
     }
 
@@ -12718,6 +12777,22 @@ class MainWindow(QMainWindow):
                     "corrisponde a nulla fa solo sparire il footprint dalle proposte.")),
                 (examples, self.i18n.text(
                     "«ESP32-S3-DEVKIT-NXRX*» · «SOT-223*» · «*QFN*48*».")),
+            ],
+            "attributes": [
+                (what, self.i18n.text(
+                    "Le caselle degli attributi del footprint di KiCad: escluso dai file di posizione, "
+                    "escluso dalla distinta (BOM), esente dal courtyard, non montare (DNP). Vuote per un "
+                    "componente normale.")),
+                (where, self.i18n.text(
+                    "Campo «attr» del footprint, dopo il tipo di montaggio (smd o through_hole); in KiCad "
+                    "si ritrovano in «Proprietà del footprint» > Attributi.")),
+                (rules, self.i18n.text(
+                    "Nessuna regola KLC le impone. Un foro di fissaggio, un fiduciale o un logo va escluso "
+                    "dalla distinta e dai file di posizione; «esente dal courtyard» serve solo a chi non ne "
+                    "disegna uno, il generatore lo scrive sempre.")),
+                (examples, self.i18n.text(
+                    "Foro di fissaggio M3: escluso dalla distinta e dai file di posizione · componente "
+                    "opzionale non montato di serie: non montare (DNP).")),
             ],
             "klc": [
                 (what, self.i18n.text(
@@ -12880,10 +12955,11 @@ class MainWindow(QMainWindow):
             open, so a renamed project proposes its new footprint filter.
         """
         if not hasattr(self, "field_reference"):
-            return {"reference": "", "datasheet": "", "fp_filters": ""}
+            return {"reference": "", "datasheet": "", "fp_filters": "", "attributes": []}
         return {"reference": self.field_reference.text().strip(),
                 "datasheet": self.field_datasheet.text().strip(),
-                "fp_filters": self.field_fp_filters.text().strip()}
+                "fp_filters": self.field_fp_filters.text().strip(),
+                "attributes": list(self._footprint_attributes())}
 
     def _restore_metadata_state(self, state) -> None:
         """@brief Put back the saved metadata; a missing key (older project) clears the fields.
@@ -12902,6 +12978,8 @@ class MainWindow(QMainWindow):
                 # project file must not put «U1» or «12» into the field.
                 value = ""
             widget.setText(value if isinstance(value, str) else "")
+        # Older projects have no «attributes»: nothing ticked, as before.
+        self._set_footprint_attributes(values.get("attributes", []))
         self._refresh_metadata_proposals()
 
     def _refresh_metadata_proposals(self) -> None:
@@ -13144,16 +13222,20 @@ class MainWindow(QMainWindow):
     #: Keys of the snapshot: the required metadata that reach the INSTALLED
     #: footprint. The designator is not in it: it lives only in the symbol,
     #: which the KiCad-tab installation does not copy.
-    APPLIED_METADATA_KEYS = ("description", "keywords", "datasheet")
+    APPLIED_METADATA_KEYS = ("description", "keywords", "datasheet", "attributes")
 
     def _metadata_snapshot(self) -> dict:
         """@brief The metadata values a footprint generation started now would write.
 
-        @return {description, keywords, datasheet}, stripped, as
-            `_metadata_dict` gives them to the generators.
+        @return {description, keywords, datasheet, attributes}, stripped, as
+            `_metadata_dict` gives them to the generators; «attributes» is
+            the ticked flags joined by spaces in KiCad's order ("" for none),
+            a string like the others so the record keeps one value type.
         """
         values = self._metadata_dict()
-        return {key: values[key] for key in self.APPLIED_METADATA_KEYS}
+        snapshot = {key: values[key] for key in self.APPLIED_METADATA_KEYS if key in values}
+        snapshot["attributes"] = " ".join(self._footprint_attributes())
+        return snapshot
 
     def _note_metadata_written(self, snapshot) -> None:
         """@brief Record the metadata a successful footprint write carried.
@@ -13173,6 +13255,10 @@ class MainWindow(QMainWindow):
         @return A dict with exactly `APPLIED_METADATA_KEYS` as strings, or None
             (treated as «not applied»: the safe side).
         """
+        if isinstance(value, dict) and "attributes" not in value:
+            # A record written before 2026-11-06 could carry no attribute
+            # flags: it applied none, which is not «never applied».
+            value = {**value, "attributes": ""}
         if (isinstance(value, dict) and set(value) == set(cls.APPLIED_METADATA_KEYS)
                 and all(isinstance(item, str) for item in value.values())):
             return dict(value)
@@ -15819,6 +15905,9 @@ class MainWindow(QMainWindow):
         # same stripped `field_tags`: every path writes what the snapshot
         # below records as «keywords».
         self._worker.tags = self.field_tags.text().strip()
+        # The attribute flags of «Attributi» reach every generator's footprint
+        # (the worker sets them on the built Footprint).
+        self._worker.attributes = self._footprint_attributes()
         # The metadata this write carries (review pass 2, M1): recorded as
         # «applied» by `_on_generated` only when the worker reports the file
         # written, so a failed or refused generation applies nothing.
@@ -23026,14 +23115,17 @@ class MainWindow(QMainWindow):
                 # The move cursor says the pad can be dragged, as on a pin
                 # of the symbol editor and on a footprint drawing.
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
-            drilled = pin.pad_type in ("thru_hole", "np_thru_hole") and pin.drill_mm
+            hole_mm = pin.hole_sizes()
+            drilled = hole_mm is not None
             if drilled:
-                diameter = pin.drill_mm * mm_to_px
+                hole_px = (hole_mm[0] * mm_to_px, hole_mm[1] * mm_to_px)
                 # The hole is centred on the pad's turning point: the same in
-                # item and scene coordinates at any pad angle.
-                item.set_hole(QPointF(x, y), diameter)
-                hole = add_hole_outline(self.preview_scene, QPointF(x, y), diameter,
-                                        QPen(QColor(SURFACE1)), 1)
+                # item and scene coordinates at any pad angle. A slot is given
+                # in the pad's axes: the copper item turns, and so does the
+                # outline (`rotation_deg`).
+                item.set_hole(QPointF(x, y), hole_px)
+                hole = add_hole_outline(self.preview_scene, QPointF(x, y), hole_px,
+                                        QPen(QColor(SURFACE1)), 1, rotation_deg=pin.rotation_deg)
                 hole.setData(PAD_PART_ROLE, pad_index)
             angle = math.radians(pin.rotation_deg)
             ca, sa = abs(math.cos(angle)), abs(math.sin(angle))
@@ -23046,10 +23138,21 @@ class MainWindow(QMainWindow):
                 dx = (a - radius) * ca + (b - radius) * sa + radius
                 dy = (a - radius) * sa + (b - radius) * ca + radius
             if drilled:
-                dx, dy = max(dx, pin.drill_mm / 2), max(dy, pin.drill_mm / 2)
+                # Half extents of the hole's box, turned with the pad, as the
+                # copper above: a mechanical slot wider than its mask opening
+                # still counts in the drawn extent.
+                hx, hy = hole_mm[0] / 2, hole_mm[1] / 2
+                dx, dy = max(dx, hx * ca + hy * sa), max(dy, hx * sa + hy * ca)
             extent = [min(extent[0], pin.x_mm - dx), min(extent[1], pin.y_mm - dy),
                       max(extent[2], pin.x_mm + dx), max(extent[3], pin.y_mm + dy)]
-            number = self.preview_scene.addSimpleText(str(pin.number))
+            mechanical = pin.pad_type == "np_thru_hole"
+            if mechanical:
+                # Written without a number (no net): shown as KiCad shows it,
+                # with the model's number kept in the tooltip so the pad can
+                # be told apart and made plated again.
+                item.setToolTip(tx("Foro non metallizzato (pad {number}, senza numero nel file)",
+                                   number=pin.number))
+            number = self.preview_scene.addSimpleText("" if mechanical else str(pin.number))
             number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(TEXT if drilled else BASE)))
             font = number.font(); font.setPointSizeF(max(6.0, min(w, h) * .45)); font.setBold(True)
@@ -23631,6 +23734,16 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(self.i18n.text("Modifica pad {number}").format(number=pin.number))
         form = QFormLayout(dialog)
+        # The mounting type of the pad (KiCad's «Pad type»): an SMD land, a
+        # plated hole or a mechanical hole. «connect» (edge-connector finger)
+        # is not offered: no generator produces it and the preview cannot
+        # show it apart from an SMD pad.
+        pad_type = QComboBox(dialog)
+        for label, value in (("SMD", "smd"), ("Foro passante", "thru_hole"),
+                             ("Foro non metallizzato", "np_thru_hole")):
+            pad_type.addItem(self.i18n.text(label), value)
+        pad_type.setCurrentIndex(max(pad_type.findData(pin.pad_type), 0))
+        form.addRow(self.i18n.text("Tipo di pad:"), pad_type)
         shape = QComboBox(dialog)
         choices = (
             ("Cerchio", "circle"), ("Quadrato", "square"),
@@ -23661,18 +23774,56 @@ class MainWindow(QMainWindow):
         height = size_control(pin.pad_width_mm)
         form.addRow(self.i18n.text("Larghezza:"), width)
         form.addRow(self.i18n.text("Altezza:"), height)
-        # Only a pad that HAS a hole gets the field: an SMD pad has none and
-        # offering one would invent a drill. `package.validate()` rejects a
-        # drill at or above the smaller pad side.
-        drill = None
-        if pin.drill_mm is not None:
-            drill = QDoubleSpinBox(dialog)
-            drill.setRange(0.05, 20.0)
-            drill.setDecimals(3)
-            drill.setSingleStep(0.05)
-            drill.setSuffix(" mm")
-            drill.setValue(float(pin.drill_mm))
-            form.addRow(self.i18n.text("Foro:"), drill)
+        rotation = QDoubleSpinBox(dialog)
+        rotation.setRange(-360.0, 360.0)
+        rotation.setDecimals(1)
+        rotation.setSingleStep(90.0)
+        rotation.setSuffix(" °")
+        rotation.setToolTip(self.i18n.text("Angolo del pad in gradi, antiorario come in KiCad."))
+        # Shown as seen from the top, like the positions below: the angle
+        # KiCad will write, whatever the source view and orientation.
+        rotation.setValue(float(package.pins_seen_from_top()[pad_index].rotation_deg))
+        form.addRow(self.i18n.text("Rotazione:"), rotation)
+        # The hole fields are always built and enabled only for a holed
+        # type, so the type can be changed here. CONTRACT CHANGED 2026-11-06
+        # (before: an SMD pad had no «Foro:» field at all). No value is
+        # invented: a pad that becomes holed starts at 0, shown as «da
+        # indicare» (to be given), and «OK» is refused until a size is typed.
+        # `package.validate()` rejects a hole at or above the pad side.
+
+        def hole_control(value, empty_text):
+            control = QDoubleSpinBox(dialog)
+            control.setRange(0.0, 20.0)
+            control.setDecimals(3)
+            control.setSingleStep(0.05)
+            control.setSuffix(" mm")
+            control.setSpecialValueText(self.i18n.text(empty_text))
+            control.setValue(0.0 if value is None else float(value))
+            return control
+
+        hole = pin.hole_sizes()
+        drill = hole_control(None if hole is None else hole[0], "da indicare")
+        drill.setToolTip(self.i18n.text(
+            "Diametro del foro; per un'asola, il lato lungo la larghezza del pad."))
+        form.addRow(self.i18n.text("Foro:"), drill)
+        slot = hole_control(hole[1] if pin.is_slot() else None, "tondo")
+        slot.setToolTip(self.i18n.text(
+            "Secondo lato dell'asola, lungo l'altezza del pad: lasciare «tondo» per un foro circolare."))
+        form.addRow(self.i18n.text("Asola, secondo lato:"), slot)
+        npth_note = QLabel(self.i18n.text(
+            "Un foro non metallizzato non ha numero nel file: il pad {number} viene scritto senza "
+            "numero e non compare nel simbolo.").format(number=pin.number))
+        npth_note.setWordWrap(True)
+        form.addRow(npth_note)
+
+        def follow_type(_index=None):
+            holed = pad_type.currentData() in ("thru_hole", "np_thru_hole")
+            drill.setEnabled(holed)
+            slot.setEnabled(holed)
+            npth_note.setVisible(pad_type.currentData() == "np_thru_hole" and bool(str(pin.number).strip()))
+
+        pad_type.currentIndexChanged.connect(follow_type)
+        follow_type()
         # Position measured from the drawing origin, Y up (user, 2026-11-02):
         # the numbers of a datasheet dimensioned from that point.
         seen = package.pins_seen_from_top()[pad_index]
@@ -23716,21 +23867,36 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
-            return
+        while True:
+            if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
+                return
+            chosen_type = pad_type.currentData()
+            if chosen_type in ("thru_hole", "np_thru_hole") and drill.value() <= 0.0:
+                # The dialog stays open: the user types the size or cancels.
+                QMessageBox.warning(self, self.i18n.text("Dimensione pad non valida"), self.i18n.text(
+                    "Indica il diametro del foro: un pad forato senza foro non può essere scritto."))
+                continue
+            break
         wants_origin = as_origin is not None and as_origin.isChecked()
         # A changed field is the typed position: the move is taken from the
         # EXACT position, not from the 3-decimal value shown, so the pad lands
         # on the typed number. An untouched field moves nothing on its axis.
         move_x = pos_x.value() - rel_x if pos_x.isEnabled() and pos_x.value() != shown_x else 0.0
         move_y = pos_y.value() - rel_y if pos_y.isEnabled() and pos_y.value() != shown_y else 0.0
-        self._apply_package_pad_dialog(pad_index, shape.currentData(), width.value(), height.value(),
-                                       None if drill is None else drill.value(), (move_x, move_y))
+        holed = chosen_type in ("thru_hole", "np_thru_hole")
+        drill_mm = drill.value() if holed else None
+        # «tondo» (0) and a second side equal to the first are a round hole.
+        drill_length_mm = slot.value() if holed and slot.value() > 0.0 and slot.value() != drill.value() else None
+        self._apply_package_pad_dialog(
+            pad_index, shape.currentData(), width.value(), height.value(), drill_mm, (move_x, move_y),
+            pad_type=chosen_type, rotation_deg=rotation.value(), drill_length_mm=drill_length_mm)
         if wants_origin != was_origin:
             self._set_footprint_drawing_origin(origin_key if wants_origin else FP_ORIGIN_DEFAULT)
 
     def _apply_package_pad_dialog(self, pad_index: int, selected_shape: str, pad_width: float,
-                                  pad_height: float, drill_mm, move_mm: tuple) -> bool:
+                                  pad_height: float, drill_mm, move_mm: tuple, *,
+                                  pad_type: str | None = None, rotation_deg: float | None = None,
+                                  drill_length_mm: float | None = None) -> bool:
         """@brief Apply the values of the pad dialog as ONE draft edit.
 
         @param pad_index Index of the pad in `package_geometry.pins`.
@@ -23738,13 +23904,26 @@ class MainWindow(QMainWindow):
             rectangle with equal sides).
         @param pad_width Pad width, mm.
         @param pad_height Pad height, mm (ignored for "square").
-        @param drill_mm Drill diameter, mm, or None for a pad without a hole.
+        @param drill_mm Drill diameter, mm (the first side of a slot), or
+            None for a pad without a hole.
         @param move_mm (dx, dy) change of the position fields, mm, X right and
             Y UP as the drawing origin measures them; (0, 0) moves nothing.
+        @param pad_type New mounting type ("smd", "thru_hole",
+            "np_thru_hole"), or None to keep the pad's. A pad made
+            «np_thru_hole» keeps its number and name in the model (the type
+            change stays reversible); the generator writes it without a
+            number, as KiCad's mechanical holes carry no net. An SMD pad
+            keeps no hole whatever `drill_mm` says.
+        @param rotation_deg New pad angle as SEEN FROM THE TOP, degrees
+            (the angle the dialog shows, like the positions), or None to
+            keep it; converted to the source frame through the package's
+            reflection and orientation.
+        @param drill_length_mm Second side of a slot, mm, along the pad
+            height; None for a round hole.
         @return True when the draft changed.
-        @note Shape, size, drill and position are one undo step. The moved
-            pad is validated on a copy (overlaps, KiCad reach); a refused
-            value changes nothing and says why.
+        @note Shape, size, type, rotation, hole and position are one undo
+            step. The moved pad is validated on a copy (overlaps, KiCad
+            reach); a refused value changes nothing and says why.
         @note With a package origin other than «body_center» the body centre
             is ESTIMATED from the pad field (`body_frame_offset`, a declared
             heuristic): moving an outer pad re-centres the drawing, so a
@@ -23759,9 +23938,26 @@ class MainWindow(QMainWindow):
         if selected_shape == "square":
             selected_shape = "rect"
             pad_height = pad_width
-        updated = replace(pin, shape=selected_shape,
-                          pad_length_mm=pad_width, pad_width_mm=pad_height,
-                          **({"drill_mm": drill_mm} if drill_mm is not None else {}))
+        new_type = pin.pad_type if pad_type is None else pad_type
+        fields = {"shape": selected_shape, "pad_length_mm": pad_width, "pad_width_mm": pad_height,
+                  "pad_type": new_type}
+        if rotation_deg is not None:
+            # The dialog shows the angle seen from the top, as it shows the
+            # positions; the model holds the source-frame angle. A reflection
+            # (bottom view, mirror) negates the angle, the package orientation
+            # adds to it (`pins_seen_from_top`): the change is converted back.
+            seen_angle = package.pins_seen_from_top()[pad_index].rotation_deg
+            flips = int(package.source_view == "bottom") + int(package.mirrored)
+            sign = -1.0 if flips % 2 else 1.0
+            fields["rotation_deg"] = (float(pin.rotation_deg) + sign * (float(rotation_deg) - seen_angle)) % 360.0
+        if new_type in ("thru_hole", "np_thru_hole"):
+            if drill_mm is not None:
+                fields["drill_mm"] = drill_mm
+            fields["drill_length_mm"] = drill_length_mm
+        else:
+            fields["drill_mm"] = None
+            fields["drill_length_mm"] = None
+        updated = replace(pin, **fields)
         dx, dy = float(move_mm[0]), float(move_mm[1])
         if (dx, dy) != (0.0, 0.0):
             # The fields read Y up; the footprint's Y points down.

@@ -477,6 +477,11 @@ class GenerateWorker(_Cad3DRunWorker):
         #: keeps the package family. The pin-header and castellated params
         #: carry their own `tags` (review 2026-10-15, R2-M2).
         self.tags = ""
+        #: KiCad attribute flags of the footprint (`Footprint.attributes`,
+        #: e.g. "exclude_from_bom"): set on the built footprint whatever the
+        #: generator, as the flags belong to the component, not to its
+        #: geometry. () writes none.
+        self.attributes = ()
         #: Chosen positions of the Reference and Value texts, {key: (x, y)}
         #: mm (user, 2026-10-13); {} keeps the generator's defaults.
         self.text_positions = {}
@@ -500,6 +505,7 @@ class GenerateWorker(_Cad3DRunWorker):
                 if isinstance(host, PackageGeometry)
                 else _patch_point("build_pin_header")(host)
             )
+            footprint.attributes = tuple(self.attributes or ())
             footprint.place_texts(self.text_positions)
             # User drawings (preview palette): records already validated,
             # added after the generated ones so they do not touch the

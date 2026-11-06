@@ -143,9 +143,11 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
                 continue
             override = overrides.get(pin_key(pin.number), {})
             size = float(override.get("size", pad_diameter))
+            # Header pins are round: a slot of the module's own pad (a
+            # connector tab) must not reach the host land.
             result_pins.append(replace(
                 pin, pad_length_mm=size, pad_width_mm=size,
-                shape=override.get("shape", shape), drill_mm=drill))
+                shape=override.get("shape", shape), drill_mm=drill, drill_length_mm=None))
         _validate_header_clearance([pin for pin in result_pins if pin.pad_type != "np_thru_hole"])
         result = _host_lands(params, pins=result_pins)
         result.validate()

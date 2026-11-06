@@ -51,6 +51,14 @@ PAD_TYPES = {"thru_hole", "smd", "np_thru_hole", "connect"}
 # 2026-10-27, G7), so `Pad` refuses the shape without the delta.
 PAD_SHAPES = {"circle", "rect", "oval", "roundrect", "trapezoid"}
 
+#: Footprint attribute flags KiCad writes after the mounting type in
+#: `(attr ...)`, in KiCad's own order (pcb_io_kicad_sexpr): «Not in
+#: schematic», «Exclude from position files», «Exclude from BOM», «Exempt
+#: from courtyard requirement», «Do not populate». `Footprint.attributes`
+#: holds a subset of them; an unknown flag is refused, not written.
+FOOTPRINT_ATTRIBUTE_FLAGS = ("board_only", "exclude_from_pos_files", "exclude_from_bom",
+                             "allow_missing_courtyard", "dnp")
+
 #: Silkscreen stroke width, mm (KLC F5.1 recommends 0.12 mm).
 SILK_WIDTH_MM = 0.12
 
@@ -95,6 +103,22 @@ def courtyard_corners(start: Point, end: Point) -> tuple:
     x0, x1 = courtyard_round_out(min(start[0], end[0]), max(start[0], end[0]))
     y0, y1 = courtyard_round_out(min(start[1], end[1]), max(start[1], end[1]))
     return (x0, y0), (x1, y1)
+
+
+def normalised_attribute_flags(flags) -> Tuple[str, ...]:
+    """@brief The footprint attribute flags in KiCad's order, each once.
+
+    @param flags Iterable of flag names (see `FOOTPRINT_ATTRIBUTE_FLAGS`);
+        None or an empty iterable gives ().
+    @return The known flags present, ordered as KiCad writes them.
+    @throws ValueError When a flag is not one KiCad knows: writing it would
+        make the file unreadable, silently dropping it would lose a choice.
+    """
+    wanted = {str(flag) for flag in (flags or ())}
+    unknown = sorted(wanted - set(FOOTPRINT_ATTRIBUTE_FLAGS))
+    if unknown:
+        raise ValueError(tx("Attributo del footprint sconosciuto: {flags}", flags=", ".join(unknown)))
+    return tuple(flag for flag in FOOTPRINT_ATTRIBUTE_FLAGS if flag in wanted)
 
 
 def validate_pad_number(number) -> None:
@@ -181,7 +205,13 @@ class Pad:
     - at: (x, y) position in mm relative to the footprint origin
     - size: (width, height) in mm
     - layers: list of KiCad layers, e.g. ["*.Cu", "*.Mask"] for THT or ["F.Cu", "F.Paste", "F.Mask"] for SMD
-    - drill: hole diameter in mm (required for thru_hole/np_thru_hole)
+    - drill: round hole diameter in mm (a thru_hole/np_thru_hole pad needs
+      `drill` or `drill_slot`, never both)
+    - drill_slot: (width, height) in mm of an oval hole (a slot), written as
+      KiCad's `(drill oval w h)`; the sides are along the pad's own axes and
+      turn with its rotation. Equal sides are a round hole and are stored
+      as `drill`. For a plated pad each side must stay below the pad side on
+      its axis, as KiCad's DRC requires copper around the hole.
     - roundrect_rratio: rounding ratio for shape="roundrect" (0..0.5)
     - rect_delta: (dx, dy) in mm, KiCad's `rect_delta` of a trapezoid pad:
       exactly one of the two is non-zero and its magnitude is below the
@@ -199,6 +229,7 @@ class Pad:
     drill: Optional[float] = None
     roundrect_rratio: Optional[float] = None
     rect_delta: Optional[Tuple[float, float]] = None
+    drill_slot: Optional[Tuple[float, float]] = None
 
     def __post_init__(self) -> None:
         if self.pad_type not in PAD_TYPES:
@@ -209,7 +240,8 @@ class Pad:
             raise ValueError(tx("shape non valida: {shape!r} (attese: {PAD_SHAPES})",
                                 shape=self.shape,
                                 PAD_SHAPES=PAD_SHAPES))
-        if self.pad_type in ("thru_hole", "np_thru_hole") and self.drill is None:
+        self._validate_drill_slot()
+        if self.pad_type in ("thru_hole", "np_thru_hole") and self.drill is None and self.drill_slot is None:
             raise ValueError(tx("pad {number!r}: drill obbligatorio per pad_type={pad_type!r}",
                                 number=self.number,
                                 pad_type=self.pad_type))
@@ -225,6 +257,45 @@ class Pad:
             if first is not None and first != second:
                 self.shape = "oval"
         self._validate_rect_delta()
+
+    def _validate_drill_slot(self) -> None:
+        """Normalise and check the slot: one hole only, finite positive sides, copper around them.
+
+        A slot and a round drill together would be two holes for one pad;
+        equal sides describe a round hole and are stored as `drill`, so a
+        file never holds `(drill oval d d)` where `(drill d)` is meant. A
+        plated pad (thru_hole) keeps copper on both axes: each side of the
+        slot must be below the pad side on that axis (KiCad's DRC refuses a
+        hole that leaves no annular ring); a mechanical hole (np_thru_hole)
+        may be as large as it needs, its "pad" is only the mask opening.
+        """
+        if self.drill_slot is None:
+            return
+        if self.drill is not None:
+            raise ValueError(tx("pad {number!r}: foro tondo e asola insieme non sono ammessi",
+                                number=self.number))
+        try:
+            width, height = (float(v) for v in self.drill_slot)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(tx("pad {number!r}: asola non valida", number=self.number)) from exc
+        if not (math.isfinite(width) and math.isfinite(height)) or width <= 0 or height <= 0:
+            raise ValueError(tx("pad {number!r}: asola non valida", number=self.number))
+        if self.pad_type not in ("thru_hole", "np_thru_hole"):
+            raise ValueError(tx("pad {number!r}: asola ammessa solo per un pad forato",
+                                number=self.number))
+        if self.pad_type == "thru_hole":
+            try:
+                size_x, size_y = (float(v) for v in self.size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(tx("pad {number!r}: asola non valida", number=self.number)) from exc
+            if width >= size_x or height >= size_y:
+                raise ValueError(tx("pad {number!r}: ogni lato dell'asola deve essere minore del lato "
+                                    "del pad sullo stesso asse", number=self.number))
+        if width == height:
+            self.drill = width
+            self.drill_slot = None
+        else:
+            self.drill_slot = (width, height)
 
     def _validate_rect_delta(self) -> None:
         """Refuse a trapezoid without its delta and a delta on another shape.
@@ -262,6 +333,8 @@ class Pad:
         node.add(sx("size", *self.size))
         if self.drill is not None:
             node.add(sx("drill", self.drill))
+        elif self.drill_slot is not None:
+            node.add(sx("drill", Symbol("oval"), *self.drill_slot))
         node.add(sx("layers", *self.layers))
         if self.shape == "roundrect" and self.roundrect_rratio is not None:
             node.add(sx("roundrect_rratio", self.roundrect_rratio))
@@ -1032,6 +1105,11 @@ class Footprint:
     #: Datasheet URL or path, written to the "Datasheet" property; "" when unknown.
     datasheet: str = ""
     attr: Optional[str] = None  # "through_hole" | "smd" | None
+    #: Attribute flags written after the mounting type in `(attr ...)`, a
+    #: subset of `FOOTPRINT_ATTRIBUTE_FLAGS` in any order (written in KiCad's
+    #: order, once each). Empty for an ordinary component. Validated by
+    #: `to_sexpr`, so a flag typed wrong is refused before a file is written.
+    attributes: Sequence[str] = ()
     reference_at: Point = (0.0, -2.0)
     value_at: Point = (0.0, 2.0)
     #: {key: justify words} of the Reference/Value texts placed by
@@ -1205,8 +1283,12 @@ class Footprint:
         root.add(self._property_node("Datasheet", self.datasheet, (0, 0), "F.Fab", hide=True))
         root.add(self._property_node("Description", self.description, (0, 0), "F.Fab", hide=True))
 
-        if self.attr:
-            root.add(sx("attr", Symbol(self.attr)))
+        flags = normalised_attribute_flags(self.attributes)
+        if self.attr or flags:
+            # KiCad accepts `(attr exclude_from_bom)` without a mounting type
+            # (a logo, a mounting hole): the type is written first when known.
+            root.add(sx("attr", *([Symbol(self.attr)] if self.attr else []),
+                        *(Symbol(flag) for flag in flags)))
 
         for item in self.graphics:
             root.add(item.to_sexpr())

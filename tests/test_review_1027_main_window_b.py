@@ -415,8 +415,11 @@ def test_g7_the_schema_and_the_pad_combo_no_longer_offer_a_trapezoid(window, mon
     offered = []
 
     def inspect(dialog):
-        combo = dialog.findChildren(QComboBox)[0]
-        offered.extend(combo.itemData(i) for i in range(combo.count()))
+        # The shape combo (since 2026-11-06 the pad type combo comes first).
+        for combo in dialog.findChildren(QComboBox):
+            data = [combo.itemData(i) for i in range(combo.count())]
+            if "rect" in data:
+                offered.extend(data)
         return QDialog.DialogCode.Rejected
     monkeypatch.setattr(QDialog, "exec", inspect)
     window._edit_package_pad(0)

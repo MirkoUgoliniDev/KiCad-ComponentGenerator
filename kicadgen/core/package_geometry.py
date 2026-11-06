@@ -74,6 +74,11 @@ class PinSpec:
     shape: str = "roundrect"
     rotation_deg: float = 0.0
     drill_mm: Optional[float] = None
+    #: Second side of the hole, mm, along the pad's width axis (`pad_width_mm`),
+    #: for a slot (oval hole): `drill_mm` is then the side along the pad's
+    #: length axis. None, or equal to `drill_mm`, is a round hole. The hole
+    #: turns with the pad (`rotation_deg`), as KiCad's `(drill oval w h)`.
+    drill_length_mm: Optional[float] = None
 
     def __post_init__(self) -> None:
         """@brief Turn a "circle" with two different sides into the "oval" KiCad would need.
@@ -135,11 +140,42 @@ class PinSpec:
         if self.pad_type in {"thru_hole", "np_thru_hole"}:
             if self.drill_mm is None:
                 raise ValueError(tx("il pin {number} richiede drill_mm", number=self.number))
-            _finite(self.drill_mm, "drill_mm", True)
-            if (self.pad_type == "thru_hole"
-                    and float(self.drill_mm) >= min(float(self.pad_length_mm), float(self.pad_width_mm))):
-                raise ValueError(tx("Il foro del pin {number} deve essere minore di entrambe le dimensioni del pad.",
-                                    number=self.number))
+            drill = _finite(self.drill_mm, "drill_mm", True)
+            slot = None if self.drill_length_mm is None else _finite(self.drill_length_mm, "drill_length_mm", True)
+            if self.pad_type == "thru_hole":
+                if slot is None or slot == drill:
+                    # A round hole must leave copper on every side.
+                    if drill >= min(length, width):
+                        raise ValueError(tx("Il foro del pin {number} deve essere minore di entrambe le "
+                                            "dimensioni del pad.", number=self.number))
+                elif drill >= length or slot >= width:
+                    # A slot leaves copper on each axis separately: its first
+                    # side runs along the pad length, the second along the width.
+                    raise ValueError(tx("Ogni lato dell'asola del pin {number} deve essere minore del lato "
+                                        "del pad sullo stesso asse.", number=self.number))
+        elif self.drill_length_mm is not None:
+            raise ValueError(tx("il pin {number} non ha foro: drill_length_mm non ammesso", number=self.number))
+
+    def hole_sizes(self) -> Optional[tuple]:
+        """@brief The hole as (size along the pad length, size along the pad width), mm, or None.
+
+        @return (drill_mm, drill_mm) for a round hole, (drill_mm,
+            drill_length_mm) for a slot, None for a pad without a hole (an
+            SMD pad, or a holed type whose drill is not given yet).
+        """
+        if self.pad_type not in {"thru_hole", "np_thru_hole"} or self.drill_mm is None:
+            return None
+        second = self.drill_mm if self.drill_length_mm is None else self.drill_length_mm
+        return (float(self.drill_mm), float(second))
+
+    def is_slot(self) -> bool:
+        """@brief Whether the hole is an oval slot.
+
+        @return True when the hole has two different sides; False for a round
+            hole or a pad without a hole.
+        """
+        sizes = self.hole_sizes()
+        return sizes is not None and sizes[0] != sizes[1]
 
 
 @dataclass
@@ -313,7 +349,7 @@ class PackageGeometry:
                 pad_length_mm=pin.pad_length_mm, pad_width_mm=pin.pad_width_mm,
                 side=pin.side, name=pin.name, pad_type=pin.pad_type,
                 shape=pin.shape, rotation_deg=_normal_angle(pad_angle + self.orientation_deg),
-                drill_mm=pin.drill_mm,
+                drill_mm=pin.drill_mm, drill_length_mm=pin.drill_length_mm,
             ))
         return result
 
@@ -600,6 +636,8 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         side=p.get("side"), name=str(p.get("name") or ""),
         pad_type=p.get("pad_type", "smd"), shape=p.get("shape", "roundrect"),
         rotation_deg=p.get("rotation_deg", 0), drill_mm=p.get("drill_mm"),
+        # Optional (2026-11-06): absent or null is a round hole, as before.
+        drill_length_mm=p.get("drill_length_mm"),
     ) for p in raw_pins]
     geometry = PackageGeometry(
         name=str(data.get("name") or "Package"),

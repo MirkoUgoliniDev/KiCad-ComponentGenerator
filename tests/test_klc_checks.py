@@ -320,6 +320,15 @@ def test_through_hole_attribute_passes():
     assert k.check_footprint_text(_footprint(attr='(attr through_hole)')) == []
 
 
+def test_the_mounting_type_followed_by_attribute_flags_passes():
+    """`(attr smd exclude_from_bom dnp)` as KiCad writes a flagged footprint (2026-11-06)."""
+    assert k.check_footprint_text(_footprint(attr='(attr smd exclude_from_bom dnp)')) == []
+    assert k.check_footprint_text(_footprint(attr='(attr exclude_from_bom through_hole)')) == []
+    # Flags alone still lack the mounting type.
+    assert [f.code for f in k.check_footprint_text(_footprint(attr='(attr exclude_from_bom dnp)'))] == [
+        'footprint_attr']
+
+
 # ── check_all ──────────────────────────────────────────────────────────────
 
 def test_check_all_merges_errors_first_and_skips_absent_texts():

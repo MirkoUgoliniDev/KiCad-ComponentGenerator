@@ -1383,6 +1383,8 @@ def generate_single_package_3d_model(
     drills = []
     for pin in pins:
         if pin.pad_type == "thru_hole":
+            # A lead is modelled as a round pin of the first hole side: a
+            # slotted pad (`drill_length_mm`) gets no flat tab in 3D.
             drills.append(float(pin.drill_mm))
             leads.append([str(pin.number), pin.x_mm, pin.y_mm])
         elif pin.pad_type == "smd":

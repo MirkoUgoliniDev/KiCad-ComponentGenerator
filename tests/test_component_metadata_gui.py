@@ -263,7 +263,7 @@ def test_the_metadata_are_saved_typed_only_and_come_back(window, tmp_path):  # n
     window.field_fp_filters.setText("")
     state = window._project_state()
     assert state["metadata"] == {"reference": "J", "datasheet": "https://example.org/ds.pdf",
-                                 "fp_filters": ""}
+                                 "fp_filters": "", "attributes": []}
     window._switch_project("ALTRO", window._general_project_state)
     assert window.field_reference.text() == "" and window.field_datasheet.text() == ""
     window._switch_project("SCHEDA", state)
@@ -285,12 +285,13 @@ def test_an_old_project_without_the_key_opens_clean_and_is_not_dirty(window, tmp
 def test_a_corrupt_metadata_value_is_ignored(window, tmp_path):  # noqa: F811
     _ready(window, tmp_path)
     state = window._project_state()
-    state["metadata"] = {"reference": 12, "datasheet": None, "fp_filters": ["x"]}
+    empty = {"reference": "", "datasheet": "", "fp_filters": "", "attributes": []}
+    state["metadata"] = {"reference": 12, "datasheet": None, "fp_filters": ["x"], "attributes": "dnp"}
     window._switch_project("SCHEDA", state)
-    assert window._metadata_state() == {"reference": "", "datasheet": "", "fp_filters": ""}
+    assert window._metadata_state() == empty
     state["metadata"] = "junk"
     window._switch_project("SCHEDA", state)
-    assert window._metadata_state() == {"reference": "", "datasheet": "", "fp_filters": ""}
+    assert window._metadata_state() == empty
     state["metadata"] = {"reference": "U1", "datasheet": "", "fp_filters": ""}
     window._switch_project("SCHEDA", state)
     assert window._metadata_state()["reference"] == "", "a hand-edited designator with digits is dropped"
@@ -365,6 +366,48 @@ def test_the_footprint_params_carry_description_keywords_and_datasheet(window): 
     castellated = window._current_castellated_params()
     assert (castellated.description, castellated.tags, castellated.datasheet) == (
         "Modulo radio", "radio", "https://example.org/ds.pdf")
+
+
+def test_the_attribute_flags_are_saved_and_come_back_in_kicad_order(window, tmp_path):  # noqa: F811
+    """«Attributi» (2026-11-06): ticked flags reach the project file and come back; unknown ones are dropped."""
+    _ready(window, tmp_path)
+    assert set(window.field_attributes) == {"exclude_from_pos_files", "exclude_from_bom",
+                                            "allow_missing_courtyard", "dnp"}
+    window.field_attributes["dnp"].setChecked(True)
+    window.field_attributes["exclude_from_bom"].setChecked(True)
+    # KiCad's order, not the ticking order.
+    assert window._footprint_attributes() == ("exclude_from_bom", "dnp")
+    state = window._project_state()
+    assert state["metadata"]["attributes"] == ["exclude_from_bom", "dnp"]
+    window._switch_project("ALTRO", window._general_project_state)
+    assert window._footprint_attributes() == ()
+    state["metadata"]["attributes"] = ["dnp", "bogus", "exclude_from_bom"]
+    window._switch_project("SCHEDA", state)
+    assert window._footprint_attributes() == ("exclude_from_bom", "dnp")
+
+
+def test_the_attribute_flags_reach_the_written_footprint_of_every_generator(window, monkeypatch):  # noqa: F811
+    """The worker sets the flags on the built footprint: `(attr <type> <flags>)` in the file."""
+    acquire(window)
+    monkeypatch.setattr(gui.GenerateWorker, "start", lambda worker: worker.run())
+    window.field_attributes["exclude_from_pos_files"].setChecked(True)
+    window.field_attributes["allow_missing_courtyard"].setChecked(True)
+    assert window._generate(footprint_only=True)
+    folder = window._project_dir()
+    text = (folder / f"{folder.name}.pretty" / f"{folder.name}.kicad_mod").read_text(encoding="utf-8")
+    attr = next(line.strip() for line in text.splitlines() if line.strip().startswith("(attr "))
+    assert attr.endswith(" exclude_from_pos_files allow_missing_courtyard)")
+    assert attr.split()[1] in ("smd", "through_hole")
+    # The applied record carries the flags: unticking one makes the files stale.
+    assert not window._metadata_not_applied()
+    window.field_attributes["allow_missing_courtyard"].setChecked(False)
+    assert window._metadata_not_applied()
+
+
+def test_an_applied_record_without_attributes_is_an_old_record_not_a_missing_one(window):  # noqa: F811
+    old = {"description": "d", "keywords": "k", "datasheet": "s"}
+    assert window._valid_applied_metadata(old) == {**old, "attributes": ""}
+    assert window._valid_applied_metadata({**old, "attributes": ["dnp"]}) is None
 
 
 def test_apply_is_refused_while_work_runs_and_with_klc_errors(window, monkeypatch):  # noqa: F811

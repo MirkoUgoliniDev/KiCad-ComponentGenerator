@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QLabel, QToolButton
 
 from tests.test_photo_inventory_gui import gui  # noqa: F401 - window fixture
 
-ROWS = ("reference", "description", "keywords", "datasheet", "fp_filters", "klc")
+ROWS = ("reference", "description", "keywords", "datasheet", "fp_filters", "attributes", "klc")
 
 
 def test_each_metadata_row_has_its_own_help_icon(window):
@@ -17,7 +17,8 @@ def test_each_metadata_row_has_its_own_help_icon(window):
     assert tuple(buttons) == ROWS
     fields = {"reference": window.field_reference, "description": window.field_meta_description,
               "keywords": window.field_meta_keywords, "datasheet": window.field_datasheet,
-              "fp_filters": window.field_fp_filters, "klc": window.klc_list}
+              "fp_filters": window.field_fp_filters, "attributes": window.field_attributes_box,
+              "klc": window.klc_list}
     for key, button in buttons.items():
         assert isinstance(button, QToolButton)
         # Same row as its field: the icon sits at the end of that line.

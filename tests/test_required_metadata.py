@@ -461,7 +461,7 @@ def test_the_applied_record_survives_the_project_file_and_old_projects_fail_clos
     assert window._save_project_config(force=True)
     state = window._project_state()
     assert state["metadata_applied"] == {"description": "Modulo radio", "keywords": "radio modulo",
-                                         "datasheet": "https://example.org/ds.pdf"}
+                                         "datasheet": "https://example.org/ds.pdf", "attributes": ""}
     window._switch_project("Altro", window._general_project_state)
     window._open_project_at(folder)
     assert all(_install_enabled(window).values()), "reopened: the files still carry the fields"

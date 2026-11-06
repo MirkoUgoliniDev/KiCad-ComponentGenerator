@@ -84,19 +84,24 @@ class _HoleCut:
         super().__init__(*args)
         self._hole = None
 
-    def set_hole(self, centre: QPointF, diameter: float) -> None:
-        """@brief Leave a round hole unpainted.
+    def set_hole(self, centre: QPointF, size) -> None:
+        """@brief Leave a round or oval hole unpainted.
 
         @param centre Hole centre in ITEM coordinates (px).
-        @param diameter Hole diameter, px; 0 or less removes the hole.
+        @param size Hole diameter, px, or (width, height) px of a slot along
+            the item's own axes (the item turns with the pad, so the slot
+            does too); a side of 0 or less removes the hole.
         """
-        self._hole = (QPointF(centre), float(diameter)) if diameter > 0 else None
+        width, height = hole_size_pair(size)
+        self._hole = (QPointF(centre), (width, height)) if width > 0 and height > 0 else None
         self.update()
 
     def hole(self):
-        """@brief The hole as (centre, diameter) in item coordinates, or None.
+        """@brief The hole as (centre, (width, height)) in item coordinates, or None.
 
-        @return A tuple, or None for a pad without a hole.
+        @return A tuple, or None for a pad without a hole. A round hole has
+            width == height (CONTRACT CHANGED 2026-11-06: it used to be
+            (centre, diameter); a slot needs both sides).
         """
         return self._hole
 
@@ -110,10 +115,10 @@ class _HoleCut:
         if self._hole is None:
             super().paint(painter, option, widget)
             return
-        centre, diameter = self._hole
+        centre, (width, height) = self._hole
         clip = QPainterPath()
         clip.addRect(self.boundingRect().adjusted(-2.0, -2.0, 2.0, 2.0))
-        clip.addEllipse(centre, diameter / 2, diameter / 2)
+        clip.addPath(hole_path(centre, width, height))
         clip.setFillRule(Qt.FillRule.OddEvenFill)
         painter.save()
         try:
@@ -135,20 +140,61 @@ class HoledPathItem(_HoleCut, QGraphicsPathItem):
     """@brief A rounded or stadium pad whose drill hole shows what lies beneath."""
 
 
-def add_hole_outline(scene, centre: QPointF, diameter: float, pen, z: float):
+def hole_size_pair(size) -> tuple:
+    """@brief (width, height) px of a hole given as a diameter or as a pair.
+
+    @param size A number (round hole) or a (width, height) pair (slot).
+    @return Two floats; a number gives (d, d).
+    """
+    if isinstance(size, (int, float)):
+        return (float(size), float(size))
+    width, height = size
+    return (float(width), float(height))
+
+
+def hole_path(centre: QPointF, width: float, height: float) -> QPainterPath:
+    """@brief Outline of a hole: a circle, or a stadium (slot) for two different sides.
+
+    @param centre Hole centre, in the coordinates the path is used in.
+    @param width Hole size along X, px.
+    @param height Hole size along Y, px.
+    @return The closed path. KiCad draws an oval hole as a stadium (two
+        half-discs joined by straight sides), not as an ellipse: a drill
+        cannot cut an ellipse, it routes a slot of constant width.
+    """
+    path = QPainterPath()
+    radius = min(width, height) / 2
+    path.addRoundedRect(QRectF(centre.x() - width / 2, centre.y() - height / 2, width, height),
+                        radius, radius)
+    return path
+
+
+def add_hole_outline(scene, centre: QPointF, size, pen, z: float, rotation_deg: float = 0.0):
     """@brief Draw the outline of a drill hole, unfilled, and return it.
 
     @param scene The preview scene.
     @param centre Hole centre, scene px.
-    @param diameter Hole diameter, px.
+    @param size Hole diameter, px, or (width, height) px of a slot along
+        the pad's own axes.
     @param pen Outline pen.
     @param z Z value (above the copper it pierces).
-    @return The ellipse item, marked with `HOLE_ROLE`.
+    @param rotation_deg KiCad pad angle, degrees (counter-clockwise on
+        screen): a slot turns with its pad; a round hole is unchanged by it.
+    @return The ellipse item of a round hole, or the path item (a stadium)
+        of a slot, marked with `HOLE_ROLE`.
     @note No brush: the copper leaves the hole unpainted (`_HoleCut`), so the
         grid and the items under it stay visible inside the outline.
     """
-    radius = diameter / 2
-    item = scene.addEllipse(centre.x() - radius, centre.y() - radius, diameter, diameter, pen)
+    width, height = hole_size_pair(size)
+    if width == height:
+        # A round hole keeps its ellipse item: its `rect()` is what the
+        # drill tests and the pad tooltips read.
+        item = scene.addEllipse(centre.x() - width / 2, centre.y() - height / 2, width, height, pen)
+    else:
+        item = scene.addPath(hole_path(centre, width, height), pen)
+        if rotation_deg:
+            item.setTransformOriginPoint(centre)
+            item.setRotation(-float(rotation_deg))  # KiCad is counter-clockwise, Qt clockwise.
     item.setZValue(z)
     item.setData(HOLE_ROLE, True)
     return item

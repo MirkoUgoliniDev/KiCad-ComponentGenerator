@@ -49,7 +49,9 @@ def test_header_preview_has_44_circular_pads_and_visible_drill_openings(window):
         assert ring.rect().width() == pytest.approx(pad.size[0] * 20)
         hole = next(item for item in holes if item.rect().center() == ring.rect().center())
         assert hole.rect().width() == pytest.approx(pad.drill * 20)
-        assert ring.hole() == (hole.rect().center(), pytest.approx(pad.drill * 20))
+        # CONTRACT CHANGED 2026-11-06 (slots): the hole is (centre, (width,
+        # height)); a round hole has equal sides.
+        assert ring.hole() == (hole.rect().center(), (pytest.approx(pad.drill * 20),) * 2)
         assert hole.zValue() > ring.zValue()
         assert not any(label.sceneBoundingRect().intersects(hole.sceneBoundingRect())
                        for label in labels + annotations)

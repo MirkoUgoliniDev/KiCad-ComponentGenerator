@@ -713,7 +713,10 @@ def _check_footprint_text(text: str) -> list[Finding]:
     if version is None or len(version) < 2 or _number(version[1]) is None:
         findings.append(_error('footprint_version', tx('Footprint: versione del formato mancante.')))
     attr = _child(footprint, 'attr')
-    if attr is None or len(attr) < 2 or attr[1] not in ('smd', 'through_hole'):
+    # The mounting type is one token among the flags of `(attr ...)`
+    # (exclude_from_bom, dnp...): KiCad writes it first, but the rule is
+    # «present», not «first».
+    if attr is None or not any(token in ('smd', 'through_hole') for token in attr[1:]):
         findings.append(_warning('footprint_attr', tx(
             'Footprint «{name}»: attributo smd/through_hole assente.', name=name)))
     if not _forms(footprint, 'pad'):

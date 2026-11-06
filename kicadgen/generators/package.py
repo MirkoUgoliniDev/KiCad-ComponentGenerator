@@ -226,11 +226,18 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         fp.add_graphic(fab_reference_text(anchor, size))
 
     for pin in pins:
+        # A slot (two different hole sides) is written as `(drill oval w h)`;
+        # a round hole, or a slot whose sides are equal, as `(drill d)`.
+        slot = pin.hole_sizes() if pin.is_slot() else None
         fp.add_pad(Pad(
-            number=pin.number,
+            # KiCad's mechanical holes carry no net: written without a
+            # number. The model keeps the number, so a pad made NPTH in the
+            # preview can be made plated again and keeps its name.
+            number="" if pin.pad_type == "np_thru_hole" else pin.number,
             pad_type=pin.pad_type, shape=pin.shape,
             at=(pin.x_mm, pin.y_mm), size=(pin.pad_length_mm, pin.pad_width_mm),
-            layers=PAD_LAYERS[pin.pad_type], rotation=pin.rotation_deg, drill=pin.drill_mm,
+            layers=PAD_LAYERS[pin.pad_type], rotation=pin.rotation_deg,
+            drill=None if slot is not None else pin.drill_mm, drill_slot=slot,
             roundrect_rratio=ROUNDRECT_RRATIO if pin.shape == "roundrect" else None,
         ))
     # Decision D1 (user, 2026-10-14): Reference above and Value below the

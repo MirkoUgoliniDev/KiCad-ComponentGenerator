@@ -1,5 +1,54 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 06/11 — FATTO, NON committato (attende OK; suite completa verde): scheda Footprint, priorità 1 (utente: «ok fallo ma attento a non rompere nulla»)
+Stato: punti 1-7 realizzati. Test mirati verdi: test_footprint_slot_attributes (nuovo, 20), test_package_pad_dialog (3 vecchi aggiornati al nuovo contratto + 6 nuovi), test_component_metadata_gui (+3), test_klc_checks (+1), preview/drills, i18n, documentazione. Difetto trovato e corretto durante il lavoro: i metodi degli attributi erano stati inseriti PRIMA del `return group` di _build_metadata_group (gruppo mai restituito, finestra non costruibile). In corso: suite completa in due meta' e audit di generalita' (agente read-only) sul diff; esito qui sotto.
+AUDIT DI GENERALITA' (agente read-only, 06/11): 3 difetti confermati, tutti corretti; 1 medio corretto; bassi corretti o dichiarati.
+- H1 undo/Annulla non ripristinavano un pad reso NPTH: la guardia di _set_footprint_edit_state confronta gli elenchi dei numeri e il numero veniva azzerato. CORREZIONE (criterio generale): il modello CONSERVA numero e nome del pad NPTH; e' build_package a scrivere `(pad "" np_thru_hole ...)`. Cosi' la conversione e' reversibile (H2) e due NPTH con nomi diversi non sono piu' «pin duplicato». Il punto 4 sopra («perde il numero») NON vale piu'; la nota nel dialog dice «scritto senza numero nel file»; l'anteprima disegna il pad NPTH senza etichetta, col numero nel tooltip.
+- H3 l'asola del pad del modulo finiva nei pad del pin header di host_mounting: `drill_length_mm=None` nel replace; test positivo aggiunto.
+- M4 «Rotazione» del dialog era nel frame sorgente mentre le posizioni sono viste dall'alto: ora il dialog mostra e scrive l'angolo visto dall'alto (quello che KiCad scrive) e lo riconverte con riflessione e orientamento del package. TRAPPOLA: la geometria di prova (window fixture) e' source_view=bottom E mirrored=True (riflessione nulla) con orientation 30: i test devono ricavare l'atteso dai flip, non supporre il frame.
+- L5 test con riflessione aggiunto; L6 commento in step_generator (lead 3D = primo lato del foro); L7 caso negativo KLC aggiunto; L9 un progetto con asola aperto nella v1.0.7 torna foro tondo di drill_mm in silenzio (chiave ignorata): accettato.
+Seconda corsa completa (dopo l'audit): meta' A 7062 passati 1 fallito, meta' B 4797 passati 3 falliti. Tre erano contratti da aggiornare per la riga «Attributi» e il nuovo combo «Tipo di pad» (test_metadata_help ROWS, test_required_metadata record applicato con attributes='', test_review_1027_main_window_b primo combo del dialog): aggiornati, 142 verdi. Il quarto, test_project_switch::test_rename_rechecks_output_links_after_staging_and_rolls_back, passa da solo: NON riprodotto, estraneo a questo diff (rename di cartelle). Terza corsa completa VERDE: meta' A 7063 passati, 9 saltati, 19 sottotest; meta' B 4800 passati, 4 saltati = 11863 passati, 13 saltati, 19 sottotest (06/11, codice fermo). Attende l'OK dell'utente al commit.
+
+Ramo `FOOTPRINT-ADVANCE` creato da main d4a8ecd e pushato. Brainstorming sulla scheda Footprint confrontato
+con il manuale KiCad 9 (capitolo Footprint Editor): l'utente ha approvato la «priorità 1» = campi del formato
+.kicad_mod che oggi non si possono scrivere. Da fare, in quest'ordine:
+1. CORE `kicadgen/core/footprint.py`: `Pad.drill_slot` (asola: `(drill oval w h)`, lati in mm nel sistema del
+   pad; rifiutata insieme a `drill`; per un thru_hole ogni lato minore del lato del pad corrispondente; lati
+   uguali -> foro tondo). `Footprint.attributes` (tupla ordinata fra board_only, exclude_from_pos_files,
+   exclude_from_bom, allow_missing_courtyard, dnp) scritta in `(attr <tipo> <flag>...)`; senza tipo si scrive
+   `(attr <flag>...)`. `footprint_pad_records`: il campo drill di un'asola e' (w, h), come la rilettura.
+2. `kicadgen/core/package_geometry.py`: `PinSpec.drill_length_mm` (secondo lato del foro, lungo pad_width;
+   None o uguale a drill_mm = tondo), validato; passato da pins_seen_from_top e package_from_mapping
+   (asdict lo salva da solo nel progetto). `generators/package.py` lo porta nel Pad.
+3. PREVIEW `kicadgen/gui/footprint_view.py`: `set_hole`/`add_hole_outline` accettano (w, h) e la rotazione;
+   `hole()` restituisce (centro, (w, h)) — CONTRATTO CAMBIATO, test test_package_preview_drills aggiornato.
+   main_window disegna l'asola ruotata col pad e la include nell'estensione.
+4. DIALOG «Modifica pad N» (`_edit_package_pad`/`_apply_package_pad_dialog`): «Tipo di pad» (SMD, foro
+   passante, foro non metallizzato), «Rotazione», «Foro» sempre presente ma abilitato solo con un tipo forato,
+   «Asola, secondo lato» con testo speciale «tondo» a 0. Passando da SMD a forato il foro parte da 0 con testo
+   «da indicare» e l'OK e' rifiutato finche' non e' inserito: NESSUN valore inventato. Un pad reso NPTH perde il
+   numero (convenzione KiCad, PinSpec gia' lo ammette solo per NPTH), detto nel dialog; si torna indietro con
+   Annulla/undo. CONTRATTO CAMBIATO: test_an_smd_pad_has_no_drill_field diventa «campo presente ma disabilitato».
+5. ATTRIBUTI nel gruppo «Metadati del componente»: riga «Attributi» con 4 caselle (escludi dalla BOM, dai file
+   di posizione, esente dal courtyard, non montare/DNP); salvate in metadata.attributes (lista), nello snapshot
+   «applicato» come stringa (chiave `attributes` in APPLIED_METADATA_KEYS; un record vecchio senza la chiave
+   vale «nessun attributo», non «mai applicato»); il worker le scrive su ogni generatore
+   (`footprint.attributes = ...`). KLC `footprint_attr`: il tipo puo' stare in qualunque posizione dell'attr.
+6. Traduzioni IT/EN/FR/DE per ogni testo nuovo; database profili da committare.
+7. Test: core (asola, attributi, record), geometry, generatore, dialog, attributi GUI + progetto, KLC, preview.
+Fuori ambito (detto all'utente): numero del pad modificabile, pad custom, margini maschera/pasta, net tie.
+Interpretazioni: l'asola e' espressa nel sistema del pad (ruota con lui), come KiCad. «connect» (edge
+connector) non offerto nel dialog: nessun generatore lo produce.
+
+## 06/11 — ESITO RILASCIO v1.0.7 e merge (main d4a8ecd, utente: «committa, pusha, mergia in main e pusha»; «fai anche il pacchetto»)
+Workflow release.yml 42002566265 VERDE (33 min): Release v1.0.7 pubblicata con KiCadGen-1.0.7.msi (485 714 180 byte,
+sha256 632cda08e69ef9c840cdd3ad16c9f03865c34ca8402515bba4ee33117f133176). Nulla da committare (albero pulito);
+RELAY pushato, main portato a d4a8ecd in fast-forward e pushato: main e RELAY coincidono. Il codice e' identico
+a v1.0.7 (solo CLAUDE.md e HANDOFF.md differiscono). Pacchetto locale richiesto dall'utente: build-windows.ps1
+-IncludeYoloModel in corso, esito qui sotto. TRAPPOLA: nella shell PowerShell del tool `git` non e' nel PATH
+(usare Bash o «C:\Program Files\Git\cmd\git.exe»); il push https non ha credential helper: usare
+`git -c credential.helper='!gh auth git-credential' push ...` (gh e' autenticato).
+
 ## 05/11 — RILASCIO v1.0.7 (main 05350d5 «release: v1.0.7», tag v1.0.7 pushato, workflow release.yml in corso)
 Ramo RELAY allineato a main (merge). Baseline: 11829 passati, 13 saltati, 19 sottotest (r3 + perf P2 corretto),
 GitHub «Tests» verde su 53c3507. Esito del workflow di rilascio (suite + MSI + Release) da riportare qui sotto.
