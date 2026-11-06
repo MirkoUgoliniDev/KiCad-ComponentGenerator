@@ -261,7 +261,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11900 passed,
+is 11909 passed,
+13 skipped and 19 subtests (2026-11-06 night, branch `FOOTPRINT-ADVANCE`, commit `40b2f1d`, halves 7109/9/19 and
+4800/4: exportable dimensions — «Quota» tool, aligned and orthogonal KiCad `dimension` writer whose side was
+verified with kicad-cli, «Esporta come quota» from measures, one ink and label model shared by writer, checks and
+preview; before that, 11900 passed,
 13 skipped and 19 subtests (2026-11-06 night, branch `FOOTPRINT-ADVANCE`, commit `3c5b9bc`, halves 7100/9/19 and
 4800/4: footprint polygons closed like the symbol's line tool (plan C12), fp_poly writer, fill from dialog and
 menu, checks on filled areas and polygon pin-1 marks; before that, 11891 passed,

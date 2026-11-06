@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 06/11 — A FATTO e committato `3c5b9bc` (pushato, mergiato in main); B IN CORSO, poi C (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
+## 06/11 — A `3c5b9bc` e B `40b2f1d` FATTI, committati, pushati e mergiati in main; C IN CORSO (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
 Tre funzioni, ciascuna chiusa da sola (commit separati possibili):
 A. POLIGONO. Lo strumento linea del footprint chiude il poligono con un clic sul primo punto a 4+ punti, come
    gia' fa il simbolo (canvas_clicktools, «polygon close-on-first»): parita' fra le due schede. Nuovo kind
@@ -81,7 +81,7 @@ Test: tests/test_footprint_dimension.py (9: ortogonale, lato negativo, misura li
 dell'inchiostro, posa dell'etichetta, svolta/specchio come punto). 338 test delle aree toccate verdi.
 NOTA: un progetto con record «dimension»/«polygon» aperto da una build precedente li scarta in silenzio
 (kind sconosciuto): come per ogni kind nuovo.
-Suite completa VERDE: meta' A 7109 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11909 passati, 13 saltati, 19 sottotest (06/11 notte, codice fermo). B attende l'OK al commit.
+Suite completa VERDE: meta' A 7109 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11909 passati, 13 saltati, 19 sottotest (06/11 notte, codice fermo). Commit 40b2f1d (utente: «ok»).
 RELEASE 1.0.8 NON PUBBLICATA: la corsa «Tests» di GitHub su main a671bf8 e' verde, ma l'esecuzione di
 scripts/publish-release.ps1 -Version 1.0.8 e' stata NEGATA dal classificatore dei permessi dello strumento
 («Create Public Surface»); non aggirata. Da fare dall'utente (o con un permesso esplicito) da un albero
