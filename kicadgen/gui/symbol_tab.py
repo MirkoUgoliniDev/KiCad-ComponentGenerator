@@ -351,7 +351,8 @@ def _add_kept_item(scene, item):
 
 TOOL_HINTS = {
     'wire': 'Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere',
-    'line': 'Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per chiudere, Esc per annullare',
+    'line': ('Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per terminare, '
+             'clic sul primo punto (da quattro punti) per chiudere un poligono, Esc per annullare'),
     'rectangle': 'Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare',
     'circle': 'Cerchio: clicca il centro e poi un punto sul bordo; Esc per annullare',
     'arc': 'Arco: clicca l’inizio, la fine e poi un punto intermedio; Esc per annullare',

@@ -1,5 +1,60 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 06/11 — IN CORSO A, poi B e C di seguito (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
+Tre funzioni, ciascuna chiusa da sola (commit separati possibili):
+A. POLIGONO. Lo strumento linea del footprint chiude il poligono con un clic sul primo punto a 4+ punti, come
+   gia' fa il simbolo (canvas_clicktools, «polygon close-on-first»): parita' fra le due schede. Nuovo kind
+   «polygon» in USER_DRAW_KINDS (0 = 3+ punti), record con «fill» (dialog proprieta': contorno / pieno),
+   scrittura come `(fp_poly (pts (xy ..)...) (stroke ..) (fill ..) (layer ..))` con una nuova classe FpPoly in
+   core/footprint.py; anteprima con QGraphicsPolygonItem; ruota/specchia/copia/trascina/maniglie come le altre
+   forme (drawing_transform gia' generico sui punti). Vale anche per il courtyard sagomato (KLC F5.3) se il
+   layer F.CrtYd viene offerto nella palette: DECISIONE UTENTE, di default NO (il courtyard lo scrive il
+   generatore; un poligono utente su F.CrtYd ne farebbe due).
+B. QUOTE ESPORTABILI. Nuovo kind «dimension» nei disegni (due punti + offset, layer Dwgs.User o Cmts.User),
+   creato dalla palette (strumento «Quota») e con «Esporta come quota» nel menu di una misura «Misura»
+   esistente; scritto come `(dimension (type aligned) (layer ..) (pts ..) (height ..) (gr_text ..) (format ..)
+   (style ..))` (ammesso nei footprint da KiCad 7); testo = valore misurato, ricalcolato dal programma quando
+   i punti seguono un pad spostato (stessa logica di reanchor di canvas_measure). Disegno via
+   canvas_measure.add_dimension_line (gia' condiviso). Verifica con kicad-cli fp export svg nel controllo
+   prima dell'installazione (gia' esistente).
+C. IMMAGINE DI RIFERIMENTO sotto il disegno (solo anteprima, non scritta nel file). Sorgenti: (1) la foto
+   calibrata `_photo_png` (scala nota: _photo_scale_px_per_mm, origine al centro della scheda) posata DA SOLA
+   senza nessun aggiustamento; (2) un'immagine scelta dall'utente (PNG/JPG o pagina del datasheet esportata)
+   con scala e offset dati a mano: campo «mm per pixel» oppure «misura nota» (due clic sull'immagine + valore
+   in mm), piu' trascinamento. Casella «Riferimento» nel gruppo Layer con cursore di opacita'. Stato salvato
+   nel progetto (percorso, scala, offset, opacita'), mai nel .kicad_mod. KiCad 8+ ammette `(image ...)` nei
+   footprint: NON esportata (decisione: un'immagine incorporata in base64 gonfia la libreria).
+STATO A (06/11 pomeriggio, NON committato): fatto. ToolSpec(close_after=4) per la linea del footprint (come
+il simbolo); _finish_footprint_drawing trasforma la linea chiusa sul primo punto in record «polygon» (primo
+punto non ripetuto, min 3 punti, USER_DRAW_MIN_POINTS); FpPoly scrive `(fp_poly (pts ..) (stroke) (fill yes|no)
+(layer))`; «fill» ammesso per polygon/rectangle/circle (USER_DRAW_FILLABLE, salvato solo se True: file vecchi
+identici); casella «Riempimento» nel dialog proprieta'; anteprima QGraphicsPolygonItem con riempimento
+traslucido; controlli geometrici misurano anche il lato di chiusura; suggerimento dello strumento linea
+aggiornato (chiusura sul primo punto da quattro punti) -> GOLDEN symbol_session.json rigenerato (solo la
+stringa di stato), nota in testa a test_symbol_clicktool_parity. Test: tests/test_footprint_polygon.py (5),
+325 test delle aree toccate verdi.
+CANVAS-PARITY-REVIEWER su A: 2 difetti + 3 rifiniture + 3 asimmetrie, tutti gestiti:
+- una forma PIENA sulla serigrafia che racchiude un pad non era vista dai controlli (misuravano solo il
+  contorno): ora `filled_area_contains` (ray casting per i poligoni) e rilievo «Serigrafia piena sopra il rame»;
+- un poligono (triangolo/smusso) accanto al pin 1 non valeva come marcatore: ora vale se il baricentro e' piu'
+  vicino al pin 1 e l'estensione e' sotto meta' del campo dei pad (euristica dichiarata come lo smusso);
+- docs/canvas-clicktools-plan.md: riga C12 (chiusura unificata; modello memorizzato diverso e accettato:
+  simbolo = polilinea col primo punto ripetuto, due maniglie coincidenti, menu «Linea»; footprint = record
+  polygon, una maniglia per spigolo, menu «Poligono»); «Riempimento» anche come voce spuntabile nel menu del
+  footprint (parita' col simbolo) oltre alla casella del dialog; test gemello del simbolo
+  test_a_line_back_onto_its_first_point_closes_a_polygon_only_from_four_points (golden nuovo
+  footprint_line_close.json); docstring aggiornate con FpPoly.
+Suite completa VERDE: meta' A 7100 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11900
+passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). A attende l'OK al commit.
+RELEASE 1.0.8 NON PUBBLICATA: la corsa «Tests» di GitHub su main a671bf8 e' verde, ma l'esecuzione di
+scripts/publish-release.ps1 -Version 1.0.8 e' stata NEGATA dal classificatore dei permessi dello strumento
+(«Create Public Surface»); non aggirata. Da fare dall'utente (o con un permesso esplicito) da un albero
+pulito su main: `powershell -ExecutionPolicy Bypass -File .\scripts\publish-release.ps1 -Version 1.0.8`.
+Impostato `git config credential.helper '!gh auth git-credential'` nel repo (push senza prompt).
+Ordine: A (piu' piccolo, parita' canvas), B, C. Ogni passo: handoff, test positivi/negativi, parita'
+simbolo/footprint dove tocca il canvas condiviso (canvas-parity-reviewer), generality-auditor, suite, OK.
+Fuori ambito: bezier nel footprint, immagine esportata, quote radiali/angolari.
+
 ## 06/11 — FATTO e committato `1bab5ea` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «ok procedi e dai anche pacchetto»): scheda Footprint, priorita' 2 — pannello Layer/Controlli/Disegno
 Obiettivo: la colonna destra della scheda Footprint (oggi solo la palette di disegno) diventa un pannello
 in tre blocchi richiudibili (CollapsibleGroupBox gia' esistente): Layer, Controlli, Disegno.

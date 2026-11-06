@@ -369,6 +369,17 @@ def _sc_line_enter(w, d, rec, dialog):
     rec.phase("finished")
 
 
+def _sc_line_close(w, d, rec, dialog):
+    """A,B,A stays an open line in progress; A,B,C,A closes into a polygon (twin of the symbol's)."""
+    w._toggle_footprint_draw_tool("line")
+    for point in ((0, 0), (2, 0), (0, 0)):
+        d.click(*point)
+    rec.phase("three_points_back_on_first")
+    d.click(2, 2)
+    d.click(0, 0)
+    rec.phase("closed")
+
+
 def _sc_line_right(w, d, rec, dialog):
     w._toggle_footprint_draw_tool("line")
     for point in ((0, 0), (3, 0)):
@@ -491,6 +502,7 @@ TWIN_SCENARIOS = {
     "circle": _sc_circle,
     "arc": _sc_arc,
     "line_enter": _sc_line_enter,
+    "line_close": _sc_line_close,
     "line_right": _sc_line_right,
     "text": _sc_text,
     "text_cancelled": _sc_text_cancelled,
@@ -618,6 +630,18 @@ def test_a_line_collects_points_and_enter_finishes_it(fp, monkeypatch, dialog):
     assert p["finished"]["drawings"][0]["points"] == [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0]]
     assert p["finished"]["tool"] is None and p["finished"]["undo"] == 1
     _golden("line_enter", rec.phases)
+
+
+def test_a_line_back_onto_its_first_point_closes_a_polygon_only_from_four_points(fp, monkeypatch, dialog):
+    """Twin of the symbol's close rule (C12, 2026-11-06): the footprint stores a «polygon» record."""
+    rec = _play(fp, monkeypatch, dialog, "line_close", _Events)
+    p = rec.phases
+    assert len(p["three_points_back_on_first"]["clicks"]) == 3
+    assert p["three_points_back_on_first"]["drawings"] == [] and p["three_points_back_on_first"]["tool"] == "line"
+    assert p["closed"]["drawings"] == [{"kind": "polygon", "layer": "F.SilkS", "width": 0.12,
+                                        "points": [[0.0, 0.0], [2.0, 0.0], [0.0, 0.0], [2.0, 2.0]]}]
+    assert p["closed"]["tool"] is None and p["closed"]["undo"] == 1
+    _golden("line_close", rec.phases)
 
 
 def test_a_right_click_finishes_a_line(fp, monkeypatch, dialog):

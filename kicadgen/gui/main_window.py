@@ -16926,7 +16926,11 @@ class MainWindow(QMainWindow):
         self._cancel_footprint_drawing()
         if armed:
             self._fp_draw_buttons[key].setChecked(True)
-            self.preview_view.set_draw_mode(True, ToolSpec(key, count=USER_DRAW_KINDS[key]))
+            # The line closes into a polygon on a click equal to its first
+            # point once it has four points, as in the symbol editor
+            # (parity, 2026-11-06); the closed shape is stored as «polygon».
+            self.preview_view.set_draw_mode(True, ToolSpec(key, count=USER_DRAW_KINDS[key],
+                                                           close_after=4 if key == "line" else 0))
 
     def _cancel_footprint_drawing(self) -> None:
         """@brief Disarm the tool and forget the clicks of the shape in progress.
@@ -17187,10 +17191,14 @@ class MainWindow(QMainWindow):
         @note The stored drawing becomes the selection (as in the symbol
             editor); a cancelled or refused shape leaves the selection unchanged.
         """
-        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_TEXT_MM, USER_TEXT_ANCHOR,
-                                      USER_DRAW_WIDTH_MM, validate_footprint_drawings)
+        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_MIN_POINTS, USER_DRAW_TEXT_MM,
+                                      USER_TEXT_ANCHOR, USER_DRAW_WIDTH_MM, validate_footprint_drawings)
+        if tool == "line" and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
+            # Closed on its first point (`ToolSpec.close_after`): a polygon,
+            # whose closing side is implied and whose first point is not stored twice.
+            tool, points = "polygon", list(points[:-1])
         count = USER_DRAW_KINDS[tool]
-        if count and len(points) != count or not count and len(points) < 2:
+        if count and len(points) != count or not count and len(points) < USER_DRAW_MIN_POINTS[tool]:
             self._cancel_footprint_drawing()
             return
         record = {"kind": tool, "layer": self.combo_fp_draw_layer.currentData(),
@@ -18833,8 +18841,8 @@ class MainWindow(QMainWindow):
         return self._transform_drawings([index], mirror_drawing)
 
     #: Title line of the drawing menu, by drawing kind (catalogue sources).
-    FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "rectangle": "Rettangolo", "circle": "Cerchio",
-                                    "arc": "Arco", "text": "Testo"}
+    FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "polygon": "Poligono", "rectangle": "Rettangolo",
+                                    "circle": "Cerchio", "arc": "Arco", "text": "Testo"}
 
     def _footprint_drawing_menu_entries(self, record: dict, several: bool = False) -> list:
         """@brief The entries of a drawing's right-click menu, in the order shared with the symbol editor.
@@ -18871,6 +18879,13 @@ class MainWindow(QMainWindow):
             entries.append(cm.MenuEntry("edit_text", tx("Modifica testo…"), separator_before=True))
         else:
             entries.append(cm.MenuEntry("stroke_width", tx("Spessore del tratto…"), separator_before=True))
+            from ..core.footprint import USER_DRAW_FILLABLE
+            if record["kind"] in USER_DRAW_FILLABLE:
+                # The symbol editor offers the fill from the menu too
+                # (parity review 2026-11-06); a .kicad_mod graphic is filled
+                # or not, so one checkable entry instead of its three modes.
+                entries.append(cm.MenuEntry("fill", tx("Riempimento"), checkable=True,
+                                            checked=bool(record.get("fill", False))))
         return entries
 
     def _footprint_drawing_context_menu(self, index: int) -> None:
@@ -18929,6 +18944,9 @@ class MainWindow(QMainWindow):
             self._set_drawing_field(index, "layer", chosen[len("layer:"):])
         elif chosen == cm.PROPERTIES:
             self._edit_drawing_properties(index)
+        elif chosen == "fill":
+            # One undo step, as the properties dialog's checkbox.
+            self.set_drawing_properties(index, {"fill": not bool(record.get("fill", False))})
         elif chosen == "stroke_width":
             value, accepted = QInputDialog.getDouble(
                 self, self.i18n.text("Spessore del tratto…"),
@@ -18953,10 +18971,12 @@ class MainWindow(QMainWindow):
             centre, rounded to 0.1 um) and "rect_width"/"rect_height"
             (rectangle) or "radius" (circle). Line and arc: position only.
         """
-        from ..core.footprint import drawing_centre
+        from ..core.footprint import USER_DRAW_FILLABLE, drawing_centre
         values = {"layer": record["layer"], "width": float(record.get("width", 0.12))}
         cx, cy = drawing_centre(record)
         values["x"], values["y"] = round(cx, 4) + 0.0, round(cy, 4) + 0.0
+        if record["kind"] in USER_DRAW_FILLABLE:
+            values["fill"] = bool(record.get("fill", False))
         if record["kind"] == "text":
             values.update(text=record["text"], size=float(record.get("size", 1.0)),
                           angle=int(record.get("angle", 0)))
@@ -19022,6 +19042,11 @@ class MainWindow(QMainWindow):
             record["layer"] = values["layer"]
         if changed("width"):
             record["width"] = round(float(values["width"]), 4)
+        if changed("fill"):
+            # Stored only when set: an outline record stays as it was saved.
+            record.pop("fill", None)
+            if bool(values["fill"]):
+                record["fill"] = True
         sizes = {key: float(values[source]) for key, source in
                  (("width", "rect_width"), ("height", "rect_height"), ("radius", "radius"))
                  if changed(source)}
@@ -19096,7 +19121,11 @@ class MainWindow(QMainWindow):
             # (its centre may lie up to KiCad's coordinate limit away).
             fields[key] = spin(current[key], -4 * KICAD_COORD_LIMIT_MM, 4 * KICAD_COORD_LIMIT_MM)
             form.addRow(f"{key.upper()} (mm)", fields[key])
-        text_edit = angle_box = None
+        text_edit = angle_box = fill_box = None
+        if "fill" in current:
+            fill_box = QCheckBox(tx("Riempimento"))
+            fill_box.setChecked(bool(current["fill"]))
+            form.addRow(fill_box)
         if record["kind"] == "rectangle":
             fields["rect_width"] = spin(current["rect_width"], 0.0, span)
             form.addRow(tx("Larghezza (mm)"), fields["rect_width"])
@@ -19128,6 +19157,8 @@ class MainWindow(QMainWindow):
             """What the widgets show now, by property key."""
             values = {key: box.value() for key, box in fields.items()}
             values["layer"] = layer_box.currentData()
+            if fill_box is not None:
+                values["fill"] = fill_box.isChecked()
             if text_edit is not None:
                 values["text"] = text_edit.text()
                 values["angle"] = angle_box.currentData()
@@ -19169,18 +19200,28 @@ class MainWindow(QMainWindow):
             points = [(x * mm_to_px, y * mm_to_px) for x, y in record["points"]]
             kind = record["kind"]
             items = []
+            # A filled shape is painted in its layer colour, translucent, so
+            # what lies under it (pads, grid) stays visible, as KiCad's
+            # filled graphics on the silkscreen.
+            brush = QBrush()
+            if record.get("fill"):
+                colour = QColor(_layer_color(record["layer"]))
+                colour.setAlpha(96)
+                brush = QBrush(colour)
             if kind == "line":
                 items = [self.preview_scene.addLine(*a, *b, pen)
                          for a, b in zip(points, points[1:])]
+            elif kind == "polygon":
+                items = [self.preview_scene.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]), pen, brush)]
             elif kind == "rectangle":
                 (x0, y0), (x1, y1) = points
                 items = [self.preview_scene.addRect(min(x0, x1), min(y0, y1),
-                                                    abs(x1 - x0), abs(y1 - y0), pen)]
+                                                    abs(x1 - x0), abs(y1 - y0), pen, brush)]
             elif kind == "circle":
                 (cx, cy), (rx, ry) = points
                 radius = math.hypot(rx - cx, ry - cy)
                 items = [self.preview_scene.addEllipse(cx - radius, cy - radius,
-                                                       2 * radius, 2 * radius, pen)]
+                                                       2 * radius, 2 * radius, pen, brush)]
             elif kind == "arc":
                 path = _arc_path(*points)
                 if path is not None:
@@ -19242,10 +19283,12 @@ class MainWindow(QMainWindow):
         if tool == "text" or len(pts) < 2:
             return None
         path = QPainterPath()
-        if tool == "line":
+        if tool in ("line", "polygon"):
             path.moveTo(*pts[0])
             for x, y in pts[1:]:
                 path.lineTo(x, y)
+            if tool == "polygon":
+                path.closeSubpath()
         elif tool == "rectangle":
             (x0, y0), (x1, y1) = pts[:2]
             path.addRect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))

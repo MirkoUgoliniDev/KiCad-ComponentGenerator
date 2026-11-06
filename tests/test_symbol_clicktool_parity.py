@@ -26,6 +26,11 @@ Where today's behaviour is one of the open differences the plan lists
 (decisions C1, C2, C3, C6, C7, C8, C9, C10, C11 and X) the test carries the id
 in its NAME and says so in its docstring: it records the value of today, which
 phase 2 of the migration flips on purpose (and says why).
+
+GOLDEN CHANGED 2026-11-06 (footprint polygon, priority 3 A): the shared
+line-tool hint now says that a click on the first point closes a polygon,
+so the ONE «status» string of the golden session that quotes the hint was
+regenerated; no event, point or committed row changed.
 """
 
 import json

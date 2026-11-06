@@ -33,7 +33,7 @@ Other handlers: `mouseDoubleClickEvent` ~626, `mouseMoveEvent`,
 
 - **Draw mode (F6)**: `_toggle_footprint_draw_tool` ~14573 (arms, `set_draw_mode(True)`: pan_cancel, cancel_interaction, CrossCursor, focus); press stores `_draw_press` and emits `draw_clicked(x, y)`; host `_on_footprint_draw_clicked` ~14595 snaps with `_snapped_draw_point` (drawn grid through the first pad, 0.1 mm fallback); `draw_hovered` → `_on_footprint_draw_hovered` stores the snapped hover node; `_refresh_draw_markers` ~15678 rebuilds tagged items (yellow click dots, dashed ghost coloured by layer, snap dot); `leaveEvent` emits `draw_hover_left`; finish = fixed count reached, right press, double click (point THEN finish), Enter; cancel = Escape, hide, project load, undo/redo, apply, discard; a point equal to the last → toast "Punto coincidente con il precedente"; wrong count / fewer than 2 points / dialog cancelled → disarmed; `validate_footprint_drawings` rejection → disarmed + toast; `_on_footprint_draw_finish` builds the record, calls `_cancel_footprint_drawing` BEFORE applying (keep this order), then `_apply_footprint_drawings` → `_edit_footprint_draft`; always one-shot.
 - **F6b (D10)**: a release farther than `QApplication.startDragDistance()` (manhattan) from the press adds the release point; a release at the press adds nothing.
-- No polygon close, no Shift constraint, no placing, no orthogonal mode in the footprint.
+- No Shift constraint, no placing, no orthogonal mode in the footprint. (Until 2026-11-06 no polygon close either: see C12.)
 - State the tests read: `window._fp_draw_tool`, `_fp_draw_clicks`, `_fp_draw_hover`, `view._draw_mode`.
 
 ## 2. Target design
@@ -105,8 +105,9 @@ Tab-specific (stays): what a finished tool commits (`finish_wire`,
 order vs stored order, text dialogs, record building, ghost and dot
 drawing and colours, status line (symbol) vs toast (footprint), the layer
 combo, `_degenerate_drawing_text`, Shift-free segments (symbol wire only;
-the footprint host ignores `free`), polygon close-on-first (symbol line
-only).
+the footprint host ignores `free`). The polygon close-on-first rule was
+symbol-only until 2026-11-06 (C12): both tabs now arm the line with
+`close_after=4`; what the closed line BECOMES stays tab-specific.
 
 Plug-in: the symbol tab builds `PointCollector(self)` and
 `ClickToolRouter(view, collector, view.camera)` where the gesture controller
@@ -144,6 +145,7 @@ that recorded the old behaviour are updated with the reason.
 | C8 | Escape during a middle pan with a tool armed: symbol cancels the wire first (VERIFY), footprint cancels the pan and keeps the tool | Footprint rule in both (the pan takes the key). |
 | C9 | left press during a middle pan while armed adds a point | Swallow it in both (`camera.pan_active`). |
 | C10 | cursor | The router sets `CrossCursor` on arm and unsets it on disarm in both (cursor shapes cannot be asserted offscreen). |
+| C12 (2026-11-06, footprint polygon) | polygon close-on-first: symbol only | Unified: `close_after=4` in both. The STORED shape differs by data model and stays so: the symbol keeps a polyline with the first point repeated (KiCad's symbol polylines, two coincident handles on the closing vertex, a handle drag opens it; menu title «Linea»), the footprint stores a «polygon» record without the repeated point (`fp_poly`, one handle per corner, stays closed under a handle drag; menu title «Poligono»). Fill: the symbol's three KiCad modes in its menu, the footprint's yes/no of the file format as a checkable «Riempimento» entry in its menu AND a checkbox in «Proprietà elemento…». Accepted, flagged to the user. |
 | C11 | placing vs wire arming (placing never gets clicks if a wire is armed) | One armed tool at a time; placing STAYS OUTSIDE the router (a `count=1` tool would make Enter cancel it) but `_start_placing` calls `collector.disarm()` (fixes the latent conflict). |
 | C12 | Enter while placing | unchanged (ignored). |
 | X | the symbol's right press finishes a wire, but a Windows context-menu event may still open the pin/element menu afterwards (VERIFY) | If confirmed, `contextMenuEvent` ignores while a tool is armed (symbol-only fix, flagged). |

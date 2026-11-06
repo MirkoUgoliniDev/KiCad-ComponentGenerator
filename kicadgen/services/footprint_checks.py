@@ -27,7 +27,7 @@ import math
 from types import SimpleNamespace
 from typing import Iterable, Optional, Sequence
 
-from ..core.footprint import FpArc, FpCircle, FpLine, FpRect, Footprint, Pad, pad_copper_centre
+from ..core.footprint import FpArc, FpCircle, FpLine, FpPoly, FpRect, Footprint, Pad, pad_copper_centre
 from ..core.package_geometry import _rotate_kicad, overlapping_pad_pairs, pad_copper_shape
 from ..core.silk import SILK_PAD_CLEARANCE_MM, pin_one
 from .klc_checks import Finding
@@ -262,7 +262,7 @@ def _arc_points(start, mid, end) -> list:
 def graphic_segments(graphic) -> list:
     """@brief The centre-line segments of a stroked graphic, mm.
 
-    @param graphic FpLine, FpRect, FpCircle or FpArc; anything else gives [].
+    @param graphic FpLine, FpRect, FpPoly, FpCircle or FpArc; anything else gives [].
     @return List of ((x0, y0), (x1, y1)) segments; curves are sampled.
     """
     if isinstance(graphic, FpLine):
@@ -271,6 +271,9 @@ def graphic_segments(graphic) -> list:
         (x0, y0), (x1, y1) = graphic.start, graphic.end
         corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         return [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    if isinstance(graphic, FpPoly):
+        corners = [tuple(p) for p in graphic.points]
+        return [(corners[i], corners[(i + 1) % len(corners)]) for i in range(len(corners))]
     if isinstance(graphic, FpCircle):
         cx, cy = graphic.center
         r = float(graphic.radius)
@@ -282,6 +285,40 @@ def graphic_segments(graphic) -> list:
         points = _arc_points(tuple(graphic.start), tuple(graphic.mid), tuple(graphic.end))
         return list(zip(points, points[1:]))
     return []
+
+
+def _inside_polygon(point, corners) -> bool:
+    """Ray-casting test: True when `point` lies inside the (possibly concave) polygon."""
+    x, y = point
+    inside = False
+    count = len(corners)
+    for i in range(count):
+        (x0, y0), (x1, y1) = corners[i], corners[(i + 1) % count]
+        if (y0 > y) != (y1 > y):
+            cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+            if x < cross:
+                inside = not inside
+    return inside
+
+
+def filled_area_contains(graphic, point) -> bool:
+    """@brief Whether a FILLED graphic's area covers `point`.
+
+    @param graphic FpPoly, FpRect or FpCircle; anything else, or an outline
+        (``fill`` False), gives False.
+    @param point (x, y), mm.
+    @return True when the point lies inside the filled area.
+    """
+    if not getattr(graphic, 'fill', False):
+        return False
+    if isinstance(graphic, FpPoly):
+        return _inside_polygon(point, [tuple(p) for p in graphic.points])
+    if isinstance(graphic, FpRect):
+        (x0, y0), (x1, y1) = graphic.start, graphic.end
+        return min(x0, x1) <= point[0] <= max(x0, x1) and min(y0, y1) <= point[1] <= max(y0, y1)
+    if isinstance(graphic, FpCircle):
+        return math.hypot(point[0] - graphic.center[0], point[1] - graphic.center[1]) <= float(graphic.radius)
+    return False
 
 
 def graphic_box(graphic) -> Optional[tuple]:
@@ -352,6 +389,15 @@ def check_silk_clearance(footprint: Footprint, clearance: float = SILK_PAD_CLEAR
             # distance is measured only for the few graphics near each pad.
             px0, py0, px1, py1 = boxes[pad_index]
             if gx0 > px1 + reach or px0 > gx1 + reach or gy0 > py1 + reach or py0 > gy1 + reach:
+                continue
+            core, _radius = copper
+            if any(filled_area_contains(graphic, point) for point in core):
+                # A filled shape covers the copper whatever its outline keeps
+                # clear (parity review 2026-11-06): the ink is the whole area.
+                number = footprint.pads[pad_index].number or '«»'
+                findings.append(_finding('silk_clearance', 'warning', tx(
+                    'Serigrafia piena sopra il rame del pad {number} (KLC F5.1).', number=number),
+                    pads=(pad_index,), graphics=(index,)))
                 continue
             gap = min(segment_copper_distance(a, b, copper) for a, b in segments) - half_stroke
             if gap < clearance - _EPS:
@@ -473,14 +519,15 @@ def has_pin_one_marker(footprint: Footprint, first: Optional[str] = None) -> boo
         user's drawn circles carry no fill) has its centre nearer to the
         pin-1 copper than to any other pad's copper, (b) the pin-1 pad has
         a shape no other electrical pad has (the square pad of a pin
-        header), or (c) a diagonal F.Fab line (an IC bevel) has its midpoint
+        header), (c) a diagonal F.Fab line (an IC bevel) has its midpoint
         nearest to pin 1 and is shorter than half the span of the pads, so
-        the slanted outline of a turned package does not count. A mark
-        beside another pad marks nothing.
-    @note (c) is a HEURISTIC, declared: a bevel is short next to the body
-        and an outline edge is not; a bevel longer than half the pad span
-        would be missed, which is reported as a missing marker, never the
-        reverse.
+        the slanted outline of a turned package does not count, or (d) a
+        polygon (a drawn triangle or chamfer) on F.SilkS or F.Fab has its
+        centroid nearest to pin 1 and spans less than half the pad span. A
+        mark beside another pad marks nothing.
+    @note (c) and (d) are HEURISTICS, declared: a bevel or a triangle is
+        small next to the body and an outline is not; a larger mark would
+        be missed, which is reported as a missing marker, never the reverse.
     """
     electrical = [(i, pad) for i, pad in enumerate(footprint.pads) if has_copper(pad)]
     if first is None:
@@ -503,6 +550,14 @@ def has_pin_one_marker(footprint: Footprint, first: Optional[str] = None) -> boo
             continue
         if isinstance(graphic, FpCircle):
             if _nearest_pad(tuple(graphic.center), coppers) in ones:
+                return True
+        elif isinstance(graphic, FpPoly):
+            box = graphic_box(graphic)
+            if box is None or math.hypot(box[2] - box[0], box[3] - box[1]) > span / 2:
+                continue
+            corners = [tuple(p) for p in graphic.points]
+            centroid = (sum(p[0] for p in corners) / len(corners), sum(p[1] for p in corners) / len(corners))
+            if _nearest_pad(centroid, coppers) in ones:
                 return True
         elif isinstance(graphic, FpLine) and layer == 'F.Fab':
             dx, dy = graphic.end[0] - graphic.start[0], graphic.end[1] - graphic.start[1]

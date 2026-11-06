@@ -63,8 +63,8 @@ from kicadgen.services.i18n import (DEFAULT_TRANSLATIONS, I18n, ITEM_SOURCE_ROLE
 
 MOUNTING = "Saldatura diretta / piazzole del modulo"
 HINT = "Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere"
-LINE_HINT = ("Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro "
-             "per chiudere, Esc per annullare")
+LINE_HINT = ("Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per terminare, "
+             "clic sul primo punto (da quattro punti) per chiudere un poligono, Esc per annullare")
 
 
 def _i18n(tmp_path, language="it"):

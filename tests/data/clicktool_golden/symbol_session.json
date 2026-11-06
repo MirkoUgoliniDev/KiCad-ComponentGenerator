@@ -4543,7 +4543,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": "line",
-   "status": "Forma inserita. Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per chiudere, Esc per annullare Esc per lasciare lo strumento.",
+   "status": "Forma inserita. Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per terminare, clic sul primo punto (da quattro punti) per chiudere un poligono, Esc per annullare Esc per lasciare lo strumento.",
    "wire_button": false,
    "wire_points": [],
    "wiring": true

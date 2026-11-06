@@ -178,6 +178,37 @@ def test_a_trapezoid_is_measured_on_its_real_corners_not_its_box():
     assert _codes(fc.check_silk_clearance(_fp(trapezoid, graphics=[beside_wide_end]))) == ["silk_clearance"]
 
 
+def test_a_filled_shape_over_a_pad_is_reported_even_when_its_outline_keeps_clear():
+    """parity review 2026-11-06: the ink of a filled shape is its whole area."""
+    from kicadgen.core.footprint import FpPoly
+    pads = (_smd("1", 0, 0), _smd("2", 3, 0))
+    frame = FpPoly(points=[(-6, -6), (8, -6), (8, 6), (-6, 6)], layer="F.SilkS", width=0.12, fill=False)
+    assert fc.check_silk_clearance(_fp(*pads, graphics=[frame])) == [], "an outline far away is fine"
+    filled = FpPoly(points=[(-6, -6), (8, -6), (8, 6), (-6, 6)], layer="F.SilkS", width=0.12, fill=True)
+    findings = fc.check_silk_clearance(_fp(*pads, graphics=[filled]))
+    assert [(f.code, f.pads) for f in findings] == [("silk_clearance", (0,)), ("silk_clearance", (1,))]
+    assert all("piena" in f.message for f in findings)
+    box = FpRect(start=(-6, -6), end=(8, 6), layer="F.SilkS", width=0.12, fill=True)
+    assert len(fc.check_silk_clearance(_fp(*pads, graphics=[box]))) == 2
+    disc = FpCircle(center=(0, 0), radius=1.5, layer="F.SilkS", width=0.12, fill=True)
+    assert [f.pads for f in fc.check_silk_clearance(_fp(*pads, graphics=[disc]))] == [(0,)]
+    # Filled on the fabrication layer: no silkscreen rule.
+    assert fc.check_silk_clearance(_fp(*pads, graphics=[FpRect(start=(-6, -6), end=(8, 6), layer="F.Fab",
+                                                               width=0.1, fill=True)])) == []
+
+
+def test_a_small_polygon_beside_pin_one_marks_it_a_large_or_misplaced_one_does_not():
+    from kicadgen.core.footprint import FpPoly
+    pads = (_smd("1", -1, 0, shape="roundrect"), _smd("2", 1, 0, shape="roundrect"),
+            _smd("3", 3, 0, shape="roundrect"))
+    chamfer = FpPoly(points=[(-2.2, -1.2), (-1.6, -1.2), (-2.2, -0.6)], layer="F.Fab", width=0.1, fill=True)
+    assert fc.check_pin_one_marker(_fp(*pads, graphics=[chamfer])) == []
+    beside_two = FpPoly(points=[(0.8, -1.2), (1.4, -1.2), (0.8, -0.6)], layer="F.SilkS", width=0.12)
+    assert _codes(fc.check_pin_one_marker(_fp(*pads, graphics=[beside_two]))) == ["pin_one_marker"]
+    outline = FpPoly(points=[(-3, -2), (4, -2), (4, 2), (-3, 2)], layer="F.Fab", width=0.1)
+    assert _codes(fc.check_pin_one_marker(_fp(*pads, graphics=[outline]))) == ["pin_one_marker"]
+
+
 def test_a_mechanical_hole_has_no_copper_for_the_copper_rules():
     hole = Pad(number="", pad_type="np_thru_hole", shape="circle", at=(0, 0), size=(1.0, 1.0), layers=THT, drill=1.0)
     assert fc.check_pads_overlap(_fp(_smd("1", 0, 0), hole)) == []

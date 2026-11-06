@@ -425,6 +425,35 @@ class FpCircle:
 
 
 @dataclass
+class FpPoly:
+    """@brief Graphic polygon on a footprint layer (fp_poly): closed, optionally filled.
+
+    @param points The corners in order, mm; the last side closes back to
+        the first corner, which is not repeated (as KiCad writes `pts`).
+    """
+
+    points: Sequence[Point]
+    layer: str
+    width: float = 0.12
+    fill: bool = False
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this polygon to a KiCad S-expression.
+
+        @return The `fp_poly` node with its `pts`, stroke, fill, layer and a fresh uuid.
+        @throws ValueError With fewer than three corners (no area to draw).
+        """
+        if len(self.points) < 3:
+            raise ValueError(tx("Un poligono richiede almeno tre punti."))
+        node = sx("fp_poly", sx("pts", *(sx("xy", x, y) for x, y in self.points)))
+        node.add(_stroke_node(self.width))
+        node.add(sx("fill", bare(self.fill)))
+        node.add(sx("layer", self.layer))
+        node.add(sx("uuid", _uuid()))
+        return node
+
+
+@dataclass
 class FpArc:
     """@brief Graphic circular arc on a footprint layer, through three points.
 
@@ -579,7 +608,14 @@ def validate_text_positions(raw) -> dict:
 USER_DRAW_LAYERS = ("F.SilkS", "F.Fab", "Cmts.User")
 #: Drawing kinds a record may declare, with the exact point count each needs
 #: (0 means "two or more", the open polyline of the line tool).
-USER_DRAW_KINDS = {"line": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1}
+USER_DRAW_KINDS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1}
+#: Fewest points of the open-ended kinds: a line is two points, a closed
+#: polygon three (its last side returns to the first point, not stored).
+USER_DRAW_MIN_POINTS = {"line": 2, "polygon": 3}
+#: Kinds whose record may carry ``fill: true`` (written as KiCad's
+#: ``(fill yes)``); absent means an outline, as every record saved before
+#: 2026-11-06, so those files stay byte-identical.
+USER_DRAW_FILLABLE = ("polygon", "rectangle", "circle")
 #: Stroke width, mm, of a user drawing (KiCad's default silkscreen line).
 USER_DRAW_WIDTH_MM = 0.12
 #: Default text height of a user text, mm (KiCad's footprint text default).
@@ -730,7 +766,7 @@ def validate_footprint_drawings(raw) -> list:
         if not isinstance(points, (list, tuple)):
             continue
         count = USER_DRAW_KINDS[kind]
-        if count and len(points) != count or not count and len(points) < 2:
+        if count and len(points) != count or not count and len(points) < USER_DRAW_MIN_POINTS[kind]:
             continue
         clean_points = []
         for point in points:
@@ -748,6 +784,14 @@ def validate_footprint_drawings(raw) -> list:
             continue
         clean = {"kind": kind, "layer": layer, "width": round(float(width), 4),
                  "points": [list(p) for p in clean_points]}
+        fill = record.get("fill", False)
+        if not isinstance(fill, bool):
+            continue
+        if fill and kind in USER_DRAW_FILLABLE:
+            clean["fill"] = True
+        if kind == "polygon" and len({tuple(p) for p in clean_points}) < 3:
+            # Repeated vertices leave fewer than three distinct corners: no area.
+            continue
         if kind == "text":
             text = record.get("text")
             size = record.get("size", USER_DRAW_TEXT_MM)
@@ -803,7 +847,7 @@ def drawing_graphics(records) -> list:
 
     @param records Records in the shape `validate_footprint_drawings` returns
         (the caller validates; a malformed record here is a programming error).
-    @return Graphic items (FpLine/FpRect/FpCircle/FpArc/FpText) ready for
+    @return Graphic items (FpLine/FpPoly/FpRect/FpCircle/FpArc/FpText) ready for
         `Footprint.add_graphic`, in record order; a line record yields one
         FpLine per segment. Points are absolute footprint mm, drawn as-is.
     @note A text anchored at `USER_TEXT_ANCHOR` is written with
@@ -817,15 +861,18 @@ def drawing_graphics(records) -> list:
         kind, layer = record["kind"], record["layer"]
         width = record.get("width", USER_DRAW_WIDTH_MM)
         points = [tuple(p) for p in record["points"]]
+        fill = bool(record.get("fill", False))
         if kind == "line":
             items.extend(FpLine(start=a, end=b, layer=layer, width=width)
                          for a, b in zip(points, points[1:]))
+        elif kind == "polygon":
+            items.append(FpPoly(points=points, layer=layer, width=width, fill=fill))
         elif kind == "rectangle":
-            items.append(FpRect(start=points[0], end=points[1], layer=layer, width=width))
+            items.append(FpRect(start=points[0], end=points[1], layer=layer, width=width, fill=fill))
         elif kind == "circle":
             radius = math.hypot(points[1][0] - points[0][0], points[1][1] - points[0][1])
             items.append(FpCircle(center=points[0], radius=round(radius, 4),
-                                  layer=layer, width=width))
+                                  layer=layer, width=width, fill=fill))
         elif kind == "arc":
             start, mid, end = points
             items.append(FpArc(start=start, mid=mid, end=end, layer=layer, width=width))
