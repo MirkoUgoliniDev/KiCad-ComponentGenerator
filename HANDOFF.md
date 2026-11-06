@@ -46,6 +46,42 @@ CANVAS-PARITY-REVIEWER su A: 2 difetti + 3 rifiniture + 3 asimmetrie, tutti gest
   footprint_line_close.json); docstring aggiornate con FpPoly.
 Suite completa VERDE: meta' A 7100 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11900
 passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). Commit 3c5b9bc (utente: «ok»).
+STATO B (06/11 sera, NON committato): fatto, in verifica. Record «dimension» (2 punti + `offset`, il `height`
+di KiCad; validato: punti distinti, offset finito entro il limite); FpDimension scrive `(dimension (type
+aligned) (layer) (uuid) (pts) (height) (gr_text «10.00 mm» ...) (format units 2 precision 2) (style ...
+keep_text_aligned))`; lato della linea = convenzione di PCB_DIM_ALIGNED::updateGeometry (crossbar = punti +
+(-dy, dx)/len * height) in `dimension_normal`/`dimension_crossbar`: DA VERIFICARE A OCCHIO IN KICAD dall'utente
+(se la linea esce dal lato opposto, basta negare il segno in dimension_normal). Strumento «Quota» nella
+palette (solo footprint, glifo locale, 3 clic: due punti + posizione della linea); anteprima con
+add_dimension_line condiviso + linee di estensione, etichetta = valore; «Scostamento (mm)» nel dialog;
+specchio nega l'offset (handedness); «Esporta come quota» nel menu delle misure (MeasureTool.on_export, solo
+footprint): linea a USER_DIMENSION_OFFSET_MM = 1.0 mm dal lato lontano dall'origine (default di posizionamento,
+dichiarato). Controlli: la quota su F.SilkS e' inchiostro (3 segmenti). Test: tests/test_footprint_dimension.py
+(7); contratto cambiato: il menu di una misura del footprint offre anche EXPORT_MEASURE
+(test_footprint_measure_parity).
+AUDIT + PARITA' su B (06/11 sera): lato della quota VERIFICATO dall'auditor con kicad-cli 10 (height +2 -> linea
+2 mm sotto i punti in Y-giu', -2 sopra): la nota «da verificare a occhio» non serve piu'. Corretto tutto:
+- misura LINEARE esportata perdeva gli ancoraggi (start/end erano i piedi sulla linea di posizionamento):
+  ora diventa quota ORTOGONALE (`type orthogonal`, `orientation` 0/1, campo record `axis` x|y) fra i due
+  ancoraggi con la linea dove la misura era posizionata; le misure dirette/perpendicolari restano allineate;
+- inchiostro della quota piu' corto del disegno KiCad: ora `dimension_ink_segments` (estensioni con sporgenza
+  DIMENSION_EXTENSION_HEIGHT_MM 0.58642, linea, 4 tratti di freccia 1.27 mm a 27.5 gradi) condiviso fra
+  scrittore (costanti nello style), controlli e anteprima; i magic number ora sono costanti commentate;
+- etichetta dell'anteprima: ora `dimension_label_pose` (oltre la linea di quota dal lato del segno, ruotata
+  lungo la linea, tenuta leggibile) come KiCad; il gr_text scritto usa lo stesso posto (prima ignorava il
+  segno); centratura col rettangolo di scena (l'item ha una trasformazione propria);
+- frecce come linee: nessun poligono da ristilizzare; etichetta colorata dal pennello;
+- scostamento sotto svolta/specchio portato come PUNTO (`_carry_dimension_offset`: la linea di quota segue i
+  punti ruotati/specchiati, l'asse ortogonale si scambia sotto un quarto di giro) invece della negazione ad hoc;
+- quota su F.Fab esente dal controllo del courtyard (documenta, non e' il pezzo);
+- terzo clic sulla linea misurata: toast «Quota sulla linea misurata» (scostamento 0 legale);
+- pareggio dell'export simmetrico rispetto all'origine: lato positivo, dichiarato nel docstring;
+- docs: canvas-measure-plan (on_export, strumento solo footprint), canvas-clicktools-plan riga C13.
+Test: tests/test_footprint_dimension.py (9: ortogonale, lato negativo, misura lineare esportata, sporgenza
+dell'inchiostro, posa dell'etichetta, svolta/specchio come punto). 338 test delle aree toccate verdi.
+NOTA: un progetto con record «dimension»/«polygon» aperto da una build precedente li scarta in silenzio
+(kind sconosciuto): come per ogni kind nuovo.
+Suite completa VERDE: meta' A 7109 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11909 passati, 13 saltati, 19 sottotest (06/11 notte, codice fermo). B attende l'OK al commit.
 RELEASE 1.0.8 NON PUBBLICATA: la corsa «Tests» di GitHub su main a671bf8 e' verde, ma l'esecuzione di
 scripts/publish-release.ps1 -Version 1.0.8 e' stata NEGATA dal classificatore dei permessi dello strumento
 («Create Public Surface»); non aggirata. Da fare dall'utente (o con un permesso esplicito) da un albero

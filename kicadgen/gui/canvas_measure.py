@@ -125,6 +125,10 @@ EDIT_MEASURE_SOURCE = "Modifica quota…"
 
 #: Menu key of «Modifica quota…» (edit the measured value).
 EDIT_MEASURE = "edit_measure"
+#: Italian source of «Esporta come quota» (export the measure as a KiCad dimension of the footprint).
+EXPORT_MEASURE_SOURCE = "Esporta come quota"
+#: Menu key of «Esporta come quota»; offered only by a host that gives `on_export`.
+EXPORT_MEASURE = "export_measure"
 
 #: Label placements of `DimensionStyle.label`.
 LABEL_ABOVE = "above"      # horizontal text above the line, scene-sized (preview dimensions)
@@ -1485,7 +1489,8 @@ class MeasureTool:
 
     def __init__(self, view, collector, *, units_per_mm: float, translate: Callable[[str], str] = str,
                  centre_tag: str = TAG_PAD_CENTRE, on_changed: Optional[Callable[[int], None]] = None,
-                 on_edit: Optional[Callable[[Measurement], bool]] = None):
+                 on_edit: Optional[Callable[[Measurement], bool]] = None,
+                 on_export: Optional[Callable[[Measurement], bool]] = None):
         """@brief Bind the tool to a view and its click collector.
 
         @param view The canvas QGraphicsView (its scale converts the screen reaches).
@@ -1498,12 +1503,17 @@ class MeasureTool:
             called with an editable measure (`measure_mover`), it asks the
             value and moves the geometry, returning True when it did. None:
             the tab's measures are read-only (the symbol editor today).
+        @param on_export The host's «Esporta come quota» (export as a
+            dimension): called with the measure, it adds a dimension drawing
+            of the host's own and returns True when it did. None: the entry
+            is not offered (the symbol has no dimensions, 2026-11-06).
         """
         self._view = view
         self._collector = collector
         self._translate = translate
         self._centre_tag = centre_tag
         self._on_edit = on_edit
+        self._on_export = on_export
         self._targets = SnapTargets()
         self._index = GuideIndex(self._targets)
         self._hover: Optional[MeasureAnchor] = None
@@ -1736,6 +1746,9 @@ class MeasureTool:
             entries.insert(0, canvas_menus.MenuEntry(
                 EDIT_MEASURE, self._translate(EDIT_MEASURE_SOURCE),
                 enabled=bool(measure_mover(self.overlay.measurements[index]))))
+        if self._on_export is not None:
+            entries.append(canvas_menus.MenuEntry(EXPORT_MEASURE, self._translate(EXPORT_MEASURE_SOURCE),
+                                                  separator_before=True))
         menu, keys = canvas_menus.build_element_menu(
             parent if parent is not None else self._view, "", entries)
         chosen = canvas_menus.exec_element_menu(menu, keys, global_pos)
@@ -1743,6 +1756,8 @@ class MeasureTool:
             self.overlay.remove(self._scene(), index)
         elif chosen == EDIT_MEASURE:
             self.edit(index)
+        elif chosen == EXPORT_MEASURE and self._on_export is not None:
+            self._on_export(self.overlay.measurements[index])
         return True
 
     def edit(self, index: int) -> bool:

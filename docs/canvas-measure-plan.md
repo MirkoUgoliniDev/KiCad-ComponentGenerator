@@ -323,6 +323,13 @@ tools if the click-tools plan unifies them.
   axis; a centre-to-edge measure moves the centre perpendicular to the edge,
   never the edge. A measure without a centre is not editable (the entry is
   greyed out).
+- Deliberate tab difference (2026-11-06): only the footprint preview passes
+  `on_export`, so «Esporta come quota» (export the measure as a KiCad
+  `dimension` drawing of the footprint, aligned for straight and
+  perpendicular measures, orthogonal for linear |dX|/|dY| ones) is offered
+  there only: KiCad symbols have no dimension primitive. The footprint also
+  has its own «Quota» palette tool (a glyph built in `_build_footprint_palette`,
+  not in `SHAPE_TOOLS`) and an inert `TOOL_HINTS['dimension']` entry.
 - Deliberate tab difference: only the footprint preview passes `on_edit`
   (package pads move freely). The symbol editor's pins sit on the 2.54 mm
   pin grid, where a typed arbitrary distance has no valid result; its

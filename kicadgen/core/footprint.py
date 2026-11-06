@@ -62,6 +62,21 @@ FOOTPRINT_ATTRIBUTE_FLAGS = ("board_only", "exclude_from_pos_files", "exclude_fr
 #: Silkscreen stroke width, mm (KLC F5.1 recommends 0.12 mm).
 SILK_WIDTH_MM = 0.12
 
+#: Stroke width, mm, of a written dimension (KiCad's default dimension line).
+USER_DIMENSION_WIDTH_MM = 0.1
+#: Text height, mm, of a written dimension's value.
+USER_DIMENSION_TEXT_MM = 1.0
+#: How far, mm, each extension line of a dimension runs BEYOND the dimension
+#: line (KiCad's default `extension_height`, pcb_dimension.cpp). Written in
+#: the style node and used by the ink of the checks and the preview, so the
+#: three agree by construction.
+DIMENSION_EXTENSION_HEIGHT_MM = 0.58642
+#: Length, mm, of the arrowheads at the dimension line's ends (KiCad's
+#: default `arrow_length`), drawn as two strokes at `DIMENSION_ARROW_ANGLE_DEG`.
+DIMENSION_ARROW_LENGTH_MM = 1.27
+#: Half opening angle, degrees, of a KiCad arrowhead (pcb_dimension.cpp `s_arrowAngle`).
+DIMENSION_ARROW_ANGLE_DEG = 27.5
+
 #: Fabrication-layer stroke width, mm (KLC F5.2 recommends 0.10 mm).
 FAB_WIDTH_MM = 0.10
 
@@ -453,6 +468,228 @@ class FpPoly:
         return node
 
 
+def dimension_normal(start: Point, end: Point) -> Point:
+    """@brief Unit vector from the measured line towards a positive `height`, KiCad's convention.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @return (-dy, dx) / length: KiCad (`PCB_DIM_ALIGNED::updateGeometry`)
+        puts the crossbar of an aligned dimension at the points plus this
+        vector times `height`; a negative height goes the other way.
+        (0, 0) for coincident points.
+    """
+    dx, dy = float(end[0]) - float(start[0]), float(end[1]) - float(start[1])
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return (0.0, 0.0)
+    return (-dy / length, dx / length)
+
+
+def dimension_offset_direction(start: Point, end: Point, axis: str = "") -> Point:
+    """@brief Unit vector along which `height` moves the dimension line.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param axis "" for an aligned dimension (`dimension_normal`), "x" for an
+        orthogonal one measuring |dX| (its line is horizontal, moved along
+        Y), "y" for one measuring |dY| (vertical line, moved along X).
+    @return The unit vector; (0, 0) for coincident aligned points.
+    """
+    if axis == "x":
+        return (0.0, 1.0)
+    if axis == "y":
+        return (1.0, 0.0)
+    return dimension_normal(start, end)
+
+
+def dimension_crossbar(start: Point, end: Point, height: float, axis: str = "") -> Tuple[Point, Point]:
+    """@brief The two ends of a dimension line, mm, as KiCad draws them.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param height Signed distance of the crossbar from the measured points, mm.
+    @param axis "" aligned; "x" / "y" orthogonal (see `dimension_offset_direction`).
+    @return (crossbar start, crossbar end). An orthogonal crossbar lies at
+        the first point's coordinate plus `height` along the perpendicular
+        axis and spans the two points along the measured axis
+        (PCB_DIM_ORTHOGONAL::updateGeometry).
+    """
+    h = float(height)
+    sx_, sy_ = float(start[0]), float(start[1])
+    ex_, ey_ = float(end[0]), float(end[1])
+    if axis == "x":
+        return ((sx_, sy_ + h), (ex_, sy_ + h))
+    if axis == "y":
+        return ((sx_ + h, sy_), (sx_ + h, ey_))
+    nx, ny = dimension_normal(start, end)
+    return ((sx_ + nx * h, sy_ + ny * h), (ex_ + nx * h, ey_ + ny * h))
+
+
+def dimension_offset_from_crossbar(start: Point, end: Point, crossbar_start: Point, axis: str = "") -> float:
+    """@brief The signed `height` that puts a dimension line through `crossbar_start`.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param crossbar_start Where the dimension line passes at the first point, mm.
+    @param axis "" aligned; "x" / "y" orthogonal.
+    @return The height, mm: the component of (crossbar_start - start) along
+        `dimension_offset_direction`. The inverse of `dimension_crossbar`,
+        used to carry a dimension through a turn or a mirror.
+    """
+    ux, uy = dimension_offset_direction(start, end, axis)
+    return (float(crossbar_start[0]) - float(start[0])) * ux + (float(crossbar_start[1]) - float(start[1])) * uy
+
+
+def dimension_value_mm(start: Point, end: Point, axis: str = "") -> float:
+    """@brief What a dimension measures, mm: the distance, or |dX| / |dY| for an orthogonal one.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param axis "" aligned; "x" / "y" orthogonal.
+    @return The measured value, mm.
+    """
+    dx, dy = float(end[0]) - float(start[0]), float(end[1]) - float(start[1])
+    if axis == "x":
+        return abs(dx)
+    if axis == "y":
+        return abs(dy)
+    return math.hypot(dx, dy)
+
+
+def dimension_text(start: Point, end: Point, axis: str = "") -> str:
+    """@brief The value a dimension shows: millimetres with two decimals, as the preview labels.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param axis "" aligned; "x" / "y" orthogonal.
+    @return «12.70 mm» style text (KiCad rewrites it from the points on
+        load; the file still carries a sane value).
+    """
+    return f"{dimension_value_mm(start, end, axis):.2f} mm"
+
+
+def dimension_ink_segments(start: Point, end: Point, height: float, axis: str = "") -> list:
+    """@brief Every stroke KiCad draws for a dimension, mm: extension lines, crossbar, arrowheads.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param height Signed distance of the crossbar from the points, mm.
+    @param axis "" aligned; "x" / "y" orthogonal.
+    @return List of ((x0, y0), (x1, y1)) segments: each extension line from
+        its measured point to `DIMENSION_EXTENSION_HEIGHT_MM` beyond the
+        crossbar, the crossbar, and the two strokes of each arrowhead
+        (`DIMENSION_ARROW_LENGTH_MM` long, `DIMENSION_ARROW_ANGLE_DEG` from
+        the crossbar, pointing outward as KiCad's default `arrow_direction`).
+        The silk-clearance check and the preview share it with the writer's
+        style constants, so what is checked and shown is what is written.
+    """
+    (c1, c2) = dimension_crossbar(start, end, height, axis)
+    ux, uy = dimension_offset_direction(start, end, axis)
+    sign = 1.0 if float(height) >= 0 else -1.0
+    over = DIMENSION_EXTENSION_HEIGHT_MM
+    segments = [(tuple(map(float, start)), (c1[0] + ux * over * sign, c1[1] + uy * over * sign)),
+                (tuple(map(float, end)), (c2[0] + ux * over * sign, c2[1] + uy * over * sign)),
+                (c1, c2)]
+    dx, dy = c2[0] - c1[0], c2[1] - c1[1]
+    length = math.hypot(dx, dy)
+    if length > 0:
+        dx, dy = dx / length, dy / length
+        angle = math.radians(DIMENSION_ARROW_ANGLE_DEG)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        for (px, py), (tx_, ty_) in ((c1, (-dx, -dy)), (c2, (dx, dy))):
+            # The two strokes of an outward arrowhead at this end.
+            for s in (1.0, -1.0):
+                ax = tx_ * cos_a - s * ty_ * sin_a
+                ay = tx_ * sin_a + s * ty_ * cos_a
+                segments.append(((px, py), (px - ax * DIMENSION_ARROW_LENGTH_MM, py - ay * DIMENSION_ARROW_LENGTH_MM)))
+    return segments
+
+
+def dimension_label_pose(start: Point, end: Point, height: float, text_size: float, axis: str = "") -> tuple:
+    """@brief Where KiCad puts a dimension's value: beyond the crossbar on the height side, along the line.
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param height Signed distance of the crossbar from the points, mm.
+    @param text_size Text height, mm.
+    @param axis "" aligned; "x" / "y" orthogonal.
+    @return ((x, y), angle_deg): the text centre, one text height past the
+        crossbar middle on the side of `height`, and the KiCad angle of the
+        text (counter-clockwise, kept upright: read left to right or bottom
+        to top), as `text_position_mode 0` with `keep_text_aligned`.
+    """
+    (c1, c2) = dimension_crossbar(start, end, height, axis)
+    ux, uy = dimension_offset_direction(start, end, axis)
+    sign = 1.0 if float(height) >= 0 else -1.0
+    centre = ((c1[0] + c2[0]) / 2 + ux * sign * text_size, (c1[1] + c2[1]) / 2 + uy * sign * text_size)
+    angle = math.degrees(math.atan2(-(c2[1] - c1[1]), c2[0] - c1[0])) % 360.0
+    if 90.0 < angle <= 270.0:
+        angle = (angle + 180.0) % 360.0
+    return (centre, angle)
+
+
+@dataclass
+class FpDimension:
+    """@brief Aligned dimension of a footprint (KiCad `dimension (type aligned)`, allowed in footprints since 7).
+
+    @param start First measured point, mm.
+    @param end Second measured point, mm.
+    @param height Signed distance of the dimension line from the measured
+        points, mm (`dimension_offset_direction` gives the side; verified
+        against KiCad 10's own render with kicad-cli, 2026-11-06).
+    @param layer KiCad layer of the dimension.
+    @param width Line thickness, mm.
+    @param text_size Height of the value text, mm.
+    @param axis "" for an aligned dimension; "x" or "y" for an orthogonal
+        one (`type orthogonal`, `orientation` 0 or 1) that measures |dX| or
+        |dY| between the points, as a linear measure of the ruler does.
+    """
+
+    start: Point
+    end: Point
+    height: float
+    layer: str
+    width: float = USER_DIMENSION_WIDTH_MM
+    text_size: float = USER_DIMENSION_TEXT_MM
+    axis: str = ""
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this dimension to a KiCad S-expression.
+
+        @return The `dimension` node: type (aligned, or orthogonal with its
+            orientation), layer, uuid, pts, height, the value as gr_text
+            placed as `dimension_label_pose` (KiCad recomputes it on load
+            anyway), a millimetre format with two decimals and KiCad's
+            default style (text outside the line, arrows and extension
+            overshoot from the shared constants).
+        @throws ValueError For coincident points (no direction to draw) or
+            an unknown axis.
+        """
+        if tuple(self.start) == tuple(self.end):
+            raise ValueError(tx("Una quota richiede due punti distinti."))
+        if self.axis not in ("", "x", "y"):
+            raise ValueError(tx("Asse della quota non valido: {axis}", axis=self.axis))
+        (tx_, ty_), angle = dimension_label_pose(self.start, self.end, self.height, self.text_size, self.axis)
+        node = sx("dimension", sx("type", Symbol("orthogonal" if self.axis else "aligned")),
+                  sx("layer", self.layer), sx("uuid", _uuid()))
+        node.add(sx("pts", sx("xy", *self.start), sx("xy", *self.end)))
+        node.add(sx("height", self.height))
+        if self.axis:
+            # KiCad: orientation 0 measures along X (horizontal line), 1 along Y.
+            node.add(sx("orientation", 0 if self.axis == "x" else 1))
+        text = sx("gr_text", dimension_text(self.start, self.end, self.axis))
+        text.add(_at_node((round(tx_, 4), round(ty_, 4)), round(angle, 2)))
+        text.add(sx("layer", self.layer))
+        text.add(sx("uuid", _uuid()))
+        text.add(_text_effects(self.text_size, 0.15))
+        node.add(text)
+        node.add(sx("format", sx("units", 2), sx("units_format", 1), sx("precision", 2)))
+        node.add(sx("style", sx("thickness", self.width), sx("arrow_length", DIMENSION_ARROW_LENGTH_MM),
+                    sx("text_position_mode", 0), sx("extension_height", DIMENSION_EXTENSION_HEIGHT_MM),
+                    sx("extension_offset", 0), Symbol("keep_text_aligned")))
+        return node
+
+
 @dataclass
 class FpArc:
     """@brief Graphic circular arc on a footprint layer, through three points.
@@ -608,7 +845,12 @@ def validate_text_positions(raw) -> dict:
 USER_DRAW_LAYERS = ("F.SilkS", "F.Fab", "Cmts.User")
 #: Drawing kinds a record may declare, with the exact point count each needs
 #: (0 means "two or more", the open polyline of the line tool).
-USER_DRAW_KINDS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1}
+USER_DRAW_KINDS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1,
+                   "dimension": 2}
+#: Default distance, mm, of the dimension line from the measured points when
+#: a measure is exported as a dimension (the tool itself takes it from the
+#: third click): a placement default of the drawing, not a measurement.
+USER_DIMENSION_OFFSET_MM = 1.0
 #: Fewest points of the open-ended kinds: a line is two points, a closed
 #: polygon three (its last side returns to the first point, not stored).
 USER_DRAW_MIN_POINTS = {"line": 2, "polygon": 3}
@@ -792,6 +1034,24 @@ def validate_footprint_drawings(raw) -> list:
         if kind == "polygon" and len({tuple(p) for p in clean_points}) < 3:
             # Repeated vertices leave fewer than three distinct corners: no area.
             continue
+        if kind == "dimension":
+            # Two distinct points and the signed distance of the dimension
+            # line from them (`offset`, KiCad's `height`): 0 lies on the points.
+            if tuple(clean_points[0]) == tuple(clean_points[1]):
+                continue
+            offset = record.get("offset", 0.0)
+            if (isinstance(offset, bool) or not isinstance(offset, (int, float))
+                    or not math.isfinite(offset) or abs(offset) > TEXT_POSITION_LIMIT_MM):
+                continue
+            clean["offset"] = round(float(offset), 4) + 0.0
+            axis = record.get("axis", "")
+            if axis not in ("", "x", "y"):
+                continue
+            if axis:
+                # Orthogonal: the measured coordinates must differ along the axis.
+                if clean_points[0][0 if axis == "x" else 1] == clean_points[1][0 if axis == "x" else 1]:
+                    continue
+                clean["axis"] = axis
         if kind == "text":
             text = record.get("text")
             size = record.get("size", USER_DRAW_TEXT_MM)
@@ -867,6 +1127,9 @@ def drawing_graphics(records) -> list:
                          for a, b in zip(points, points[1:]))
         elif kind == "polygon":
             items.append(FpPoly(points=points, layer=layer, width=width, fill=fill))
+        elif kind == "dimension":
+            items.append(FpDimension(start=points[0], end=points[1], height=record.get("offset", 0.0),
+                                     layer=layer, width=width, axis=record.get("axis", "")))
         elif kind == "rectangle":
             items.append(FpRect(start=points[0], end=points[1], layer=layer, width=width, fill=fill))
         elif kind == "circle":
@@ -935,6 +1198,10 @@ def drawing_bounds(record: dict) -> Tuple[float, float, float, float]:
         (cx, cy), (rx, ry) = points
         radius = math.hypot(rx - cx, ry - cy)
         points = [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+    elif kind == "dimension":
+        # The measured points and the dimension line beyond them.
+        points = points + list(dimension_crossbar(points[0], points[1], record.get("offset", 0.0),
+                                                  record.get("axis", "")))
     elif kind == "arc":
         start, mid, end = points
         centre = _arc_centre(start, mid, end)
@@ -996,7 +1263,32 @@ def turn_drawing(record: dict, counter_clockwise_on_screen: bool) -> dict:
             clean["angle"] = 90
         return clean
     clean["points"] = rotate_points_90(record["points"], drawing_centre(record), counter_clockwise_on_screen)
+    if record["kind"] == "dimension":
+        _carry_dimension_offset(record, clean, lambda pts: rotate_points_90(
+            pts, drawing_centre(record), counter_clockwise_on_screen),
+            swap_axis=True)
     return clean
+
+
+def _carry_dimension_offset(record: dict, clean: dict, transform, swap_axis: bool = False) -> None:
+    """Give `clean` (a transformed copy of the dimension `record`) the offset that keeps its line in place.
+
+    The dimension line is carried as a point: the old crossbar start is
+    transformed with the measured points and the new offset is read back
+    from it (`dimension_offset_from_crossbar`), so a turn keeps the line
+    where the user sees it and a mirror lands it on the mirrored side,
+    whatever the kind of dimension. An orthogonal dimension swaps its axis
+    under a quarter turn.
+    """
+    axis = record.get("axis", "")
+    old_start, old_end = (tuple(p) for p in record["points"][:2])
+    crossbar_start = dimension_crossbar(old_start, old_end, record.get("offset", 0.0), axis)[0]
+    moved = transform([list(old_start), list(crossbar_start)])
+    new_axis = {"x": "y", "y": "x"}.get(axis, axis) if swap_axis else axis
+    new_start, new_end = (tuple(p) for p in clean["points"][:2])
+    clean["offset"] = round(dimension_offset_from_crossbar(new_start, new_end, tuple(moved[1]), new_axis), 4) + 0.0
+    if new_axis:
+        clean["axis"] = new_axis
 
 
 def mirror_drawing(record: dict) -> dict:
@@ -1015,6 +1307,11 @@ def mirror_drawing(record: dict) -> dict:
     if record["kind"] == "text":
         return clean
     clean["points"] = mirror_points_x(record["points"], drawing_centre(record)[0])
+    if record["kind"] == "dimension":
+        # A reflection flips the handedness of `dimension_normal`: the line
+        # is carried as a point, so it lands on the mirrored side.
+        axis_x = drawing_centre(record)[0]
+        _carry_dimension_offset(record, clean, lambda pts: mirror_points_x(pts, axis_x))
     return clean
 
 

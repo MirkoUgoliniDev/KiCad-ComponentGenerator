@@ -358,6 +358,8 @@ TOOL_HINTS = {
     'arc': 'Arco: clicca l’inizio, la fine e poi un punto intermedio; Esc per annullare',
     'bezier': 'Bézier: clicca l’inizio, i due punti di controllo e la fine; Esc per annullare',
     'text': 'Testo: clicca il punto di ancoraggio, poi scrivi il testo; Esc per annullare',
+    # Footprint only: the symbol has no dimensions.
+    'dimension': 'Quota: clicca i due punti da misurare, poi dove mettere la linea di quota; Esc per annullare',
 }
 
 

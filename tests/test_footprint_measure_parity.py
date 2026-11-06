@@ -209,7 +209,7 @@ from PyQt6.QtTest import QTest                                      # noqa: E402
 
 from kicadgen.gui import canvas_measure as cm                       # noqa: E402
 from kicadgen.gui import canvas_menus                               # noqa: E402
-from kicadgen.gui.canvas_measure import EDIT_MEASURE                 # noqa: E402
+from kicadgen.gui.canvas_measure import EDIT_MEASURE, EXPORT_MEASURE  # noqa: E402
 
 PX = 20.0
 SHIFT = Qt.KeyboardModifier.ShiftModifier
@@ -405,7 +405,9 @@ def test_footprint_right_click_on_a_measure_offers_remove_and_not_the_pad_menu(f
     qapp.processEvents()
     # flipped: was [[DELETE]]; the footprint also offers «Modifica quota…» (edit the value,
     # user 2026-11-02), the symbol editor does not (no on_edit host).
-    assert offered == [[EDIT_MEASURE, canvas_menus.DELETE]] and fp._fp_measure.overlay.count == count - 1
+    # flipped again 2026-11-06: «Esporta come quota» (export as dimension) after a separator,
+    # footprint only (the symbol has no dimensions, no on_export host).
+    assert offered == [[EDIT_MEASURE, canvas_menus.DELETE, EXPORT_MEASURE]] and fp._fp_measure.overlay.count == count - 1
     assert pads == []
     # Negative: a right click on a pad away from any measure still opens the pad editor.
     QTest.mouseClick(fp.preview_view.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier,
@@ -558,7 +560,7 @@ def test_footprint_right_click_over_a_measure_finishes_the_line_tool(fp, qapp, m
     QTest.mouseClick(fp.preview_view.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier,
                      _fp_pos(fp, 0.0, 0.0))
     qapp.processEvents()
-    assert offered == [[EDIT_MEASURE, canvas_menus.DELETE]]     # flipped: «Modifica quota…» added
+    assert offered == [[EDIT_MEASURE, canvas_menus.DELETE, EXPORT_MEASURE]]     # flipped: «Modifica quota…», then «Esporta come quota» (2026-11-06)
 
 
 def test_footprint_right_press_during_a_rubber_band_opens_no_measure_menu(fp, qapp, monkeypatch):

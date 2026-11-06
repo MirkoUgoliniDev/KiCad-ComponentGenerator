@@ -27,7 +27,8 @@ import math
 from types import SimpleNamespace
 from typing import Iterable, Optional, Sequence
 
-from ..core.footprint import FpArc, FpCircle, FpLine, FpPoly, FpRect, Footprint, Pad, pad_copper_centre
+from ..core.footprint import (FpArc, FpCircle, FpDimension, FpLine, FpPoly, FpRect, Footprint, Pad,
+                              dimension_ink_segments, pad_copper_centre)
 from ..core.package_geometry import _rotate_kicad, overlapping_pad_pairs, pad_copper_shape
 from ..core.silk import SILK_PAD_CLEARANCE_MM, pin_one
 from .klc_checks import Finding
@@ -274,6 +275,10 @@ def graphic_segments(graphic) -> list:
     if isinstance(graphic, FpPoly):
         corners = [tuple(p) for p in graphic.points]
         return [(corners[i], corners[(i + 1) % len(corners)]) for i in range(len(corners))]
+    if isinstance(graphic, FpDimension):
+        # The ink of a dimension as KiCad draws it from the written style:
+        # extension lines with their overshoot, the dimension line, arrowheads.
+        return dimension_ink_segments(tuple(graphic.start), tuple(graphic.end), graphic.height, graphic.axis)
     if isinstance(graphic, FpCircle):
         cx, cy = graphic.center
         r = float(graphic.radius)
@@ -438,7 +443,9 @@ def check_courtyard_enclosure(footprint: Footprint, margin: float = COURTYARD_MI
     pads_out = [i for i, pad in enumerate(footprint.pads) if not _box_inside(copper_box(pad), courtyard, margin)]
     graphics_out = []
     for index, graphic in enumerate(footprint.graphics):
-        if getattr(graphic, 'layer', None) != 'F.Fab':
+        if getattr(graphic, 'layer', None) != 'F.Fab' or isinstance(graphic, FpDimension):
+            # A dimension documents the part, it is not the part: the
+            # courtyard need not enclose it.
             continue
         box = graphic_box(graphic)
         if box is not None and not _box_inside(box, courtyard, margin):

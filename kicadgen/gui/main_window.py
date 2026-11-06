@@ -16389,7 +16389,8 @@ class MainWindow(QMainWindow):
             self.preview_view, self.preview_view.click_collector, units_per_mm=_FP_PREVIEW_MM_TO_PX,
             translate=self.i18n.text,
             on_changed=lambda count: self.btn_fp_measure_clear.setEnabled(count > 0),
-            on_edit=self._edit_footprint_measure)
+            on_edit=self._edit_footprint_measure,
+            on_export=self._export_measure_as_dimension)
         self._fp_measure.router = self.preview_view.click_router
         self.preview_view.measure = self._fp_measure
         self.preview_view.set_framing_provider(self._preview_framing_rect)
@@ -16563,6 +16564,17 @@ class MainWindow(QMainWindow):
         grid = QGridLayout()
         grid.setSpacing(2)
         tools = [g for g in shape_tool_glyphs() if g.key != "bezier"]
+        # Footprint-only tool (2026-11-06): an aligned KiCad dimension, two
+        # measured points then the placement of its line. The symbol has
+        # no dimensions, so the glyph lives here, not in SHAPE_TOOLS.
+        from ..generators.symbol_glyphs import Glyph, Primitive, SHAPE_WIDTH_MM
+        tools.append(Glyph("dimension", "Quota", (
+            Primitive("polyline", ((0.0, 0.0), (0.0, 5.08)), 0.0, "none", SHAPE_WIDTH_MM),
+            Primitive("polyline", ((5.08, 0.0), (5.08, 5.08)), 0.0, "none", SHAPE_WIDTH_MM),
+            Primitive("polyline", ((0.0, 2.54), (5.08, 2.54)), 0.0, "none", SHAPE_WIDTH_MM),
+            Primitive("polyline", ((1.0, 1.8), (0.0, 2.54), (1.0, 3.3)), 0.0, "none", SHAPE_WIDTH_MM),
+            Primitive("polyline", ((4.08, 1.8), (5.08, 2.54), (4.08, 3.3)), 0.0, "none", SHAPE_WIDTH_MM),
+        ), (), "", group="tool"))
         for index, glyph in enumerate(tools):
             button = QToolButton()
             button.setIcon(glyph_icon(glyph))
@@ -16929,7 +16941,10 @@ class MainWindow(QMainWindow):
             # The line closes into a polygon on a click equal to its first
             # point once it has four points, as in the symbol editor
             # (parity, 2026-11-06); the closed shape is stored as «polygon».
-            self.preview_view.set_draw_mode(True, ToolSpec(key, count=USER_DRAW_KINDS[key],
+            # A dimension stores two points but takes a third click, the
+            # placement of its line (`_finish_footprint_drawing`).
+            count = 3 if key == "dimension" else USER_DRAW_KINDS[key]
+            self.preview_view.set_draw_mode(True, ToolSpec(key, count=count,
                                                            close_after=4 if key == "line" else 0))
 
     def _cancel_footprint_drawing(self) -> None:
@@ -17197,12 +17212,33 @@ class MainWindow(QMainWindow):
             # Closed on its first point (`ToolSpec.close_after`): a polygon,
             # whose closing side is implied and whose first point is not stored twice.
             tool, points = "polygon", list(points[:-1])
+        offset = None
+        if tool == "dimension":
+            # Two measured points, then where the dimension line goes: its
+            # signed distance from the measured line (KiCad's `height`).
+            if len(points) != 3:
+                self._cancel_footprint_drawing()
+                return
+            from ..core.footprint import dimension_normal
+            (x1, y1), (x2, y2), (qx, qy) = points
+            nx, ny = dimension_normal((x1, y1), (x2, y2))
+            offset = round((qx - x1) * nx + (qy - y1) * ny, 4) + 0.0
+            points = points[:2]
         count = USER_DRAW_KINDS[tool]
         if count and len(points) != count or not count and len(points) < USER_DRAW_MIN_POINTS[tool]:
             self._cancel_footprint_drawing()
             return
         record = {"kind": tool, "layer": self.combo_fp_draw_layer.currentData(),
                   "width": USER_DRAW_WIDTH_MM, "points": [list(p) for p in points]}
+        if offset is not None:
+            from ..core.footprint import USER_DIMENSION_WIDTH_MM
+            record["offset"], record["width"] = offset, USER_DIMENSION_WIDTH_MM
+            if offset == 0.0:
+                # Legal (KiCad draws the line on the points) but invisible as
+                # a choice: said, with the way to change it.
+                self._draw_feedback_toast(self.i18n.text("Quota sulla linea misurata."), self.i18n.text(
+                    "Il terzo clic era sulla linea fra i due punti: scostamento zero. "
+                    "Si cambia in «Proprietà elemento…»."))
         if tool == "arc":
             # Click order is start, end, mid (same hint as the symbol);
             # the file stores start, mid, end as KiCad writes fp_arc.
@@ -18526,6 +18562,11 @@ class MainWindow(QMainWindow):
                 box.setPen(pen)
                 box.setData(self._FP_SELECTION_BOX_ROLE, True)
             return
+        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        if isinstance(item, QGraphicsSimpleTextItem):
+            # A dimension's value label: coloured by its brush, never outlined.
+            item.setBrush(QBrush(colour))
+            return
         width = max(1.0, record.get("width", 0.12) * mm_to_px)
         pen = QPen(colour)
         pen.setWidthF(max(2.5, width * 1.6) if selected else width)
@@ -18842,7 +18883,58 @@ class MainWindow(QMainWindow):
 
     #: Title line of the drawing menu, by drawing kind (catalogue sources).
     FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "polygon": "Poligono", "rectangle": "Rettangolo",
-                                    "circle": "Cerchio", "arc": "Arco", "text": "Testo"}
+                                    "circle": "Cerchio", "arc": "Arco", "text": "Testo", "dimension": "Quota"}
+
+    def _export_measure_as_dimension(self, measurement) -> bool:
+        """@brief «Esporta come quota»: add a dimension drawing between the two points of a measure.
+
+        @param measurement The `canvas_measure.Measurement` (scene px).
+        @return True when the drawing was added (one undo step).
+        @note A linear measure (|dX| or |dY|, placed by its third click)
+            becomes an ORTHOGONAL dimension between its two anchors with the
+            line where the measure was placed: what the user measured and
+            where they put it. A straight or perpendicular measure becomes an
+            aligned dimension between its ends (the foot of a perpendicular
+            measure is its measured end), with the line
+            `USER_DIMENSION_OFFSET_MM` away on the side farther from the
+            footprint origin (a placement default of the drawing, not a
+            measurement; a measure symmetric about the origin takes the
+            positive side; the properties dialog changes it). The layer is
+            the palette's current drawing layer. The measure itself stays: it
+            is a tool overlay, the dimension is part of the file.
+        """
+        from ..core.footprint import (USER_DIMENSION_OFFSET_MM, USER_DIMENSION_WIDTH_MM, dimension_normal,
+                                      validate_footprint_drawings)
+        mm = _FP_PREVIEW_MM_TO_PX
+
+        def to_mm(x, y):
+            return (round(float(x) / mm, 4) + 0.0, round(float(y) / mm, 4) + 0.0)
+
+        axis = getattr(measurement, "axis", "") or ""
+        if axis in ("x", "y"):
+            start, end = to_mm(measurement.first.x, measurement.first.y), to_mm(measurement.second.x, measurement.second.y)
+            line = to_mm(measurement.start[0], measurement.start[1])
+            # The placement line's coordinate along the perpendicular axis.
+            offset = (line[1] - start[1]) if axis == "x" else (line[0] - start[0])
+        else:
+            axis = ""
+            start, end = to_mm(*measurement.start), to_mm(*measurement.end)
+            nx, ny = dimension_normal(start, end)
+            mid = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            side = 1.0 if mid[0] * nx + mid[1] * ny >= 0 else -1.0
+            offset = side * USER_DIMENSION_OFFSET_MM
+        record = {"kind": "dimension", "layer": self.combo_fp_draw_layer.currentData(),
+                  "width": USER_DIMENSION_WIDTH_MM, "points": [list(start), list(end)],
+                  "offset": round(offset, 4) + 0.0}
+        if axis:
+            record["axis"] = axis
+        valid = validate_footprint_drawings([record])
+        if not valid:
+            self._draw_feedback_toast(self.i18n.text("Disegno scartato."), self._degenerate_drawing_text(record))
+            return False
+        new = len(self.footprint_drawings)
+        self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
+        return True
 
     def _footprint_drawing_menu_entries(self, record: dict, several: bool = False) -> list:
         """@brief The entries of a drawing's right-click menu, in the order shared with the symbol editor.
@@ -18977,6 +19069,8 @@ class MainWindow(QMainWindow):
         values["x"], values["y"] = round(cx, 4) + 0.0, round(cy, 4) + 0.0
         if record["kind"] in USER_DRAW_FILLABLE:
             values["fill"] = bool(record.get("fill", False))
+        if record["kind"] == "dimension":
+            values["offset"] = float(record.get("offset", 0.0))
         if record["kind"] == "text":
             values.update(text=record["text"], size=float(record.get("size", 1.0)),
                           angle=int(record.get("angle", 0)))
@@ -19047,6 +19141,8 @@ class MainWindow(QMainWindow):
             record.pop("fill", None)
             if bool(values["fill"]):
                 record["fill"] = True
+        if changed("offset"):
+            record["offset"] = round(float(values["offset"]), 4) + 0.0
         sizes = {key: float(values[source]) for key, source in
                  (("width", "rect_width"), ("height", "rect_height"), ("radius", "radius"))
                  if changed(source)}
@@ -19134,6 +19230,10 @@ class MainWindow(QMainWindow):
         elif record["kind"] == "circle":
             fields["radius"] = spin(current["radius"], 0.0, math.ceil(span * math.sqrt(2.0)))
             form.addRow(tx("Raggio (mm)"), fields["radius"])
+        elif record["kind"] == "dimension":
+            fields["offset"] = spin(current["offset"], -TEXT_POSITION_LIMIT_MM, TEXT_POSITION_LIMIT_MM)
+            fields["offset"].setToolTip(tx("Distanza della linea di quota dai punti misurati; il segno sceglie il lato."))
+            form.addRow(tx("Scostamento (mm)"), fields["offset"])
         elif record["kind"] == "text":
             text_edit = QLineEdit(current["text"])
             text_edit.setMaxLength(200)
@@ -19213,6 +19313,32 @@ class MainWindow(QMainWindow):
                          for a, b in zip(points, points[1:])]
             elif kind == "polygon":
                 items = [self.preview_scene.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]), pen, brush)]
+            elif kind == "dimension":
+                # The strokes KiCad draws (`dimension_ink_segments`: extension
+                # lines with their overshoot, the dimension line, the
+                # arrowheads) and the value where KiCad puts it
+                # (`dimension_label_pose`), all in the layer colour and in mm
+                # scaled to the scene, so the preview shows what is written.
+                from ..core.footprint import (USER_DIMENSION_TEXT_MM, dimension_ink_segments,
+                                              dimension_label_pose, dimension_text)
+                start, end = (tuple(p) for p in record["points"][:2])
+                offset, axis = record.get("offset", 0.0), record.get("axis", "")
+                items = [self.preview_scene.addLine(a[0] * mm_to_px, a[1] * mm_to_px,
+                                                    b[0] * mm_to_px, b[1] * mm_to_px, pen)
+                         for a, b in dimension_ink_segments(start, end, offset, axis)]
+                (lx, ly), angle = dimension_label_pose(start, end, offset, USER_DIMENSION_TEXT_MM, axis)
+                label = _kicad_size_text_item(dimension_text(start, end, axis), USER_DIMENSION_TEXT_MM,
+                                              _layer_color(record["layer"]), mm_to_px)
+                self.preview_scene.addItem(label)
+                # Centred on the pose point, turned by KiCad's angle (Qt turns
+                # clockwise). The item carries its own scale transform, so the
+                # centring reads the SCENE bounds after the turn.
+                label.setTransformOriginPoint(label.boundingRect().center())
+                label.setRotation(-angle)
+                bounds = label.sceneBoundingRect()
+                label.setPos(label.pos() + QPointF(lx * mm_to_px - bounds.center().x(),
+                                                   ly * mm_to_px - bounds.center().y()))
+                items.append(label)
             elif kind == "rectangle":
                 (x0, y0), (x1, y1) = points
                 items = [self.preview_scene.addRect(min(x0, x1), min(y0, y1),
@@ -19266,7 +19392,8 @@ class MainWindow(QMainWindow):
         if collector is not None:
             collector.hover(None)
 
-    def _ghost_path(self, points: list, tool: str | None = None, stored: bool = False):
+    def _ghost_path(self, points: list, tool: str | None = None, stored: bool = False,
+                    offset_mm: float | None = None, axis: str = ""):
         """@brief Dashed outline of a shape through `points` (mm).
 
         @param points The shape's points: clicked ones plus the hovered one
@@ -19274,6 +19401,10 @@ class MainWindow(QMainWindow):
         @param tool Shape kind; None means the armed tool.
         @param stored True when `points` are in the STORED order (an arc is
             start, mid, end); False for the click order (start, end, mid).
+        @param offset_mm A stored dimension's `offset` (its line's signed
+            distance from the points); None while a dimension is being
+            clicked, when the third point gives it.
+        @param axis A stored dimension's `axis` ("" aligned, "x" / "y" orthogonal).
         @return A QPainterPath in scene px, or None when nothing can be
             outlined yet (a text, or a single point).
         """
@@ -19289,6 +19420,24 @@ class MainWindow(QMainWindow):
                 path.lineTo(x, y)
             if tool == "polygon":
                 path.closeSubpath()
+        elif tool == "dimension":
+            # Two points: the measured line; three (the placement, or the
+            # stored offset): the dimension line with its extension lines.
+            from ..core.footprint import dimension_ink_segments, dimension_normal
+            (x1, y1), (x2, y2) = points[:2]
+            if len(pts) < 3 and not stored:
+                path.moveTo(*pts[0])
+                path.lineTo(*pts[1])
+            else:
+                if stored:
+                    offset = float(offset_mm or 0.0)
+                else:
+                    qx, qy = points[2]
+                    nx, ny = dimension_normal((x1, y1), (x2, y2))
+                    offset = (qx - x1) * nx + (qy - y1) * ny
+                for (ax, ay), (bx, by) in dimension_ink_segments((x1, y1), (x2, y2), offset, axis if stored else ""):
+                    path.moveTo(ax * mm_to_px, ay * mm_to_px)
+                    path.lineTo(bx * mm_to_px, by * mm_to_px)
         elif tool == "rectangle":
             (x0, y0), (x1, y1) = pts[:2]
             path.addRect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
@@ -19359,7 +19508,8 @@ class MainWindow(QMainWindow):
             path.addRect(bounds.translated(dx * _FP_PREVIEW_MM_TO_PX, dy * _FP_PREVIEW_MM_TO_PX))
             return path
         moved = [(round(x + dx, 4), round(y + dy, 4)) for x, y in record["points"]]
-        return self._ghost_path(moved, record["kind"], stored=True)
+        return self._ghost_path(moved, record["kind"], stored=True, offset_mm=record.get("offset"),
+                                axis=record.get("axis", ""))
 
     def _refresh_drawing_handles(self) -> None:
         """@brief Show the handles of the hovered drawing, and the ghost of a handle drag.
@@ -19404,7 +19554,8 @@ class MainWindow(QMainWindow):
                         ghost.setData(0x48474F, True)
                         ghost.setZValue(8)
             else:
-                path = self._ghost_path(points, record["kind"], stored=True)
+                path = self._ghost_path(points, record["kind"], stored=True, offset_mm=record.get("offset"),
+                                        axis=record.get("axis", ""))
                 if path is not None:
                     ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
                     ghost.setData(0x48474F, True)
