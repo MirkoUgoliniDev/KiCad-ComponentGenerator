@@ -261,7 +261,11 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11863 passed,
+is 11891 passed,
+13 skipped and 19 subtests (2026-11-06 evening, branch `FOOTPRINT-ADVANCE`, commit `1bab5ea`, halves 7091/9/19
+and 4800/4: footprint side panel «Layer / Controlli / Disegno» — layer visibility by LAYER_ROLE, courtyard and
+F.Fab drawn, kicadgen/services/footprint_checks.py geometric rules with published thresholds, conftest post-test
+collection made deterministic, camera goldens regenerated for the 250 px panel; before that, 11863 passed,
 13 skipped and 19 subtests (2026-11-06, branch `FOOTPRINT-ADVANCE` from `main` d4a8ecd, commit `e67d2df`,
 halves 7063/9/19 and 4800/4: footprint tab priority 1 — slots `(drill oval w h)`, pad type and top-view
 rotation in the pad dialog, «Attributi» flags in the metadata group written after the mounting type,

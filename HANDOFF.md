@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 06/11 — FATTO, NON committato (attende OK; suite verde): scheda Footprint, priorita' 2 — pannello Layer/Controlli/Disegno
+## 06/11 — FATTO e committato `1bab5ea` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «ok procedi e dai anche pacchetto»): scheda Footprint, priorita' 2 — pannello Layer/Controlli/Disegno
 Obiettivo: la colonna destra della scheda Footprint (oggi solo la palette di disegno) diventa un pannello
 in tre blocchi richiudibili (CollapsibleGroupBox gia' esistente): Layer, Controlli, Disegno.
 A. LAYER (visibilita' e colore): elenco fisso Pad (rame), Fori, F.SilkS, F.Fab, F.CrtYd, Cmts.User,
@@ -93,7 +93,7 @@ CORREZIONE in tests/conftest.py `_collect_after_test`: hook dei distruttori inst
 automatica sospesa (gc.disable) fino alla finally, cosi' gli oggetti rilasciati li libera solo il nostro
 gc.collect con guardie armate. test_test_infrastructure 30/30. Suite completa rilanciata (il conftest tocca
 ogni teardown): VERDE, meta' A 7091 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11891
-passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). Attende l'OK dell'utente al commit.
+passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). Commit 1bab5ea; pacchetto locale in costruzione da questo codice.
 
 ## 06/11 — Release vecchie eliminate da GitHub (utente: «ok»)
 Cancellate le Release v1.0.0 e v1.0.2-v1.0.6 (solo pagina e MSI; i tag restano, protetti dal ruleset). Restano v1.0.7 (latest) e «models» (pesi ONNX usati dal build del setup: NON cancellarla). Pacchetto locale ricostruito da main 31d725c come KiCadGen-1.0.7.msi (stesso numero della release ma con le novita' della scheda Footprint: la 1.0.8 solo su richiesta esplicita).
