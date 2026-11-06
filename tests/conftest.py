@@ -932,6 +932,20 @@ def _collect_after_test(test_id: str = "?") -> None:
                            f"(limit {POST_TEST_WATCHDOG_S} s)\n")
     patcher = pytest.MonkeyPatch()
     previous_unraisable = sys.unraisablehook
+    # The released objects must be freed by OUR gc.collect below, with the
+    # dialog guard and the destructor hook in place, never by an automatic
+    # collection that the allocations of arming them happen to trigger
+    # (2026-11-06: a bigger kicadgen import shifted the generation
+    # thresholds, a Cyclic test object was freed inside
+    # `_refuse_modal_dialogs_after_test` with pytest's unraisable hook
+    # still active, and its refused dialog became a mere warning). The
+    # automatic collector is paused until the finally; `gc.collect()` runs
+    # regardless of that switch.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    # The destructor hook goes in FIRST: whatever frees an object from here
+    # on is recorded as an escape.
+    sys.unraisablehook = _record_unraisable
     report = None
     # Every step, the opening of the report included, is inside the guarded
     # region: this runs inside the `pytest_runtest_protocol` hook, where an
@@ -952,7 +966,6 @@ def _collect_after_test(test_id: str = "?") -> None:
         if target is not None:
             faulthandler.dump_traceback_later(POST_TEST_WATCHDOG_S, exit=True, file=target)
         _refuse_modal_dialogs_after_test(patcher)
-        sys.unraisablehook = _record_unraisable
         application = None
         try:
             from PyQt6.QtCore import QCoreApplication, QEvent, QThreadPool
@@ -981,6 +994,8 @@ def _collect_after_test(test_id: str = "?") -> None:
         faulthandler.cancel_dump_traceback_later()
         if report is not None:
             report.close()
+        if gc_was_enabled:
+            gc.enable()
 
 
 @pytest.hookimpl(wrapper=True)

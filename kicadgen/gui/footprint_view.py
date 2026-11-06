@@ -45,6 +45,18 @@ PAD_PART_ROLE = 0x504150
 #: Item data role of the outline of a drill hole in the preview (True).
 HOLE_ROLE = 0x484F4C
 
+#: Item data role naming the preview layer an item belongs to («pads»,
+#: «holes», «numbers», «texts», «dimensions» or a KiCad layer such as
+#: «F.SilkS»): the «Layer» panel shows or hides the items of one layer
+#: without redrawing. Untagged items (grid, origin, handles, measures) are
+#: always shown.
+LAYER_ROLE = 0x4C4159
+
+#: Item data role set (True) on an item the «Layer» panel hid, so that
+#: showing the layer again shows only those items: an item hidden by its own
+#: logic (a text's anchor square shown on hover only) stays hidden.
+LAYER_HIDDEN_ROLE = 0x4C4148
+
 #: Item data role of the editable package body: "move" on the outline (its
 #: stroke moves the whole body), a compass part ("n", "s", "e", "w", "ne",
 #: "nw", "se", "sw") on its eight resize handles (user, 2026-11-03: «muovere con

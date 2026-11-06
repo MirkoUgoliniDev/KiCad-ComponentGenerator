@@ -1,5 +1,100 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 06/11 — FATTO, NON committato (attende OK; suite verde): scheda Footprint, priorita' 2 — pannello Layer/Controlli/Disegno
+Obiettivo: la colonna destra della scheda Footprint (oggi solo la palette di disegno) diventa un pannello
+in tre blocchi richiudibili (CollapsibleGroupBox gia' esistente): Layer, Controlli, Disegno.
+A. LAYER (visibilita' e colore): elenco fisso Pad (rame), Fori, F.SilkS, F.Fab, F.CrtYd, Cmts.User,
+   Testi Reference/Value, Numeri dei pad, Quote. Casella «occhio» + quadratino col colore KiCad. Ogni item
+   dell'anteprima viene marcato con un ruolo LAYER_ROLE nel punto in cui e' disegnato; la casella fa solo
+   setVisible sugli item di quel layer (nessun ridisegno). Il courtyard F.CrtYd oggi NON e' disegnato
+   nell'anteprima: viene aggiunto (dal Footprint costruito in memoria, colore KiCad). Le scelte di
+   visibilita' sono preferenze dell'utente (store profili/preferenze), non del progetto.
+B. CONTROLLI in tempo reale («Footprint checker» del manuale KiCad): lista errore/avviso aggiornata a ogni
+   modifica del draft (stesso debounce di _refresh_klc_findings), calcolata sul footprint COSTRUITO DAL
+   DRAFT, non sul file su disco. Fonti: (1) klc_checks.check_footprint_text gia' esistente (attr, descr,
+   Reference/Value, F.Fab, F.CrtYd); (2) NUOVO modulo puro kicadgen/services/footprint_checks.py con regole
+   geometriche su core.footprint.Footprint: pad sovrapposti (riuso di package_geometry overlapping_pad_pairs),
+   serigrafia sopra il rame (KLC F5.1, distanza minima dichiarata nel modulo con il numero di regola),
+   courtyard che non contiene pad e corpo (F5.3), anello del foro sotto il minimo (valore KLC dichiarato),
+   marcatore pin 1 assente con pin 1 noto (F5.2), testo serigrafia sotto lo spessore minimo, pad fuori dal
+   courtyard. Ogni regola: codice, severita', messaggio, rimedio (dove cliccare) e gli indici degli elementi
+   coinvolti; il clic sulla riga seleziona/evidenzia quegli elementi nel disegno (riuso della selezione
+   condivisa canvas_selection). Soglie SOLO dai testi KLC, citati nel commento: nessuna taratura sul pezzo.
+   Cache per repr dei parametri come _pad_records_of (perf: i package da 400 pad).
+   La lista «Controlli KiCad (KLC)» dei metadati resta per metadati, simbolo e file; le regole geometriche
+   del footprint vivono SOLO nel pannello (nessun doppione).
+C. DISEGNO: la palette attuale, invariata, sotto i due blocchi.
+Passi: 1) footprint_checks.py + test unitari con caso positivo e negativo per OGNI regola; 2) LAYER_ROLE e
+courtyard nel disegno, casella di visibilita' con test GUI (item nascosti/mostrati, preferenza salvata);
+3) pannello e lista dei controlli con test (aggiornamento dopo una modifica del pad, clic -> selezione);
+4) testi in 4 lingue; 5) generality-auditor sul diff e revisione avversariale del pannello; 6) suite.
+Fuori ambito: DRC completo di KiCad (clearance rame-rame, maschera), kicad-cli in tempo reale (resta nel
+controllo prima dell'installazione), modifica dei colori dei layer.
+Dubbi da sciogliere con l'utente: nessuno bloccante; il pannello allarga la colonna destra a ~260 px.
+STATO (06/11 pomeriggio): passi 1-4 realizzati, NON committati.
+- kicadgen/services/footprint_checks.py (nuovo): regole pads_overlap (errore), silk_clearance (F5.1,
+  SILK_PAD_CLEARANCE_MM 0.2 di core.silk), courtyard_enclosure (F5.3, 0.25 mm generico dichiarato),
+  annular_ring (0.15 mm dalla guida KiCad, dichiarato NON KLC), pin_one_marker (F5.1/F5.2). Distanze misurate
+  sul rame reale (core convesso + raggio), non sui box; prefiltro a box per i package grandi.
+  DEVIAZIONE DAL PIANO: il pannello mostra SOLO le regole geometriche; i controlli KLC sul testo del file
+  restano nella lista dei metadati (nessun doppione, nessun parse del file a ogni ridisegno).
+- GUI: LAYER_ROLE in footprint_view; blocchi _begin/_end_preview_layer nei tre disegnatori (header,
+  castellated, package), i disegni utente taggati col loro layer; F.CrtYd e F.Fab del footprint costruito
+  disegnati sottili (_draw_built_layers); pannello _build_footprint_side_panel (Layer / Controlli / Disegno,
+  250 px); visibilita' in config «preview_layers»; controlli con ritardo 150 ms (_fp_checks_timer) sul
+  footprint costruito + disegni utente; clic sulla riga -> selezione pad o disegni.
+  TRAPPOLA trovata: confrontare gli item della scena per id() NON funziona (i wrapper temporanei di
+  scene.items() vengono raccolti e l'id riusato dal pad nuovo): si tengono i riferimenti agli item.
+- Test: tests/test_footprint_checks.py (13), tests/test_footprint_side_panel.py (8); contratti aggiornati:
+  KICAD_LAYER_COLORS ha F.CrtYd (test_footprint_drawings), «Disegno» e' il titolo del gruppo e non piu'
+  un'etichetta nella palette.
+- Il rilievo «pad sovrapposti» non puo' mai scattare su un package (build_package li rifiuta prima): vale
+  per footprint costruiti altrove; nei test GUI si usa l'anello sottile.
+- GOLDEN rigenerati (KICADGEN_REGEN_CAMERA_GOLDEN=1): footprint_camera.json e footprint_grid.json. Causa:
+  il pannello laterale ha larghezza fissa 250 px dove la vecchia palette prendeva la larghezza del combo
+  dei layer, quindi la vista di prova e' piu' larga: rettangolo inquadrato identico, scala e scroll
+  cambiati, hash dei pixel della griglia cambiati con la vista. Nota in testa al test.
+- Visibilita': solo gli item di primo livello vengono commutati (i figli seguono il gruppo) e torna
+  visibile solo cio' che il pannello ha nascosto (LAYER_HIDDEN_ROLE): il quadratino di ancoraggio dei
+  testi, nascosto dalla sua logica, resta nascosto.
+AUDIT DI GENERALITA' + REVISIONE AVVERSARIALE (06/11, due agenti read-only): tutto corretto.
+- annular_ring ignorava `drill_offset` dei pad castellated (anello 0.10 letto 0.40): ora per asse, meta' lato
+  - |offset| - meta' foro; test sul modulo castellated reale.
+- Mappa indice grafico -> disegno per sottrazione: sbagliata dopo una polilinea (un FpLine per segmento). Ora
+  la mappa e' costruita record per record; test con polilinea prima della linea sulla serigrafia.
+- pin_one_marker accettava QUALUNQUE cerchio pieno, QUALUNQUE linea obliqua su F.Fab (contorno di un package
+  ruotato) e qualunque forma diversa; e il rimedio «cerchio pieno» era inseguibile (i cerchi utente non hanno
+  fill). Ora: cerchio (pieno o no) col centro piu' vicino al rame del pin 1 che a ogni altro pad; forma del
+  pad del pin 1 non condivisa dagli altri; smusso F.Fab obliquo col punto medio piu' vicino al pin 1 e piu'
+  corto di meta' dell'estensione dei pad (EURISTICA dichiarata). Test positivi e negativi strutturali.
+- Campionamento fisso a 36 segmenti: una circonferenza di serigrafia da 50 mm a 0.15 mm dal pad passava. Ora
+  il numero di segmenti deriva dal raggio con sagitta <= 0.005 mm (_CURVE_SAGITTA_MM, meta' griglia 0.01).
+- Trapezio misurato come box: ora i 4 spigoli reali da rect_delta (convenzione KiCad, dichiarata).
+- NPTH: niente rame per sovrapposizione e serigrafia (has_copper).
+- Lista «Controlli» stantia se build_pin_header fallisce: _after_preview_drawn(None) anche su quel ramo;
+  _reset_project_runtime_state azzera il footprint in attesa e ferma il timer.
+- Rubber band selezionava pad/disegni di layer nascosti (poi Delete li cancellava invisibili): ora li salta.
+- Clic su una riga che nomina un disegno seleziona il DISEGNO (e' lui che il rimedio dice di spostare), i
+  pad solo altrimenti; Invio/Spazio (itemActivated) come il clic.
+- Contorno del corpo modificabile e sue maniglie (BODY_PART_ROLE) NON taggati: restano sempre visibili.
+- Stack dei blocchi azzerato in _forget_preview_items (un'eccezione in un disegnatore lo lasciava aperto).
+- Etichetta «Numeri e nomi dei pad» (le funzioni dei pin seguono quella casella, dichiarato).
+Restano dichiarati e non corretti: courtyard 0.25 generico (KLC F5.3; 0.5 dei connettori e l'eventuale valore
+ridotto dei package minuscoli non distinguibili dalla geometria); il rilievo di sovrapposizione non puo'
+scattare su un package (build_package rifiuta prima).
+Suite completa dopo le correzioni: meta' A 7091 verdi; meta' B 4798 verdi + 2 ROSSI in
+tests/test_test_infrastructure.py (modal dialog dopo il test, eccezione dopo l'ultimo test), riprodotti da soli
+e VERDI su un worktree pulito di HEAD: causati dal diff. CATENA DELLE CAUSE: il figlio importa il conftest del
+repo (quindi kicadgen.gui); il diff fa crescere l'import (main_window importa canvas_measure a livello di
+modulo, catalogo i18n piu' grande) e sposta le soglie del garbage collector: una raccolta AUTOMATICA scattava
+dentro _refuse_modal_dialogs_after_test, prima di `sys.unraisablehook = _record_unraisable`, l'oggetto Cyclic
+veniva liberato con l'hook di pytest attivo e il dialog rifiutato diventava un semplice warning (2 passed).
+CORREZIONE in tests/conftest.py `_collect_after_test`: hook dei distruttori installato per PRIMO e raccolta
+automatica sospesa (gc.disable) fino alla finally, cosi' gli oggetti rilasciati li libera solo il nostro
+gc.collect con guardie armate. test_test_infrastructure 30/30. Suite completa rilanciata (il conftest tocca
+ogni teardown): VERDE, meta' A 7091 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11891
+passati, 13 saltati, 19 sottotest (06/11 sera, codice fermo). Attende l'OK dell'utente al commit.
+
 ## 06/11 — Release vecchie eliminate da GitHub (utente: «ok»)
 Cancellate le Release v1.0.0 e v1.0.2-v1.0.6 (solo pagina e MSI; i tag restano, protetti dal ruleset). Restano v1.0.7 (latest) e «models» (pesi ONNX usati dal build del setup: NON cancellarla). Pacchetto locale ricostruito da main 31d725c come KiCadGen-1.0.7.msi (stesso numero della release ma con le novita' della scheda Footprint: la 1.0.8 solo su richiesta esplicita).
 

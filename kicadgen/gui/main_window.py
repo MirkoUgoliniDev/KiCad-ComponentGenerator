@@ -157,6 +157,7 @@ from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from ..services.component_image_match import CROP_GEOMETRY_KEYS as _CROP_GEOMETRY_KEYS
 from .theme import BASE, BLUE, GREEN, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .canvas_measure import DIMENSION_COLOR
 from .kicad_text_item import REFERENCE_PX as _KICAD_TEXT_REFERENCE_PX, cap_height_px as _kicad_cap_height_px, kicad_text_item as _kicad_text_item, text_baseline_px as _kicad_text_baseline_px
 from .tooltips import install_tooltip_filter
 # Workers and call-contract helpers: moved to gui/workers.py
@@ -1308,7 +1309,8 @@ def _arc_path(start, mid, end):
 #: PCB editor (user, 2026-10-13: «i colori predefiniti di KiCad»), so a
 #: drawing looks the same here and in KiCad. One table for the generated
 #: silkscreen, the user drawings, the layer selector and the ghost shape.
-KICAD_LAYER_COLORS = {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc"}
+KICAD_LAYER_COLORS = {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc",
+                      "F.CrtYd": "#ff26e2"}
 
 
 def _layer_color(layer: str) -> str:
@@ -8913,6 +8915,12 @@ class MainWindow(QMainWindow):
         """
         self._extraction_started_stamp = None
         self.project_kind = None
+        # The «Controlli» list of the closed project must not survive a
+        # redraw that fails before reaching it.
+        self._fp_checks_pending = None
+        timer = getattr(self, "_fp_checks_timer", None)
+        if timer is not None:
+            timer.stop()
         self._declared_row_spacing = None
         self._reviewed_this_extraction = False
         self._relaunch_base_synthesized = False
@@ -16460,7 +16468,10 @@ class MainWindow(QMainWindow):
         canvas_row.addWidget(self.preview_view, 1)
         # Minimal drawing palette, on the right as in the symbol editor
         # (user, 2026-10-13): free tools only, no numbered pads.
-        canvas_row.addWidget(self._build_footprint_palette())
+        # ... grown on 2026-11-06 into the side panel: layer visibility,
+        # live geometry checks, then the palette (KiCad's Appearance panel
+        # and Footprint Checker, in one column).
+        canvas_row.addWidget(self._build_footprint_side_panel())
         outer.addLayout(canvas_row, 1)
         #: Pointer line under the canvas, the symbol editor's (`canvas_origin.readout_text`)
         #: plus the drawing origin it is measured from.
@@ -16537,8 +16548,8 @@ class MainWindow(QMainWindow):
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(2)
-        title = QLabel(self.i18n.text("Disegno"))
-        column.addWidget(title)
+        # No title of its own since 2026-11-06: the «Disegno» group of the
+        # side panel names it.
         self.combo_fp_draw_layer = QComboBox()
         for layer, label in self.FOOTPRINT_DRAW_LAYERS:
             # The colour square tells which colour the drawing will take.
@@ -16570,6 +16581,313 @@ class MainWindow(QMainWindow):
         column.addLayout(grid)
         column.addStretch(1)
         return panel
+
+    # ── Footprint side panel: layers, live checks, drawing palette ──────────
+
+    #: Preview layers of the «Layer» group: (key, label, swatch colour). The
+    #: keys are the `LAYER_ROLE` tags the drawers put on their items; the
+    #: KiCad layers keep their KiCad names and default colours.
+    FOOTPRINT_VIEW_LAYERS = (
+        ("pads", "Pad (rame)", BLUE),
+        ("holes", "Fori", SURFACE1),
+        ("F.SilkS", "Serigrafia", KICAD_LAYER_COLORS["F.SilkS"]),
+        ("F.Fab", "Fabbricazione", KICAD_LAYER_COLORS["F.Fab"]),
+        ("F.CrtYd", "Courtyard", KICAD_LAYER_COLORS["F.CrtYd"]),
+        ("Cmts.User", "Commenti", KICAD_LAYER_COLORS["Cmts.User"]),
+        ("texts", "Testi Reference/Value", TEXT),
+        ("numbers", "Numeri e nomi dei pad", TEXT),
+        ("dimensions", "Quote", DIMENSION_COLOR),
+    )
+
+    #: Item data role of a check row: (pad indices, drawing indices) it concerns.
+    _FP_CHECK_TARGETS_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    #: Delay, ms, between the last preview redraw and the geometry checks:
+    #: a drag redraws at every pointer move and the checks run once it rests.
+    _FP_CHECKS_DELAY_MS = 150
+
+    def _build_footprint_side_panel(self) -> QWidget:
+        """@brief Build the right column of the footprint tab: «Layer», «Controlli», «Disegno».
+
+        @return A fixed-width column of three collapsible groups: the layer
+            visibility boxes, the live geometry checks list and the drawing
+            palette (`_build_footprint_palette`).
+        """
+        from PyQt6.QtCore import QTimer
+        from .collapsible_group import CollapsibleGroupBox
+        panel = QWidget()
+        column = QVBoxLayout(panel)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        layers = CollapsibleGroupBox("Layer", expanded=True)
+        layers.setToolTip("Mostra o nascondi i layer dell'anteprima: non cambia il footprint scritto.")
+        layers_column = QVBoxLayout(layers.body)
+        layers_column.setContentsMargins(0, 4, 0, 0)
+        layers_column.setSpacing(1)
+        self.fp_layer_boxes: dict[str, QCheckBox] = {}
+        for key, label, colour in self.FOOTPRINT_VIEW_LAYERS:
+            box = QCheckBox(label)
+            box.setIcon(_layer_swatch(colour))
+            box.setChecked(self._preview_layer_visible(key))
+            box.toggled.connect(lambda checked, k=key: self._on_preview_layer_toggled(k, checked))
+            layers_column.addWidget(box)
+            self.fp_layer_boxes[key] = box
+        column.addWidget(layers)
+        checks = CollapsibleGroupBox("Controlli", expanded=True)
+        checks.setToolTip("Controlli geometrici sul footprint in bozza (KLC): clic su una riga per "
+                          "selezionare gli elementi coinvolti nel disegno.")
+        checks_column = QVBoxLayout(checks.body)
+        checks_column.setContentsMargins(0, 4, 0, 0)
+        self.fp_checks_list = QListWidget()
+        # Findings are messages computed at run time, not catalogue sources.
+        self.fp_checks_list.setProperty("i18n_skip", True)
+        self.fp_checks_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.fp_checks_list.setWordWrap(True)
+        self.fp_checks_list.setMinimumHeight(110)
+        self.fp_checks_list.itemClicked.connect(self._on_footprint_check_clicked)
+        # Enter/Space on the current row, for keyboard users.
+        self.fp_checks_list.itemActivated.connect(self._on_footprint_check_clicked)
+        checks_column.addWidget(self.fp_checks_list)
+        column.addWidget(checks, 1)
+        drawing = CollapsibleGroupBox("Disegno", expanded=True)
+        drawing_column = QVBoxLayout(drawing.body)
+        drawing_column.setContentsMargins(0, 4, 0, 0)
+        drawing_column.addWidget(self._build_footprint_palette())
+        column.addWidget(drawing)
+        panel.setFixedWidth(250)
+        self._fp_checks_timer = QTimer(self)
+        self._fp_checks_timer.setSingleShot(True)
+        self._fp_checks_timer.setInterval(self._FP_CHECKS_DELAY_MS)
+        self._fp_checks_timer.timeout.connect(self._refresh_footprint_checks_now)
+        self._fp_checks_pending = None
+        self._fp_last_checks: list = []
+        self._fp_layer_stack: list = []
+        return panel
+
+    def _preview_layer_visible(self, key: str) -> bool:
+        """@brief Whether the preview layer `key` is shown: the saved preference, True by default.
+
+        @param key A key of `FOOTPRINT_VIEW_LAYERS`.
+        @return False only when the user hid the layer (`preview_layers` of the configuration).
+        """
+        layers = self._config.get("preview_layers") if hasattr(self, "_config") else None
+        return bool(layers.get(key, True)) if isinstance(layers, dict) else True
+
+    def _on_preview_layer_toggled(self, key: str, checked: bool) -> None:
+        """@brief Save the visibility of one preview layer and apply it without a redraw.
+
+        @param key A key of `FOOTPRINT_VIEW_LAYERS`.
+        @param checked True to show the layer.
+        """
+        layers = self._config.get("preview_layers")
+        layers = dict(layers) if isinstance(layers, dict) else {}
+        layers[key] = bool(checked)
+        self._config["preview_layers"] = layers
+        self._save_config_safely()
+        self._apply_preview_layer_visibility()
+
+    def _apply_preview_layer_visibility(self) -> None:
+        """@brief Show or hide every tagged item of the preview scene by its layer's preference."""
+        from .footprint_view import LAYER_HIDDEN_ROLE, LAYER_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        shown = {key: self._preview_layer_visible(key) for key, _label, _colour in self.FOOTPRINT_VIEW_LAYERS}
+        for item in scene.items():
+            tag = item.data(LAYER_ROLE)
+            # A child follows its parent (a text group's glyphs and anchor
+            # square): only top-level items are switched.
+            if tag is None or item.parentItem() is not None:
+                continue
+            if shown.get(str(tag), True):
+                # Only what THIS panel hid comes back: an item its own logic
+                # keeps hidden stays so.
+                if item.data(LAYER_HIDDEN_ROLE):
+                    item.setData(LAYER_HIDDEN_ROLE, None)
+                    item.setVisible(True)
+            elif item.isVisible():
+                item.setData(LAYER_HIDDEN_ROLE, True)
+                item.setVisible(False)
+
+    def _begin_preview_layer(self, tag: str) -> None:
+        """@brief Start a block of drawing whose new items belong to the preview layer `tag`.
+
+        @param tag A key of `FOOTPRINT_VIEW_LAYERS` (or a KiCad layer name).
+        @note Closed by `_end_preview_layer`, which tags the items added in
+            between. Inside a «pads» block the hole outlines become «holes»
+            and the number labels «numbers», so one block covers a pad loop.
+        """
+        stack = getattr(self, "_fp_layer_stack", None)
+        if stack is None:
+            self._fp_layer_stack = stack = []
+        # The ITEMS are kept, not their ids: `scene.items()` makes a transient
+        # Python wrapper for an item drawn from C++ (a grid line), and once
+        # it is collected its id is reused by the next pad created, which
+        # then looked like an old item and stayed untagged.
+        stack.append((tag, set(self.preview_scene.items())))
+
+    def _end_preview_layer(self) -> None:
+        """@brief Close the block opened by `_begin_preview_layer` and tag the items it added."""
+        from PyQt6.QtWidgets import QGraphicsSimpleTextItem
+        from .footprint_view import BODY_PART_ROLE, HOLE_ROLE, LAYER_ROLE
+        stack = getattr(self, "_fp_layer_stack", None)
+        if not stack:
+            return
+        tag, before = stack.pop()
+        for item in self.preview_scene.items():
+            if item in before or item.data(LAYER_ROLE) is not None:
+                continue
+            # The editable body outline and its handles are an editing
+            # affordance, always shown: hiding the silkscreen must not take
+            # away the thing the mouse resizes the body with.
+            if item.data(BODY_PART_ROLE):
+                continue
+            layer = tag
+            if tag == "pads":
+                if item.data(HOLE_ROLE):
+                    layer = "holes"
+                elif isinstance(item, QGraphicsSimpleTextItem):
+                    layer = "numbers"
+            item.setData(LAYER_ROLE, layer)
+
+    def _draw_built_layers(self, footprint, mm_to_px: float) -> None:
+        """@brief Draw the courtyard and fabrication graphics of the built footprint, thin, under the copper.
+
+        @param footprint The `core.footprint.Footprint` the generator built
+            for this preview, or None when it did not build.
+        @note Only stroked graphics (line, rectangle, circle, arc): the
+            fabrication reference text is a property of the file, not of
+            the drawing. Tagged with their KiCad layer for the «Layer» group.
+        """
+        if footprint is None:
+            return
+        from ..core.footprint import FpArc, FpCircle, FpLine, FpRect
+        for layer in ("F.CrtYd", "F.Fab"):
+            pen = QPen(QColor(_layer_color(layer)))
+            pen.setWidthF(1.0)
+            pen.setCosmetic(True)
+            self._begin_preview_layer(layer)
+            try:
+                for graphic in footprint.graphics:
+                    if getattr(graphic, "layer", None) != layer:
+                        continue
+                    item = None
+                    if isinstance(graphic, FpLine):
+                        item = self.preview_scene.addLine(*(v * mm_to_px for v in (*graphic.start, *graphic.end)), pen)
+                    elif isinstance(graphic, FpRect):
+                        (x0, y0), (x1, y1) = graphic.start, graphic.end
+                        item = self.preview_scene.addRect(min(x0, x1) * mm_to_px, min(y0, y1) * mm_to_px,
+                                                          abs(x1 - x0) * mm_to_px, abs(y1 - y0) * mm_to_px, pen)
+                    elif isinstance(graphic, FpCircle):
+                        r = graphic.radius * mm_to_px
+                        item = self.preview_scene.addEllipse(graphic.center[0] * mm_to_px - r,
+                                                             graphic.center[1] * mm_to_px - r, 2 * r, 2 * r, pen)
+                    elif isinstance(graphic, FpArc):
+                        path = _arc_path(*((x * mm_to_px, y * mm_to_px)
+                                           for x, y in (graphic.start, graphic.mid, graphic.end)))
+                        if path is not None:
+                            item = self.preview_scene.addPath(path, pen)
+                    if item is not None:
+                        item.setZValue(0.5)
+            finally:
+                self._end_preview_layer()
+
+    def _after_preview_drawn(self, footprint) -> None:
+        """@brief Common tail of the three 2D drawers: layer visibility, then the geometry checks.
+
+        @param footprint The built footprint the drawer showed, or None when
+            there is none (no parameters) or it did not build.
+        """
+        self._apply_preview_layer_visibility()
+        self._refresh_footprint_checks(footprint)
+
+    def _refresh_footprint_checks(self, footprint) -> None:
+        """@brief Schedule the geometry checks of `footprint` once the preview rests.
+
+        @param footprint The built footprint, or None.
+        @note Coalesced by `_FP_CHECKS_DELAY_MS`: a drag redraws at every
+            pointer move, the checks run once on the final geometry.
+        """
+        timer = getattr(self, "_fp_checks_timer", None)
+        if timer is None:
+            return
+        self._fp_checks_pending = footprint
+        timer.start()
+
+    def _refresh_footprint_checks_now(self) -> None:
+        """@brief Rewrite the «Controlli» list from the pending footprint and the user drawings.
+
+        @note The checked footprint is the built one plus the draft's
+            drawings (`drawing_graphics`), so a silkscreen line drawn over a
+            pad is reported before «Applica». Each row carries its remedy as
+            tooltip and the elements it concerns for `_on_footprint_check_clicked`.
+        """
+        from dataclasses import replace
+        from ..core.footprint import drawing_graphics
+        from ..services.footprint_checks import check_footprint_geometry
+        lst = getattr(self, "fp_checks_list", None)
+        if lst is None:
+            return
+        timer = getattr(self, "_fp_checks_timer", None)
+        if timer is not None:
+            timer.stop()
+        lst.clear()
+        built = self._fp_checks_pending
+        if built is None:
+            self._fp_last_checks = []
+            lst.addItem(self.i18n.text("Nessun footprint da controllare."))
+            return
+        # One record may yield several graphics (a polyline is one FpLine per
+        # segment): the graphic index -> drawing index map is built record
+        # by record, never by subtraction.
+        extra, owners = [], []
+        for record_index, record in enumerate(self.footprint_drawings):
+            try:
+                graphics = drawing_graphics([record])
+            except (TypeError, ValueError):
+                continue
+            extra.extend(graphics)
+            owners.extend([record_index] * len(graphics))
+        generated = len(built.graphics)
+        findings = check_footprint_geometry(replace(built, graphics=list(built.graphics) + extra))
+        self._fp_last_checks = findings
+        if not findings:
+            lst.addItem(self.i18n.text("Nessun problema trovato"))
+            return
+        for finding in findings:
+            prefix = "⛔ " if finding.severity == "error" else "⚠ "
+            item = QListWidgetItem(prefix + finding.message)
+            item.setToolTip(finding.hint)
+            item.setData(self.FINDING_CODE_ROLE, finding.code)
+            drawings = tuple(dict.fromkeys(owners[index - generated] for index in finding.graphics
+                                           if 0 <= index - generated < len(owners)))
+            item.setData(self._FP_CHECK_TARGETS_ROLE, (tuple(finding.pads), drawings))
+            lst.addItem(item)
+
+    def _on_footprint_check_clicked(self, item) -> None:
+        """@brief Select in the preview the pads or drawings a check row concerns.
+
+        @param item The clicked row of «Controlli».
+        @note A row naming the user's drawings selects them: the drawing is
+            the element its remedy tells to move (a silkscreen line over a
+            pad). Otherwise its pads are selected when they are package pads
+            (selectable and movable); the pads of a pin header or a
+            castellated module are not. Pads and drawings stay two exclusive
+            selections, as the rubber band keeps them.
+        """
+        targets = item.data(self._FP_CHECK_TARGETS_ROLE)
+        if not targets:
+            return
+        pads, drawings = targets
+        if drawings:
+            self._fp_selection.set_many(drawings)
+            self._fp_pad_selection.clear()
+        elif pads and self.package_geometry is not None:
+            self._fp_pad_selection.set_many(pads)
+            self._fp_selection.clear()
+        else:
+            return
+        self._refresh_drawing_selection()
 
     # ── Footprint draw tools: the window is the ClickToolHost of the preview ──
 
@@ -18127,6 +18445,10 @@ class MainWindow(QMainWindow):
         from .footprint_view import PAD_KEY_ROLE
         inside = []
         for index in range(len(self.footprint_drawings)):
+            # A drawing of a hidden layer is not on screen: the band must
+            # not select (and Delete must not remove) what cannot be seen.
+            if not self._preview_layer_visible(self.footprint_drawings[index].get("layer", "")):
+                continue
             bounds = self._footprint_drawing_scene_bounds(index)
             if bounds is None:
                 continue
@@ -18135,7 +18457,7 @@ class MainWindow(QMainWindow):
         pads = []
         for item in self.preview_scene.items():
             parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
-            if parts[0] != "package" or len(parts) != 3:
+            if parts[0] != "package" or len(parts) != 3 or not item.isVisible():
                 continue
             bounds = item.sceneBoundingRect()
             if encloses(rect, (bounds.left(), bounds.top(), bounds.right(), bounds.bottom())):
@@ -18839,7 +19161,7 @@ class MainWindow(QMainWindow):
         @note Selected drawings (`_fp_selected_indices`) are drawn in the
             selection accent with a thicker stroke (`_style_drawing_item`).
         """
-        from .footprint_view import DRAWING_KEY_ROLE
+        from .footprint_view import DRAWING_KEY_ROLE, LAYER_ROLE
         selected = set(self._fp_selected_indices())
         for index, record in enumerate(self.footprint_drawings):
             pen = QPen(QColor(_layer_color(record["layer"])))
@@ -18877,6 +19199,8 @@ class MainWindow(QMainWindow):
                     # Selected drawings in the theme's selection accent.
                     self._style_drawing_item(item, record, True, mm_to_px)
                 item.setData(DRAWING_KEY_ROLE, index)
+                # Its own KiCad layer: the «Layer» group hides it with that layer.
+                item.setData(LAYER_ROLE, record["layer"])
                 item.setZValue(6)
                 item.setToolTip(hint)
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
@@ -19130,6 +19454,9 @@ class MainWindow(QMainWindow):
             # the scene; `_rebind_pad_drag_items` draws them again.
             drag["items"] = []
             drag["crosshair"] = None
+        # A layer block left open by an exception in a drawer would pin the
+        # dead items of the cleared scene: every redraw starts with no block.
+        self._fp_layer_stack = []
         view = getattr(self, "preview_view", None)
         if view is None:
             return
@@ -22553,13 +22880,17 @@ class MainWindow(QMainWindow):
         silk_pen.setWidthF(1.5)
         half_l = p.body_length / 2 * mm_to_px
         half_w = p.body_width / 2 * mm_to_px
+        self._draw_built_layers(built, mm_to_px)
+        self._begin_preview_layer("F.SilkS")
         self.preview_scene.addRect(-half_l, -half_w, 2 * half_l, 2 * half_w, silk_pen)
+        self._end_preview_layer()
 
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
         first_number = None
         xs_px, ys_px = [], []
 
+        self._begin_preview_layer("pads")
         for placement in pad_positions(p):
             if first_number is None:
                 first_number = placement.number
@@ -22590,15 +22921,20 @@ class MainWindow(QMainWindow):
             self._add_preview_pin_function(placement.number, placement.edge, bounds,
                 max_length=(p.body_width if placement.edge in ("top", "bottom")
                             else p.body_length) * mm_to_px * .3)
+        self._end_preview_layer()
 
         if xs_px and ys_px:
             left, right = min(xs_px + [-half_l]), max(xs_px + [half_l])
             top, bottom = min(ys_px + [-half_w]), max(ys_px + [half_w])
+            self._begin_preview_layer("dimensions")
             self._add_dim_h(-half_l, half_l, top - 40, self._dim_label("dim.body", p.body_length))
             self._add_dim_v(-half_w, half_w, left - 40, self._dim_label("dim.body", p.body_width))
             self._add_dim_h(left, right, bottom + 60, self._dim_label("dim.total", (right - left) / mm_to_px))
+            self._end_preview_layer()
 
+        self._begin_preview_layer("texts")
         self._draw_footprint_texts(mm_to_px, built)
+        self._end_preview_layer()
         self._draw_footprint_drawings(mm_to_px)
         self._set_footprint_origin_points(
             [(-p.body_length / 2, -p.body_width / 2), (p.body_length / 2, -p.body_width / 2),
@@ -22607,6 +22943,7 @@ class MainWindow(QMainWindow):
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(built)
+        self._after_preview_drawn(built)
 
     def _add_castellated_pad_shape(self, p, placement, mm_to_px, pen, brush,
                                    xs_px, ys_px) -> None:
@@ -22737,6 +23074,7 @@ class MainWindow(QMainWindow):
             self._fp_origin_points = {}
             self._apply_drawing_origin()
             self._sync_footprint_measures(None)
+            self._after_preview_drawn(None)
             return
         if isinstance(params, PackageGeometry):
             self._draw_preview_package(params)
@@ -22763,6 +23101,7 @@ class MainWindow(QMainWindow):
             self._fp_origin_points = {}
             self._apply_drawing_origin()
             self._sync_footprint_measures(None)
+            self._after_preview_drawn(None)
             return
         courtyard = next(g for g in footprint.graphics if g.layer == "F.CrtYd")
         # The generator's courtyard encloses the body AND populated copper.
@@ -22773,6 +23112,8 @@ class MainWindow(QMainWindow):
                         origin=text_grid_origin(footprint))
         silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
+        self._draw_built_layers(footprint, mm_to_px)
+        self._begin_preview_layer("F.SilkS")
         for graphic in footprint.graphics:
             if graphic.layer != "F.SilkS":
                 continue
@@ -22787,6 +23128,7 @@ class MainWindow(QMainWindow):
                 self.preview_scene.addEllipse(graphic.center[0] * mm_to_px - r,
                                               graphic.center[1] * mm_to_px - r, 2 * r, 2 * r,
                                               silk_pen, QBrush(silk_pen.color()) if graphic.fill else QBrush())
+        self._end_preview_layer()
 
         pad_pen = QPen(QColor(SURFACE1))
         pad_brush = QBrush(QColor(BLUE))
@@ -22800,6 +23142,7 @@ class MainWindow(QMainWindow):
         # The square pad is the pin-1 marker's pin, as in the written file
         # (`pin_header.square_pad_pin`): «A1» on a header numbered A1, A2...
         square = square_pad_pin([pin for pin, _x, _y in positions], p)
+        self._begin_preview_layer("pads")
         for pin, x_mm, y_mm in positions:
             x, y = x_mm * mm_to_px, y_mm * mm_to_px
             xs_px.append(x)
@@ -22842,6 +23185,7 @@ class MainWindow(QMainWindow):
                           y + radius + 3)
             number.setZValue(5)
             label_bounds.append(number.sceneBoundingRect())
+        self._end_preview_layer()
 
         left, right = x0 * mm_to_px, x1 * mm_to_px
         top, bottom = y0 * mm_to_px, y1 * mm_to_px
@@ -22849,6 +23193,7 @@ class MainWindow(QMainWindow):
         # Dimension close to the component: pitch (at the top) and row spacing (on the left)
         labels_top = min((rect.top() for rect in label_bounds), default=top)
         labels_bottom = max((rect.bottom() for rect in label_bounds), default=bottom)
+        self._begin_preview_layer("dimensions")
         if p.cols >= 2:
             self._add_dim_h(0, p.pitch * mm_to_px, min(top, labels_top) - 20,
                             self._dim_label("dim.pitch", p.pitch))
@@ -22885,8 +23230,11 @@ class MainWindow(QMainWindow):
         # Actual body/copper envelope, excluding courtyard clearance.
         self._add_dim_h(left, right, max(bottom, labels_bottom) + 60, self._dim_label("dim.total", x1 - x0))
         self._add_dim_v(top, bottom, right + 60, self._dim_label("dim.total", y1 - y0))
+        self._end_preview_layer()
 
+        self._begin_preview_layer("texts")
         self._draw_footprint_texts(mm_to_px, footprint)
+        self._end_preview_layer()
         self._draw_footprint_drawings(mm_to_px)
         self._set_footprint_origin_points(
             [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
@@ -22894,6 +23242,7 @@ class MainWindow(QMainWindow):
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(footprint)
+        self._after_preview_drawn(footprint)
 
     #: Keys of the editable body dimensions of the package preview: the
     #: horizontal (screen X) and the vertical (screen Y) side of the body.
@@ -23061,6 +23410,8 @@ class MainWindow(QMainWindow):
         margin = 1.0
         silk_pen = QPen(QColor(_layer_color("F.SilkS")))
         silk_pen.setWidthF(1.5)
+        self._draw_built_layers(built, mm_to_px)
+        self._begin_preview_layer("F.SilkS")
         if package.body_length_mm and package.body_width_mm:
             # Same outline as build_package: the body turns with the package.
             from ..core.package_geometry import pad_outline
@@ -23083,6 +23434,7 @@ class MainWindow(QMainWindow):
             # The drawn box, an envelope of the pads when the body is unknown.
             body_corners = [(-body_l / 2, -body_w / 2), (body_l / 2, -body_w / 2),
                             (body_l / 2, body_w / 2), (-body_l / 2, body_w / 2)]
+        self._end_preview_layer()
         from .footprint_view import (PAD_KEY_ROLE, PAD_PART_ROLE, HoledEllipseItem, HoledPathItem,
                                      HoledRectItem, add_hole_outline)
         pad_brush = QBrush(QColor(BLUE))
@@ -23092,6 +23444,7 @@ class MainWindow(QMainWindow):
         extent = ([-body_l / 2, -body_w / 2, body_l / 2, body_w / 2]
                   if package.body_length_mm and package.body_width_mm else
                   [math.inf, math.inf, -math.inf, -math.inf])
+        self._begin_preview_layer("pads")
         for pad_index, pin in enumerate(pins):
             x, y = pin.x_mm * mm_to_px, pin.y_mm * mm_to_px
             w, h = pin.pad_length_mm * mm_to_px, pin.pad_width_mm * mm_to_px
@@ -23180,14 +23533,19 @@ class MainWindow(QMainWindow):
                     max_length=(body_w if pin.side in ("top", "bottom") else body_l) * mm_to_px * .3)
                 if label is not None:
                     label.setData(PAD_PART_ROLE, pad_index)
+        self._end_preview_layer()
         left, top, right, bottom = [value * mm_to_px for value in extent]
         self._draw_grid(mm_to_px, body_l, body_w, margin,
                         x0=-body_l / 2, y0=-body_w / 2,
                         origin=package_preview_grid_origin(package))
         # Texts first: the dimensions are laid out beyond them (second review
         # 2026-11-03, the default Value text covered the body number).
+        self._begin_preview_layer("texts")
         self._draw_footprint_texts(mm_to_px, built)
+        self._end_preview_layer()
+        self._begin_preview_layer("dimensions")
         self._draw_package_dimensions(package, extent, body_l, body_w, mm_to_px)
+        self._end_preview_layer()
         self._draw_footprint_drawings(mm_to_px)
         self._set_footprint_origin_points(body_corners,
                                           [(pin.number, pin.x_mm, pin.y_mm) for pin in pins])
@@ -23195,6 +23553,7 @@ class MainWindow(QMainWindow):
         self._fit_preview()
         self._sync_footprint_measures(built, package=package)
         self._rebind_pad_drag_items()
+        self._after_preview_drawn(built)
 
     def _edit_preview_pad(self, token: str) -> None:
         """@brief Open the pad editor for a pad clicked in the 2D preview.

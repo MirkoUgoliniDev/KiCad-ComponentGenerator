@@ -912,10 +912,12 @@ def test_drawings_generated_silk_and_selector_use_the_kicad_default_colours(prev
     from PyQt6.QtWidgets import QGraphicsLineItem, QGraphicsRectItem
     from kicadgen.gui.main_window import KICAD_LAYER_COLORS
     window, _saves, _generations = preview
-    assert KICAD_LAYER_COLORS == {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc"}
-    assert len(set(KICAD_LAYER_COLORS.values())) == 3, "one distinct colour per layer"
+    # F.CrtYd added 2026-11-06 for the courtyard drawn in the preview (not a drawing layer).
+    assert KICAD_LAYER_COLORS == {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc",
+                                  "F.CrtYd": "#ff26e2"}
+    assert len(set(KICAD_LAYER_COLORS.values())) == 4, "one distinct colour per layer"
     window.footprint_drawings = validate_footprint_drawings([
-        record("line", ((0, 0), (5, 0)), layer=layer) for layer in KICAD_LAYER_COLORS])
+        record("line", ((0, 0), (5, 0)), layer=layer) for layer in ("F.SilkS", "F.Fab", "Cmts.User")])
     window._draw_preview()
     by_index = {item.data(0x445257): item.pen().color().name() for item in _drawing_items(window)}
     assert by_index == {0: "#f2eda1", 1: "#afafaf", 2: "#5994dc"}

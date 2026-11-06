@@ -34,6 +34,12 @@ wheel steps, fit counts and the grid pixel hashes are unchanged.
 Regenerated AGAIN the same day (second adversarial review): the pin-1 dot
 ink and the dimensions laid out beyond the texts enlarge the drawn rect,
 so only «fit/forced» changed once more.
+
+GOLDEN CHANGED 2026-11-06 (footprint side panel «Layer / Controlli /
+Disegno», fixed at 250 px where the old palette took the width of its layer
+combo): the viewport of the test window is wider, so the fit SCALE and every
+scroll value changed while the framed rect («fit/forced» rect) is identical;
+the grid pixel hashes changed with the viewport size. Both files regenerated.
 """
 import hashlib
 import json
