@@ -1815,11 +1815,19 @@ class MainWindow(QMainWindow):
         #: aid only, never written to the .kicad_mod and never part of the
         #: footprint draft. Key of a point of `_fp_origin_points`.
         self.footprint_drawing_origin: str = FP_ORIGIN_DEFAULT
+        #: The picture under the footprint drawing (`_valid_reference_image`
+        #: record) or None; a view setting saved with the project (2026-11-06).
+        self.reference_image = None
+        self._reference_pixmap_cache = None
         #: Candidate drawing origins of the footprint drawn last: key -> (x, y)
         #: mm in footprint coordinates (Y down); filled by every preview drawer.
         self._fp_origin_points: dict[str, tuple] = {}
         #: Body centre of the footprint drawn last, mm: names the body corners.
         self._fp_body_centre_mm: tuple = (0.0, 0.0)
+        #: Centre of the DECLARED body, mm, set by a drawer that knows it
+        #: apart from the drawn outline (the pin header); None otherwise.
+        #: Where the calibrated photo is centred (`_reference_anchor_mm`).
+        self._fp_photo_anchor_mm = None
         #: User drawings of the footprint preview (validated records, see
         #: core.footprint.validate_footprint_drawings); drawn in every 2D
         #: preview and appended to the exported .kicad_mod (user, 2026-10-13).
@@ -8215,9 +8223,12 @@ class MainWindow(QMainWindow):
         return bool(name) and (self._project_dir() / f"{name}.pretty"
                                / f"{name}.kicad_mod").is_file()
 
-    def _photo_review_frame(self) -> tuple[float, float]:
+    def _photo_review_frame(self, quiet: bool = False) -> tuple[float, float]:
         """@brief Board size (mm) that gives the photo its scale in the review.
 
+        @param quiet True reads the sizes without the log line below: for a
+            caller that runs at every redraw (the reference image), where
+            the same warning would be written hundreds of times.
         @return The CURRENT values of the body fields that describe the
             photographed board: those of the type used by the extraction, or,
             for a reopened project, those that match the saved review bundle.
@@ -8232,7 +8243,7 @@ class MainWindow(QMainWindow):
         sizes = self._body_sizes()
         current = "cast" if self._is_castellated() else "matrix"
         key = getattr(self, "_photo_body_fields", None) or current
-        if key != current and any(abs(a - b) > 0.01 for a, b in zip(sizes[key], sizes[current])):
+        if not quiet and key != current and any(abs(a - b) > 0.01 for a, b in zip(sizes[key], sizes[current])):
             self._append_log(tx(
                 "Revisione foto: la foto mostra la scheda di {length:.2f} x {width:.2f} mm "
                 "dell'analisi; la tipologia attuale usa un corpo di {current_length:.2f} x "
@@ -8452,6 +8463,8 @@ class MainWindow(QMainWindow):
             "footprint_drawings": deepcopy(applied["drawings"]),
             # A view setting, saved as soon as it changes (never a draft edit).
             "footprint_drawing_origin": self.footprint_drawing_origin,
+            # The picture under the drawing: a view setting too (2026-11-06).
+            "reference_image": self._reference_image_state(),
             "metadata": self._metadata_state(),
             "models": {"session_model": getattr(self, "_session_model", None),
                        "vlm_model": getattr(self, "_vlm_model", None)},
@@ -8752,6 +8765,9 @@ class MainWindow(QMainWindow):
         # origin there (`_drawing_origin_mm`); only the type is checked here.
         self.footprint_drawing_origin = (origin if isinstance(origin, str) and origin.strip()
                                          else FP_ORIGIN_DEFAULT)
+        # A record the validator refuses (or an older project) draws nothing.
+        self.reference_image = self._valid_reference_image(state.get("reference_image"))
+        self._reference_pixmap_cache = None
         self._fp_drawings_undo, self._fp_drawings_redo = [], []
         # What the file holds is the applied state: no draft, nothing offered
         # until `_offer_footprint_recovery` reads this project's recovery file.
@@ -16600,6 +16616,7 @@ class MainWindow(QMainWindow):
     #: keys are the `LAYER_ROLE` tags the drawers put on their items; the
     #: KiCad layers keep their KiCad names and default colours.
     FOOTPRINT_VIEW_LAYERS = (
+        ("reference", "Immagine di riferimento", SUBTEXT),
         ("pads", "Pad (rame)", BLUE),
         ("holes", "Fori", SURFACE1),
         ("F.SilkS", "Serigrafia", KICAD_LAYER_COLORS["F.SilkS"]),
@@ -16644,6 +16661,15 @@ class MainWindow(QMainWindow):
             box.toggled.connect(lambda checked, k=key: self._on_preview_layer_toggled(k, checked))
             layers_column.addWidget(box)
             self.fp_layer_boxes[key] = box
+        # The reference image under the drawing (2026-11-06): the calibrated
+        # photo laid by its own scale, or any picture scaled and placed by
+        # the user. Preview only, never written to the .kicad_mod.
+        self.btn_fp_reference = QPushButton("Immagine di riferimento…")
+        self.btn_fp_reference.setToolTip(
+            "Posa sotto il disegno la foto calibrata o un'immagine a scelta (pagina del datasheet, scansione), "
+            "con scala, posizione e trasparenza; solo nell'anteprima, mai nel file.")
+        self.btn_fp_reference.clicked.connect(self._edit_reference_image)
+        layers_column.addWidget(self.btn_fp_reference)
         column.addWidget(layers)
         checks = CollapsibleGroupBox("Controlli", expanded=True)
         checks.setToolTip("Controlli geometrici sul footprint in bozza (KLC): clic su una riga per "
@@ -16805,13 +16831,409 @@ class MainWindow(QMainWindow):
                 self._end_preview_layer()
 
     def _after_preview_drawn(self, footprint) -> None:
-        """@brief Common tail of the three 2D drawers: layer visibility, then the geometry checks.
+        """@brief Common tail of the three 2D drawers: reference image, layer visibility, then the geometry checks.
 
         @param footprint The built footprint the drawer showed, or None when
             there is none (no parameters) or it did not build.
         """
+        self._draw_reference_image()
         self._apply_preview_layer_visibility()
         self._refresh_footprint_checks(footprint)
+
+    # ── Reference image under the footprint drawing ─────────────────────────
+
+    #: Keys and bounds of a saved reference image: source «photo» (the
+    #: calibrated photo, scaled by the board size and centred on the drawn
+    #: body) or «file» (a picture scaled by the user, centred on the
+    #: footprint origin); millimetres per image pixel along X and Y, the
+    #: offset of the image centre from that anchor, mm, and the opacity.
+    #: Values outside these bounds drop the whole record.
+    REFERENCE_SOURCES = ("photo", "file")
+    #: Sanity bounds of a scale, mm per image pixel: below 10 nm a pixel is
+    #: no picture, above 100 mm one pixel covers a whole board. Not a
+    #: measurement: the range any real scan or photo falls into.
+    REFERENCE_SCALE_BOUNDS_MM = (1e-5, 100.0)
+    #: The image centre stays within KiCad's own coordinate range.
+    REFERENCE_OFFSET_LIMIT_MM = 2147.483647
+    #: Opacity bounds: the dialog's slider floor (5 %) up to opaque; an
+    #: invisible image (0) is refused, it would look like a lost one.
+    REFERENCE_OPACITY_BOUNDS = (0.05, 1.0)
+    #: Scale offered for a picture that carries no resolution metadata:
+    #: 0.1 mm per pixel (254 dpi), a round value to start from, replaced by
+    #: the file's own dots-per-metre when it states them, or by a calibration.
+    REFERENCE_DEFAULT_SCALE_MM = 0.1
+    #: Tool key of the two-click scale calibration (no palette button).
+    _REFERENCE_SCALE_TOOL = "reference_scale"
+
+    @classmethod
+    def _valid_reference_image(cls, raw):
+        """@brief The saved reference image record, or None when absent or malformed.
+
+        @param raw The `reference_image` value of a project file.
+        @return {"source", "path", "mm_per_px_x", "mm_per_px_y", "offset_x",
+            "offset_y", "opacity"} with finite numbers in bounds, or None.
+        @note Loading never raises: a record it cannot trust is dropped, as
+            the drawings' validator does.
+        """
+        if not isinstance(raw, dict) or raw.get("source") not in cls.REFERENCE_SOURCES:
+            return None
+        path = raw.get("path", "")
+        if not isinstance(path, str) or (raw["source"] == "file" and not path.strip()):
+            return None
+        clean = {"source": raw["source"], "path": path.strip()}
+        low, high = cls.REFERENCE_SCALE_BOUNDS_MM
+        for key, bounds, default in (("mm_per_px_x", (low, high), None), ("mm_per_px_y", (low, high), None),
+                                     ("offset_x", (-cls.REFERENCE_OFFSET_LIMIT_MM, cls.REFERENCE_OFFSET_LIMIT_MM), 0.0),
+                                     ("offset_y", (-cls.REFERENCE_OFFSET_LIMIT_MM, cls.REFERENCE_OFFSET_LIMIT_MM), 0.0),
+                                     ("opacity", cls.REFERENCE_OPACITY_BOUNDS, 0.5)):
+            value = raw.get(key, default)
+            if value is None and raw["source"] == "photo" and key.startswith("mm_per_px"):
+                # The photo's scale is recomputed from the board size at each draw.
+                clean[key] = None
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or not bounds[0] <= value <= bounds[1]):
+                return None
+            clean[key] = float(value)
+        return clean
+
+    def _reference_image_state(self):
+        """@brief The reference image record saved with the project, or None."""
+        return deepcopy(getattr(self, "reference_image", None))
+
+    def _set_reference_image(self, record) -> bool:
+        """@brief Make `record` the reference image, redraw and save it with the project.
+
+        @param record A record `_valid_reference_image` accepts, or None to remove the image.
+        @return True when applied; False when `record` is refused by the
+            validator, in which case the previous image STAYS (a bad value
+            never silently removes a picture the user placed).
+        @note A view setting, like the drawing origin: no undo step, no
+            draft, the .kicad_mod is never touched.
+        """
+        valid = self._valid_reference_image(record)
+        if record is not None and valid is None:
+            return False
+        self.reference_image = valid
+        self._reference_pixmap_cache = None
+        self._draw_reference_image()
+        self._apply_preview_layer_visibility()
+        self._save_project_config()
+        return True
+
+    def _reference_file_path(self, record) -> Path | None:
+        """@brief The file of a «file» reference record on this machine.
+
+        @param record A validated reference record.
+        @return The path: a relative one is taken from the project folder
+            (a project copied elsewhere keeps its picture when the picture
+            travelled with it); None for the photo source.
+        """
+        if record["source"] != "file":
+            return None
+        path = Path(record["path"])
+        if path.is_absolute():
+            return path
+        folder = self._project_dir_or_none()
+        return (folder / path) if folder is not None else path
+
+    def _reference_pixmap(self, record):
+        """@brief The QPixmap of a reference record, cached per source, or None when it cannot be read.
+
+        @param record A validated reference record.
+        @return The pixmap, or None (a missing or unreadable file, no
+            calibrated photo): the log says so once per source.
+        @note The cache follows the photo OBJECT (a new analysis gives a new
+            bytes object) and a file's path, size and modification time (a
+            picture re-scanned in place is reloaded), never a byte count.
+        """
+        file_path = self._reference_file_path(record)
+        if record["source"] == "photo":
+            key = ("photo", id(self._photo_png) if self._photo_png is not None else None)
+        else:
+            try:
+                stat = file_path.stat()
+                key = ("file", str(file_path), stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                key = ("file", str(file_path), None, None)
+        cache = getattr(self, "_reference_pixmap_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        pixmap = QPixmap()
+        if record["source"] == "photo":
+            if self._photo_png:
+                pixmap.loadFromData(bytes(self._photo_png))
+        else:
+            pixmap.load(str(file_path))
+        if pixmap.isNull():
+            pixmap = None
+            self._append_log(self.i18n.text("Immagine di riferimento non leggibile: {path}").format(
+                path=str(file_path) if file_path is not None else self.i18n.text("foto calibrata assente")))
+        self._reference_pixmap_cache = (key, pixmap)
+        return pixmap
+
+    def _reference_anchor_mm(self, record) -> tuple:
+        """@brief Where the image centre goes before its offset, footprint mm.
+
+        @param record A validated reference record.
+        @return For the calibrated photo, the centre of the DECLARED body
+            when the drawer declared it (`_fp_photo_anchor_mm`: a pin-header
+            footprint, whose origin is pin 1 and whose body starts at its
+            offset), else the centre of the drawn body (`_fp_body_centre_mm`,
+            the origin for a castellated module or a package): the photo
+            crop is the board (generality audit 2026-11-06). For a file, the
+            footprint origin: the user places it.
+        """
+        if record["source"] == "photo":
+            anchor = getattr(self, "_fp_photo_anchor_mm", None)
+            cx, cy = anchor if anchor is not None else getattr(self, "_fp_body_centre_mm", (0.0, 0.0))
+            return (float(cx), float(cy))
+        return (0.0, 0.0)
+
+    def _reference_scale_mm_per_px(self, record, pixmap):
+        """@brief (mm per pixel along X, along Y) of a reference record.
+
+        @param record A validated reference record.
+        @param pixmap Its pixmap.
+        @return The record's own scale for a file; for the calibrated photo,
+            the board length over the image width and the board width over
+            the image height (`_photo_review_frame`: the photo is calibrated
+            axis by axis), or None when the board size is unknown.
+        """
+        if record["source"] == "file":
+            return (record["mm_per_px_x"], record["mm_per_px_y"])
+        length_mm, width_mm = self._photo_review_frame(quiet=True)
+        if not length_mm or not width_mm or pixmap.width() <= 0 or pixmap.height() <= 0:
+            return None
+        return (float(length_mm) / pixmap.width(), float(width_mm) / pixmap.height())
+
+    def _draw_reference_image(self) -> None:
+        """@brief Put the reference image under the drawing (or remove it), scaled and placed as its record says.
+
+        @note Drawn below every other item (z -10) with its own opacity; the
+            image centre sits at `_reference_anchor_mm` plus the offset.
+            Tagged «reference» for the «Layer» group.
+        """
+        from PyQt6.QtGui import QTransform
+        from PyQt6.QtWidgets import QGraphicsPixmapItem
+        from .footprint_view import LAYER_ROLE
+        scene = getattr(self, "preview_scene", None)
+        if scene is None:
+            return
+        for item in list(scene.items()):
+            if isinstance(item, QGraphicsPixmapItem) and item.data(LAYER_ROLE) == "reference":
+                scene.removeItem(item)
+        record = getattr(self, "reference_image", None)
+        if record is None:
+            return
+        pixmap = self._reference_pixmap(record)
+        if pixmap is None:
+            return
+        scale = self._reference_scale_mm_per_px(record, pixmap)
+        if scale is None:
+            return
+        mm_to_px = _FP_PREVIEW_MM_TO_PX
+        item = QGraphicsPixmapItem(pixmap)
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        sx, sy = scale[0] * mm_to_px, scale[1] * mm_to_px
+        item.setTransform(QTransform.fromScale(sx, sy))
+        ax, ay = self._reference_anchor_mm(record)
+        item.setPos((ax + record["offset_x"]) * mm_to_px - pixmap.width() * sx / 2,
+                    (ay + record["offset_y"]) * mm_to_px - pixmap.height() * sy / 2)
+        item.setOpacity(record["opacity"])
+        item.setZValue(-10)
+        item.setData(LAYER_ROLE, "reference")
+        scene.addItem(item)
+
+    def _edit_reference_image(self) -> None:
+        """@brief «Immagine di riferimento…»: choose the source, scale, place and fade the image under the drawing.
+
+        @note Source «Foto calibrata» uses the project's calibrated photo
+            at the scale of the board size (nothing to type); «File…» takes
+            a picture with millimetres per pixel typed, or found with
+            «Calibra con una misura nota…» (two clicks on the image and the
+            real distance). «Nessuna» removes the image.
+        """
+        from PyQt6.QtWidgets import QDialogButtonBox, QSlider
+        tx = self.i18n.text
+        current = self._reference_image_state() or {}
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tx("Immagine di riferimento"))
+        form = QFormLayout(dialog)
+        source = QComboBox(dialog)
+        source.addItem(tx("Nessuna"), "")
+        source.addItem(tx("Foto calibrata del progetto"), "photo")
+        source.addItem(tx("File immagine…"), "file")
+        source.setCurrentIndex(max(source.findData(current.get("source", "")), 0))
+        form.addRow(tx("Sorgente:"), source)
+        path = QLineEdit(current.get("path", ""), dialog)
+        browse = QPushButton(tx("Sfoglia…"), dialog)
+        path_row = QWidget(dialog)
+        path_layout = QHBoxLayout(path_row)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.addWidget(path, 1)
+        path_layout.addWidget(browse)
+        form.addRow(tx("File:"), path_row)
+
+        folder = self._project_dir_or_none()
+
+        def pick():
+            chosen, _filter = QFileDialog.getOpenFileName(
+                dialog, tx("Immagine di riferimento"), path.text() or (str(folder) if folder else ""),
+                tx("Immagini (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff);;Tutti i file (*)"))
+            if chosen:
+                path.setText(chosen)
+                # A picture that states its resolution (a scan's dots per
+                # metre) proposes its own scale, axis by axis.
+                stated = self._image_scale_from_metadata(chosen)
+                if stated is not None:
+                    scale_x.setValue(stated[0])
+                    scale_y.setValue(stated[1])
+
+        browse.clicked.connect(pick)
+
+        def spin(value, low, high, decimals, step):
+            box = QDoubleSpinBox(dialog)
+            box.setDecimals(decimals)
+            box.setRange(low, high)
+            box.setSingleStep(step)
+            box.setValue(float(value))
+            return box
+
+        low, high = self.REFERENCE_SCALE_BOUNDS_MM
+        default = self.REFERENCE_DEFAULT_SCALE_MM
+        scale_x = spin(current.get("mm_per_px_x") or default, low, high, 5, 0.001)
+        scale_y = spin(current.get("mm_per_px_y") or default, low, high, 5, 0.001)
+        scale_x.setSuffix(" mm/px")
+        scale_y.setSuffix(" mm/px")
+        form.addRow(tx("Scala X:"), scale_x)
+        form.addRow(tx("Scala Y:"), scale_y)
+        limit = self.REFERENCE_OFFSET_LIMIT_MM
+        offset_x = spin(current.get("offset_x", 0.0), -limit, limit, 3, 0.1)
+        offset_y = spin(current.get("offset_y", 0.0), -limit, limit, 3, 0.1)
+        offset_x.setSuffix(" mm")
+        offset_y.setSuffix(" mm")
+        form.addRow(tx("Centro X:"), offset_x)
+        form.addRow(tx("Centro Y:"), offset_y)
+        opacity = QSlider(Qt.Orientation.Horizontal, dialog)
+        opacity.setRange(5, 100)
+        opacity.setValue(int(round(float(current.get("opacity", 0.5)) * 100)))
+        form.addRow(tx("Opacità:"), opacity)
+        calibrate = QPushButton(tx("Calibra con una misura nota…"), dialog)
+        calibrate.setToolTip(tx("Clicca due punti dell'immagine di cui conosci la distanza reale: la scala "
+                                "viene ricavata da quella, con lo stesso fattore sui due assi."))
+        form.addRow(calibrate)
+        note = QLabel(tx("La foto calibrata prende la scala dalle dimensioni del corpo; l'immagine da file "
+                         "la prende da questi campi. Solo nell'anteprima: il file KiCad non cambia."))
+        note.setWordWrap(True)
+        form.addRow(note)
+
+        def follow_source(_index=None):
+            kind = source.currentData()
+            for widget in (path, browse):
+                widget.setEnabled(kind == "file")
+            for widget in (scale_x, scale_y, calibrate):
+                widget.setEnabled(kind == "file")
+            for widget in (offset_x, offset_y, opacity):
+                widget.setEnabled(bool(kind))
+
+        source.currentIndexChanged.connect(follow_source)
+        follow_source()
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+                                   parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        wants_calibration = []
+        calibrate.clicked.connect(lambda: (wants_calibration.append(True), dialog.accept()))
+        if self._run_modal(dialog) != QDialog.DialogCode.Accepted:
+            return
+        kind = source.currentData()
+        if not kind:
+            self._set_reference_image(None)
+            return
+        chosen_path = path.text().strip() if kind == "file" else ""
+        if chosen_path and folder is not None:
+            # Inside the project folder the path is kept relative, so the
+            # project travels with its picture (generality audit 2026-11-06).
+            try:
+                chosen_path = Path(chosen_path).resolve().relative_to(folder.resolve()).as_posix()
+            except ValueError:
+                pass
+        record = {"source": kind, "path": chosen_path,
+                  "mm_per_px_x": scale_x.value() if kind == "file" else None,
+                  "mm_per_px_y": scale_y.value() if kind == "file" else None,
+                  "offset_x": offset_x.value(), "offset_y": offset_y.value(),
+                  "opacity": opacity.value() / 100.0}
+        if not self._set_reference_image(record):
+            QMessageBox.warning(self, tx("Immagine di riferimento"),
+                                tx("Indica il file dell'immagine e una scala maggiore di zero."))
+            return
+        if wants_calibration and kind == "file":
+            if self._reference_pixmap(self.reference_image) is None:
+                self._draw_feedback_toast(tx("Calibrazione dell'immagine"),
+                                          tx("L'immagine non si legge: nulla da calibrare."))
+                return
+            self._start_reference_calibration()
+
+    @staticmethod
+    def _image_scale_from_metadata(path: str):
+        """@brief (mm per pixel along X, along Y) stated by an image file, or None when it states none.
+
+        @param path The image file.
+        @return From the file's dots per metre (a scan's resolution); None
+            when the file has no such metadata or Qt's default placeholder.
+        """
+        from PyQt6.QtGui import QImageReader
+        reader = QImageReader(path)
+        image = reader.read()
+        if image.isNull():
+            return None
+        dots_x, dots_y = image.dotsPerMeterX(), image.dotsPerMeterY()
+        # Qt reports 3780 dots/m (96 dpi) when a file states nothing: not a measurement.
+        if dots_x <= 0 or dots_y <= 0 or (dots_x == 3780 and dots_y == 3780):
+            return None
+        return (1000.0 / dots_x, 1000.0 / dots_y)
+
+    def _start_reference_calibration(self) -> None:
+        """@brief Arm the two-click calibration of the reference image's scale."""
+        from .canvas_clicktools import ToolSpec
+        self._cancel_footprint_drawing()
+        self.preview_view.set_draw_mode(True, ToolSpec(self._REFERENCE_SCALE_TOOL, count=2))
+        self._draw_feedback_toast(self.i18n.text("Calibrazione dell'immagine"), self.i18n.text(
+            "Clicca due punti dell'immagine di cui conosci la distanza reale."))
+
+    def _finish_reference_calibration(self, points: list) -> None:
+        """@brief Two points clicked on the image: ask their real distance and set the scale from it.
+
+        @param points The two clicked points, footprint mm (unsnapped).
+        @note The new scale is the current one times the real distance over
+            the clicked one, the same factor on both axes (one known
+            distance cannot tell the axes apart; a picture scanned square
+            needs no more). Nothing changes on a cancelled dialog or a
+            degenerate click pair.
+        """
+        record = getattr(self, "reference_image", None)
+        if record is None or record["source"] != "file" or len(points) != 2:
+            return
+        (x1, y1), (x2, y2) = points
+        clicked_mm = math.hypot(x2 - x1, y2 - y1)
+        if clicked_mm <= 1e-9:
+            self._draw_feedback_toast(self.i18n.text("Calibrazione dell'immagine"),
+                                      self.i18n.text("I due punti coincidono: nessuna scala ricavabile."))
+            return
+        value, accepted = QInputDialog.getDouble(
+            self, self.i18n.text("Calibrazione dell'immagine"),
+            self.i18n.text("Distanza reale fra i due punti (mm):"), clicked_mm, 0.001, 10000.0, 3)
+        if not accepted or value <= 0:
+            return
+        factor = float(value) / clicked_mm
+        if not self._set_reference_image({**record, "mm_per_px_x": record["mm_per_px_x"] * factor,
+                                          "mm_per_px_y": record["mm_per_px_y"] * factor}):
+            # Out of the sanity bounds: the picture stays as it was.
+            self._draw_feedback_toast(self.i18n.text("Calibrazione dell'immagine"), self.i18n.text(
+                "Scala fuori dai limiti ({low} .. {high} mm per pixel): immagine lasciata com'era.").format(
+                    low=self.REFERENCE_SCALE_BOUNDS_MM[0], high=self.REFERENCE_SCALE_BOUNDS_MM[1]))
 
     def _refresh_footprint_checks(self, footprint) -> None:
         """@brief Schedule the geometry checks of `footprint` once the preview rests.
@@ -16937,7 +17359,10 @@ class MainWindow(QMainWindow):
         armed = self._fp_draw_tool != key
         self._cancel_footprint_drawing()
         if armed:
-            self._fp_draw_buttons[key].setChecked(True)
+            # The reference-image calibration (`_start_reference_calibration`)
+            # is armed without a palette button; every palette tool has one.
+            if key in self._fp_draw_buttons:
+                self._fp_draw_buttons[key].setChecked(True)
             # The line closes into a polygon on a click equal to its first
             # point once it has four points, as in the symbol editor
             # (parity, 2026-11-06); the closed shape is stored as «polygon».
@@ -17087,6 +17512,10 @@ class MainWindow(QMainWindow):
         """
         if spec.key == self._MEASURE_KEY:
             return self._fp_measure.snap(point, free, points)
+        if spec.key == self._REFERENCE_SCALE_TOOL:
+            # A point ON the picture, not on the grid: the image is what is measured.
+            mm = _FP_PREVIEW_MM_TO_PX
+            return [(round(point.x() / mm, 4), round(point.y() / mm, 4))]
         return [self._snapped_draw_point(point.x(), point.y())]
 
     def tool_points_changed(self, spec, points: list) -> None:
@@ -17208,6 +17637,11 @@ class MainWindow(QMainWindow):
         """
         from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_MIN_POINTS, USER_DRAW_TEXT_MM,
                                       USER_TEXT_ANCHOR, USER_DRAW_WIDTH_MM, validate_footprint_drawings)
+        if tool == self._REFERENCE_SCALE_TOOL:
+            # Not a drawing: the reference image's scale from two clicks.
+            self._cancel_footprint_drawing()
+            self._finish_reference_calibration(list(points))
+            return
         if tool == "line" and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
             # Closed on its first point (`ToolSpec.close_after`): a polygon,
             # whose closing side is implied and whose first point is not stored twice.
@@ -19414,7 +19848,9 @@ class MainWindow(QMainWindow):
         if tool == "text" or len(pts) < 2:
             return None
         path = QPainterPath()
-        if tool in ("line", "polygon"):
+        if tool in ("line", "polygon", self._REFERENCE_SCALE_TOOL):
+            # The calibration of the reference image shows the measured
+            # segment as a line does.
             path.moveTo(*pts[0])
             for x, y in pts[1:]:
                 path.lineTo(x, y)
@@ -19651,6 +20087,9 @@ class MainWindow(QMainWindow):
         # A layer block left open by an exception in a drawer would pin the
         # dead items of the cleared scene: every redraw starts with no block.
         self._fp_layer_stack = []
+        # The photo anchor is declared again by the drawer that knows it
+        # (the pin header); the others centre the photo on the drawn body.
+        self._fp_photo_anchor_mm = None
         view = getattr(self, "preview_view", None)
         if view is None:
             return
@@ -23433,6 +23872,12 @@ class MainWindow(QMainWindow):
         self._set_footprint_origin_points(
             [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
             [(pin, x_mm, y_mm) for pin, x_mm, y_mm in pin_positions(p)])
+        # The DECLARED body of the header (its offset from the pin-1 origin
+        # and its size): where the board photo is centred. The drawn corners
+        # above come from the courtyard and include the clearances.
+        if p.body_length and p.body_width:
+            self._fp_photo_anchor_mm = (float(p.body_offset_x) + float(p.body_length) / 2,
+                                        float(p.body_offset_y) + float(p.body_width) / 2)
         self.preview_scene.setBackgroundBrush(QBrush(QColor(BASE)))
         self._fit_preview()
         self._sync_footprint_measures(footprint)

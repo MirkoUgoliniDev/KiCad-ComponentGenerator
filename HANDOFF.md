@@ -1,6 +1,41 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 06/11 — A `3c5b9bc` e B `40b2f1d` FATTI, committati, pushati e mergiati in main; C IN CORSO (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
+## 06/11 — A `3c5b9bc` e B `40b2f1d` FATTI, committati, pushati e mergiati in main; C IN CORSO
+TRAPPOLA (06/11 notte): il commit 40b2f1d ha portato con se' tre sorgenti KiCad (pcb_dimension9.cpp, util.h,
+vector2d9.h) scaricati nella RADICE del repo dall'agente di audit; rimossi col commit successivo. Prima di
+`git add -A` dopo una revisione con agenti, guardare `git status --short` per file estranei nella radice.
+STATO C (06/11 notte, NON committato): fatto, in verifica. Record `reference_image` nel file di progetto
+(impostazione di vista, come footprint_drawing_origin: niente undo, niente bozza, .kicad_mod intatto):
+source photo|file, path, mm_per_px_x/y (None per la foto: ricalcolati a ogni disegno da _photo_review_frame
+asse per asse, larghezza_px/lunghezza_mm e altezza_px/larghezza_mm), offset_x/y (centro dell'immagine
+rispetto all'origine), opacity. Validatore `_valid_reference_image` (scarta senza eccezioni). Disegno:
+QGraphicsPixmapItem z=-10 in `_after_preview_drawn` (tutti e tre i disegnatori), tag LAYER_ROLE «reference»,
+casella «Immagine di riferimento» prima fra i layer; pixmap in cache per sorgente, file illeggibile -> una
+riga di log. Dialog «Immagine di riferimento…» nel gruppo Layer: sorgente (Nessuna / Foto calibrata / File),
+file+Sfoglia, scala X/Y mm/px, centro X/Y, opacita', «Calibra con una misura nota…» (strumento a 2 clic
+`reference_scale` NON agganciato alla griglia, poi QInputDialog con la distanza reale: fattore uniforme sui
+due assi, dichiarato). DEVIAZIONE DAL PIANO: niente trascinamento dell'immagine col mouse (solo i campi del
+dialog), per non toccare i gesti condivisi. Test: tests/test_footprint_reference_image.py (6).
+AUDIT + REVISIONE GUI su C (06/11 notte): tutto corretto.
+- La foto era ancorata all'ORIGINE del footprint: giusto per il castellated (origine = centro corpo), sbagliato
+  per il pin header (origine = pin 1). Ora `_reference_anchor_mm`: il disegnatore del pin header dichiara
+  `_fp_photo_anchor_mm` = (body_offset + lato/2) dal corpo DICHIARATO; gli altri usano il centro del corpo
+  disegnato (`_fp_body_centre_mm`); l'immagine da file resta sull'origine (la posa l'utente). Test con header
+  1x4, corpo 25.4x15.2, offset (-3, -1.27): centro a (9.7, 6.33).
+- `_photo_review_frame(quiet=True)` dal ridisegno: niente riga di log «Revisione foto…» a ogni redraw.
+- Percorso dell'immagine: relativo alla cartella del progetto se e' dentro (as_posix), risolto al caricamento
+  (`_reference_file_path`); assoluto altrimenti.
+- Cache pixmap: chiave = id() dell'oggetto foto (una nuova analisi = nuovo oggetto), o (path, size, mtime)
+  del file; non piu' la lunghezza in byte.
+- Calibrazione fuori limiti: il record vecchio RESTA e un toast lo dice (`_set_reference_image` ora ritorna
+  False su record rifiutato invece di azzerare); immagine illeggibile -> niente strumento, toast; ghost del
+  tool di calibrazione come una linea; fattore uniforme detto nel tooltip.
+- Costanti dichiarate: limiti scala 1e-5..100 mm/px (sanita'), offset entro KICAD_COORD_LIMIT_MM, opacita'
+  0.05..1 (= slider), default 0.1 mm/px (254 dpi, da sostituire) ma un file con risoluzione dichiarata
+  (dots per metre, es. scansione 300 dpi) propone la propria scala asse per asse (`_image_scale_from_metadata`,
+  escluso il placeholder Qt 96 dpi).
+- `_project_dir_or_none` nel dialog; commento sulla guardia del pulsante assente.
+Test: tests/test_footprint_reference_image.py (10). Suite completa VERDE: meta' A 7118 passati 9 saltati 19 sottotest, meta' B 4800 passati 4 saltati = 11918 passati, 13 saltati, 19 sottotest (07/11, codice fermo). C attende l'OK al commit. data/analysis_profiles.sqlite3 modificato dal catalogo (traduzioni nuove): controllo segreti vuoto, va nel commit. (utente: «ok» al piano, courtyard FUORI dalla palette; «poi fai tutti gli altri»): scheda Footprint, priorita' 3
 Tre funzioni, ciascuna chiusa da sola (commit separati possibili):
 A. POLIGONO. Lo strumento linea del footprint chiude il poligono con un clic sul primo punto a 4+ punti, come
    gia' fa il simbolo (canvas_clicktools, «polygon close-on-first»): parita' fra le due schede. Nuovo kind

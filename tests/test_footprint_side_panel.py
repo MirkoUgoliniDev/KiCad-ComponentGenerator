@@ -12,7 +12,8 @@ from kicadgen.gui.footprint_view import DRAWING_KEY_ROLE, HOLE_ROLE, LAYER_ROLE,
 from tests.test_package_project_gui import acquire
 from tests.test_photo_inventory_gui import gui  # noqa: F401 - window fixture
 
-LAYER_KEYS = ("pads", "holes", "F.SilkS", "F.Fab", "F.CrtYd", "Cmts.User", "texts", "numbers", "dimensions")
+LAYER_KEYS = ("reference", "pads", "holes", "F.SilkS", "F.Fab", "F.CrtYd", "Cmts.User", "texts", "numbers",
+              "dimensions")   # «reference» added 2026-11-06 (the picture under the drawing)
 
 
 def _tagged(window, tag):
