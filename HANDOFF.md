@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 08/11 — FATTO, NON committato (attende OK): strumenti di disegno al livello di KiCad 9, revisione e correzioni
+## 08/11 — FATTO e committato `8bee44f` su FOOTPRINT-ADVANCE (NON pushato, NON mergiato): strumenti di disegno al livello di KiCad 9, revisione e correzioni
 
 Utente: «spremiti un po il cervello e cerca di relaizzare uno s trumento al pari di Kicad ok ?», poi «fai un piano
 super dettagliato ok? poi scatena tutti gli agenti esperti che ti servono ok? popi però fai un acontrollo
@@ -110,7 +110,7 @@ PARZIALI RIMASTI, dichiarati: SILK_MIN 0.10 senza fonte verificata (nessun acces
 convenzione non verificata, la KLC 0.12 resta il predefinito); `_toggle_footprint_draw_tool` e `_fp_draw_buttons` restano
 come API per test/script, documentati; asse della quota ortogonale dentro il riquadro = lato lungo (KiCad tiene
 l'orientamento precedente, qui senza stato).
-SUITE FINALE VERDE (08/11 notte, codice fermo, dopo N1): A 7523 passati 9 saltati 19 sottotest, B 4839 passati 4 saltati = 12362 passati, 13 saltati, 19 sottotest. FATTO, NON committato (attende OK dell'utente).
+SUITE FINALE VERDE (08/11 notte, codice fermo, dopo N1): A 7523 passati 9 saltati 19 sottotest, B 4839 passati 4 saltati = 12362 passati, 13 saltati, 19 sottotest. Commit 8bee44f (utente: «poi se riesci fai il pacchetto nuovo e quand ohai finito spegni il pc», preso come OK al commit; NON pushato, NON mergiato). Poi pacchetto locale (build-installer, nessuna release) e spegnimento del PC chiesto dall'utente. Decisioni del coordinatore ancora DA CONFERMARE dall'utente (elencate sopra).
 DECISIONI DEL COORDINATORE (da confermare all'utente nel rapporto): E con piu' pad selezionati apre il primo pad come il
 simbolo apre il primo pin; le quote prendono lo spessore del layer come ogni altro disegno (M13); X/Y di disegni e pad nel
 pannello E nel dialog dei disegni nel riferimento dell'origine di disegno con Y in alto, come il dialog del pad e la riga

@@ -261,7 +261,12 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 11918 passed,
+is 12362 passed,
+13 skipped and 19 subtests (2026-11-08, branch `FOOTPRINT-ADVANCE`, commit `8bee44f`, halves 7523/9/19 and 4839/4:
+KiCad-grade drawing tools in both canvases — ToolGrid with Select, live Properties panel, object snap with typed
+markers, free/90/45 line modes on Shift+Space, KLC per-layer widths, polygon, Bezier, text box, radial/centre/leader
+dimensions measured against kicad-cli 10, plus the fixes of a six-reviewer adversarial review, see
+docs/footprint-drawing-kicad-plan.md and HANDOFF.md 08/11; before that, 11918 passed,
 13 skipped and 19 subtests (2026-11-07, branch `FOOTPRINT-ADVANCE`, commit `4e977b1`, halves 7118/9/19 and 4800/4:
 reference image under the footprint preview — calibrated photo centred on the body, image file with scale, offset,
 opacity, two-click calibration, relative paths; footprint priority 3 closed; before that, 11909 passed,
