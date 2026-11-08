@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from math import floor, hypot, isfinite
 from typing import Iterator, Optional, Tuple
 
-from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, Pad,
+from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, Pad,
                               courtyard_corners, fab_reference_text, require_kicad_reach,
                               validate_pad_number)
 from ..core.output_names import validate_output_name
@@ -723,7 +723,7 @@ def build_pin_header(params: PinHeaderParams) -> Footprint:
     # clearance is never below the margin.
     courtyard_start, courtyard_end = courtyard_corners((min_x - m, min_y - m), (max_x + m, max_y + m))
     fp.add_graphic(FpRect(
-        start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05,
+        start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=COURTYARD_WIDTH_MM,
     ))
     # KLC F5.2 reference on F.Fab, centred on the body outline when one is
     # declared, otherwise on the pin field the silkscreen frames.

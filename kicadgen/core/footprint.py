@@ -24,8 +24,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Tuple
 
+from .draw_constraints import polygon_has_area
 from .drawing_transform import bounds_centre, mirror_points_x, rotate_points_90
-from .kicad_text import kicad_centre_from_corner, kicad_centre_to_corner
+from .footprint_layers import default_width, drawable_layers, layer as draw_layer
+from .kicad_text import (KICAD_PEN_CLAMP_RATIO, kicad_advance_units, kicad_centre_from_corner,
+                         kicad_centre_to_corner, kicad_text_width)
 from .sexpr import YES, SExpr, Symbol, bare, sx
 from ..services.messages import tx
 
@@ -62,10 +65,16 @@ FOOTPRINT_ATTRIBUTE_FLAGS = ("board_only", "exclude_from_pos_files", "exclude_fr
 #: Silkscreen stroke width, mm (KLC F5.1 recommends 0.12 mm).
 SILK_WIDTH_MM = 0.12
 
+#: Courtyard stroke width, mm (KLC F5.3: 0.05 mm), read from the layer
+#: table `footprint_layers.LAYERS` so the generators and the table agree.
+COURTYARD_WIDTH_MM = draw_layer("F.CrtYd").width_mm
+
 #: Stroke width, mm, of a written dimension (KiCad's default dimension line).
 USER_DIMENSION_WIDTH_MM = 0.1
 #: Text height, mm, of a written dimension's value.
 USER_DIMENSION_TEXT_MM = 1.0
+#: Stroke thickness, mm, of a written dimension's value text.
+DIMENSION_TEXT_THICKNESS_MM = 0.15
 #: How far, mm, each extension line of a dimension runs BEYOND the dimension
 #: line (KiCad's default `extension_height`, pcb_dimension.cpp). Written in
 #: the style node and used by the ink of the checks and the preview, so the
@@ -597,35 +606,331 @@ def dimension_ink_segments(start: Point, end: Point, height: float, axis: str = 
         angle = math.radians(DIMENSION_ARROW_ANGLE_DEG)
         cos_a, sin_a = math.cos(angle), math.sin(angle)
         for (px, py), (tx_, ty_) in ((c1, (-dx, -dy)), (c2, (dx, dy))):
-            # The two strokes of an outward arrowhead at this end.
+            # The two strokes of an outward arrowhead at this end: the
+            # tangent turned by +angle and by -angle (s flips the sine).
             for s in (1.0, -1.0):
-                ax = tx_ * cos_a - s * ty_ * sin_a
-                ay = tx_ * sin_a + s * ty_ * cos_a
+                ax = tx_ * cos_a - ty_ * s * sin_a
+                ay = tx_ * s * sin_a + ty_ * cos_a
                 segments.append(((px, py), (px - ax * DIMENSION_ARROW_LENGTH_MM, py - ay * DIMENSION_ARROW_LENGTH_MM)))
     return segments
 
 
-def dimension_label_pose(start: Point, end: Point, height: float, text_size: float, axis: str = "") -> tuple:
-    """@brief Where KiCad puts a dimension's value: beyond the crossbar on the height side, along the line.
+def dimension_label_pose(start: Point, end: Point, height: float, text_size: float, axis: str = "",
+                         thickness: float = DIMENSION_TEXT_THICKNESS_MM) -> tuple:
+    """@brief Where KiCad puts an aligned/orthogonal dimension's value: beside the crossbar middle, upright.
 
     @param start First measured point, mm.
     @param end Second measured point, mm.
     @param height Signed distance of the crossbar from the points, mm.
     @param text_size Text height, mm.
     @param axis "" aligned; "x" / "y" orthogonal.
-    @return ((x, y), angle_deg): the text centre, one text height past the
-        crossbar middle on the side of `height`, and the KiCad angle of the
+    @param thickness Written text stroke thickness, mm (its clamped pen is
+        part of the offset).
+    @return ((x, y), angle_deg): the text centre and the KiCad angle of the
         text (counter-clockwise, kept upright: read left to right or bottom
-        to top), as `text_position_mode 0` with `keep_text_aligned`.
+        to top), as KiCad recomputes them on load for `text_position_mode 0`
+        (outside) with `keep_text_aligned` (`PCB_DIM_ALIGNED::updateText`,
+        which the orthogonal type also ends in): the crossbar middle moved
+        by text size + pen perpendicular to the crossbar, towards -y (up the
+        page) for any non-vertical crossbar and towards -x for a vertical
+        one, WHATEVER the sign of `height`: a positive height on a rightward
+        line puts the text between the crossbar and the measured points.
+    @note Verified with kicad-cli 10.0 `fp upgrade`, which rewrites the
+        gr_text position (2026-11-08): (0,0)->(4,0) height 1 -> (2, -0.15);
+        (0,0)->(0,4) height 1 -> (-2.15, 2); (0,0)->(3,4) height 2 ->
+        (0.82, 2.51); orthogonal (1,4)->(0,0) along Y height 2 -> (1.85, 2).
     """
     (c1, c2) = dimension_crossbar(start, end, height, axis)
-    ux, uy = dimension_offset_direction(start, end, axis)
-    sign = 1.0 if float(height) >= 0 else -1.0
-    centre = ((c1[0] + c2[0]) / 2 + ux * sign * text_size, (c1[1] + c2[1]) / 2 + uy * sign * text_size)
+    hx, hy = (c2[0] - c1[0]) / 2.0, (c2[1] - c1[1]) / 2.0
+    # KiCad turns the half crossbar a quarter turn (RotatePoint, Y down:
+    # +90 maps (x, y) to (y, -x), -90 to (-y, x)): +90 when it runs right,
+    # -90 when it runs left, and for a vertical one by the sign of -y.
+    if hx == 0.0:
+        quarter = 1.0 if hy < 0 else -1.0
+    else:
+        quarter = 1.0 if hx > 0 else -1.0
+    px, py = (hy, -hx) if quarter > 0 else (-hy, hx)
+    distance = float(text_size) + dimension_text_pen(text_size, thickness)
+    norm = math.hypot(px, py)
+    if norm > 0.0:
+        px, py = px / norm * distance, py / norm * distance
+    centre = (c1[0] + hx + px, c1[1] + hy + py)
     angle = math.degrees(math.atan2(-(c2[1] - c1[1]), c2[0] - c1[0])) % 360.0
     if 90.0 < angle <= 270.0:
         angle = (angle + 180.0) % 360.0
     return (centre, angle)
+
+
+#: Dimension types a drawing record's ``dtype`` may name, as KiCad's
+#: `(type ...)` tokens. A record without ``dtype`` is the type written before
+#: the field existed: aligned, or orthogonal when it carries ``axis``.
+DIMENSION_TYPES = ("aligned", "orthogonal", "radial", "center", "leader")
+#: Default distance, mm, from the rim point of a radial dimension to its
+#: knee: KiCad's own default (`PCB_DIM_RADIAL` constructor: three arrow lengths).
+DIMENSION_RADIAL_LEADER_MM = 3 * DIMENSION_ARROW_LENGTH_MM
+#: Length, mm, of the horizontal shelf a radial or leader dimension draws
+#: from its knee to the edge of its text box. A placement default of the
+#: drawing (KiCad takes the text position from a click; this program
+#: derives it), chosen as one arrowhead length so the shelf reads as part of
+#: the arrow; not a measurement.
+DIMENSION_SHELF_MM = DIMENSION_ARROW_LENGTH_MM
+#: Text frame of a leader, record value -> KiCad's `text_frame` number
+#: (`DIM_TEXT_BORDER`: NONE 0, RECTANGLE 1, CIRCLE 2).
+LEADER_FRAMES = {"none": 0, "rect": 1, "circle": 2}
+#: Height factor of KiCad's stroke-font text box: `EDA_TEXT::GetTextBox`
+#: (KiCad 10 eda_text.cpp) adds ``KiROUND(extents.y * 0.17)`` («fudgeFactor»)
+#: to the height of a stroke-font text.
+_STROKE_TEXT_BOX_HEIGHT_FACTOR = 1.17
+#: Pen widths, in effective text pens, that KiCad's stroke font adds to both
+#: extents of a one-line text box (`FONT::StringBoundaryLimits`). Measured
+#: with kicad-cli 10.0 `fp export svg` on leader frames (2026-11-08): the box
+#: is exactly (size + 3 x pen) x 1.17 high for sizes 0.5-2.0 mm and pens
+#: 0.05-0.25 x size, any text, and its width carries the same 3 x pen.
+_STROKE_TEXT_BOX_PENS = 3.0
+#: Width, in text sizes, that a non-empty stroke text box lacks against the
+#: summed glyph advances (the spacing after the last glyph is not ink).
+#: Same kicad-cli 10.0 measurement, 32 texts from «.» to «R 2.50 mm» at
+#: sizes 1 and 2 mm, residue below 0.0001 mm; an empty text has no glyph and
+#: no such spacing (its box is 3 x pen wide).
+_STROKE_TEXT_BOX_TRAIL = 0.2
+
+
+def _unit(dx: float, dy: float) -> Optional[Point]:
+    """Unit vector of (dx, dy), None for a null vector."""
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return None
+    return (dx / length, dy / length)
+
+
+def _arrow_strokes(tip: Point, direction: Point) -> list:
+    """The two strokes of a KiCad arrowhead at `tip`, running from it along `direction`.
+
+    Each stroke is `DIMENSION_ARROW_LENGTH_MM` long and turned by
+    +-`DIMENSION_ARROW_ANGLE_DEG` from `direction` (pcb_dimension.cpp
+    `drawAnArrow`).
+    """
+    unit = _unit(float(direction[0]), float(direction[1]))
+    if unit is None:
+        return []
+    ux, uy = unit
+    angle = math.radians(DIMENSION_ARROW_ANGLE_DEG)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    x, y = float(tip[0]), float(tip[1])
+    strokes = []
+    for s in (1.0, -1.0):
+        # `direction` turned by +angle and by -angle (s flips the sine).
+        ax = ux * cos_a - uy * s * sin_a
+        ay = ux * s * sin_a + uy * cos_a
+        strokes.append(((x, y), (x + ax * DIMENSION_ARROW_LENGTH_MM, y + ay * DIMENSION_ARROW_LENGTH_MM)))
+    return strokes
+
+
+def dimension_text_half_box(text: str, text_size: float,
+                            thickness: float = DIMENSION_TEXT_THICKNESS_MM) -> Point:
+    """@brief Half width and half height, mm, of the box KiCad gives a one-line dimension text.
+
+    @param text The text as KiCad shows it.
+    @param text_size Text height, mm.
+    @param thickness Text stroke thickness, mm.
+    @return (half width, half height) of `EDA_TEXT::GetTextBox` for a stroke
+        font: width = size x advances / 21 - `_STROKE_TEXT_BOX_TRAIL` x size
+        (that term only for a non-empty text) + `_STROKE_TEXT_BOX_PENS` x pen;
+        height = (size + `_STROKE_TEXT_BOX_PENS` x pen) x
+        `_STROKE_TEXT_BOX_HEIGHT_FACTOR`; pen = `thickness` clamped to
+        `KICAD_PEN_CLAMP_RATIO` x size, as KiCad draws it.
+    @note Matches kicad-cli 10.0's own frames within 0.0001 mm on the
+        measured range (see the constants); the preview, the checks and the
+        writer share it.
+    """
+    size = float(text_size)
+    pen = dimension_text_pen(size, thickness)
+    width = _STROKE_TEXT_BOX_PENS * pen
+    if text:
+        width += size * kicad_advance_units(text) / 21.0 - _STROKE_TEXT_BOX_TRAIL * size
+    height = (size + _STROKE_TEXT_BOX_PENS * pen) * _STROKE_TEXT_BOX_HEIGHT_FACTOR
+    return (max(width, 0.0) / 2.0, height / 2.0)
+
+
+def dimension_text_pen(text_size: float, thickness: float = DIMENSION_TEXT_THICKNESS_MM) -> float:
+    """@brief The pen KiCad draws a dimension text with, mm (`GetEffectiveTextPenWidth`).
+
+    @param text_size Text height, mm.
+    @param thickness Written stroke thickness, mm.
+    @return `thickness` clamped to `KICAD_PEN_CLAMP_RATIO` x `text_size`.
+    """
+    return min(float(thickness), KICAD_PEN_CLAMP_RATIO * float(text_size))
+
+
+def _shelf_sign(a: Point, b: Point) -> float:
+    """+1 when the shelf from `b` runs right (b right of or level with a), -1 when it runs left."""
+    return -1.0 if float(b[0]) - float(a[0]) < 0 else 1.0
+
+
+def radial_dimension_text(centre: Point, rim: Point) -> str:
+    """@brief The value a radial dimension shows: «R» and the radius in millimetres with two decimals.
+
+    @param centre Circle centre, mm.
+    @param rim A point on the circle, mm.
+    @return «R 1.50 mm» style text (prefix «R » as KiCad's default radial
+        dimension, units mm with suffix, precision 2).
+    """
+    return f"R {math.hypot(float(rim[0]) - float(centre[0]), float(rim[1]) - float(centre[1])):.2f} mm"
+
+
+def radial_dimension_knee(centre: Point, rim: Point, leader_length: float) -> Point:
+    """@brief The knee of a radial dimension: the rim point moved outwards by the leader length.
+
+    @param centre Circle centre, mm.
+    @param rim A point on the circle, mm.
+    @param leader_length Distance from the rim point to the knee, mm.
+    @return (x, y) mm (`PCB_DIM_RADIAL::GetKnee`); the rim point itself
+        when centre and rim coincide.
+    """
+    unit = _unit(float(rim[0]) - float(centre[0]), float(rim[1]) - float(centre[1])) or (0.0, 0.0)
+    return (float(rim[0]) + unit[0] * float(leader_length), float(rim[1]) + unit[1] * float(leader_length))
+
+
+def radial_dimension_label_pose(centre: Point, rim: Point, leader_length: float, text_size: float) -> tuple:
+    """@brief Where a radial dimension's value is written: beyond a horizontal shelf from the knee.
+
+    @param centre Circle centre, mm.
+    @param rim A point on the circle, mm.
+    @param leader_length Distance from the rim point to the knee, mm.
+    @param text_size Text height, mm.
+    @return ((x, y), 0.0): the text centre, on the knee's horizontal line,
+        `DIMENSION_SHELF_MM` plus the text box reach away from the knee on
+        the side the radius points to (right when it is vertical); the text
+        is horizontal (KiCad keeps a radial text aligned with the shelf).
+    @note KiCad clips the shelf at the text box inflated by half a text
+        height on each side (`PCB_DIM_RADIAL::updateGeometry`), so the shelf
+        it draws is `DIMENSION_SHELF_MM` long.
+    """
+    kx, ky = radial_dimension_knee(centre, rim, leader_length)
+    half_w, _half_h = dimension_text_half_box(radial_dimension_text(centre, rim), text_size)
+    reach = half_w + float(text_size) / 2.0
+    sign = _shelf_sign(centre, rim)
+    return ((kx + sign * (DIMENSION_SHELF_MM + reach), ky), 0.0)
+
+
+def radial_dimension_ink(centre: Point, rim: Point, leader_length: float, text_size: float) -> list:
+    """@brief Every stroke KiCad draws for a radial dimension, mm.
+
+    @param centre Circle centre, mm.
+    @param rim A point on the circle, mm.
+    @param leader_length Distance from the rim point to the knee, mm.
+    @param text_size Text height, mm (fixes nothing here but is kept in the
+        signature of every dimension ink for symmetry with the label pose).
+    @return ((x0, y0), (x1, y1)) segments: the centre cross (two axis-aligned
+        strokes of +-`DIMENSION_ARROW_LENGTH_MM`), the leader from the rim
+        point to the knee, the shelf to the text box, and the arrowhead at
+        the rim point pointing at the circle (`PCB_DIM_RADIAL::updateGeometry`).
+    """
+    cx, cy = float(centre[0]), float(centre[1])
+    arm = DIMENSION_ARROW_LENGTH_MM
+    knee = radial_dimension_knee(centre, rim, leader_length)
+    rim = (float(rim[0]), float(rim[1]))
+    sign = _shelf_sign(centre, rim)
+    segments = [((cx, cy - arm), (cx, cy + arm)), ((cx - arm, cy), (cx + arm, cy))]
+    if knee != rim:
+        segments.append((rim, knee))
+    segments.append((knee, (knee[0] + sign * DIMENSION_SHELF_MM, knee[1])))
+    segments.extend(_arrow_strokes(rim, (rim[0] - cx, rim[1] - cy)))
+    return segments
+
+
+def center_dimension_ink(centre: Point, end: Point) -> list:
+    """@brief The two strokes of a centre mark, mm.
+
+    @param centre Marked centre, mm.
+    @param end End of one arm, mm: the arm length and its direction.
+    @return Two segments through the centre: centre -+ arm and centre -+ the
+        arm turned a quarter turn (`PCB_DIM_CENTER::updateGeometry`). A
+        centre mark has no text.
+    """
+    cx, cy = float(centre[0]), float(centre[1])
+    ax, ay = float(end[0]) - cx, float(end[1]) - cy
+    return [((cx - ax, cy - ay), (cx + ax, cy + ay)), ((cx - ay, cy + ax), (cx + ay, cy - ax))]
+
+
+def _leader_reach(text: str, text_size: float, frame: str) -> float:
+    """Horizontal distance, mm, from a leader text's centre to where KiCad clips its shelf."""
+    half_w, _half_h = dimension_text_half_box(text, text_size)
+    # KiCad inflates the text box by half a text size across
+    # (`PCB_DIM_LEADER::updateGeometry`); a circle frame's radius is that
+    # half width minus half the text pen.
+    frame_half_w = half_w + float(text_size) / 2.0
+    if frame == "circle":
+        return frame_half_w - dimension_text_pen(text_size) / 2.0
+    return frame_half_w
+
+
+def leader_dimension_label_pose(tip: Point, elbow: Point, text: str, text_size: float,
+                                frame: str = "none") -> tuple:
+    """@brief Where a leader's text is written: beyond a horizontal shelf from the elbow.
+
+    @param tip Arrow tip, mm.
+    @param elbow Elbow of the leader, mm.
+    @param text The free text of the leader ("" shows nothing).
+    @param text_size Text height, mm.
+    @param frame "none", "rect" or "circle" (`LEADER_FRAMES`).
+    @return ((x, y), 0.0): the text centre on the elbow's horizontal line,
+        `DIMENSION_SHELF_MM` plus the frame reach away from the elbow, on the
+        side away from the tip (right when the leader is vertical); the text
+        is horizontal.
+    """
+    sign = _shelf_sign(tip, elbow)
+    reach = _leader_reach(text, text_size, frame)
+    return ((float(elbow[0]) + sign * (DIMENSION_SHELF_MM + reach), float(elbow[1])), 0.0)
+
+
+def leader_dimension_frame_circle(tip: Point, elbow: Point, text: str, text_size: float,
+                                  frame: str = "none") -> Optional[tuple]:
+    """@brief The circle KiCad draws around a leader's text, or None.
+
+    @param tip Arrow tip, mm.
+    @param elbow Elbow of the leader, mm.
+    @param text The free text of the leader.
+    @param text_size Text height, mm.
+    @param frame "none", "rect" or "circle".
+    @return ((cx, cy), radius) mm for a circle frame around a non-empty text
+        (radius: half the inflated text box width minus half the text stroke,
+        `PCB_DIM_LEADER::updateGeometry`); None otherwise.
+    """
+    if frame != "circle" or not text:
+        return None
+    centre, _angle = leader_dimension_label_pose(tip, elbow, text, text_size, frame)
+    return (centre, _leader_reach(text, text_size, frame))
+
+
+def leader_dimension_ink(tip: Point, elbow: Point, text: str, text_size: float, frame: str = "none") -> list:
+    """@brief Every straight stroke KiCad draws for a leader, mm.
+
+    @param tip Arrow tip, mm.
+    @param elbow Elbow of the leader, mm.
+    @param text The free text of the leader.
+    @param text_size Text height, mm.
+    @param frame "none", "rect" or "circle".
+    @return Segments: tip to elbow, the arrowhead at the tip pointing at it,
+        the shelf from the elbow to the text frame, and the four sides of a
+        rectangle frame (the text box inflated by half a text size across
+        and by two text pens up and down, `PCB_DIM_LEADER::updateGeometry`)
+        around a non-empty text. A
+        circle frame is not a segment: `leader_dimension_frame_circle` gives it.
+    """
+    tip = (float(tip[0]), float(tip[1]))
+    elbow = (float(elbow[0]), float(elbow[1]))
+    sign = _shelf_sign(tip, elbow)
+    segments = [(tip, elbow)]
+    segments.extend(_arrow_strokes(tip, (elbow[0] - tip[0], elbow[1] - tip[1])))
+    segments.append((elbow, (elbow[0] + sign * DIMENSION_SHELF_MM, elbow[1])))
+    if frame == "rect" and text:
+        (x, y), _angle = leader_dimension_label_pose(tip, elbow, text, text_size, frame)
+        half_w, half_h = dimension_text_half_box(text, text_size)
+        hw, hh = half_w + float(text_size) / 2.0, half_h + 2.0 * dimension_text_pen(text_size)
+        corners = [(x - hw, y - hh), (x + hw, y - hh), (x + hw, y + hh), (x - hw, y + hh)]
+        segments.extend((corners[i], corners[(i + 1) % 4]) for i in range(4))
+    return segments
 
 
 @dataclass
@@ -643,6 +948,16 @@ class FpDimension:
     @param axis "" for an aligned dimension; "x" or "y" for an orthogonal
         one (`type orthogonal`, `orientation` 0 or 1) that measures |dX| or
         |dY| between the points, as a linear measure of the ruler does.
+    @param dtype "" (default) for the aligned/orthogonal dimension chosen by
+        `axis`, written exactly as before the field existed; "radial"
+        (`start` = circle centre, `end` = a rim point), "center" (`start` =
+        centre, `end` = end of one arm) or "leader" (`start` = arrow tip,
+        `end` = elbow). "aligned" and "orthogonal" are accepted as synonyms
+        of "" with the matching `axis`. `height` and `axis` apply only to
+        aligned/orthogonal.
+    @param leader_length Radial only: distance, mm, from the rim point to the knee.
+    @param text Leader only: the free text shown ("" shows nothing).
+    @param frame Leader only: "none", "rect" or "circle" (`LEADER_FRAMES`).
     """
 
     start: Point
@@ -652,6 +967,48 @@ class FpDimension:
     width: float = USER_DIMENSION_WIDTH_MM
     text_size: float = USER_DIMENSION_TEXT_MM
     axis: str = ""
+    dtype: str = ""
+    leader_length: float = DIMENSION_RADIAL_LEADER_MM
+    text: str = ""
+    frame: str = "none"
+
+    def kind(self) -> str:
+        """@brief The KiCad dimension type this item writes.
+
+        @return One of `DIMENSION_TYPES`: "orthogonal" for a legacy item
+            with an axis, "aligned" for one without, else `dtype`.
+        """
+        if self.dtype in ("", "aligned", "orthogonal"):
+            return "orthogonal" if self.axis else "aligned"
+        return self.dtype
+
+    def ink_segments(self) -> list:
+        """@brief Every straight stroke KiCad draws for this dimension, mm.
+
+        @return The segments of the type's one geometry function
+            (`dimension_ink_segments`, `radial_dimension_ink`,
+            `center_dimension_ink`, `leader_dimension_ink`); a leader's
+            circle frame comes from `frame_circle`.
+        """
+        kind = self.kind()
+        start, end = tuple(self.start), tuple(self.end)
+        if kind == "radial":
+            return radial_dimension_ink(start, end, self.leader_length, self.text_size)
+        if kind == "center":
+            return center_dimension_ink(start, end)
+        if kind == "leader":
+            return leader_dimension_ink(start, end, self.text, self.text_size, self.frame)
+        return dimension_ink_segments(start, end, self.height, self.axis)
+
+    def frame_circle(self) -> Optional[tuple]:
+        """@brief The circle around a leader's text, ((cx, cy), radius) mm, or None.
+
+        @return `leader_dimension_frame_circle` for a leader; None for every other type.
+        """
+        if self.kind() != "leader":
+            return None
+        return leader_dimension_frame_circle(tuple(self.start), tuple(self.end), self.text,
+                                             self.text_size, self.frame)
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this dimension to a KiCad S-expression.
@@ -661,13 +1018,22 @@ class FpDimension:
             placed as `dimension_label_pose` (KiCad recomputes it on load
             anyway), a millimetre format with two decimals and KiCad's
             default style (text outside the line, arrows and extension
-            overshoot from the shared constants).
-        @throws ValueError For coincident points (no direction to draw) or
-            an unknown axis.
+            overshoot from the shared constants). Radial, centre and leader
+            dimensions follow KiCad 10's writer
+            (`PCB_IO_KICAD_SEXPR::format(PCB_DIMENSION_BASE*)`): pts,
+            leader_length (radial), format (none for a centre mark), style,
+            then the gr_text (none for a centre mark).
+        @throws ValueError For coincident points (no direction to draw), an
+            unknown axis, type or leader frame.
         """
         if tuple(self.start) == tuple(self.end):
             raise ValueError(tx("Una quota richiede due punti distinti."))
-        if self.axis not in ("", "x", "y"):
+        if self.dtype not in ("",) + DIMENSION_TYPES:
+            raise ValueError(tx("Tipo di quota non valido: {dtype}", dtype=self.dtype))
+        if self.dtype in ("radial", "center", "leader"):
+            return self._typed_sexpr()
+        if self.axis not in ("", "x", "y") or (self.dtype == "aligned" and self.axis) \
+                or (self.dtype == "orthogonal" and not self.axis):
             raise ValueError(tx("Asse della quota non valido: {axis}", axis=self.axis))
         (tx_, ty_), angle = dimension_label_pose(self.start, self.end, self.height, self.text_size, self.axis)
         node = sx("dimension", sx("type", Symbol("orthogonal" if self.axis else "aligned")),
@@ -681,12 +1047,198 @@ class FpDimension:
         text.add(_at_node((round(tx_, 4), round(ty_, 4)), round(angle, 2)))
         text.add(sx("layer", self.layer))
         text.add(sx("uuid", _uuid()))
-        text.add(_text_effects(self.text_size, 0.15))
+        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM))
         node.add(text)
         node.add(sx("format", sx("units", 2), sx("units_format", 1), sx("precision", 2)))
         node.add(sx("style", sx("thickness", self.width), sx("arrow_length", DIMENSION_ARROW_LENGTH_MM),
                     sx("text_position_mode", 0), sx("extension_height", DIMENSION_EXTENSION_HEIGHT_MM),
                     sx("extension_offset", 0), Symbol("keep_text_aligned")))
+        return node
+
+    def _typed_sexpr(self) -> SExpr:
+        """The `dimension` node of a radial, centre or leader dimension, in KiCad 10's own order."""
+        kind = self.dtype
+        if kind == "radial" and not (math.isfinite(float(self.leader_length)) and float(self.leader_length) > 0):
+            raise ValueError(tx("Lunghezza del richiamo della quota non valida."))
+        if kind == "leader" and self.frame not in LEADER_FRAMES:
+            raise ValueError(tx("Cornice del richiamo non valida: {frame}", frame=self.frame))
+        start, end = tuple(self.start), tuple(self.end)
+        node = sx("dimension", sx("type", Symbol(kind)), sx("layer", self.layer), sx("uuid", _uuid()))
+        node.add(sx("pts", sx("xy", *start), sx("xy", *end)))
+        if kind == "radial":
+            node.add(sx("leader_length", self.leader_length))
+        if kind == "radial":
+            # Prefix «R », millimetres with the unit suffix: KiCad shows «R 1.50 mm».
+            node.add(sx("format", sx("prefix", "R "), sx("suffix", ""), sx("units", 2),
+                        sx("units_format", 1), sx("precision", 2)))
+        elif kind == "leader":
+            # The leader's text is KiCad's override value, shown without units.
+            node.add(sx("format", sx("prefix", ""), sx("suffix", ""), sx("units", 2),
+                        sx("units_format", 0), sx("precision", 2), sx("override_value", self.text)))
+        style = sx("style", sx("thickness", self.width), sx("arrow_length", DIMENSION_ARROW_LENGTH_MM),
+                   sx("text_position_mode", 0))
+        if kind == "leader":
+            style.add(sx("text_frame", LEADER_FRAMES[self.frame]))
+        style.add(sx("extension_offset", 0))
+        if kind == "radial":
+            style.add(sx("keep_text_aligned", YES))
+        node.add(style)
+        if kind == "center":
+            # A centre mark has no text (KiCad writes no format and no gr_text).
+            return node
+        if kind == "radial":
+            (tx_, ty_), angle = radial_dimension_label_pose(start, end, self.leader_length, self.text_size)
+            shown = radial_dimension_text(start, end)
+        else:
+            (tx_, ty_), angle = leader_dimension_label_pose(start, end, self.text, self.text_size, self.frame)
+            shown = self.text
+        text = sx("gr_text", shown)
+        text.add(_at_node((round(tx_, 4), round(ty_, 4)), round(angle, 2)))
+        text.add(sx("layer", self.layer))
+        text.add(sx("uuid", _uuid()))
+        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM))
+        node.add(text)
+        return node
+
+
+def bezier_point(control: Sequence[Point], t: float) -> Point:
+    """@brief A point of a cubic Bezier curve.
+
+    @param control The four control points (start, c1, c2, end), mm.
+    @param t Curve parameter, 0 at the start, 1 at the end.
+    @return (x, y) mm.
+    """
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = ((float(x), float(y)) for x, y in control)
+    u = 1.0 - t
+    a, b, c, d = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+    return (a * x0 + b * x1 + c * x2 + d * x3, a * y0 + b * y1 + c * y2 + d * y3)
+
+
+def bezier_points(control: Sequence[Point], segments: int) -> list:
+    """@brief Points along a cubic Bezier curve at evenly spaced parameters.
+
+    @param control The four control points, mm.
+    @param segments Number of segments (at least 1).
+    @return segments + 1 points from the start to the end.
+    """
+    count = max(1, int(segments))
+    return [bezier_point(control, i / count) for i in range(count + 1)]
+
+
+def bezier_bounds(control: Sequence[Point]) -> Tuple[float, float, float, float]:
+    """@brief Exact axis-aligned bounding box, mm, of a cubic Bezier curve.
+
+    @param control The four control points, mm.
+    @return (x_min, y_min, x_max, y_max) of the drawn curve: its ends plus
+        the points where dx/dt or dy/dt vanishes inside (0, 1), not the
+        control polygon (which only bounds it from outside).
+    """
+    pts = [(float(x), float(y)) for x, y in control]
+    params = [0.0, 1.0]
+    for axis in (0, 1):
+        p0, p1, p2, p3 = (p[axis] for p in pts)
+        # dB/dt / 3 = A t^2 + B t + C with a = p1 - p0, b = p2 - p1, c = p3 - p2.
+        a, b, c = p1 - p0, p2 - p1, p3 - p2
+        qa, qb, qc = a - 2 * b + c, 2 * (b - a), a
+        if abs(qa) < 1e-12:
+            if abs(qb) > 1e-12:
+                params.append(-qc / qb)
+        else:
+            disc = qb * qb - 4 * qa * qc
+            if disc >= 0:
+                root = math.sqrt(disc)
+                params.extend(((-qb + root) / (2 * qa), (-qb - root) / (2 * qa)))
+    points = [bezier_point(pts, t) for t in params if 0.0 <= t <= 1.0]
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+@dataclass
+class FpCurve:
+    """@brief Cubic Bezier curve on a footprint layer (fp_curve).
+
+    @param points The four control points in order: start, first control,
+        second control, end, mm (KiCad's `pts` of a BEZIER shape).
+    """
+
+    points: Sequence[Point]
+    layer: str
+    width: float = 0.12
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this curve to a KiCad S-expression.
+
+        @return The `fp_curve` node with its four `pts`, stroke, layer and a
+            fresh uuid, as KiCad 10 writes a footprint BEZIER shape (no fill).
+        @throws ValueError Without exactly four control points.
+        """
+        if len(self.points) != 4:
+            raise ValueError(tx("Una curva di Bézier richiede quattro punti."))
+        node = sx("fp_curve", sx("pts", *(sx("xy", x, y) for x, y in self.points)))
+        node.add(_stroke_node(self.width))
+        node.add(sx("layer", self.layer))
+        node.add(sx("uuid", _uuid()))
+        return node
+
+
+def textbox_margin(width: float, size: float) -> float:
+    """@brief KiCad's default inner margin of a text box, mm.
+
+    @param width Border stroke width, mm.
+    @param size Text height, mm.
+    @return Half the border stroke plus 0.75 text heights, rounded to 0.1 um
+        (`PCB_TEXTBOX::GetLegacyTextMargin`, the default of a new text box).
+    """
+    return round(float(width) / 2.0 + float(size) * 0.75, 4) + 0.0
+
+
+@dataclass
+class FpTextBox:
+    """@brief Text box on a footprint layer (fp_text_box): a rectangle with a text inside.
+
+    @param start One corner of the box, mm.
+    @param end The opposite corner, mm.
+    @param text The text (may hold newlines: a KiCad text box is multi-line).
+    @param layer KiCad layer.
+    @param size Text height, mm.
+    @param thickness Text stroke thickness, mm.
+    @param width Border stroke width, mm.
+    @param border True draws the rectangle's border, False only the text.
+    @param angle 0 or 90, degrees counter-clockwise: the text's angle;
+        written as ``(angle 90)`` only when non-zero, as KiCad does.
+    """
+
+    start: Point
+    end: Point
+    text: str
+    layer: str
+    size: float = 1.0
+    thickness: float = 0.15
+    width: float = 0.1
+    border: bool = True
+    angle: float = 0
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this text box to a KiCad S-expression.
+
+        @return The `fp_text_box` node in KiCad 10's order
+            (`PCB_IO_KICAD_SEXPR::format(PCB_TEXTBOX*)`): text, start, end,
+            margins (`textbox_margin` on the four sides), optional angle,
+            layer, uuid, effects (text justified left and top inside the
+            box), border, stroke, knockout no.
+        """
+        margin = textbox_margin(self.width, self.size)
+        node = sx("fp_text_box", self.text, sx("start", *self.start), sx("end", *self.end))
+        node.add(sx("margins", margin, margin, margin, margin))
+        if self.angle:
+            node.add(sx("angle", self.angle))
+        node.add(sx("layer", self.layer))
+        node.add(sx("uuid", _uuid()))
+        node.add(_text_effects(self.size, self.thickness, ("left", "top")))
+        node.add(sx("border", bare(bool(self.border))))
+        node.add(_stroke_node(self.width))
+        node.add(sx("knockout", bare(False)))
         return node
 
 
@@ -839,14 +1391,16 @@ def validate_text_positions(raw) -> dict:
 
 
 #: Layers a user drawing of the footprint preview may live on: printed
-#: silkscreen, assembly documentation, free comments. Copper and courtyard
-#: are deliberately excluded: they carry electrical and DRC meaning the
-#: preview must not let a free sketch change.
-USER_DRAW_LAYERS = ("F.SilkS", "F.Fab", "Cmts.User")
+#: silkscreen, assembly documentation, free comments and user drawings, the
+#: drawable layers of `footprint_layers.LAYERS` in table order. Copper and
+#: courtyard are deliberately excluded: they carry electrical and DRC
+#: meaning the preview must not let a free sketch change.
+USER_DRAW_LAYERS = tuple(entry.name for entry in drawable_layers())
 #: Drawing kinds a record may declare, with the exact point count each needs
-#: (0 means "two or more", the open polyline of the line tool).
+#: (0 means "two or more", the open polyline of the line tool). A "curve" is
+#: a cubic Bezier (start, c1, c2, end); a "textbox" is two opposite corners.
 USER_DRAW_KINDS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1,
-                   "dimension": 2}
+                   "dimension": 2, "curve": 4, "textbox": 2}
 #: Default distance, mm, of the dimension line from the measured points when
 #: a measure is exported as a dimension (the tool itself takes it from the
 #: third click): a placement default of the drawing, not a measurement.
@@ -858,8 +1412,23 @@ USER_DRAW_MIN_POINTS = {"line": 2, "polygon": 3}
 #: ``(fill yes)``); absent means an outline, as every record saved before
 #: 2026-11-06, so those files stay byte-identical.
 USER_DRAW_FILLABLE = ("polygon", "rectangle", "circle")
-#: Stroke width, mm, of a user drawing (KiCad's default silkscreen line).
+#: Stroke width, mm, of a user drawing record saved without ``width`` (KiCad's
+#: default silkscreen line). Kept under this name for the records and callers
+#: written before the per-layer table; a NEW drawing takes its layer's
+#: default from `user_draw_width`.
 USER_DRAW_WIDTH_MM = 0.12
+
+
+def user_draw_width(layer_name: str) -> float:
+    """@brief Default stroke width, mm, of a new user drawing on a layer.
+
+    @param layer_name KiCad layer name («F.Fab»).
+    @return The layer's default from `footprint_layers.LAYERS`: 0.12 mm on
+        F.SilkS (KLC F5.1), 0.10 mm on F.Fab (KLC F5.2) and on the user
+        layers (KiCad's «Other layers» default); the silkscreen width for a
+        layer not in the table.
+    """
+    return default_width(layer_name)
 #: Default text height of a user text, mm (KiCad's footprint text default).
 USER_DRAW_TEXT_MM = 1.0
 #: Value of a text record's ``anchor`` field when its point is the
@@ -970,6 +1539,22 @@ def arc_centre_representable(start: Point, mid: Point, end: Point) -> bool:
         math.isfinite(v) and abs(v) <= KICAD_COORD_LIMIT_MM for v in centre)
 
 
+#: Coordinate resolution, mm, of a stored drawing point (4 decimals).
+_STORED_POINT_RESOLUTION_MM = 1e-4
+
+
+def _polygon_has_area(points) -> bool:
+    """Whether polygon vertices enclose an area: the ONE shared rule, `draw_constraints.polygon_has_area`.
+
+    Some vertex must lie farther than one stored rounding unit from the line
+    through the two vertices farthest apart. A bow tie has area by this rule
+    (KiCad accepts self-intersecting outlines). The symbol editor applies the
+    same function, so both tabs refuse exactly the same polygons.
+    """
+    return polygon_has_area([(float(p[0]), float(p[1])) for p in points],
+                            resolution=_STORED_POINT_RESOLUTION_MM)
+
+
 def validate_footprint_drawings(raw) -> list:
     """@brief Keep the well-formed records of saved footprint user drawings.
 
@@ -991,6 +1576,19 @@ def validate_footprint_drawings(raw) -> list:
         (`arc_centre_representable`: collinear points, or nearly collinear
         ones whose centre falls outside `KICAD_COORD_LIMIT_MM`, are left
         out); anything else is left out, like a malformed pad override.
+        A ``curve`` needs four points not all equal. A ``textbox`` needs two
+        corners differing on both axes, a non-blank ``text`` (newlines
+        allowed), ``size``, an optional bool ``border`` (stored only when
+        False) and ``angle`` as a text's. A ``dimension`` may carry
+        ``dtype`` (`DIMENSION_TYPES`): absent, "aligned" or "orthogonal"
+        give the record saved before the field (dtype not stored, it must
+        agree with ``axis``); "radial" stores ``leader_length``, "center"
+        nothing more, "leader" ``text`` (may be empty) and ``frame`` when
+        not "none". A ``polygon`` must enclose an area (`_polygon_has_area`:
+        all-collinear or repeated vertices drop it; a self-intersecting one
+        is kept). A field of the wrong type (a list, a dict, a number where
+        a name is expected) drops the record. Keys a kind does not use are
+        dropped.
     @note Same contract style as `validate_text_positions`: loading never
         raises, it silently drops what it cannot trust.
     """
@@ -1003,6 +1601,10 @@ def validate_footprint_drawings(raw) -> list:
         kind = record.get("kind")
         layer = record.get("layer")
         points = record.get("points")
+        # A string check first: an unhashable value (a list, a dict) in a
+        # dict membership test would raise instead of dropping the record.
+        if not isinstance(kind, str) or not isinstance(layer, str):
+            continue
         if kind not in USER_DRAW_KINDS or layer not in USER_DRAW_LAYERS:
             continue
         if not isinstance(points, (list, tuple)):
@@ -1031,21 +1633,37 @@ def validate_footprint_drawings(raw) -> list:
             continue
         if fill and kind in USER_DRAW_FILLABLE:
             clean["fill"] = True
-        if kind == "polygon" and len({tuple(p) for p in clean_points}) < 3:
-            # Repeated vertices leave fewer than three distinct corners: no area.
+        if kind == "polygon" and not _polygon_has_area(clean_points):
+            # Repeated or collinear vertices enclose no area: KiCad would
+            # write a polygon that draws a line, or nothing.
             continue
         if kind == "dimension":
-            # Two distinct points and the signed distance of the dimension
-            # line from them (`offset`, KiCad's `height`): 0 lies on the points.
             if tuple(clean_points[0]) == tuple(clean_points[1]):
                 continue
+            dtype = record.get("dtype")
+            if dtype is not None and (not isinstance(dtype, str) or dtype not in DIMENSION_TYPES):
+                continue
+            if dtype in ("radial", "center", "leader"):
+                typed = _clean_typed_dimension(record, dtype)
+                if typed is None:
+                    continue
+                clean.update(typed)
+                result.append(clean)
+                continue
+            # Aligned/orthogonal: two distinct points and the signed distance
+            # of the dimension line from them (`offset`, KiCad's `height`): 0
+            # lies on the points. An explicit dtype must agree with `axis`
+            # and is not stored, so the record stays the one saved before
+            # the field existed.
             offset = record.get("offset", 0.0)
             if (isinstance(offset, bool) or not isinstance(offset, (int, float))
                     or not math.isfinite(offset) or abs(offset) > TEXT_POSITION_LIMIT_MM):
                 continue
             clean["offset"] = round(float(offset), 4) + 0.0
             axis = record.get("axis", "")
-            if axis not in ("", "x", "y"):
+            if not isinstance(axis, str) or axis not in ("", "x", "y"):
+                continue
+            if (dtype == "aligned" and axis) or (dtype == "orthogonal" and not axis):
                 continue
             if axis:
                 # Orthogonal: the measured coordinates must differ along the axis.
@@ -1062,7 +1680,7 @@ def validate_footprint_drawings(raw) -> list:
                     or not math.isfinite(size) or not 0 < size <= 50):
                 continue
             anchor = record.get("anchor")
-            if anchor is not None and anchor != USER_TEXT_ANCHOR:
+            if anchor is not None and (not isinstance(anchor, str) or anchor != USER_TEXT_ANCHOR):
                 continue
             angle = record.get("angle")
             if angle is not None:
@@ -1098,8 +1716,89 @@ def validate_footprint_drawings(raw) -> list:
             # cannot be stored. A large radius alone is a legitimate flat arc.
             if not arc_centre_representable(*clean_points):
                 continue
+        elif kind == "curve":
+            # Four control points that all coincide draw nothing.
+            if len(set(clean_points)) < 2:
+                continue
+        elif kind == "textbox":
+            box = _clean_textbox(record, clean_points)
+            if box is None:
+                continue
+            clean.update(box)
         result.append(clean)
     return result
+
+
+def _clean_angle(raw) -> Optional[int]:
+    """The 0/90 text angle of a record value, or None when it must drop the record (see `validate_footprint_drawings`)."""
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw % 90:
+        return None
+    angle = int(raw) % 180
+    return angle if angle in USER_TEXT_ANGLES else None
+
+
+def _clean_textbox(record: dict, points: list) -> Optional[dict]:
+    """The text fields of a text box record (text, size, border, angle), or None to drop it.
+
+    The corners must differ on both axes (a box with an area); the text is
+    non-blank (judged without surrounding white space), may hold newlines
+    but no carriage return, and is stored with only its trailing newlines
+    removed, so an indented first line keeps its indentation; the size is in
+    (0, 50] mm; ``border`` is a bool stored only when False (default True);
+    ``angle`` follows the text record's rule (0/90, stored only when 90).
+    """
+    if points[0][0] == points[1][0] or points[0][1] == points[1][1]:
+        return None
+    text = record.get("text")
+    if not isinstance(text, str) or not text.strip() or "\r" in text:
+        return None
+    size = record.get("size", USER_DRAW_TEXT_MM)
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or not 0 < size <= 50:
+        return None
+    border = record.get("border", True)
+    if not isinstance(border, bool):
+        return None
+    angle = _clean_angle(record.get("angle"))
+    if angle is None:
+        return None
+    clean = {"text": text.rstrip("\n"), "size": round(float(size), 4)}
+    if not border:
+        clean["border"] = False
+    if angle:
+        clean["angle"] = angle
+    return clean
+
+
+def _clean_typed_dimension(record: dict, dtype: str) -> Optional[dict]:
+    """The fields of a radial, centre or leader dimension record, or None to drop it.
+
+    radial: ``leader_length`` finite in (0, `TEXT_POSITION_LIMIT_MM`] mm,
+    default `DIMENSION_RADIAL_LEADER_MM`, always stored; centre: no field;
+    leader: ``text`` a string without line breaks (stripped, "" allowed:
+    KiCad then shows nothing), always stored, and ``frame`` one of
+    `LEADER_FRAMES`, stored only when not "none". ``offset`` and ``axis``
+    belong to aligned/orthogonal dimensions and are dropped.
+    """
+    clean = {"dtype": dtype}
+    if dtype == "radial":
+        length = record.get("leader_length", DIMENSION_RADIAL_LEADER_MM)
+        if (isinstance(length, bool) or not isinstance(length, (int, float)) or not math.isfinite(length)
+                or not 0 < length <= TEXT_POSITION_LIMIT_MM):
+            return None
+        clean["leader_length"] = round(float(length), 4) + 0.0
+    elif dtype == "leader":
+        text = record.get("text", "")
+        if not isinstance(text, str) or "\n" in text or "\r" in text:
+            return None
+        frame = record.get("frame", "none")
+        if not isinstance(frame, str) or frame not in LEADER_FRAMES:
+            return None
+        clean["text"] = text.strip()
+        if frame != "none":
+            clean["frame"] = frame
+    return clean
 
 
 def drawing_graphics(records) -> list:
@@ -1107,7 +1806,8 @@ def drawing_graphics(records) -> list:
 
     @param records Records in the shape `validate_footprint_drawings` returns
         (the caller validates; a malformed record here is a programming error).
-    @return Graphic items (FpLine/FpPoly/FpRect/FpCircle/FpArc/FpText) ready for
+    @return Graphic items (FpLine/FpPoly/FpRect/FpCircle/FpArc/FpText/
+        FpDimension/FpCurve/FpTextBox) ready for
         `Footprint.add_graphic`, in record order; a line record yields one
         FpLine per segment. Points are absolute footprint mm, drawn as-is.
     @note A text anchored at `USER_TEXT_ANCHOR` is written with
@@ -1129,7 +1829,18 @@ def drawing_graphics(records) -> list:
             items.append(FpPoly(points=points, layer=layer, width=width, fill=fill))
         elif kind == "dimension":
             items.append(FpDimension(start=points[0], end=points[1], height=record.get("offset", 0.0),
-                                     layer=layer, width=width, axis=record.get("axis", "")))
+                                     layer=layer, width=width, axis=record.get("axis", ""),
+                                     dtype=record.get("dtype", ""),
+                                     leader_length=record.get("leader_length", DIMENSION_RADIAL_LEADER_MM),
+                                     text=record.get("text", ""), frame=record.get("frame", "none")))
+        elif kind == "curve":
+            items.append(FpCurve(points=points, layer=layer, width=width))
+        elif kind == "textbox":
+            size = record.get("size", USER_DRAW_TEXT_MM)
+            # Text stroke 15 % of the height, the KLC ratio of every default text.
+            items.append(FpTextBox(start=points[0], end=points[1], text=record["text"], layer=layer,
+                                   size=size, thickness=round(float(size) * 0.15, 4), width=width,
+                                   border=record.get("border", True), angle=record.get("angle", 0)))
         elif kind == "rectangle":
             items.append(FpRect(start=points[0], end=points[1], layer=layer, width=width, fill=fill))
         elif kind == "circle":
@@ -1180,15 +1891,59 @@ def migrate_centred_text(record: dict, corner_offset: Point) -> dict:
     return clean
 
 
+def record_dimension(record: dict) -> "FpDimension":
+    """@brief The `FpDimension` a validated dimension record writes, for its geometry.
+
+    @param record A validated ``dimension`` record.
+    @return The item `drawing_graphics` builds for it; its `ink_segments`,
+        `frame_circle` and the type's label pose are what the writer, the
+        checks and the preview share.
+    """
+    points = [tuple(p) for p in record["points"]]
+    return FpDimension(start=points[0], end=points[1], height=record.get("offset", 0.0),
+                       layer=record["layer"], width=record.get("width", USER_DIMENSION_WIDTH_MM),
+                       axis=record.get("axis", ""), dtype=record.get("dtype", ""),
+                       leader_length=record.get("leader_length", DIMENSION_RADIAL_LEADER_MM),
+                       text=record.get("text", ""), frame=record.get("frame", "none"))
+
+
+def dimension_label(dimension: "FpDimension") -> Optional[tuple]:
+    """@brief Text and pose of a dimension's value as written, for every type.
+
+    @param dimension An `FpDimension`.
+    @return (text, (x, y), angle_deg) with (x, y) the text centre; None for
+        a centre mark (no text). The pose functions are the writer's own
+        (`dimension_label_pose`, `radial_dimension_label_pose`,
+        `leader_dimension_label_pose`).
+    """
+    kind = dimension.kind()
+    start, end = tuple(dimension.start), tuple(dimension.end)
+    if kind == "center":
+        return None
+    if kind == "radial":
+        centre, angle = radial_dimension_label_pose(start, end, dimension.leader_length, dimension.text_size)
+        return (radial_dimension_text(start, end), centre, angle)
+    if kind == "leader":
+        centre, angle = leader_dimension_label_pose(start, end, dimension.text, dimension.text_size,
+                                                    dimension.frame)
+        return (dimension.text, centre, angle)
+    centre, angle = dimension_label_pose(start, end, dimension.height, dimension.text_size, dimension.axis)
+    return (dimension_text(start, end, dimension.axis), centre, angle)
+
+
 def drawing_bounds(record: dict) -> Tuple[float, float, float, float]:
     """@brief Axis-aligned bounding box, mm, of what a shape record draws.
 
-    @param record A validated shape record (line, rectangle, circle or arc).
-    @return (x_min, y_min, x_max, y_max) mm, Y down: a line's and a
-        rectangle's points; a circle's centre +- radius; an arc's start and
+    @param record A validated shape record (line, rectangle, circle, arc,
+        polygon, curve, text box or dimension).
+    @return (x_min, y_min, x_max, y_max) mm, Y down: a line's, a
+        rectangle's and a text box's points; a circle's centre +- radius; an arc's start and
         end plus every quarter point (0, 90, 180, 270 degrees on its circle)
         the arc passes through, so the box is the drawn arc's, not its three
-        stored points'.
+        stored points'; a curve's exact box (`bezier_bounds`); an
+        aligned/orthogonal dimension's points and crossbar; a radial, centre
+        or leader dimension's points and every stroke of its ink (frame
+        included, text excluded).
     @note A text has no drawn box here: its geometry depends on the font
         (its anchor is its stored point).
     """
@@ -1198,10 +1953,21 @@ def drawing_bounds(record: dict) -> Tuple[float, float, float, float]:
         (cx, cy), (rx, ry) = points
         radius = math.hypot(rx - cx, ry - cy)
         points = [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+    elif kind == "dimension" and record.get("dtype") in ("radial", "center", "leader"):
+        # Everything KiCad draws but the text: crosses, leaders, shelves, frames.
+        dimension = record_dimension(record)
+        points = points + [p for segment in dimension.ink_segments() for p in segment]
+        circle = dimension.frame_circle()
+        if circle is not None:
+            (cx, cy), radius = circle
+            points += [(cx - radius, cy - radius), (cx + radius, cy + radius)]
     elif kind == "dimension":
         # The measured points and the dimension line beyond them.
         points = points + list(dimension_crossbar(points[0], points[1], record.get("offset", 0.0),
                                                   record.get("axis", "")))
+    elif kind == "curve":
+        x0, y0, x1, y1 = bezier_bounds(points)
+        points = [(x0, y0), (x1, y1)]
     elif kind == "arc":
         start, mid, end = points
         centre = _arc_centre(start, mid, end)
@@ -1230,11 +1996,18 @@ def drawing_centre(record: dict) -> Point:
 
     @param record A validated drawing record.
     @return A shape's `drawing_bounds` centre (computed by the shared
-        `drawing_transform.bounds_centre`); a text's anchor point.
+        `drawing_transform.bounds_centre`); a text's anchor point; the
+        circle centre of a radial dimension and the marked centre of a
+        centre mark (the first point: they turn about what they mark); the
+        centre of a leader's two stored points (its text side is derived
+        from them, so its ink box is not a fixed frame to turn about).
     """
-    if record["kind"] == "text":
+    if record["kind"] == "text" or (record["kind"] == "dimension"
+                                    and record.get("dtype") in ("radial", "center")):
         x, y = record["points"][0]
         return (float(x), float(y))
+    if record["kind"] == "dimension" and record.get("dtype") == "leader":
+        return bounds_centre(record["points"])
     x0, y0, x1, y1 = drawing_bounds(record)
     return bounds_centre([(x0, y0), (x1, y1)])
 
@@ -1250,7 +2023,11 @@ def turn_drawing(record: dict, counter_clockwise_on_screen: bool) -> dict:
         keeps its start/mid/end order. A text: its anchor stays and its
         ``angle`` toggles between 0 (no field) and 90, because a text is
         horizontal or vertical (`USER_TEXT_ANGLES`, taken modulo 180 as the
-        symbol editor's texts); both senses give the same toggle.
+        symbol editor's texts); both senses give the same toggle. A text
+        box: its corners turn about its centre (it stays axis aligned) and
+        its ``angle`` toggles like a text's. A radial, centre or leader
+        dimension: its two points turn about `drawing_centre`; its derived
+        parts (knee, shelf, text) follow from them.
     @note The caller validates the result (`validate_footprint_drawings`): a
         turned shape may leave `TEXT_POSITION_LIMIT_MM`.
     """
@@ -1263,11 +2040,22 @@ def turn_drawing(record: dict, counter_clockwise_on_screen: bool) -> dict:
             clean["angle"] = 90
         return clean
     clean["points"] = rotate_points_90(record["points"], drawing_centre(record), counter_clockwise_on_screen)
-    if record["kind"] == "dimension":
+    if record["kind"] == "textbox":
+        # The box turns about its centre and its text with it (0 <-> 90).
+        if record.get("angle", 0):
+            clean.pop("angle", None)
+        else:
+            clean["angle"] = 90
+    if _is_linear_dimension(record):
         _carry_dimension_offset(record, clean, lambda pts: rotate_points_90(
             pts, drawing_centre(record), counter_clockwise_on_screen),
             swap_axis=True)
     return clean
+
+
+def _is_linear_dimension(record: dict) -> bool:
+    """True for an aligned/orthogonal dimension record, the ones carrying an ``offset``."""
+    return record["kind"] == "dimension" and record.get("dtype") in (None, "", "aligned", "orthogonal")
 
 
 def _carry_dimension_offset(record: dict, clean: dict, transform, swap_axis: bool = False) -> None:
@@ -1300,14 +2088,17 @@ def mirror_drawing(record: dict) -> dict:
         (`drawing_transform.mirror_points_x`; an arc keeps its start/mid/end
         order, the mirrored three points define the mirrored arc); a text is
         returned unchanged (a copy): KiCad never mirrors text glyphs and its
-        anchor is the mirror's own axis point (plan decision C-M1).
+        anchor is the mirror's own axis point (plan decision C-M1). A text
+        box keeps its box (mirrored about its own centre) and its text
+        unmirrored; a curve's control points are mirrored; a leader's shelf
+        and text move to the side away from the mirrored tip.
     """
     clean = dict(record)
     clean["points"] = [list(p) for p in record["points"]]
     if record["kind"] == "text":
         return clean
     clean["points"] = mirror_points_x(record["points"], drawing_centre(record)[0])
-    if record["kind"] == "dimension":
+    if _is_linear_dimension(record):
         # A reflection flips the handedness of `dimension_normal`: the line
         # is carried as a point, so it lands on the mirrored side.
         axis_x = drawing_centre(record)[0]
@@ -1337,16 +2128,19 @@ def resize_drawing(record: dict, *, width: Optional[float] = None, height: Optio
     @param width New rectangle width, mm (None keeps it).
     @param height New rectangle height, mm (None keeps it).
     @param radius New circle radius, mm (None keeps it).
-    @return A new record. A rectangle keeps its centre and which corner is
+    @return A new record. A rectangle or a text box keeps its centre and which corner is
         stored first; a circle keeps its centre and the direction of its rim
-        point. Any other kind, or a size that does not apply to the kind, is
+        point, and so do a radial dimension (radius = centre to rim) and a
+        centre mark (radius = arm length). Any other kind, or a size that does not apply to the kind, is
         returned unchanged (a copy). A non-positive size gives a degenerate
         record the caller's validation refuses.
     """
     clean = dict(record)
     points = [[float(x), float(y)] for x, y in record["points"]]
     clean["points"] = [list(p) for p in record["points"]]
-    if record["kind"] == "rectangle" and (width is not None or height is not None):
+    radial = record["kind"] == "circle" or (record["kind"] == "dimension"
+                                            and record.get("dtype") in ("radial", "center"))
+    if record["kind"] in ("rectangle", "textbox") and (width is not None or height is not None):
         (x0, y0), (x1, y1) = points
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
         half_w = abs(x1 - x0) / 2.0 if width is None else float(width) / 2.0
@@ -1355,7 +2149,7 @@ def resize_drawing(record: dict, *, width: Optional[float] = None, height: Optio
         sign_y = 1.0 if y0 >= y1 else -1.0
         clean["points"] = [[round(cx + sign_x * half_w, 4) + 0.0, round(cy + sign_y * half_h, 4) + 0.0],
                            [round(cx - sign_x * half_w, 4) + 0.0, round(cy - sign_y * half_h, 4) + 0.0]]
-    elif record["kind"] == "circle" and radius is not None:
+    elif radial and radius is not None:
         (cx, cy), (rx, ry) = points
         old = math.hypot(rx - cx, ry - cy)
         ux, uy = ((rx - cx) / old, (ry - cy) / old) if old > 0 else (1.0, 0.0)
@@ -1742,9 +2536,34 @@ def text_grid_origin(footprint: "Footprint") -> Point:
 
 
 def _graphic_points(item) -> list:
-    """Points bounding a footprint graphic (circles by their radius); [] for texts."""
+    """Points bounding a footprint graphic (circles by their radius); [] for texts.
+
+    A dimension is bounded by what KiCad draws for it, not by its two
+    defining points: every ink stroke end (`FpDimension.ink_segments`), a
+    leader's frame circle and the corners of its value's text box (turned by
+    the text angle), so a Reference/Value placed from the envelope clears a
+    radial knee, a leader's shelf and a label beside the crossbar.
+    """
     if isinstance(item, FpText):
         return []
+    if isinstance(item, FpDimension):
+        points = [p for segment in item.ink_segments() for p in segment]
+        circle = item.frame_circle()
+        if circle is not None:
+            (cx, cy), r = circle
+            points += [(cx - r, cy - r), (cx + r, cy + r)]
+        label = dimension_label(item)
+        if label is not None and label[0]:
+            text, (lx, ly), angle = label
+            half_w, half_h = dimension_text_half_box(text, item.text_size)
+            # KiCad angles turn counter-clockwise on a Y-down page.
+            c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+            for ex, ey in ((-half_w, -half_h), (half_w, -half_h), (half_w, half_h), (-half_w, half_h)):
+                points.append((lx + ex * c + ey * s, ly - ex * s + ey * c))
+        return points
+    if isinstance(item, FpCurve):
+        x0, y0, x1, y1 = bezier_bounds(item.points)
+        return [(x0, y0), (x1, y1)]
     if isinstance(item, FpCircle):
         (cx, cy), r = item.center, abs(float(item.radius))
         return [(cx - r, cy - r), (cx + r, cy + r)]
@@ -1758,7 +2577,8 @@ def footprint_envelope(footprint: "Footprint") -> Optional[Tuple[float, float, f
     @param footprint Footprint whose pads and graphics are read.
     @return (min x, min y, max x, max y) of the pad copper (rotation and
         drill offset included) and of the graphics on TEXT_ENVELOPE_LAYERS (texts
-        excluded); None when there is neither, or a value is not finite.
+        excluded; a dimension counts with its whole ink, frame and value
+        text box); None when there is neither, or a value is not finite.
     @note Arcs are bounded by their three points, a slight underestimate
         that the text margin covers.
     """

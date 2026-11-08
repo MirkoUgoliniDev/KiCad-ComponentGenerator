@@ -134,9 +134,10 @@ def test_layer_submenu_lists_the_three_layers_with_the_current_checked(preview, 
     rows = open_menu(window, monkeypatch, 0)
     layer_row = next(row for row in rows if row[0] == "Layer")
     sub = layer_row[2]
+    # «Disegni utente» (Dwgs.User) added 2026-11-08 (plan B6): every drawable layer of the table.
     assert [r[0] for r in sub] == ["Serigrafia (stampata)", "Fabbricazione (documentazione)",
-                                   "Commenti (solo progetto)"]
-    assert [r[3] for r in sub] == [False, True, False]
+                                   "Commenti (solo progetto)", "Disegni utente (solo progetto)"]
+    assert [r[3] for r in sub] == [False, True, False, False]
 
 
 def test_choosing_a_layer_moves_the_drawing(preview, monkeypatch):
@@ -431,7 +432,10 @@ def test_m1_a_real_edit_in_the_same_dialog_still_commits(preview, monkeypatch, d
     after = window.footprint_drawings[0]
     assert len(window._fp_drawings_undo) == depth + 1
     assert after["width"] == before["width"] and after["layer"] == before["layer"]
-    assert after["points"] == [[x, round(y + 1.0, 4)] for x, y in before["points"]]
+    # CONTRACT CHANGED (contract 16, review M10): the dialog's Y is measured
+    # from the drawing origin with Y UP, so +1 moves the drawing 1 mm up the
+    # screen, i.e. -1 mm in footprint coordinates (Y down).
+    assert after["points"] == [[x, round(y - 1.0, 4)] for x, y in before["points"]]
 
 
 def test_l1_a_text_has_no_stroke_width_row(preview, monkeypatch):

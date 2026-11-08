@@ -7,11 +7,11 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QPoint, QPointF, Qt
 from PyQt6.QtWidgets import QGraphicsPathItem, QGraphicsSimpleTextItem
 
 from kicadgen.generators import symbol_glyphs as g
-from kicadgen.gui.symbol_tab import SymbolTab, SCENE_UNITS_PER_MM
+from kicadgen.gui.symbol_tab import PANEL_COLUMN_WIDTH, SymbolTab, SCENE_UNITS_PER_MM
 
 
 def _tab():
@@ -144,7 +144,10 @@ def test_the_palette_is_a_vertical_panel_with_collapsible_groups(qapp):
     try:
         groups = grouped_catalogue()
         assert [key for key, _label, _glyphs in groups][:2] == ['relay', 'passive']
-        assert tab.palette.width() <= 160, 'narrow panel on the left'
+        # CONTRACT CHANGED 2026-11-08 (plan docs/footprint-drawing-kicad-plan.md C3):
+        # the right column holds the palette AND the «Proprietà» panel, 200 px wide
+        # (was <= 160 for the palette alone).
+        assert tab.palette.width() == PANEL_COLUMN_WIDTH == 200, 'narrow column beside the canvas'
         first = groups[0][0]
         assert tab.palette.group_is_open(first)
         buttons_of_first = [action for action in tab.palette_actions()
@@ -257,7 +260,9 @@ def test_the_palette_sits_on_the_right_of_the_canvas(qapp):
     tab.show()
     qapp.processEvents()
     try:
-        assert tab.palette.geometry().left() > tab.view.geometry().left()
+        # The palette now sits in the right column (palette + «Proprietà», plan C3):
+        # its own geometry is relative to that column, so compare in tab coordinates.
+        assert tab.palette.mapTo(tab, QPoint(0, 0)).x() > tab.view.mapTo(tab, QPoint(0, 0)).x() + tab.view.width() - 1
     finally:
         tab.deleteLater()
 
@@ -738,14 +743,19 @@ def test_the_drawing_section_offers_the_five_shape_tools(qapp):
     try:
         assert 'drawing' in tab.palette._groups
         keys = [key for key, _l, _k, _c in g.SHAPE_TOOLS]
-        assert all(key in tab.palette._tool_actions for key in keys)
+        # CONTRACT CHANGED 2026-11-08 (plan A1): the shape tools are buttons of the
+        # shared `ToolGrid` (Select first), no longer QActions of `_tool_actions`.
+        grid = tab.palette.tool_grid
+        assert grid.keys() == [''] + keys, 'Select first, then every shape tool'
         assert all(action.data() not in keys for action in tab.palette_actions()), 'tools are not elements'
-        tab.palette._tool_actions['rectangle'].trigger()
+        grid.button('rectangle').click()
         assert tab.shape_tool() == 'rectangle' and tab.view.wiring
-        assert tab.palette._tool_actions['rectangle'].isChecked()
+        assert grid.active_key() == 'rectangle' and grid.button('rectangle').isChecked()
         assert not tab.wire_button.defaultAction().isChecked(), 'one tool at a time'
         tab.start_wire()
-        assert tab.shape_tool() is None and not tab.palette._tool_actions['rectangle'].isChecked()
+        assert tab.shape_tool() is None and grid.active_key() is None and not grid.button('rectangle').isChecked()
+        # Review S4 (2026-11-08): the wire is a tool outside the grid, Select is not shown either.
+        assert grid.outside_active() and not grid.button('').isChecked()
         tab.finish_wire(False)
     finally:
         tab.deleteLater()
@@ -898,7 +908,7 @@ def test_the_text_tool_asks_its_content_and_the_text_is_drawn_edited_and_exporte
         body_text = serialize_symbol('Board', pins, body=body, graphics=tab.graphics())
         # KiCad stores symbol text angles in tenths of a degree (B1, 2026-10-13).
         assert '(text "OUT" (at 2.54 5.08 900) (effects (font (size 2.54 2.54)) (justify left bottom)))' in body_text
-        assert tab.palette._tool_actions['text'].data() == 'text'
+        assert tab.palette.tool_grid.button('text') is not None
     finally:
         tab.deleteLater()
 

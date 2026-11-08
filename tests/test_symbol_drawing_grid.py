@@ -81,6 +81,10 @@ def test_shape_points_snap_to_the_fine_grid_while_pins_keep_the_pin_grid(qapp):
         # the fine node 7.62 = 30 x 0.254; 5.2 falls on 5.08 = 20 x 0.254.
         # The negative case for the pin grid: 7.3 mm snaps to 7.366 (29 x
         # 0.254), a value the pin grid could never produce.
+        # Object snap off (2026-11-08, plan B3): this test pins the GRID rounding;
+        # with the toggle on, the pin end at 7.62 mm within the 10 px magnet
+        # would win (tests/test_symbol_drawing_kicad.py covers that rule).
+        tab.set_object_snap(False)
         tab.start_shape('rectangle')
         tab.add_shape_point(0, 0)
         tab.add_shape_point(7.3, 2.6)

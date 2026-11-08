@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol, Sequence
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, QPoint, QPointF, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PyQt6.QtWidgets import QApplication, QGraphicsView
 
 #: Reason given to `ClickToolHost.tool_refused` when a click adds nothing
@@ -38,6 +38,41 @@ REFUSED_COINCIDENT = "coincident"
 #: Largest number of nested cancellations `PointCollector.arm` performs when a
 #: host keeps arming tools from inside `tool_finished` (a runaway-host guard).
 _MAX_ARM_CANCELS = 8
+
+#: Angle modes of the drawing tools (plan `docs/footprint-drawing-kicad-plan.md`,
+#: A6). The collector only STORES the mode and hands it to the host's
+#: `tool_snap_ex`; the geometry and the ONE cycling order live in
+#: `kicadgen/core/draw_constraints.py` (pure Python, no Qt): the constants here
+#: are its plain string values, so the two modules cannot drift apart.
+from ..core.draw_constraints import ANGLE_MODES as _CORE_ANGLE_MODES, AngleMode as _AngleMode
+
+ANGLE_FREE = _AngleMode.FREE.value
+#: Segments constrained to horizontal, vertical and the two diagonals.
+ANGLE_45 = _AngleMode.DEG45.value
+#: Segments constrained to horizontal and vertical.
+ANGLE_90 = _AngleMode.DEG90.value
+#: Shift+Space cycling order (free -> 90 -> 45, KiCad's declared order), as plain strings.
+ANGLE_MODES = tuple(mode.value for mode in _CORE_ANGLE_MODES)
+
+
+def next_angle_mode(mode: str) -> str:
+    """@brief The angle mode that follows `mode` in the Shift+Space cycle.
+
+    @param mode One of `ANGLE_MODES` (an equal string, e.g. a `str` enum value, is accepted).
+    @return The next mode, wrapping from the last back to `ANGLE_FREE`; an
+        unknown mode returns `ANGLE_FREE` (never raises: called from a key slot).
+    """
+    try:
+        index = ANGLE_MODES.index(str(getattr(mode, "value", mode)))
+    except ValueError:
+        return ANGLE_FREE
+    return ANGLE_MODES[(index + 1) % len(ANGLE_MODES)]
+
+
+def _angle_mode_value(mode) -> str | None:
+    """The plain string of a known angle mode (accepts a `str` enum), None when unknown."""
+    value = getattr(mode, "value", mode)
+    return value if isinstance(value, str) and value in ANGLE_MODES else None
 
 
 @dataclass(frozen=True)
@@ -53,12 +88,18 @@ class ToolSpec:
     count: int = 0
     #: > 0: with at least this many points, a click equal to the FIRST point
     #: finishes the tool (the symbol polygon closes at 4). 0 = no close rule.
+    #: The threshold counts the closing click: a polygon of at least three
+    #: vertices (plan D1) uses close_after=4; 3 would close on A, B, A.
     close_after: int = 0
     #: True: the host's `tool_finished` may return True to stay armed after a
     #: committed shape; this field documents the intent and is read by hosts.
     persistent: bool = False
     #: True: a press-move-release drag adds the release point (router rule).
     drag_adds_release_point: bool = True
+    #: Fewest points a committed shape needs (a polygon: 3). Informative only:
+    #: the collector never refuses a finish because of it; the host reads it in
+    #: `tool_finished` and applies its own outcome (toast, status line). 0 = no rule.
+    min_points: int = 0
 
 
 class ClickToolHost(Protocol):
@@ -71,6 +112,17 @@ class ClickToolHost(Protocol):
         `tool_snap` and SHOULD NOT call `hover`/`click` from inside
         `tool_finished`/`tool_disarmed` (the collector is idle there and
         both are ignored). The per-method notes list the exact rules.
+    @note OPTIONAL callbacks (looked up with `getattr`, absent = ignored, so a
+        host written before them keeps working unchanged): `tool_snap_ex`
+        replaces `tool_snap` when defined and also receives the angle mode;
+        `tool_angle_mode_changed` is told when the angle mode changes. Both
+        are documented on `ClickToolHostEx`.
+    @note SHIFT = FREE (plan contract 3): `free` True means no object snap and
+        no angle constraint; the grid rounding still applies when the host's
+        grid snap is on. The router computes `free`, the host applies it.
+    @note A third OPTIONAL callback, `tool_snap_kind`, lets the preview be
+        re-emitted when only the kind of the snapped hot point changed (see
+        `ClickToolHostEx.tool_snap_kind`).
     """
 
     def tool_snap(self, spec: ToolSpec, point: QPointF, free: bool, points: Sequence) -> list:
@@ -78,7 +130,8 @@ class ClickToolHost(Protocol):
 
         @param spec The armed tool.
         @param point Raw scene position of the click or of the hover.
-        @param free True when the user asked for an unconstrained point (Shift).
+        @param free True when the user asked for an unconstrained point (Shift):
+            no object snap and no angle constraint, grid rounding kept.
         @param points Snapshot (tuple) of the points collected so far.
         @return The points to append: 0 (refused: nothing is added, the click
             reports `tool_refused` unless it was `quiet`), 1, or 2 (the wire's
@@ -161,6 +214,51 @@ class ClickToolHost(Protocol):
         """
 
 
+class ClickToolHostEx(ClickToolHost, Protocol):
+    """@brief The OPTIONAL callbacks a host may add to `ClickToolHost` (angle mode).
+
+    @note The collector finds them with `getattr`: a host may implement either,
+        both or none. Same re-entrancy rules as `tool_snap`.
+    """
+
+    def tool_snap_ex(self, spec: ToolSpec, point: QPointF, free: bool, points: Sequence,
+                     angle_mode: str) -> list:
+        """@brief `tool_snap` with the angle mode: called INSTEAD of `tool_snap` when defined.
+
+        @param spec The armed tool.
+        @param point Raw scene position of the click or of the hover.
+        @param free True for Shift: no object snap and no angle constraint
+            (the angle mode must then be ignored), grid rounding kept.
+        @param points Snapshot (tuple) of the points collected so far.
+        @param angle_mode One of `ANGLE_MODES`: the constraint the host applies
+            to the segment from the last collected point to `point` (geometry in
+            `kicadgen/core/draw_constraints.py`); the collector applies none.
+        @return As `tool_snap`.
+        """
+
+    def tool_angle_mode_changed(self, mode: str) -> None:
+        """@brief The angle mode changed (Shift+Space or `set_angle_mode`).
+
+        @param mode The new mode, one of `ANGLE_MODES`.
+        @note Called only on an actual change, before the preview is
+            recomputed with the new mode; also called while no tool is armed
+            (a panel control). The host may update its control and save it.
+        """
+
+    def tool_snap_kind(self):
+        """@brief The kind of hot point the LAST `tool_snap`/`tool_snap_ex` call snapped to.
+
+        @return Any hashable value the host uses to draw its typed snap marker
+            (e.g. "pad", "endpoint"), or None for a plain grid point.
+        @note Read by the collector right after each hover snap and compared,
+            together with the preview points, with the previous hover: a
+            pointer whose snapped point stays the same while its kind changes
+            (a grid node that coincides with a pad centre, the object snap
+            switched on or off) still gets `tool_preview_changed`, so the
+            marker is never missing or stale. Must be cheap and pure.
+        """
+
+
 class PointCollector(QObject):
     """@brief The click-tool state machine: idle -> collecting -> idle, one `tool_finished` per tool run.
 
@@ -185,6 +283,15 @@ class PointCollector(QObject):
         #: Incremented at every arm, end and stay, so a callback that changed
         #: the state under a running click/hover is detected.
         self._epoch = 0
+        #: Angle mode handed to `tool_snap_ex`; kept across tools (one per tab).
+        self._angle_mode = ANGLE_FREE
+        #: (point, free) of the last hover with a point, so Backspace and an
+        #: angle-mode change can refresh the ghost without a mouse move; None
+        #: after a leave, an arm or an end.
+        self._last_hover: tuple | None = None
+        #: The host's `tool_snap_kind()` after the snap that produced `_preview`
+        #: (None without the optional callback); compared with the points.
+        self._preview_kind = None
 
     @property
     def armed(self) -> bool:
@@ -218,6 +325,126 @@ class PointCollector(QObject):
         """
         return list(self._preview)
 
+    @property
+    def angle_mode(self) -> str:
+        """@brief The angle mode handed to the host's `tool_snap_ex`.
+
+        @return One of `ANGLE_MODES`; `ANGLE_FREE` for a new collector.
+        """
+        return self._angle_mode
+
+    def set_angle_mode(self, mode) -> bool:
+        """@brief Set the angle mode (panel control, saved configuration, Shift+Space).
+
+        @param mode One of `ANGLE_MODES` (a `str` enum with such a value is accepted).
+        @return True when the mode changed; False when it was already set or is
+            unknown (nothing done, never raises).
+        @note On a change: store, then the optional host callback
+            `tool_angle_mode_changed(mode)`, then, while armed and with a
+            remembered hover, the preview is recomputed for that hover (emitted
+            only when it differs). Works while idle too (no preview then).
+        """
+        value = _angle_mode_value(mode)
+        if value is None or value == self._angle_mode:
+            return False
+        self._angle_mode = value
+        callback = getattr(self._host, "tool_angle_mode_changed", None)
+        if callable(callback):
+            callback(value)
+        if self._armed and self._last_hover is not None:
+            point, free = self._last_hover
+            self.hover(point, free=free)
+        return True
+
+    def cycle_angle_mode(self) -> str:
+        """@brief Move to the next angle mode of `ANGLE_MODES` (Shift+Space).
+
+        @return The new mode (see `set_angle_mode` for the callbacks).
+        """
+        self.set_angle_mode(next_angle_mode(self._angle_mode))
+        return self._angle_mode
+
+    @property
+    def hover_point(self):
+        """@brief The scene point of the last remembered hover, or None.
+
+        @return The point given to the last `hover` with a point; None after a
+            leave, an arm or the end of a tool (a click keeps it: the pointer
+            is still there).
+        """
+        return None if self._last_hover is None else self._last_hover[0]
+
+    @property
+    def hover_free(self) -> bool | None:
+        """@brief The Shift state (`free`) of the last remembered hover, or None without one.
+
+        @return True / False, or None when no hover is remembered.
+        """
+        return None if self._last_hover is None else self._last_hover[1]
+
+    def rehover(self, free: bool) -> bool:
+        """@brief Re-run the last hover with another Shift state (Shift pressed or released, no mouse move).
+
+        @param free The new Shift state.
+        @return True when the hover was re-run; False when idle, with no
+            remembered hover, or when `free` equals the remembered state
+            (a held Shift's key auto-repeat costs nothing).
+        @note The preview follows the usual emission rule of `hover`, so the
+            ghost and the snap marker show what a click WITH the new Shift
+            state would add.
+        """
+        if not self._armed or self._last_hover is None or self._last_hover[1] == bool(free):
+            return False
+        self.hover(self._last_hover[0], free=bool(free))
+        return True
+
+    def _snap_kind(self):
+        """The host's optional `tool_snap_kind()` (None when the host has none)."""
+        callback = getattr(self._host, "tool_snap_kind", None)
+        return callback() if callable(callback) else None
+
+    def _snap(self, spec: ToolSpec, point, free: bool) -> list:
+        """The host's snap: `tool_snap_ex` with the angle mode when defined, else `tool_snap`."""
+        snap_ex = getattr(self._host, "tool_snap_ex", None)
+        if callable(snap_ex):
+            return list(snap_ex(spec, point, bool(free), tuple(self._points), self._angle_mode))
+        return list(self._host.tool_snap(spec, point, bool(free), tuple(self._points)))
+
+    def undo_last(self) -> bool:
+        """@brief Remove the last collected point (Backspace, KiCad behaviour).
+
+        @return True when a point was removed; False, with nothing done and the
+            tool still armed, when idle or with no point collected.
+        @note Exactly ONE point is removed, even when the click that added it
+            appended two (the wire's corner). Order: pop ->
+            `tool_points_changed` -> the preview is recomputed from the last
+            remembered hover and `tool_preview_changed` is emitted ONCE
+            whatever its value (the old ghost was drawn from the removed
+            point), with [] when no hover is remembered. A host that ended or
+            re-armed the tool inside `tool_points_changed` stops the rest.
+        """
+        if not self._armed or not self._points:
+            return False
+        spec, epoch = self._spec, self._epoch
+        self._points.pop()
+        self._preview = []
+        self._preview_kind = None
+        self._host.tool_points_changed(spec, list(self._points))
+        if not self._armed or self._epoch != epoch:
+            return True
+        new: list = []
+        kind = None
+        if self._last_hover is not None:
+            point, free = self._last_hover
+            new = self._snap(spec, point, free)
+            if not self._armed or self._epoch != epoch:
+                return True
+            kind = self._snap_kind()
+        self._preview = new
+        self._preview_kind = kind
+        self._host.tool_preview_changed(spec, list(self._points), list(new))
+        return True
+
     def arm(self, spec: ToolSpec) -> bool:
         """@brief Arm a tool, ending any armed tool first.
 
@@ -241,6 +468,8 @@ class PointCollector(QObject):
         self._spec = spec
         self._points = []
         self._preview = []
+        self._preview_kind = None
+        self._last_hover = None
         self._epoch += 1
         epoch = self._epoch
         self._host.tool_armed(spec)
@@ -270,7 +499,7 @@ class PointCollector(QObject):
         if not self._armed:
             return False
         spec, epoch = self._spec, self._epoch
-        appended = list(self._host.tool_snap(spec, point, bool(free), tuple(self._points)))
+        appended = self._snap(spec, point, free)
         if not self._armed or self._epoch != epoch:
             return False
         if not appended or (self._points and appended[0] == self._points[-1]):
@@ -279,6 +508,7 @@ class PointCollector(QObject):
             return False
         self._points.extend(appended)
         self._preview = []
+        self._preview_kind = None
         total = len(self._points)
         if spec.count and total >= spec.count:
             self.finish(True)
@@ -318,25 +548,34 @@ class PointCollector(QObject):
         @param point Raw scene position, or None to clear (the pointer left).
         @param free True for an unconstrained point (Shift).
         @note With a point, `tool_preview_changed` is emitted only when the
-            new preview differs (`!=`) from the previous one. With None
+            new preview differs (`!=`) from the previous one, or when the
+            host's optional `tool_snap_kind()` differs from the previous
+            hover's (same point, other marker). With None
             (leave) it is ALWAYS emitted, once per call, with an empty
             preview, whatever was stored: a click resets the stored preview
             silently, and the host may still show a ghost or snap dot that
             only this emission clears (hosts treat clearing as idempotent).
-            No-op when idle.
+            No-op when idle. A point is remembered with its `free` flag (and
+            None forgets it) so `undo_last` and `set_angle_mode` can refresh
+            the ghost without a mouse move.
         """
         if not self._armed:
             return
         spec, epoch = self._spec, self._epoch
         if point is None:
             self._preview = []
+            self._preview_kind = None
+            self._last_hover = None
             self._host.tool_preview_changed(spec, list(self._points), [])
             return
-        new = list(self._host.tool_snap(spec, point, bool(free), tuple(self._points)))
+        self._last_hover = (point, bool(free))
+        new = self._snap(spec, point, free)
         if not self._armed or self._epoch != epoch:
             return
-        if new != self._preview:
+        kind = self._snap_kind()
+        if new != self._preview or kind != self._preview_kind:
             self._preview = new
+            self._preview_kind = kind
             self._host.tool_preview_changed(spec, list(self._points), list(new))
 
     def _end(self, commit: bool, *, allow_stay: bool) -> bool:
@@ -344,6 +583,8 @@ class PointCollector(QObject):
         spec, points = self._spec, self._points
         self._points = []
         self._preview = []
+        self._preview_kind = None
+        self._last_hover = None
         self._armed = False
         self._spec = None
         self._epoch += 1
@@ -380,6 +621,10 @@ class ClickToolRouter:
         Shift is read from the event's `modifiers()` for press, double click
         and move; `hover_at` (a hover with no event, e.g. after a key) reads
         `QApplication.keyboardModifiers()`, as the symbol editor does today.
+        Pressing or releasing Shift WITHOUT moving the mouse re-runs the last
+        hover with the new state (`modifiers_changed`, called by `key` for
+        the press and by `key_release` for the release), so the ghost and
+        the next click always agree.
     """
 
     def __init__(self, view: QGraphicsView, collector: PointCollector, camera,
@@ -620,11 +865,23 @@ class ClickToolRouter:
         @note Escape asks `camera.pan_cancel()` first: a cancelled pan takes
             the key and the tool survives (the CrossCursor is set again,
             the pan reset it); otherwise the tool is cancelled. Return and
-            Enter (keypad too) finish with commit. Nothing else is handled.
+            Enter (keypad too) finish with commit. Backspace removes the last
+            collected point (`collector.undo_last`) and is consumed even with
+            no point left, so the view never turns it into a deletion of the
+            selection while drawing; the tool stays armed. Shift+Space cycles
+            the angle mode (`collector.cycle_angle_mode`); the ghost is then
+            recomputed with the REAL modifiers, i.e. free while Shift is held,
+            and shows the new constraint once Shift is released
+            (`key_release`). Shift alone re-runs the last hover as free
+            (`modifiers_changed`) and is NOT consumed (returns False), so the
+            view's own Shift handling keeps working. Nothing else is handled.
         """
         if not self._usable() or not self._collector.armed:
             return False
         key = event.key()
+        if key == Qt.Key.Key_Shift:
+            self.modifiers_changed(True)
+            return False
         if key == Qt.Key.Key_Escape:
             if self._camera.pan_cancel():
                 self._cursor_set = False
@@ -638,7 +895,93 @@ class ClickToolRouter:
             self._sync_cursor()
             event.accept()
             return True
+        if key == Qt.Key.Key_Backspace:
+            self._collector.undo_last()
+            self._sync_cursor()
+            event.accept()
+            return True
+        if key == Qt.Key.Key_Space and self._shift(event):
+            self._collector.cycle_angle_mode()
+            self._sync_cursor()
+            event.accept()
+            return True
         return False
+
+    def key_release(self, event) -> bool:
+        """@brief A key release; views call it from `keyReleaseEvent`.
+
+        @param event The `QKeyEvent`.
+        @return Always False: nothing is consumed, the view handles the
+            release as before.
+        @note A Shift release re-runs the last hover with the constraint back
+            on (`modifiers_changed(False)`): after Shift+Space the ghost then
+            shows the NEW angle mode without a mouse move. Auto-repeat
+            releases are ignored.
+        """
+        if not self._usable() or not self._collector.armed:
+            return False
+        if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
+            self.modifiers_changed(False)
+        return False
+
+    def modifiers_changed(self, event_or_modifiers) -> bool:
+        """@brief The Shift state changed with no mouse move: re-run the last hover with it.
+
+        @param event_or_modifiers The new state as a bool (free), a
+            `Qt.KeyboardModifier` combination, a `QKeyEvent` of the Shift key
+            itself (press = Shift held, release = Shift up, whatever the
+            platform reports in `modifiers()` for that event), or any other
+            event with `modifiers()`.
+        @return True when the preview was recomputed; False when idle, during
+            a pan, with no remembered hover, or when the state did not change.
+        @note The remembered hover is the collector's (a click keeps it: the
+            pointer is still there), so a click followed by Shift updates the
+            ghost of the next segment. The router's own hover memory is
+            updated too, so a following `hover_at` at the same point does not
+            snap twice.
+        """
+        if not self._usable() or not self._collector.armed or self._camera.pan_active:
+            return False
+        free = self._free_from(event_or_modifiers)
+        point = self._collector.hover_point
+        if point is None or not self._collector.rehover(free):
+            return False
+        self._last_hover = (point, free)
+        self._sync_cursor()
+        return True
+
+    @staticmethod
+    def _free_from(value) -> bool:
+        """The Shift state carried by a bool, a modifier combination or an event."""
+        if isinstance(value, bool):
+            return value
+        key = getattr(value, "key", None)
+        if callable(key) and key() == Qt.Key.Key_Shift:
+            return value.type() == QEvent.Type.KeyPress
+        modifiers = getattr(value, "modifiers", None)
+        if callable(modifiers):
+            value = modifiers()
+        try:
+            return bool(value & Qt.KeyboardModifier.ShiftModifier)
+        except TypeError:
+            return bool(value)
+
+    @property
+    def angle_mode(self) -> str:
+        """@brief The collector's angle mode (one of `ANGLE_MODES`).
+
+        @return The mode handed to the host's `tool_snap_ex`.
+        """
+        return self._collector.angle_mode
+
+    def set_angle_mode(self, mode) -> bool:
+        """@brief Set the angle mode from the panel control or the saved configuration, armed or not.
+
+        @param mode One of `ANGLE_MODES`.
+        @return True when it changed (the host's optional `tool_angle_mode_changed`
+            was called once); False when unchanged or unknown.
+        """
+        return self._collector.set_angle_mode(mode)
 
     def cancel_tool(self) -> bool:
         """@brief Cancel the armed tool as Escape does: forget the press record first, then `collector.cancel()`.

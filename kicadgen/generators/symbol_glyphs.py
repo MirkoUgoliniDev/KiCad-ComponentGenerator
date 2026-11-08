@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ..core.draw_constraints import polygon_has_area
 from ..core.footprint import arc_centre_representable
 from ..core.sexpr import format_number, quote
 from ..services.messages import tx
@@ -1358,9 +1359,13 @@ SHAPE_SOURCE = "shape"
 #: user closes the polyline). The click order is what the stored primitive
 #: expects, except the arc (start, end, then a point between them: the mid
 #: point is the third click because it is easier to aim once the ends are
-#: fixed) and the circle (centre, then a point on the rim).
+#: fixed) and the circle (centre, then a point on the rim). The polygon
+#: (plan docs/footprint-drawing-kicad-plan.md, D1) is open-ended like the line
+#: and is stored as a CLOSED polyline (first point repeated), exactly like a
+#: line closed on its first point (click-tools plan, C12).
 SHAPE_TOOLS = (
     ("line", "Linea", "polyline", 0),
+    ("polygon", "Poligono", "polyline", 0),
     ("rectangle", "Rettangolo", "rectangle", 2),
     ("circle", "Cerchio", "circle", 2),
     ("arc", "Arco", "arc", 3),
@@ -1391,6 +1396,9 @@ def shape_tool_glyphs() -> list[Glyph]:
     """
     sample = {
         "line": Primitive("polyline", ((0, 0), (2.54, 2.54), (5.08, 1.27)), 0.0, "none", SHAPE_WIDTH_MM),
+        # A closed five-sided outline: the first point repeated closes it.
+        "polygon": Primitive("polyline", ((0.0, 1.27), (2.54, 3.81), (5.08, 2.54), (4.445, 0.0), (1.27, 0.0),
+                                          (0.0, 1.27)), 0.0, "none", SHAPE_WIDTH_MM),
         "rectangle": Primitive("rectangle", ((0, 0), (5.08, 3.81)), 0.0, "none", SHAPE_WIDTH_MM),
         "circle": Primitive("circle", ((2.54, 2.54),), 2.54, "none", SHAPE_WIDTH_MM),
         "arc": Primitive("arc", ((0, 0), (2.54, 2.54), (5.08, 0)), 0.0, "none", SHAPE_WIDTH_MM),
@@ -1398,6 +1406,36 @@ def shape_tool_glyphs() -> list[Glyph]:
         "text": Primitive("text", ((0, 0),), text="T", size=5.08),
     }
     return [Glyph(key, label, (sample[key],), (), "tool") for key, label, _kind, _count in SHAPE_TOOLS]
+
+
+def _closed_polygon(points: list) -> Optional[list]:
+    """@brief The vertices of a polygon tool, closed by repeating the first one.
+
+    @param points Clicked points, (x, y) rounded to 0.0001 mm; the last may
+        already repeat the first (the click that closed the polygon).
+    @return The vertices followed by the first one again, or None when they
+        are fewer than three distinct points or enclose no area (all on one
+        line within the storage rounding, `polygon_has_area`): such a
+        "polygon" is a line, and the line tool draws it. A self-intersecting
+        outline (a bow tie) has area and is kept, as KiCad keeps it.
+    @note Consecutive repeats are dropped first, so a closing click on the
+        first vertex and a double click on the last one count once.
+    """
+    vertices: list = []
+    for point in points:
+        if not vertices or point != vertices[-1]:
+            vertices.append(point)
+    if len(vertices) > 1 and vertices[-1] == vertices[0]:
+        vertices.pop()
+    if len(set(vertices)) < 3:
+        return None
+    # The shared rule of both tabs (`polygon_has_area`): a vertex farther than the
+    # 0.0001 mm storage rounding from the longest chord proves an area. A signed
+    # shoelace sum refused a bow tie (its lobes cancel) and accepted collinear
+    # points that rounding pushed off the line; KiCad keeps a bow tie.
+    if not polygon_has_area(vertices):
+        return None
+    return vertices + [vertices[0]]
 
 
 def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: str = "none",
@@ -1417,7 +1455,8 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
         the shape's bounds (so turning and mirroring act about the shape
         itself) and whose points are relative to it; None when the clicks
         do not make the shape (too few, a circle of zero radius, a
-        rectangle without area, an arc through a repeated point, a text
+        rectangle without area, an arc through a repeated point, a polygon
+        of fewer than three distinct vertices or without area, a text
         that is blank or not on one line or of zero or negative size).
     @note A text's origin is the clicked point and that point is the
         BOTTOM-LEFT corner of the text (user, 2026-10-14): `justify` "left",
@@ -1431,6 +1470,10 @@ def shape_instance(key: str, clicks: list, width: float = SHAPE_WIDTH_MM, fill: 
         return None
     _key, label, kind, count = tool
     points = [(round(float(x), 4), round(float(y), 4)) for x, y in clicks]
+    if key == "polygon":
+        points = _closed_polygon(points)
+        if points is None:
+            return None
     if count and len(points) != count or not count and len(points) < 2:
         return None
     radius = 0.0

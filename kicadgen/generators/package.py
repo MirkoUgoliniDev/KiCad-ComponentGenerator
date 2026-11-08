@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 
-from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpLine,
+from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpLine,
                               FpRect, Pad, courtyard_corners, fab_reference_text)
 from ..core.package_geometry import ROUNDRECT_RRATIO, PackageGeometry, pad_outline
 from ..core.silk import (PIN_ONE_UNMARKED_NOTE, clip_segment, keepout_box, marker_ink_box, pin_one,
@@ -214,7 +214,7 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         # so the clearance is never below the margin.
         courtyard_start, courtyard_end = courtyard_corners((extent[0] - m, extent[1] - m),
                                                            (extent[2] + m, extent[3] + m))
-        fp.add_graphic(FpRect(start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=0.05))
+        fp.add_graphic(FpRect(start=courtyard_start, end=courtyard_end, layer="F.CrtYd", width=COURTYARD_WIDTH_MM))
         # KLC F5.2 reference on F.Fab: centred on the body (the footprint
         # origin) when its size is known, otherwise on the pad field.
         if geometry.body_length_mm and geometry.body_width_mm:

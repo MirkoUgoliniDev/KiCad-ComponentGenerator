@@ -101,7 +101,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto di partenza del filo",
    "wire_button": true,
    "wire_points": [],
    "wiring": true
@@ -157,7 +157,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto successivo del filo; doppio clic o Invio per finire, Backspace toglie l'ultimo punto",
    "wire_button": true,
    "wire_points": [
     [
@@ -225,7 +225,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto successivo del filo; doppio clic o Invio per finire, Backspace toglie l'ultimo punto",
    "wire_button": true,
    "wire_points": [
     [
@@ -286,7 +286,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto successivo del filo; doppio clic o Invio per finire, Backspace toglie l'ultimo punto",
    "wire_button": true,
    "wire_points": [
     [
@@ -351,7 +351,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto successivo del filo; doppio clic o Invio per finire, Backspace toglie l'ultimo punto",
    "wire_button": true,
    "wire_points": [
     [
@@ -420,7 +420,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": null,
-   "status": "Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.",
+   "status": "Clic sul punto successivo del filo; doppio clic o Invio per finire, Backspace toglie l'ultimo punto",
    "wire_button": true,
    "wire_points": [
     [
@@ -1031,7 +1031,7 @@
    "placing": false,
    "shape_points": [],
    "shape_tool": "rectangle",
-   "status": "Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare",
+   "status": "Clic sul primo angolo",
    "wire_button": false,
    "wire_points": [],
    "wiring": true
@@ -1953,7 +1953,7 @@
     ]
    ],
    "shape_tool": "rectangle",
-   "status": "Forma inserita. Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare Esc per lasciare lo strumento.",
+   "status": "Clic sull'angolo opposto",
    "wire_button": false,
    "wire_points": [],
    "wiring": true

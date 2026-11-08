@@ -55,7 +55,9 @@ from ..generators.pin_header import (PinHeaderParams, build_pin_header, default_
 from ..generators.package import build_package
 from ..generators.package import preview_grid_origin as package_preview_grid_origin
 from ..generators.castellated_module import preview_grid_origin as castellated_preview_grid_origin
-from ..core.footprint import text_grid_origin
+from ..core.footprint import text_grid_origin, user_draw_width
+from ..core.footprint_layers import LAYERS as _FOOTPRINT_LAYER_TABLE, drawable_layers as _drawable_fp_layers
+from ..core import object_snap as _object_snap
 from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, PackageGeometry,
                                      package_from_mapping)
 from ..services import component_types, recent_projects
@@ -1305,12 +1307,77 @@ def _arc_path(start, mid, end):
     return path
 
 
+def _curve_path(control, mm_to_px):
+    """@brief Scene path of a cubic Bezier curve, sampled as the footprint checks sample it.
+
+    @param control The four control points (start, c1, c2, end), mm.
+    @param mm_to_px Scene px per mm.
+    @return A QPainterPath through `core.footprint.bezier_points` with the
+        segment count of `services.footprint_checks.bezier_segments`, so the
+        preview, the checks and the writer's curve agree.
+    """
+    from ..core.footprint import bezier_points
+    from ..services.footprint_checks import bezier_segments
+    pts = bezier_points(control, bezier_segments(control))
+    path = QPainterPath()
+    path.moveTo(pts[0][0] * mm_to_px, pts[0][1] * mm_to_px)
+    for x, y in pts[1:]:
+        path.lineTo(x * mm_to_px, y * mm_to_px)
+    return path
+
+
+#: Pitch between the lines of a text box, in text heights: KiCad's stroke
+#: font interline (`KIFONT::STROKE_FONT`, about 1.62 x the glyph size). An
+#: approximation for the preview only; the file stores the text, KiCad lays it out.
+_FP_TEXTBOX_LINE_PITCH = 1.62
+
+
+def _wrap_textbox_line(line: str, size: float, column_mm: float, thickness: float) -> list:
+    """@brief Break one line of a text box into the lines KiCad draws, at word boundaries.
+
+    @param line One line of the text (no newline), as KiCad shows it (unescaped).
+    @param size Text height, mm.
+    @param column_mm Inner width of the box, mm (box side minus twice the margin).
+    @param thickness Text stroke thickness, mm.
+    @return The drawn lines, at least one. A word never breaks: a word wider
+        than the column stays on its own line, as in KiCad.
+    @note Follows KiCad's `FONT::LinebreakText`: the line is cut into words
+        and single spaces; a word that would make the line wider than
+        ``column - thickness`` after pending spaces starts a new line, and
+        the spaces at the break are dropped. Widths are the stroke-font
+        advances of `core.kicad_text` (`kicad_advance_units`, 1/21 of the
+        size per unit), an approximation of KiCad's measured run widths for
+        the preview only.
+    """
+    from ..core.kicad_text import kicad_advance_units
+    if not line:
+        return [line]
+    space = float(size) * kicad_advance_units(" ") / 21.0
+    limit = float(column_mm) - float(thickness)
+    lines, current, width, pending = [], "", 0.0, ""
+    for token in (t for t in re.split(r"( )", line) if t):
+        if token == " ":
+            pending += token
+            continue
+        word = float(size) * kicad_advance_units(token) / 21.0
+        if current and width + len(pending) * space + word > limit and pending:
+            lines.append(current)
+            current, width, pending = "", 0.0, ""
+        current += pending + token
+        width += len(pending) * space + word
+        pending = ""
+    # Spaces left after the last word are never drawn (KiCad appends them only before a word).
+    lines.append(current)
+    return lines
+
+
 #: Layer colours of the 2D footprint preview: the default theme of KiCad's
 #: PCB editor (user, 2026-10-13: «i colori predefiniti di KiCad»), so a
 #: drawing looks the same here and in KiCad. One table for the generated
 #: silkscreen, the user drawings, the layer selector and the ghost shape.
-KICAD_LAYER_COLORS = {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc",
-                      "F.CrtYd": "#ff26e2"}
+#: Read from the per-layer defaults table `core.footprint_layers.LAYERS`
+#: (plan D5): a colour is changed there only.
+KICAD_LAYER_COLORS = {entry.name: entry.colour for entry in _FOOTPRINT_LAYER_TABLE}
 
 
 def _layer_color(layer: str) -> str:
@@ -1334,6 +1401,38 @@ def _layer_swatch(color: str) -> QIcon:
     pixmap = QPixmap(12, 12)
     pixmap.fill(QColor(color))
     return QIcon(pixmap)
+
+
+class _ClickableLabel(QLabel):
+    """@brief A label that reports a left click: the name of a drawable layer in the «Layer» group.
+
+    @note Clicking the NAME of a drawable layer makes it the active drawing
+        layer (plan B5) while its check box keeps showing or hiding it, so the
+        two actions never share one click target.
+    """
+
+    #: Emitted on a left button press.
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str = "", parent=None):
+        """@brief Create the label with a pointing-hand cursor.
+
+        @param text Italian source text (translated by the generic i18n pass).
+        @param parent Parent widget.
+        """
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        """@brief Qt override: a left press emits `clicked`; other buttons go to the base class.
+
+        @param event The mouse press event.
+        """
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 def _screen_dot(scene, x, y, size, outline, fill, role, z):
@@ -3287,16 +3386,43 @@ class MainWindow(QMainWindow):
     def _shortcut_ai_log(self) -> None:
         self._click_if_available(getattr(self, "btn_ai_log", None))
 
+    def drawing_shortcuts(self) -> tuple:
+        """@brief The drawing-tool shortcuts of the canvases, for «Scorciatoie da tastiera…» (plan A7).
+
+        @return ((key sequence, Italian source label), ...): the tool keys of
+            `canvas_tool_hints.TOOL_SHORTCUTS` (the table both tabs bind),
+            then properties (E), angle mode (Shift+Space), the last point
+            (Backspace) and Select (Esc).
+        """
+        from .canvas_tool_hints import (ANGLE_MODE_SHORTCUT, PROPERTIES_SHORTCUT, SELECT_SHORTCUT,
+                                        TOOL_SHORTCUTS, UNDO_POINT_SHORTCUT)
+        names = {"line": "Linea", "polygon": "Poligono", "rectangle": "Rettangolo", "circle": "Cerchio",
+                 "arc": "Arco", "bezier": "Bézier", "text": "Testo", "textbox": "Casella di testo",
+                 "dimension": "Quota", "measure": "Misura"}
+        rows = tuple((TOOL_SHORTCUTS[key], names[key]) for key in names if key in TOOL_SHORTCUTS)
+        return rows + ((PROPERTIES_SHORTCUT, "Proprietà dell'elemento"),
+                       (ANGLE_MODE_SHORTCUT, "Cambia il modo angolo (libero, 90°, 45°) mentre disegni"),
+                       (UNDO_POINT_SHORTCUT, "Togli l'ultimo punto mentre disegni"),
+                       (SELECT_SHORTCUT, "Torna a Seleziona"))
+
     def _show_shortcuts(self) -> None:
-        """@brief List the keyboard shortcuts, from the same table that binds them."""
-        rows = "".join(
-            f"<tr><td style='padding-right:18px'><b>{escape(key)}</b></td>"
-            f"<td>{escape(self.i18n.text(label))}</td></tr>"
-            for key, label, _method in self.SHORTCUTS)
+        """@brief List the keyboard shortcuts, from the same tables that bind them.
+
+        @note Two sections: the window's `SHORTCUTS`, then the drawing tools
+            of the footprint preview and the symbol editor (`drawing_shortcuts`).
+        """
+        def table(entries):
+            return "".join(
+                f"<tr><td style='padding-right:18px'><b>{escape(key)}</b></td>"
+                f"<td>{escape(self.i18n.text(label))}</td></tr>"
+                for key, label in entries)
+        rows = table((key, label) for key, label, _method in self.SHORTCUTS)
+        drawing = table(self.drawing_shortcuts())
         box = QMessageBox(self)
         box.setWindowTitle(self.i18n.text("Scorciatoie da tastiera"))
         box.setTextFormat(Qt.TextFormat.RichText)
-        box.setText(f"<table>{rows}</table>")
+        box.setText(f"<table>{rows}</table><p><b>{escape(self.i18n.text('Strumenti di disegno'))}</b></p>"
+                    f"<table>{drawing}</table>")
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         self._shortcuts_box = box
         self._run_modal(box)
@@ -3707,6 +3833,8 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_PREVIEW, self.i18n.tr("tab.preview.name"))
         self.tabs.setTabText(TAB_SYMBOL, self.i18n.tr("tab.symbol.name"))
         self.symbol_tab.retranslate()
+        self._retranslate_footprint_palette()
+        self._retranslate_fp_properties()
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
         self.tabs.setTabText(TAB_KICAD, self.i18n.tr("tab.kicad.name"))
         self.tabs.setTabText(TAB_EXPORTS, self.i18n.tr("tab.exports.name"))
@@ -16494,7 +16622,15 @@ class MainWindow(QMainWindow):
         #: plus the drawing origin it is measured from.
         self.preview_readout = QLabel()
         self.preview_readout.setProperty("i18n_skip", True)
-        outer.addWidget(self.preview_readout)
+        #: Next step of the armed drawing tool (plan A4, contract 12), left of
+        #: the pointer readout; empty with no tool. Toasts stay for results.
+        self.fp_hint_label = QLabel()
+        self.fp_hint_label.setProperty("i18n_skip", True)
+        readout_row = QHBoxLayout()
+        readout_row.setContentsMargins(0, 0, 0, 0)
+        readout_row.addWidget(self.fp_hint_label, 1)
+        readout_row.addWidget(self.preview_readout)
+        outer.addLayout(readout_row)
         #: Last pointer position over the footprint, scene px (kept when the pointer leaves).
         self._fp_cursor_position = None
         self.preview_view.pointer_changed.connect(self._update_footprint_readout)
@@ -16534,6 +16670,14 @@ class MainWindow(QMainWindow):
             self.preview_view, bindings,
             runner=self._fp_checkpoint.run,
             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        # Drawing tools as KiCad (plan A7): they arm a tool or open a dialog,
+        # never edit the draft by themselves, so no deferred checkpoint.
+        from .canvas_tool_hints import PROPERTIES_SHORTCUT, TOOL_SHORTCUTS
+        tool_bindings = [(TOOL_SHORTCUTS[key], lambda k=key: self._arm_footprint_tool_shortcut(k))
+                         for key in self.FOOTPRINT_PALETTE_TOOLS + ("dimension", "measure")]
+        tool_bindings.append((PROPERTIES_SHORTCUT, self._edit_footprint_target_properties))
+        self._fp_shortcuts += bind_shortcuts(self.preview_view, tool_bindings, runner=None,
+                                             context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.preview_view.drawing_context_requested.connect(self._footprint_drawing_context_menu)
         self.preview_view.drawing_toggled.connect(self._toggle_footprint_drawing_selection)
         self.preview_view.pad_toggled.connect(self._toggle_footprint_pad_selection)
@@ -16543,86 +16687,502 @@ class MainWindow(QMainWindow):
 
         return tab
 
-    #: Layers a preview drawing may go to: (KiCad layer, source label).
     #: Drawing-grid divisors offered in the preview header (1/10 default).
     FOOTPRINT_FINE_GRID_DIVISORS = (10, 5, 2, 1)
 
-    FOOTPRINT_DRAW_LAYERS = (("F.SilkS", "Serigrafia (stampata)"),
-                             ("F.Fab", "Fabbricazione (documentazione)"),
-                             ("Cmts.User", "Commenti (solo progetto)"))
+    #: Layers a preview drawing may go to: (KiCad layer, source label), the
+    #: drawable layers of the per-layer defaults table (plan D5, B6).
+    FOOTPRINT_DRAW_LAYERS = tuple((entry.name, entry.label) for entry in _drawable_fp_layers())
+
+    #: Shape tools of the «Disegno» grid after Select, in grid order (plan A2).
+    #: The «Quota» drop-down button follows them (`footprint_tool_glyphs`).
+    FOOTPRINT_PALETTE_TOOLS = ("line", "polygon", "rectangle", "circle", "arc", "bezier", "text", "textbox")
+
+    #: Click tool key -> drawing kind it stores, where they differ: the Bezier
+    #: tool (named as in the symbol editor and the shortcut table) stores a
+    #: KiCad `fp_curve`; the dimension variants store a «dimension» record.
+    FOOTPRINT_TOOL_KINDS = {"bezier": "curve", "dimension_orthogonal": "dimension",
+                            "dimension_radial": "dimension", "dimension_center": "dimension",
+                            "dimension_leader": "dimension"}
+
+    #: «Quota» drop-down variant -> click tool key. The aligned dimension keeps
+    #: the tool key «dimension» it had before the variants (saved tests,
+    #: recovery and the measure export name it so).
+    FOOTPRINT_DIMENSION_TOOLS = {"dimension_aligned": "dimension", "dimension_orthogonal": "dimension_orthogonal",
+                                 "dimension_radial": "dimension_radial", "dimension_center": "dimension_center",
+                                 "dimension_leader": "dimension_leader"}
+
+    #: Clicks of each footprint click tool (`ToolSpec.count`; 0 = open-ended).
+    #: A linear dimension takes a third click, the placement of its line; a
+    #: radial dimension, a centre mark and a leader take two (the leader's
+    #: text is asked after the second click).
+    FOOTPRINT_TOOL_CLICKS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "bezier": 4,
+                             "text": 1, "textbox": 2, "dimension": 3, "dimension_orthogonal": 3,
+                             "dimension_radial": 2, "dimension_center": 2, "dimension_leader": 2}
+
+    #: Tools whose segment from the previous collected point follows the angle
+    #: mode (plan A6), with the index of the collected-point count at which it
+    #: applies (None = every point after the first): line and polygon at every
+    #: vertex; a linear dimension only for its second measured point (the
+    #: placement click is free); a leader for its second point.
+    FOOTPRINT_ANGLE_TOOLS = {"line": None, "polygon": None, "dimension": 1, "dimension_orthogonal": 1,
+                             "dimension_leader": 1}
+
+    #: Labels of the angle modes in the «Disegno» control (Italian sources, as the symbol editor's).
+    FOOTPRINT_ANGLE_LABELS = {"free": "Libero", "90": "90°", "45": "45°"}
+
+    #: Object-snap magnet radius in SCREEN pixels (plan B1, KiCad's magnet):
+    #: an alias of the ONE shared reach of both tabs (`core.object_snap.SNAP_REACH_PX`,
+    #: review M4), a UI reach converted to mm with the current zoom, not a
+    #: geometric threshold. Kept as a name for the tests that read it.
+    FOOTPRINT_SNAP_REACH_PX = _object_snap.SNAP_REACH_PX
+
+    #: Tag of the typed object-snap marker items of the preview (`canvas_snap_marker`).
+    _FP_SNAP_MARKER_TAG = "footprint-object-snap"
+
+    #: Range, mm, of the width box of NEW drawings in the «Disegno» group;
+    #: a saved width outside it is ignored (`_fp_layer_width`, review A5).
+    _FP_NEW_WIDTH_RANGE = (0.01, 5.0)
+
+    #: Bounds, mm, and decimals of the stroke width when an EXISTING drawing
+    #: is edited: the «Proprietà» panel, «Proprietà elemento…» and the menu's
+    #: «Spessore del tratto…» share them (review B8): the validator's (0, 10].
+    _FP_EDIT_WIDTH_RANGE = (0.0001, 10.0)
+    _FP_EDIT_WIDTH_DECIMALS = 4
+
+    #: Longest text, characters, of a drawing's text field in the panel and
+    #: in the dialog (review B9).
+    _FP_TEXT_MAX_LENGTH = 200
+
+    #: Configuration keys of the «Disegno» group (saved like `preview_layers`).
+    _FP_WIDTHS_KEY = "fp_draw_widths"
+    _FP_FILL_KEY = "fp_draw_fill"
+    _FP_ANGLE_KEY = "fp_angle_mode"
+    _FP_OBJECT_SNAP_KEY = "fp_object_snap"
+
+    def _fp_tool_glyphs(self) -> dict:
+        """@brief The palette glyph of every footprint tool and dimension variant, by key.
+
+        @return Mapping key -> `symbol_glyphs.Glyph`: the shape tools from the
+            shared `shape_tool_glyphs` (the symbol editor's icons), with a
+            footprint fallback for a tool that list lacks, plus the text box
+            and the five dimension variants of `footprint_tool_glyphs`.
+        """
+        from ..generators.symbol_glyphs import shape_tool_glyphs
+        from . import footprint_tool_glyphs as fg
+        glyphs = {glyph.key: glyph for glyph in shape_tool_glyphs()}
+        glyphs.setdefault("polygon", fg.polygon_glyph())
+        glyphs.setdefault("bezier", fg.bezier_glyph())
+        glyphs["textbox"] = fg.textbox_glyph()
+        glyphs.update(fg.dimension_glyphs())
+        return glyphs
+
+    def _fp_tool_tooltip(self, key: str) -> str:
+        """@brief Translated tooltip of a palette tool: its hint, then its KiCad shortcut.
+
+        @param key A key of `FOOTPRINT_PALETTE_TOOLS`, or `DIMENSION_BUTTON_KEY`.
+        @return `canvas_tool_hints.tooltip` of the tool's hint (`symbol_tab.TOOL_HINTS`
+            when it has one, else the glyph's name) in the interface language.
+        """
+        from .canvas_tool_hints import tooltip
+        from .symbol_tab import TOOL_HINTS
+        hints = {"textbox": "Casella di testo: clicca due angoli opposti, poi scrivi il testo; Esc per annullare"}
+        source = TOOL_HINTS.get(key) or hints.get(key) or self.FOOTPRINT_DRAWING_KIND_NAMES.get(key, key)
+        return tooltip(self.i18n.text(source), key)
 
     def _build_footprint_palette(self) -> QWidget:
-        """@brief Build the minimal drawing palette of the footprint preview.
+        """@brief Build the «Disegno» group of the footprint preview (plan A2).
 
-        @return A narrow column: the target layer selector, then one
-            checkable button per free drawing tool (line, rectangle,
-            circle, arc, text). No library elements and no numbered pads:
-            a pad must match a symbol pin, so it is not free drawing.
+        @return A column: the shared `ToolGrid` (Select, line, polygon,
+            rectangle, circle, arc, Bezier, text, text box and one «Quota»
+            drop-down with the five KiCad dimension types), then the active
+            layer, the stroke width of that layer with a «Predefinito KLC»
+            reset, «Riempi» for new filled shapes, the angle mode and
+            «Aggancia agli oggetti». No numbered pads: a pad must match a
+            symbol pin, so it is not free drawing.
+        @note Icons and the active button's accent take the active layer's
+            KiCad colour (`_on_fp_draw_layer_changed`); every value of the
+            group is saved in the configuration like `preview_layers`.
         """
-        from .symbol_tab import glyph_icon, TOOL_HINTS
-        from ..generators.symbol_glyphs import shape_tool_glyphs
+        from .canvas_clicktools import ANGLE_MODES
+        from .canvas_toolpalette import ToolGrid, select_arrow_icon
+        from .canvas_tool_hints import SELECT_SHORTCUT
+        from .footprint_tool_glyphs import DIMENSION_BUTTON_KEY, DIMENSION_VARIANTS
+        from .symbol_tab import glyph_icon
+        tx = self.i18n.text
         panel = QWidget()
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(2)
-        # No title of its own since 2026-11-06: the «Disegno» group of the
-        # side panel names it.
+        column.setSpacing(3)
+        layer = self.FOOTPRINT_DRAW_LAYERS[0][0]
+        colour = _layer_color(layer)
+        glyphs = self._fp_tool_glyphs()
+        self._fp_glyphs = glyphs
+        grid = ToolGrid(columns=6, icon_size=28, button_size=34)
+        grid.set_accent(colour)
+        select = grid.add_select(select_arrow_icon(28, colour), f"{tx('Seleziona')} ({SELECT_SHORTCUT})")
+        select.setAccessibleName(tx("Seleziona"))
+        select.setProperty("i18n_skip", True)
+        for key in self.FOOTPRINT_PALETTE_TOOLS:
+            glyph = glyphs[key]
+            button = grid.add_tool(key, glyph_icon(glyph, 28, stroke=colour), self._fp_tool_tooltip(key),
+                                   tx(glyph.label))
+            # Composed tooltip (hint + shortcut): refreshed by `_retranslate_footprint_palette`.
+            button.setProperty("i18n_skip", True)
+        variants = [(variant, tx(label), glyph_icon(glyphs[variant], 28, stroke=colour))
+                    for variant, label in DIMENSION_VARIANTS]
+        button = grid.add_tool(DIMENSION_BUTTON_KEY, variants[0][2], self._fp_tool_tooltip("dimension"),
+                               tx("Quota"), menu_items=variants)
+        button.setProperty("i18n_skip", True)
+        button.menu().setProperty("i18n_skip", True)
+        grid.tool_triggered.connect(self._on_fp_tool_triggered)
+        self.fp_tool_grid = grid
+        column.addWidget(grid)
+        form = QFormLayout()
+        form.setContentsMargins(0, 2, 0, 0)
+        form.setHorizontalSpacing(4)
+        form.setVerticalSpacing(2)
         self.combo_fp_draw_layer = QComboBox()
-        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
+        for name, label in self.FOOTPRINT_DRAW_LAYERS:
             # The colour square tells which colour the drawing will take.
-            self.i18n.add_item(self.combo_fp_draw_layer, label, layer,
-                               icon=_layer_swatch(_layer_color(layer)))
-        self.combo_fp_draw_layer.setToolTip(self.i18n.text(
+            self.i18n.add_item(self.combo_fp_draw_layer, label, name, icon=_layer_swatch(_layer_color(name)))
+        self.combo_fp_draw_layer.setToolTip(tx(
             "Layer del disegno: la serigrafia viene stampata sulla scheda, "
             "la fabbricazione documenta il montaggio, i commenti restano nel progetto."))
-        column.addWidget(self.combo_fp_draw_layer)
-        self._fp_draw_buttons = {}
-        grid = QGridLayout()
-        grid.setSpacing(2)
-        tools = [g for g in shape_tool_glyphs() if g.key != "bezier"]
-        # Footprint-only tool (2026-11-06): an aligned KiCad dimension, two
-        # measured points then the placement of its line. The symbol has
-        # no dimensions, so the glyph lives here, not in SHAPE_TOOLS.
-        from ..generators.symbol_glyphs import Glyph, Primitive, SHAPE_WIDTH_MM
-        tools.append(Glyph("dimension", "Quota", (
-            Primitive("polyline", ((0.0, 0.0), (0.0, 5.08)), 0.0, "none", SHAPE_WIDTH_MM),
-            Primitive("polyline", ((5.08, 0.0), (5.08, 5.08)), 0.0, "none", SHAPE_WIDTH_MM),
-            Primitive("polyline", ((0.0, 2.54), (5.08, 2.54)), 0.0, "none", SHAPE_WIDTH_MM),
-            Primitive("polyline", ((1.0, 1.8), (0.0, 2.54), (1.0, 3.3)), 0.0, "none", SHAPE_WIDTH_MM),
-            Primitive("polyline", ((4.08, 1.8), (5.08, 2.54), (4.08, 3.3)), 0.0, "none", SHAPE_WIDTH_MM),
-        ), (), "", group="tool"))
-        for index, glyph in enumerate(tools):
-            button = QToolButton()
-            button.setIcon(glyph_icon(glyph))
-            button.setIconSize(QSize(28, 28))
-            button.setFixedSize(34, 34)
-            button.setCheckable(True)
-            button.setAutoRaise(True)
-            # No `i18n_skip`: the generic pass keeps tooltip and accessible
-            # name in the current language (they were set once, in Italian).
-            button.setAccessibleName(self.i18n.text(glyph.label))
-            button.setToolTip(self.i18n.text(TOOL_HINTS.get(glyph.key, glyph.label)))
-            button.clicked.connect(lambda _checked=False, k=glyph.key:
-                                   self._toggle_footprint_draw_tool(k))
-            grid.addWidget(button, index // 2, index % 2)
-            self._fp_draw_buttons[glyph.key] = button
-        column.addLayout(grid)
-        column.addStretch(1)
+        self.combo_fp_draw_layer.currentIndexChanged.connect(lambda _index: self._on_fp_draw_layer_chosen())
+        form.addRow(tx("Layer"), self.combo_fp_draw_layer)
+        width_row = QHBoxLayout()
+        width_row.setContentsMargins(0, 0, 0, 0)
+        width_row.setSpacing(2)
+        self.spin_fp_draw_width = QDoubleSpinBox()
+        self.spin_fp_draw_width.setRange(*self._FP_NEW_WIDTH_RANGE)
+        self.spin_fp_draw_width.setSingleStep(0.01)
+        self.spin_fp_draw_width.setDecimals(2)
+        self.spin_fp_draw_width.setSuffix(" mm")
+        self.spin_fp_draw_width.setKeyboardTracking(False)
+        self.spin_fp_draw_width.setToolTip(tx(
+            "Spessore dei nuovi disegni su questo layer; il valore scritto resta finché non premi «Predefinito KLC»."))
+        self.spin_fp_draw_width.valueChanged.connect(self._on_fp_draw_width_changed)
+        width_row.addWidget(self.spin_fp_draw_width, 1)
+        self.btn_fp_draw_width_reset = QPushButton("Predefinito KLC")
+        # Composed from the per-layer table (review A8): set by `_retranslate_footprint_palette`.
+        self.btn_fp_draw_width_reset.clicked.connect(self._reset_fp_draw_width)
+        width_row.addWidget(self.btn_fp_draw_width_reset)
+        form.addRow(tx("Spessore"), width_row)
+        self.combo_fp_angle_mode = QComboBox()
+        # Composed labels («90°»), refreshed by `_retranslate_footprint_palette`.
+        self.combo_fp_angle_mode.setProperty("i18n_skip", True)
+        for mode in ANGLE_MODES:
+            self.combo_fp_angle_mode.addItem(tx(self.FOOTPRINT_ANGLE_LABELS[mode]), mode)
+        self.combo_fp_angle_mode.setToolTip(tx(
+            "Angolo di linee e poligoni: libero, 90° o 45° "
+            "(Maiusc+Spazio cambia modo mentre disegni, Maiusc tenuto libera il punto)"))
+        self.combo_fp_angle_mode.currentIndexChanged.connect(
+            lambda _index: self._on_fp_angle_combo_changed(self.combo_fp_angle_mode.currentData()))
+        form.addRow(tx("Angolo"), self.combo_fp_angle_mode)
+        column.addLayout(form)
+        self.chk_fp_draw_fill = QCheckBox("Riempi")
+        self.chk_fp_draw_fill.setToolTip(tx(
+            "Riempie i nuovi poligoni, rettangoli e cerchi (solo per gli strumenti che hanno un'area)."))
+        self.chk_fp_draw_fill.setChecked(self._fp_config_flag(self._FP_FILL_KEY, False))
+        self.chk_fp_draw_fill.toggled.connect(self._on_fp_draw_fill_toggled)
+        column.addWidget(self.chk_fp_draw_fill)
+        self.chk_fp_object_snap = QCheckBox("Aggancia agli oggetti")
+        # Tooltip composed with the shared reach (review A8): `_retranslate_footprint_palette`.
+        self.chk_fp_object_snap.setChecked(self._fp_config_flag(self._FP_OBJECT_SNAP_KEY, True))
+        self.chk_fp_object_snap.toggled.connect(self._on_fp_object_snap_toggled)
+        column.addWidget(self.chk_fp_object_snap)
+        saved_mode = self._config.get(self._FP_ANGLE_KEY)
+        router = getattr(getattr(self, "preview_view", None), "click_router", None)
+        # Restoring the saved mode must not write it back (review A6): the
+        # router reports the change through `tool_angle_mode_changed`, which
+        # saves only outside this restore, as the symbol editor's `_restoring_settings`.
+        self._fp_restoring_settings = True
+        try:
+            if router is not None and saved_mode in ANGLE_MODES:
+                router.set_angle_mode(saved_mode)
+            self._sync_fp_angle_combo(router.angle_mode if router is not None else "free")
+            self._on_fp_draw_layer_changed()
+        finally:
+            self._fp_restoring_settings = False
+        self._update_fp_fill_enabled()
+        self._set_fp_palette_tooltips()
         return panel
 
-    # ── Footprint side panel: layers, live checks, drawing palette ──────────
+    def _fp_config_flag(self, key: str, default: bool) -> bool:
+        """@brief A boolean of the «Disegno» group read from the configuration.
+
+        @param key Configuration key (`_FP_FILL_KEY`, `_FP_OBJECT_SNAP_KEY`).
+        @param default Value used when the key is missing or not a real bool.
+        @return The saved value only when it is a `bool`: a hand-edited
+            «false» string or a number reads as the default (review A5),
+            never through truthiness («false» would be True).
+        """
+        value = self._config.get(key, default) if hasattr(self, "_config") else default
+        return value if isinstance(value, bool) else bool(default)
+
+    def _set_fp_palette_tooltips(self) -> None:
+        """@brief Write the tooltips of the «Disegno» group that carry numbers, in the interface language.
+
+        @note The numbers come from their constants (review A8), never typed
+            in the text: the reach from `core.object_snap.SNAP_REACH_PX`, the
+            widths of every drawable layer from `core.footprint_layers`.
+        """
+        from ..core.footprint_layers import drawable_layers
+        tx = self.i18n.text
+        reset = getattr(self, "btn_fp_draw_width_reset", None)
+        if reset is not None:
+            widths = ", ".join(f"{tx(self._FP_VIEW_LAYER_LABELS.get(entry.name, entry.label))} {entry.width_mm:.2f} mm"
+                               for entry in drawable_layers())
+            reset.setToolTip(tx("Riporta lo spessore del layer al valore predefinito "
+                                "(KLC per serigrafia e fabbricazione): {widths}.").format(widths=widths))
+        snap = getattr(self, "chk_fp_object_snap", None)
+        if snap is not None:
+            snap.setToolTip(tx("I punti dei disegni si agganciano a pad, estremi, punti medi, centri e incroci "
+                               "entro {reach} pixel; Maiusc tenuto libera il punto.").format(
+                reach=f"{_object_snap.SNAP_REACH_PX:g}"))
+
+    # ── «Disegno» group state: active layer, width, fill, angle, object snap ──
+
+    def _fp_active_layer(self) -> str:
+        """@brief The active drawing layer: the KiCad name the combo shows (F.SilkS before it exists)."""
+        combo = getattr(self, "combo_fp_draw_layer", None)
+        value = combo.currentData() if combo is not None else None
+        return value or self.FOOTPRINT_DRAW_LAYERS[0][0]
+
+    def _fp_layer_width(self, layer: str) -> float:
+        """@brief Stroke width, mm, of a NEW drawing on `layer` (plan D5, contract 9).
+
+        @param layer KiCad layer name.
+        @return The width the user typed for that layer (`fp_draw_widths` of
+            the configuration) until «Predefinito KLC», else the layer's KLC
+            default (`core.footprint.user_draw_width`).
+        @note A saved width outside the width box's range
+            (`_FP_NEW_WIDTH_RANGE`), a bool or a non-finite number is ignored
+            and the default used (review A5): the box could not show it, so
+            the drawing would take a width the user never saw.
+        """
+        from ..core.footprint import user_draw_width
+        widths = self._config.get(self._FP_WIDTHS_KEY) if hasattr(self, "_config") else None
+        value = widths.get(layer) if isinstance(widths, dict) else None
+        low, high = self._FP_NEW_WIDTH_RANGE
+        if (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                and low <= value <= high):
+            return round(float(value), 4)
+        return user_draw_width(layer)
+
+    def _on_fp_draw_layer_chosen(self) -> None:
+        """@brief The layer combo changed: a hidden layer is shown first, then the palette follows it.
+
+        @note Same rule as clicking the layer's name (`_activate_fp_draw_layer`,
+            contract 10, review A4): a drawing must not land on a layer the
+            user cannot see, whichever control chose it.
+        """
+        boxes = getattr(self, "fp_layer_boxes", {})
+        box = boxes.get(self._fp_active_layer())
+        if box is not None and not box.isChecked():
+            box.setChecked(True)
+        self._on_fp_draw_layer_changed()
+
+    def _on_fp_draw_layer_changed(self) -> None:
+        """@brief The active layer changed: tint the icons and accent, show its width, mark its row.
+
+        @note No redraw: only the tool icons, the grid accent, the width box
+            and the «Layer» rows change; an armed tool's ghost takes the new
+            colour at its next refresh.
+        """
+        from .symbol_tab import glyph_icon
+        from .canvas_toolpalette import SELECT_KEY, select_arrow_icon
+        layer = self._fp_active_layer()
+        colour = _layer_color(layer)
+        grid = getattr(self, "fp_tool_grid", None)
+        if grid is not None:
+            grid.set_accent(colour)
+            icons = {key: glyph_icon(glyph, 28, stroke=colour) for key, glyph in self._fp_glyphs.items()}
+            icons[SELECT_KEY] = select_arrow_icon(28, colour)
+            grid.set_icons(icons)
+        spin = getattr(self, "spin_fp_draw_width", None)
+        if spin is not None:
+            blocked = spin.blockSignals(True)
+            spin.setValue(self._fp_layer_width(layer))
+            spin.blockSignals(blocked)
+        self._refresh_fp_active_layer_rows()
+
+    def _on_fp_draw_width_changed(self, value: float) -> None:
+        """@brief A width typed for the active layer: it wins for its new drawings until «Predefinito KLC».
+
+        @param value The width shown, mm.
+        @note A value equal to the KLC default removes the override, so the
+            saved table holds only real choices.
+        """
+        from ..core.footprint import user_draw_width
+        layer = self._fp_active_layer()
+        widths = self._config.get(self._FP_WIDTHS_KEY)
+        widths = dict(widths) if isinstance(widths, dict) else {}
+        value = round(float(value), 4)
+        if abs(value - user_draw_width(layer)) < 1e-9:
+            widths.pop(layer, None)
+        else:
+            widths[layer] = value
+        self._config[self._FP_WIDTHS_KEY] = widths
+        self._save_fp_draw_config()
+
+    def _reset_fp_draw_width(self) -> None:
+        """@brief «Predefinito KLC»: forget the width typed for the active layer and show its default."""
+        layer = self._fp_active_layer()
+        widths = self._config.get(self._FP_WIDTHS_KEY)
+        widths = dict(widths) if isinstance(widths, dict) else {}
+        widths.pop(layer, None)
+        self._config[self._FP_WIDTHS_KEY] = widths
+        self._save_config_safely()
+        self._on_fp_draw_layer_changed()
+
+    def _on_fp_draw_fill_toggled(self, checked: bool) -> None:
+        """@brief Save «Riempi»: new polygons, rectangles and circles are filled while it is ticked.
+
+        @param checked The box state.
+        """
+        self._config[self._FP_FILL_KEY] = bool(checked)
+        self._save_fp_draw_config()
+
+    def _save_fp_draw_config(self) -> None:
+        """@brief Save the configuration after a «Disegno» change, except while the start-up restore runs.
+
+        @note The restore (`_build_footprint_palette`) shows the saved values
+            and must not write them back (review A6).
+        """
+        if getattr(self, "_fp_restoring_settings", False):
+            return
+        self._save_config_safely()
+
+    def _update_fp_fill_enabled(self) -> None:
+        """@brief «Riempi» is enabled only while no tool or a tool that can make an area is armed.
+
+        @note With no tool armed it stays enabled so the choice can be made
+            before drawing; an arc, curve, text or dimension greys it out.
+        @note The LINE keeps it enabled (review A3): a line closed on its
+            first point becomes a polygon (`_finish_footprint_drawing`),
+            which «Riempi» fills; an open line ignores it (`_fp_fill_new`
+            fills only kinds with an area). Before, the box was greyed for
+            the line and still filled the closed polygon.
+        """
+        from ..core.footprint import USER_DRAW_FILLABLE
+        box = getattr(self, "chk_fp_draw_fill", None)
+        if box is None:
+            return
+        tool = self._fp_draw_tool
+        box.setEnabled(tool is None or tool == "line"
+                       or self.FOOTPRINT_TOOL_KINDS.get(tool, tool) in USER_DRAW_FILLABLE)
+
+    def _fp_fill_new(self, kind: str) -> bool:
+        """@brief Whether a new drawing of `kind` is stored filled.
+
+        @param kind Drawing kind.
+        @return True when «Riempi» is ticked and the kind has an area (`USER_DRAW_FILLABLE`).
+        """
+        from ..core.footprint import USER_DRAW_FILLABLE
+        box = getattr(self, "chk_fp_draw_fill", None)
+        return bool(box is not None and box.isChecked() and kind in USER_DRAW_FILLABLE)
+
+    def _on_fp_object_snap_toggled(self, checked: bool) -> None:
+        """@brief Save «Aggancia agli oggetti» and re-run the last hover with the new state.
+
+        @param checked The box state.
+        @note The ghost and the typed marker follow at once (review P8):
+            switched off, the marker of a caught object goes away without a
+            mouse move; switched on, the hovered object is caught.
+        """
+        self._config[self._FP_OBJECT_SNAP_KEY] = bool(checked)
+        self._save_fp_draw_config()
+        collector = self._fp_click_collector()
+        if collector is not None and collector.armed and collector.hover_point is not None:
+            collector.hover(collector.hover_point, free=bool(collector.hover_free))
+
+    def _fp_object_snap_on(self) -> bool:
+        """@brief True while «Aggancia agli oggetti» is ticked (True before the box exists)."""
+        box = getattr(self, "chk_fp_object_snap", None)
+        return True if box is None else box.isChecked()
+
+    def _sync_fp_angle_combo(self, mode: str) -> None:
+        """@brief Show `mode` in the angle control without feeding it back to the router."""
+        combo = getattr(self, "combo_fp_angle_mode", None)
+        if combo is None:
+            return
+        index = combo.findData(mode)
+        if index >= 0 and index != combo.currentIndex():
+            blocked = combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(blocked)
+
+    def _on_fp_angle_combo_changed(self, mode) -> None:
+        """@brief The angle control changed: hand the mode to the router (which saves it through the host)."""
+        router = getattr(getattr(self, "preview_view", None), "click_router", None)
+        if router is not None and mode:
+            router.set_angle_mode(mode)
+
+    def tool_angle_mode_changed(self, mode: str) -> None:
+        """@brief `ClickToolHostEx`: the angle mode changed (Shift+Space or the control); show and save it.
+
+        @param mode The new mode, one of `canvas_clicktools.ANGLE_MODES`.
+        """
+        self._sync_fp_angle_combo(mode)
+        if hasattr(self, "_config"):
+            self._config[self._FP_ANGLE_KEY] = mode
+            self._save_fp_draw_config()
+
+    def _retranslate_footprint_palette(self) -> None:
+        """@brief Rewrite the composed texts of the «Disegno» group in the interface language.
+
+        @note The tool tooltips (hint + shortcut), the dimension variants
+            and the angle labels are composed or keyed texts the generic
+            pass cannot translate (`i18n_skip`).
+        """
+        from .canvas_tool_hints import SELECT_SHORTCUT
+        from .footprint_tool_glyphs import DIMENSION_BUTTON_KEY, DIMENSION_VARIANTS
+        grid = getattr(self, "fp_tool_grid", None)
+        if grid is None:
+            return
+        tx = self.i18n.text
+        for key, button in grid.buttons().items():
+            if not key:
+                button.setToolTip(f"{tx('Seleziona')} ({SELECT_SHORTCUT})")
+                button.setAccessibleName(tx("Seleziona"))
+                continue
+            button.setToolTip(self._fp_tool_tooltip(key))
+            if key == DIMENSION_BUTTON_KEY:
+                button.setAccessibleName(tx("Quota"))
+                labels = dict(DIMENSION_VARIANTS)
+                for action in button.menu().actions():
+                    action.setText(tx(labels.get(action.data(), "")))
+            else:
+                button.setAccessibleName(tx(self._fp_glyphs[key].label))
+        combo = self.combo_fp_angle_mode
+        for index in range(combo.count()):
+            combo.setItemText(index, tx(self.FOOTPRINT_ANGLE_LABELS[combo.itemData(index)]))
+        self._set_fp_palette_tooltips()
+        self._refresh_fp_hint()
+
+    # ── Footprint side panel: layers, drawing palette, properties, live checks ──
+
+    #: Short labels of the KiCad layers in the «Layer» group (the combo uses
+    #: the table's longer ones); colours come from `KICAD_LAYER_COLORS`.
+    _FP_VIEW_LAYER_LABELS = {"F.SilkS": "Serigrafia", "F.Fab": "Fabbricazione", "F.CrtYd": "Courtyard",
+                             "Cmts.User": "Commenti", "Dwgs.User": "Disegni utente"}
 
     #: Preview layers of the «Layer» group: (key, label, swatch colour). The
     #: keys are the `LAYER_ROLE` tags the drawers put on their items; the
-    #: KiCad layers keep their KiCad names and default colours.
+    #: KiCad layers keep their KiCad names and default colours, in the order
+    #: of the per-layer table (silkscreen, fabrication, comments, user
+    #: drawings) with the courtyard after the fabrication as before.
     FOOTPRINT_VIEW_LAYERS = (
         ("reference", "Immagine di riferimento", SUBTEXT),
         ("pads", "Pad (rame)", BLUE),
         ("holes", "Fori", SURFACE1),
-        ("F.SilkS", "Serigrafia", KICAD_LAYER_COLORS["F.SilkS"]),
-        ("F.Fab", "Fabbricazione", KICAD_LAYER_COLORS["F.Fab"]),
-        ("F.CrtYd", "Courtyard", KICAD_LAYER_COLORS["F.CrtYd"]),
-        ("Cmts.User", "Commenti", KICAD_LAYER_COLORS["Cmts.User"]),
+        ("F.SilkS", _FP_VIEW_LAYER_LABELS["F.SilkS"], KICAD_LAYER_COLORS["F.SilkS"]),
+        ("F.Fab", _FP_VIEW_LAYER_LABELS["F.Fab"], KICAD_LAYER_COLORS["F.Fab"]),
+        ("F.CrtYd", _FP_VIEW_LAYER_LABELS["F.CrtYd"], KICAD_LAYER_COLORS["F.CrtYd"]),
+        ("Cmts.User", _FP_VIEW_LAYER_LABELS["Cmts.User"], KICAD_LAYER_COLORS["Cmts.User"]),
+        ("Dwgs.User", _FP_VIEW_LAYER_LABELS["Dwgs.User"], KICAD_LAYER_COLORS["Dwgs.User"]),
         ("texts", "Testi Reference/Value", TEXT),
         ("numbers", "Numeri e nomi dei pad", TEXT),
         ("dimensions", "Quote", DIMENSION_COLOR),
@@ -16635,12 +17195,21 @@ class MainWindow(QMainWindow):
     #: a drag redraws at every pointer move and the checks run once it rests.
     _FP_CHECKS_DELAY_MS = 150
 
-    def _build_footprint_side_panel(self) -> QWidget:
-        """@brief Build the right column of the footprint tab: «Layer», «Controlli», «Disegno».
+    #: Rows the «Controlli» list grows to before it scrolls (plan A3).
+    _FP_CHECKS_MAX_ROWS = 6
 
-        @return A fixed-width column of three collapsible groups: the layer
-            visibility boxes, the live geometry checks list and the drawing
-            palette (`_build_footprint_palette`).
+    def _build_footprint_side_panel(self) -> QWidget:
+        """@brief Build the right column of the footprint tab: «Layer», «Disegno», «Proprietà», «Controlli».
+
+        @return A fixed-width column of four collapsible groups (plan A3):
+            the layer visibility boxes (a drawable layer's NAME makes it the
+            active drawing layer, plan B5), the drawing palette
+            (`_build_footprint_palette`), the «Proprietà» slot of the
+            selection (`fp_properties_group` / `fp_properties_body`, filled by
+            the live properties panel of plan C2) and the live geometry checks.
+        @note The «Proprietà» slot takes the stretch; the checks list grows
+            with its rows up to `_FP_CHECKS_MAX_ROWS`, then scrolls
+            (`_fit_footprint_checks_height`).
         """
         from PyQt6.QtCore import QTimer
         from .collapsible_group import CollapsibleGroupBox
@@ -16649,17 +17218,36 @@ class MainWindow(QMainWindow):
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(4)
         layers = CollapsibleGroupBox("Layer", expanded=True)
-        layers.setToolTip("Mostra o nascondi i layer dell'anteprima: non cambia il footprint scritto.")
+        layers.setToolTip("Mostra o nascondi i layer dell'anteprima: non cambia il footprint scritto. "
+                          "Clic sul nome di un layer disegnabile: diventa il layer attivo del disegno.")
         layers_column = QVBoxLayout(layers.body)
         layers_column.setContentsMargins(0, 4, 0, 0)
         layers_column.setSpacing(1)
         self.fp_layer_boxes: dict[str, QCheckBox] = {}
+        #: Clickable names of the drawable layers (plan B5), by KiCad layer.
+        self.fp_layer_names: dict[str, QLabel] = {}
+        drawable = {name for name, _label in self.FOOTPRINT_DRAW_LAYERS}
         for key, label, colour in self.FOOTPRINT_VIEW_LAYERS:
-            box = QCheckBox(label)
-            box.setIcon(_layer_swatch(colour))
+            if key in drawable:
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(2)
+                box = QCheckBox()
+                box.setIcon(_layer_swatch(colour))
+                box.setToolTip(self.i18n.text("Mostra o nascondi il layer"))
+                name = _ClickableLabel(label)
+                name.setToolTip(self.i18n.text("Clic: layer attivo del disegno"))
+                name.clicked.connect(lambda k=key: self._activate_fp_draw_layer(k))
+                row.addWidget(box)
+                row.addWidget(name, 1)
+                layers_column.addLayout(row)
+                self.fp_layer_names[key] = name
+            else:
+                box = QCheckBox(label)
+                box.setIcon(_layer_swatch(colour))
+                layers_column.addWidget(box)
             box.setChecked(self._preview_layer_visible(key))
             box.toggled.connect(lambda checked, k=key: self._on_preview_layer_toggled(k, checked))
-            layers_column.addWidget(box)
             self.fp_layer_boxes[key] = box
         # The reference image under the drawing (2026-11-06): the calibrated
         # photo laid by its own scale, or any picture scaled and placed by
@@ -16671,6 +17259,28 @@ class MainWindow(QMainWindow):
         self.btn_fp_reference.clicked.connect(self._edit_reference_image)
         layers_column.addWidget(self.btn_fp_reference)
         column.addWidget(layers)
+        drawing = CollapsibleGroupBox("Disegno", expanded=True)
+        drawing_column = QVBoxLayout(drawing.body)
+        drawing_column.setContentsMargins(0, 4, 0, 0)
+        drawing_column.addWidget(self._build_footprint_palette())
+        column.addWidget(drawing)
+        # The live properties panel of the selection (plan C2): the shared
+        # widget the symbol editor uses (`canvas_properties`), filled by
+        # `_refresh_fp_properties` and committed by `_fp_property_committed`.
+        from .canvas_properties import EMPTY_TEXT, MIXED_PLACEHOLDER, PropertiesPanel
+        self.fp_properties_group = CollapsibleGroupBox("Proprietà", expanded=True)
+        self.fp_properties_body = QVBoxLayout(self.fp_properties_group.body)
+        self.fp_properties_body.setContentsMargins(0, 4, 0, 0)
+        # «(vari)» in the interface language; `_on_language_changed` updates it (review M11).
+        self.fp_properties_panel = PropertiesPanel(mixed_placeholder=self.i18n.text(MIXED_PLACEHOLDER))
+        self.fp_properties_panel.set_empty(self.i18n.text(EMPTY_TEXT))
+        self.fp_properties_panel.committed.connect(self._fp_property_committed)
+        #: What the panel's fields edit: ("drawing", index), ("drawings",
+        #: indices), ("pads", indices) or ("none",) (`_fp_properties_fields`).
+        self._fp_properties_subject = ("none",)
+        self.fp_properties_body.addWidget(self.fp_properties_panel)
+        self.fp_properties_body.addStretch(1)
+        column.addWidget(self.fp_properties_group, 1)
         checks = CollapsibleGroupBox("Controlli", expanded=True)
         checks.setToolTip("Controlli geometrici sul footprint in bozza (KLC): clic su una riga per "
                           "selezionare gli elementi coinvolti nel disegno.")
@@ -16681,18 +17291,13 @@ class MainWindow(QMainWindow):
         self.fp_checks_list.setProperty("i18n_skip", True)
         self.fp_checks_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.fp_checks_list.setWordWrap(True)
-        self.fp_checks_list.setMinimumHeight(110)
         self.fp_checks_list.itemClicked.connect(self._on_footprint_check_clicked)
         # Enter/Space on the current row, for keyboard users.
         self.fp_checks_list.itemActivated.connect(self._on_footprint_check_clicked)
         checks_column.addWidget(self.fp_checks_list)
-        column.addWidget(checks, 1)
-        drawing = CollapsibleGroupBox("Disegno", expanded=True)
-        drawing_column = QVBoxLayout(drawing.body)
-        drawing_column.setContentsMargins(0, 4, 0, 0)
-        drawing_column.addWidget(self._build_footprint_palette())
-        column.addWidget(drawing)
+        column.addWidget(checks)
         panel.setFixedWidth(250)
+        self._fit_footprint_checks_height()
         self._fp_checks_timer = QTimer(self)
         self._fp_checks_timer.setSingleShot(True)
         self._fp_checks_timer.setInterval(self._FP_CHECKS_DELAY_MS)
@@ -16700,7 +17305,53 @@ class MainWindow(QMainWindow):
         self._fp_checks_pending = None
         self._fp_last_checks: list = []
         self._fp_layer_stack: list = []
+        self._refresh_fp_active_layer_rows()
         return panel
+
+    def _fit_footprint_checks_height(self) -> None:
+        """@brief Size the «Controlli» list to its rows, at least one and at most `_FP_CHECKS_MAX_ROWS`.
+
+        @note Beyond the cap the list scrolls; the free height of the column
+            goes to the «Proprietà» slot (plan A3: one row no longer takes
+            the whole column).
+        """
+        lst = getattr(self, "fp_checks_list", None)
+        if lst is None:
+            return
+        rows = [max(lst.sizeHintForRow(i), lst.fontMetrics().height() + 4)
+                for i in range(min(lst.count(), self._FP_CHECKS_MAX_ROWS))]
+        if not rows:
+            rows = [lst.fontMetrics().height() + 4]
+        height = sum(rows) + 2 * lst.frameWidth() + 4
+        lst.setFixedHeight(int(height))
+
+    def _activate_fp_draw_layer(self, layer: str) -> None:
+        """@brief A drawable layer's name was clicked: make it the active drawing layer (plan B5).
+
+        @param layer KiCad layer name of a row of `fp_layer_names`.
+        @note A hidden layer is shown first (a drawing must not land on a
+            layer the user cannot see); the combo follows, and its change
+            tints the palette (`_on_fp_draw_layer_changed`).
+        """
+        box = self.fp_layer_boxes.get(layer)
+        if box is not None and not box.isChecked():
+            box.setChecked(True)
+        index = self.combo_fp_draw_layer.findData(layer)
+        if index >= 0:
+            self.combo_fp_draw_layer.setCurrentIndex(index)
+
+    def _refresh_fp_active_layer_rows(self) -> None:
+        """@brief Mark the active drawing layer's row: bold name and an accent bar in its colour."""
+        names = getattr(self, "fp_layer_names", None)
+        if not names:
+            return
+        active = self._fp_active_layer()
+        for layer, label in names.items():
+            on = layer == active
+            colour = _layer_color(layer) if on else "transparent"
+            label.setStyleSheet(f"QLabel {{ border-left: 3px solid {colour}; padding-left: 3px;"
+                                f" font-weight: {'bold' if on else 'normal'}; }}")
+            label.setProperty("active", on)
 
     def _preview_layer_visible(self, key: str) -> bool:
         """@brief Whether the preview layer `key` is shown: the saved preference, True by default.
@@ -16839,6 +17490,9 @@ class MainWindow(QMainWindow):
         self._draw_reference_image()
         self._apply_preview_layer_visibility()
         self._refresh_footprint_checks(footprint)
+        # Every redraw (commit, undo, redo, apply, discard, project switch,
+        # language switch) shows the selection's current values (plan C2).
+        self._refresh_fp_properties()
 
     # ── Reference image under the footprint drawing ─────────────────────────
 
@@ -17270,6 +17924,7 @@ class MainWindow(QMainWindow):
         if built is None:
             self._fp_last_checks = []
             lst.addItem(self.i18n.text("Nessun footprint da controllare."))
+            self._fit_footprint_checks_height()
             return
         # One record may yield several graphics (a polyline is one FpLine per
         # segment): the graphic index -> drawing index map is built record
@@ -17287,6 +17942,7 @@ class MainWindow(QMainWindow):
         self._fp_last_checks = findings
         if not findings:
             lst.addItem(self.i18n.text("Nessun problema trovato"))
+            self._fit_footprint_checks_height()
             return
         for finding in findings:
             prefix = "⛔ " if finding.severity == "error" else "⚠ "
@@ -17297,6 +17953,7 @@ class MainWindow(QMainWindow):
                                            if 0 <= index - generated < len(owners)))
             item.setData(self._FP_CHECK_TARGETS_ROLE, (tuple(finding.pads), drawings))
             lst.addItem(item)
+        self._fit_footprint_checks_height()
 
     def _on_footprint_check_clicked(self, item) -> None:
         """@brief Select in the preview the pads or drawings a check row concerns.
@@ -17352,33 +18009,163 @@ class MainWindow(QMainWindow):
             return []
         return collector.points
 
-    def _toggle_footprint_draw_tool(self, key: str) -> None:
-        """@brief Arm a palette tool of the preview, or disarm the armed one."""
-        from ..core.footprint import USER_DRAW_KINDS
+    def _fp_tool_spec(self, key: str):
+        """@brief The `ToolSpec` of a footprint click tool.
+
+        @param key A key of `FOOTPRINT_TOOL_CLICKS`.
+        @return The spec: the tool's click count; the line closes into a
+            polygon on a click equal to its first point once it has four
+            points, as in the symbol editor (parity, 2026-11-06), and the
+            polygon tool closes the same way (plan D1:
+            ``ToolSpec('polygon', count=0, close_after=4, min_points=3)``,
+            the closing click counted).
+        """
         from .canvas_clicktools import ToolSpec
-        armed = self._fp_draw_tool != key
+        if key == "polygon":
+            return ToolSpec("polygon", count=0, close_after=4, min_points=3)
+        return ToolSpec(key, count=self.FOOTPRINT_TOOL_CLICKS[key], close_after=4 if key == "line" else 0)
+
+    @staticmethod
+    def _fp_tool_key(key: str) -> str:
+        """@brief The click tool key of a palette key (a «Quota» variant maps to its tool).
+
+        @param key Palette key, variant key or click tool key.
+        @return The click tool key.
+        """
+        return MainWindow.FOOTPRINT_DIMENSION_TOOLS.get(key, key)
+
+    @staticmethod
+    def _fp_grid_key(tool: str) -> str:
+        """@brief The `ToolGrid` key that shows a click tool (the aligned dimension is the «dimension_aligned» variant).
+
+        @param tool Click tool key.
+        @return The grid key (a variant key for a dimension tool).
+        """
+        for variant, spec_key in MainWindow.FOOTPRINT_DIMENSION_TOOLS.items():
+            if spec_key == tool:
+                return variant
+        return tool
+
+    def _toggle_footprint_draw_tool(self, key: str) -> None:
+        """@brief Arm a palette tool of the preview, or disarm it when it is the armed one.
+
+        @param key A click tool key (`FOOTPRINT_TOOL_CLICKS`) or a «Quota»
+            variant key; «dimension» is the aligned dimension.
+        @note The programmatic toggle (scripts and tests); it arms through
+            `_arm_footprint_tool`, the ONE arming path of the palette clicks
+            and the shortcuts (review A7), and disarms through
+            `_cancel_footprint_drawing`.
+        """
+        if self._fp_draw_tool == self._fp_tool_key(key):
+            self._cancel_footprint_drawing()
+        else:
+            self._arm_footprint_tool(key)
+
+    def _arm_footprint_tool(self, key: str) -> None:
+        """@brief Arm a palette tool, ending any armed tool first (re-arming the armed one restarts it).
+
+        @param key Click tool key or «Quota» variant key.
+        @note The single arming path (review A7): the «Disegno» grid
+            (`_on_fp_tool_triggered`), the shortcuts
+            (`_arm_footprint_tool_shortcut`) and `_toggle_footprint_draw_tool`
+            all end here.
+        """
+        tool = self._fp_tool_key(key)
         self._cancel_footprint_drawing()
-        if armed:
-            # The reference-image calibration (`_start_reference_calibration`)
-            # is armed without a palette button; every palette tool has one.
-            if key in self._fp_draw_buttons:
-                self._fp_draw_buttons[key].setChecked(True)
-            # The line closes into a polygon on a click equal to its first
-            # point once it has four points, as in the symbol editor
-            # (parity, 2026-11-06); the closed shape is stored as «polygon».
-            # A dimension stores two points but takes a third click, the
-            # placement of its line (`_finish_footprint_drawing`).
-            count = 3 if key == "dimension" else USER_DRAW_KINDS[key]
-            self.preview_view.set_draw_mode(True, ToolSpec(key, count=count,
-                                                           close_after=4 if key == "line" else 0))
+        self.preview_view.set_draw_mode(True, self._fp_tool_spec(tool))
+
+    @property
+    def _fp_draw_buttons(self) -> dict:
+        """@brief The palette buttons by key, Select excluded (read-only, derived from `fp_tool_grid`).
+
+        @return Mapping key -> button; the five dimension variants share the
+            «dimension» button. Empty before the palette exists. Derived, not
+            stored (review A7): the grid is the one owner of its buttons.
+        """
+        grid = getattr(self, "fp_tool_grid", None)
+        return {key: button for key, button in grid.buttons().items() if key} if grid is not None else {}
+
+    def _on_fp_tool_triggered(self, key: str) -> None:
+        """@brief A user click in the «Disegno» grid: "" (Select, or the active tool again) disarms.
+
+        @param key Palette key or variant key emitted by `ToolGrid.tool_triggered`.
+        """
+        if not key:
+            self._cancel_footprint_drawing()
+            return
+        self._arm_footprint_tool(key)
+
+    def _arm_footprint_tool_shortcut(self, key: str) -> None:
+        """@brief A drawing shortcut (plan A7): arm the tool, as KiCad's hotkeys do.
+
+        @param key A key of `canvas_tool_hints.TOOL_SHORTCUTS`: «dimension»
+            arms the «Quota» variant used last, «measure» the measuring tool.
+        """
+        from .footprint_tool_glyphs import DIMENSION_BUTTON_KEY
+        if key == self._MEASURE_KEY:
+            if not self._fp_measure.armed:
+                self._toggle_footprint_measure()
+            return
+        if key == DIMENSION_BUTTON_KEY:
+            key = self.fp_tool_grid.current_variant(DIMENSION_BUTTON_KEY) or "dimension_aligned"
+        self._arm_footprint_tool(key)
+
+    def _edit_footprint_target_properties(self) -> bool:
+        """@brief E (plan A7, C2): edit the selection, else the drawing under the pointer.
+
+        @return True when something was offered for editing.
+        @note Same rule as the symbol editor's `SymbolTab.edit_properties`:
+            with selected drawings the first editable field of the
+            «Proprietà» panel takes the focus (the group is expanded when
+            collapsed); with selected pads the FIRST one's dialog opens (pads
+            keep their dialog, as pins do; several selected pads open the
+            first, as the symbol editor opens the first of several pins:
+            contract 17, coordinator decision 2026-11-08); with nothing
+            selected the drawing under the pointer opens «Proprietà elemento…».
+        @note CONTRACT CHANGED (plan C2): the selection now wins over the
+            hovered drawing; before, E opened the hovered drawing's dialog
+            even with another drawing selected.
+        """
+        if self._fp_selected_indices():
+            return self._focus_fp_properties()
+        pads = self._fp_selected_pads()
+        if pads:
+            self._edit_package_pad(pads[0])
+            return True
+        index = self._fp_hovered_drawing
+        if 0 <= index < len(self.footprint_drawings):
+            self._edit_drawing_properties(index)
+            return True
+        return False
+
+    def _focus_fp_properties(self) -> bool:
+        """@brief Give the focus to the first editable field of the «Proprietà» panel.
+
+        @return True when a field took the focus; False when the panel shows
+            no editable field (read-only or empty).
+        """
+        panel = getattr(self, "fp_properties_panel", None)
+        if panel is None:
+            return False
+        self._refresh_fp_properties()
+        for key in panel.field_keys():
+            widget = panel.field_widget(key)
+            if (widget is None or isinstance(widget, QLabel) or not widget.isEnabled()
+                    or widget.focusPolicy() == Qt.FocusPolicy.NoFocus):
+                continue
+            if not self.fp_properties_group.isExpanded():
+                self.fp_properties_group.setExpanded(True)
+            widget.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            return True
+        return False
 
     def _cancel_footprint_drawing(self) -> None:
         """@brief Disarm the tool and forget the clicks of the shape in progress.
 
-        @note Runs the draw-state reset (buttons, hover, handle drag, markers)
-            exactly once, whether or not a tool was armed: when one was, the
-            collector's `tool_disarmed` callback is told to leave it to this
-            call.
+        @note Runs the draw-state reset (palette, hover, handle drag, markers,
+            hint) exactly once, whether or not a tool was armed: when one was,
+            the collector's `tool_disarmed` callback is told to leave it to
+            this call.
         """
         collector = self._fp_click_collector()
         if collector is not None and collector.armed:
@@ -17387,14 +18174,40 @@ class MainWindow(QMainWindow):
             self._fp_skip_disarm = False
         self._fp_draw_dirty = False
         self._fp_draw_hover = None
+        self._fp_draw_hover_kind = None
         self._fp_handle_drag = None
         self._fp_handle_origin = None
-        for button in getattr(self, "_fp_draw_buttons", {}).values():
-            button.setChecked(False)
+        self._fp_points_shown = 0
+        grid = getattr(self, "fp_tool_grid", None)
+        if grid is not None:
+            grid.set_active(None)
         measure_button = getattr(self, "btn_fp_measure", None)
         if measure_button is not None:
             measure_button.setChecked(False)
         self._refresh_draw_markers()
+        self._update_fp_fill_enabled()
+        self._refresh_fp_hint()
+
+    def _refresh_fp_hint(self) -> None:
+        """@brief Show the next step of the armed tool under the canvas (plan A4, contract 12).
+
+        @note The text is `canvas_tool_hints.step_hint` of the tool's hint key
+            and of the points collected so far, translated; empty with no
+            tool armed. Called on arm, after every collected point, after
+            Backspace and on disarm.
+        """
+        from .canvas_tool_hints import step_hint
+        label = getattr(self, "fp_hint_label", None)
+        if label is None:
+            return
+        collector = self._fp_click_collector()
+        spec = collector.spec if collector is not None else None
+        if spec is None:
+            label.setText("")
+            return
+        count = len(collector.points)
+        key = "dimension" if spec.key == "dimension_orthogonal" else spec.key
+        label.setText(self.i18n.text(step_hint(key, count, closable=key == "line" and count >= 3)))
 
     # ── Measuring tool (shared `canvas_measure`, plan docs/canvas-measure-plan.md) ──
 
@@ -17465,15 +18278,72 @@ class MainWindow(QMainWindow):
         @note No footprint and no package: the draft is transiently invalid
             and the measures are kept (`MeasureTool.sync(None)`, decision a).
         """
+        targets = None
+        if footprint is not None:
+            targets = self._footprint_measure_targets(footprint)
+            pads = [(str(pad.number or ""), pad.shape, float(pad.at[0]), float(pad.at[1]), float(pad.size[0]),
+                     float(pad.size[1]), float(pad.rotation or 0.0), pad.rect_delta) for pad in footprint.pads]
+        elif package is not None:
+            targets = self._package_measure_targets(package)
+            pads = [(str(pin.number), str(pin.shape), pin.x_mm, pin.y_mm, pin.pad_length_mm, pin.pad_width_mm,
+                     float(pin.rotation_deg or 0.0), None) for pin in package.pins_seen_from_top()]
+        else:
+            pads = []
+        # The same geometry feeds the drawing tools' object snap (plan B2):
+        # one source for what the ruler and the drawing tools catch. Nothing
+        # drawn (no footprint, no package) drops it (review M1): the scene is
+        # empty, so no pad of the previous footprint may still be caught.
+        self._fp_geometry_targets = targets
+        self._fp_pad_hot_points = [point for pad in pads for point in self._pad_hot_points(*pad)]
         measure = getattr(self, "_fp_measure", None)
         if measure is None:
             return
-        if footprint is not None:
-            measure.sync(self._footprint_measure_targets(footprint))
-        elif package is not None:
-            measure.sync(self._package_measure_targets(package))
+        measure.sync(targets)
+
+    @staticmethod
+    def _pad_hot_points(number: str, shape: str, x: float, y: float, size_x: float, size_y: float,
+                        rotation: float, rect_delta=None) -> list:
+        """@brief Object-snap hot points of a pad's copper besides its centre, from its DECLARED shape (review M6).
+
+        @param number Pad number (the owner tag of the points).
+        @param shape KiCad pad shape: rect, roundrect, trapezoid, circle, oval.
+        @param x Pad centre X, mm (footprint axes, Y down).
+        @param y Pad centre Y, mm.
+        @param size_x Pad size along its local X, mm.
+        @param size_y Pad size along its local Y, mm.
+        @param rotation KiCad pad angle, degrees (counter-clockwise on screen).
+        @param rect_delta KiCad's `rect_delta` (dx, dy), mm, of a trapezoid; None otherwise.
+        @return `core.object_snap.SnapCandidate` items in footprint mm:
+            - rect: its four corners (kind corner), turned with the pad;
+            - trapezoid: its four REAL vertices, as KiCad's
+              `TransformTrapezoidToPolygon` builds them from the half size
+              and half `rect_delta` (corner);
+            - roundrect: no corner, since a rounded corner holds no copper at
+              the bounding-box vertex; the four side midpoints instead
+              (midpoint), the points where the straight copper edge really is;
+            - circle and oval: nothing (the centre, kind pad, is enough).
+            A shape this writer does not know (KiCad's custom pads are not
+            written by it) gets nothing rather than a guessed envelope.
+        """
+        from ..core import object_snap as osnap
+        owner = ("pad", number)
+        hx, hy = float(size_x) / 2.0, float(size_y) / 2.0
+        if shape == "rect":
+            local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
+            kind = osnap.CORNER
+        elif shape == "trapezoid" and rect_delta is not None:
+            ddx, ddy = float(rect_delta[0]) / 2.0, float(rect_delta[1]) / 2.0
+            local = [(-hx + ddy, -hy - ddx), (hx - ddy, -hy + ddx), (hx + ddy, hy - ddx), (-hx - ddy, hy + ddx)]
+            kind = osnap.CORNER
+        elif shape == "roundrect":
+            local = [(0.0, -hy), (hx, 0.0), (0.0, hy), (-hx, 0.0)]
+            kind = osnap.MIDPOINT
         else:
-            measure.sync(None)
+            return []
+        angle = math.radians(float(rotation))
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        # KiCad's pad rotation: counter-clockwise on a Y-down screen (`package_geometry._rotate_kicad`).
+        return osnap.points([(x + u * cos_a + v * sin_a, y - u * sin_a + v * cos_a) for u, v in local], kind, owner)
 
     @staticmethod
     def _package_measure_targets(package):
@@ -17501,14 +18371,54 @@ class MainWindow(QMainWindow):
         return SnapTargets(centres=centres, corners=corners, edges=edges)
 
     def tool_snap(self, spec, point, free: bool, points) -> list:
-        """@brief `ClickToolHost`: the point a click or a hover at `point` would add, on the drawn grid.
+        """@brief `ClickToolHost`: the point a click or a hover at `point` would add (free angle mode).
 
-        @param spec The armed tool (unused: every footprint tool snaps alike).
+        @param spec The armed tool.
         @param point Raw scene position (px).
-        @param free Shift state (unused: the footprint has no free mode).
-        @param points Points collected so far (unused).
+        @param free Shift state: no object snap and no angle constraint.
+        @param points Points collected so far, footprint mm.
+        @return As `tool_snap_ex` with the CURRENT angle mode of the
+            collector (review P12), so the plain protocol and the extended
+            one give the same point. The collector calls `tool_snap_ex` since
+            that callback exists; this stays for callers of the plain protocol.
+        """
+        from .canvas_clicktools import ANGLE_FREE
+        collector = self._fp_click_collector()
+        mode = collector.angle_mode if collector is not None else ANGLE_FREE
+        return self.tool_snap_ex(spec, point, free, points, mode)
+
+    def tool_snap_kind(self):
+        """@brief `ClickToolHostEx`: the kind of hot point the LAST snap caught, or None for a grid point.
+
+        @return A `core.object_snap` kind («pad», «corner»...) while the last
+            `tool_snap_ex` caught an object, else None. The collector compares
+            it with the previous hover's, so a marker whose point stays the
+            same while its kind changes is redrawn (review M5).
+        """
+        hit = getattr(self, "_fp_snap_hit", None)
+        return hit[1] if hit is not None else None
+
+    def tool_snap_ex(self, spec, point, free: bool, points, angle_mode: str) -> list:
+        """@brief `ClickToolHostEx`: the point a click or a hover at `point` would add.
+
+        @param spec The armed tool.
+        @param point Raw scene position (px).
+        @param free True with Shift held: no object snap and no angle
+            constraint, the grid rounding stays (plan contract 3).
+        @param points Points collected so far, footprint mm.
+        @param angle_mode One of `canvas_clicktools.ANGLE_MODES`.
         @return One footprint point in mm; for the measuring tool one
             `MeasureAnchor` in scene px (`MeasureTool.snap`).
+        @note Order (contract 13): an object hot point within reach
+            (`_fp_object_snap`, «Aggancia agli oggetti» on) wins; else, for
+            the tools of `FOOTPRINT_ANGLE_TOOLS` at their constrained step,
+            the shared rule of both tabs `draw_constraints.constrain_to_grid`
+            (review M3): on the allowed ray from the previous point, whole
+            fine-grid steps from it on each axis; else the plain grid point
+            (`_snapped_draw_point`, unchanged). Hovers and clicks share this
+            function, so the ghost shows the point a click adds (contract 2).
+            The hot point's kind is kept in `_fp_snap_hit` for the typed
+            marker and `tool_snap_kind`.
         """
         if spec.key == self._MEASURE_KEY:
             return self._fp_measure.snap(point, free, points)
@@ -17516,21 +18426,177 @@ class MainWindow(QMainWindow):
             # A point ON the picture, not on the grid: the image is what is measured.
             mm = _FP_PREVIEW_MM_TO_PX
             return [(round(point.x() / mm, 4), round(point.y() / mm, 4))]
+        self._fp_snap_hit = None
+        if not free and self._fp_object_snap_on():
+            hit = self._fp_object_snap(point.x() / _FP_PREVIEW_MM_TO_PX, point.y() / _FP_PREVIEW_MM_TO_PX, points)
+            if hit is not None:
+                node = (round(hit.x, 4) + 0.0, round(hit.y, 4) + 0.0)
+                self._fp_snap_hit = (node, hit.kind)
+                return [node]
+        step = self.FOOTPRINT_ANGLE_TOOLS.get(spec.key, -1)
+        if (not free and points and angle_mode != "free" and step != -1
+                and (step is None or len(points) == step)):
+            from ..core.draw_constraints import constrain_to_grid
+            k = _FP_PREVIEW_MM_TO_PX
+            grid_step, grid_origin = self._fp_draw_grid_mm()
+            anchor = (float(points[-1][0]), float(points[-1][1]))
+            return [constrain_to_grid(anchor, (point.x() / k, point.y() / k), angle_mode, grid_step,
+                                      grid_origin=grid_origin, ndigits=4)]
         return [self._snapped_draw_point(point.x(), point.y())]
 
-    def tool_points_changed(self, spec, points: list) -> None:
-        """@brief `ClickToolHost`: a point was added; redraw the dots, ghost and snap marker.
+    def _fp_draw_grid_mm(self) -> tuple:
+        """@brief The drawing (fine) grid of the preview in footprint mm: (step, origin).
 
-        @param spec The armed tool (unused).
-        @param points Copy of the collected points (the window reads them from the collector).
-        @note The empty list sent right after arming is skipped: there is
-            nothing to draw yet and `_cancel_footprint_drawing` just cleaned
-            the markers.
+        @return The step and the node it passes through that
+            `_snapped_draw_point` rounds to (`FootprintView.drawing_grid`),
+            converted to mm: the same grid for free points and for the
+            angle-constrained runs of `constrain_to_grid`.
         """
+        step, (ox, oy) = self.preview_view.drawing_grid(0.1 * _FP_PREVIEW_MM_TO_PX)
+        k = _FP_PREVIEW_MM_TO_PX
+        return step / k, (ox / k, oy / k)
+
+    # ── Object snap of the drawing tools (plan B1, B2, B4) ──────────────────
+
+    def _fp_snap_reach_mm(self) -> float:
+        """@brief The object-snap reach in mm: `object_snap.SNAP_REACH_PX` screen px at the current zoom.
+
+        @return The UI reach; 0 when the view has no usable scale.
+        """
+        scale = abs(self.preview_view.transform().m11()) * _FP_PREVIEW_MM_TO_PX
+        return _object_snap.SNAP_REACH_PX / scale if scale > 0 else 0.0
+
+    def _fp_snap_index(self):
+        """@brief The `SnapIndex` of the footprint and its drawings, built once per geometry.
+
+        @return The cached index; rebuilt only when the drawings revision,
+            the drawn footprint's targets, the drawing origin or the hidden
+            layers changed (never on a hover).
+        """
+        targets = getattr(self, "_fp_geometry_targets", None)
+        hidden = tuple(key for key, _label, _colour in self.FOOTPRINT_VIEW_LAYERS
+                       if not self._preview_layer_visible(key))
+        origin = None
+        if getattr(self, "_fp_origin_points", None):
+            origin = (self._drawing_origin_mm(), self._resolved_drawing_origin())
+        key = (getattr(self, "_fp_drawings_revision", 0), id(self.footprint_drawings), hidden, origin)
+        cache = getattr(self, "_fp_snap_cache", None)
+        if cache is not None and cache[0] == key and cache[1] is targets and cache[2] is self.footprint_drawings:
+            return cache[3]
+        index = self._build_fp_snap_index(targets, hidden, origin)
+        self._fp_snap_cache = (key, targets, self.footprint_drawings, index)
+        return index
+
+    def _build_fp_snap_index(self, targets, hidden: tuple, origin):
+        """@brief Build the object-snap candidates of the preview, in footprint mm (plan B2).
+
+        @param targets The `SnapTargets` of the drawn footprint (scene px), or None.
+        @param hidden Keys of the hidden preview layers: their objects are not caught.
+        @param origin ((x, y) mm, key) of the drawing origin, or None when
+            the footprint offers none; the key types its candidate (review
+            G6): a body corner is a corner, a pad a pad, the body centre and
+            the footprint origin a centre.
+        @return A `core.object_snap.SnapIndex` with pad centres (kind pad)
+            and the copper hot points of `_pad_hot_points` (from each pad's
+            declared shape, review M6), the generated F.Fab body corners, side
+            midpoints and centre (review P9, as the symbol's body), the
+            drawing origin, every user drawing's hot points (segment ends
+            and midpoints, polygon vertices, rectangle corners, midpoints and
+            centre, circle centre and quadrants, arc ends and centre, curve
+            ends, text box corners, dimension points) and the intersections
+            of the drawings' straight segments and the body edges. No edge
+            segments: drawing tools never snap to an edge foot (parity
+            decision with the symbol editor, 2026-11-08).
+        """
+        from ..core import object_snap as osnap
+        k = _FP_PREVIEW_MM_TO_PX
+        candidates, segments = [], []
+        if targets is not None:
+            if "pads" not in hidden:
+                for x, y, label, _shape in targets.centres:
+                    candidates.append(osnap.SnapCandidate(x / k, y / k, osnap.PAD, ("pad", label)))
+                candidates += list(getattr(self, "_fp_pad_hot_points", ()))
+            if "F.Fab" not in hidden:
+                candidates += osnap.points([(x / k, y / k) for x, y in targets.corners], osnap.CORNER, ("body",))
+                edges = [((x0 / k, y0 / k), (x1 / k, y1 / k)) for x0, y0, x1, y1 in targets.edges]
+                segments += [osnap.SnapSegment(a, b, ("body",)) for a, b in edges]
+                # Side midpoints and the centre of the body, as the symbol's body offers them.
+                candidates += osnap.points([((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0) for a, b in edges],
+                                           osnap.MIDPOINT, ("body",))
+                if targets.corners and getattr(self, "_fp_origin_points", None):
+                    candidates += osnap.points([self._fp_body_centre_mm], osnap.CENTRE, ("body",))
+        if origin is not None:
+            (ox, oy), origin_key = origin
+            origin_kind = (osnap.CORNER if origin_key.startswith("corner:")
+                           else osnap.PAD if origin_key.startswith("pad:") else osnap.CENTRE)
+            candidates += osnap.points([(ox, oy)], origin_kind, ("origin",))
+        for index, record in enumerate(self.footprint_drawings):
+            if record.get("layer") in hidden:
+                continue
+            owner = ("drawing", index)
+            kind = record["kind"]
+            pts = [tuple(map(float, p)) for p in record["points"]]
+            if kind in ("line", "polygon"):
+                closed = kind == "polygon"
+                candidates += osnap.polyline(pts, closed, owner)
+                segments += osnap.polyline_segments(pts, closed, owner)
+            elif kind == "rectangle":
+                candidates += osnap.rectangle(pts[0], pts[1], owner)
+                segments += osnap.rectangle_segments(pts[0], pts[1], owner)
+            elif kind == "circle":
+                (cx, cy), (rx, ry) = pts
+                candidates += osnap.circle((cx, cy), math.hypot(rx - cx, ry - cy), owner)
+            elif kind == "arc":
+                candidates += osnap.arc(pts[0], pts[1], pts[2], owner)
+            elif kind == "curve":
+                candidates += osnap.points([pts[0], pts[3]], osnap.ENDPOINT, owner)
+            elif kind == "textbox":
+                (x0, y0), (x1, y1) = pts
+                candidates += osnap.points([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], osnap.CORNER, owner)
+            elif kind == "dimension":
+                candidates += osnap.points(pts, osnap.ENDPOINT, owner)
+        candidates += osnap.intersections(segments, ("intersection",))
+        # Parity decision (coordinator, 2026-11-08, as the symbol editor): no edge
+        # snapping for drawing tools, an edge foot would pull nearly every click
+        # near a stroke off the grid. Edges only feed the intersections.
+        return osnap.SnapIndex(candidates, ())
+
+    def _fp_object_snap(self, x_mm: float, y_mm: float, points):
+        """@brief The object hot point within reach of the pointer, or None (plan B1/B2).
+
+        @param x_mm Pointer x, footprint mm.
+        @param y_mm Pointer y, footprint mm.
+        @param points The points the armed tool collected (mm): every one but
+            the last is a hot point too (the first closes a polygon; the last
+            would only repeat itself and be refused as coincident).
+        @return A `core.object_snap.SnapResult` from the ONE classifier of
+            both tabs, `object_snap.snap_point` (review M4, contract 15): the
+            cached index and the collected points but the last, by the shared
+            priority then distance, an exact tie to the existing drawing.
+        """
+        reach = self._fp_snap_reach_mm()
+        if reach <= 0:
+            return None
+        collected = [tuple(map(float, p)) for p in points]
+        return _object_snap.snap_point(self._fp_snap_index(), collected, x_mm, y_mm, reach)
+
+    def tool_points_changed(self, spec, points: list) -> None:
+        """@brief `ClickToolHost`: the collected points changed; redraw the dots, ghost and snap marker.
+
+        @param spec The armed tool.
+        @param points Copy of the collected points (the window reads them from the collector).
+        @note The empty list sent right after arming is skipped (nothing to
+            draw yet, `_cancel_footprint_drawing` just cleaned the markers);
+            an empty list after Backspace removed the last point redraws, so
+            its dot goes away. The step hint follows every change.
+        """
+        self._refresh_fp_hint()
         if spec.key == self._MEASURE_KEY:
             self._fp_measure.points_changed(points)
             return
-        if points:
+        shown = getattr(self, "_fp_points_shown", 0)
+        self._fp_points_shown = len(points)
+        if points or shown:
             self._refresh_draw_markers()
 
     def tool_preview_changed(self, spec, points: list, preview: list) -> None:
@@ -17540,15 +18606,20 @@ class MainWindow(QMainWindow):
         @param points Copy of the collected points (unused).
         @param preview The snapped node a click would add, or [] when none.
         @note The collector forgets its preview at every click without
-            telling, so the node is compared with the one already shown: the
-            number of rebuilds stays the number of snapped-node changes.
+            telling, so the node AND the kind of the caught object are
+            compared with the ones already shown: the number of rebuilds stays
+            the number of snapped-node or marker changes. A node that stays
+            while its kind changes (a grid node on a pad centre, the object
+            snap switched off) rebuilds the marker (review M5).
         """
         if spec.key == self._MEASURE_KEY:
             self._fp_measure.preview_changed(points, preview)
             return
         node = preview[0] if preview else None
-        if node != self._fp_draw_hover:
+        kind = self.tool_snap_kind() if node is not None else None
+        if node != self._fp_draw_hover or kind != getattr(self, "_fp_draw_hover_kind", None):
             self._fp_draw_hover = node
+            self._fp_draw_hover_kind = kind
             self._refresh_draw_markers()
 
     def tool_refused(self, spec, reason: str) -> None:
@@ -17591,13 +18662,24 @@ class MainWindow(QMainWindow):
 
         @param spec The tool now armed; its key names the palette button.
         """
+        from .canvas_toolpalette import OUTSIDE_KEY
         self._fp_draw_dirty = True
+        self._fp_points_shown = 0
+        self._fp_snap_hit = None
+        self._update_fp_fill_enabled()
+        self._refresh_fp_hint()
+        grid = getattr(self, "fp_tool_grid", None)
         if spec.key == self._MEASURE_KEY:
+            if grid is not None:
+                # A tool outside the grid is armed: not even Select is shown
+                # checked, the palette never claims the user is selecting.
+                grid.set_active(OUTSIDE_KEY)
             self.btn_fp_measure.setChecked(True)
             return
-        button = getattr(self, "_fp_draw_buttons", {}).get(spec.key)
-        if button is not None:
-            button.setChecked(True)
+        if grid is not None:
+            # The reference-image calibration has no palette button either:
+            # shown as a tool outside the grid, as «Misura».
+            grid.set_active(self._fp_grid_key(spec.key) if spec.key in self.FOOTPRINT_TOOL_CLICKS else OUTSIDE_KEY)
 
     def tool_disarmed(self, spec) -> None:
         """@brief `ClickToolHost`: the tool ended by Escape or a hide; reset the draw state once.
@@ -17628,65 +18710,115 @@ class MainWindow(QMainWindow):
     def _finish_footprint_drawing(self, tool: str, points: list) -> None:
         """@brief Build the record of a finished shape, reset the draw state, then apply it.
 
-        @param tool Palette tool key.
+        @param tool Click tool key (`FOOTPRINT_TOOL_CLICKS`).
         @param points Clicked points in footprint mm, in click order.
         @note `_cancel_footprint_drawing` runs BEFORE `_apply_footprint_drawings`
             so the markers are gone when the preview redraws.
         @note The stored drawing becomes the selection (as in the symbol
             editor); a cancelled or refused shape leaves the selection unchanged.
+        @note A new drawing takes the active layer's width (`_fp_layer_width`,
+            plan D5) and, for a kind with an area, «Riempi». A dimension takes
+            that width too, like every other drawing (review M13, coordinator
+            decision 2026-11-08), and so does a measure exported as a
+            dimension, so the two routes still write the same item; CONTRACT
+            CHANGED: before, every dimension was written at
+            `USER_DIMENSION_WIDTH_MM` (0.10 mm, under the KLC 0.12 mm on the
+            silkscreen). Stored records keep their own width.
         """
-        from ..core.footprint import (USER_DRAW_KINDS, USER_DRAW_MIN_POINTS, USER_DRAW_TEXT_MM,
-                                      USER_TEXT_ANCHOR, USER_DRAW_WIDTH_MM, validate_footprint_drawings)
+        from ..core.footprint import (DIMENSION_RADIAL_LEADER_MM, USER_DRAW_KINDS,
+                                      USER_DRAW_MIN_POINTS, USER_TEXT_ANCHOR,
+                                      dimension_offset_from_crossbar, validate_footprint_drawings)
+        from ..core.footprint_layers import default_text
         if tool == self._REFERENCE_SCALE_TOOL:
             # Not a drawing: the reference image's scale from two clicks.
             self._cancel_footprint_drawing()
             self._finish_reference_calibration(list(points))
             return
-        if tool == "line" and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
+        if tool in ("line", "polygon") and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
             # Closed on its first point (`ToolSpec.close_after`): a polygon,
             # whose closing side is implied and whose first point is not stored twice.
             tool, points = "polygon", list(points[:-1])
-        offset = None
-        if tool == "dimension":
+        if tool == "polygon" and len(points) < USER_DRAW_MIN_POINTS["polygon"]:
+            # `ToolSpec.min_points`: the collector never refuses a finish, the host says why.
+            self._cancel_footprint_drawing()
+            if points:
+                self._draw_feedback_toast(self.i18n.text("Disegno scartato."),
+                                          self.i18n.text("Un poligono richiede almeno tre vertici."))
+            return
+        layer = self._fp_active_layer()
+        kind = self.FOOTPRINT_TOOL_KINDS.get(tool, tool)
+        extra = {}
+        if tool in ("dimension", "dimension_orthogonal"):
             # Two measured points, then where the dimension line goes: its
-            # signed distance from the measured line (KiCad's `height`).
+            # signed distance from the measured points (KiCad's `height`).
+            # An orthogonal dimension takes its axis from that third click,
+            # as KiCad's drawing tool does (`_orthogonal_dimension_axis`, review M7).
             if len(points) != 3:
                 self._cancel_footprint_drawing()
                 return
-            from ..core.footprint import dimension_normal
-            (x1, y1), (x2, y2), (qx, qy) = points
-            nx, ny = dimension_normal((x1, y1), (x2, y2))
-            offset = round((qx - x1) * nx + (qy - y1) * ny, 4) + 0.0
+            (x1, y1), (x2, y2), placement = points
+            axis = ""
+            if tool == "dimension_orthogonal":
+                axis = self._orthogonal_dimension_axis((x1, y1), (x2, y2), placement)
+                extra["axis"] = axis
+            extra["offset"] = round(dimension_offset_from_crossbar((x1, y1), (x2, y2), placement, axis), 4) + 0.0
             points = points[:2]
-        count = USER_DRAW_KINDS[tool]
-        if count and len(points) != count or not count and len(points) < USER_DRAW_MIN_POINTS[tool]:
+        elif tool == "dimension_radial":
+            extra.update(dtype="radial", leader_length=DIMENSION_RADIAL_LEADER_MM)
+        elif tool == "dimension_center":
+            extra["dtype"] = "center"
+        elif tool == "dimension_leader":
+            extra.update(dtype="leader", text="")
+        count = USER_DRAW_KINDS[kind]
+        if count and len(points) != count or not count and len(points) < USER_DRAW_MIN_POINTS[kind]:
             self._cancel_footprint_drawing()
             return
-        record = {"kind": tool, "layer": self.combo_fp_draw_layer.currentData(),
-                  "width": USER_DRAW_WIDTH_MM, "points": [list(p) for p in points]}
-        if offset is not None:
-            from ..core.footprint import USER_DIMENSION_WIDTH_MM
-            record["offset"], record["width"] = offset, USER_DIMENSION_WIDTH_MM
-            if offset == 0.0:
+        record = {"kind": kind, "layer": layer, "width": self._fp_layer_width(layer),
+                  "points": [list(p) for p in points]}
+        record.update(extra)
+        if kind == "dimension":
+            if record.get("offset") == 0.0 and "dtype" not in record:
                 # Legal (KiCad draws the line on the points) but invisible as
                 # a choice: said, with the way to change it.
                 self._draw_feedback_toast(self.i18n.text("Quota sulla linea misurata."), self.i18n.text(
                     "Il terzo clic era sulla linea fra i due punti: scostamento zero. "
                     "Si cambia in «Proprietà elemento…»."))
-        if tool == "arc":
+        if self._fp_fill_new(kind):
+            record["fill"] = True
+        if kind == "arc":
             # Click order is start, end, mid (same hint as the symbol);
             # the file stores start, mid, end as KiCad writes fp_arc.
             start, end, mid = points
             record["points"] = [list(start), list(mid), list(end)]
-        if tool == "text":
+        if kind == "text":
             text, accepted = QInputDialog.getText(
                 self, self.i18n.text("Testo"), self.i18n.text("Testo da scrivere:"))
             if not accepted or not text.strip():
                 self._cancel_footprint_drawing()
                 return
-            record["text"], record["size"] = text.strip(), USER_DRAW_TEXT_MM
+            record["text"], record["size"] = text.strip(), default_text(layer)[0]
             # The clicked (snapped) node is the bottom-left corner of the text.
             record["anchor"] = USER_TEXT_ANCHOR
+        elif kind == "textbox":
+            # A KiCad text box holds several lines (plan D3).
+            text, accepted = QInputDialog.getMultiLineText(
+                self, self.i18n.text("Casella di testo"), self.i18n.text("Testo da scrivere:"))
+            text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+            if not accepted or not text.strip():
+                self._cancel_footprint_drawing()
+                return
+            # Blank is judged on the stripped text, but only trailing newlines
+            # are dropped: leading indentation is the user's (review C5, same
+            # rule as the validator).
+            record["text"], record["size"] = text.rstrip("\n"), default_text(layer)[0]
+        elif tool == "dimension_leader":
+            # The leader's free text; empty is allowed (KiCad then shows the arrow only).
+            text, accepted = QInputDialog.getText(
+                self, self.i18n.text("Richiamo"), self.i18n.text("Testo del richiamo (può restare vuoto):"))
+            if not accepted:
+                self._cancel_footprint_drawing()
+                return
+            record["text"] = " ".join(text.split())
         valid = validate_footprint_drawings([record])
         self._cancel_footprint_drawing()
         if not valid:
@@ -17699,6 +18831,47 @@ class MainWindow(QMainWindow):
         # does; a cancelled or refused one (above) leaves the selection as it was.
         new = len(self.footprint_drawings)
         self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
+
+    @staticmethod
+    def _orthogonal_dimension_axis(first, second, placement) -> str:
+        """@brief Which axis an orthogonal dimension measures, from where its line is placed (review M7).
+
+        @param first (x, y) first measured point, mm.
+        @param second (x, y) second measured point, mm.
+        @param placement (x, y) the third click (or the hovered point of the ghost), mm.
+        @return "x" (horizontal measure, the dimension line above or below
+            the points) or "y" (vertical measure, the line left or right).
+        @note KiCad 9's rule (`DRAWING_TOOL::DrawDimension`, step
+            SET_HEIGHT of an orthogonal dimension, read in its source): with
+            the placement OUTSIDE the bounding box of the two points, a box of
+            zero width measures Y and one of zero height X; a placement whose
+            X lies strictly between the box's left and right (above or below
+            it) measures X; one whose Y lies strictly between its top and
+            bottom (beside it) measures Y; in a diagonal corner region the
+            larger offset from the box centre decides (|dy| < |dx| -> "y").
+        @note Inside the box (edges included) KiCad keeps the orientation the
+            preview already had, which starts as the longer extent of the box
+            (width < height -> vertical). This one-shot function holds no
+            state: there it returns that starting orientation, the DECLARED
+            fallback (|dX| >= |dY| -> "x", the rule used before this change).
+            The tool and its ghost both call this function, so the ghost
+            shows the axis a click writes.
+        """
+        (x1, y1), (x2, y2), (px, py) = first, second, placement
+        left, right, top, bottom = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
+        width, height = right - left, bottom - top
+        if left <= px <= right and top <= py <= bottom:
+            return "y" if width < height else "x"
+        if width == 0:
+            return "y"
+        if height == 0:
+            return "x"
+        if left < px < right:
+            return "x"
+        if top < py < bottom:
+            return "y"
+        dx, dy = px - (left + right) / 2.0, py - (top + bottom) / 2.0
+        return "y" if abs(dy) < abs(dx) else "x"
 
     def _degenerate_drawing_text(self, record: dict) -> str:
         """@brief Translated reason why a drawing record was refused by the validator.
@@ -17728,7 +18901,7 @@ class MainWindow(QMainWindow):
                     or not isinstance(size, (int, float)) or not 0 < size <= 50):
                 return self.i18n.text(
                     "Testo non valido: serve una riga non vuota con dimensione maggiore di zero.")
-        width = record.get("width", 0.12)
+        width = record.get("width", user_draw_width(record.get("layer", "")))
         if not isinstance(width, (int, float)) or not 0 < width <= 10:
             return self.i18n.text(
                 "Spessore del tratto non valido: deve essere maggiore di 0 e al massimo 10 mm.")
@@ -18231,9 +19404,13 @@ class MainWindow(QMainWindow):
         draft_package = self._fp_draft_package
         swapped = self.package_geometry
         self._fp_draft_package = swapped
+        #: True while the swap holds the applied footprint: the «Proprietà»
+        #: panel neither refreshes nor commits (review B4).
+        self._fp_applied_swap_active = True
         try:
             yield
         finally:
+            self._fp_applied_swap_active = False
             (self._footprint_drawings, self.footprint_text_positions,
              self.header_pad_overrides, self.package_geometry) = saved
             self._fp_draft_package = draft_package
@@ -19001,14 +20178,24 @@ class MainWindow(QMainWindow):
             # A dimension's value label: coloured by its brush, never outlined.
             item.setBrush(QBrush(colour))
             return
-        width = max(1.0, record.get("width", 0.12) * mm_to_px)
+        width = max(1.0, record.get("width", user_draw_width(record.get("layer", ""))) * mm_to_px)
         pen = QPen(colour)
         pen.setWidthF(max(2.5, width * 1.6) if selected else width)
         item.setPen(pen)
 
     def _refresh_drawing_selection(self) -> None:
-        """@brief Recolour the drawn drawings and package pads after the selection changed (no redraw)."""
-        from .footprint_view import DRAWING_KEY_ROLE, PAD_KEY_ROLE
+        """@brief Recolour the drawn drawings and package pads after the selection changed (no redraw).
+
+        @note The single hook of every selection change (plan C4): the
+            «Proprietà» panel follows it here (`_refresh_fp_properties`).
+        @note An item whose drawn kind (`DRAWING_KIND_ROLE`) is not the kind
+            of the record now at its index is skipped (review B3): the list
+            was replaced without a redraw, and styling, say, a line item with
+            a text's rules would call a method the item lacks. The next
+            redraw draws the right items.
+        """
+        from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, PAD_KEY_ROLE
+        self._refresh_fp_properties()
         scene = getattr(self, "preview_scene", None)
         if scene is None:
             return
@@ -19017,8 +20204,9 @@ class MainWindow(QMainWindow):
         for item in scene.items():
             index = item.data(DRAWING_KEY_ROLE)
             if index is not None and 0 <= int(index) < len(self.footprint_drawings):
-                self._style_drawing_item(item, self.footprint_drawings[int(index)],
-                                         int(index) in selected, _FP_PREVIEW_MM_TO_PX)
+                record = self.footprint_drawings[int(index)]
+                if item.data(DRAWING_KIND_ROLE) == record["kind"]:
+                    self._style_drawing_item(item, record, int(index) in selected, _FP_PREVIEW_MM_TO_PX)
                 continue
             parts = str(item.data(PAD_KEY_ROLE) or "").split(":", 2)
             if parts[0] == "package" and len(parts) == 3:
@@ -19317,7 +20505,12 @@ class MainWindow(QMainWindow):
 
     #: Title line of the drawing menu, by drawing kind (catalogue sources).
     FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "polygon": "Poligono", "rectangle": "Rettangolo",
-                                    "circle": "Cerchio", "arc": "Arco", "text": "Testo", "dimension": "Quota"}
+                                    "circle": "Cerchio", "arc": "Arco", "text": "Testo", "dimension": "Quota",
+                                    "curve": "Bézier", "bezier": "Bézier", "textbox": "Casella di testo"}
+
+    #: Frames a leader's text may have, in the order the properties dialog
+    #: offers them: (record value, Italian source label).
+    FOOTPRINT_LEADER_FRAMES = (("none", "Nessuna"), ("rect", "Rettangolo"), ("circle", "Cerchio"))
 
     def _export_measure_as_dimension(self, measurement) -> bool:
         """@brief «Esporta come quota»: add a dimension drawing between the two points of a measure.
@@ -19334,11 +20527,12 @@ class MainWindow(QMainWindow):
             footprint origin (a placement default of the drawing, not a
             measurement; a measure symmetric about the origin takes the
             positive side; the properties dialog changes it). The layer is
-            the palette's current drawing layer. The measure itself stays: it
-            is a tool overlay, the dimension is part of the file.
+            the palette's current drawing layer and the width that layer's
+            width for new drawings (`_fp_layer_width`, review M13), as a
+            dimension drawn with the tool. The measure itself stays: it is a
+            tool overlay, the dimension is part of the file.
         """
-        from ..core.footprint import (USER_DIMENSION_OFFSET_MM, USER_DIMENSION_WIDTH_MM, dimension_normal,
-                                      validate_footprint_drawings)
+        from ..core.footprint import USER_DIMENSION_OFFSET_MM, dimension_normal, validate_footprint_drawings
         mm = _FP_PREVIEW_MM_TO_PX
 
         def to_mm(x, y):
@@ -19357,8 +20551,9 @@ class MainWindow(QMainWindow):
             mid = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
             side = 1.0 if mid[0] * nx + mid[1] * ny >= 0 else -1.0
             offset = side * USER_DIMENSION_OFFSET_MM
-        record = {"kind": "dimension", "layer": self.combo_fp_draw_layer.currentData(),
-                  "width": USER_DIMENSION_WIDTH_MM, "points": [list(start), list(end)],
+        layer = self._fp_active_layer()
+        record = {"kind": "dimension", "layer": layer,
+                  "width": self._fp_layer_width(layer), "points": [list(start), list(end)],
                   "offset": round(offset, 4) + 0.0}
         if axis:
             record["axis"] = axis
@@ -19474,12 +20669,15 @@ class MainWindow(QMainWindow):
             # One undo step, as the properties dialog's checkbox.
             self.set_drawing_properties(index, {"fill": not bool(record.get("fill", False))})
         elif chosen == "stroke_width":
+            # The bounds and decimals of the panel and of «Proprietà elemento…» (review B8).
+            low, high = self._FP_EDIT_WIDTH_RANGE
             value, accepted = QInputDialog.getDouble(
                 self, self.i18n.text("Spessore del tratto…"),
                 self.i18n.text("Spessore del tratto in mm"),
-                float(record.get("width", 0.12)), 0.01, 5.0, 3)
+                float(record.get("width", user_draw_width(record.get("layer", "")))), low, high,
+                self._FP_EDIT_WIDTH_DECIMALS)
             if accepted:
-                self._set_drawing_field(index, "width", round(float(value), 4))
+                self._set_drawing_field(index, "width", round(float(value), self._FP_EDIT_WIDTH_DECIMALS))
         elif chosen == "edit_text":
             text, accepted = QInputDialog.getText(
                 self, self.i18n.text("Testo"), self.i18n.text("Testo da scrivere:"),
@@ -19496,22 +20694,37 @@ class MainWindow(QMainWindow):
             "text", "size", "angle"; for a shape, "x", "y" (its bounding-box
             centre, rounded to 0.1 um) and "rect_width"/"rect_height"
             (rectangle) or "radius" (circle). Line and arc: position only.
+            A text box: "text" (may hold newlines), "size", "angle", "border",
+            "rect_width"/"rect_height"; a curve: position only. A dimension:
+            "offset" (aligned/orthogonal), "leader_length" and "radius"
+            (radial), "radius" = arm length (centre mark), "text" and "frame"
+            (leader).
         """
         from ..core.footprint import USER_DRAW_FILLABLE, drawing_centre
-        values = {"layer": record["layer"], "width": float(record.get("width", 0.12))}
+        values = {"layer": record["layer"], "width": float(record.get("width", user_draw_width(record.get("layer", ""))))}
         cx, cy = drawing_centre(record)
         values["x"], values["y"] = round(cx, 4) + 0.0, round(cy, 4) + 0.0
         if record["kind"] in USER_DRAW_FILLABLE:
             values["fill"] = bool(record.get("fill", False))
-        if record["kind"] == "dimension":
+        dtype = record.get("dtype", "") if record["kind"] == "dimension" else None
+        if dtype in ("", "aligned", "orthogonal"):
             values["offset"] = float(record.get("offset", 0.0))
+        elif dtype == "radial":
+            values["leader_length"] = float(record.get("leader_length", 0.0))
+        elif dtype == "leader":
+            values.update(text=record.get("text", ""), frame=record.get("frame", "none"))
         if record["kind"] == "text":
             values.update(text=record["text"], size=float(record.get("size", 1.0)),
                           angle=int(record.get("angle", 0)))
+        elif record["kind"] == "textbox":
+            (x0, y0), (x1, y1) = record["points"]
+            values.update(text=record["text"], size=float(record.get("size", 1.0)),
+                          angle=int(record.get("angle", 0)), border=bool(record.get("border", True)),
+                          rect_width=round(abs(x1 - x0), 4), rect_height=round(abs(y1 - y0), 4))
         elif record["kind"] == "rectangle":
             (x0, y0), (x1, y1) = record["points"]
             values.update(rect_width=round(abs(x1 - x0), 4), rect_height=round(abs(y1 - y0), 4))
-        elif record["kind"] == "circle":
+        elif record["kind"] == "circle" or dtype in ("radial", "center"):
             (cx0, cy0), (rx, ry) = record["points"]
             values["radius"] = round(math.hypot(rx - cx0, ry - cy0), 4)
         return values
@@ -19586,22 +20799,145 @@ class MainWindow(QMainWindow):
             dx = float(values["x"]) - current["x"] if changed("x") else 0.0
             dy = float(values["y"]) - current["y"] if changed("y") else 0.0
             record = translate_drawing(record, dx, dy)
-        if record["kind"] == "text":
+        if record["kind"] in ("text", "textbox"):
             if changed("text"):
-                # Validation strips it and refuses a blank or multi-line text.
-                record["text"] = str(values["text"])
+                # Validation strips it and refuses a blank text (and, for a
+                # text, a multi-line one; a text box keeps its lines).
+                record["text"] = str(values["text"]).replace("\r\n", "\n").replace("\r", "\n")
             if changed("size"):
                 record["size"] = round(float(values["size"]), 4)
             if changed("angle"):
                 record.pop("angle", None)
                 if int(values["angle"]) % 180:
                     record["angle"] = 90
+        if record["kind"] == "textbox" and changed("border"):
+            # Stored only when False, as the validator keeps it.
+            record.pop("border", None)
+            if not bool(values["border"]):
+                record["border"] = False
+        if record["kind"] == "dimension":
+            if changed("leader_length"):
+                record["leader_length"] = round(float(values["leader_length"]), 4) + 0.0
+            if record.get("dtype") == "leader":
+                if changed("text"):
+                    record["text"] = " ".join(str(values["text"]).split())
+                if changed("frame"):
+                    record.pop("frame", None)
+                    if values["frame"] != "none":
+                        record["frame"] = values["frame"]
         return record
+
+    #: Visible mark of a line break of a text box in the one-line text field
+    #: of the «Proprietà» panel: the panel shows the lines joined by it and
+    #: turns it back into a line break on commit (the dialog keeps a
+    #: multi-line editor). A character no footprint text plausibly holds.
+    _FP_PANEL_LINE_MARK = "⏎"
+
+    def _drawing_property_specs(self, record: dict, current: dict | None = None) -> list:
+        """@brief The editable fields of one drawing, shared by «Proprietà elemento…» and the «Proprietà» panel.
+
+        @param record A validated drawing record.
+        @param current Its `_drawing_properties_values`; computed when None.
+        @return `canvas_properties.FieldSpec` items in display order, keyed by
+            the change keys `set_drawing_properties` takes: "layer" (choice
+            of the drawable layers), "width" (not for a text: KiCad's text
+            stroke is not the record's width), "x", "y", "fill" (fillable
+            kinds), "rect_width"/"rect_height" (rectangle, text box),
+            "radius" (circle, radial and centre dimensions), "offset"
+            (aligned/orthogonal dimension), "leader_length" (radial), "text",
+            "frame" (leader), "size", "angle", "border" (text box).
+        @note One description for both editors (plan C2, contract 11): the
+            dialog and the panel cannot offer different fields or bounds.
+            The bounds are the validator's own, or wider (the validator then
+            refuses with its reason); never narrower, so no shown value is
+            clamped: stroke (0, 10] mm (`_FP_EDIT_WIDTH_RANGE`, also the
+            menu's «Spessore del tratto…»), radius up to the half diagonal of
+            the +-500 mm square, positions wide enough for the drawn bounds of
+            a long arc (its centre may lie up to KiCad's coordinate limit away).
+        @note "x" and "y" are measured from the DRAWING ORIGIN with Y up
+            (contract 16, review M10), as the pad dialog and the pointer line
+            under the view show positions (`_to_drawing_mm`); the editors turn
+            a typed value back with `_drawing_changes_to_footprint`. CONTRACT
+            CHANGED: before, they were footprint coordinates with Y down, so
+            a number copied from the pad dialog mirrored the drawing.
+        @note A text field holds at most `_FP_TEXT_MAX_LENGTH` characters
+            (review B9).
+        """
+        from .canvas_properties import FieldSpec
+        from ..core.footprint import KICAD_COORD_LIMIT_MM, TEXT_POSITION_LIMIT_MM
+        tx = self.i18n.text
+        if current is None:
+            current = self._drawing_properties_values(record)
+        span = 2.0 * TEXT_POSITION_LIMIT_MM
+
+        def number(key, label, low, high, step=0.1, suffix="", tooltip="", value=None, decimals=4):
+            shown = float(current[key]) if value is None else float(value)
+            return FieldSpec(key, label, "float", shown, minimum=low, maximum=high, step=step,
+                             decimals=decimals, suffix=suffix, tooltip=tooltip)
+
+        specs = [FieldSpec("layer", tx("Layer"), "choice", current["layer"],
+                           choices=tuple((layer, tx(label)) for layer, label in self.FOOTPRINT_DRAW_LAYERS))]
+        if record["kind"] != "text":
+            low, high = self._FP_EDIT_WIDTH_RANGE
+            specs.append(number("width", tx("Spessore del tratto in mm"), low, high, 0.01,
+                                decimals=self._FP_EDIT_WIDTH_DECIMALS))
+        shown_xy = dict(zip(("x", "y"), self._to_drawing_mm(current["x"], current["y"])))
+        origin_tip = tx("Misurata da: {origin} (Y verso l'alto).").format(
+            origin=self._footprint_origin_name(self._resolved_drawing_origin()))
+        for key in ("x", "y"):
+            specs.append(number(key, f"{key.upper()} (mm)", -4 * KICAD_COORD_LIMIT_MM, 4 * KICAD_COORD_LIMIT_MM,
+                                tooltip=origin_tip, value=round(shown_xy[key], 4) + 0.0))
+        if "fill" in current:
+            specs.append(FieldSpec("fill", tx("Riempimento"), "bool", bool(current["fill"])))
+        if "rect_width" in current:
+            specs += [number("rect_width", tx("Larghezza (mm)"), 0.0, span),
+                      number("rect_height", tx("Altezza (mm)"), 0.0, span)]
+        if "radius" in current:
+            specs.append(number("radius", tx("Raggio (mm)"), 0.0, math.ceil(span * math.sqrt(2.0))))
+        if "offset" in current:
+            specs.append(number("offset", tx("Scostamento (mm)"), -TEXT_POSITION_LIMIT_MM, TEXT_POSITION_LIMIT_MM,
+                                tooltip=tx("Distanza della linea di quota dai punti misurati; il segno sceglie il lato.")))
+        if "leader_length" in current:
+            specs.append(number("leader_length", tx("Lunghezza del richiamo (mm)"), 0.0001, TEXT_POSITION_LIMIT_MM))
+        if "text" in current:
+            specs.append(FieldSpec("text", tx("Testo"), "text", current["text"],
+                                   max_length=self._FP_TEXT_MAX_LENGTH))
+        if "frame" in current:
+            specs.append(FieldSpec("frame", tx("Cornice"), "choice", current["frame"],
+                                   choices=tuple((value, tx(label)) for value, label in self.FOOTPRINT_LEADER_FRAMES)))
+        if "size" in current:
+            specs.append(number("size", tx("Dimensione"), 0.0001, 50.0, suffix=" mm"))
+        if "angle" in current:
+            specs.append(FieldSpec("angle", tx("Rotazione"), "choice", current["angle"],
+                                   choices=tuple((angle, f"{angle}°") for angle in (0, 90))))
+        if "border" in current:
+            specs.append(FieldSpec("border", tx("Bordo visibile"), "bool", bool(current["border"])))
+        return specs
+
+    def _drawing_changes_to_footprint(self, changes: dict) -> dict:
+        """@brief The editors' changes with "x"/"y" turned from the drawing-origin frame into footprint mm.
+
+        @param changes Change keys of `_drawing_property_specs` as typed: "x"
+            and "y" from the drawing origin, X right and Y up (contract 16).
+        @return A copy whose "x"/"y" are footprint coordinates (Y down),
+            rounded to 0.1 um, the frame `set_drawing_properties` works in;
+            the other keys unchanged. The two axes are independent, so a
+            change of one coordinate never moves the other.
+        """
+        ox, oy = self._drawing_origin_mm()
+        converted = dict(changes)
+        if "x" in converted:
+            converted["x"] = round(ox + float(converted["x"]), 4) + 0.0
+        if "y" in converted:
+            converted["y"] = round(oy - float(converted["y"]), 4) + 0.0
+        return converted
 
     def _edit_drawing_properties(self, index: int) -> None:
         """@brief «Proprietà elemento…» of a drawing: layer, stroke, position, size; for a text its content.
 
         @param index Index of the drawing.
+        @note The rows come from `_drawing_property_specs`, the description
+            the «Proprietà» panel shows too (plan C2).
         @note OK applies the changed values as one undo step
             (`set_drawing_properties`); refused values keep the dialog open
             with the reason derived from the refused record, as in the
@@ -19610,76 +20946,59 @@ class MainWindow(QMainWindow):
             showed when the dialog opened, never from the record: a spin box
             rounds to 0.1 um and clamps to its range, so comparing its value
             with the record would rewrite a drawing accepted unchanged.
-            The ranges are the validation bounds anyway (stroke (0, 10] mm,
-            radius up to the half diagonal of the +-500 mm square, positions
-            wide enough for the drawn bounds of a long arc).
-        @note A text has no stroke width row: KiCad's text stroke is not the
-            record's width (`FpText` writes its own thickness).
+        @note X and Y are typed from the drawing origin with Y up, as in the
+            pad dialog (contract 16); OK turns them back
+            (`_drawing_changes_to_footprint`).
         """
         if not 0 <= index < len(self.footprint_drawings):
             return
         record = self.footprint_drawings[index]
-        current = self._drawing_properties_values(record)
         tx = self.i18n.text
         dialog = QDialog(self)
         dialog.setWindowTitle(tx("Proprietà elemento…").rstrip("…"))
         form = QFormLayout(dialog)
-        layer_box = QComboBox()
-        for layer, label in self.FOOTPRINT_DRAW_LAYERS:
-            layer_box.addItem(_layer_swatch(_layer_color(layer)), tx(label), layer)
-        layer_box.setCurrentIndex(layer_box.findData(record["layer"]))
-        form.addRow(tx("Layer"), layer_box)
-
-        def spin(value, low, high, step=0.1):
-            box = QDoubleSpinBox()
-            box.setDecimals(4)
-            box.setRange(low, high)
-            box.setSingleStep(step)
-            box.setValue(float(value))
-            return box
-
-        from ..core.footprint import KICAD_COORD_LIMIT_MM, TEXT_POSITION_LIMIT_MM
-        # Bounds: the validator's own, or wider (the validator then refuses
-        # with its reason); never narrower, so no shown value is clamped.
-        span = 2.0 * TEXT_POSITION_LIMIT_MM
-        fields = {}
-        if record["kind"] != "text":
-            fields["width"] = spin(current["width"], 0.0001, 10.0, 0.01)
-            form.addRow(tx("Spessore del tratto in mm"), fields["width"])
-        for key in ("x", "y"):
-            # A long arc's drawn box may reach far beyond its stored points
-            # (its centre may lie up to KiCad's coordinate limit away).
-            fields[key] = spin(current[key], -4 * KICAD_COORD_LIMIT_MM, 4 * KICAD_COORD_LIMIT_MM)
-            form.addRow(f"{key.upper()} (mm)", fields[key])
-        text_edit = angle_box = fill_box = None
-        if "fill" in current:
-            fill_box = QCheckBox(tx("Riempimento"))
-            fill_box.setChecked(bool(current["fill"]))
-            form.addRow(fill_box)
-        if record["kind"] == "rectangle":
-            fields["rect_width"] = spin(current["rect_width"], 0.0, span)
-            form.addRow(tx("Larghezza (mm)"), fields["rect_width"])
-            fields["rect_height"] = spin(current["rect_height"], 0.0, span)
-            form.addRow(tx("Altezza (mm)"), fields["rect_height"])
-        elif record["kind"] == "circle":
-            fields["radius"] = spin(current["radius"], 0.0, math.ceil(span * math.sqrt(2.0)))
-            form.addRow(tx("Raggio (mm)"), fields["radius"])
-        elif record["kind"] == "dimension":
-            fields["offset"] = spin(current["offset"], -TEXT_POSITION_LIMIT_MM, TEXT_POSITION_LIMIT_MM)
-            fields["offset"].setToolTip(tx("Distanza della linea di quota dai punti misurati; il segno sceglie il lato."))
-            form.addRow(tx("Scostamento (mm)"), fields["offset"])
-        elif record["kind"] == "text":
-            text_edit = QLineEdit(current["text"])
-            text_edit.setMaxLength(200)
-            form.addRow(tx("Testo"), text_edit)
-            fields["size"] = spin(current["size"], 0.0001, 50.0)
-            fields["size"].setSuffix(" mm")
-            form.addRow(tx("Dimensione"), fields["size"])
-            angle_box = QComboBox()
-            for angle in (0, 90):
-                angle_box.addItem(f"{angle}°", angle)
-            angle_box.setCurrentIndex(angle_box.findData(current["angle"]))
-            form.addRow(tx("Rotazione"), angle_box)
+        from PyQt6.QtWidgets import QPlainTextEdit
+        readers = {}
+        for spec in self._drawing_property_specs(record):
+            if spec.kind == "float":
+                box = QDoubleSpinBox()
+                box.setDecimals(spec.decimals)
+                box.setRange(spec.minimum, spec.maximum)
+                box.setSingleStep(spec.step)
+                box.setValue(float(spec.value))
+                if spec.suffix:
+                    box.setSuffix(spec.suffix)
+                box.setToolTip(spec.tooltip)
+                form.addRow(spec.label, box)
+                readers[spec.key] = box.value
+            elif spec.kind == "choice":
+                combo = QComboBox()
+                for data, label in spec.choices:
+                    if spec.key == "layer":
+                        combo.addItem(_layer_swatch(_layer_color(data)), label, data)
+                    else:
+                        combo.addItem(label, data)
+                found = combo.findData(spec.value)
+                # A leader frame the list does not hold reads as its first entry («none»).
+                combo.setCurrentIndex(found if spec.key == "layer" else max(0, found))
+                form.addRow(spec.label, combo)
+                readers[spec.key] = combo.currentData
+            elif spec.kind == "bool":
+                check = QCheckBox(spec.label)
+                check.setChecked(bool(spec.value))
+                form.addRow(check)
+                readers[spec.key] = check.isChecked
+            elif spec.kind == "text":
+                if record["kind"] == "textbox":
+                    # A text box holds several lines (plan D3).
+                    edit = QPlainTextEdit(spec.value)
+                    edit.setFixedHeight(80)
+                    readers[spec.key] = edit.toPlainText
+                else:
+                    edit = QLineEdit(spec.value)
+                    edit.setMaxLength(spec.max_length or self._FP_TEXT_MAX_LENGTH)
+                    readers[spec.key] = edit.text
+                form.addRow(spec.label, edit)
         message = QLabel("")
         message.setWordWrap(True)
         form.addRow(message)
@@ -19689,20 +21008,14 @@ class MainWindow(QMainWindow):
 
         def shown():
             """What the widgets show now, by property key."""
-            values = {key: box.value() for key, box in fields.items()}
-            values["layer"] = layer_box.currentData()
-            if fill_box is not None:
-                values["fill"] = fill_box.isChecked()
-            if text_edit is not None:
-                values["text"] = text_edit.text()
-                values["angle"] = angle_box.currentData()
-            return values
+            return {key: read() for key, read in readers.items()}
 
         initial = shown()
 
         def accept():
             now = shown()
-            changes = {key: value for key, value in now.items() if value != initial[key]}
+            changes = self._drawing_changes_to_footprint(
+                {key: value for key, value in now.items() if value != initial[key]})
             if self.set_drawing_properties(index, changes):
                 dialog.accept()
             else:
@@ -19716,6 +21029,221 @@ class MainWindow(QMainWindow):
         finally:
             dialog.deleteLater()
 
+    # ── Live «Proprietà» panel of the selection (plan C2) ──────────────────
+
+    def _fp_properties_fields(self) -> tuple:
+        """@brief The fields of the «Proprietà» panel for the current selection.
+
+        @return (subject, specs, title): subject names what the fields edit
+            (("drawing", index), ("drawings", indices), ("pads", indices) or
+            ("none",)); specs a list of `FieldSpec`; title the bold heading.
+        @note The panel follows the SELECTION only, as KiCad's, never the
+            hovered drawing; a drawing just drawn is the selection already.
+        @note One drawing: `_drawing_property_specs`, the dialog's fields (a
+            text box's lines joined by `_FP_PANEL_LINE_MARK`). Several
+            drawings: the layer; the stroke width when none is a text (the
+            dialog's rule: a text has no stroke row); the fill when every one
+            is fillable; each «(vari)» when they differ. Pads (never selected
+            together with drawings): number, X, Y and size, read-only (pads
+            keep their own dialog in this phase).
+        """
+        from .canvas_properties import FieldSpec
+        from ..core.footprint import USER_DRAW_FILLABLE
+        tx = self.i18n.text
+        chosen = self._fp_selected_indices()
+        drawings = self.footprint_drawings
+        if len(chosen) == 1:
+            from dataclasses import replace as replace_spec
+            record = drawings[chosen[0]]
+            specs = self._drawing_property_specs(record)
+            if record["kind"] == "textbox":
+                specs = [replace_spec(s, value=str(s.value).replace("\n", self._FP_PANEL_LINE_MARK),
+                                      tooltip=tx("Una riga per ogni ⏎; per scrivere su più righe usa "
+                                                 "«Proprietà elemento…»."))
+                         if s.key == "text" else s for s in specs]
+            # A text the one-line field cannot give back unchanged is shown
+            # read-only (review B5): a literal «⏎» of a text box would come
+            # back as a line break, a text longer than the field would be cut.
+            # The dialog edits it whole.
+            specs = [replace_spec(s, kind="readonly", tooltip=tx(
+                         "Questo testo si modifica con «Proprietà elemento…»."))
+                     if s.key == "text" and self._panel_text_is_lossy(record, str(record.get("text", ""))) else s
+                     for s in specs]
+            title = tx(self.FOOTPRINT_DRAWING_KIND_NAMES.get(record["kind"], ""))
+            return ("drawing", chosen[0]), specs, title
+        if chosen:
+            records = [drawings[i] for i in chosen]
+            values = [self._drawing_properties_values(r) for r in records]
+
+            def common(key, rounding=None):
+                found = {round(v[key], rounding) if rounding is not None else v[key] for v in values}
+                return (next(iter(found)), False) if len(found) == 1 else (None, True)
+            layer, mixed = common("layer")
+            specs = [FieldSpec("layer", tx("Layer"), "choice", layer, mixed=mixed,
+                               choices=tuple((name, tx(label)) for name, label in self.FOOTPRINT_DRAW_LAYERS))]
+            if all(r["kind"] != "text" for r in records):
+                width, mixed = common("width", self._FP_EDIT_WIDTH_DECIMALS)
+                low, high = self._FP_EDIT_WIDTH_RANGE
+                specs.append(FieldSpec("width", tx("Spessore del tratto in mm"), "float", width, mixed=mixed,
+                                       minimum=low, maximum=high, step=0.01, decimals=self._FP_EDIT_WIDTH_DECIMALS))
+            if all(r["kind"] in USER_DRAW_FILLABLE for r in records):
+                fill, mixed = common("fill")
+                specs.append(FieldSpec("fill", tx("Riempimento"), "bool", fill, mixed=mixed))
+            return ("drawings", tuple(chosen)), specs, tx("{count} elementi").format(count=len(chosen))
+        pads = self._fp_selected_pads()
+        package = getattr(self, "package_geometry", None)
+        if pads and package is not None:
+            try:
+                seen = package.pins_seen_from_top()
+            except (TypeError, ValueError):
+                seen = list(package.pins)
+            pins = [seen[i] for i in pads if 0 <= i < len(seen)]
+            if len(pins) == 1:
+                pin = pins[0]
+                # From the drawing origin with Y up, as the pad dialog (contract 16, review M10).
+                px, py = self._to_drawing_mm(float(pin.x_mm), float(pin.y_mm))
+                specs = [FieldSpec("number", tx("Numero"), "readonly", str(pin.number)),
+                         FieldSpec("x", "X (mm)", "readonly", round(px, 4) + 0.0, decimals=4),
+                         FieldSpec("y", "Y (mm)", "readonly", round(py, 4) + 0.0, decimals=4),
+                         FieldSpec("size", tx("Dimensione"), "readonly",
+                                   f"{float(pin.pad_length_mm):g} × {float(pin.pad_width_mm):g}", suffix=" mm")]
+                return ("pads", tuple(pads)), specs, tx("Pad {number}").format(number=pin.number)
+            if pins:
+                specs = [FieldSpec("numbers", tx("Pad"), "readonly", ", ".join(str(p.number) for p in pins))]
+                return ("pads", tuple(pads)), specs, tx("{count} elementi").format(count=len(pins))
+        return ("none",), [], ""
+
+    def _panel_text_is_lossy(self, record: dict, text: str) -> bool:
+        """@brief Whether the panel's one-line text field could not give `text` back unchanged.
+
+        @param record The drawing the text belongs to.
+        @param text Its stored text.
+        @return True for a text box whose text holds a literal
+            `_FP_PANEL_LINE_MARK` (the field turns the mark into a line
+            break), or a text longer than `_FP_TEXT_MAX_LENGTH` once shown on
+            one line (the field would cut it): such a text is edited in the
+            dialog only (review B5).
+        """
+        shown = text.replace("\n", self._FP_PANEL_LINE_MARK) if record["kind"] == "textbox" else text
+        return (record["kind"] == "textbox" and self._FP_PANEL_LINE_MARK in text
+                or len(shown) > self._FP_TEXT_MAX_LENGTH)
+
+    def _retranslate_fp_properties(self) -> None:
+        """@brief Show the «Proprietà» panel in the new interface language (review M11).
+
+        @note The panel's labels, choice entries («Serigrafia»...), composed
+            title («{count} elementi») and empty text are written when the
+            fields are built, so a refresh rebuilds them in the new language;
+            the mixed-value placeholder «(vari)» is handed to the panel first.
+            A refresh never commits (contract 11).
+        """
+        from .canvas_properties import MIXED_PLACEHOLDER
+        panel = getattr(self, "fp_properties_panel", None)
+        if panel is None:
+            return
+        panel.set_mixed_placeholder(self.i18n.text(MIXED_PLACEHOLDER))
+        self._refresh_fp_properties()
+
+    def _refresh_fp_properties(self) -> None:
+        """@brief Show the selection in the «Proprietà» panel; never commits (contract 11).
+
+        @note Called by `_refresh_drawing_selection` (every selection change)
+            and `_after_preview_drawn` (every redraw: commit, undo, redo,
+            apply, discard, project switch). Skipped while a drag runs in the
+            preview, which redraws at each pointer move: the panel catches up
+            once at its end (`gesture_end`), as the symbol editor's skips
+            during a drag.
+        """
+        from .canvas_properties import EMPTY_TEXT
+        panel = getattr(self, "fp_properties_panel", None)
+        if panel is None:
+            return
+        gestures = getattr(getattr(self, "preview_view", None), "gestures", None)
+        if gestures is not None and gestures.active:
+            return
+        if getattr(self, "_fp_applied_swap_active", False):
+            # The fields hold the APPLIED footprint for a moment (a
+            # generation): the panel keeps showing the draft (review B4).
+            return
+        subject, specs, title = self._fp_properties_fields()
+        self._fp_properties_subject = subject
+        if specs:
+            panel.set_fields(specs, title, subject=subject)
+        else:
+            panel.set_empty(self.i18n.text(EMPTY_TEXT))
+
+    def _fp_property_committed(self, key: str, value) -> None:
+        """@brief A field of the «Proprietà» panel was edited: one commit, one undo step.
+
+        @param key A change key of `set_drawing_properties` (the panel keys
+            are the dialog's own).
+        @param value The new value.
+        @note Ignored while `_applied_footprint_in_memory` holds the applied
+            footprint (review B4): a commit then would edit the applied
+            drawings, which the swap puts back the moment it ends.
+        @note X and Y come from the drawing origin with Y up (contract 16)
+            and are turned back by `_drawing_changes_to_footprint`.
+        @note One drawing goes through `set_drawing_properties`, the
+            dialog's path, so a panel commit equals the dialog's result for
+            the same input; several drawings through
+            `_set_drawings_properties` (one undo step for all). A refused
+            value changes nothing, shows the «Modifica scartata.» toast with
+            the validator's reason, and the refresh puts the stored value
+            back in the field.
+        """
+        if getattr(self, "_fp_applied_swap_active", False):
+            return
+        subject = self._fp_properties_subject
+        try:
+            if subject[0] == "drawing":
+                index = subject[1]
+                if self._fp_selected_indices() != [index]:
+                    return
+                if key == "text" and self.footprint_drawings[index]["kind"] == "textbox":
+                    value = str(value).replace(self._FP_PANEL_LINE_MARK, "\n")
+                changes = self._drawing_changes_to_footprint({key: value})
+                if not self.set_drawing_properties(index, changes):
+                    refused = self._drawing_properties_record(index, changes)
+                    self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
+                                              self._degenerate_drawing_text(refused) if refused is not None else "")
+            elif subject[0] == "drawings":
+                if tuple(self._fp_selected_indices()) != tuple(subject[1]):
+                    return
+                self._set_drawings_properties(subject[1], {key: value})
+        finally:
+            self._refresh_fp_properties()
+
+    def _set_drawings_properties(self, indices, values: dict) -> bool:
+        """@brief Apply the same «Proprietà» values to several drawings as ONE undo step.
+
+        @param indices Indices into `footprint_drawings`; unknown ones are skipped.
+        @param values Change keys of `set_drawing_properties` (layer, width, fill).
+        @return True when accepted (applied, or changing nothing: no undo
+            step); False when one result is refused by the validation: then
+            nothing changes at all and the «Modifica scartata.» toast gives
+            the reason of the first refused drawing.
+        @note Each drawing is built by `_drawing_properties_record`, the
+            single-drawing path, so a multi-edit equals the same edit made
+            on each drawing alone; the selection is kept (same list length).
+        """
+        from ..core.footprint import validate_footprint_drawings
+        chosen = [i for i in indices if 0 <= i < len(self.footprint_drawings)]
+        updated = deepcopy(self.footprint_drawings)
+        changed = False
+        for index in chosen:
+            candidate = self._drawing_properties_record(index, values)
+            valid = validate_footprint_drawings([candidate]) if candidate is not None else []
+            if not valid:
+                self._draw_feedback_toast(self.i18n.text("Modifica scartata."),
+                                          self._degenerate_drawing_text(candidate or {}))
+                return False
+            if valid[0] != updated[index]:
+                updated[index] = valid[0]
+                changed = True
+        if not changed:
+            return True
+        return self._commit_drawings(updated)
+
     def _draw_footprint_drawings(self, mm_to_px: float) -> None:
         """@brief Draw the user drawings and the clicks in progress on the scene.
 
@@ -19726,11 +21254,11 @@ class MainWindow(QMainWindow):
         @note Selected drawings (`_fp_selected_indices`) are drawn in the
             selection accent with a thicker stroke (`_style_drawing_item`).
         """
-        from .footprint_view import DRAWING_KEY_ROLE, LAYER_ROLE
+        from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, LAYER_ROLE
         selected = set(self._fp_selected_indices())
         for index, record in enumerate(self.footprint_drawings):
             pen = QPen(QColor(_layer_color(record["layer"])))
-            pen.setWidthF(max(1.0, record.get("width", 0.12) * mm_to_px))
+            pen.setWidthF(max(1.0, record.get("width", user_draw_width(record.get("layer", ""))) * mm_to_px))
             points = [(x * mm_to_px, y * mm_to_px) for x, y in record["points"]]
             kind = record["kind"]
             items = []
@@ -19748,31 +21276,48 @@ class MainWindow(QMainWindow):
             elif kind == "polygon":
                 items = [self.preview_scene.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]), pen, brush)]
             elif kind == "dimension":
-                # The strokes KiCad draws (`dimension_ink_segments`: extension
-                # lines with their overshoot, the dimension line, the
-                # arrowheads) and the value where KiCad puts it
-                # (`dimension_label_pose`), all in the layer colour and in mm
-                # scaled to the scene, so the preview shows what is written.
-                from ..core.footprint import (USER_DIMENSION_TEXT_MM, dimension_ink_segments,
-                                              dimension_label_pose, dimension_text)
-                start, end = (tuple(p) for p in record["points"][:2])
-                offset, axis = record.get("offset", 0.0), record.get("axis", "")
+                # The strokes KiCad draws for the dimension's type
+                # (`FpDimension.ink_segments`: extension lines, dimension
+                # line and arrowheads; the radial cross, leader and shelf; a
+                # centre mark; a leader's arrow, shelf and frame) and the
+                # value where KiCad puts it (`dimension_label`), all from the
+                # record through `record_dimension`, the writer's own item,
+                # so the preview shows what is written.
+                from ..core.footprint import dimension_label, record_dimension
+                dimension = record_dimension(record)
                 items = [self.preview_scene.addLine(a[0] * mm_to_px, a[1] * mm_to_px,
                                                     b[0] * mm_to_px, b[1] * mm_to_px, pen)
-                         for a, b in dimension_ink_segments(start, end, offset, axis)]
-                (lx, ly), angle = dimension_label_pose(start, end, offset, USER_DIMENSION_TEXT_MM, axis)
-                label = _kicad_size_text_item(dimension_text(start, end, axis), USER_DIMENSION_TEXT_MM,
-                                              _layer_color(record["layer"]), mm_to_px)
-                self.preview_scene.addItem(label)
-                # Centred on the pose point, turned by KiCad's angle (Qt turns
-                # clockwise). The item carries its own scale transform, so the
-                # centring reads the SCENE bounds after the turn.
-                label.setTransformOriginPoint(label.boundingRect().center())
-                label.setRotation(-angle)
-                bounds = label.sceneBoundingRect()
-                label.setPos(label.pos() + QPointF(lx * mm_to_px - bounds.center().x(),
-                                                   ly * mm_to_px - bounds.center().y()))
-                items.append(label)
+                         for a, b in dimension.ink_segments()]
+                circle = dimension.frame_circle()
+                if circle is not None:
+                    (fx, fy), radius = circle
+                    items.append(self.preview_scene.addEllipse((fx - radius) * mm_to_px, (fy - radius) * mm_to_px,
+                                                               2 * radius * mm_to_px, 2 * radius * mm_to_px, pen))
+                shown = dimension_label(dimension)
+                if shown is not None and shown[0]:
+                    from ..core.kicad_text import kicad_unescape
+                    text, (lx, ly), angle = shown
+                    # The label as KiCad shows it: a leader's free text keeps
+                    # KiCad's escapes in the file ({slash}...), shown resolved
+                    # as every other drawn text (review B7); a value is plain.
+                    label = _kicad_size_text_item(kicad_unescape(text), dimension.text_size,
+                                                  _layer_color(record["layer"]), mm_to_px)
+                    self.preview_scene.addItem(label)
+                    # Centred on the pose point, turned by KiCad's angle (Qt turns
+                    # clockwise). The item carries its own scale transform, so the
+                    # centring reads the SCENE bounds after the turn.
+                    label.setTransformOriginPoint(label.boundingRect().center())
+                    label.setRotation(-angle)
+                    bounds = label.sceneBoundingRect()
+                    label.setPos(label.pos() + QPointF(lx * mm_to_px - bounds.center().x(),
+                                                       ly * mm_to_px - bounds.center().y()))
+                    items.append(label)
+            elif kind == "curve":
+                # Sampled as the checks sample it (`bezier_segments`), from the
+                # writer's own curve function (`bezier_points`).
+                items = [self.preview_scene.addPath(_curve_path(record["points"], mm_to_px), pen)]
+            elif kind == "textbox":
+                items = self._textbox_items(record, pen, mm_to_px)
             elif kind == "rectangle":
                 (x0, y0), (x1, y1) = points
                 items = [self.preview_scene.addRect(min(x0, x1), min(y0, y1),
@@ -19800,6 +21345,8 @@ class MainWindow(QMainWindow):
                     # Selected drawings in the theme's selection accent.
                     self._style_drawing_item(item, record, True, mm_to_px)
                 item.setData(DRAWING_KEY_ROLE, index)
+                # The kind it was drawn as: `_refresh_drawing_selection` restyles only a match.
+                item.setData(DRAWING_KIND_ROLE, kind)
                 # Its own KiCad layer: the «Layer» group hides it with that layer.
                 item.setData(LAYER_ROLE, record["layer"])
                 item.setZValue(6)
@@ -19807,6 +21354,52 @@ class MainWindow(QMainWindow):
                 item.setCursor(Qt.CursorShape.SizeAllCursor)
         self._refresh_draw_markers()
         self._refresh_drawing_handles()
+
+    def _textbox_items(self, record: dict, pen: QPen, mm_to_px: float) -> list:
+        """@brief Scene items of a text box: its border (when drawn) and one text item per line.
+
+        @param record A validated «textbox» record.
+        @param pen The layer pen (border width).
+        @param mm_to_px Scene px per mm.
+        @return The items, already in the scene: a rectangle when ``border``
+            is not False, then the lines laid out as KiCad lays them in a
+            text box (`FpTextBox`: justified left and top inside the
+            `textbox_margin`, read upwards from the bottom-left corner when
+            ``angle`` is 90), each `size` mm tall with KiCad's width.
+        @note The line pitch is `_FP_TEXTBOX_LINE_PITCH` text heights, an
+            approximation of KiCad's interline, stated where it is defined.
+        @note Each line is wrapped at word boundaries to the box's inner
+            width (box side minus twice the margin) as KiCad's
+            `FONT::LinebreakText` does (`_wrap_textbox_line`, review B6):
+            the file stores the unwrapped text, KiCad wraps it when drawing.
+        """
+        from ..core.footprint import textbox_margin
+        (x0, y0), (x1, y1) = record["points"]
+        left, top, right, bottom = min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+        size = float(record.get("size", 1.0))
+        margin = textbox_margin(record.get("width", user_draw_width(record["layer"])), size)
+        items = []
+        if record.get("border", True):
+            items.append(self.preview_scene.addRect(left * mm_to_px, top * mm_to_px, (right - left) * mm_to_px,
+                                                    (bottom - top) * mm_to_px, pen))
+        vertical = record.get("angle", 0) == 90
+        pitch = size * _FP_TEXTBOX_LINE_PITCH
+        thickness = round(size * 0.15, 4)
+        column = ((bottom - top) if vertical else (right - left)) - 2.0 * margin
+        from ..core.kicad_text import kicad_unescape
+        lines = [wrapped for line in str(record["text"]).split("\n")
+                 for wrapped in _wrap_textbox_line(kicad_unescape(line), size, column, thickness)]
+        for row, line in enumerate(lines):
+            if vertical:
+                x, y = left + margin + row * pitch, bottom - margin
+            else:
+                x, y = left + margin, top + margin + row * pitch
+            item = _kicad_text_item(line, size, x * mm_to_px, y * mm_to_px, base_font=QFont(),
+                                    mm_to_px=mm_to_px, thickness=thickness, justify="left",
+                                    vjustify="top", vertical=vertical, colour=_layer_color(record["layer"]))
+            self.preview_scene.addItem(item)
+            items.append(item)
+        return items
 
     def _snapped_draw_point(self, x: float, y: float) -> tuple:
         """@brief A scene point (px) snapped to the drawn grid, in footprint mm."""
@@ -19827,27 +21420,45 @@ class MainWindow(QMainWindow):
             collector.hover(None)
 
     def _ghost_path(self, points: list, tool: str | None = None, stored: bool = False,
-                    offset_mm: float | None = None, axis: str = ""):
+                    offset_mm: float | None = None, axis: str = "", record: dict | None = None):
         """@brief Dashed outline of a shape through `points` (mm).
 
         @param points The shape's points: clicked ones plus the hovered one
             while drawing, or a stored record's points with one moved.
-        @param tool Shape kind; None means the armed tool.
+        @param tool Click tool key or stored drawing kind; None means the armed tool.
         @param stored True when `points` are in the STORED order (an arc is
             start, mid, end); False for the click order (start, end, mid).
         @param offset_mm A stored dimension's `offset` (its line's signed
             distance from the points); None while a dimension is being
             clicked, when the third point gives it.
         @param axis A stored dimension's `axis` ("" aligned, "x" / "y" orthogonal).
+        @param record The stored record when `stored` (its `dtype`,
+            `leader_length`, `text` and `frame` shape a typed dimension).
         @return A QPainterPath in scene px, or None when nothing can be
             outlined yet (a text, or a single point).
+        @note Every dimension ghost is drawn from `FpDimension.ink_segments`
+            (via `record_dimension`) and every curve from `bezier_points`: the
+            same geometry the writer and the preview use.
         """
+        from ..core.footprint import record_dimension
         mm_to_px = 20.0
         tool = self._fp_draw_tool if tool is None else tool
         pts = [(x * mm_to_px, y * mm_to_px) for x, y in points]
         if tool == "text" or len(pts) < 2:
             return None
         path = QPainterPath()
+
+        def add_ink(dimension):
+            for (ax, ay), (bx, by) in dimension.ink_segments():
+                path.moveTo(ax * mm_to_px, ay * mm_to_px)
+                path.lineTo(bx * mm_to_px, by * mm_to_px)
+            circle = dimension.frame_circle()
+            if circle is not None:
+                (cx, cy), radius = circle
+                path.addEllipse(QPointF(cx * mm_to_px, cy * mm_to_px), radius * mm_to_px, radius * mm_to_px)
+
+        dtype = (record or {}).get("dtype", "") if stored else {
+            "dimension_radial": "radial", "dimension_center": "center", "dimension_leader": "leader"}.get(tool, "")
         if tool in ("line", "polygon", self._REFERENCE_SCALE_TOOL):
             # The calibration of the reference image shows the measured
             # segment as a line does.
@@ -19856,25 +21467,41 @@ class MainWindow(QMainWindow):
                 path.lineTo(x, y)
             if tool == "polygon":
                 path.closeSubpath()
-        elif tool == "dimension":
+        elif dtype in ("radial", "center", "leader"):
+            (x1, y1), (x2, y2) = points[:2]
+            if (x1, y1) == (x2, y2):
+                return None
+            base = dict(record) if stored else {"kind": "dimension", "layer": self._fp_active_layer(), "dtype": dtype}
+            base["points"] = [[x1, y1], [x2, y2]]
+            add_ink(record_dimension(base))
+        elif tool in ("dimension", "dimension_orthogonal"):
             # Two points: the measured line; three (the placement, or the
             # stored offset): the dimension line with its extension lines.
-            from ..core.footprint import dimension_ink_segments, dimension_normal
+            from ..core.footprint import dimension_offset_from_crossbar
             (x1, y1), (x2, y2) = points[:2]
             if len(pts) < 3 and not stored:
                 path.moveTo(*pts[0])
                 path.lineTo(*pts[1])
-            else:
+            elif (x1, y1) != (x2, y2):
                 if stored:
-                    offset = float(offset_mm or 0.0)
+                    offset, used_axis = float(offset_mm or 0.0), axis
                 else:
-                    qx, qy = points[2]
-                    nx, ny = dimension_normal((x1, y1), (x2, y2))
-                    offset = (qx - x1) * nx + (qy - y1) * ny
-                for (ax, ay), (bx, by) in dimension_ink_segments((x1, y1), (x2, y2), offset, axis if stored else ""):
-                    path.moveTo(ax * mm_to_px, ay * mm_to_px)
-                    path.lineTo(bx * mm_to_px, by * mm_to_px)
-        elif tool == "rectangle":
+                    used_axis = ""
+                    if tool == "dimension_orthogonal":
+                        # The tool's own rule, so the ghost shows the axis a click writes.
+                        used_axis = self._orthogonal_dimension_axis((x1, y1), (x2, y2), points[2])
+                    offset = dimension_offset_from_crossbar((x1, y1), (x2, y2), points[2], used_axis)
+                add_ink(record_dimension({"kind": "dimension", "layer": self._fp_active_layer(),
+                                          "points": [[x1, y1], [x2, y2]], "offset": offset, "axis": used_axis}))
+        elif tool in ("bezier", "curve"):
+            if len(points) < 4:
+                # Start and control points so far: the control polygon.
+                path.moveTo(*pts[0])
+                for x, y in pts[1:]:
+                    path.lineTo(x, y)
+            else:
+                path = _curve_path(points[:4], mm_to_px)
+        elif tool in ("rectangle", "textbox"):
             (x0, y0), (x1, y1) = pts[:2]
             path.addRect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
         elif tool == "circle":
@@ -19900,13 +21527,18 @@ class MainWindow(QMainWindow):
             di aggancio»): a dot on every clicked node, a brighter dot on the
             grid node the next click would take, and the dashed outline the
             shape would have if clicked there.
+        @note When the object snap caught the hovered node, the typed snap
+            marker of `canvas_snap_marker` is drawn on it (tag
+            `_FP_SNAP_MARKER_TAG`) and removed with the other markers.
         """
         scene = getattr(self, "preview_scene", None)
         if scene is None:
             return
+        from .canvas_snap_marker import make_snap_marker_items, remove_snap_markers
         for item in list(scene.items()):
             if item.data(0x44524D) is not None:
                 scene.removeItem(item)
+        remove_snap_markers(scene, self._FP_SNAP_MARKER_TAG)
         if self._fp_draw_tool is None:
             return
         mm_to_px = 20.0
@@ -19923,6 +21555,10 @@ class MainWindow(QMainWindow):
             ghost.setData(0x44524D, True)
             ghost.setZValue(6)
         _screen_dot(scene, hx, hy, 7, YELLOW, YELLOW, 0x44524D, 8)
+        hit = getattr(self, "_fp_snap_hit", None)
+        if hit is not None and hit[0] == tuple(self._fp_draw_hover):
+            # The typed marker says what the object snap caught (plan B4, contract 4).
+            make_snap_marker_items(hit[1], hx, hy, tag=self._FP_SNAP_MARKER_TAG, scene=scene)
 
     def _moved_drawing_ghost(self, index: int, delta: tuple):
         """@brief Dashed outline of drawing `index` moved by `delta`, for a whole or group drag.
@@ -19945,7 +21581,7 @@ class MainWindow(QMainWindow):
             return path
         moved = [(round(x + dx, 4), round(y + dy, 4)) for x, y in record["points"]]
         return self._ghost_path(moved, record["kind"], stored=True, offset_mm=record.get("offset"),
-                                axis=record.get("axis", ""))
+                                axis=record.get("axis", ""), record=record)
 
     def _refresh_drawing_handles(self) -> None:
         """@brief Show the handles of the hovered drawing, and the ghost of a handle drag.
@@ -19991,7 +21627,7 @@ class MainWindow(QMainWindow):
                         ghost.setZValue(8)
             else:
                 path = self._ghost_path(points, record["kind"], stored=True, offset_mm=record.get("offset"),
-                                        axis=record.get("axis", ""))
+                                        axis=record.get("axis", ""), record=record)
                 if path is not None:
                     ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
                     ghost.setData(0x48474F, True)
@@ -20160,7 +21796,16 @@ class MainWindow(QMainWindow):
             symbol editor); a cancelled handle drag drops its ghost. Called
             with the controller already idle, so the commit's redraw and
             `_end_footprint_drawing_interaction` find nothing to cancel.
+        @note The «Proprietà» panel skips every refresh while the drag runs
+            (`_refresh_fp_properties`) and catches up here, once, at its end.
         """
+        try:
+            self._finish_gesture(target, last, commit)
+        finally:
+            self._refresh_fp_properties()
+
+    def _finish_gesture(self, target: tuple, last, commit: bool) -> None:
+        """The body of `gesture_end`: commit the drop once, or undo the picture of a cancel."""
         if target[0] == "text":
             drag, self._fp_text_drag = self._fp_text_drag, None
             key = str(target[1])
@@ -21037,6 +22682,9 @@ class MainWindow(QMainWindow):
     def _build_symbol_tab(self):
         from .symbol_tab import SymbolTab
         self.symbol_tab = SymbolTab(tx=self.i18n.text)
+        # Angle mode and object snap of the symbol editor, saved in the app
+        # configuration (flat keys `symbol_angle_mode`, `symbol_object_snap`).
+        self.symbol_tab.bind_settings(self._config, self._save_config_safely)
         self.symbol_tab.edits_applied.connect(self._apply_symbol_pinout)
         self.symbol_tab.functional_symbol_toggled.connect(self._toggle_functional_symbol)
         # The footprint selection highlight borrows the symbol's `selected` colour.

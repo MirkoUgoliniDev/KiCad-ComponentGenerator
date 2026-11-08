@@ -103,17 +103,28 @@ def test_a_dimension_on_the_silkscreen_is_ink_including_the_overshoot_and_the_ar
     assert fc.check_courtyard_enclosure(fp) == []
 
 
-def test_the_label_sits_beyond_the_crossbar_on_the_height_side_turned_along_the_line():
+def test_the_label_sits_where_kicad_recomputes_it_beside_the_crossbar_turned_along_the_line():
+    """Contract changed on purpose (review C4, 08/11): KiCad's position, not the height side.
+
+    KiCad (`PCB_DIM_ALIGNED::updateText`, text_position_mode 0) moves the
+    value by size + pen (1.15 mm here) from the crossbar middle, up the page
+    for a non-vertical crossbar and to the left for a vertical one, whatever
+    the sign of the height; kicad-cli `fp upgrade` rewrites these very
+    positions. Before, the label went one size beyond the crossbar on the
+    height side, a position KiCad never kept.
+    """
     from kicadgen.core.footprint import dimension_label_pose
-    assert dimension_label_pose((0, 0), (10, 0), 2.0, 1.0) == ((5.0, 3.0), 0.0)
-    assert dimension_label_pose((0, 0), (10, 0), -2.0, 1.0) == ((5.0, -3.0), 0.0)
+    (centre, angle) = dimension_label_pose((0, 0), (10, 0), 2.0, 1.0)
+    assert centre == pytest.approx((5.0, 0.85)) and angle == 0.0, "above the crossbar at y = 2"
+    (centre, angle) = dimension_label_pose((0, 0), (10, 0), -2.0, 1.0)
+    assert centre == pytest.approx((5.0, -3.15)) and angle == 0.0, "above the crossbar at y = -2"
     (centre, angle) = dimension_label_pose((0, 0), (0, 10), 2.0, 1.0)
-    assert centre == pytest.approx((-3.0, 5.0)) and angle == 90.0, "vertical: read bottom to top"
+    assert centre == pytest.approx((-3.15, 5.0)) and angle == 90.0, "vertical: left of it, read bottom to top"
     (_centre, angle) = dimension_label_pose((10, 0), (0, 0), 2.0, 1.0)
     assert angle == 0.0, "right to left: kept upright"
     fp = Footprint(name="T", attr="smd")
     fp.add_graphic(FpDimension(start=(0, 0), end=(10, 0), height=-2.0, layer="F.Fab"))
-    assert "(at 5 -3)" in fp.render(), "the written text follows the height side"
+    assert "(at 5 -3.15)" in fp.render(), "the written text is where KiCad recomputes it"
 
 
 # ── Tool, preview, dialog, export ─────────────────────────────────────────
@@ -154,9 +165,10 @@ def test_the_dimension_is_drawn_with_its_value_and_its_offset_is_edited_in_the_d
     labels = [i for i in items if isinstance(i, QGraphicsSimpleTextItem)]
     assert labels and labels[0].text() == "10.00 mm"
     assert len(items) == 8, "two extension lines, the dimension line, four arrow strokes and the label"
-    # The label is centred where KiCad puts it: one text height beyond the crossbar (y = -28 + 1 mm).
+    # The label is centred where KiCad recomputes it (review C4): size + pen
+    # (1.15 mm) up the page from the crossbar at y = -28, so y = -29.15.
     centre = labels[0].mapToScene(labels[0].boundingRect().center())
-    assert centre.x() == pytest.approx(-25.0 * 20, abs=1.0) and centre.y() == pytest.approx(-27.0 * 20, abs=1.0)
+    assert centre.x() == pytest.approx(-25.0 * 20, abs=1.0) and centre.y() == pytest.approx(-29.15 * 20, abs=1.0)
     assert window._drawing_properties_values(REC)["offset"] == 2.0
     assert window.set_drawing_properties(0, {"offset": -1.5})
     assert window.footprint_drawings[0]["offset"] == -1.5

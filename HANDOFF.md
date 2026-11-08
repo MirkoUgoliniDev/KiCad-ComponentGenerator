@@ -1,5 +1,165 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 08/11 — FATTO, NON committato (attende OK): strumenti di disegno al livello di KiCad 9, revisione e correzioni
+
+Utente: «spremiti un po il cervello e cerca di relaizzare uno s trumento al pari di Kicad ok ?», poi «fai un piano
+super dettagliato ok? poi scatena tutti gli agenti esperti che ti servono ok? popi però fai un acontrollo
+avversariale». Branch `FOOTPRINT-ADVANCE`, base `bd83c9a` (= main = origin, allineati e pushati l'08/11).
+Punto di partenza: proposta in 12 punti fatta in chat (pannello compatto, strumento Selezione, strumento attivo
+evidente, icone nel colore del layer, spessori KLC per layer al momento del disegno, vincolo 45/90 con Spazio,
+aggancio agli oggetti, layer attivo dal pannello Layer, pannello Proprieta' della selezione, quote radiale/centro/
+leader, textbox/Bezier/ancora, scorciatoie stile KiCad), in fasi A-D. PIANO SCRITTO: docs/footprint-drawing-kicad-plan.md
+(dopo l'inventario di tre agenti Explore in sola lettura): tabella KiCad vs oggi, ambito A-D, fuori ambito, file per
+agente in ondate, 12 contratti, differenze volute fra schede, punti fragili.
+Da fare, in quest'ordine: ondata 1 (4 agenti in parallelo: W1-core footprint.py+footprint_layers.py+footprint_checks.py,
+W1-snap object_snap.py+draw_constraints.py, W1-tools canvas_clicktools.py+canvas_tool_hints.py, W1-widgets
+canvas_toolpalette.py+canvas_properties.py); ondata 2 (W2-footprint main_window/footprint_view/workers, W2-symbol
+symbol_tab/symbol_glyphs); coordinatore: traduzioni in i18n.py, golden rigenerati di proposito, suite in due meta';
+revisione avversariale (agenti read-only su ambiti disgiunti + parity + generality + library verifier); correzioni.
+Decisioni/interpretazioni: ciclo della modalita' di linea con Maiusc+Spazio come KiCad (in chat avevo detto Spazio: in
+KiCad Spazio azzera le coordinate locali); Ctrl+Shift+R/B/X nostre per rettangolo/Bezier/textbox (KiCad non ne ha);
+nuovo layer disegnabile Dwgs.User; courtyard resta fuori dalla palette (decisione utente 06/11).
+Fuori ambito, SEGNALATO non autorizzato: layer B.*, spostare l'ancora del footprint, modifica dei vertici, tabelle/zone.
+Commit: solo dopo OK esplicito dell'utente.
+STATO (08/11): ONDATA 1 FATTA (non committata), test focalizzati verdi:
+- W1-core: kicadgen/core/footprint_layers.py (tabella layer KLC, Dwgs.User #c2c2c2 da builtin_color_themes.h di KiCad 10),
+  footprint.py: kind «curve» (fp_curve) e «textbox» (fp_text_box), dimension dtype radial/center/leader, COURTYARD_WIDTH_MM
+  nei tre generatori, user_draw_width(layer); footprint_checks.py: bezier_segments, check_silk_stroke_width (SILK_MIN 0.10,
+  confine stretto: 0.10 passa). Sintassi presa dal writer/parser di KiCad 10 (scaricati SOLO nello scratchpad) e verificata
+  con kicad-cli 10 fp export svg (test che salta senza KiCad). CORRETTO un difetto preesistente: dimension_ink_segments
+  disegnava le due alette della freccia sulla stessa linea nelle quote orizzontali (segno della rotazione).
+  CORREZIONE DELLA DIAGNOSI (revisore core, 08/11): la vecchia formula era una RIFLESSIONE, non una rotazione, e
+  sbagliava in OGNI orientamento: orizzontale = alette coincidenti, verticale/obliqua = seconda aletta nel verso
+  sbagliato. La nuova coincide con l'SVG di kicad-cli per allineate, ortogonali, ruotate e specchiate; il file scritto
+  era gia' giusto (byte identico a bd83c9a), sbagliavano anteprima e inchiostro dei controlli. Il test di regressione
+  guarda solo il caso orizzontale e non distingue un'aletta rovesciata: da rafforzare.
+- W1-snap: core/object_snap.py (SnapIndex, priorita' pad > estremo=angolo > intersezione > medio > centro > quadrante >
+  bordo; portata inclusiva), core/draw_constraints.py (constrain, ciclo UNICO libero->90->45 come KiCad: il coordinatore ha
+  riallineato l'ordine, prima era libero->45->90, e canvas_clicktools ora importa da qui).
+- W1-tools: canvas_clicktools.py (undo_last/Backspace, Shift+Space, tool_snap_ex e tool_angle_mode_changed opzionali,
+  ToolSpec.min_points; poligono = close_after=4 min_points=3), canvas_tool_hints.py (step_hint, TOOL_SHORTCUTS).
+- W1-widgets: canvas_toolpalette.py (ToolGrid), canvas_properties.py (PropertiesPanel), canvas_snap_marker.py (il
+  coordinatore ha aggiunto il tipo «pad» = anello pieno), glyph_icon(stroke=).
+- Coordinatore: 43 traduzioni in 4 lingue in i18n.py (suggerimenti, Seleziona, (vari), Nessuna selezione, layer, controlli).
+Differenza voluta registrata nel piano: Maiusc = punto libero (KiCad usa Ctrl), per continuita' col filo del simbolo.
+W2-symbol FATTO: poligono (SHAPE_TOOLS), ToolGrid nella palette (3 col, Selezione), suggerimenti per passo, modalita'
+angolo (combo in toolbar, solo linea/poligono), aggancio agli oggetti (toggle, indice in cache, marcatore, SENZA aggancio ai
+bordi: decisione del coordinatore valida per entrambe le schede, i piedi sui bordi strapperebbero dalla griglia quasi ogni
+clic), scorciatoie Ctrl+Shift+L/P/R/C/A/B/T ed E, pannello Proprieta' sotto la palette (colonna 200 px), bind_settings
+(chiavi symbol_angle_mode, symbol_object_snap; la riga in main_window la mette W2-footprint). Contratti cambiati di
+proposito: forma agganciata al capo del pin (non ancorata), larghezza palette 200, golden symbol_session (8 stati) e golden
+camera del simbolo rigenerati dal coordinatore (solo offset del fit: vista 50 px piu' stretta). 749 test simbolo verdi.
+W2-footprint FATTO: layer dalla tabella (Dwgs.User), pannello Layer/Disegno/Proprieta'(slot)/Controlli, ToolGrid 6 col con
+Quota a tendina (5 tipi), spessore per layer + «Predefinito KLC», Riempi, combo angolo, aggancio agli oggetti (senza bordi),
+nome del layer cliccabile = layer attivo, suggerimento sotto la vista, scorciatoie (anche nel dialog «Scorciatoie»), nuovi
+tipi disegnati con la stessa geometria del writer; chiavi config fp_draw_widths, fp_draw_fill, fp_angle_mode,
+fp_object_snap. Contratti cambiati: fixture dei test a griglia con aggancio spento, 4/5 layer, golden camera del footprint
+rigenerati (vista qualche px piu' piccola). Le quote restano a 0.10 mm (USER_DIMENSION_WIDTH_MM), non seguono lo spessore.
+Coordinatore: 36 traduzioni in piu'; «Spessore» in inglese diventa «Stroke width» (prima «Width», ambiguo con «Larg.»:
+all'avvio in inglese il cambio di lingua non sapeva da quale sorgente ritradurre); test tooltip aggiornato (ora con
+scorciatoia). TRAPPOLA: python che conta i CRLF dice 0 su file appena riscritti: il repo normalizza a LF
+(.gitattributes text=auto), guardare `git diff --stat`, non i byte.
+W3 FATTO: pannello Proprieta' del footprint (PropertiesPanel nello slot), campi da `_drawing_property_specs` condivisi col
+dialog (che ora costruisce i suoi widget da li'), multi-selezione in un passo di annullamento (`_set_drawings_properties`),
+pad in sola lettura, E porta al pannello se c'e' selezione, refresh saltato durante il trascinamento. 701 test footprint
+verdi. Difetto PREESISTENTE segnalato da W3, non corretto: sostituire footprint_drawings senza ridisegno fa ristilare a
+`_refresh_drawing_selection` item vecchi (setBrush su una linea). Coordinatore: altre 4 traduzioni.
+IN CORSO (08/11 sera): suite completa in due meta' a codice fermo + REVISIONE AVVERSARIALE fase 1 = SOLO RAPPORTO
+(skill adversarial-review: le correzioni dopo che l'utente ha visto l'elenco). Ambiti, 6 agenti read-only:
+main_window.py righe 1-18700 (palette, pannello, strumenti, aggancio) / main_window.py 18700-fine (disegno, fantasmi,
+proprieta', gesti) / symbol_tab.py+symbol_glyphs.py / canvas-parity-reviewer sui moduli canvas_* e le due schede /
+core (footprint.py, footprint_layers, object_snap, draw_constraints) + footprint_checks + generatori con kicad-cli /
+generality-auditor su soglie e regole nuove (portata 10 px, priorita', SILK_MIN 0.10, campionamento Bezier).
+CORREZIONI IN CORSO (08/11 notte). Utente: «rreggi tutto ok ?» -> tutti i 13 medi e tutti i bassi.
+Ondata F1 (parallela): F-shared = canvas_clicktools/canvas_properties/canvas_toolpalette/core object_snap/draw_constraints
+(helper unico vincolo+griglia M3, classificatore unico con punti raccolti senza l'ultimo e costante di portata M4,
+riemissione dell'anteprima quando cambia il tipo d'aggancio M5, ricalcolo del fantasma al cambio di Maiusc M2 parte
+condivisa, etichette delle tendine e segnaposto tradotti M11, niente sovrascrittura del campo con fuoco modificato M12,
+stato «nessuno» della ToolGrid, incroci senza troncamento silenzioso, polygon_has_area con tolleranza dall'arrotondamento,
+FieldSpec.max_length); F-core = core/footprint.py + footprint_checks.py (M8 validatore, M9 cornice, posa etichetta allineata
+come KiCad, fattore 1.17 misurato, textbox senza strip del rientro, courtyard esenta la textbox, ingombro con inchiostro
+delle quote nuove, test alette verticale/obliqua, fonte di SILK_MIN, poligono senza area rifiutato, test textbox_margin).
+Ondata F2 (parallela, dopo F1): F-footprint = main_window.py/footprint_view.py (M1, M2, M3, M4, M5, M6, M7, M10, M11, M13
+e tutti i bassi del footprint); F-symbol = symbol_tab.py/symbol_glyphs.py (adozioni M2-M5, M11, Ctrl+Shift+M, suggerimenti
+di Misura, poligono, _last_snap, stile misto, lacune di test).
+F1 FATTA: F-shared (437 test verdi: constrain_to_grid, snap_point, SNAP_REACH_PX, tool_snap_kind, key_release/rehover,
+pannello con segnaposto tradotto e campo con fuoco preservato, max_length, OUTSIDE_KEY, incroci con griglia di bucket
+senza troncamento, MAX_INTERSECTION_SEGMENTS rimosso); F-core (562 test verdi, kicad-cli 10 non saltato): validatore
+mai in eccezione, altezza del riquadro del testo MISURATA = (size + 3*pen)*1.17 e larghezza size*avanzamenti/21 -
+0.2*size + 3*pen (residuo < 0.0001 mm su 36+32 casi), cornice del richiamo = +2*pen in verticale come il sorgente di
+KiCad (la regola «+size/2» del revisore tornava per caso), posizione del valore delle quote allineate = quella che KiCad
+ricalcola (CAMBIA una riga del file scritto rispetto a bd83c9a: (at -25 -29.15) invece di -27; KiCad la riscriveva
+comunque), test alette con la vecchia formula che deve fallire, textbox esentata dal courtyard, ingombro con
+l'inchiostro delle quote, SILK_MIN dichiarata convenzione NON verificata (niente accesso web per una fonte). Il
+coordinatore ha reso UNICA la regola del poligono senza area (footprint.py chiama draw_constraints.polygon_has_area).
+F2 FATTA: F-symbol (950 test simbolo verdi; nuovo tests/test_symbol_drawing_review_fixes.py, contratto cambiato: col filo
+armato la griglia mostra OUTSIDE_KEY, nessun pulsante acceso; glifo con primitivi diversi mostra «(vari)»); F-footprint
+(901 test footprint verdi; nuovi tests/test_footprint_drawing_review.py e test_footprint_properties_review.py; contratti
+cambiati: Riempi abilitato per la linea, asse della quota ortogonale dal terzo clic come DRAWING_TOOL::DrawDimension di
+KiCad 9 (dentro il riquadro: lato lungo, non «orientamento precedente» perche' senza stato), Y+1 nel dialog = -1 in
+coordinate footprint (contratto 16)). Coordinatore: 3 traduzioni nuove con segnaposto {widths}/{reach}, 2 voci vecchie
+tolte (tooltip con 10 px e 0.12/0.10 fissi).
+SUITE dopo le correzioni (08/11 notte, codice fermo): A 7520 passati 9 saltati 19 sottotest, B 4839 passati 4 saltati =
+12359 passati, 13 saltati, 19 sottotest.
+VERIFICA (revisore read-only): 12/13 medi FIXED, M12 PARTIAL; bassi 30 FIXED, 3 PARTIAL; 1 difetto NUOVO N1 (nato dalla
+correzione M12): un valore scritto e trattenuto nel pannello finiva sull'elemento selezionato DOPO (stesso insieme di campi,
+fuoco rimasto nel campo). Corretti dal coordinatore: N1 con `PropertiesPanel.set_fields(subject=)` (soggetto cambiato =
+modifica non confermata SCARTATA, mai scritta altrove), i due host passano il loro soggetto; textbox appena creata ora tiene
+il rientro della prima riga (rstrip("\n") come il validatore). Test positivo+negativo per entrambi (141 focalizzati verdi).
+PARZIALI RIMASTI, dichiarati: SILK_MIN 0.10 senza fonte verificata (nessun accesso web dagli agenti: dichiarata
+convenzione non verificata, la KLC 0.12 resta il predefinito); `_toggle_footprint_draw_tool` e `_fp_draw_buttons` restano
+come API per test/script, documentati; asse della quota ortogonale dentro il riquadro = lato lungo (KiCad tiene
+l'orientamento precedente, qui senza stato).
+SUITE FINALE VERDE (08/11 notte, codice fermo, dopo N1): A 7523 passati 9 saltati 19 sottotest, B 4839 passati 4 saltati = 12362 passati, 13 saltati, 19 sottotest. FATTO, NON committato (attende OK dell'utente).
+DECISIONI DEL COORDINATORE (da confermare all'utente nel rapporto): E con piu' pad selezionati apre il primo pad come il
+simbolo apre il primo pin; le quote prendono lo spessore del layer come ogni altro disegno (M13); X/Y di disegni e pad nel
+pannello E nel dialog dei disegni nel riferimento dell'origine di disegno con Y in alto, come il dialog del pad e la riga
+sotto la vista (M10, cambia il contratto del dialog); l'aggancio a un oggetto vince sul vincolo d'angolo, ora scritto nei
+contratti e provato insieme; poligoni che si autointersecano ammessi (KiCad li accetta), rifiutati solo quelli senza area.
+SUITE COMPLETA VERDE (08/11 sera, codice fermo, prima delle correzioni della revisione): meta' A 7337 passati 9 saltati
+19 sottotest, meta' B 4823 passati 4 saltati = 12160 passati, 13 saltati, 19 sottotest. NON committato.
+REVISIONE FATTA (08/11), 0 critici, 0 alti, 13 medi, ~40 bassi raggruppati in 22 voci. Tutti RICHIESTI (rientrano nel
+lavoro chiesto dall'utente) ma NESSUNA CORREZIONE avviata: attende la scelta dell'utente. Script di riproduzione degli
+agenti in scratchpad\rev\ e scratchpad\rev-core\ (sessione, non nel repo).
+MEDI (confermati):
+M1 aggancio cattura i pad di un footprint non piu' disegnato (_sync_footprint_measures(None) non azzera _fp_geometry_targets).
+M2 Maiusc premuto/rilasciato senza muovere il mouse: fantasma e marcatore non si aggiornano, il clic aggiunge un altro punto.
+M3 vincolo d'angolo calcolato in modo diverso nelle due schede (simbolo: passi dalla partenza; footprint: griglia assoluta
+   poi di nuovo vincolo): risultati diversi con partenza fuori griglia. Serve UN helper in draw_constraints.
+M4 l'ultimo punto raccolto e' agganciabile solo nel simbolo (fantasma collassa, clic rifiutato) e la regola dei pareggi e'
+   opposta (< contro <=). Serve UN classificatore in object_snap e UNA costante di portata.
+M5 marcatore assente o vecchio quando il punto agganciato coincide col punto di griglia (il collector emette solo se cambia
+   la lista di punti, non il tipo): entrambe le schede.
+M6 angoli di aggancio dei pad presi dal rettangolo d'ingombro anche per roundrect/trapezio/custom (punti senza rame).
+M7 quota ortogonale: asse indovinato dai due punti, terzo clic ignorato (KiCad lo prende dalla posizione del terzo punto).
+M8 validate_footprint_drawings solleva TypeError con frame/kind non stringa: progetto o bozza corrotti non si caricano
+   (verificato dal coordinatore; per `kind` il difetto era gia' in bd83c9a).
+M9 cornice rettangolare del richiamo 0.175 mm per lato piu' bassa di quella di KiCad (kicad-cli): anteprima e controllo
+   distanza serigrafia sbagliati. Correzione suggerita hh = half_h + size/2, con test contro l'SVG.
+M10 pannello Proprieta': X/Y in coordinate footprint con Y in basso, il dialog del pad e la riga sotto la vista usano
+    l'origine di disegno con Y in alto: copiare un numero specchia il pad.
+M11 pannello Proprieta' (entrambe le schede): voci delle tendine e titolo composto non ritradotti al cambio lingua;
+    «(vari)» resta italiano.
+M12 valore scritto nel pannello e non confermato cancellato da un ridisegno che non prende il fuoco (Annulla, toggle...).
+M13 quote su serigrafia scritte a 0.10 mm = esattamente la soglia nuova e sotto la KLC 0.12; ignorano lo spessore del layer.
+BASSI (sintesi): riempimento salvato con «Riempi» disattivato quando la linea si chiude; layer nascosto scelto dalla
+tendina; spessore salvato fuori dall'intervallo dello spin e flag stringa; scrittura config all'avvio; codice morto
+(_toggle_footprint_draw_tool, _fp_draw_buttons solo nei test); numeri fissi nei tooltip (10 px, 0.12/0.10);
+MAX_INTERSECTION_SEGMENTS 400 tronca in silenzio; origine sempre di tipo «centro»; fattore 1.17 non misurato ed
+etichetta delle quote allineate ~2 mm lontana da dove KiCad la ricalcola (solo anteprima); SILK_MIN 0.10 senza fonte;
+precedenza aggancio/angolo non nei contratti e mai provata insieme; Ctrl+Shift+M e suggerimenti di Misura mancano nel
+simbolo; poligono collineare rifiutato nel simbolo e accettato nel footprint, tolleranza d'area fissa, farfalla
+simmetrica rifiutata; E con piu' pad/pin (decisione: simbolo apre il primo, footprint nulla); spegnere l'aggancio non
+toglie il marcatore nel footprint; punti medi/centro del corpo solo nel simbolo; lacune nei test di parita'; test delle
+alette debole; textbox: strip toglie il rientro della prima riga, «⏎» letterale, niente a capo automatico (sospetto),
+testo del richiamo non de-escapato, limite 200 caratteri solo nel dialog; dialog «Spessore del tratto…» tronca a 5 mm;
+courtyard giudica la textbox dal bordo; ingombro per i testi Reference/Value ignora l'inchiostro delle quote nuove;
+ristile di item vecchi (latente, preesistente) e commit durante la generazione automatica (sospetto); «Seleziona»
+evidenziato col filo armato; _last_snap non azzerato per filo/righello; stile misto letto dal primo primitivo; il piano
+cita ancora l'aggancio ai bordi (da allineare alla decisione); textbox_margin provato su un solo valore.
+ONDATA 2 (storico): W2-symbol (symbol_tab.py, symbol_glyphs.py) e W2-footprint (main_window.py, footprint_view.py, workers.py,
+nuovo footprint_tool_glyphs.py); poi un agente per il pannello Proprieta' del footprint (C2) su main_window.py.
+
 ## 06-07/11 — PRIORITA' 3 CHIUSA: A `3c5b9bc`, B `40b2f1d`, C `4e977b1`, committati, pushati e mergiati in main
 PACCHETTO LOCALE dopo la priorita' 3 (06/11 sera, utente: «il pacchetto e' partito?»): build-windows.ps1 -IncludeYoloModel
 da main b531523, dist/KiCadGen-1.0.7.msi 461 MB (483 302 132 byte, 20:00), --check-runtime OK, avvisi soliti (ICE60, ICE03,

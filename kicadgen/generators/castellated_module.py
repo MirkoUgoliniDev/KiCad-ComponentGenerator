@@ -61,7 +61,7 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Sequence
 
-from ..core.footprint import (FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, FpText,
+from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB_MM, SILK_WIDTH_MM, Footprint, FpRect, FpText,
                               Pad, courtyard_corners, fab_reference_text, require_kicad_reach,
                               validate_pad_number)
 from ..core.output_names import validate_output_name
@@ -2734,7 +2734,7 @@ def build_castellated_module(params: CastellatedModuleParams) -> Footprint:
         start=courtyard_start,
         end=courtyard_end,
         layer="F.CrtYd",
-        width=0.05,
+        width=COURTYARD_WIDTH_MM,
     ))
 
     assumed = params.assumed_sizes_description()

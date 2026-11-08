@@ -1228,3 +1228,404 @@ def test_a_drag_release_snapping_onto_the_last_point_is_dropped_silently(router,
     router.press(press(60, 60))
     router.release(release(60 + 3 * d, 60))
     assert host.named('finished'), "the real drag closed the rectangle"
+
+
+# ---------------------------------------------------------------------------
+# Backspace (plan A5, contract 6), angle mode (A6), polygon semantics (D1)
+# ---------------------------------------------------------------------------
+
+from kicadgen.gui.canvas_clicktools import (ANGLE_45, ANGLE_90, ANGLE_FREE, ANGLE_MODES,
+                                            next_angle_mode)
+
+
+def keyev_mod(key, mods):
+    return QKeyEvent(QEvent.Type.KeyPress, key, mods)
+
+
+class HostEx(Host):
+    """Host with the optional callbacks: snaps like `Host` and records the angle mode."""
+
+    def __init__(self):
+        super().__init__()
+        self.modes = []
+
+    def tool_snap_ex(self, spec, point, free, points, angle_mode):
+        self.calls.append(('snap_ex', spec.key, free, tuple(points), angle_mode))
+        return [(round(point.x()), round(point.y()))]
+
+    def tool_angle_mode_changed(self, mode):
+        self.modes.append(mode)
+
+
+def test_undo_last_removes_exactly_the_last_point_and_reports_it(col, host):
+    col.arm(LINE)
+    col.click(QPointF(1, 1))
+    col.click(QPointF(2, 2))
+    host.calls.clear()
+    assert col.undo_last() is True
+    assert col.points == [(1, 1)] and col.armed
+    assert host.named('points') == [('points', 'line', [(1, 1)])]
+
+
+def test_undo_last_with_no_point_is_a_no_op_that_keeps_the_tool(col, host):
+    col.arm(LINE)
+    host.calls.clear()
+    assert col.undo_last() is False
+    assert col.armed and host.calls == []
+
+
+def test_undo_last_when_idle_is_a_no_op(col, host):
+    assert col.undo_last() is False and host.calls == []
+
+
+def test_undo_last_removes_one_point_of_a_two_point_append(col, host):
+    col.arm(WIRE)
+    host.snap_result = [(5, 0), (5, 5)]          # the wire's corner, then the point
+    col.click(QPointF(5, 5))
+    assert col.undo_last() is True
+    assert col.points == [(5, 0)]
+
+
+def test_undo_refreshes_the_ghost_from_the_last_hover_without_a_move(col, host):
+    col.arm(LINE)
+    col.click(QPointF(1, 1))
+    col.click(QPointF(2, 2))
+    col.hover(QPointF(7, 7))
+    host.calls.clear()
+    col.undo_last()
+    snaps = host.named('snap')
+    assert snaps == [('snap', 'line', False, ((1, 1),))], "re-snapped against the remaining points"
+    assert host.named('preview') == [('preview', 'line', [(1, 1)], [(7, 7)])]
+    assert col.preview == [(7, 7)]
+
+
+def test_undo_without_a_remembered_hover_clears_the_ghost(col, host):
+    col.arm(LINE)
+    col.click(QPointF(1, 1))
+    col.hover(None)                                # the pointer left: nothing to re-snap
+    host.calls.clear()
+    col.undo_last()
+    assert host.named('snap') == []
+    assert host.named('preview') == [('preview', 'line', [], [])]
+
+
+def test_undo_emits_the_preview_even_when_it_is_unchanged(col, host):
+    # The ghost was drawn FROM the removed point: the same appended point still
+    # needs a redraw, so the emission is unconditional.
+    col.arm(LINE)
+    col.click(QPointF(1, 1))
+    col.click(QPointF(2, 2))
+    col.hover(QPointF(7, 7))
+    col.click(QPointF(7, 7))
+    col.hover(QPointF(7, 7))                       # preview equals [(7, 7)] once more
+    host.calls.clear()
+    col.undo_last()
+    assert len(host.named('preview')) == 1
+
+
+def test_a_new_arm_forgets_the_last_hover(col, host):
+    col.arm(LINE)
+    col.hover(QPointF(3, 3))
+    col.arm(LINE)
+    col.click(QPointF(1, 1))
+    host.calls.clear()
+    col.undo_last()
+    assert host.named('snap') == [] and host.named('preview') == [('preview', 'line', [], [])]
+
+
+def test_backspace_through_the_router_removes_the_last_point(router, col, view, host):
+    router.arm(LINE)
+    router.press(press(50, 50))
+    router.release(release(50, 50))
+    router.press(press(80, 50))
+    router.release(release(80, 50))
+    ev = keyev(Qt.Key.Key_Backspace)
+    assert router.key(ev) is True and ev.isAccepted()
+    assert col.points == [sp(view, 50, 50)] and col.armed
+
+
+def test_backspace_with_no_point_is_consumed_and_keeps_the_tool(router, col, host):
+    router.arm(LINE)
+    host.calls.clear()
+    assert router.key(keyev(Qt.Key.Key_Backspace)) is True
+    assert col.armed and host.named('finished') == []
+
+
+def test_backspace_is_not_consumed_when_idle(router, col):
+    ev = keyev(Qt.Key.Key_Backspace)
+    ev.ignore()
+    assert router.key(ev) is False and not ev.isAccepted()
+
+
+def test_angle_mode_constants_match_the_geometry_module_values():
+    assert ANGLE_MODES == (ANGLE_FREE, ANGLE_90, ANGLE_45)
+    assert (ANGLE_FREE, ANGLE_45, ANGLE_90) == ("free", "45", "90")
+
+
+def test_next_angle_mode_cycles_and_falls_back_to_free():
+    assert [next_angle_mode(m) for m in ANGLE_MODES] == [ANGLE_90, ANGLE_45, ANGLE_FREE]
+    assert next_angle_mode("bogus") == ANGLE_FREE
+
+
+def test_shift_space_cycles_the_angle_mode_and_calls_the_host():
+    h = HostEx()
+    c = PointCollector(h)
+    c.arm(LINE)
+    assert c.cycle_angle_mode() == ANGLE_90
+    assert c.cycle_angle_mode() == ANGLE_45
+    assert c.cycle_angle_mode() == ANGLE_FREE
+    assert h.modes == [ANGLE_90, ANGLE_45, ANGLE_FREE]
+
+
+def test_shift_space_through_the_router_while_armed(view, cam):
+    h = HostEx()
+    c = PointCollector(h)
+    r = ClickToolRouter(view, c, cam)
+    r.arm(LINE)
+    ev = keyev_mod(Qt.Key.Key_Space, SHIFT)
+    assert r.key(ev) is True and ev.isAccepted()
+    assert r.angle_mode == ANGLE_90 and h.modes == [ANGLE_90]
+
+
+def test_plain_space_and_idle_shift_space_do_not_cycle(view, cam):
+    h = HostEx()
+    c = PointCollector(h)
+    r = ClickToolRouter(view, c, cam)
+    assert r.key(keyev_mod(Qt.Key.Key_Space, SHIFT)) is False      # idle: the view decides
+    r.arm(LINE)
+    ev = keyev(Qt.Key.Key_Space)
+    ev.ignore()
+    assert r.key(ev) is False and not ev.isAccepted()              # Space alone is KiCad's local origin
+    assert r.angle_mode == ANGLE_FREE and h.modes == []
+
+
+def test_angle_mode_without_the_optional_callback_is_silent(router, col, host):
+    router.arm(LINE)
+    assert router.key(keyev_mod(Qt.Key.Key_Space, SHIFT)) is True
+    assert col.angle_mode == ANGLE_90                               # the plain host has no callback: no error
+
+
+def test_set_angle_mode_emits_once_and_only_on_a_change():
+    h = HostEx()
+    c = PointCollector(h)
+    assert c.set_angle_mode(ANGLE_45) is True                       # idle: the panel control works too
+    assert c.set_angle_mode(ANGLE_45) is False
+    assert c.set_angle_mode("bogus") is False
+    assert h.modes == [ANGLE_45] and c.angle_mode == ANGLE_45
+
+
+def test_set_angle_mode_accepts_a_str_enum_value():
+    import enum
+
+    class Mode(str, enum.Enum):
+        DEG90 = "90"
+
+    c = PointCollector(HostEx())
+    assert c.set_angle_mode(Mode.DEG90) is True and c.angle_mode == ANGLE_90
+    assert type(c.angle_mode) is str
+
+
+def test_an_angle_mode_change_refreshes_the_ghost_with_the_new_mode():
+    h = HostEx()
+    c = PointCollector(h)
+    c.arm(LINE)
+    c.click(QPointF(0, 0))
+    c.hover(QPointF(4, 3))
+    h.calls.clear()
+    c.set_angle_mode(ANGLE_45)
+    assert h.named('snap_ex') == [('snap_ex', 'line', False, ((0, 0),), ANGLE_45)]
+
+
+def test_tool_snap_ex_is_preferred_when_the_host_defines_it():
+    h = HostEx()
+    c = PointCollector(h)
+    c.set_angle_mode(ANGLE_90)
+    c.arm(LINE)
+    c.click(QPointF(1, 2), free=True)
+    c.hover(QPointF(3, 3))
+    assert h.named('snap') == []
+    assert h.named('snap_ex') == [('snap_ex', 'line', True, (), ANGLE_90),
+                                  ('snap_ex', 'line', False, ((1, 2),), ANGLE_90)]
+
+
+def test_tool_snap_is_used_when_the_host_has_no_extended_snap(col, host):
+    col.set_angle_mode(ANGLE_90)
+    col.arm(LINE)
+    col.click(QPointF(1, 2))
+    col.hover(QPointF(3, 3))
+    assert [c[0] for c in host.calls if c[0].startswith('snap')] == ['snap', 'snap']
+
+
+def test_tool_spec_min_points_defaults_to_zero_and_is_part_of_the_value():
+    assert ToolSpec('line').min_points == 0
+    assert ToolSpec('polygon', min_points=3) != ToolSpec('polygon')
+
+
+#: An explicit polygon (plan D1). `close_after` counts the closing click too, so
+#: a polygon of at least three vertices closes from the FOURTH click (the one on
+#: the first vertex): close_after=4, as the line's polygon rule of both tabs.
+POLYGON = ToolSpec('polygon', count=0, close_after=4, min_points=3)
+
+
+def test_explicit_polygon_closes_on_the_first_point_with_three_points(col, host):
+    col.arm(POLYGON)
+    for p in ((0, 0), (5, 0), (5, 5)):
+        col.click(QPointF(*p))
+    assert not host.named('finished')
+    col.click(QPointF(0, 0))
+    assert host.named('finished') == [('finished', 'polygon', [(0, 0), (5, 0), (5, 5), (0, 0)], True)]
+
+
+def test_explicit_polygon_does_not_close_with_two_points(col, host):
+    col.arm(POLYGON)
+    col.click(QPointF(0, 0))
+    col.click(QPointF(5, 0))
+    col.click(QPointF(0, 0))                       # two vertices + the first again: no polygon
+    assert host.named('finished') == [] and col.armed
+    assert col.points == [(0, 0), (5, 0), (0, 0)]
+
+
+def test_close_after_three_would_close_a_two_vertex_shape():
+    # Pins why the polygon uses close_after=4: the threshold counts the closing click.
+    h = Host()
+    c = PointCollector(h)
+    c.arm(ToolSpec('polygon', close_after=3))
+    c.click(QPointF(0, 0))
+    c.click(QPointF(5, 0))
+    c.click(QPointF(0, 0))
+    assert h.named('finished') == [('finished', 'polygon', [(0, 0), (5, 0), (0, 0)], True)]
+
+
+# ── Snap kind in the preview comparison (review M5) ──
+
+class KindHost(Host):
+    """Host whose snap returns a fixed point while the hot point's KIND can change under it."""
+
+    def __init__(self):
+        super().__init__()
+        self.kind = None
+        self.snap_result = [(3, 3)]
+
+    def tool_snap_kind(self):
+        return self.kind
+
+
+def test_preview_re_emitted_when_only_the_snap_kind_changes(col):
+    h = KindHost()
+    c = PointCollector(h)
+    c.arm(LINE)
+    c.hover(QPointF(3, 3))
+    assert len(h.named('preview')) == 1
+    h.kind = 'pad'                                   # same point, now a pad centre
+    c.hover(QPointF(3.2, 3.1))
+    assert len(h.named('preview')) == 2, "the marker must change even though the point did not"
+    c.hover(QPointF(3.1, 3.0))
+    assert len(h.named('preview')) == 2, "same point AND same kind: no emission"
+    h.kind = None                                    # back to a plain grid node
+    c.hover(QPointF(3.0, 3.0))
+    assert len(h.named('preview')) == 3
+
+
+def test_preview_kind_ignored_for_a_host_without_the_callback(col, host):
+    host.snap_result = [(3, 3)]
+    col.arm(LINE)
+    col.hover(QPointF(3, 3))
+    col.hover(QPointF(3.2, 3.2))
+    assert len(host.named('preview')) == 1
+
+
+def test_undo_last_records_the_kind_so_the_next_equal_hover_is_quiet():
+    h = KindHost()
+    h.snap_result = None                             # clicks snap to whole units
+    c = PointCollector(h)
+    c.arm(LINE)
+    c.click(QPointF(0, 0))
+    c.click(QPointF(1, 1))
+    h.snap_result = [(3, 3)]
+    h.kind = 'endpoint'
+    c.hover(QPointF(3, 3))
+    h.calls.clear()
+    c.undo_last()
+    assert len(h.named('preview')) == 1              # undo always emits once
+    c.hover(QPointF(3, 3))
+    assert len(h.named('preview')) == 1, "kind recorded by undo: the same hover stays quiet"
+    h.kind = 'pad'
+    c.hover(QPointF(3, 3))
+    assert len(h.named('preview')) == 2
+
+
+# ── Shift pressed / released without a mouse move (review M2) ──
+
+def keyrel(key, mods=NOMOD, auto=False):
+    return QKeyEvent(QEvent.Type.KeyRelease, key, mods, "", auto)
+
+
+def test_shift_press_and_release_rehover_with_the_new_free_state(router, col, host, view):
+    router.arm(LINE)
+    router.move(move(50, 50))
+    assert host.named('snap')[-1][2] is False
+    host.calls.clear()
+    ev = keyev_mod(Qt.Key.Key_Shift, SHIFT)
+    assert router.key(ev) is False, "Shift is not consumed: the view keeps its own handling"
+    assert [c[2] for c in host.named('snap')] == [True], "the ghost is recomputed as free"
+    host.calls.clear()
+    assert router.key_release(keyrel(Qt.Key.Key_Shift)) is False
+    assert [c[2] for c in host.named('snap')] == [False], "the constraint is back on"
+
+
+def test_shift_key_auto_repeat_and_idle_do_not_resnap(router, col, host):
+    assert router.key(keyev_mod(Qt.Key.Key_Shift, SHIFT)) is False       # idle
+    assert router.key_release(keyrel(Qt.Key.Key_Shift)) is False
+    assert host.calls == []
+    router.arm(LINE)
+    router.move(move(50, 50))
+    router.key(keyev_mod(Qt.Key.Key_Shift, SHIFT))
+    host.calls.clear()
+    router.key(keyev_mod(Qt.Key.Key_Shift, SHIFT))                       # auto-repeat press
+    router.key_release(keyrel(Qt.Key.Key_Shift, SHIFT, auto=True))       # auto-repeat release
+    assert host.named('snap') == []
+
+
+def test_shift_without_a_remembered_hover_does_nothing(router, col, host):
+    router.arm(LINE)
+    host.calls.clear()
+    assert router.modifiers_changed(True) is False
+    assert host.named('snap') == []
+
+
+def test_shift_after_a_click_updates_the_next_segment_ghost(router, col, host, view):
+    """A click keeps the collector's hover: Shift right after it re-snaps the same pointer as free."""
+    router.arm(LINE)
+    router.move(move(50, 50))
+    router.press(press(50, 50))
+    router.release(release(50, 50))
+    host.calls.clear()
+    assert router.modifiers_changed(SHIFT) is True
+    assert host.named('snap')[-1][2] is True and host.named('snap')[-1][3] == (sp(view, 50, 50),)
+
+
+def test_modifiers_changed_accepts_bools_flags_and_events(router, col, host):
+    router.arm(LINE)
+    router.move(move(50, 50))
+    assert router.modifiers_changed(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier)
+    assert router.modifiers_changed(NOMOD)
+    assert router.modifiers_changed(keyev_mod(Qt.Key.Key_Shift, NOMOD)), "a Shift PRESS means held"
+    assert router.modifiers_changed(keyrel(Qt.Key.Key_Shift, SHIFT)), "a Shift RELEASE means up"
+    assert router.modifiers_changed(keyev_mod(Qt.Key.Key_A, SHIFT))
+    assert router.modifiers_changed(True) is False, "unchanged state: no snap"
+
+
+def test_shift_space_then_shift_release_shows_the_new_constraint(view, cam):
+    """Shift held: the cycle refreshes as free; releasing Shift re-hovers with the new mode."""
+    h = HostEx()
+    c = PointCollector(h)
+    r = ClickToolRouter(view, c, cam)
+    r.arm(LINE)
+    r.move(move(50, 50))
+    r.key(keyev_mod(Qt.Key.Key_Shift, SHIFT))
+    h.calls.clear()
+    assert r.key(keyev_mod(Qt.Key.Key_Space, SHIFT)) is True
+    assert h.named('snap_ex')[-1][2] is True and h.named('snap_ex')[-1][4] == ANGLE_90
+    h.calls.clear()
+    r.key_release(keyrel(Qt.Key.Key_Shift))
+    assert [(c[2], c[4]) for c in h.named('snap_ex')] == [(False, ANGLE_90)]

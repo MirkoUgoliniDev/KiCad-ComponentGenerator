@@ -57,6 +57,7 @@ from PyQt6.QtCore import QEvent
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QApplication, QComboBox, QMenu, QPushButton, QToolButton, QWidget
 
+from kicadgen.gui.canvas_tool_hints import tooltip as tool_tooltip
 from kicadgen.services.analysis_profiles import ProfileStore
 from kicadgen.services.i18n import (DEFAULT_TRANSLATIONS, I18n, ITEM_SOURCE_ROLE,
                                     set_item_source)
@@ -438,7 +439,8 @@ def test_the_italian_interface_keeps_its_italian_texts(window):  # noqa: F811
     assert window.combo_mounting.itemText(0) == MOUNTING
     assert window.combo_preview_mounting.itemText(0) == MOUNTING
     assert window.symbol_tab.discard_draft_action.text() == "Scarta bozza"
-    assert window._fp_draw_buttons["line"].toolTip() == LINE_HINT
+    # Since 2026-11-08 a drawing tool tooltip carries its KiCad shortcut (plan A1/A7).
+    assert window._fp_draw_buttons["line"].toolTip() == tool_tooltip(LINE_HINT, "line")
 
 
 def test_the_mounting_combo_and_the_draw_layer_follow_each_switch(window):  # noqa: F811
@@ -453,7 +455,7 @@ def test_the_mounting_combo_and_the_draw_layer_follow_each_switch(window):  # no
         assert window.combo_mounting.currentIndex() == 1
         assert window.combo_fp_draw_layer.itemData(0) == "F.SilkS"
         # Testo tenuto in un dizionario (TOOL_HINTS), risolto dalla chiave.
-        assert window._fp_draw_buttons["line"].toolTip() == _rendered(language, LINE_HINT)
+        assert window._fp_draw_buttons["line"].toolTip() == tool_tooltip(_rendered(language, LINE_HINT), "line")
 
 
 def test_the_mounting_combo_is_english_when_the_app_starts_in_english(qapp, monkeypatch, tmp_path):

@@ -31,6 +31,14 @@ GOLDEN CHANGED 2026-11-06 (footprint polygon, priority 3 A): the shared
 line-tool hint now says that a click on the first point closes a polygon,
 so the ONE «status» string of the golden session that quotes the hint was
 regenerated; no event, point or committed row changed.
+
+GOLDEN CHANGED 2026-11-08 (plan docs/footprint-drawing-kicad-plan.md A4):
+an armed wire or shape tool shows the hint of its NEXT step
+(`canvas_tool_hints.step_hint`) on arming and after every collected point,
+so eight «status» strings of the session changed (six wire steps, the armed
+rectangle, and the first corner of the second rectangle, which replaces the
+previous «Forma inserita.» result). Results and refusals keep their texts;
+no event, point, count or committed row changed.
 """
 
 import json
@@ -238,7 +246,9 @@ def _tool_state(tab):
         'shape_points': _anonymised(tab, tab._shape_points),
         'shape_tool': tab._shape_tool,
         'wire_button': tab.wire_button.defaultAction().isChecked(),
-        'palette': sorted(key for key, action in tab.palette._tool_actions.items() if action.isChecked()),
+        # The wire's action and the active button of the «Disegno» tool grid
+        # (2026-11-08, plan A1: the shape tools moved into the shared ToolGrid).
+        'palette': tab.palette.checked_tools(),
         'glyph_checked': any(action.isChecked() for action in tab.palette_actions()),
         'status': tab.status.text(),
         'band': _band(tab),
@@ -687,14 +697,42 @@ def test_escape_abandons_a_shape_in_progress(tab, twin, qapp):
     assert tab._shape_points == [] and _band(tab) is None and len(tab._history) == 1
 
 
-def test_a_shape_does_not_anchor_to_a_pin_but_snaps_to_the_drawing_grid(tab, qapp):
-    """@brief Shape points are drawings, not connections: a click on a pin end is a plain grid point; the wire anchors."""
+def test_a_shape_snaps_to_a_pin_end_without_anchoring_and_falls_back_to_the_grid(tab, qapp):
+    """@brief CONTRACT CHANGED 2026-11-08 (plan B3, «Aggancia agli oggetti»).
+
+    Was `test_a_shape_does_not_anchor_to_a_pin_but_snaps_to_the_drawing_grid`:
+    shape points snapped to the drawing grid only. Now, with the object snap on
+    (the default), a click a little off a pin end lands EXACTLY on it (a
+    plain copied point, never an anchor: shapes are drawings); with the
+    toggle off, or with Shift held, the same click is a drawing-grid point.
+    The wire keeps anchoring to the pin.
+    """
+    end = (-5.08, 2.54)
+    # About 5 px away, inside the 10 px magnet; off the pin end by more than one grid step.
+    off = 5.0 / (tab.view.transform().m11() * S)
+    pointer = (end[0] + off, end[1] + off / 2)
+    grid = tab._grid_point(*pointer)
+    assert grid != end, 'the pointer is far enough for the grid to give another point'
     tab.start_shape('line')
-    _click(tab, qapp, -5.08, 2.54)
-    assert tab._shape_points == [(-5.08, 2.54)]
+    QTest.mouseClick(tab.view.viewport(), LEFT, NO_MOD, _vp(tab, *pointer))
+    qapp.processEvents()
+    assert tab._shape_points == [end] and isinstance(tab._shape_points[0], tuple), 'snapped, not anchored'
+    tab.finish_shape(False)
+    # Negative: Shift = free point, the grid alone decides.
+    tab.start_shape('line')
+    QTest.mouseClick(tab.view.viewport(), LEFT, SHIFT, _vp(tab, *pointer))
+    qapp.processEvents()
+    assert tab._shape_points == [grid]
+    tab.finish_shape(False)
+    # Negative: the toggle off.
+    tab.set_object_snap(False)
+    tab.start_shape('line')
+    QTest.mouseClick(tab.view.viewport(), LEFT, NO_MOD, _vp(tab, *pointer))
+    qapp.processEvents()
+    assert tab._shape_points == [grid]
     tab.finish_shape(False)
     tab.start_wire()
-    _click(tab, qapp, -5.08, 2.54)
+    _click(tab, qapp, *end)
     assert isinstance(tab._wire_points[0], dict)
 
 

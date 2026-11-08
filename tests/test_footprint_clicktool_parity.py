@@ -169,6 +169,10 @@ def fp(window, qapp, monkeypatch):
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     window.combo_fine_grid.setCurrentIndex(window.combo_fine_grid.findData(1))
+    # CONTRACT (2026-11-08, plan B2): these records pin the GRID behaviour of the
+    # tools; the object snap (on by default, as KiCad's magnet) would catch the
+    # pin header's pads 9 px away. It has its own tests in test_footprint_drawing_kicad.py.
+    window.chk_fp_object_snap.setChecked(False)
     window._draw_preview()
     _place_camera(window)
     return window

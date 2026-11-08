@@ -1,57 +1,57 @@
 {
  "coarse_dark_x2": {
-  "grab": "592b42a5ef0ef58e962aaedf11293ff8a5a17369",
+  "grab": "1152f40b8391a121c9f095b4c8797c2f04e8ad37",
   "legible": false,
-  "sparse": "2d157ad69ad6f271dc091d51c34fc2cf89fb8189"
+  "sparse": "9fc231879291a0fac8cec2f1e1a0072e394a3344"
  },
  "equal_dark_x1": {
-  "grab": "4d60a3e32e765d1dbe3f4c1d0bca94dc01e0b808",
+  "grab": "9ffb185d4286b352aa54ac051e9fd3fe72e3a75e",
   "legible": false,
-  "sparse": "bda27a18132a5040a379cc4537b483aba01dbd26"
+  "sparse": "b177e86d3d3913c7518701a99a1d4ca56daff6a2"
  },
  "equal_light_x3": {
-  "grab": "64696a4b91633614ac4ce7dac2b6f0ba5a16d15c",
+  "grab": "2231075be58dc00b8ab34a966d789234decac7fa",
   "legible": false,
-  "sparse": "93b0cd5b5b3d6fbfc395d1434e47e0b022b2f411"
+  "sparse": "c323353fbc9b8195671bcc450163b7d138ddfc9b"
  },
  "fine_dark_illegible_x0_5": {
-  "grab": "7aacdd91718b601587433d595ec5d12852c6fa2e",
+  "grab": "658e2ce81916f5b1cfc2ec2a1a6d7d62c09ee9f4",
   "legible": false,
-  "sparse": "e54ab8003d77dc8aee12b417b2fafcf9d96a25ed"
+  "sparse": "d986f30f57a4e8f69401075aef92c5f1bbb3f97f"
  },
  "fine_dark_legible_x1": {
-  "grab": "e3efc8b93eb92bf6747029d4e647707278bd9088",
+  "grab": "f33920f1e8097223b7224efe96bb58bc30123b62",
   "legible": true,
-  "sparse": "cd1f09bb0931e142ab47f33853f06a6c8155c667"
+  "sparse": "991482708856286dfb8cd03f0bc6c68f9586b56f"
  },
  "fine_dark_legible_x3": {
-  "grab": "2ab6fc13fe76a48752d230eadc523821916d74c7",
+  "grab": "7e9c4be550dbbd372c634ae1617f63683a32709f",
   "legible": true,
-  "sparse": "74b1a5b9ecf7d70410239d31b492d9c9a62684bd"
+  "sparse": "d34f2e56f6a39be69343b75730df39c37a952807"
  },
  "fine_dark_legible_x6": {
-  "grab": "69e84ea20e087f4cfc1425b26bddd24aefc21568",
+  "grab": "e1fe4c31ecacf4da86b3e62a3933d46a40239a14",
   "legible": true,
-  "sparse": "c83b77172cb4c0d4444aa9a283487b217260672a"
+  "sparse": "0e96ae0056681afea655b03f295c7c20d7b9db36"
  },
  "fine_light_illegible_x0_5": {
-  "grab": "ceb6f47b120f20f3b7e57a50746fe8fe83448ddd",
+  "grab": "06a940e347b29235e4b5570eaf9fd8de2784960a",
   "legible": false,
-  "sparse": "8f150c1bc40ec13f216352021c4f573115371038"
+  "sparse": "fd08dd9d6aa8e6c6b13ad49ddd23c8ac1635fa4a"
  },
  "fine_light_legible_x6": {
-  "grab": "ec8c3e60c758dff38a65b467c884a19241126798",
+  "grab": "baaf8ac6726a9be96e8595b94788eecaa127de81",
   "legible": true,
-  "sparse": "06bcfcd148336bbd8117eae59db9a2f4d2a41293"
+  "sparse": "29c468914f83f5c3edc2ff5572e5669be5da1a80"
  },
  "limit_high_light_x20": {
-  "grab": "910b293698ce0a922f0519f3c6beaab545572620",
+  "grab": "7cde8d47ea0322e77c7b97682cb773b019b7a411",
   "legible": true,
-  "sparse": "bef7d0a8eda9d4c70e1386d6234af229311b88b8"
+  "sparse": "6a49f00054282217fcefe3987a6d4d9e7c65ff01"
  },
  "limit_low_dark_x0_15": {
-  "grab": "603b11a54fb93fdf41f9c2dfa2539e67fde9967c",
+  "grab": "4ea4e62791d5d0a3f424400e294d95c4b8c09e58",
   "legible": false,
-  "sparse": "d269a408afdfc3420474856088c9bba698f29cb7"
+  "sparse": "d6a0be8e031cdf438c9f609dec7842ed4008709a"
  }
 }

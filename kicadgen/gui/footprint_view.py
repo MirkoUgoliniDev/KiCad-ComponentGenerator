@@ -30,6 +30,12 @@ TEXT_KEY_ROLE = 0x544558
 #: Item data role carrying the index of a user drawing of the footprint.
 DRAWING_KEY_ROLE = 0x445257
 
+#: Item data role carrying the KIND of the record a drawing item was drawn
+#: from («line», «text»...): a restyle skips an item whose kind no longer
+#: matches the record at its index (a list replaced without a redraw), so a
+#: stale scene is never styled with another kind's rules (review B3).
+DRAWING_KIND_ROLE = 0x44524B
+
 #: Item data role of a drawing handle: "<drawing index>:<point index>";
 #: point index -1 means the WHOLE drawing (a press on its body).
 HANDLE_KEY_ROLE = 0x48444C
@@ -593,14 +599,25 @@ class FootprintView(QGraphicsView):
         @note Graphic elements (drawings, texts, handles) go through here;
             pads and pins never do: they keep the main grid (user, 2026-10-13).
         """
-        if self._grid and self._grid[2] and self._grid[0] > 0:
-            step, (ox, oy), _visible = self._grid
-            step = step / self._fine_divisor
-        else:
-            step, ox, oy = float(fallback_step), 0.0, 0.0
+        step, (ox, oy) = self.drawing_grid(fallback_step)
         if step <= 0:
             return float(x), float(y)
         return ox + round((x - ox) / step) * step, oy + round((y - oy) / step) * step
+
+    def drawing_grid(self, fallback_step):
+        """@brief The drawing (fine) grid `snap_to_grid` rounds to: its step and a node it passes through.
+
+        @param fallback_step Step in scene units when the grid is hidden or unset.
+        @return (step, (ox, oy)) in scene units: the shown grid's main step
+            divided by the fine divisor and its origin, else `fallback_step`
+            from the scene origin. The host's angle-constrained runs
+            (`draw_constraints.constrain_to_grid`) use the same grid, so a
+            free point and a constrained one land on one lattice (review M3).
+        """
+        if self._grid and self._grid[2] and self._grid[0] > 0:
+            step, (ox, oy), _visible = self._grid
+            return step / self._fine_divisor, (float(ox), float(oy))
+        return float(fallback_step), (0.0, 0.0)
 
     def set_drawing_origin(self, point):
         """@brief Show the drawing origin marker at a scene point, or hide it.
@@ -1344,7 +1361,14 @@ class FootprintView(QGraphicsView):
         """@brief Qt override: releasing Shift during a body drag re-steps it at once.
 
         @param event Qt key release event, forwarded to the base class otherwise.
+        @note An armed click tool hears every release first
+            (`ClickToolRouter.key_release`, review M2): a Shift release
+            re-runs the last hover with the constraint and the object snap
+            back on, so the ghost a click would add follows the key without a
+            mouse move. The router never consumes the release.
         """
+        if self.click_router is not None:
+            self.click_router.key_release(event)
         if self._restep_body_on_shift(event):
             return
         super().keyReleaseEvent(event)

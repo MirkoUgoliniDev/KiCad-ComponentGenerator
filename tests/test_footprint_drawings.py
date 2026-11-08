@@ -137,6 +137,9 @@ def preview(window, monkeypatch):
     # check WHAT is rewritten, so the turn is run right away.
     monkeypatch.setattr(window, "_schedule_footprint_rewrite",
                         lambda **_kwargs: window._generate(footprint_only=True))
+    # CONTRACT (2026-11-08, plan B2): the grid cases below predate the object snap
+    # (on by default, KiCad's magnet), which has its own tests in test_footprint_drawing_kicad.py.
+    window.chk_fp_object_snap.setChecked(False)
     window._draw_preview()
     return window, saves, generations
 
@@ -913,9 +916,10 @@ def test_drawings_generated_silk_and_selector_use_the_kicad_default_colours(prev
     from kicadgen.gui.main_window import KICAD_LAYER_COLORS
     window, _saves, _generations = preview
     # F.CrtYd added 2026-11-06 for the courtyard drawn in the preview (not a drawing layer).
+    # Dwgs.User added 2026-11-08 (plan B6), read from core.footprint_layers.LAYERS.
     assert KICAD_LAYER_COLORS == {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc",
-                                  "F.CrtYd": "#ff26e2"}
-    assert len(set(KICAD_LAYER_COLORS.values())) == 4, "one distinct colour per layer"
+                                  "Dwgs.User": "#c2c2c2", "F.CrtYd": "#ff26e2"}
+    assert len(set(KICAD_LAYER_COLORS.values())) == 5, "one distinct colour per layer"
     window.footprint_drawings = validate_footprint_drawings([
         record("line", ((0, 0), (5, 0)), layer=layer) for layer in ("F.SilkS", "F.Fab", "Cmts.User")])
     window._draw_preview()

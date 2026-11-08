@@ -4,8 +4,9 @@ The checks read a `core.footprint.Footprint` (pads and graphics) and nothing
 else: no part name, no package family, no file on disk. Each rule yields a
 `GeometryFinding` with the KLC rule it comes from, a severity, a message, a
 remedy and the indices of the pads and graphics concerned, so the preview can
-select them. Every threshold is a published value and says where it comes
-from; none is tuned to a part.
+select them. Every threshold says where it comes from (a published value,
+except `SILK_MIN_WIDTH_MM`, declared an unverified convention); none is
+tuned to a part.
 
 Rules:
 - pads_overlap (error): two pads with different numbers whose copper
@@ -19,6 +20,8 @@ Rules:
   rule: said so in the message).
 - pin_one_marker (warning, KLC F5.1/F5.2): the footprint has a pin 1 but no
   marker of it on the silkscreen or fabrication layer.
+- silk_stroke_width (warning, an unverified fab convention, not KLC): a
+  silkscreen stroke thinner than `SILK_MIN_WIDTH_MM`.
 """
 from __future__ import annotations
 
@@ -27,8 +30,8 @@ import math
 from types import SimpleNamespace
 from typing import Iterable, Optional, Sequence
 
-from ..core.footprint import (FpArc, FpCircle, FpDimension, FpLine, FpPoly, FpRect, Footprint, Pad,
-                              dimension_ink_segments, pad_copper_centre)
+from ..core.footprint import (FpArc, FpCircle, FpCurve, FpDimension, FpLine, FpPoly, FpRect, FpTextBox,
+                              Footprint, Pad, bezier_points, pad_copper_centre)
 from ..core.package_geometry import _rotate_kicad, overlapping_pad_pairs, pad_copper_shape
 from ..core.silk import SILK_PAD_CLEARANCE_MM, pin_one
 from .klc_checks import Finding
@@ -69,6 +72,38 @@ def _circle_segments(radius: float, sweep: float = 2 * math.pi) -> int:
     full = max(_CURVE_SEGMENTS_MIN, min(_CURVE_SEGMENTS_MAX, full))
     return max(2, math.ceil(full * abs(sweep) / (2 * math.pi)))
 
+#: Thinnest silkscreen stroke, mm, the check accepts without a warning.
+#: UNVERIFIED CONVENTION: 0.10 mm is the figure commonly quoted as a PCB
+#: fab's minimum silkscreen line, but no manufacturer's published capability
+#: page was checked when it was set (2026-11-08: no source verified; fabs
+#: quote different minimums, some above 0.10 mm). It is NOT a KLC rule. What
+#: it is: a warning floor below KLC F5.1's 0.12 mm default, which stays the
+#: default width of a silkscreen drawing (`footprint_layers`), so a stroke
+#: between 0.10 and 0.12 mm (below KLC but plausible) passes silently and
+#: only a clearly thinner one is flagged. A stroke of exactly 0.10 mm passes.
+#: A verified, dated fab source would replace this note, not the check.
+SILK_MIN_WIDTH_MM = 0.10
+
+
+def bezier_segments(control) -> int:
+    """@brief Number of equal-parameter segments that follow a cubic Bezier within `_CURVE_SAGITTA_MM`.
+
+    @param control The four control points, mm.
+    @return N in [1, `_CURVE_SEGMENTS_MAX`]: the standard flattening bound
+        for a polynomial curve, distance(curve, chord polyline) <=
+        max|B''| / (8 N^2), with max|B''| <= 6 x the largest second
+        difference of the control points (|p0 - 2 p1 + p2|, |p1 - 2 p2 + p3|),
+        solved for N. The count follows from the curve's own bending, so a
+        long gentle curve and a tight hook are measured equally finely; a
+        straight curve (collinear, evenly spaced controls) needs one segment.
+    """
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = ((float(x), float(y)) for x, y in control)
+    bend = max(math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2), math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3))
+    if bend <= 0.0:
+        return 1
+    count = math.ceil(math.sqrt(6.0 * bend / (8.0 * _CURVE_SAGITTA_MM)))
+    return max(1, min(_CURVE_SEGMENTS_MAX, count))
+
 #: Float noise absorbed by the comparisons, mm.
 _EPS = 1e-6
 
@@ -87,6 +122,9 @@ GEOMETRY_HINTS = {
     'pin_one_marker': ('Disegna un cerchio sulla serigrafia accanto al pad del pin 1 (strumento cerchio '
                        'della palette, più vicino a lui che a ogni altro pad) oppure dai al pin 1 una forma '
                        'di pad diversa dagli altri: chi monta la scheda deve riconoscerlo.'),
+    'silk_stroke_width': ('Apri le proprietà del disegno (tasto destro sul disegno) e porta lo spessore ad '
+                          'almeno 0.10 mm, meglio 0.12 mm come consiglia la KLC: un tratto più sottile molte '
+                          'fabbriche non riescono a stamparlo.'),
 }
 
 
@@ -263,8 +301,14 @@ def _arc_points(start, mid, end) -> list:
 def graphic_segments(graphic) -> list:
     """@brief The centre-line segments of a stroked graphic, mm.
 
-    @param graphic FpLine, FpRect, FpPoly, FpCircle or FpArc; anything else gives [].
-    @return List of ((x0, y0), (x1, y1)) segments; curves are sampled.
+    @param graphic FpLine, FpRect, FpPoly, FpCircle, FpArc, FpCurve, FpTextBox
+        or FpDimension; anything else gives [].
+    @return List of ((x0, y0), (x1, y1)) segments; curves are sampled (a
+        Bezier into `bezier_segments` pieces). A text box gives the four
+        sides of its border, or [] when the border is off (its text, like
+        every text, is not checked). A dimension gives the strokes KiCad
+        draws for its type (`FpDimension.ink_segments`) plus its sampled
+        text frame circle (a leader's), never its text.
     """
     if isinstance(graphic, FpLine):
         return [(tuple(graphic.start), tuple(graphic.end))]
@@ -275,10 +319,27 @@ def graphic_segments(graphic) -> list:
     if isinstance(graphic, FpPoly):
         corners = [tuple(p) for p in graphic.points]
         return [(corners[i], corners[(i + 1) % len(corners)]) for i in range(len(corners))]
+    if isinstance(graphic, FpTextBox):
+        if not graphic.border:
+            return []
+        (x0, y0), (x1, y1) = graphic.start, graphic.end
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        return [(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    if isinstance(graphic, FpCurve):
+        points = bezier_points(graphic.points, bezier_segments(graphic.points))
+        return list(zip(points, points[1:]))
     if isinstance(graphic, FpDimension):
-        # The ink of a dimension as KiCad draws it from the written style:
-        # extension lines with their overshoot, the dimension line, arrowheads.
-        return dimension_ink_segments(tuple(graphic.start), tuple(graphic.end), graphic.height, graphic.axis)
+        # The ink of a dimension as KiCad draws it from the written style,
+        # one geometry function per type shared with the writer.
+        segments = list(graphic.ink_segments())
+        circle = graphic.frame_circle()
+        if circle is not None:
+            (cx, cy), r = circle
+            count = _circle_segments(r)
+            points = [(cx + r * math.cos(2 * math.pi * i / count),
+                       cy + r * math.sin(2 * math.pi * i / count)) for i in range(count + 1)]
+            segments.extend(zip(points, points[1:]))
+        return segments
     if isinstance(graphic, FpCircle):
         cx, cy = graphic.center
         r = float(graphic.radius)
@@ -434,7 +495,8 @@ def check_courtyard_enclosure(footprint: Footprint, margin: float = COURTYARD_MI
     @param footprint The footprint checked.
     @param margin Minimum distance, mm, between an element and the courtyard.
     @return At most two warnings: one naming the pads outside, one the
-        F.Fab graphics outside. Nothing without a courtyard (the file-level
+        F.Fab graphics outside (dimensions and text boxes excluded: they
+        document the part). Nothing without a courtyard (the file-level
         check reports its absence).
     """
     courtyard = _courtyard_box(footprint)
@@ -443,9 +505,12 @@ def check_courtyard_enclosure(footprint: Footprint, margin: float = COURTYARD_MI
     pads_out = [i for i, pad in enumerate(footprint.pads) if not _box_inside(copper_box(pad), courtyard, margin)]
     graphics_out = []
     for index, graphic in enumerate(footprint.graphics):
-        if getattr(graphic, 'layer', None) != 'F.Fab' or isinstance(graphic, FpDimension):
-            # A dimension documents the part, it is not the part: the
-            # courtyard need not enclose it.
+        if getattr(graphic, 'layer', None) != 'F.Fab' or isinstance(graphic, (FpDimension, FpTextBox)):
+            # A dimension or a text box documents the part, it is not the
+            # part: the courtyard need not enclose it. A text box is judged
+            # as text whatever its border flag: the border frames a note, it
+            # does not outline the body (the body outline is a line,
+            # rectangle, polygon, circle or arc).
             continue
         box = graphic_box(graphic)
         if box is not None and not _box_inside(box, courtyard, margin):
@@ -593,6 +658,50 @@ def check_pin_one_marker(footprint: Footprint) -> list:
         number=first), pads=(index,))]
 
 
+def _stroke_width(graphic) -> Optional[float]:
+    """The printed stroke width of a stroked graphic, mm, or None when it prints no line.
+
+    Texts are not strokes here (their thickness is a font property); a text
+    box without border prints no line; a FILLED shape prints its area, so
+    its stroke width does not make a line too thin to print.
+    """
+    if not graphic_segments(graphic):
+        return None
+    if getattr(graphic, 'fill', False):
+        return None
+    width = getattr(graphic, 'width', None)
+    if isinstance(width, bool) or not isinstance(width, (int, float)):
+        return None
+    return float(width)
+
+
+def check_silk_stroke_width(footprint: Footprint, minimum: float = SILK_MIN_WIDTH_MM) -> list:
+    """@brief Silkscreen strokes thinner than `minimum` (an unverified fab convention, not KLC).
+
+    @param footprint The footprint checked.
+    @param minimum Thinnest printable stroke, mm (`SILK_MIN_WIDTH_MM`).
+    @return At most one warning naming every F.SilkS graphic whose stroke is
+        below `minimum` (a stroke equal to it passes) and the thinnest width
+        found; nothing when all are wide enough.
+    @note Lines, rectangles, circles, arcs, polygons, curves, text box
+        borders and dimensions are strokes; texts and filled shapes are not
+        (see `_stroke_width`).
+    """
+    thin = []
+    for index, graphic in enumerate(footprint.graphics):
+        if getattr(graphic, 'layer', None) != 'F.SilkS':
+            continue
+        width = _stroke_width(graphic)
+        if width is not None and width < minimum - _EPS:
+            thin.append((index, width))
+    if not thin:
+        return []
+    return [_finding('silk_stroke_width', 'warning', tx(
+        'Serigrafia: {count} tratti più sottili di {minimum:.2f} mm (il più sottile è di {width:.2f} mm): '
+        'molte fabbriche non li stampano.', count=len(thin), minimum=minimum,
+        width=min(width for _index, width in thin)), graphics=[index for index, _width in thin])]
+
+
 def check_footprint_geometry(footprint: Footprint) -> list:
     """@brief Run every geometric rule on a footprint: errors first, then warnings.
 
@@ -603,6 +712,6 @@ def check_footprint_geometry(footprint: Footprint) -> list:
     """
     findings = []
     for check in (check_pads_overlap, check_silk_clearance, check_courtyard_enclosure,
-                  check_annular_ring, check_pin_one_marker):
+                  check_annular_ring, check_pin_one_marker, check_silk_stroke_width):
         findings.extend(check(footprint))
     return sorted(findings, key=lambda f: 0 if f.severity == 'error' else 1)

@@ -26,14 +26,49 @@ from . import canvas_menus
 from .canvas_menus import ElementClipboard, MenuEntry
 from .canvas_selection import IndexSelection, RubberBand, encloses, is_click
 from .canvas_camera import Camera
-from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
+from .canvas_clicktools import ANGLE_FREE, ANGLE_MODES, ClickToolRouter, PointCollector, ToolSpec
+from .canvas_tool_hints import PROPERTIES_SHORTCUT, SELECT_SHORTCUT, TOOL_SHORTCUTS, step_hint, tooltip as tool_tooltip
+from .canvas_toolpalette import OUTSIDE_KEY, ToolGrid, select_arrow_icon
+from .canvas_properties import EMPTY_TEXT, MIXED_PLACEHOLDER, FieldSpec, PropertiesPanel
+from .canvas_snap_marker import make_snap_marker_items
+from ..core import object_snap
+from ..core.draw_constraints import constrain_to_grid
 from .canvas_measure import (CLEAR_MEASURES_SOURCE, MEASURE_KEY, MEASURE_SPEC, MEASURE_TOOLTIP_SOURCE,
                              TAG_PIN_END, MeasureTool, SnapTargets, bounds_without_measures, circle_polygon)
+
+from .theme import BLUE
 
 #: Hit radius of a pin connection point for the measuring tool, mm: a
 #: quarter of the 2.54 mm pin grid, so the hit areas of neighbouring pins
 #: never overlap (a pointing area, like a pad's copper in the footprint).
 PIN_MEASURE_HIT_MM = 0.635
+
+#: Width in px of the right column (palette above, «Proprietà» below; plan
+#: docs/footprint-drawing-kicad-plan.md C3). It was 150 px for the palette
+#: alone; 200 px leaves the properties fields readable at three icons a row.
+PANEL_COLUMN_WIDTH = 200
+
+#: Magnet radius of the object snap, in SCREEN pixels (plan B1): an alias of
+#: the ONE reach both tabs use (`object_snap.SNAP_REACH_PX`), converted to mm
+#: with the current zoom at each query. A UI reach, no physical meaning.
+OBJECT_SNAP_REACH_PX = object_snap.SNAP_REACH_PX
+
+#: Configuration keys of the symbol editor's drawing settings (`bind_settings`).
+#: Symbol-specific: the footprint preview keeps its own angle mode and snap.
+CONFIG_ANGLE_MODE = 'symbol_angle_mode'
+CONFIG_OBJECT_SNAP = 'symbol_object_snap'
+
+#: Tag of the typed snap marker items this tab adds to its scene.
+SNAP_MARKER_TAG = 'symbol-object-snap'
+
+#: Shape tools whose segments follow the angle mode (plan A6): the segment
+#: from the previous point to the pointer. Rectangle and circle are axis-bound
+#: or radial; arc, Bezier and text points are not segment ends.
+ANGLE_CONSTRAINED_TOOLS = ('line', 'polygon')
+
+#: Labels of the angle modes in the toolbar control: «Libero» is an Italian
+#: source translated by `tx`, the degree labels are language-neutral (`_angle_label`).
+ANGLE_MODE_LABELS = {'free': 'Libero', '90': '90°', '45': '45°'}
 from .canvas_origin import readout_text
 from .canvas_grid import DARK_GRID_DOT_COLOR, ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_gestures import (HANDLE_SIZE_PX, HOVER_MARGIN_PX, CancelOnEscapeAndHide, DeferredCheckpoint,
@@ -193,11 +228,15 @@ _TYPE_LABELS = {
 }
 
 
-def glyph_icon(glyph, size: int = 36) -> QIcon:
+def glyph_icon(glyph, size: int = 36, *, stroke: str | None = None) -> QIcon:
     """@brief Icon of a palette element, drawn from its own primitives (no asset file).
 
     @param glyph Catalogue glyph.
     @param size Icon side in pixels.
+    @param stroke Colour of the strokes and outline fills (any QColor name);
+        None keeps the theme text colour, pixel-identical to the icon drawn
+        before this keyword existed. The footprint tints its tools with the
+        active layer colour; terminal dots keep their own green.
     @return A transparent icon with the glyph's polylines, arcs, circles and
         rectangles scaled to fit, light strokes, and its terminals as dots:
         the stylised picture of what will be inserted (user, 2026-10-10:
@@ -234,10 +273,11 @@ def glyph_icon(glyph, size: int = 36) -> QIcon:
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor('#cdd6f4'), 1.4)
+    ink = QColor(stroke) if stroke is not None else QColor('#cdd6f4')
+    pen = QPen(ink, 1.4)
     painter.setPen(pen)
     for p in primitives:
-        fill = QColor('#cdd6f4') if p.fill == 'outline' else QColor(0, 0, 0, 0)
+        fill = QColor(ink) if p.fill == 'outline' else QColor(0, 0, 0, 0)
         painter.setBrush(fill)
         if p.kind in ('polyline', 'arc', 'bezier'):
             points = primitive_outline(p)
@@ -264,6 +304,27 @@ def glyph_icon(glyph, size: int = 36) -> QIcon:
     for t in terminals:
         px, py = to_px(t.x, t.y)
         painter.drawEllipse(QPointF(px, py), 1.6, 1.6)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _object_snap_icon(size: int = 20) -> QIcon:
+    """@brief Icon of the «Aggancia agli oggetti» toggle: a snap square on a line end, drawn in code.
+
+    @param size Icon side in pixels.
+    @return A transparent icon: a short diagonal line ending in the square the
+        snap marker draws for an endpoint (`canvas_snap_marker`), in the theme
+        text colour.
+    """
+    from PyQt6.QtGui import QPixmap
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor('#cdd6f4'), 1.4))
+    painter.drawLine(QPointF(size * 0.12, size * 0.88), QPointF(size * 0.62, size * 0.38))
+    painter.setPen(QPen(QColor('#94e2d5'), 1.6))
+    painter.drawRect(QRectF(size * 0.5, size * 0.12, size * 0.38, size * 0.38))
     painter.end()
     return QIcon(pixmap)
 
@@ -353,6 +414,8 @@ TOOL_HINTS = {
     'wire': 'Filo: clicca i punti nel simbolo; doppio clic o tasto destro per chiudere',
     'line': ('Linea: clicca i punti sulla griglia; doppio clic, Invio o tasto destro per terminare, '
              'clic sul primo punto (da quattro punti) per chiudere un poligono, Esc per annullare'),
+    'polygon': ('Poligono: clicca i vertici; clic sul primo punto, doppio clic, Invio o tasto destro '
+                'per chiuderlo (almeno tre vertici), Esc per annullare'),
     'rectangle': 'Rettangolo: clicca un angolo e poi quello opposto; Esc per annullare',
     'circle': 'Cerchio: clicca il centro e poi un punto sul bordo; Esc per annullare',
     'arc': 'Arco: clicca l’inizio, la fine e poi un punto intermedio; Esc per annullare',
@@ -448,6 +511,8 @@ class PalettePanel(QWidget):
         self._actions = []
         self._tool_actions = {}
         self._groups = {}
+        #: The «Disegno» tool grid (`ToolGrid`), rebuilt with the panel.
+        self.tool_grid = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.scroll = QScrollArea()
@@ -464,7 +529,8 @@ class PalettePanel(QWidget):
         self._content_layout.setSpacing(2)
         self.scroll.setWidget(self._content)
         outer.addWidget(self.scroll)
-        self.setFixedWidth(150)
+        # The right column also holds the «Proprietà» panel (plan C3).
+        self.setFixedWidth(PANEL_COLUMN_WIDTH)
         # Same dark ground as the canvas, whatever the application style: the
         # element strokes are light and would vanish on a light panel.
         for widget in (self.scroll.viewport(), self._content):
@@ -477,9 +543,15 @@ class PalettePanel(QWidget):
         self.rebuild()
 
     def rebuild(self):
-        """@brief Fill (again) the groups and icons from the catalogue, keeping open/closed states."""
+        """@brief Fill (again) the groups and icons from the catalogue, keeping open/closed states.
+
+        @note The active drawing tool shown by the «Disegno» grid survives the
+            rebuild (a language change while a tool is armed).
+        """
         from ..generators.symbol_glyphs import grouped_catalogue
         open_state = {key: section.isChecked() for key, (section, _body) in self._groups.items()}
+        active_tool = self.tool_grid.active_key() if self.tool_grid is not None else None
+        outside = self.tool_grid.outside_active() if self.tool_grid is not None else False
         # The actions are children of the panel, not of the buttons deleted
         # below: without this they piled up at every language change (audit
         # L1, 2026-10-15). `setParent(None)` detaches them at once (so
@@ -497,6 +569,7 @@ class PalettePanel(QWidget):
         self._actions = []
         self._tool_actions = {}
         self._groups = {}
+        self.tool_grid = None
         # Tools first (user, 2026-10-10: «il filo lo vorrei nella palette», I
         # would like the wire in the palette).
         from ..generators.symbol_glyphs import Glyph, Primitive
@@ -504,76 +577,153 @@ class PalettePanel(QWidget):
                                                       0.0, 'none', 0.254),), (), 'tool')
         self._add_section('tools', 'Collegamenti', [wire_glyph], open_state.get('tools', True), tool=True)
         # Free drawing (user, 2026-10-12: «tracciare disegni, linee curve»,
-        # draw drawings, curved lines):
-        # shapes without terminals, closed by a fixed number of clicks.
+        # draw drawings, curved lines): the shared tool grid with the Select
+        # arrow first (plan docs/footprint-drawing-kicad-plan.md, A1).
         from ..generators.symbol_glyphs import shape_tool_glyphs
-        self._add_section('drawing', 'Disegno', shape_tool_glyphs(), open_state.get('drawing', True), tool=True)
+        self._add_tool_grid('drawing', 'Disegno', shape_tool_glyphs(), open_state.get('drawing', True))
+        if active_tool:
+            self.tool_grid.set_active(active_tool)
+        elif outside:
+            self.tool_grid.set_active(OUTSIDE_KEY)
         for key, label, glyphs in grouped_catalogue():
             self._add_section(key, label, glyphs, open_state.get(key, True))
         self._content_layout.addStretch(1)
 
+    def _new_section(self, key, label, is_open):
+        """One collapsible group: its header button and its (still empty) body, mounted in the panel.
+
+        @return The body widget; the caller lays its content out.
+        """
+        header = QToolButton()
+        header.setText(self.tx(label))
+        header.setCheckable(True)
+        header.setChecked(is_open)
+        header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setArrowType(Qt.ArrowType.DownArrow if header.isChecked() else Qt.ArrowType.RightArrow)
+        header.setAutoRaise(True)
+        header.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        header.setMinimumWidth(0)
+        header.setProperty('i18n_skip', True)
+        body = QWidget()
+        body.setAutoFillBackground(True)
+        body.setPalette(self._content.palette())
+        header.toggled.connect(lambda checked, b=body, h=header: (
+            b.setVisible(checked),
+            h.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)))
+        self._content_layout.addWidget(header)
+        self._content_layout.addWidget(body)
+        # Mounted first, shown after: an unparented body made visible is a
+        # top-level window, one flash per open group at start-up
+        # (user, 2026-10-13).
+        body.setVisible(header.isChecked())
+        self._groups[key] = (header, body)
+        return body
+
     def _add_section(self, key, label, glyphs, is_open, tool=False):
         """One collapsible group: a header and a grid of icon buttons (elements or tools)."""
-        if True:
-            header = QToolButton()
-            header.setText(self.tx(label))
-            header.setCheckable(True)
-            header.setChecked(is_open)
-            header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            header.setArrowType(Qt.ArrowType.DownArrow if header.isChecked() else Qt.ArrowType.RightArrow)
-            header.setAutoRaise(True)
-            header.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            header.setMinimumWidth(0)
-            header.setProperty('i18n_skip', True)
-            body = QWidget()
-            body.setAutoFillBackground(True)
-            body.setPalette(self._content.palette())
-            grid = QGridLayout(body)
-            grid.setContentsMargins(4, 0, 0, 4)
-            grid.setSpacing(2)
-            grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-            for index, glyph in enumerate(glyphs):
-                action = QAction(glyph_icon(glyph), self.tx(glyph.label), self)
-                action.setCheckable(True)
-                action.setData(glyph.key)
-                action.setToolTip(self.tx(glyph.label) + ' — ' + self.tx('clicca, poi clicca nel simbolo'))
-                if tool:
-                    action.setToolTip(self.tx(TOOL_HINTS.get(glyph.key, glyph.label)))
-                    action.triggered.connect(lambda checked=False, k=glyph.key: self.tool_chosen.emit(k))
-                else:
-                    action.triggered.connect(lambda checked=False, k=glyph.key: self._pick(k))
-                button = QToolButton()
-                button.setDefaultAction(action)
-                button.setIconSize(QSize(36, 36))
-                button.setFixedSize(42, 42)
-                button.setAutoRaise(True)
-                button.setProperty('i18n_skip', True)
-                button.setAccessibleName(self.tx(glyph.label))
-                grid.addWidget(button, index // 3, index % 3, Qt.AlignmentFlag.AlignLeft)
-                if tool:
-                    self._tool_actions[glyph.key] = action
-                else:
-                    self._actions.append(action)
-            header.toggled.connect(lambda checked, b=body, h=header: (
-                b.setVisible(checked),
-                h.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)))
-            self._content_layout.addWidget(header)
-            self._content_layout.addWidget(body)
-            # Mounted first, shown after: an unparented body made visible is a
-            # top-level window, one flash per open group at start-up
-            # (user, 2026-10-13).
-            body.setVisible(header.isChecked())
-            self._groups[key] = (header, body)
+        body = self._new_section(key, label, is_open)
+        grid = QGridLayout(body)
+        grid.setContentsMargins(4, 0, 0, 4)
+        grid.setSpacing(2)
+        grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for index, glyph in enumerate(glyphs):
+            action = QAction(glyph_icon(glyph), self.tx(glyph.label), self)
+            action.setCheckable(True)
+            action.setData(glyph.key)
+            action.setToolTip(self.tx(glyph.label) + ' — ' + self.tx('clicca, poi clicca nel simbolo'))
+            if tool:
+                action.setToolTip(self.tx(TOOL_HINTS.get(glyph.key, glyph.label)))
+                action.triggered.connect(lambda checked=False, k=glyph.key: self.tool_chosen.emit(k))
+            else:
+                action.triggered.connect(lambda checked=False, k=glyph.key: self._pick(k))
+            button = QToolButton()
+            button.setDefaultAction(action)
+            button.setIconSize(QSize(36, 36))
+            button.setFixedSize(42, 42)
+            button.setAutoRaise(True)
+            button.setProperty('i18n_skip', True)
+            button.setAccessibleName(self.tx(glyph.label))
+            grid.addWidget(button, index // 3, index % 3, Qt.AlignmentFlag.AlignLeft)
+            if tool:
+                self._tool_actions[glyph.key] = action
+            else:
+                self._actions.append(action)
+
+    def _add_tool_grid(self, key, label, glyphs, is_open):
+        """The «Disegno» group: a shared `ToolGrid` (Select first, then the shape tools).
+
+        The grid emits only on user clicks; `tool_chosen` carries the tool key,
+        or "" for Select (and for a click on the active tool), which the tab
+        turns into "disarm". Tooltips are the translated tool hint followed by
+        its shortcut (`canvas_tool_hints.tooltip`).
+        """
+        body = self._new_section(key, label, is_open)
+        column = QVBoxLayout(body)
+        column.setContentsMargins(4, 0, 0, 4)
+        column.setSpacing(0)
+        grid = ToolGrid(columns=3, icon_size=36, button_size=42)
+        # The theme accent: the palette ground is always dark (see __init__).
+        grid.set_accent(BLUE)
+        select = grid.add_select(select_arrow_icon(36), f"{self.tx('Seleziona')} ({SELECT_SHORTCUT})")
+        select.setAccessibleName(self.tx('Seleziona'))
+        select.setProperty('i18n_skip', True)
+        for glyph in glyphs:
+            button = grid.add_tool(glyph.key, glyph_icon(glyph),
+                                   tool_tooltip(self.tx(TOOL_HINTS.get(glyph.key, glyph.label)), glyph.key),
+                                   self.tx(glyph.label))
+            button.setProperty('i18n_skip', True)
+        grid.tool_triggered.connect(self.tool_chosen.emit)
+        column.addWidget(grid)
+        self.tool_grid = grid
 
     def set_tool_checked(self, key, checked):
         """@brief Show a palette tool as active or not; unknown keys are ignored.
 
-        @param key Catalogue key of the tool action.
-        @param checked True to show the tool as active.
+        @param key Catalogue key of the tool: "wire" (its action) or a shape
+            tool of the «Disegno» grid.
+        @param checked True to show the tool as active. False on a grid tool
+            that is not the active one changes nothing (the active one stays shown).
+        @note Silent: never emits `tool_chosen` (the tab mirrors its armed tool here).
         """
         action = self._tool_actions.get(key)
         if action is not None:
             action.setChecked(bool(checked))
+            return
+        grid = self.tool_grid
+        if grid is None or not key or grid.button(key) is None:
+            return
+        if checked:
+            grid.set_active(key)
+        elif grid.active_key() == key:
+            grid.set_active(None)
+
+    def show_outside_tool(self, armed):
+        """@brief Show that a tool living outside the «Disegno» grid is armed, or that it ended (review S4).
+
+        @param armed True while the wire, the «Misura» ruler or a glyph placing
+            is armed: no grid button is checked, not even Select, so the grid
+            never claims the user is selecting. False drops that state back to
+            Select, only when the grid was showing it (a grid tool shown as
+            active is left alone).
+        @note Silent: never emits `tool_chosen`.
+        """
+        grid = self.tool_grid
+        if grid is None:
+            return
+        if armed:
+            grid.set_active(OUTSIDE_KEY)
+        elif grid.outside_active():
+            grid.set_active(None)
+
+    def checked_tools(self):
+        """@brief The tools shown as active, sorted: the wire and/or the active drawing tool.
+
+        @return Sorted list of tool keys (empty when Select is shown and the wire is off).
+        """
+        keys = [key for key, action in self._tool_actions.items() if action.isChecked()]
+        if self.tool_grid is not None and self.tool_grid.active_key():
+            keys.append(self.tool_grid.active_key())
+        return sorted(keys)
 
     def _pick(self, key):
         for action in self._actions:
@@ -964,6 +1114,18 @@ class _SymbolView(QGraphicsView):
             self.clear_selection_requested.emit()
         super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):
+        """@brief Qt override: report key releases to the click tools (review M2).
+
+        @param event The key event; always handed to the base class too.
+        @note A Shift release re-runs the last hover with the constraints back
+            on (`ClickToolRouter.key_release`), so the ghost leaves the free
+            grid point and returns to the snapped one without a mouse move.
+        """
+        if self.clicktools is not None:
+            self.clicktools.key_release(event)
+        super().keyReleaseEvent(event)
+
     def cancel_interaction(self):
         """@brief Release capture and roll back unfinished edits before leaving the view.
 
@@ -1242,6 +1404,22 @@ class SymbolTab(QWidget):
         self._finish_result = False
         #: True: each new wire segment is horizontal or vertical (Shift frees it).
         self._wire_orthogonal = True
+        #: True: shape points catch the hot points of pins, elements and shapes (plan B3).
+        self._object_snap = True
+        #: (draft, layout, SnapIndex) of the last object-snap build: rebuilt only
+        #: when the draft or the layout object changed (`_snap_index`).
+        self._snap_cache = None
+        #: (point, kind) of the last shape snap that caught an object, None after
+        #: a grid or free point: the typed marker of the hovered point.
+        self._last_snap = None
+        #: The snap marker items on the scene and what they show ((kind, x, y) or None).
+        self._marker_items = []
+        self._marker_shown = None
+        #: Application configuration and its saver (`bind_settings`); None until bound.
+        self._settings = None
+        self._settings_save = None
+        #: True while settings are being applied from the configuration (no save back).
+        self._restoring_settings = False
         layout = QVBoxLayout(self)
         self.title = QLabel(self.tx('Simbolo elettrico'))
         layout.addWidget(self.title)
@@ -1337,6 +1515,11 @@ class SymbolTab(QWidget):
         self.grid_check.defaultAction().toggled.connect(self.view.set_grid_visible)
         self.measure_button = icon_button('measure-ruler.svg', MEASURE_TOOLTIP_SOURCE, self.toggle_measure)
         self.measure_button.defaultAction().setCheckable(True)
+        # KiCad's measure shortcut, the same as the footprint preview's (review P3).
+        self.measure_button.setProperty('shortcut_hint', TOOL_SHORTCUTS[MEASURE_KEY])
+        measure_tip = f'{self.tx(MEASURE_TOOLTIP_SOURCE)} ({TOOL_SHORTCUTS[MEASURE_KEY]})'
+        self.measure_button.defaultAction().setToolTip(measure_tip)
+        self.measure_button.setToolTip(measure_tip)
         self.clear_measures_button = icon_button('delete.svg', CLEAR_MEASURES_SOURCE, self.clear_measures)
         self.clear_measures_button.defaultAction().setEnabled(False)
         separator()
@@ -1450,6 +1633,24 @@ class SymbolTab(QWidget):
         self.snap_button.defaultAction().setCheckable(True)
         self.snap_button.defaultAction().setChecked(True)
         self.snap_button.defaultAction().toggled.connect(self.set_snap)
+        # Angle mode of lines and polygons (plan A6), cycled by Shift+Space while
+        # a tool is armed; the combo follows the router both ways
+        # (`tool_angle_mode_changed`). The wire keeps its own orthogonal button.
+        self.angle_combo = QComboBox()
+        self.angle_combo.setProperty('i18n_skip', True)
+        for mode in ANGLE_MODES:
+            self.angle_combo.addItem(self._angle_label(mode), mode)
+        self.angle_combo.currentIndexChanged.connect(
+            lambda _i: self.set_angle_mode(self.angle_combo.currentData()))
+        toolbar.addWidget(self.angle_combo)
+        # Object snap (plan B3): shape points catch pin ends, terminals, vertices,
+        # midpoints, centres and intersections within a 10 px magnet.
+        self.object_snap_button = icon_button('measure-ruler.svg', 'Aggancia agli oggetti')
+        self.object_snap_button.setIcon(_object_snap_icon(20))
+        self.object_snap_button.defaultAction().setIcon(_object_snap_icon(20))
+        self.object_snap_button.defaultAction().setCheckable(True)
+        self.object_snap_button.defaultAction().setChecked(True)
+        self.object_snap_button.defaultAction().toggled.connect(self.set_object_snap)
         icon_button('info.svg', 'Trascina i pin sulla griglia. Tasto destro per ruotare. Maniglie per ridimensionare; Esc annulla.')
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -1466,7 +1667,27 @@ class SymbolTab(QWidget):
         canvas_row = QHBoxLayout()
         canvas_row.setContentsMargins(0, 0, 0, 0)
         canvas_row.addWidget(self.view, 1)
-        canvas_row.addWidget(self.palette)       # on the right (user, 2026-10-10)
+        # Right column (user, 2026-10-10: on the right): the palette above, the
+        # live «Proprietà» of the selection below (plan C3, shared widget).
+        side = QWidget()
+        side.setFixedWidth(PANEL_COLUMN_WIDTH)
+        side_column = QVBoxLayout(side)
+        side_column.setContentsMargins(0, 0, 0, 0)
+        side_column.setSpacing(2)
+        side_column.addWidget(self.palette, 1)
+        self.properties_title = QLabel(self.tx('Proprietà'))
+        self.properties_title.setProperty('i18n_skip', True)
+        title_font = QFont(self.properties_title.font())
+        title_font.setBold(True)
+        self.properties_title.setFont(title_font)
+        side_column.addWidget(self.properties_title)
+        self.properties_panel = PropertiesPanel(mixed_placeholder=self.tx(MIXED_PLACEHOLDER))
+        self.properties_panel.set_empty(self.tx(EMPTY_TEXT))
+        self.properties_panel.committed.connect(self._property_committed)
+        side_column.addWidget(self.properties_panel)
+        #: What the panel shows: ('none',), ('element', index), ('elements', indices) or ('pins', numbers).
+        self._properties_subject = ('none',)
+        canvas_row.addWidget(side)
         preview_layout.addLayout(canvas_row, 1)
         # Every key of the view goes through the deferred checkpoint
         # (`_key_action`): an auto-repeated key defers the recovery-file
@@ -1489,6 +1710,14 @@ class SymbolTab(QWidget):
         bindings.append(('Delete', lambda: self._measure.remove_hovered() or self._delete_selected_graphic()))
         # Clipboard of elements (user, 2026-10-12): copy, paste, duplicate.
         bindings += [('Ctrl+C', self.copy_selected), ('Ctrl+V', self.paste), ('Ctrl+D', self.duplicate_selected)]
+        # Drawing tools as KiCad (plan A7): only the symbol's own tools (the
+        # dimension and the text box are footprint-only), plus E = properties.
+        from ..generators.symbol_glyphs import SHAPE_TOOLS
+        bindings += [(TOOL_SHORTCUTS[key], lambda k=key: self.start_shape(k))
+                     for key, _label, _kind, _count in SHAPE_TOOLS if key in TOOL_SHORTCUTS]
+        bindings.append((PROPERTIES_SHORTCUT, self.edit_properties))
+        # Ctrl+Shift+M toggles the ruler, as in the footprint preview (review P3).
+        bindings.append((TOOL_SHORTCUTS[MEASURE_KEY], self.toggle_measure))
         bind_shortcuts(self.view, bindings, self._checkpoint.run, Qt.ShortcutContext.WidgetShortcut)
         # The drag state machine of the view, hosted by this tab
         # (`gesture_begin/step/end`), and the filters cancelling a drag on
@@ -2722,11 +2951,29 @@ class SymbolTab(QWidget):
         self.theme_changed.emit()
 
     def _tool_chosen(self, key):
-        """A palette tool click: the wire or one of the shape tools."""
+        """A palette tool click: the wire, one of the shape tools, or "" for Select.
+
+        Select (or a click on the active drawing tool, which the grid turns
+        into Select) disarms whatever click tool or glyph placing is armed.
+        """
         if key == 'wire':
             self.start_wire()
+        elif not key:
+            self.select_tool()
         else:
             self.start_shape(key)
+
+    def select_tool(self):
+        """@brief Back to Select: disarm the armed click tool and cancel a glyph placing.
+
+        @note Nothing armed: nothing changes (no redraw, no status change).
+        """
+        if self.view.placing:
+            self.view.placing = False
+            self._place_requested(None)
+        if self._collector.armed:
+            self._router.disarm()
+        self._uncheck_tool_buttons()
 
     # ── Click tools: the tab is the host of the shared state machine ──────────
 
@@ -2739,16 +2986,20 @@ class SymbolTab(QWidget):
         """@brief The `ToolSpec` of a shape tool of SHAPE_TOOLS.
 
         @param key Tool key: line, rectangle, circle, arc, bezier or text.
-        @return The spec: the click count of the tool (0 = open-ended line), a
-            polygon close rule for the line (four points), and persistence for
-            every tool but the text (the text inserts through a dialog and is one-shot).
-            A press-move-release drag adds the release point, so a drag draws a
-            rectangle, a circle or a line like in the footprint preview (plan decision C1).
+        @return The spec: the click count of the tool (0 = open-ended line or
+            polygon), a close rule for the open-ended tools (a click on the
+            first point closes from four points, i.e. three vertices), at
+            least three points for the polygon (plan D1, the footprint's
+            spec), and persistence for every tool but the text (the text
+            inserts through a dialog and is one-shot). A press-move-release
+            drag adds the release point, so a drag draws a rectangle, a
+            circle or a line like in the footprint preview (plan decision C1).
         """
         from ..generators.symbol_glyphs import shape_tool
         count = shape_tool(key)[3]
         return ToolSpec(key, count=count, close_after=4 if count == 0 else 0,
-                        persistent=key != 'text', drag_adds_release_point=True)
+                        persistent=key != 'text', drag_adds_release_point=True,
+                        min_points=3 if key == 'polygon' else 0)
 
     @property
     def _wire_points(self):
@@ -2793,6 +3044,7 @@ class SymbolTab(QWidget):
             self.measure_button.defaultAction().setChecked(False)
         for key, _label, _kind, _count in SHAPE_TOOLS:
             self.palette.set_tool_checked(key, False)
+        self.palette.show_outside_tool(False)
 
     # ── Measuring tool (shared `canvas_measure`, plan docs/canvas-measure-plan.md) ──
 
@@ -2889,14 +3141,29 @@ class SymbolTab(QWidget):
         self._uncheck_tool_buttons()
         if spec.key == MEASURE_KEY:
             self.measure_button.defaultAction().setChecked(True)
-            self.set_status(self.tx(MEASURE_TOOLTIP_SOURCE))
+            self.palette.show_outside_tool(True)
+            # The next step, like the footprint's ruler (review P4).
+            self.set_status(self.tx(step_hint(MEASURE_KEY, 0)))
         elif spec.key == 'wire':
             self.wire_button.defaultAction().setChecked(True)
             self.palette.set_tool_checked('wire', True)
-            self.set_status(self.tx('Filo: clicca i punti (si agganciano a pin e terminali); doppio clic, Invio o tasto destro per chiudere, Esc per annullare.'))
+            self.palette.show_outside_tool(True)
+            self._show_step_hint(spec, [])
         else:
             self.palette.set_tool_checked(spec.key, True)
-            self.set_status(self.tx(TOOL_HINTS[spec.key]))
+            self._show_step_hint(spec, [])
+
+    def _show_step_hint(self, spec, points):
+        """@brief Print the next step of the armed wire or shape tool on the status line (plan A4).
+
+        @param spec The armed tool (not the measuring tool, which keeps its own text).
+        @param points The points collected so far.
+        @note The line may close on its first point once a click there would
+            reach the close rule (`ToolSpec.close_after`), so its hint says so.
+        """
+        count = len(points)
+        closable = bool(spec.close_after) and count + 1 >= spec.close_after
+        self.set_status(self.tx(step_hint(spec.key, count, closable=closable)))
 
     def tool_disarmed(self, spec):
         """@brief Host callback: the tool ended and nothing replaced it; show every tool as inactive.
@@ -2905,7 +3172,10 @@ class SymbolTab(QWidget):
         """
         if spec.key == MEASURE_KEY:
             self._measure.disarmed()
+        # No tool, no snapped kind (review S5): the next tool starts clean.
+        self._last_snap = None
         self._uncheck_tool_buttons()
+        self._clear_snap_marker()
         self._wire_cursor_item = None
         # A tool ended through the direct API (`finish_wire`) did not pass through a router
         # event, which is where the router unsets its cursor.
@@ -2924,12 +3194,18 @@ class SymbolTab(QWidget):
         """
         if spec.key == MEASURE_KEY:
             self._measure.points_changed(points)
+            # The next step after each point and after Backspace (review P4).
+            self.set_status(self.tx(step_hint(MEASURE_KEY, len(points))))
             return
         if self._stay_redraw_done and not points:
+            # The commit (or refusal) text stays on the status line: it is a result.
             self._stay_redraw_done = False
             return
         self._stay_redraw_done = False
         self._draw(self._symbol)
+        if self._symbol is not None:
+            # The next step after each collected point and after Backspace (contract 12).
+            self._show_step_hint(spec, points)
 
     def tool_preview_changed(self, spec, points, preview):
         """@brief Host callback: the pointer moved to another point; reshape the rubber band IN PLACE.
@@ -2944,6 +3220,58 @@ class SymbolTab(QWidget):
             self._measure.preview_changed(points, preview)
             return
         self._reshape_band(points, preview)
+        if spec.key == 'wire':
+            # The wire attaches to pin ends by its own rule and draws no typed
+            # marker (review S5): only the object-snapping shape tools do.
+            self._clear_snap_marker()
+        else:
+            self._show_snap_marker(preview)
+
+    def _show_snap_marker(self, preview):
+        """@brief Show the typed marker of the object the hovered point caught, or none (plan B4).
+
+        @param preview The points a click at the pointer would append; [] clears the marker.
+        @note The marker is drawn only when the last snap (`_last_snap`, set by
+            `tool_snap_ex`) caught an object AT the previewed point; a grid or
+            free point shows none. Items are found again by their tag, so a
+            scene cleared by `_draw` leaves nothing dangling.
+        """
+        self._clear_snap_marker()
+        last = self._last_snap
+        if not preview or last is None or tuple(preview[-1]) != last[0]:
+            return
+        (x, y), kind = last
+        # Built in Python (`make_snap_marker_items`): the wrappers report their
+        # deletion when `_draw` clears the scene, so keeping them is safe.
+        self._marker_items = make_snap_marker_items(kind, x * SCENE_UNITS_PER_MM, -y * SCENE_UNITS_PER_MM,
+                                                    tag=SNAP_MARKER_TAG, scene=self.view.scene())
+        self._marker_shown = (kind, x, y)
+
+    def _clear_snap_marker(self):
+        """@brief Remove the typed snap marker from the scene (disarm, leave, a new hover).
+
+        @note O(1): the tab keeps its marker items instead of scanning the scene
+            on every hover change (`remove_snap_markers` stays the fallback for
+            a scene whose items were not tracked).
+        """
+        self._marker_shown = None
+        items, self._marker_items = getattr(self, '_marker_items', []), []
+        for item in items:
+            if not sip.isdeleted(item) and item.scene() is not None:
+                item.scene().removeItem(item)
+
+    def snap_marker(self):
+        """@brief The typed snap marker on the scene (tests and diagnostics).
+
+        @return (kind, x mm, y mm) of the marker shown, or None when the scene
+            holds no marker of this tab (removed, or cleared by a redraw).
+        """
+        from .canvas_snap_marker import SNAP_MARKER_ROLE
+        shown = getattr(self, '_marker_shown', None)
+        if shown is None or sip.isdeleted(self.view):
+            return None
+        present = any(item.data(SNAP_MARKER_ROLE) == SNAP_MARKER_TAG for item in self.view.scene().items())
+        return shown if present else None
 
     def _reshape_band(self, points, preview):
         """@brief Set the rubber band path from the collected points and the preview.
@@ -2973,12 +3301,37 @@ class SymbolTab(QWidget):
 
         @param spec The armed tool.
         @param point Scene position (QPointF).
-        @param free True when Shift frees the wire segment from the orthogonal constraint.
+        @param free True for Shift: no object snap, no angle constraint, no wire corner.
         @param points Tuple of the points collected so far.
-        @return The wire's snapped point(s) (anchor, corner), or the shape's drawing-grid
-            point; [] when the draft is invalid (nothing is drawn, so a point would be invisible)
-            or when a wire point repeats the last one.
+        @return As `tool_snap_ex` with the collector's current angle mode (the
+            collector calls `tool_snap_ex` itself; this stays for the protocol).
         """
+        return self.tool_snap_ex(spec, point, free, points, self._collector.angle_mode)
+
+    def tool_snap_ex(self, spec, point, free, points, angle_mode):
+        """@brief Host callback: the snapped point(s) a click or a hover would append, with the angle mode.
+
+        @param spec The armed tool.
+        @param point Scene position (QPointF).
+        @param free True for Shift (plan A8): no object snap and no angle
+            constraint; the drawing grid still applies when its snap is on.
+            For the wire, Shift frees the segment from the orthogonal rule.
+        @param points Tuple of the points collected so far.
+        @param angle_mode One of `canvas_clicktools.ANGLE_MODES`; applied to the
+            segment from the previous point of a line or polygon only.
+        @return The wire's snapped point(s) (anchor, corner); for a shape one
+            point: the object snapped within `OBJECT_SNAP_REACH_PX` when the
+            toggle is on, else the angle-constrained, grid-rounded point;
+            [] when the draft is invalid (nothing is drawn, so a point would be
+            invisible) or when a wire point repeats the last one.
+        @note Priority: an object within reach wins over the angle mode and the
+            grid (the user aimed at it); then the angle mode; then the grid.
+            The wire keeps its own orthogonal rule (deliberate difference §4).
+        """
+        # Reset first (review S5): a measure, a wire or an invalid draft snaps to
+        # no typed hot point, so neither `tool_snap_kind` nor the marker may
+        # report the kind of an earlier shape hover.
+        self._last_snap = None
         if self._symbol is None:
             return []
         if spec.key == MEASURE_KEY:
@@ -2986,8 +3339,136 @@ class SymbolTab(QWidget):
         x, y = point.x() / SCENE_UNITS_PER_MM, -point.y() / SCENE_UNITS_PER_MM
         if spec.key == 'wire':
             return self._next_wire_points(x, y, free, points)
+        if not free and self._object_snap:
+            hit = self._object_snap_at(x, y, points)
+            if hit is not None:
+                snapped = (round(hit.x, 4), round(hit.y, 4))
+                self._last_snap = (snapped, hit.kind)
+                return [snapped]
+        if not free and points and spec.key in ANGLE_CONSTRAINED_TOOLS and angle_mode != ANGLE_FREE:
+            return [self._constrained_point(points[-1], x, y, angle_mode)]
         return [self._grid_point(x, y)]
 
+    def tool_snap_kind(self):
+        """@brief Host callback: the kind of hot point the last `tool_snap_ex` snapped to.
+
+        @return The object-snap kind ("pad", "endpoint", ...) of the last shape
+            snap, or None for a grid, angle-constrained, free, wire or measure
+            point. Lets the collector re-emit the preview when only the kind
+            changed on the same point, so the marker is never stale (review M5).
+        """
+        last = self._last_snap
+        return None if last is None else last[1]
+
+    def _constrained_point(self, anchor, x, y, mode):
+        """@brief The pointer constrained to the angle mode from `anchor`, then put on the grid along that ray.
+
+        @param anchor (x, y) previous point, symbol mm.
+        @param x Pointer X, symbol mm.
+        @param y Pointer Y, symbol mm.
+        @param mode 90 or 45 (`draw_constraints.AngleMode` value).
+        @return (x, y) rounded to 0.0001 mm. The run along each axis is a whole
+            number of grid steps (0.01 mm with the grid snap off), the same on
+            both axes for a diagonal: the result stays exactly on the allowed
+            ray, and on the grid whenever the anchor is.
+        @note The ONE rule of both tabs (`draw_constraints.constrain_to_grid`,
+            plan contract 13); only the step choice is this tab's.
+        """
+        step = self._grid_mm if self._snap else 0.01
+        return tuple(constrain_to_grid((float(anchor[0]), float(anchor[1])), (x, y), mode, step, ndigits=4))
+
+    def _object_snap_reach_mm(self):
+        """@brief `OBJECT_SNAP_REACH_PX` converted to symbol mm at the current zoom (a UI reach)."""
+        px_per_mm = abs(self.view.transform().m11()) * SCENE_UNITS_PER_MM
+        return OBJECT_SNAP_REACH_PX / px_per_mm if px_per_mm > 0 else 0.0
+
+    def _object_snap_at(self, x, y, points):
+        """@brief The hot point under the pointer: the drawing's index, or a point of the tool being drawn.
+
+        @param x Pointer X, symbol mm.
+        @param y Pointer Y, symbol mm.
+        @param points The points the armed tool collected (they close a polygon).
+        @return An `object_snap.SnapResult`, or None when nothing is within reach.
+        @note The ONE classifier of both tabs (`object_snap.snap_point`): the
+            collected points but the last are endpoints competing by priority
+            then distance (an exact tie goes to the drawing); the last one is
+            the segment's anchor and never a candidate.
+        """
+        reach = self._object_snap_reach_mm()
+        if reach <= 0:
+            return None
+        return object_snap.snap_point(self._snap_index(), [tuple(p) for p in points], x, y, reach)
+
+    def _snap_index(self):
+        """@brief The object-snap index of the current drawing, built once per drawing revision.
+
+        @return An `object_snap.SnapIndex`. Rebuilt only when the draft or the
+            layout object changed (every commit, undo and load replaces them),
+            never per mouse move.
+        """
+        cached = self._snap_cache
+        if cached is not None and cached[0] is self._draft and cached[1] is self._symbol:
+            return cached[2]
+        index = object_snap.SnapIndex(*self._snap_candidates())
+        self._snap_cache = (self._draft, self._symbol, index)
+        return index
+
+    def _snap_candidates(self):
+        """@brief Hot points and intersections of the drawn symbol, symbol mm (plan B3).
+
+        @return (candidates, segments): pin outer and inner ends and element
+            terminal ends (kind "pad", the connection points), the vertices,
+            midpoints, corners, centres and quadrants of every drawn primitive
+            (glyphs, shapes and wires), the body rectangle's corners, side
+            midpoints and centre, then the intersections of all straight
+            segments (pairwise, uncapped: `object_snap.intersections`).
+            The segments list is empty: edge snapping (the foot of the
+            perpendicular on any line) is left out on purpose, it would pull
+            nearly every click near a stroke off the drawing grid.
+        """
+        from ..generators.symbol_glyphs import (TERMINAL_ENDS, is_wire, pin_inner_ends, placed_primitives,
+                                                placed_terminals, terminal_end)
+        symbol = self._symbol
+        candidates = []
+        segments = []
+        if symbol is None:
+            return candidates, segments
+        inner = pin_inner_ends(symbol)
+        for placed in symbol.pins:
+            number = str(placed.pin.number)
+            owner = ('pin', number)
+            candidates += object_snap.points([(placed.x, placed.y)], object_snap.PAD, owner)
+            if number in inner:
+                candidates += object_snap.points([inner[number]], object_snap.PAD, owner)
+        half_w, half_h = symbol.width / 2, symbol.height / 2
+        candidates += object_snap.rectangle((-half_w, -half_h), (half_w, half_h), ('body',))
+        segments_for_crossings = object_snap.rectangle_segments((-half_w, -half_h), (half_w, half_h), ('body',))
+        graphics = self._graphics(self._draft)
+        for index, instance in enumerate(graphics):
+            owner = ('graphic', index)
+            if not is_wire(instance):
+                for terminal in placed_terminals(instance):
+                    candidates += object_snap.points([terminal_end(terminal, end) for end in TERMINAL_ENDS],
+                                                     object_snap.PAD, owner)
+            for primitive in placed_primitives(instance, graphics, inner):
+                pts = [(float(px), float(py)) for px, py in primitive.points]
+                if primitive.kind == 'polyline' and len(pts) >= 2:
+                    closed = len(pts) > 2 and pts[0] == pts[-1]
+                    vertices = pts[:-1] if closed else pts
+                    candidates += object_snap.polyline(vertices, closed, owner)
+                    segments_for_crossings += object_snap.polyline_segments(vertices, closed, owner)
+                elif primitive.kind == 'rectangle' and len(pts) == 2:
+                    candidates += object_snap.rectangle(pts[0], pts[1], owner)
+                    segments_for_crossings += object_snap.rectangle_segments(pts[0], pts[1], owner)
+                elif primitive.kind == 'circle' and pts:
+                    candidates += object_snap.circle(pts[0], primitive.radius, owner)
+                elif primitive.kind == 'arc' and len(pts) == 3:
+                    candidates += object_snap.arc(pts[0], pts[1], pts[2], owner)
+                elif primitive.kind == 'bezier' and len(pts) == 4:
+                    # The curve's own ends; the control points are not on the drawing.
+                    candidates += object_snap.points([pts[0], pts[3]], object_snap.ENDPOINT, owner)
+        candidates += object_snap.intersections(segments_for_crossings)
+        return candidates, segments
     def tool_refused(self, spec, reason):
         """@brief Host callback: a click added nothing (a repeated point).
 
@@ -3134,12 +3615,15 @@ class SymbolTab(QWidget):
     def start_shape(self, key):
         """@brief Arm a shape tool (SHAPE_TOOLS): clicks on the grid draw the shape.
 
-        @param key Tool key: line, rectangle, circle, arc, bezier or text.
+        @param key Tool key: line, polygon, rectangle, circle, arc, bezier or text.
         @return True when the tool was armed (a symbol is loaded, key known).
-        @note The line is closed by the user (double click, Enter, right
-            button) like a wire; the other shapes close themselves at their
-            last click. Shape points snap to the grid only: they are
-            drawings, not connections, so they do not anchor to pins.
+        @note The line and the polygon are closed by the user (double click,
+            Enter, right button, or a click on the first point from three
+            vertices) like a wire; the other shapes close themselves at their
+            last click. Shape points snap to the objects within reach when
+            «Aggancia agli oggetti» is on (`tool_snap_ex`), else to the grid;
+            the point is copied, never ANCHORED: shapes are drawings, not
+            connections, so they do not follow a pin afterwards.
         """
         from ..generators.symbol_glyphs import shape_tool
         tool = shape_tool(key)
@@ -3195,6 +3679,101 @@ class SymbolTab(QWidget):
             blocked = action.blockSignals(True)
             action.setChecked(self._snap)
             action.blockSignals(blocked)
+
+    # ── Angle mode and object snap (plan A6, B3), saved per tab ─────────────
+
+    def _angle_label(self, mode):
+        """The toolbar label of an angle mode: «Libero» translated, the degrees as they are (no language)."""
+        label = ANGLE_MODE_LABELS[mode]
+        return self.tx(label) if mode == ANGLE_FREE else label
+
+    def angle_mode(self):
+        """@brief The angle mode of lines and polygons.
+
+        @return One of `canvas_clicktools.ANGLE_MODES` ("free", "90", "45").
+        """
+        return self._router.angle_mode
+
+    def set_angle_mode(self, mode):
+        """@brief Set the angle mode from the toolbar control, the configuration or a script.
+
+        @param mode One of `canvas_clicktools.ANGLE_MODES`; an unknown value is ignored.
+        @return True when it changed. The router then calls `tool_angle_mode_changed`,
+            which syncs the control and saves the configuration.
+        """
+        return self._router.set_angle_mode(mode)
+
+    def tool_angle_mode_changed(self, mode):
+        """@brief Host callback: the angle mode changed (Shift+Space, the control, the configuration).
+
+        @param mode The new mode.
+        @note The toolbar control follows silently (no feedback loop) and the
+            mode is saved under `CONFIG_ANGLE_MODE` when settings are bound.
+        """
+        index = self.angle_combo.findData(mode)
+        if index >= 0 and self.angle_combo.currentIndex() != index:
+            blocked = self.angle_combo.blockSignals(True)
+            self.angle_combo.setCurrentIndex(index)
+            self.angle_combo.blockSignals(blocked)
+        self._save_setting(CONFIG_ANGLE_MODE, str(mode))
+
+    def object_snap(self):
+        """@brief Whether shape points snap to the objects of the drawing.
+
+        @return True when «Aggancia agli oggetti» is on.
+        """
+        return self._object_snap
+
+    def set_object_snap(self, enabled):
+        """@brief Turn the object snap of the shape tools on or off (toolbar toggle, configuration).
+
+        @param enabled True to catch pin ends, terminals, vertices, centres and intersections.
+        @note The toggle follows silently; the value is saved under
+            `CONFIG_OBJECT_SNAP` when settings are bound. Turning it off
+            drops a marker already shown at the next hover.
+        """
+        self._object_snap = bool(enabled)
+        action = self.object_snap_button.defaultAction()
+        if action.isChecked() != self._object_snap:
+            blocked = action.blockSignals(True)
+            action.setChecked(self._object_snap)
+            action.blockSignals(blocked)
+        if not self._object_snap:
+            self._last_snap = None
+            self._clear_snap_marker()
+        self._save_setting(CONFIG_OBJECT_SNAP, self._object_snap)
+
+    def bind_settings(self, config, save=None):
+        """@brief Read and keep the drawing settings in the application configuration.
+
+        @param config The window's live configuration dict (`app_config.load_config`).
+        @param save Callable writing the configuration (the window's safe saver), or None.
+        @note Reads `CONFIG_ANGLE_MODE` and `CONFIG_OBJECT_SNAP` (symbol-specific
+            keys; invalid values keep the defaults) and applies them without
+            saving back; later changes are written into `config` and `save()`
+            is called. Until bound, the tab keeps its defaults (free, snap on).
+        """
+        self._settings, self._settings_save = config, save
+        self._restoring_settings = True
+        try:
+            mode = config.get(CONFIG_ANGLE_MODE) if isinstance(config, dict) else None
+            if mode in ANGLE_MODES:
+                self.set_angle_mode(mode)
+            snap = config.get(CONFIG_OBJECT_SNAP) if isinstance(config, dict) else None
+            if isinstance(snap, bool):
+                self.set_object_snap(snap)
+        finally:
+            self._restoring_settings = False
+
+    def _save_setting(self, key, value):
+        """Write one drawing setting into the bound configuration and save it (no-op unbound or restoring)."""
+        if self._settings is None or self._restoring_settings or not isinstance(self._settings, dict):
+            return
+        if self._settings.get(key) == value:
+            return
+        self._settings[key] = value
+        if self._settings_save is not None:
+            self._settings_save()
 
     def add_shape_point(self, x, y):
         """@brief Add a clicked point (symbol mm, Y up) to the shape being drawn.
@@ -3361,6 +3940,9 @@ class SymbolTab(QWidget):
             return arc_points(start, mid, end)
         if kind == 'bezier' and len(points) >= 4:
             return bezier_points(*points[:4])
+        if kind == 'polygon' and len(points) >= 3 and points[-1] != points[0]:
+            # The polygon is always closed: the band shows the closing side too.
+            return points + [points[0]]
         return points
 
     def finish_wire(self, commit=True):
@@ -3412,6 +3994,8 @@ class SymbolTab(QWidget):
         # otherwise win the press and the glyph would never be placed.
         self._router.disarm()
         self.view.placing = True
+        # Glyph placing is a tool outside the «Disegno» grid (review S4).
+        self.palette.show_outside_tool(True)
         self.view.setFocus()
         self.set_status(self.tx('Clicca nel simbolo dove posizionare l’elemento; Esc o tasto destro per annullare.'))
 
@@ -3420,6 +4004,9 @@ class SymbolTab(QWidget):
         self.view.placing = False
         if hasattr(self, 'palette'):
             self.palette.release()
+            collector = getattr(self, '_collector', None)
+            if collector is None or not collector.armed:
+                self.palette.show_outside_tool(False)
         if point is None or self._symbol is None:
             self.set_status('')
             return
@@ -3897,6 +4484,201 @@ class SymbolTab(QWidget):
         finally:
             dialog.deleteLater()
 
+    # ── Live «Proprietà» panel (plan C3, shared `canvas_properties`) ─────────
+
+    def edit_properties(self):
+        """@brief «E» (KiCad's properties key): edit the selection, else the hovered element.
+
+        @return True when something was offered for editing.
+        @note With selected elements the first editable field of the
+            «Proprietà» panel takes the focus; with a selected pin its dialog
+            opens (pins keep their own editing); with nothing selected the
+            element under the pointer opens the «Proprietà elemento…» dialog.
+        """
+        if self.selected_graphics():
+            for key in self.properties_panel.field_keys():
+                widget = self.properties_panel.field_widget(key)
+                if widget is not None and widget.isEnabled() and widget.focusPolicy() != Qt.FocusPolicy.NoFocus:
+                    widget.setFocus(Qt.FocusReason.ShortcutFocusReason)
+                    return True
+            return False
+        if self._selected_pin is not None:
+            self._edit_selected_pin()
+            return True
+        index = self._hovered_graphic()
+        if index is None:
+            return False
+        self._edit_element_properties(index)
+        return True
+
+    def _hovered_graphic(self):
+        """The index of the element under the pointer (its drag target), None when none."""
+        point = self._cursor_position
+        if point is None or not self._pointer_inside:
+            return None
+        for item in self.view.items(self.view.mapFromScene(point)):
+            target = item.data(0)
+            if target and target[0] == 'graphic':
+                return target[1]
+        return None
+
+    def _properties_fields(self, rows):
+        """@brief The fields of the «Proprietà» panel for the current selection.
+
+        @param rows A private copy of the draft (the redraw's).
+        @return (subject, specs, title): subject names what the fields edit
+            (('element', index), ('elements', indices), ('pins', numbers) or
+            ('none',)); specs is a list of `FieldSpec`; title the bold heading.
+        @note One element: X, Y (step = drawing grid for a shape, pin grid
+            otherwise), then for a styleable element (not a wire, not a lone
+            text) the stroke width, fill and line style, the radius of a
+            circle, the width and height of a rectangle, the text and size of
+            a text. Several elements: stroke width, fill and line style, each
+            «(vari)» when they differ, shown only when every selected element
+            is styleable. Pins: number and name, read-only.
+        """
+        from ..generators.symbol_glyphs import instance_bounds, is_shape
+        chosen = []
+        if self._element_selection:
+            # From the redraw's rows: `selected_graphics()` would copy the draft again (perf P2).
+            graphics = self._graphics(rows)
+            chosen = self._selected_indices(len(graphics))
+        if chosen:
+            records = [graphics[i] for i in chosen]
+            styleable = all(self._styleable(r) for r in records)
+            specs = []
+            if len(chosen) == 1:
+                record = records[0]
+                shape = is_shape(record)
+                step = self._grid_mm if shape else GRID_MM
+                specs += [FieldSpec('x', 'X (mm)', 'float', float(record.get('x', 0.0)), minimum=-998.22,
+                                    maximum=998.22, step=step, decimals=3),
+                          FieldSpec('y', 'Y (mm)', 'float', float(record.get('y', 0.0)), minimum=-998.22,
+                                    maximum=998.22, step=step, decimals=3)]
+            if styleable:
+                specs += self._style_fields(records)
+            if len(chosen) == 1:
+                record = records[0]
+                first = (record.get('primitives') or [{}])[0]
+                kind = first.get('kind', '')
+                if is_shape(record) and kind == 'circle':
+                    specs.append(FieldSpec('radius', self.tx('Raggio (mm)'), 'float', float(first.get('radius', 0.0)),
+                                           minimum=0.01, maximum=500.0, step=self._grid_mm, decimals=3))
+                elif is_shape(record) and kind == 'rectangle':
+                    bounds = instance_bounds(dict(record, rotation=0, mirror=False)) or (0, 0, 0, 0)
+                    specs += [FieldSpec('size_w', self.tx('Larghezza (mm)'), 'float', bounds[2] - bounds[0],
+                                        minimum=0.01, maximum=1000.0, step=self._grid_mm, decimals=3),
+                              FieldSpec('size_h', self.tx('Altezza (mm)'), 'float', bounds[3] - bounds[1],
+                                        minimum=0.01, maximum=1000.0, step=self._grid_mm, decimals=3)]
+                elif kind == 'text' and len(record.get('primitives') or []) == 1:
+                    specs += [FieldSpec('text', self.tx('Testo'), 'text', str(first.get('text', ''))),
+                              FieldSpec('text_size', self.tx('Dimensione'), 'float', float(first.get('size', 1.27)),
+                                        minimum=0.1, maximum=25.4, step=0.127, decimals=3, suffix=' mm')]
+                title = self.tx(str(records[0].get('label', '')))
+                return ('element', chosen[0]), specs, title
+            if not specs:
+                specs = [FieldSpec('count', self.tx('Elementi'), 'readonly', len(chosen))]
+            return ('elements', tuple(chosen)), specs, self.tx('{count} elementi').format(count=len(chosen))
+        pins = sorted(self._selection_ids(), key=pin_sort_key) if self._symbol is not None else []
+        if pins:
+            if len(pins) == 1:
+                row = next((r for r in rows if str(r.get('pin')) == str(pins[0])), {})
+                specs = [FieldSpec('pin', self.tx('Pin'), 'readonly', str(pins[0])),
+                         FieldSpec('name', self.tx('Funzione'), 'readonly', str(row.get('name', '')))]
+            else:
+                specs = [FieldSpec('pins', self.tx('Pin'), 'readonly', ', '.join(map(str, pins)))]
+            return ('pins', tuple(pins)), specs, ''
+        return ('none',), [], ''
+
+    @staticmethod
+    def _styleable(record):
+        """Whether the element menu offers stroke, fill and line style for a record (not a wire nor a lone text)."""
+        from ..generators.symbol_glyphs import is_wire
+        primitives = record.get('primitives') or [{}]
+        lone_text = primitives[0].get('kind') == 'text' and len(primitives) == 1
+        return not is_wire(record) and not lone_text
+
+    def _style_fields(self, records):
+        """Stroke width, fill and line style over EVERY primitive of the records, mixed when they differ.
+
+        A commit restyles every primitive of every record (`set_primitive_style`),
+        so the panel reads them all (review S7): a glyph whose second
+        primitive differs from its first shows «(vari)», not the first value.
+        """
+        primitives = [p for r in records for p in (r.get('primitives') or [{}]) if isinstance(p, dict)] or [{}]
+        widths = {round(float(p.get('width', 0.0) or 0.0), 4) for p in primitives}
+        fills = {str(p.get('fill', 'none')) for p in primitives}
+        styles = {str(p.get('style', 'default')) for p in primitives}
+        return [
+            FieldSpec('width', self.tx('Spessore del tratto in mm'), 'float', next(iter(widths)) if len(widths) == 1 else None,
+                      mixed=len(widths) > 1, minimum=0.0, maximum=5.0, step=0.0254, decimals=4,
+                      tooltip=self.tx('Spessore del tratto in mm (0 = predefinito di KiCad)')),
+            FieldSpec('fill', self.tx('Riempimento'), 'choice', next(iter(fills)) if len(fills) == 1 else None,
+                      mixed=len(fills) > 1, choices=tuple((mode, self.tx(label)) for mode, label in FILL_LABELS)),
+            FieldSpec('style', self.tx('Tipo di linea'), 'choice', next(iter(styles)) if len(styles) == 1 else None,
+                      mixed=len(styles) > 1, choices=tuple((mode, self.tx(label)) for mode, label in STYLE_LABELS)),
+        ]
+
+    def _refresh_properties(self, rows):
+        """@brief Show the selection in the «Proprietà» panel; never commits (contract 11).
+
+        @param rows A private copy of the draft (the redraw's).
+        @note Called by `_draw`, the one place every selection change and
+            every committed edit pass through. Skipped during a drag (the
+            panel catches up at its end, which redraws).
+        """
+        panel = getattr(self, 'properties_panel', None)
+        if panel is None or self._gesture_before is not None:
+            return
+        subject, specs, title = self._properties_fields(rows)
+        self._properties_subject = subject
+        if specs:
+            panel.set_fields(specs, title, subject=subject)
+        else:
+            panel.set_empty(self.tx(EMPTY_TEXT))
+
+    def _property_committed(self, key, value):
+        """@brief A field of the «Proprietà» panel was edited: one commit, one undo step.
+
+        @param key Field key (see `_properties_fields`).
+        @param value The new value.
+        @note Goes through the setters the menus and the dialog use:
+            `set_element_geometry` for position and sizes, `_edit_graphic`
+            for a text, `_edit_selected_graphics` for stroke, fill and style
+            (one commit for the whole selection). A refused value redraws,
+            which puts the stored value back in the panel.
+        """
+        subject = self._properties_subject
+        done = False
+        if subject[0] == 'element':
+            index = subject[1]
+            graphics = self._graphics()
+            if not 0 <= index < len(graphics):
+                return
+            record = graphics[index]
+            x, y = float(record.get('x', 0.0)), float(record.get('y', 0.0))
+            first = (record.get('primitives') or [{}])[0]
+            if key == 'x':
+                done = self.set_element_geometry(index, float(value), y)
+            elif key == 'y':
+                done = self.set_element_geometry(index, x, float(value))
+            elif key == 'radius':
+                done = self.set_element_geometry(index, x, y, radius=float(value))
+            elif key == 'size_w':
+                done = self.set_element_geometry(index, x, y, width=float(value))
+            elif key == 'size_h':
+                done = self.set_element_geometry(index, x, y, height=float(value))
+            elif key in ('text', 'text_size'):
+                text = str(value) if key == 'text' else str(first.get('text', ''))
+                size = float(value) if key == 'text_size' else float(first.get('size', 1.27))
+                done = self._edit_graphic(index, 'text', (text, size))
+                if not done:
+                    self.set_status(self.tx('Testo non valido: serve una riga non vuota con dimensione maggiore di zero.'))
+        if subject[0] in ('element', 'elements') and key in ('width', 'fill', 'style'):
+            done = self._edit_selected_graphics(key, float(value) if key == 'width' else value)
+        if not done:
+            self._draw(self._symbol)
+
     def move_wire_vertex(self, index, position, x, y):
         """@brief Move one vertex of a wire: anchored within the snap tolerance of a pin end or
         element terminal, else free on the grid.
@@ -4150,6 +4932,13 @@ class SymbolTab(QWidget):
             button.setToolTip(tooltip)
             button.setAccessibleName(self.tx(source))
         self.view.setToolTip(self.tx('Sinistro sullo spazio vuoto: sposta la vista. Rotella: zoom sul cursore. Adatta: mostra tutto.'))
+        for index in range(self.angle_combo.count()):
+            self.angle_combo.setItemText(index, self._angle_label(self.angle_combo.itemData(index)))
+        self.angle_combo.setToolTip(self.tx('Angolo di linee e poligoni: libero, 90° o 45° '
+                                            '(Maiusc+Spazio cambia modo mentre disegni, Maiusc tenuto libera il punto)'))
+        self.properties_title.setText(self.tx('Proprietà'))
+        # Mixed fields in the new language; `_changed` below refreshes the labels and choices.
+        self.properties_panel.set_mixed_placeholder(self.tx(MIXED_PLACEHOLDER))
         for action in self.align_button.defaultAction().menu().actions():
             action.setText(self.tx(action.data()))
         for action in self.recovery_button.menu().actions():
@@ -5848,6 +6637,8 @@ class SymbolTab(QWidget):
         if rows is None:
             rows = self.draft_rows()
         self._names_hidden = symbol_pin_names_hidden(rows)
+        # The live «Proprietà» follow every selection change and committed edit (plan C3).
+        self._refresh_properties(rows)
         self.align_button.defaultAction().setEnabled(len(self._selection_ids()) >= 2)
         self._update_readout()
         scene = self.view.scene()
