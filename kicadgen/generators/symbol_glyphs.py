@@ -1606,6 +1606,133 @@ def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
     return True
 
 
+#: Shape keys whose first primitive is a polyline the user can add vertices to or
+#: remove vertices from (plan docs/footprint-back-anchor-vertices-zones-plan.md, F3),
+#: mapped to whether the key alone makes the outline closed. The polygon's closing
+#: side is implied by the key: its stored points repeat the first vertex at the end
+#: (`_closed_polygon`). A line is closed when its own points end on the first one
+#: (`_shape_closed`, user decision A1).
+VERTEX_EDIT_KEYS = {"shape:line": False, "shape:polygon": True}
+
+
+def _shape_closed(instance: dict) -> Optional[bool]:
+    """Whether a line/polygon shape is edited as a closed outline; None for other records.
+
+    A polygon always is. A line is too when its stored points end on the first
+    one with 3+ distinct vertices (`vertex_edit.is_closed_outline`): user
+    decision A1 (2026-11-09, «Come il footprint»: like the footprint), so a
+    removed vertex keeps it closed and the polygon rules (3 vertices, area)
+    apply. Decided on the STORED (own-frame) points, the ones every edit
+    rewrites, so the placement never changes the answer."""
+    from ..core.vertex_edit import is_closed_outline
+    closed = VERTEX_EDIT_KEYS.get(str(instance.get("key", "")))
+    if closed is None:
+        return None
+    if closed:
+        return True
+    points = (instance.get("primitives") or [{}])[0].get("points") or []
+    try:
+        return is_closed_outline([_point_xy(pt) for pt in points])
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def vertex_edit_shape(instance: dict) -> Optional[tuple[list[tuple[float, float]], bool]]:
+    """@brief The editable vertices of a line or polygon shape, absolute symbol mm.
+
+    @param instance Placed record.
+    @return (distinct vertices in drawing order, closed), the closing repeat
+        of a polygon, or of a line that ends on its first point (user decision
+        A1), removed (`vertex_edit.open_vertices`); None for any record that
+        is not a line or polygon drawn with a shape tool (glyphs, wires, other
+        shapes, a malformed record).
+    @note Wires are left out on purpose: their ends carry anchors to pins and
+        terminals, and a removed anchored end would silently disconnect them.
+    """
+    from ..core.vertex_edit import open_vertices
+    if not is_shape(instance):
+        return None
+    primitives = instance.get("primitives") or []
+    if not primitives or not isinstance(primitives[0], dict):
+        return None
+    closed = _shape_closed(instance)
+    if closed is None or primitives[0].get("kind", "polyline") != "polyline":
+        return None
+    placed = placed_primitives(instance)
+    if not placed:
+        return None
+    points = list(placed[0].points)
+    vertices = open_vertices(points) if closed else [(float(x), float(y)) for x, y in points]
+    if len(vertices) < 2:
+        return None
+    return vertices, closed
+
+
+def _local_shape_vertices(instance: dict, closed: bool) -> list[tuple[float, float]]:
+    """The stored (own-frame) distinct vertices of a line/polygon shape.
+
+    Edits work on the stored points, so the vertices they keep are written
+    back byte-identical (no absolute -> local round trip)."""
+    from ..core.vertex_edit import open_vertices
+    points = [_point_xy(pt) for pt in instance["primitives"][0].get("points", [])]
+    return open_vertices(points) if closed else [(float(x), float(y)) for x, y in points]
+
+
+def _store_shape_vertices(instance: dict, vertices: list, closed: bool) -> None:
+    """Write own-frame `vertices` into the shape (closing repeat added for a closed outline:
+    a polygon, or a line that ended on its first point, decision A1)."""
+    local = [[float(x), float(y)] for x, y in vertices]
+    if closed:
+        local.append(list(local[0]))
+    instance["primitives"][0]["points"] = local
+
+
+def insert_shape_vertex(instance: dict, segment: int, x: float, y: float) -> None:
+    """@brief Insert a vertex on one segment of a line or polygon shape, in place.
+
+    @param instance Shape record (`vertex_edit_shape` must accept it), mutated.
+    @param segment Segment index (`vertex_edit.SegmentHit.index`); the
+        closing side of a polygon or closed line (decision A1) is the last one.
+    @param x Absolute symbol X of the new vertex, mm (already snapped).
+    @param y Absolute symbol Y, mm.
+    @throws VertexEditRefused BAD_INDEX for a record that is not an editable
+        line/polygon or an unknown segment; COINCIDENT for a vertex on an end
+        of its segment (`vertex_edit.insert_vertex`); the record is then unchanged.
+    @note The record's origin (its turning centre) is kept, as a handle drag
+        keeps it (`set_shape_point`); the new point is stored in the shape's
+        own frame (`wire_local_point`).
+    """
+    from ..core.vertex_edit import BAD_INDEX, VertexEditRefused, insert_vertex
+    shape = vertex_edit_shape(instance)
+    if shape is None:
+        raise VertexEditRefused(BAD_INDEX, "not a line or polygon shape")
+    closed = shape[1]
+    new = wire_local_point(instance, float(x), float(y))
+    vertices = insert_vertex(_local_shape_vertices(instance, closed), segment, new, closed)
+    _store_shape_vertices(instance, vertices, closed)
+
+
+def remove_shape_vertex(instance: dict, position: int) -> None:
+    """@brief Remove one vertex of a line or polygon shape, in place.
+
+    @param instance Shape record (`vertex_edit_shape` must accept it), mutated.
+    @param position Vertex index among the distinct vertices.
+    @throws VertexEditRefused BAD_INDEX for a record that is not an editable
+        line/polygon or an unknown vertex; TOO_FEW_POINTS, NO_AREA, NO_LENGTH
+        or DUPLICATE when the drawing would become invalid
+        (`vertex_edit.remove_vertex`); the record is then unchanged.
+    @note A closed line (ends on its first point, decision A1) keeps its
+        closing repeat and refuses to go below 3 vertices, as a polygon.
+    """
+    from ..core.vertex_edit import BAD_INDEX, VertexEditRefused, remove_vertex
+    shape = vertex_edit_shape(instance)
+    if shape is None:
+        raise VertexEditRefused(BAD_INDEX, "not a line or polygon shape")
+    closed = shape[1]
+    vertices = remove_vertex(_local_shape_vertices(instance, closed), position, closed)
+    _store_shape_vertices(instance, vertices, closed)
+
+
 def _arc_placeable(instance: dict, points) -> bool:
     """True when the arc through `points` (record frame) has a centre KiCad can hold once placed.
 

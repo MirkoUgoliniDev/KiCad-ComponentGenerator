@@ -917,14 +917,17 @@ def test_drawings_generated_silk_and_selector_use_the_kicad_default_colours(prev
     window, _saves, _generations = preview
     # F.CrtYd added 2026-11-06 for the courtyard drawn in the preview (not a drawing layer).
     # Dwgs.User added 2026-11-08 (plan B6), read from core.footprint_layers.LAYERS.
+    # B.SilkS and B.Fab added 2026-11-09 (back layers, plan F1), KiCad 10's B_SilkS/B_Fab theme colours.
     assert KICAD_LAYER_COLORS == {"F.SilkS": "#f2eda1", "F.Fab": "#afafaf", "Cmts.User": "#5994dc",
-                                  "Dwgs.User": "#c2c2c2", "F.CrtYd": "#ff26e2"}
-    assert len(set(KICAD_LAYER_COLORS.values())) == 5, "one distinct colour per layer"
+                                  "Dwgs.User": "#c2c2c2", "F.CrtYd": "#ff26e2",
+                                  "B.SilkS": "#e8b2a7", "B.Fab": "#585d84"}
+    assert len(set(KICAD_LAYER_COLORS.values())) == 7, "one distinct colour per layer"
     window.footprint_drawings = validate_footprint_drawings([
-        record("line", ((0, 0), (5, 0)), layer=layer) for layer in ("F.SilkS", "F.Fab", "Cmts.User")])
+        record("line", ((0, 0), (5, 0)), layer=layer)
+        for layer in ("F.SilkS", "F.Fab", "Cmts.User", "B.SilkS", "B.Fab")])
     window._draw_preview()
     by_index = {item.data(0x445257): item.pen().color().name() for item in _drawing_items(window)}
-    assert by_index == {0: "#f2eda1", 1: "#afafaf", 2: "#5994dc"}
+    assert by_index == {0: "#f2eda1", 1: "#afafaf", 2: "#5994dc", 3: "#e8b2a7", 4: "#585d84"}
     # The generated silkscreen takes the same silkscreen colour.
     generated = [i for i in window.preview_scene.items()
                  if isinstance(i, (QGraphicsLineItem, QGraphicsRectItem)) and i.data(0x445257) is None
@@ -1001,9 +1004,11 @@ def test_a_right_click_on_a_handle_opens_the_menu_and_changes_the_layer(preview,
     # CONTRACT CHANGED 2026-11-02 (drawing origin, user): the background has
     # its own menu now; what must not open there is a DRAWING menu.
     # Far up and left of the footprint: the nearest point is the top-left corner.
+    # CONTRACT CHANGED 2026-11-09 (plan F2): the background menu also moves the footprint anchor.
     assert [[a.text() for a in m.actions()] for m in menus] == [[
-        "Imposta origine di disegno: spigolo in alto a sinistra", "Ripristina origine del footprint"]], \
-        "no drawing there: only the drawing-origin menu"
+        "Imposta origine di disegno: spigolo in alto a sinistra", "Ripristina origine del footprint", "",
+        "Sposta ancora qui", "Ripristina ancora del footprint"]], \
+        "no drawing there: only the drawing-origin and anchor menu"
     view.camera.pan_cancel()
 
 

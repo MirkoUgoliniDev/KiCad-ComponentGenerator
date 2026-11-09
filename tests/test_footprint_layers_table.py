@@ -13,19 +13,22 @@ from kicadgen.core.footprint_layers import LAYERS, default_text, default_width, 
 
 
 def test_the_table_holds_the_klc_and_kicad_defaults_in_order():
-    assert [entry.name for entry in LAYERS] == ["F.SilkS", "F.Fab", "Cmts.User", "Dwgs.User", "F.CrtYd"]
+    # Each back layer follows its front twin, as KiCad's own layer list (plan F1, 2026-11-09).
+    assert [entry.name for entry in LAYERS] == ["F.SilkS", "B.SilkS", "F.Fab", "B.Fab", "Cmts.User",
+                                                "Dwgs.User", "F.CrtYd"]
     assert (layer("F.SilkS").width_mm, layer("F.SilkS").text_mm, layer("F.SilkS").text_thickness_mm) == (0.12, 1.0, 0.15)
     assert layer("F.Fab").width_mm == 0.10 and layer("Cmts.User").width_mm == 0.10
     assert layer("Dwgs.User").width_mm == 0.10 and layer("F.CrtYd").width_mm == 0.05
     for entry in LAYERS:
         assert re.fullmatch(r"#[0-9a-f]{6}", entry.colour), entry
-        assert entry.side == "front" and entry.label.strip()
+        assert entry.side == ("back" if entry.name.startswith("B.") else "front") and entry.label.strip()
     # KiCad 10 default theme (builtin_color_themes.h).
     assert layer("Dwgs.User").colour == "#c2c2c2" and layer("F.CrtYd").colour == "#ff26e2"
 
 
 def test_only_the_courtyard_is_not_drawable_and_unknown_layers_have_no_entry():
-    assert [entry.name for entry in drawable_layers()] == ["F.SilkS", "F.Fab", "Cmts.User", "Dwgs.User"]
+    assert [entry.name for entry in drawable_layers()] == ["F.SilkS", "B.SilkS", "F.Fab", "B.Fab",
+                                                           "Cmts.User", "Dwgs.User"]
     assert layer("F.CrtYd").drawable is False
     assert layer("F.Cu") is None and layer("") is None
 
@@ -42,7 +45,7 @@ def test_the_entries_are_frozen():
 
 
 def test_footprint_reads_the_table():
-    assert fpmod.USER_DRAW_LAYERS == ("F.SilkS", "F.Fab", "Cmts.User", "Dwgs.User")
+    assert fpmod.USER_DRAW_LAYERS == ("F.SilkS", "B.SilkS", "F.Fab", "B.Fab", "Cmts.User", "Dwgs.User")
     assert fpmod.COURTYARD_WIDTH_MM == 0.05
     assert fpmod.USER_DRAW_WIDTH_MM == 0.12, "the name of records saved without width is kept"
     assert fpmod.user_draw_width("F.Fab") == 0.10 and fpmod.user_draw_width("F.SilkS") == 0.12

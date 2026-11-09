@@ -11,27 +11,51 @@ Rules:
 - pads_overlap (error): two pads with different numbers whose copper
   overlaps or touches (KiCad refuses the net assignment, DRC flags it).
 - silk_clearance (warning, KLC F5.1): silkscreen ink closer than
-  `SILK_PAD_CLEARANCE_MM` to a pad's copper.
-- courtyard_enclosure (warning, KLC F5.3): a pad or a fabrication-layer
-  graphic that the courtyard does not enclose with the minimum clearance.
+  `SILK_PAD_CLEARANCE_MM` to a pad's copper ON THE SAME SIDE: F.SilkS
+  against the front copper, B.SilkS against the back copper
+  (`pad_copper_sides`); the two print on opposite faces of the board.
+- courtyard_enclosure (warning, KLC F5.3): a pad or an F.Fab graphic that
+  the F.CrtYd courtyard does not enclose with the minimum clearance.
+  Keepout zones are neither ink nor body: no silk or courtyard rule reads them.
+  B.Fab graphics are NOT held to the F.CrtYd courtyard, a declared limit:
+  KLC F5.3 asks a component that needs room on the back of the board for
+  its own courtyard on B.CrtYd («If the component requires a courtyard on
+  the back of the PCB, a corresponding courtyard must be provided on the
+  B.CrtYd layer», content/footprint/F5/F5.3.adoc of gitlab.com/kicad/
+  libraries/klc, read 2026-11-09), and this program draws no B.CrtYd (user
+  decision): the front courtyard is the wrong outline to measure a back
+  body against, and no check of the back body exists.
 - annular_ring (warning): a plated hole whose copper ring is thinner than
   `ANNULAR_RING_MIN_MM` (the KiCad getting-started guide's advice, not a KLC
   rule: said so in the message).
 - pin_one_marker (warning, KLC F5.1/F5.2): the footprint has a pin 1 but no
   marker of it on the silkscreen or fabrication layer.
-- silk_stroke_width (warning, KLC F5.1): a silkscreen stroke thinner than
-  `SILK_MIN_WIDTH_MM`, the low end of the KLC's allowed range. ONLY the
-  lower bound is checked (see `SILK_MIN_WIDTH_MM`).
+- silk_stroke_width (warning, KLC F5.1): a silkscreen stroke, on either
+  side, thinner than `SILK_MIN_WIDTH_MM`, the low end of the KLC's allowed
+  range. ONLY the lower bound is checked (see `SILK_MIN_WIDTH_MM`).
+- silk_text_size (warning, not a KLC rule): a text, text box or dimension
+  on F.SilkS or B.SilkS lower than `SILK_TEXT_MIN_HEIGHT_MM` or drawn with a
+  pen thinner than `SILK_TEXT_MIN_THICKNESS_MM`: KiCad's DRC board defaults.
+- pad_in_keepout (warning, not a KLC rule): a pad whose copper meets a
+  keepout zone of the footprint that forbids pads on a copper layer the pad
+  has, by at least KiCad's DRC epsilon (`KEEPOUT_DRC_EPSILON_MM`, a length).
+  KiCad's DRC flags it on the board: its disallow constraint exempts
+  only the footprint ITSELF from its own keepout, not the footprint's pads
+  (pcbnew/drc/drc_engine.cpp, branch 10.0: «A footprint's own keepout never
+  applies to that footprint», tested as item == parent footprint).
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 import math
 from types import SimpleNamespace
 from typing import Iterable, Optional, Sequence
 
-from ..core.footprint import (FpArc, FpCircle, FpCurve, FpDimension, FpLine, FpPoly, FpRect, FpTextBox,
-                              Footprint, Pad, bezier_points, pad_copper_centre)
+from ..core.footprint import (DIMENSION_TEXT_THICKNESS_MM, FpArc, FpCircle, FpCurve, FpDimension, FpLine,
+                              FpPoly, FpRect, FpText, FpTextBox, FpZone, Footprint, Pad, bezier_points,
+                              pad_copper_centre)
+from ..core.kicad_text import KICAD_PEN_CLAMP_RATIO
 from ..core.package_geometry import _rotate_kicad, overlapping_pad_pairs, pad_copper_shape
 from ..core.silk import SILK_PAD_CLEARANCE_MM, pin_one
 from .klc_checks import Finding
@@ -127,7 +151,16 @@ GEOMETRY_HINTS = {
     'silk_stroke_width': ('Apri le proprietà del disegno (tasto destro sul disegno) e porta lo spessore ad '
                           'almeno 0.10 mm, meglio 0.12 mm: la KLC F5.1 ammette da 0.10 a 0.15 mm, 0.12 mm '
                           'è il valore nominale.'),
+    'pad_in_keepout': ('Sposta il pad fuori dalla zona di esclusione, ridisegna la zona attorno al pad oppure '
+                       'togli il divieto «pad» dalle sue proprietà.'),
+    'silk_text_size': ("Apri le proprietà del testo (tasto destro sul testo) e porta l'altezza ad almeno "
+                       '0.80 mm, oppure spostalo sul layer di fabbricazione: il DRC di KiCad, con i valori '
+                       'predefiniti della scheda, segnala i testi di serigrafia più bassi di 0.80 mm o con '
+                       'tratto sotto 0.08 mm.'),
 }
+
+#: The silkscreen layers and the outer copper layer each one prints over.
+SILK_COPPER_SIDE = {'F.SilkS': 'F.Cu', 'B.SilkS': 'B.Cu'}
 
 
 def has_copper(pad: Pad) -> bool:
@@ -138,6 +171,32 @@ def has_copper(pad: Pad) -> bool:
         opening, as the generators write it), True otherwise.
     """
     return pad.pad_type != 'np_thru_hole'
+
+
+def pad_copper_sides(pad: Pad) -> frozenset:
+    """@brief The outer copper layers («F.Cu», «B.Cu») a pad has copper on.
+
+    @param pad A `core.footprint.Pad`.
+    @return A plated through-hole pad («thru_hole») always gives both: its
+        barrel ends in copper on both faces. Any other pad (SMD, connector,
+        mechanical hole) gives the outer copper layers its KiCad layer list
+        names: «*.Cu» (or the legacy «F&B.Cu») both, «F.Cu» / «B.Cu» their
+        own side; a pad naming no outer copper layer (a paste or mask
+        aperture, a mechanical hole written with only «*.Mask», a pad on
+        inner layers only) gives none: an aperture is not copper.
+    @note Checked against KiCad's own DRC (`kicad-cli pcb drc`, KiCad
+        10.0.8, 2026-11-09, test in tests/test_footprint_checks_back_zone.py):
+        a «thru_hole» pad written with «F.Cu» only IS reported in a B.Cu
+        keepout (KiCad gives a PTH every copper layer), while an
+        «np_thru_hole» follows its layer list exactly like an SMD pad: with
+        «*.Cu» it is reported, with «F.Cu» only it is not reported in a B.Cu
+        keepout, with «*.Mask» only it is reported in none; a mask-only or
+        paste+mask SMD aperture is reported in none.
+    """
+    layers = {str(name) for name in pad.layers}
+    if pad.pad_type == 'thru_hole' or layers & {'*.Cu', 'F&B.Cu'}:
+        return frozenset(('F.Cu', 'B.Cu'))
+    return frozenset(layers & {'F.Cu', 'B.Cu'})
 
 
 @dataclass(frozen=True)
@@ -428,7 +487,7 @@ def check_pads_overlap(footprint: Footprint) -> list:
 
 
 def check_silk_clearance(footprint: Footprint, clearance: float = SILK_PAD_CLEARANCE_MM) -> list:
-    """@brief Silkscreen ink closer than `clearance` to a pad's copper (KLC F5.1).
+    """@brief Silkscreen ink closer than `clearance` to a pad's copper on the same side (KLC F5.1).
 
     @param footprint The footprint checked.
     @param clearance Minimum ink-to-copper distance, mm.
@@ -436,13 +495,19 @@ def check_silk_clearance(footprint: Footprint, clearance: float = SILK_PAD_CLEAR
     @note The ink reaches half the stroke width beyond the centre line, so
         the distance measured is centre line to copper minus that half width.
         Texts are not checked: the Reference's place is the user's.
+    @note F.SilkS ink is measured against the pads with front copper and
+        B.SilkS ink against the pads with back copper (`SILK_COPPER_SIDE`,
+        `pad_copper_sides`): ink printed on one face cannot cover copper on
+        the other, so a back-only pad under front silk is not a finding.
     """
     # A mechanical hole has no copper for the silk to clash with.
     coppers = [pad_copper(pad) if has_copper(pad) else None for pad in footprint.pads]
+    sides = [pad_copper_sides(pad) for pad in footprint.pads]
     boxes = [copper_box(pad) for pad in footprint.pads]
     findings = []
     for index, graphic in enumerate(footprint.graphics):
-        if getattr(graphic, 'layer', None) != 'F.SilkS':
+        copper_side = SILK_COPPER_SIDE.get(getattr(graphic, 'layer', None))
+        if copper_side is None:
             continue
         segments = graphic_segments(graphic)
         if not segments:
@@ -451,7 +516,7 @@ def check_silk_clearance(footprint: Footprint, clearance: float = SILK_PAD_CLEAR
         gx0, gy0, gx1, gy1 = graphic_box(graphic)
         reach = clearance + half_stroke + _EPS
         for pad_index, copper in enumerate(coppers):
-            if copper is None:
+            if copper is None or copper_side not in sides[pad_index]:
                 continue
             # Boxes farther apart than the reach cannot violate it: the exact
             # distance is measured only for the few graphics near each pad.
@@ -500,6 +565,10 @@ def check_courtyard_enclosure(footprint: Footprint, margin: float = COURTYARD_MI
         F.Fab graphics outside (dimensions and text boxes excluded: they
         document the part). Nothing without a courtyard (the file-level
         check reports its absence).
+    @note B.Fab graphics are not measured: KLC F5.3 wants a back body
+        enclosed by a B.CrtYd courtyard, which this program does not draw
+        (see the module docstring); holding it to F.CrtYd would test the
+        wrong outline.
     """
     courtyard = _courtyard_box(footprint)
     if courtyard is None:
@@ -682,16 +751,17 @@ def check_silk_stroke_width(footprint: Footprint, minimum: float = SILK_MIN_WIDT
 
     @param footprint The footprint checked.
     @param minimum Thinnest printable stroke, mm (`SILK_MIN_WIDTH_MM`).
-    @return At most one warning naming every F.SilkS graphic whose stroke is
-        below `minimum` (a stroke equal to it passes) and the thinnest width
-        found; nothing when all are wide enough.
+    @return At most one warning naming every F.SilkS or B.SilkS graphic
+        whose stroke is below `minimum` (a stroke equal to it passes) and the
+        thinnest width found; nothing when all are wide enough. The KLC
+        range is stated for the silkscreen, whatever its side.
     @note Lines, rectangles, circles, arcs, polygons, curves, text box
         borders and dimensions are strokes; texts and filled shapes are not
         (see `_stroke_width`).
     """
     thin = []
     for index, graphic in enumerate(footprint.graphics):
-        if getattr(graphic, 'layer', None) != 'F.SilkS':
+        if getattr(graphic, 'layer', None) not in SILK_COPPER_SIDE:
             continue
         width = _stroke_width(graphic)
         if width is not None and width < minimum - _EPS:
@@ -704,6 +774,400 @@ def check_silk_stroke_width(footprint: Footprint, minimum: float = SILK_MIN_WIDT
         width=min(width for _index, width in thin)), graphics=[index for index, _width in thin])]
 
 
+#: Smallest silkscreen text height and stroke, mm, KiCad's DRC accepts on a
+#: new board: BOARD_DESIGN_SETTINGS sets m_MinSilkTextHeight to
+#: DEFAULT_SILK_TEXT_SIZE x 0.8 = 1.0 x 0.8 and m_MinSilkTextThickness to
+#: DEFAULT_SILK_TEXT_WIDTH x 0.8 = 0.1 x 0.8 (pcbnew/board_design_settings.cpp
+#: and include/board_design_settings.h, branch 10.0, read 2026-11-09); the
+#: DRC applies them to texts on F.Silkscreen and B.Silkscreen
+#: («board setup constraints silk text height / thickness»,
+#: pcbnew/drc/drc_engine.cpp). These are KiCad's board DEFAULTS, not a KLC
+#: rule: a board may set others in its «Constraints» page. Checked with
+#: kicad-cli 10.0.8 `pcb drc` on 2026-11-09 (test in
+#: tests/test_footprint_checks_back_zone.py).
+SILK_TEXT_MIN_HEIGHT_MM = 0.8
+SILK_TEXT_MIN_THICKNESS_MM = 0.08
+
+
+def _silk_text(graphic) -> Optional[tuple]:
+    """(height, pen) in mm of a text KiCad's text-size DRC measures, or None for anything else.
+
+    Texts, text boxes and dimensions carry a text (pcbnew/drc/
+    drc_test_provider_text_dims.cpp tests PCB_TEXT_T, PCB_TEXTBOX_T and
+    PCB_DIMENSION_T); a centre mark writes none. The pen is the one KiCad
+    draws (EDA_TEXT::GetEffectiveTextPenWidth): the written thickness clamped
+    to `KICAD_PEN_CLAMP_RATIO` x the size (ClampTextPenSize, common/gr_text.cpp).
+    """
+    if isinstance(graphic, FpDimension):
+        if graphic.dtype == 'center':
+            return None
+        size, thickness = graphic.text_size, DIMENSION_TEXT_THICKNESS_MM
+    elif isinstance(graphic, (FpText, FpTextBox)):
+        size, thickness = graphic.size, graphic.thickness
+    else:
+        return None
+    size, thickness = float(size), float(thickness)
+    return size, min(thickness, KICAD_PEN_CLAMP_RATIO * size)
+
+
+def check_silk_text_size(footprint: Footprint, min_height: float = SILK_TEXT_MIN_HEIGHT_MM,
+                         min_thickness: float = SILK_TEXT_MIN_THICKNESS_MM) -> list:
+    """@brief Silkscreen texts lower or thinner than KiCad's DRC board defaults (not a KLC rule).
+
+    @param footprint The footprint checked.
+    @param min_height Lowest text height, mm (`SILK_TEXT_MIN_HEIGHT_MM`).
+    @param min_thickness Thinnest drawn text stroke, mm (`SILK_TEXT_MIN_THICKNESS_MM`).
+    @return At most one warning naming every F.SilkS or B.SilkS text, text
+        box or dimension whose height is below `min_height` or whose drawn
+        pen is below `min_thickness` (a value equal to the minimum passes,
+        as in KiCad); nothing when all pass.
+    @note The Reference and Value properties are not graphics and keep
+        KiCad's default size (`PROPERTY_TEXT_SIZE`, `PROPERTY_TEXT_THICKNESS`),
+        above both minimums. A text on the fabrication or user layers is not
+        printed and not checked, as in KiCad.
+    """
+    small = []
+    for index, graphic in enumerate(footprint.graphics):
+        if getattr(graphic, 'layer', None) not in SILK_COPPER_SIDE:
+            continue
+        measured = _silk_text(graphic)
+        if measured is None:
+            continue
+        height, pen = measured
+        if height < min_height - _EPS or pen < min_thickness - _EPS:
+            small.append((index, height, pen))
+    if not small:
+        return []
+    return [_finding('silk_text_size', 'warning', tx(
+        'Serigrafia: {count} testi sotto i minimi predefiniti del DRC di KiCad (altezza {height:.2f} mm, '
+        'tratto {thickness:.2f} mm; il testo più basso è alto {smallest:.2f} mm, il tratto più sottile è di '
+        '{pen:.3f} mm): '
+        'KiCad li segnala sulla scheda (non è una regola KLC).', count=len(small), height=min_height,
+        thickness=min_thickness, smallest=min(height for _i, height, _p in small),
+        pen=min(pen for _i, _h, pen in small)), graphics=[index for index, _h, _p in small])]
+
+
+#: KiCad's DRC epsilon, mm: ADVANCED_CFG::m_DRCEpsilon = 0.0005 («0.5um is
+#: small enough not to materially violate any constraints»,
+#: common/advanced_config.cpp, branch 10.0, read 2026-11-09), returned by
+#: BOARD_DESIGN_SETTINGS::GetDRCEpsilon(). A LENGTH: before testing a keepout
+#: KiCad deflates the rule area by it (pcbnew/pcbexpr_functions.cpp,
+#: getDeflatedZoneOutline: «Collisions include touching, so we need to
+#: deflate outline by enough to exclude it») and then reports any pad whose
+#: shape meets the deflated outline, touching included (collidesWithArea).
+#: Measured with kicad-cli 10.0.8 `pcb drc` (2026-11-09): rectangular,
+#: round and oval pads that cross the border by 0.1-0.4 um are not reported,
+#: by 0.5 um or more they are (exactly 0.5 um sits on KiCad's 1 nm rounding
+#: and went either way for different shapes).
+KEEPOUT_DRC_EPSILON_MM = 0.0005
+
+#: KiCad's internal unit, mm (1 nm, coordinates are 32-bit nanometres): the
+#: membership tests of `copper_meets_keepout` accept half of it, the finest
+#: difference a written file can express.
+_KICAD_UNIT_MM = 1e-6
+
+
+def _convex_hull(points) -> list:
+    """Convex hull of `points`, counter-clockwise in (x, y) maths axes (Andrew's monotone chain)."""
+    unique = sorted(set((float(x), float(y)) for x, y in points))
+    if len(unique) < 3:
+        return unique
+    lower, upper = [], []
+    for point in unique:
+        while len(lower) >= 2 and _orientation(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    for point in reversed(unique):
+        while len(upper) >= 2 and _orientation(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _point_hull_distance(point, hull) -> float:
+    """Distance, mm, from `point` to a convex hull given as 1, 2 or 3+ ordered points (0 inside)."""
+    if len(hull) == 1:
+        return math.hypot(point[0] - hull[0][0], point[1] - hull[0][1])
+    if len(hull) == 2:
+        return _point_segment_distance(point, hull[0], hull[1])
+    if _inside_convex(point, hull):
+        return 0.0
+    return min(_point_segment_distance(point, hull[i], hull[(i + 1) % len(hull)]) for i in range(len(hull)))
+
+
+def _offset_lines(a, b, distance: float) -> list:
+    """The two lines parallel to a-b at `distance` on either side, as (point, direction); [] for a point."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return []
+    nx, ny = -dy / length * distance, dx / length * distance
+    return [((a[0] + nx, a[1] + ny), (dx, dy)), ((a[0] - nx, a[1] - ny), (dx, dy))]
+
+
+def _line_line(first, second) -> list:
+    """Crossing point of two lines (point, direction); [] when parallel."""
+    (px, py), (dx, dy) = first
+    (qx, qy), (ex, ey) = second
+    det = dx * ey - dy * ex
+    if det == 0.0:
+        return []
+    t = ((qx - px) * ey - (qy - py) * ex) / det
+    return [(px + t * dx, py + t * dy)]
+
+
+def _line_circle(line, circle) -> list:
+    """Points where a line (point, direction) meets a circle (centre, radius)."""
+    (px, py), (dx, dy) = line
+    (cx, cy), radius = circle
+    length2 = dx * dx + dy * dy
+    if length2 <= 0.0:
+        return []
+    t0 = ((cx - px) * dx + (cy - py) * dy) / length2
+    fx, fy = px + t0 * dx, py + t0 * dy
+    gap2 = (fx - cx) ** 2 + (fy - cy) ** 2
+    if gap2 > radius * radius:
+        return []
+    half = math.sqrt(max(0.0, radius * radius - gap2) / length2)
+    return [(fx + half * dx, fy + half * dy), (fx - half * dx, fy - half * dy)]
+
+
+def _circle_circle(first, second) -> list:
+    """Points where two circles (centre, radius) meet; [] for concentric or separate circles."""
+    (ax, ay), ra = first
+    (bx, by), rb = second
+    dx, dy = bx - ax, by - ay
+    gap = math.hypot(dx, dy)
+    if gap <= 0.0 or gap > ra + rb or gap < abs(ra - rb):
+        return []
+    along = (ra * ra - rb * rb + gap * gap) / (2 * gap)
+    height = math.sqrt(max(0.0, ra * ra - along * along))
+    mx, my = ax + along * dx / gap, ay + along * dy / gap
+    return [(mx - height * dy / gap, my + height * dx / gap), (mx + height * dy / gap, my - height * dx / gap)]
+
+
+def _meet(first, second) -> list:
+    """Crossing points of two boundary carriers, each ('line', (point, direction)) or ('circle', (centre, r))."""
+    (kind_a, a), (kind_b, b) = first, second
+    if kind_a == 'line' and kind_b == 'line':
+        return _line_line(a, b)
+    if kind_a == 'line':
+        return _line_circle(a, b)
+    if kind_b == 'line':
+        return _line_circle(b, a)
+    return _circle_circle(a, b)
+
+
+def _zone_carriers(corners, epsilon: float) -> list:
+    """The lines and circles the boundary of the zone deflated by `epsilon` lies on (a superset)."""
+    count = len(corners)
+    carriers = []
+    for i in range(count):
+        carriers.extend(('line', line) for line in _offset_lines(corners[i], corners[(i + 1) % count], epsilon))
+        carriers.append(('circle', (corners[i], epsilon)))
+    return carriers
+
+
+def _copper_carriers(hull, radius: float) -> list:
+    """The lines and circles the boundary of a pad's copper (convex `hull` grown by `radius`) lies on."""
+    count = len(hull)
+    sides = [(hull[i], hull[(i + 1) % count]) for i in range(count if count > 2 else count - 1)]
+    carriers = []
+    for a, b in sides:
+        if radius > 0.0:
+            carriers.extend(('line', line) for line in _offset_lines(a, b, radius))
+        else:
+            carriers.append(('line', (a, (b[0] - a[0], b[1] - a[1]))))
+    if radius > 0.0:
+        carriers.extend(('circle', (point, radius)) for point in hull)
+    return carriers
+
+
+class KeepoutOutline:
+    """@brief A keepout zone's outline prepared ONCE for every pad `copper_meets_keepout` tests against it.
+
+    Everything that depends on the zone alone is computed here and shared:
+    the corners, sides and bounding box at once; the boundary carriers of
+    the deflated zone and the crossings of those carriers with each other
+    lazily, on the first pad that needs them, sorted by X so each pad reads
+    only the crossings inside its own copper box (`crossings_in`). The
+    carrier crossings are quadratic in the number of corners, so computing
+    them per pad made the rule quadratic per pad (0.31 s for two pads on a
+    256-corner zone, verification review 2026-11-09); the depth test of a
+    crossing is left to the pads, since one is needed only near a pad.
+    @param corners The zone's corners in order, mm (closed implicitly).
+    @param epsilon How far, mm, the zone is deflated (`KEEPOUT_DRC_EPSILON_MM`).
+    @note The answers are those of the unprepared computation: each
+        candidate point is tested by the same predicates, only the tests
+        that do not depend on the pad are done once.
+    """
+
+    def __init__(self, corners: Sequence, epsilon: float = KEEPOUT_DRC_EPSILON_MM):
+        """@brief Store the corners, sides and bounding box; the carriers wait for the first pad.
+
+        @param corners The zone's corners in order, mm.
+        @param epsilon Deflation, mm.
+        """
+        self.zone = [(float(x), float(y)) for x, y in corners]
+        self.epsilon = float(epsilon)
+        self.sides = [(self.zone[i], self.zone[(i + 1) % len(self.zone)]) for i in range(len(self.zone))]
+        self.box = ((min(p[0] for p in self.zone), min(p[1] for p in self.zone),
+                     max(p[0] for p in self.zone), max(p[1] for p in self.zone)) if self.zone else None)
+        self._carriers = None
+        self._crossings = None
+        self._crossing_xs = None
+
+    def deep(self, point) -> bool:
+        """@brief Whether `point` lies inside the zone at least epsilon from every side (half a KiCad unit tolerance).
+
+        @param point (x, y) mm.
+        @return True for a point of the deflated zone.
+        """
+        if not _inside_polygon(point, self.zone):
+            return False
+        tolerance = _KICAD_UNIT_MM / 2
+        return min(_point_segment_distance(point, a, b) for a, b in self.sides) >= self.epsilon - tolerance
+
+    @property
+    def carriers(self) -> list:
+        """@brief The lines and circles the deflated boundary lies on (`_zone_carriers`), computed once.
+
+        @return The carrier list.
+        """
+        if self._carriers is None:
+            self._carriers = _zone_carriers(self.zone, self.epsilon)
+        return self._carriers
+
+    def crossings_in(self, box) -> list:
+        """@brief Crossings of the zone's carriers with each other inside a box (built once, then sliced).
+
+        @param box (x0, y0, x1, y1) mm, borders included.
+        @return The crossing points (x, y) mm in the box; their depth in the
+            zone is NOT tested here (the caller tests it after the cheaper
+            copper test).
+        """
+        if self._crossings is None:
+            carriers = self.carriers
+            points = []
+            for i, first in enumerate(carriers):
+                for second in carriers[i + 1:]:
+                    points.extend(_meet(first, second))
+            points.sort()
+            self._crossings = points
+            self._crossing_xs = [point[0] for point in points]
+        x0, y0, x1, y1 = box
+        low, high = bisect_left(self._crossing_xs, x0), bisect_right(self._crossing_xs, x1)
+        return [point for point in self._crossings[low:high] if y0 <= point[1] <= y1]
+
+
+def copper_meets_keepout(copper: tuple, corners, epsilon: float = KEEPOUT_DRC_EPSILON_MM) -> bool:
+    """@brief Whether a pad's copper meets a keepout polygon deflated by `epsilon`, as KiCad's DRC tests it.
+
+    @param copper (core, radius) as `pad_copper` gives it: the convex hull of
+        the core grown by the radius, EXACTLY (no sampled outline, so an
+        overlap thinner than any sampling step is not lost).
+    @param corners The zone's corners in order, mm (closed implicitly), or a
+        `KeepoutOutline` prepared once for many pads (used as it is when its
+        epsilon is `epsilon`, re-prepared otherwise); the interior is the
+        even-odd one of the outline.
+    @param epsilon How far, mm, the zone is deflated first
+        (`KEEPOUT_DRC_EPSILON_MM`): copper that only touches the border, or
+        crosses it by less than epsilon, does not meet it.
+    @return True when some point of the copper lies inside the zone at least
+        `epsilon` from every side (KiCad: the deflated outline collides with
+        the pad's effective shape, touching included), within half a KiCad
+        unit (`_KICAD_UNIT_MM`).
+    @note Exact by construction: if the set S of such points is not empty,
+        its rightmost point is a corner of S (two boundary carriers crossing:
+        sides of the copper, sides of the zone moved in by epsilon, circles
+        of radius epsilon round the zone's corners) or the rightmost point
+        of one of the copper's convex arcs; every candidate of those kinds
+        is tested, so no S is missed. The deflation is the round one; KiCad
+        joins the deflated sides with mitres (CORNER_STRATEGY::
+        ALLOW_ACUTE_CORNERS, mitre limit 10), which excludes slightly more
+        near a CONCAVE corner of the zone: there, copper crossing by less
+        than about 10 x epsilon (5 um) may be reported here and not by
+        KiCad. Declared residual divergence.
+    """
+    if isinstance(corners, KeepoutOutline):
+        outline = corners if corners.epsilon == float(epsilon) else KeepoutOutline(corners.zone, epsilon)
+    else:
+        outline = KeepoutOutline(corners, epsilon)
+    core, radius = copper
+    radius = float(radius)
+    zone = outline.zone
+    hull = _convex_hull(core)
+    if len(zone) < 3 or not hull:
+        return False
+    tolerance = _KICAD_UNIT_MM / 2
+
+    def in_copper(point) -> bool:
+        return _point_hull_distance(point, hull) <= radius + tolerance
+
+    # Fast answers first: the copper's first core point deep in the zone,
+    # or copper and zone entirely apart (no side within reach and neither
+    # one holding a point of the other).
+    if outline.deep(hull[0]) and in_copper(hull[0]):
+        return True
+    copper_box = (min(p[0] for p in hull) - radius, min(p[1] for p in hull) - radius,
+                  max(p[0] for p in hull) + radius, max(p[1] for p in hull) + radius)
+    zone_box = outline.box
+    if (copper_box[0] > zone_box[2] or zone_box[0] > copper_box[2]
+            or copper_box[1] > zone_box[3] or zone_box[1] > copper_box[3]):
+        return False
+    probe = (hull, radius)
+    if (all(segment_copper_distance(a, b, probe) > tolerance for a, b in outline.sides)
+            and not _inside_polygon(hull[0], zone) and not in_copper(zone[0])):
+        return False
+    # Zone-only candidates (carrier x carrier), built once per zone: only
+    # those in the copper box widened by the tolerance can be in the copper.
+    reach_box = (copper_box[0] - tolerance, copper_box[1] - tolerance,
+                 copper_box[2] + tolerance, copper_box[3] + tolerance)
+    candidates = outline.crossings_in(reach_box)
+    copper_carriers = _copper_carriers(hull, radius)
+    candidates.extend((x + radius, y) for x, y in hull)
+    for first in outline.carriers:
+        for second in copper_carriers:
+            candidates.extend(_meet(first, second))
+    return any(in_copper(point) and outline.deep(point) for point in candidates)
+
+
+def check_pad_in_keepout(footprint: Footprint) -> list:
+    """@brief Pads whose copper meets a keepout zone that forbids pads on their side.
+
+    @param footprint The footprint checked.
+    @return One warning per (zone, pad) pair: the zone forbids pads
+        (`FpZone.forbids`), the pad has a copper side among the zone's
+        layers (`pad_copper_sides`: a mechanical hole counts on the copper
+        layers it names, as KiCad tests every pad object on its layer set)
+        and its shape meets the zone deflated by KiCad's DRC epsilon
+        (`copper_meets_keepout`, `KEEPOUT_DRC_EPSILON_MM`: touching, or
+        crossing the border by less than 0.5 um, is not a finding, as in
+        KiCad).
+    @note Not a KLC rule: KiCad's DRC reports it on the board, said so in
+        the message. A zone that allows pads is never a finding.
+    """
+    findings = []
+    zones = [(index, graphic) for index, graphic in enumerate(footprint.graphics)
+             if isinstance(graphic, FpZone) and graphic.forbids('pads')]
+    for zone_index, zone in zones:
+        corners = [tuple(point) for point in zone.points]
+        if len(corners) < 3:
+            continue
+        # Zone-only geometry once per zone, shared by every pad.
+        outline = KeepoutOutline(corners)
+        for pad_index, pad in enumerate(footprint.pads):
+            shared = pad_copper_sides(pad) & set(zone.layers)
+            if not shared or not copper_meets_keepout(pad_copper(pad), outline):
+                continue
+            findings.append(_finding('pad_in_keepout', 'warning', tx(
+                'Pad {number} dentro una zona di esclusione che vieta i pad su {layers}: il DRC di KiCad lo '
+                'segnala sulla scheda (non è una regola KLC).', number=pad.number or '«»',
+                layers=', '.join(name for name in ('F.Cu', 'B.Cu') if name in shared)),
+                pads=(pad_index,), graphics=(zone_index,)))
+    return findings
+
+
 def check_footprint_geometry(footprint: Footprint) -> list:
     """@brief Run every geometric rule on a footprint: errors first, then warnings.
 
@@ -714,6 +1178,7 @@ def check_footprint_geometry(footprint: Footprint) -> list:
     """
     findings = []
     for check in (check_pads_overlap, check_silk_clearance, check_courtyard_enclosure,
-                  check_annular_ring, check_pin_one_marker, check_silk_stroke_width):
+                  check_annular_ring, check_pin_one_marker, check_silk_stroke_width,
+                  check_silk_text_size, check_pad_in_keepout):
         findings.extend(check(footprint))
     return sorted(findings, key=lambda f: 0 if f.severity == 'error' else 1)

@@ -1,9 +1,11 @@
 """@brief KiCad footprint (.kicad_mod) data model and writer.
 
-Provides high-level classes (Pad, FpLine, FpRect, FpCircle, FpText) that
-convert themselves into S-expressions through core.sexpr, and the
-Footprint class that assembles them into the complete file format
-accepted by KiCad (pcbnew) version 10.x.
+Provides high-level classes (Pad, FpLine, FpRect, FpCircle, FpText, ...,
+FpZone for keepout zones) that convert themselves into S-expressions through
+core.sexpr, and the Footprint class that assembles them into the complete
+file format accepted by KiCad (pcbnew) version 10.x. Every positioned item is
+a `Movable`, so `Footprint.shift_origin` moves the footprint anchor; a text
+on a back layer is written mirrored (`mirrored_justify`).
 
 Minimal example:
 
@@ -18,15 +20,17 @@ Minimal example:
 
 from __future__ import annotations
 
+import copy
 import math
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Tuple
+from typing import ClassVar, Optional, Sequence, Tuple
 
 from .draw_constraints import polygon_has_area
+from .vertex_edit import STORED_POINT_RESOLUTION_MM, stored_key
 from .drawing_transform import bounds_centre, mirror_points_x, rotate_points_90
-from .footprint_layers import default_width, drawable_layers, layer as draw_layer
+from .footprint_layers import default_width, drawable_layers, is_back_layer, layer as draw_layer
 from .kicad_text import (KICAD_PEN_CLAMP_RATIO, kicad_advance_units, kicad_centre_from_corner,
                          kicad_centre_to_corner, kicad_text_width)
 from .sexpr import YES, SExpr, Symbol, bare, sx
@@ -217,8 +221,73 @@ def _text_effects(size: float = 1.0, thickness: float = 0.15,
     return node
 
 
+def mirrored_justify(layer: str, justify: Optional[Tuple[str, ...]] = None) -> Optional[Tuple[str, ...]]:
+    """@brief The justify words KiCad writes for a text on `layer`: «mirror» added on a back layer.
+
+    @param layer KiCad layer of the text.
+    @param justify The text's own justify words, None for a centred text.
+    @return `justify` unchanged on a front layer (the output written before
+        back layers existed); on a back layer (`footprint_layers.is_back_layer`)
+        the same words followed by «mirror», or ("mirror",) for a centred text.
+    @note KiCad's drawing tool mirrors every text, text box and dimension it
+        creates on a back layer (`m_Mirrored = IsBackLayer(layer)`,
+        pcbnew/tools/drawing_tool.cpp) and its writer puts the flag last:
+        ``(justify [left|right] [top|bottom] mirror)`` (EDA_TEXT::Format,
+        common/eda_text.cpp, KiCad 10). The installed library writes
+        ``(justify mirror)`` for its centred B.SilkS texts. Verified with
+        kicad-cli 10.0 `fp export svg` (2026-11-09): a mirrored text is the
+        front text reflected along its own reading direction about its
+        anchor (a horizontal text grows LEFT of a left-justified anchor, a
+        90-degree one grows DOWN), a text box's text is reflected about the
+        box's centre line, a mirrored dimension value keeps its centre.
+    """
+    if not is_back_layer(layer):
+        return justify
+    return tuple(justify or ()) + ("mirror",)
+
+
+class Movable:
+    """@brief Mixin of every item the footprint writes at a position: pads and graphics.
+
+    Each subclass names the fields that hold footprint coordinates, so one
+    `translate` moves them all and `Footprint.shift_origin` cannot forget a
+    point: `_POINT_FIELDS` hold one (x, y) each, `_POINT_LIST_FIELDS` a
+    sequence of them. Sizes, radii, rotations, drill offsets (pad-local),
+    dimension heights and leader lengths are relative and never listed.
+    @note tests/test_footprint_back_anchor_zone.py enumerates every class of
+        this module that writes itself (`to_sexpr`) and fails when one is
+        not a `Movable` or when a field annotated as a point is not listed.
+    """
+
+    _POINT_FIELDS: ClassVar[Tuple[str, ...]] = ()
+    _POINT_LIST_FIELDS: ClassVar[Tuple[str, ...]] = ()
+
+    def translate(self, dx: float, dy: float) -> None:
+        """@brief Move every coordinate of the item by (dx, dy) mm, in place.
+
+        @param dx Shift along X, mm.
+        @param dy Shift along Y (down), mm.
+        """
+        for name in self._POINT_FIELDS:
+            x, y = getattr(self, name)
+            setattr(self, name, (x + dx, y + dy))
+        for name in self._POINT_LIST_FIELDS:
+            setattr(self, name, [(x + dx, y + dy) for x, y in getattr(self, name)])
+
+    def anchor_points(self) -> list:
+        """@brief Every stored coordinate of the item, mm.
+
+        @return The (x, y) of each point field, then of each point of the
+            point-list fields, in declaration order.
+        """
+        points = [tuple(getattr(self, name)) for name in self._POINT_FIELDS]
+        for name in self._POINT_LIST_FIELDS:
+            points.extend(tuple(p) for p in getattr(self, name))
+        return points
+
+
 @dataclass
-class Pad:
+class Pad(Movable):
     """@brief Footprint pad: number, type, shape, position, size, layers and optional drill.
 
     - number: pin name/number (e.g. "1", "A2", "" for mechanical pads without a net)
@@ -254,6 +323,9 @@ class Pad:
     roundrect_rratio: Optional[float] = None
     rect_delta: Optional[Tuple[float, float]] = None
     drill_slot: Optional[Tuple[float, float]] = None
+
+    #: `at` is the hole; a drill offset is pad-local and moves with it.
+    _POINT_FIELDS = ("at",)
 
     def __post_init__(self) -> None:
         if self.pad_type not in PAD_TYPES:
@@ -371,7 +443,7 @@ class Pad:
 
 
 @dataclass
-class FpLine:
+class FpLine(Movable):
     """@brief Graphic line segment on a footprint layer.
 
     Used for the silkscreen, fab and courtyard outlines, among others.
@@ -381,6 +453,8 @@ class FpLine:
     end: Point
     layer: str
     width: float = 0.12
+
+    _POINT_FIELDS = ("start", "end")
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this line graphic to a KiCad S-expression.
@@ -395,7 +469,7 @@ class FpLine:
 
 
 @dataclass
-class FpRect:
+class FpRect(Movable):
     """@brief Graphic rectangle on a footprint layer, optionally filled.
 
     Graphic rectangle (e.g. a silkscreen outline).
@@ -406,6 +480,8 @@ class FpRect:
     layer: str
     width: float = 0.12
     fill: bool = False
+
+    _POINT_FIELDS = ("start", "end")
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this rectangle graphic to a KiCad S-expression.
@@ -421,7 +497,7 @@ class FpRect:
 
 
 @dataclass
-class FpCircle:
+class FpCircle(Movable):
     """@brief Graphic circle on a footprint layer, optionally filled.
 
     Graphic circle (e.g. the pin 1 marker).
@@ -432,6 +508,8 @@ class FpCircle:
     layer: str
     width: float = 0.12
     fill: bool = False
+
+    _POINT_FIELDS = ("center",)
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this circle graphic to a KiCad S-expression.
@@ -449,7 +527,7 @@ class FpCircle:
 
 
 @dataclass
-class FpPoly:
+class FpPoly(Movable):
     """@brief Graphic polygon on a footprint layer (fp_poly): closed, optionally filled.
 
     @param points The corners in order, mm; the last side closes back to
@@ -460,6 +538,8 @@ class FpPoly:
     layer: str
     width: float = 0.12
     fill: bool = False
+
+    _POINT_LIST_FIELDS = ("points",)
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this polygon to a KiCad S-expression.
@@ -934,7 +1014,7 @@ def leader_dimension_ink(tip: Point, elbow: Point, text: str, text_size: float, 
 
 
 @dataclass
-class FpDimension:
+class FpDimension(Movable):
     """@brief Aligned dimension of a footprint (KiCad `dimension (type aligned)`, allowed in footprints since 7).
 
     @param start First measured point, mm.
@@ -971,6 +1051,10 @@ class FpDimension:
     leader_length: float = DIMENSION_RADIAL_LEADER_MM
     text: str = ""
     frame: str = "none"
+
+    #: The height, the leader length and the label pose are relative to the
+    #: two points (the label is recomputed from them), so only they move.
+    _POINT_FIELDS = ("start", "end")
 
     def kind(self) -> str:
         """@brief The KiCad dimension type this item writes.
@@ -1022,7 +1106,8 @@ class FpDimension:
             dimensions follow KiCad 10's writer
             (`PCB_IO_KICAD_SEXPR::format(PCB_DIMENSION_BASE*)`): pts,
             leader_length (radial), format (none for a centre mark), style,
-            then the gr_text (none for a centre mark).
+            then the gr_text (none for a centre mark). On a back layer the
+            value text is mirrored (`mirrored_justify`: ``(justify mirror)``).
         @throws ValueError For coincident points (no direction to draw), an
             unknown axis, type or leader frame.
         """
@@ -1047,7 +1132,8 @@ class FpDimension:
         text.add(_at_node((round(tx_, 4), round(ty_, 4)), round(angle, 2)))
         text.add(sx("layer", self.layer))
         text.add(sx("uuid", _uuid()))
-        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM))
+        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM,
+                               mirrored_justify(self.layer)))
         node.add(text)
         node.add(sx("format", sx("units", 2), sx("units_format", 1), sx("precision", 2)))
         node.add(sx("style", sx("thickness", self.width), sx("arrow_length", DIMENSION_ARROW_LENGTH_MM),
@@ -1096,7 +1182,8 @@ class FpDimension:
         text.add(_at_node((round(tx_, 4), round(ty_, 4)), round(angle, 2)))
         text.add(sx("layer", self.layer))
         text.add(sx("uuid", _uuid()))
-        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM))
+        text.add(_text_effects(self.text_size, DIMENSION_TEXT_THICKNESS_MM,
+                               mirrored_justify(self.layer)))
         node.add(text)
         return node
 
@@ -1155,7 +1242,7 @@ def bezier_bounds(control: Sequence[Point]) -> Tuple[float, float, float, float]
 
 
 @dataclass
-class FpCurve:
+class FpCurve(Movable):
     """@brief Cubic Bezier curve on a footprint layer (fp_curve).
 
     @param points The four control points in order: start, first control,
@@ -1165,6 +1252,8 @@ class FpCurve:
     points: Sequence[Point]
     layer: str
     width: float = 0.12
+
+    _POINT_LIST_FIELDS = ("points",)
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this curve to a KiCad S-expression.
@@ -1194,7 +1283,7 @@ def textbox_margin(width: float, size: float) -> float:
 
 
 @dataclass
-class FpTextBox:
+class FpTextBox(Movable):
     """@brief Text box on a footprint layer (fp_text_box): a rectangle with a text inside.
 
     @param start One corner of the box, mm.
@@ -1219,6 +1308,8 @@ class FpTextBox:
     border: bool = True
     angle: float = 0
 
+    _POINT_FIELDS = ("start", "end")
+
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this text box to a KiCad S-expression.
 
@@ -1226,7 +1317,8 @@ class FpTextBox:
             (`PCB_IO_KICAD_SEXPR::format(PCB_TEXTBOX*)`): text, start, end,
             margins (`textbox_margin` on the four sides), optional angle,
             layer, uuid, effects (text justified left and top inside the
-            box), border, stroke, knockout no.
+            box; ``(justify left top mirror)`` on a back layer,
+            `mirrored_justify`), border, stroke, knockout no.
         """
         margin = textbox_margin(self.width, self.size)
         node = sx("fp_text_box", self.text, sx("start", *self.start), sx("end", *self.end))
@@ -1235,7 +1327,7 @@ class FpTextBox:
             node.add(sx("angle", self.angle))
         node.add(sx("layer", self.layer))
         node.add(sx("uuid", _uuid()))
-        node.add(_text_effects(self.size, self.thickness, ("left", "top")))
+        node.add(_text_effects(self.size, self.thickness, mirrored_justify(self.layer, ("left", "top"))))
         node.add(sx("border", bare(bool(self.border))))
         node.add(_stroke_node(self.width))
         node.add(sx("knockout", bare(False)))
@@ -1243,7 +1335,7 @@ class FpTextBox:
 
 
 @dataclass
-class FpArc:
+class FpArc(Movable):
     """@brief Graphic circular arc on a footprint layer, through three points.
 
     Graphic arc (fp_arc): start, mid point and end, the way KiCad writes it.
@@ -1254,6 +1346,8 @@ class FpArc:
     end: Point
     layer: str
     width: float = 0.12
+
+    _POINT_FIELDS = ("start", "mid", "end")
 
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this arc graphic to a KiCad S-expression.
@@ -1269,7 +1363,7 @@ class FpArc:
 
 
 @dataclass
-class FpText:
+class FpText(Movable):
     """@brief Graphic text item on a footprint layer.
 
     Graphic text (used for extra references, not the Reference/Value properties).
@@ -1295,18 +1389,108 @@ class FpText:
     justify: Optional[Tuple[str, ...]] = None
     angle: float = 0
 
+    _POINT_FIELDS = ("at",)
+
     def to_sexpr(self) -> SExpr:
         """@brief Serialize this text graphic to a KiCad S-expression.
 
         @return The `fp_text` node with kind, text, position (with the angle
             when non-zero), layer, a fresh uuid and the font effects (size,
-            thickness, optional justify).
+            thickness, optional justify). On a back layer «mirror» is added
+            to the justify words (`mirrored_justify`), as KiCad writes a
+            text it created there; a front text is written as before.
         """
         node = sx("fp_text", Symbol(self.kind), self.text)
         node.add(_at_node(self.at, self.angle))
         node.add(sx("layer", self.layer))
         node.add(sx("uuid", _uuid()))
-        node.add(_text_effects(self.size, self.thickness, self.justify))
+        node.add(_text_effects(self.size, self.thickness, mirrored_justify(self.layer, self.justify)))
+        return node
+
+
+#: Copper layer sets a keepout zone may name, in KiCad's order: the front,
+#: the back, or both outer layers (written ``(layers "F.Cu" "B.Cu")``).
+ZONE_LAYER_CHOICES = (("F.Cu",), ("B.Cu",), ("F.Cu", "B.Cu"))
+#: What a keepout zone may forbid, in the order KiCad writes them inside
+#: ``(keepout ...)``: tracks, vias, pads, copper pours (``copperpour``) and
+#: footprints. A record flag True means ``not_allowed``.
+ZONE_KEEPOUT_FLAGS = ("tracks", "vias", "pads", "copperpour", "footprints")
+#: KiCad 10's defaults of a new rule area: the `ZONE_SETTINGS` constructor
+#: (pcbnew/zone_settings.cpp, branch 10.0, read 2026-11-09) sets
+#: SetDoNotAllowTracks(true), SetDoNotAllowVias(true), SetDoNotAllowPads(true),
+#: SetDoNotAllowZoneFills(false), SetDoNotAllowFootprints(false), and the
+#: rule-area tool starts from those board defaults (zone_create_helper.cpp).
+ZONE_KEEPOUT_DEFAULTS = {"tracks": True, "vias": True, "pads": True, "copperpour": False, "footprints": False}
+#: Border hatch pitch, mm, and its style: KiCad 10's defaults
+#: (ZONE_BORDER_HATCH_DIST_MM 0.5, DIAGONAL_EDGE written «edge», pcbnew/zones.h).
+ZONE_HATCH_PITCH_MM = 0.5
+#: Minimum fill thickness, mm (ZONE_THICKNESS_MM 0.25, pcbnew/zones.h).
+ZONE_MIN_THICKNESS_MM = 0.25
+#: Thermal relief gap and spoke width, mm (ZONE_THERMAL_RELIEF_GAP_MM and
+#: ZONE_THERMAL_RELIEF_COPPER_WIDTH_MM, 0.5 each, pcbnew/zones.h).
+ZONE_THERMAL_MM = 0.5
+
+
+@dataclass
+class FpZone(Movable):
+    """@brief Keepout zone (KiCad rule area) of a footprint: a closed polygon on copper layers.
+
+    @param points The corners in order, mm; the last side closes back to the
+        first corner, which is not repeated (as KiCad writes `pts`).
+    @param layers One of `ZONE_LAYER_CHOICES`.
+    @param keepout {flag: True for not allowed} over `ZONE_KEEPOUT_FLAGS`; a
+        missing flag takes `ZONE_KEEPOUT_DEFAULTS`.
+    @note A zone is neither ink nor body: it has no `layer` attribute, so the
+        silkscreen, courtyard and envelope rules, which read one, skip it.
+    """
+
+    points: Sequence[Point]
+    layers: Sequence[str]
+    keepout: dict = field(default_factory=lambda: dict(ZONE_KEEPOUT_DEFAULTS))
+
+    _POINT_LIST_FIELDS = ("points",)
+
+    def forbids(self, flag: str) -> bool:
+        """@brief Whether the zone forbids `flag` (one of `ZONE_KEEPOUT_FLAGS`).
+
+        @param flag Keepout flag name.
+        @return The zone's flag, or its KiCad default when not set.
+        """
+        return bool(self.keepout.get(flag, ZONE_KEEPOUT_DEFAULTS[flag]))
+
+    def to_sexpr(self) -> SExpr:
+        """@brief Serialize this keepout zone to a KiCad S-expression.
+
+        @return The `zone` node in the form of KiCad 10's own library
+            (Connector_PCBEdge.pretty/SODIMM-200_1.8V_Card_edge.kicad_mod for
+            two layers, Button_Switch_SMD.pretty/SW_SPST_SKQG_WithoutStem
+            .kicad_mod for one): ``layer`` or ``layers``, uuid, hatch edge,
+            connect_pads clearance 0, min_thickness, keepout flags, placement
+            disabled, fill thermal values, polygon pts. The numbers are KiCad
+            10's zone defaults (`ZONE_HATCH_PITCH_MM`, `ZONE_MIN_THICKNESS_MM`,
+            `ZONE_THERMAL_MM`).
+        @throws ValueError With fewer than three corners, a layer set not in
+            `ZONE_LAYER_CHOICES` or an unknown keepout flag.
+        """
+        if len(self.points) < 3:
+            raise ValueError(tx("Una zona di esclusione richiede almeno tre punti."))
+        layers = tuple(self.layers)
+        if layers not in ZONE_LAYER_CHOICES:
+            raise ValueError(tx("Layer della zona di esclusione non validi: {layers}", layers=", ".join(layers)))
+        unknown = sorted(set(self.keepout) - set(ZONE_KEEPOUT_FLAGS))
+        if unknown:
+            raise ValueError(tx("Divieto della zona di esclusione sconosciuto: {flags}", flags=", ".join(unknown)))
+        node = sx("zone", sx("layer", layers[0]) if len(layers) == 1 else sx("layers", *layers))
+        node.add(sx("uuid", _uuid()))
+        node.add(sx("hatch", Symbol("edge"), ZONE_HATCH_PITCH_MM))
+        node.add(sx("connect_pads", sx("clearance", 0)))
+        node.add(sx("min_thickness", ZONE_MIN_THICKNESS_MM))
+        node.add(sx("keepout", *(sx(flag, Symbol("not_allowed" if self.forbids(flag) else "allowed"))
+                                  for flag in ZONE_KEEPOUT_FLAGS)))
+        node.add(sx("placement", sx("enabled", bare(False)), sx("sheetname", "")))
+        node.add(sx("fill", sx("thermal_gap", ZONE_THERMAL_MM), sx("thermal_bridge_width", ZONE_THERMAL_MM),
+                    sx("island_removal_mode", 0)))
+        node.add(sx("polygon", sx("pts", *(sx("xy", x, y) for x, y in self.points))))
         return node
 
 
@@ -1391,23 +1575,25 @@ def validate_text_positions(raw) -> dict:
 
 
 #: Layers a user drawing of the footprint preview may live on: printed
-#: silkscreen, assembly documentation, free comments and user drawings, the
-#: drawable layers of `footprint_layers.LAYERS` in table order. Copper and
-#: courtyard are deliberately excluded: they carry electrical and DRC
-#: meaning the preview must not let a free sketch change.
+#: silkscreen and assembly documentation of both sides, free comments and
+#: user drawings, the drawable layers of `footprint_layers.LAYERS` in table
+#: order. Copper and courtyard are deliberately excluded: they carry
+#: electrical and DRC meaning the preview must not let a free sketch change
+#: (a keepout ``zone`` names copper layers in its own ``layers`` field).
 USER_DRAW_LAYERS = tuple(entry.name for entry in drawable_layers())
 #: Drawing kinds a record may declare, with the exact point count each needs
-#: (0 means "two or more", the open polyline of the line tool). A "curve" is
-#: a cubic Bezier (start, c1, c2, end); a "textbox" is two opposite corners.
+#: (0 means "at least `USER_DRAW_MIN_POINTS`"). A "curve" is a cubic Bezier
+#: (start, c1, c2, end); a "textbox" is two opposite corners; a "zone" is a
+#: keepout polygon on copper layers.
 USER_DRAW_KINDS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "text": 1,
-                   "dimension": 2, "curve": 4, "textbox": 2}
+                   "dimension": 2, "curve": 4, "textbox": 2, "zone": 0}
 #: Default distance, mm, of the dimension line from the measured points when
 #: a measure is exported as a dimension (the tool itself takes it from the
 #: third click): a placement default of the drawing, not a measurement.
 USER_DIMENSION_OFFSET_MM = 1.0
 #: Fewest points of the open-ended kinds: a line is two points, a closed
-#: polygon three (its last side returns to the first point, not stored).
-USER_DRAW_MIN_POINTS = {"line": 2, "polygon": 3}
+#: polygon or zone three (its last side returns to the first point, not stored).
+USER_DRAW_MIN_POINTS = {"line": 2, "polygon": 3, "zone": 3}
 #: Kinds whose record may carry ``fill: true`` (written as KiCad's
 #: ``(fill yes)``); absent means an outline, as every record saved before
 #: 2026-11-06, so those files stay byte-identical.
@@ -1539,8 +1725,9 @@ def arc_centre_representable(start: Point, mid: Point, end: Point) -> bool:
         math.isfinite(v) and abs(v) <= KICAD_COORD_LIMIT_MM for v in centre)
 
 
-#: Coordinate resolution, mm, of a stored drawing point (4 decimals).
-_STORED_POINT_RESOLUTION_MM = 1e-4
+#: Coordinate resolution, mm, of a stored drawing point (4 decimals): the
+#: one value of `vertex_edit.STORED_POINT_RESOLUTION_MM`.
+_STORED_POINT_RESOLUTION_MM = STORED_POINT_RESOLUTION_MM
 
 
 def _polygon_has_area(points) -> bool:
@@ -1553,6 +1740,108 @@ def _polygon_has_area(points) -> bool:
     """
     return polygon_has_area([(float(p[0]), float(p[1])) for p in points],
                             resolution=_STORED_POINT_RESOLUTION_MM)
+
+
+def collapse_repeated_points(points, closed: bool) -> list:
+    """@brief Drop every vertex equal to the one before it, as stored at `_STORED_POINT_RESOLUTION_MM`.
+
+    @param points Vertices (x, y), mm, in drawing order; each keeps its own
+        type (tuple or list) in the result.
+    @param closed True for a polygon or zone, whose last side returns to the
+        first vertex: a last vertex equal to the first is dropped too. False
+        for an open polyline, whose ends may coincide (a closed outline
+        drawn as a line).
+    @return The vertices without consecutive repeats. Two vertices are equal
+        when they round to the same stored coordinates (4 decimals), the
+        resolution every saved record has: `vertex_edit.stored_key`, the
+        same rule as `vertex_edit.same_point`.
+    @note A repeated vertex draws nothing but a zero-length segment, which
+        KiCad would write as a degenerate fp_line or polygon side. Records
+        are cleaned by DROPPING the repeat, not refused, so a file saved by
+        an older version with such a vertex keeps the drawing; a record left
+        with too few vertices is then dropped by the count rule.
+    """
+    key = stored_key
+    result = []
+    for point in points:
+        if not result or key(point) != key(result[-1]):
+            result.append(point)
+    while closed and len(result) > 1 and key(result[-1]) == key(result[0]):
+        result.pop()
+    return result
+
+
+def _grid_units(point) -> Tuple[int, int]:
+    """A point on the stored 1e-4 mm grid as two integers (`vertex_edit.stored_key`), so the crossing tests are exact."""
+    return stored_key(point)
+
+
+def _cross(o, a, b) -> int:
+    """Exact orientation of o-a-b on the integer grid: > 0 left turn, < 0 right turn, 0 collinear."""
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _on_segment(a, b, p) -> bool:
+    """Whether the collinear point `p` lies on the closed segment a-b."""
+    return min(a[0], b[0]) <= p[0] <= max(a[0], b[0]) and min(a[1], b[1]) <= p[1] <= max(a[1], b[1])
+
+
+def _segments_meet(a, b, c, d) -> bool:
+    """Whether the closed segments a-b and c-d share at least one point (exact, integer grid)."""
+    d1, d2, d3, d4 = _cross(c, d, a), _cross(c, d, b), _cross(a, b, c), _cross(a, b, d)
+    if ((d1 > 0 > d2) or (d1 < 0 < d2)) and ((d3 > 0 > d4) or (d3 < 0 < d4)):
+        return True
+    return ((d1 == 0 and _on_segment(c, d, a)) or (d2 == 0 and _on_segment(c, d, b))
+            or (d3 == 0 and _on_segment(a, b, c)) or (d4 == 0 and _on_segment(a, b, d)))
+
+
+def polygon_is_simple(points) -> bool:
+    """@brief Whether a closed polygon's outline never crosses or touches itself.
+
+    @param points Corners (x, y), mm, in order; the last side returns to the
+        first corner, which is not repeated. Coordinates are compared on the
+        stored grid (`_STORED_POINT_RESOLUTION_MM`) with integer arithmetic,
+        so the answer is exact for every stored record.
+    @return False when two non-adjacent sides share a point (a crossing, as
+        in a bow tie, or a corner lying on another side), when two adjacent
+        sides fold back over each other, or when a side has zero length;
+        True otherwise. Fewer than three corners are not a polygon: False.
+    @note Used to refuse self-intersecting keepout zones. KiCad 10 itself
+        does not refuse drawing one (POLYGON_GEOM_MANAGER's
+        m_intersectionsAllowed starts true and AllowIntersections() sets it
+        true whatever its argument, common/preview_items/
+        polygon_geom_manager.cpp and its header, branch 10.0, read
+        2026-11-09), but such an outline has no single interior: its DRC
+        deflates the rule area with Clipper2's ClipperOffset
+        (pcbnew/pcbexpr_functions.cpp getDeflatedZoneOutline,
+        SHAPE_POLY_SET::inflate2), whose result follows each lobe's
+        orientation, and lobes of a crossed outline run opposite ways. What
+        the zone forbids would then depend on that library detail rather
+        than on what the user drew, so the program refuses the outline.
+    """
+    grid = [_grid_units(p) for p in points]
+    count = len(grid)
+    if count < 3:
+        return False
+    sides = [(grid[i], grid[(i + 1) % count]) for i in range(count)]
+    if any(a == b for a, b in sides):
+        return False
+    for i in range(count):
+        a, b = sides[i]
+        for j in range(i + 1, count):
+            c, d = sides[j]
+            if j == i + 1 or (i == 0 and j == count - 1):
+                # Adjacent sides share one corner; they fail only when they
+                # run back over each other (collinear, the far end of one on
+                # the other).
+                shared, far_a, far_b = (b, a, d) if j == i + 1 else (a, b, c)
+                if _cross(shared, far_a, far_b) == 0 and (
+                        _on_segment(shared, far_a, far_b) or _on_segment(shared, far_b, far_a)):
+                    return False
+                continue
+            if _segments_meet(a, b, c, d):
+                return False
+    return True
 
 
 def validate_footprint_drawings(raw) -> list:
@@ -1584,11 +1873,25 @@ def validate_footprint_drawings(raw) -> list:
         give the record saved before the field (dtype not stored, it must
         agree with ``axis``); "radial" stores ``leader_length``, "center"
         nothing more, "leader" ``text`` (may be empty) and ``frame`` when
-        not "none". A ``polygon`` must enclose an area (`_polygon_has_area`:
-        all-collinear or repeated vertices drop it; a self-intersecting one
-        is kept). A field of the wrong type (a list, a dict, a number where
-        a name is expected) drops the record. Keys a kind does not use are
-        dropped.
+        not "none". In a ``line``, ``polygon`` or ``zone`` a vertex equal to
+        the one before it (after rounding to 4 decimals; for a polygon or
+        zone also a last vertex equal to the first) is dropped
+        (`collapse_repeated_points`) and the record then needs its minimum
+        count (`USER_DRAW_MIN_POINTS`), so no zero-length segment is ever
+        stored or written. A ``polygon`` must enclose an area
+        (`_polygon_has_area`: all-collinear vertices drop it; a
+        self-intersecting one is kept, KiCad draws it). A ``zone`` has no
+        ``layer`` and no ``width``: it is
+        {kind, layers, points, keepout} (`_clean_zone`): ``layers`` one of
+        `ZONE_LAYER_CHOICES` (the two copper layers in either order, stored
+        in KiCad's), three or more points enclosing an area (the polygon
+        rule) along an outline that never crosses or touches itself
+        (`polygon_is_simple`: a bow tie is dropped, see there why),
+        ``keepout`` a dict of bools over `ZONE_KEEPOUT_FLAGS`, stored
+        complete with `ZONE_KEEPOUT_DEFAULTS` for a missing flag; an unknown
+        layer or flag, or a non-bool flag, drops it. A field of the wrong
+        type (a list, a dict, a number where a name is expected) drops the
+        record. Keys a kind does not use are dropped.
     @note Same contract style as `validate_text_positions`: loading never
         raises, it silently drops what it cannot trust.
     """
@@ -1601,6 +1904,11 @@ def validate_footprint_drawings(raw) -> list:
         kind = record.get("kind")
         layer = record.get("layer")
         points = record.get("points")
+        if kind == "zone":
+            zone = _clean_zone(record)
+            if zone is not None:
+                result.append(zone)
+            continue
         # A string check first: an unhashable value (a list, a dict) in a
         # dict membership test would raise instead of dropping the record.
         if not isinstance(kind, str) or not isinstance(layer, str):
@@ -1622,6 +1930,13 @@ def validate_footprint_drawings(raw) -> list:
             clean_points.append((round(float(point[0]), 4), round(float(point[1]), 4)))
         if len(clean_points) != len(points):
             continue
+        if kind in USER_DRAW_MIN_POINTS:
+            # A vertex repeated once rounded to the stored resolution is no
+            # vertex: it is dropped, and a record left with too few points
+            # is dropped like any short one (see `collapse_repeated_points`).
+            clean_points = collapse_repeated_points(clean_points, closed=kind != "line")
+            if len(clean_points) < USER_DRAW_MIN_POINTS[kind]:
+                continue
         width = record.get("width", USER_DRAW_WIDTH_MM)
         if (isinstance(width, bool) or not isinstance(width, (int, float))
                 or not math.isfinite(width) or not 0 < width <= 10):
@@ -1729,6 +2044,53 @@ def validate_footprint_drawings(raw) -> list:
     return result
 
 
+def _clean_points(points, minimum: int) -> Optional[list]:
+    """The rounded [x, y] points of a record, or None unless there are `minimum`+ finite pairs within the limit."""
+    if not isinstance(points, (list, tuple)) or len(points) < minimum:
+        return None
+    clean = []
+    for point in points:
+        if (not isinstance(point, (list, tuple)) or len(point) != 2
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                           and math.isfinite(v) and abs(v) <= TEXT_POSITION_LIMIT_MM for v in point)):
+            return None
+        clean.append([round(float(point[0]), 4), round(float(point[1]), 4)])
+    return clean
+
+
+def _clean_zone(record: dict) -> Optional[dict]:
+    """The clean form of a keepout zone record, or None to drop it (see `validate_footprint_drawings`).
+
+    The copper layers are compared as a set so either order of the two is
+    accepted and stored in KiCad's (`ZONE_LAYER_CHOICES`); repeated
+    consecutive corners are collapsed (`collapse_repeated_points`); the
+    polygon needs an area by the one shared rule (`_polygon_has_area`) and
+    must not cross itself (`polygon_is_simple`); every flag is stored, a
+    missing one with KiCad's default.
+    """
+    layers = record.get("layers")
+    if not isinstance(layers, (list, tuple)) or not all(isinstance(name, str) for name in layers):
+        return None
+    chosen = next((choice for choice in ZONE_LAYER_CHOICES
+                   if len(layers) == len(choice) and set(layers) == set(choice)), None)
+    if chosen is None:
+        return None
+    points = _clean_points(record.get("points"), USER_DRAW_MIN_POINTS["zone"])
+    if points is None:
+        return None
+    points = collapse_repeated_points(points, closed=True)
+    if (len(points) < USER_DRAW_MIN_POINTS["zone"] or not _polygon_has_area(points)
+            or not polygon_is_simple(points)):
+        return None
+    flags = record.get("keepout", {})
+    if not isinstance(flags, dict) or not all(isinstance(key, str) for key in flags):
+        return None
+    if set(flags) - set(ZONE_KEEPOUT_FLAGS) or not all(isinstance(value, bool) for value in flags.values()):
+        return None
+    keepout = {flag: flags.get(flag, ZONE_KEEPOUT_DEFAULTS[flag]) for flag in ZONE_KEEPOUT_FLAGS}
+    return {"kind": "zone", "layers": list(chosen), "points": points, "keepout": keepout}
+
+
 def _clean_angle(raw) -> Optional[int]:
     """The 0/90 text angle of a record value, or None when it must drop the record (see `validate_footprint_drawings`)."""
     if raw is None:
@@ -1807,9 +2169,15 @@ def drawing_graphics(records) -> list:
     @param records Records in the shape `validate_footprint_drawings` returns
         (the caller validates; a malformed record here is a programming error).
     @return Graphic items (FpLine/FpPoly/FpRect/FpCircle/FpArc/FpText/
-        FpDimension/FpCurve/FpTextBox) ready for
+        FpDimension/FpCurve/FpTextBox/FpZone) ready for
         `Footprint.add_graphic`, in record order; a line record yields one
-        FpLine per segment. Points are absolute footprint mm, drawn as-is.
+        FpLine per segment, a zone record one FpZone (written after the pads
+        by `Footprint.to_sexpr`). Points are absolute footprint mm, drawn as-is,
+        except that consecutive repeated vertices of a line, polygon or zone
+        are collapsed (`collapse_repeated_points`): no zero-length fp_line or
+        side is ever written.
+    @note A text, a text box or a dimension on a back layer is written
+        mirrored by its own writer (`mirrored_justify`).
     @note A text anchored at `USER_TEXT_ANCHOR` is written with
         ``(justify left bottom)`` at its point; a legacy text (no anchor)
         keeps KiCad's default centred justification, exactly as before.
@@ -1818,11 +2186,20 @@ def drawing_graphics(records) -> list:
     """
     items = []
     for record in records:
-        kind, layer = record["kind"], record["layer"]
+        # A zone has copper `layers`, not a drawing `layer`.
+        kind, layer = record["kind"], record.get("layer")
         width = record.get("width", USER_DRAW_WIDTH_MM)
         points = [tuple(p) for p in record["points"]]
         fill = bool(record.get("fill", False))
-        if kind == "line":
+        if kind in ("line", "polygon", "zone"):
+            # Defence in depth: a caller may hold a record edited after its
+            # validation (a vertex dragged onto its neighbour); a repeated
+            # vertex must never become a zero-length fp_line or side.
+            points = collapse_repeated_points(points, closed=kind != "line")
+        if kind == "zone":
+            items.append(FpZone(points=points, layers=tuple(record["layers"]),
+                                keepout=dict(record.get("keepout", ZONE_KEEPOUT_DEFAULTS))))
+        elif kind == "line":
             items.extend(FpLine(start=a, end=b, layer=layer, width=width)
                          for a, b in zip(points, points[1:]))
         elif kind == "polygon":
@@ -1935,7 +2312,7 @@ def drawing_bounds(record: dict) -> Tuple[float, float, float, float]:
     """@brief Axis-aligned bounding box, mm, of what a shape record draws.
 
     @param record A validated shape record (line, rectangle, circle, arc,
-        polygon, curve, text box or dimension).
+        polygon, zone, curve, text box or dimension).
     @return (x_min, y_min, x_max, y_max) mm, Y down: a line's, a
         rectangle's and a text box's points; a circle's centre +- radius; an arc's start and
         end plus every quarter point (0, 90, 180, 270 degrees on its circle)
@@ -2257,7 +2634,10 @@ class Footprint:
     text_justify: dict = field(default_factory=dict)
 
     pads: list = field(default_factory=list)
-    graphics: list = field(default_factory=list)  # FpLine | FpRect | FpCircle | FpText
+    #: Graphic items (`Movable`: FpLine, FpRect, FpCircle, FpArc, FpPoly,
+    #: FpCurve, FpText, FpTextBox, FpDimension) and keepout zones (FpZone,
+    #: written after the pads as KiCad does).
+    graphics: list = field(default_factory=list)
 
     def place_default_texts(self, grid_origin: Optional[Point] = None) -> "Footprint":
         """@brief Move Reference and Value to their geometry-derived defaults.
@@ -2378,10 +2758,59 @@ class Footprint:
         """@brief Append a graphic item (line, rectangle, circle or text) and return self for chaining.
 
         @param item Any object with a `to_sexpr()` method (FpLine, FpRect,
-            FpCircle, FpArc, FpText).
+            FpCircle, FpArc, FpText, ... FpZone); `shift_origin` also needs
+            it to be a `Movable`.
         @return This footprint.
         """
         self.graphics.append(item)
+        return self
+
+    def shift_origin(self, ax: float, ay: float) -> "Footprint":
+        """@brief Make the point (ax, ay) the footprint origin: move everything by (-ax, -ay) mm.
+
+        @param ax X of the new origin in the current coordinates, mm.
+        @param ay Y of the new origin (Y down), mm.
+        @return self, for chaining.
+        @throws ValueError When ax or ay is not a finite number (a bool is
+            refused), or when the moved footprint would reach beyond the
+            coordinates KiCad can hold (`require_kicad_reach`); the
+            footprint is then left unchanged.
+        @throws TypeError When a pad or graphic is not a `Movable` (it could
+            not be moved, and writing it in place would detach it).
+        @note Every pad (`at`, the hole: rotation, size, drill and the
+            pad-local drill offset are unchanged), every graphic and zone
+            (`Movable.translate`) and the Reference/Value positions move;
+            their justification is kept. The hidden Datasheet/Description
+            properties stay at (0, 0), where the writer always puts them.
+        @note (0, 0) is an exact no-op: nothing is touched, so the written
+            file is the one written without the call. Call it once, when the
+            file is built (plan F2: stored drawings keep the generator's
+            coordinates); a footprint also shown elsewhere should be copied
+            first (`copy.deepcopy`).
+        """
+        for value in (ax, ay):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(tx("Ancora del footprint non valida: servono due numeri finiti in mm."))
+        if ax == 0 and ay == 0:
+            return self
+        for item in (*self.pads, *self.graphics):
+            if not isinstance(item, Movable):
+                raise TypeError(f"footprint item {type(item).__name__} cannot be moved (not a Movable)")
+        dx, dy = -float(ax), -float(ay)
+        pads = copy.deepcopy(self.pads)
+        graphics = copy.deepcopy(self.graphics)
+        for item in (*pads, *graphics):
+            item.translate(dx, dy)
+        reference = (self.reference_at[0] + dx, self.reference_at[1] + dy)
+        value = (self.value_at[0] + dx, self.value_at[1] + dy)
+        reach = [abs(v) for v in (*reference, *value)]
+        for pad in pads:
+            reach.extend(abs(v) for v in _pad_box(pad))
+        for item in graphics:
+            reach.extend(abs(v) for point in (*item.anchor_points(), *_graphic_points(item)) for v in point)
+        require_kicad_reach(max(reach))
+        self.pads, self.graphics = pads, graphics
+        self.reference_at, self.value_at = reference, value
         return self
 
     def _property_node(self, key: str, value: str, at: Point, layer: str, hide: bool = False) -> SExpr:
@@ -2401,8 +2830,8 @@ class Footprint:
         """@brief Serialize the complete footprint to a KiCad S-expression.
 
         @return The root `footprint` node: header, properties (Reference,
-            Value, hidden Datasheet and Description), attribute, graphics
-            and pads, in the order KiCad writes them.
+            Value, hidden Datasheet and Description), attribute, graphics,
+            pads and keepout zones, in the order KiCad writes them.
         """
         root = sx("footprint", self.name)
         root.add(sx("version", KICAD_VERSION))
@@ -2429,9 +2858,15 @@ class Footprint:
                         *(Symbol(flag) for flag in flags)))
 
         for item in self.graphics:
-            root.add(item.to_sexpr())
+            if not isinstance(item, FpZone):
+                root.add(item.to_sexpr())
         for pad in self.pads:
             root.add(pad.to_sexpr())
+        # KiCad writes a footprint's zones after its pads (library files,
+        # e.g. Button_Switch_SMD.pretty/SW_SPST_SKQG_WithoutStem.kicad_mod).
+        for item in self.graphics:
+            if isinstance(item, FpZone):
+                root.add(item.to_sexpr())
 
         return root
 

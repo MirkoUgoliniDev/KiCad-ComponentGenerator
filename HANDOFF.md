@@ -1,5 +1,118 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 09/11 — IN CORSO su FOOTPRINT-ADVANCE (base c26d6b6 = main): layer B.*, «Sposta ancora», vertici, zone di esclusione
+
+Utente: «ok implementa anche quelle cose nuove, ma poi prima di dire ok rifai sempre controlli avversariali»; disegno
+confermato in chat (AskUserQuestion): «Sì, tabelle fuori». PIANO: docs/footprint-back-anchor-vertices-zones-plan.md
+(funzioni F1-F4, contratti 1-8, ondate). Ondata 1 in parallelo: W1-core (footprint_layers, footprint, NUOVO
+core/vertex_edit.py, footprint_checks), W1-delivery (kicad_library attach_3d_model con offset + verifica del SEGNO
+con kicad-cli), W1-menus (canvas_menus + symbol_tab/symbol_glyphs: vertici anche nel simbolo, regola «stessa UX»).
+Ondata 2: W2-footprint (main_window, footprint_view, workers). Poi coordinatore: traduzioni, golden, suite in due
+meta', REVISIONE AVVERSARIALE (regola utente), correzioni, suite. COMMIT SOLO CON OK dell'utente (non dato per questo giro).
+Interpretazioni: ancora come campo `anchor` della bozza in coordinate del generatore, applicata solo dallo scrittore
+e dall'offset del modello (nulla di salvato viene riscritto); zone = kind «zone» dei disegni; vertici anche nel
+simbolo (polilinee/poligoni). Riferimento sintassi zona: libreria KiCad 10 installata,
+Button_Switch_SMD.pretty/SW_SPST_SKQG_WithoutStem.kicad_mod.
+W1-delivery FATTO: SEGNO MISURATO con kicad-cli 10.0.8 (export step e glb, modello R_1206 e box WRL): posizione del
+modello = (at.x + ox, at.y - oy) -> ancora (ax, ay) => `(offset (xyz -ax ay 0))`. API: kicad_library.model_offset_for_anchor,
+attach_3d_model(offset=), ComponentArtifacts.model_offset, discover_component_artifacts(model_offset=),
+verify_component(model_offset=); tests/test_kicad_model_offset.py (20, test KiCad end-to-end eseguito). Chiamate GUI da
+cambiare in ondata 2: main_window `_current_kicad_artifacts` (~14627) e args di verify_component (~14421). PUNTO FRAGILE:
+l'ancora non sta nel .kicad_mod: l'ondata 2 deve passare l'ancora APPLICATA (quella con cui il file e' stato scritto), non
+quella della bozza; valutare di salvarla accanto al footprint scritto.
+W1-menus FATTO: core/vertex_edit.py (pick/nearest_segment/insert_vertex/remove_vertex, VertexEditRefused con .reason),
+canvas_menus (ADD_VERTEX/REMOVE_VERTEX, vertex_entries, VERTEX_PICK_PX = HANDLE_SIZE_PX 6 px, scelta di interfaccia),
+generators/symbol_glyphs.py (NON gui/: VERTEX_EDIT_KEYS, insert/remove_shape_vertex), symbol_tab.py (menu dopo «Duplica»,
+punto letto PRIMA della selezione che ridisegna e sposta la vista), test_vertex_edit 22 + test_symbol_vertex_edit 17;
+265 test mirati verdi. Fili ESCLUSI di proposito (capi ancorati). 7 stringhe nuove da tradurre (elenco nel rapporto:
+Aggiungi/Rimuovi vertice, Modifica dei vertici rifiutata., 4 motivi). SEGNALATO, NON AUTORIZZATO (preesistente): nel
+simbolo le maniglie di un poligono includono la ripetizione di chiusura: trascinare la maniglia 0 sposta solo il primo
+punto e il contorno perde la chiusura.
+W1-core FATTO (478 test mirati verdi, kicad-cli nei test): B.SilkS #e8b2a7 / B.Fab #585d84 (builtin_color_themes.h),
+ordine LAYERS F.SilkS,B.SilkS,F.Fab,B.Fab,...; testi/textbox/quote su B scritti con «mirror» in coda al justify (EDA_TEXT::Format);
+Footprint.shift_origin(ax, ay) con mixin Movable + test che enumera ogni classe; zona = kind «zone» SENZA layer/width,
+layers [F.Cu]|[B.Cu]|[F.Cu,B.Cu], keepout 5 flag. CORREZIONE DEL PIANO: i predefiniti KiCad 10 (zone_settings.cpp) vietano
+piste, via E PAD, ammettono riempimenti e footprint (il piano diceva pad ammessi); numeri delle zone dai predefiniti
+KiCad 10 (hatch edge 0.5, min_thickness 0.25), forma come SODIMM-200 della libreria. Controlli: rame per lato
+(pad_copper_sides), serigrafia per lato, nuova regola pad_in_keepout VERIFICATA con kicad-cli pcb drc (stessi pad di
+items_not_allowed; contatto sul bordo non segnalato -> area di sovrapposizione). 3 test GUI rotti da aggiornare in
+ondata 2 (colori, tooltip spessore, sottomenu layer). 8 stringhe nuove.
+ONDATA 2 avviata: W2-footprint (main_window, footprint_view, workers + test GUI). Coordinatore: traduzioni in parallelo.
+ONDATA 2 FATTA: B.* nel pannello/palette (disegni dietro a z 0.3, sotto i contorni), testi B specchiati da
+`_mirror_scene_item`; ancora = `footprint_anchor` nella bozza (undo, Applica/Annulla, progetto «footprint_anchor»,
+recupero), pulsante «Sposta ancora» + voci di menu dello sfondo «Sposta ancora qui»/«Ripristina ancora del footprint»,
+marcatore #fab387 (scelta NON KiCad); scrittura con shift_origin in GenerateWorker e nella firma di allineamento;
+offset del modello dall'ancora APPLICATA (`_kicad_model_offset`), test: ancora non applicata = offset 0. Vertici nel
+footprint per linea/poligono/zona (messaggi condivisi da symbol_tab._VERTEX_REFUSALS). Zone: strumento in palette,
+dialogo rame+divieti, tratteggio nei colori del rame, riga «Zone di esclusione» nel pannello Layer. Nessun golden cambiato.
+Coordinatore: 'anchor' in footprint_draft.OPTIONAL_STATE_KEYS (xfail tolto), «modello 3D» -> «modello STEP» nel tooltip
+dell'ancora, 35 traduzioni (15 + 20) nelle 4 lingue; 140 test i18n/draft/anchor verdi.
+REVISIONE AVVERSARIALE (in corso, solo rapporto): 6 agenti read-only su ambiti disgiunti, poi correzioni, poi suite.
+RAPPORTI ARRIVATI (5/6): nessun alto. MEDI: (core) pad_in_keepout diverge da kicad-cli pcb drc: zona a farfalla
+(aree che si annullano: noi zitti, KiCad segnala) e soglia 1e-6 mm2 come AREA invece dell'epsilon di LUNGHEZZA del DRC
+(noi segnaliamo penetrazioni 0.1-0.3 um, KiCad da 0.5 um); (consegna) aggiungere 'anchor' a OPTIONAL_STATE_KEYS rende
+non riconosciute le bozze di recupero scritte da HEAD/v1.0.7 (impronta con package_body ma senza anchor) -> perse alla
+prima modifica [nato da una modifica del coordinatore]; (parita') D1 simbolo: tasto destro su una maniglia di vertice
+spesso non apre il menu (hit test di 1 px, il footprint ha margine 4 px); D2 footprint: il punto del menu letto da
+QCursor.pos() invece che dall'evento (segnale drawing_context_requested senza posizione). BASSI: OverflowError su interi
+JSON enormi nell'ancora (progetto, recupero, _checked_offset); copper_outline inscritto (sagitta 5 um); NPTH/pad senza
+rame -> fronte (fallback da togliere: NPTH = due lati per tipo, altri senza rame = nessun lato); VERTEX_PICK_PX 6 px
+contro un segmento corto (usare mezza diagonale 4.24 e preferire il segmento); test kicad-cli di shift_origin che passa
+anche se non sposta; vertici consecutivi duplicati accettati; B.Fab fuori dal controllo courtyard non dichiarato;
+testi di serigrafia troppo piccoli non controllati (il DRC di KiCad: altezza min 0.8 mm) - preesistente; offset del
+modello a 4 decimali contro 6 dei pad; L1 offset catturato prima delle domande modali (difesa in profondita');
+L2 ancora non valida nella bozza = (0,0) mentre la chiave assente = ancora applicata; L3 controllo componente senza gate;
+duplicazioni (formula punto/portata nelle due schede, _VERTEX_REFUSALS privato importato, letterali "segment"/"vertex").
+DECISIONE UTENTE (09/11, A1): nel simbolo una linea che finisce sul suo primo punto si tratta come CHIUSA per i vertici,
+come il footprint (rimuovere un vertice la lascia chiusa, sotto 3 punti rifiuto).
+CORREZIONI (4 fixer su file disgiunti): F-delivery FATTO (bozze HEAD di nuovo offerte: forme ammesse dedotte dalle
+chiavi che la bozza ha, chiavi opzionali solo in coda; OverflowError -> ValueError; offset a 6 decimali come i pad;
+@pre di verify_component). F-shared FATTO (938 test): A1 con vertex_edit.is_closed_outline; same_point a 1e-4 mm e
+motivo DUPLICATE; VERTEX_PICK_PX = mezza diagonale della maniglia (4.24 px) e a pari portata vince il piu' vicino fra
+vertice e punto medio del lato (EDIT_POINTS::FindPoint di KiCad); simbolo: `_context_target` con margine 4 px
+(CONTEXT_HIT_MARGIN_PX) e maniglie prima; VERTEX_REFUSALS/pick_reach_mm pubblici in canvas_menus (alias in symbol_tab).
+SEGNALATO, NON AUTORIZZATO (preesistente): nel simbolo la shape() di QGraphicsPathItem di una linea APERTA include
+l'area della chiusura implicita: un clic destro dentro la «L» fino a ~20 px dal tratto apre il suo menu.
+F-core FATTO (550+81+162 test, oracolo kicad-cli). CORREZIONI DI DIAGNOSI (09/11): (1) NON e' vero che KiCad vieti le zone
+autointersecanti (polygon_geom_manager: m_intersectionsAllowed sempre true): le rifiutiamo NOI, perche' il DRC sgonfia
+l'area con Clipper2 e i lobi di verso opposto renderebbero il divieto un dettaglio di libreria (footprint.polygon_is_simple,
+aritmetica intera sulla griglia 1e-4); i poligoni grafici possono ancora incrociarsi. (2) La riga sopra «contatto sul bordo
+non segnalato -> area di sovrapposizione» era SBAGLIATA: KiCad sgonfia la zona di DRCEpsilon = 0.0005 mm (LUNGHEZZA,
+ADVANCED_CFG::m_DRCEpsilon) e poi segnala qualunque contatto: ora copper_meets_keepout esatto, niente campionamento;
+divergenza dichiarata: angoli concavi (KiCad unisce a mitra), < ~5 um. (3) SBAGLIATO anche «NPTH = due lati per tipo»
+(premessa mia nel brief): l'oracolo dice PTH = due lati sempre, NPTH e ogni altro pad = solo i layer di rame che nomina,
+pad senza rame (aperture pasta/maschera) = nessun lato (fallback «fronte» tolto). Altro: vertici consecutivi ripetuti
+COLLASSATI (collapse_repeated_points, anche in drawing_graphics), B.Fab fuori dal courtyard DICHIARATO (KLC F5.3 vuole
+B.CrtYd per i corpi sotto, fuori ambito), nuova regola silk_text_size (DRC KiCad: 0.8 mm altezza, 0.08 tratto =
+predefiniti 1.0x0.8 e 0.1x0.8 di board_design_settings), test kicad-cli di shift_origin ora verifica le coordinate.
+Coordinatore: 3 traduzioni (DUPLICATE, silk_text_size messaggio e rimedio). Inviati a F-footprint: motivo di rifiuto per
+zona autointersecante, record validato dopo il trascinamento di una maniglia, adozione delle API condivise di canvas_menus.
+F-footprint FATTO (1381 test mirati): ZoneOutlineItem (zona colpita solo sul contorno; _near_polygon_outline condiviso con
+_body_part_at), zona riaccende la riga «Zone di esclusione» all'armamento, voci ancora nel menu del contorno del corpo,
+drawing_context_requested(int, QPoint), ancora: limite prima di isfinite, bozza con ancora non valida = ancora applicata,
+offset ricostruito dopo le domande nel ciclo d'installazione, _verify_component rifiutato con file del footprint vecchio
+(CONTRATTO CAMBIATO), main_window sulle API condivise di canvas_menus, HIT_MARGIN_PX alias di CONTEXT_HIT_MARGIN_PX,
+linea chiusa (ultimo = primo) trattata come chiusa anche nel footprint, motivo di rifiuto per zona che si incrocia,
+record validato dopo il rilascio della maniglia. 1 traduzione nuova (coordinatore). TRAPPOLA test: in una finestra
+mostrata il clic destro su un pad apre il dialog modale del pad e blocca pytest (helper `_right_press`).
+SEGNALATI, NON AUTORIZZATI (preesistenti): (a) rettangoli/poligoni/cerchi NON riempiti e archi/curve aperti catturano i
+clic al loro interno in entrambe le schede (KiCad: solo il contorno se non riempiti; da fare insieme nelle due schede per
+la parita'); (b) la ripetizione di chiusura di una linea chiusa ha due maniglie (0 e ultima): trascinarne una apre la linea
+(stesso difetto gia' segnalato nel simbolo).
+VERIFICA DELLE CORREZIONI (revisore read-only): tutti i medi FIXED, i bassi FIXED tranne la duplicazione (PARTIAL);
+5 bassi NUOVI, tutti corretti da un ultimo fixer (747 test mirati): una sola regola «stesso punto» (vertex_edit.stored_key
+= round(v, 4), usata anche da collapse_repeated_points e polygon_is_simple); portata del pick + meta' spessore del tratto
+(EDA_SHAPE::hitTest, citato a memoria, non riletto); simbolo: la maniglia vince solo se il passaggio esatto non trova
+nulla (pin sotto la maniglia di un filo selezionato tiene il suo menu); motivo «si incrocia» calcolato dopo il collasso
+dei ripetuti; KeepoutOutline preparato una volta per zona (256 angoli, 8 pad: 0.22 s); canvas_menus.scene_point_mm
+condiviso, alias morti tolti. Nessuna stringa nuova.
+SUITE COMPLETA (1a corsa, codice fermo): A 7759 passati 2 falliti, B 4904 passati 1 fallito; i 3 rossi
+(test_gui_block_d x2, test_project_tab_buttons x1) riprodotti da soli: i finti Footprint dei test non avevano
+`shift_origin`, che GenerateWorker ora chiama sempre (CONTRATTO CAMBIATO: aggiunto ai finti, piu' l'asserzione che
+l'ancora (0,0) arrivi una volta allo scrittore). 67 test dei due file verdi.
+SUITE COMPLETA VERDE (2a corsa, 09/11, codice fermo): A 7761 passati 9 saltati 19 sottotest, B 4905 passati 4 saltati
+= 12666 passati, 13 saltati, 19 sottotest. NON committato: in attesa dell'OK dell'utente. Piano corretto (sezione 4).
+
 ## 09/11 — FATTO, committato `33cbd08` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «fai tutto, poi committa, pusha, mergia in main, pusha e rifai il pacchetto»): residui del giro dell'08/11; pacchetto: vedi in fondo alla sezione
 
 Utente (09/11): «ok fai tutto , poi committa, pusha , mergi ain main , pusha e rifai il paxxherro se serve ok ? rimuovend
@@ -41,6 +154,9 @@ PACCHETTO LOCALE (09/11 09:45): vecchi MSI rimossi da dist/ su richiesta dell'ut
 dell'08/11), poi build-windows.ps1 -IncludeYoloModel da e8dc716: dist/KiCadGen-1.0.7.msi 461 MB (483 482 356 byte),
 --check-runtime OK, 5 modelli con SHA-256 verificato, avvisi soliti (ICE60, ICE03). Nessuna release, numero invariato.
 APERTO, da chiedere all'utente: punto 5 (layer B.*, spostare l'ancora del footprint, modifica dei vertici, tabelle/zone).
+09/11 (dopo il pacchetto) utente: «ok implementa anche quelle cose nuove, ma poi prima di dire ok rifai sempre controlli
+avversariali». In attesa di conferma del DISEGNO delle 4 funzioni (regola «conferma l'intento»): proposta in chat,
+nessun codice toccato finche' l'utente non dice di partire.
 
 ## 08/11 — FATTO e committato `8bee44f` su FOOTPRINT-ADVANCE (NON pushato, NON mergiato): strumenti di disegno al livello di KiCad 9, revisione e correzioni
 

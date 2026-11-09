@@ -233,6 +233,41 @@ def test_several_elements_menu_holding_a_wire_still_turns(board, monkeypatch):
     assert seen['rows'] == _head('2 elementi selezionati')
 
 
+ADD_VERTEX = 'Aggiungi vertice'
+REMOVE_VERTEX = 'Rimuovi vertice'
+
+
+def _vertex_shape(tab, key, points):
+    """Draw a line or polygon far from the board's elements; return its index."""
+    assert tab.start_shape(key) is not False
+    for x, y in points:
+        tab.add_shape_point(x, y)
+    assert tab.finish_wire(True), key
+    tab.select_tool()
+    return len(tab.graphics()) - 1
+
+
+@pytest.mark.parametrize('key, points', [
+    ('line', [(20.32, -20.32), (25.4, -20.32), (25.4, -25.4)]),
+    ('polygon', [(20.32, -20.32), (25.4, -20.32), (25.4, -25.4), (20.32, -25.4)]),
+])
+def test_line_and_polygon_menu_order_with_the_vertex_group(board, monkeypatch, key, points):
+    """@brief Full order of a line/polygon menu, separators included, as the footprint test pins it.
+
+    CONTRACT 2026-11-09 (plan F3): the vertex group «Aggiungi vertice» /
+    «Rimuovi vertice» follows «Duplica» after a separator and precedes
+    «Proprietà elemento…»; a click off the outline (here the menu opens at a
+    screen point far from it) greys both entries out.
+    """
+    index = _vertex_shape(board, key, points)
+    record = board.graphics()[index]
+    assert record['key'] == f'shape:{key}'
+    seen = _open(board, index, monkeypatch)
+    assert seen['rows'] == (_head(record['label'])
+                            + ['-', (ADD_VERTEX, False, False, None, None), (REMOVE_VERTEX, False, False, None, None)]
+                            + [(PROPERTIES, True, False, None, None), '-'] + _style_rows(record))
+
+
 def test_an_unknown_index_opens_no_menu(board, monkeypatch):
     seen = _open(board, 9, monkeypatch)
     assert seen == {}

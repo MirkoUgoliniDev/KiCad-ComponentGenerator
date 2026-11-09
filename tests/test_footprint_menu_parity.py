@@ -99,7 +99,10 @@ def test_shape_menu_entries(preview, monkeypatch):
     window = preview
     window.footprint_drawings = validate_footprint_drawings([record()])
     rows = open_menu(window, monkeypatch, 0)
-    assert _texts(rows) == ["Linea", "-"] + SHARED + ["-", "Spessore del tratto…"]
+    # CONTRACT CHANGED 2026-11-09 (plan F3): a line has the vertex entries after «Duplica», as the symbol's.
+    vertex = SHARED.index("Duplica (Ctrl+D)") + 1
+    assert _texts(rows) == (["Linea", "-"] + SHARED[:vertex] + ["-", "Aggiungi vertice", "Rimuovi vertice"]
+                            + SHARED[vertex:] + ["-", "Spessore del tratto…"])
     assert rows[0][1] is False, "the title line is disabled"
     assert next(r for r in rows if r[0] == "Specchia")[1] is True, "a shape can be mirrored"
 
@@ -134,10 +137,13 @@ def test_layer_submenu_lists_the_three_layers_with_the_current_checked(preview, 
     rows = open_menu(window, monkeypatch, 0)
     layer_row = next(row for row in rows if row[0] == "Layer")
     sub = layer_row[2]
-    # «Disegni utente» (Dwgs.User) added 2026-11-08 (plan B6): every drawable layer of the table.
-    assert [r[0] for r in sub] == ["Serigrafia (stampata)", "Fabbricazione (documentazione)",
+    # «Disegni utente» (Dwgs.User) added 2026-11-08 (plan B6): every drawable layer of the table;
+    # the back layers 2026-11-09 (plan F1), each after its front twin as in KiCad's layer list.
+    assert [r[0] for r in sub] == ["Serigrafia (stampata)", "Serigrafia lato inferiore (stampata)",
+                                   "Fabbricazione (documentazione)",
+                                   "Fabbricazione lato inferiore (documentazione)",
                                    "Commenti (solo progetto)", "Disegni utente (solo progetto)"]
-    assert [r[3] for r in sub] == [False, True, False, False]
+    assert [r[3] for r in sub] == [False, False, True, False, False, False]
 
 
 def test_choosing_a_layer_moves_the_drawing(preview, monkeypatch):

@@ -488,6 +488,10 @@ class GenerateWorker(_Cad3DRunWorker):
         #: User drawings of the footprint preview (validated records, see
         #: core.footprint.validate_footprint_drawings); [] adds nothing.
         self.drawings = []
+        #: Footprint anchor (x, y) mm in the generator's coordinates (plan
+        #: F2): the written file puts this point at (0, 0)
+        #: (`Footprint.shift_origin`); (0, 0) writes exactly as before.
+        self.anchor = (0.0, 0.0)
 
     def run(self) -> None:
         """@brief QThread override: save the footprint, then generate the 3D model, reporting each through its own signals."""
@@ -513,6 +517,9 @@ class GenerateWorker(_Cad3DRunWorker):
             from ..core.footprint import drawing_graphics
             for item in drawing_graphics(self.drawings):
                 footprint.add_graphic(item)
+            # Once, on the footprint built for this file only (nothing else
+            # holds it): every pad, graphic, zone and text moves by -anchor.
+            footprint.shift_origin(*self.anchor)
             pretty_dir = self.project_dir / f"{self.params.name}.pretty"
             out_path = pretty_dir / f"{self.params.name}.kicad_mod"
             footprint.save(str(out_path))

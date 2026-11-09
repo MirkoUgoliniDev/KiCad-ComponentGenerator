@@ -11,11 +11,13 @@ driven by a `ClickToolRouter`), the same state machine as the symbol
 editor's wire and shape tools: the window is the `ClickToolHost`.
 """
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPainterPath
-from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsView
+from PyQt6.QtGui import QColor, QPainterPath, QPainterPathStroker
+from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPolygonItem, QGraphicsRectItem,
+                             QGraphicsView)
 
 from .canvas_camera import Camera
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
+from .canvas_menus import CONTEXT_HIT_MARGIN_PX
 from .canvas_grid import DARK_GRID_DOT_COLOR, ExposedRegion, GridStyle, dots_legible, paint_grid
 from .canvas_origin import paint_origin_marker
 from .canvas_gestures import (
@@ -57,6 +59,16 @@ HOLE_ROLE = 0x484F4C
 #: without redrawing. Untagged items (grid, origin, handles, measures) are
 #: always shown.
 LAYER_ROLE = 0x4C4159
+
+#: Item data role of a keepout zone's item: the copper layer («F.Cu» or
+#: «B.Cu») it is drawn for. A zone on both layers has one item per layer,
+#: each restyled in its own side's colour (plan F4).
+ZONE_COPPER_ROLE = 0x5A4F4E
+
+#: Colour of the footprint anchor marker (plan F2) when it is NOT at the
+#: drawing origin (where the drawing-origin marker already marks it): a
+#: contrast choice of this preview, not a KiCad theme value.
+ANCHOR_MARKER_COLOR = "#fab387"
 
 #: Item data role set (True) on an item the «Layer» panel hid, so that
 #: showing the layer again shows only those items: an item hidden by its own
@@ -156,6 +168,30 @@ class HoledRectItem(_HoleCut, QGraphicsRectItem):
 
 class HoledPathItem(_HoleCut, QGraphicsPathItem):
     """@brief A rounded or stadium pad whose drill hole shows what lies beneath."""
+
+
+class ZoneOutlineItem(QGraphicsPolygonItem):
+    """@brief A keepout zone's hatched polygon whose hit shape is its OUTLINE only.
+
+    @note KiCad selects a rule area by its border (review 2026-11-09): the
+        hatch is painted over the whole area, but the shape Qt hit-tests
+        (view queries, tooltip, hover cursor) is the closed outline stroked at
+        the pen width, so a pad, a body dimension or the background inside
+        the zone stays reachable. The view's `_drawing_at` widens the reach to
+        HIT_MARGIN_PX screen pixels through its query rectangle.
+    """
+
+    def shape(self):
+        """@brief Qt override: the closed outline stroked at the pen width (at least 1e-3 scene px).
+
+        @return A QPainterPath around the border, without the interior.
+        """
+        path = QPainterPath()
+        path.addPolygon(self.polygon())
+        path.closeSubpath()
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(self.pen().widthF(), 1e-3))
+        return stroker.createStroke(path)
 
 
 def hole_size_pair(size) -> tuple:
@@ -264,8 +300,10 @@ GRID_STYLE = GridStyle(QColor(GRID_LINE_COLOR), QColor(GRID_DOT_COLOR), 1.5, Non
 
 #: Grab tolerance around the pointer, screen px: a press this close to a
 #: handle or to a drawing stroke still takes it. A UI tolerance (strokes
-#: and handles are a few px wide at any zoom), not geometry.
-HIT_MARGIN_PX = 4
+#: and handles are a few px wide at any zoom), not geometry. An alias of the
+#: shared `canvas_menus.CONTEXT_HIT_MARGIN_PX` (parity review 2026-11-09):
+#: one value for the right-click hit test of both tabs.
+HIT_MARGIN_PX = CONTEXT_HIT_MARGIN_PX
 
 #: Handles stay visible while the pointer is within this many screen px of
 #: the hovered drawing's bounds, as the symbol editor's HANDLE_HOVER_MARGIN:
@@ -289,8 +327,11 @@ class FootprintView(QGraphicsView):
     pad_context_requested = pyqtSignal(str)
     #: Right click on a text: key.
     text_context_requested = pyqtSignal(str)
-    #: Right click on a user drawing (outside draw mode): its index.
-    drawing_context_requested = pyqtSignal(int)
+    #: Right click on a user drawing (outside draw mode): its index and the
+    #: global screen position of the press (as `dimension_context_requested`),
+    #: so the host picks the vertex under the click, not under a pointer
+    #: that may have moved since (parity review 2026-11-09, D2).
+    drawing_context_requested = pyqtSignal(int, QPoint)
     #: Outside draw mode: the pointer is over this drawing (-1: none).
     drawing_hovered = pyqtSignal(int)
     #: The text whose anchor square must show changed: its key ("" for none).
@@ -385,6 +426,9 @@ class FootprintView(QGraphicsView):
         self._background_press = None
         #: Scene point of the drawing origin marker (shared `canvas_origin`), or None.
         self._drawing_origin = None
+        #: Scene point of the footprint anchor (plan F2), or None when no
+        #: footprint is drawn; painted only where no drawing-origin marker is.
+        self._anchor_marker = None
 
     @property
     def auto_fit(self):
@@ -639,6 +683,35 @@ class FootprintView(QGraphicsView):
         """
         return None if self._drawing_origin is None else QPointF(self._drawing_origin)
 
+    def set_anchor_marker(self, point):
+        """@brief Show the footprint anchor (the point that is (0, 0) in the written file), or hide it.
+
+        @param point Scene `QPointF` (px), or None to hide the marker.
+        @note Painted in `drawForeground` like the drawing origin marker, with
+            the same glyph (a circle with a cross, as KiCad's anchor) in
+            `ANCHOR_MARKER_COLOR`; not painted where the drawing origin marker
+            already is (the drawing origin «footprint origin» follows the
+            anchor), so an unmoved anchor paints exactly what it painted before.
+        """
+        point = None if point is None else QPointF(point)
+        if point != self._anchor_marker:
+            self._anchor_marker = point
+            self.viewport().update()
+
+    def anchor_marker(self):
+        """@brief The scene point of the footprint anchor marker, or None.
+
+        @return A `QPointF` copy, or None when no anchor is shown.
+        """
+        return None if self._anchor_marker is None else QPointF(self._anchor_marker)
+
+    def anchor_marker_painted(self) -> bool:
+        """@brief Whether the anchor marker is painted: an anchor away from the drawing origin marker.
+
+        @return True when an anchor is set and differs from the drawing origin point.
+        """
+        return self._anchor_marker is not None and self._anchor_marker != self._drawing_origin
+
     def drawForeground(self, painter, rect):
         """@brief Qt override: paint the drawing origin marker above the footprint.
 
@@ -647,6 +720,8 @@ class FootprintView(QGraphicsView):
         """
         super().drawForeground(painter, rect)
         paint_origin_marker(painter, self, self._drawing_origin)
+        if self.anchor_marker_painted():
+            paint_origin_marker(painter, self, self._anchor_marker, ANCHOR_MARKER_COLOR)
 
     def drawBackground(self, painter, rect):
         """@brief Qt override: draw the grid lines (and fine dots) where Qt paints, like the symbol editor.
@@ -762,15 +837,26 @@ class FootprintView(QGraphicsView):
         outline = getattr(self, "_body_outline", None)
         if outline is None or not _alive(outline):
             return None
+        return "move" if self._near_polygon_outline(outline, pos) else None
+
+    def _near_polygon_outline(self, item, pos) -> bool:
+        """@brief True when a viewport point lies within HIT_MARGIN_PX screen px of a polygon item's closed outline.
+
+        @param item A QGraphicsPolygonItem (the body outline, a keepout zone).
+        @param pos Viewport position (QPoint).
+        @return True on the stroke (the closing side included), False inside
+            or outside it: the interior is not part of the hit.
+        @note The margin is in screen pixels at any zoom, as `_items_near`.
+        """
         point = self.mapToScene(pos)
         scale = max(abs(self.transform().m11()), 1e-9)
-        polygon = outline.mapToScene(outline.polygon())
+        polygon = item.mapToScene(item.polygon())
         count = polygon.count()
         for index in range(count):
             a, b = polygon.at(index), polygon.at((index + 1) % count)
             if _segment_distance(point, a, b) * scale <= HIT_MARGIN_PX:
-                return "move"
-        return None
+                return True
+        return False
 
     def _report_body_hover(self, pos) -> None:
         """Show the body handles by the shared ring rule (or while a drag of the body runs); no scene scan."""
@@ -836,14 +922,25 @@ class FootprintView(QGraphicsView):
         return None
 
     def _drawing_at(self, pos):
-        """The index of the drawing (or of the drawing a handle belongs to) under a point, else -1."""
+        """The index of the drawing (or of the drawing a handle belongs to) under a point, else -1.
+
+        A keepout zone answers on its OUTLINE only, as KiCad selects a rule
+        area by its border (review 2026-11-09): its hatched item covers the
+        area, and a hit on the interior would take every right click, drag,
+        Ctrl+click and double click meant for a pad, a body dimension or the
+        background inside it. A filled graphic keeps its interior hit, as
+        KiCad's filled shapes do.
+        """
         handle = self._handle_at(pos)
         if handle is not None:
             return handle[0]
         for item in self._items_near(pos):
             index = item.data(DRAWING_KEY_ROLE)
-            if index is not None:
-                return int(index)
+            if index is None:
+                continue
+            if item.data(DRAWING_KIND_ROLE) == "zone" and not self._near_polygon_outline(item, pos):
+                continue
+            return int(index)
         return -1
 
     def _drawing_bounds(self, index):
@@ -1038,7 +1135,7 @@ class FootprintView(QGraphicsView):
             # 2026-10-14) while hovered.
             drawing_index = self._drawing_at(event.pos())
             if drawing_index >= 0:
-                self.drawing_context_requested.emit(drawing_index)
+                self.drawing_context_requested.emit(drawing_index, event.globalPosition().toPoint())
                 event.accept()
                 return
             for item in self.scene().items(self.mapToScene(event.pos())):

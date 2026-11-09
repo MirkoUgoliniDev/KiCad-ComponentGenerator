@@ -11,7 +11,7 @@ import logging
 import tempfile
 import time
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRectF, QPointF, QItemSelectionModel
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QPoint, QRect, QRectF, QPointF, QItemSelectionModel
 from PyQt6.QtGui import (QPalette, QAction, QColor, QContextMenuEvent, QFont, QPainter, QPen, QIcon)
 from PyQt6.QtWidgets import (QHBoxLayout, QGridLayout, QFrame, QScrollArea, QAbstractItemView, QComboBox, QGraphicsScene, QGraphicsView, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QMenu, QToolButton, QSplitter, QTableWidget, QTableWidgetItem, QListWidget, QToolBar, QSizePolicy, QVBoxLayout, QWidget, QLineEdit, QCheckBox)
 
@@ -986,24 +986,55 @@ class _SymbolView(QGraphicsView):
             self._tool_took_right_press = False
             event.accept()
             return
-        for item in self.items(event.pos()):
+        target = self._context_target(event.pos())
+        if target is None:
+            event.ignore()
+            return
+        if target[0] == 'pin':
+            self.pin_context_requested.emit(target[1], event.globalPos())
+        elif target[0] == 'graphic':
+            self.graphic_context_requested.emit(target[1], event.globalPos())
+        else:
+            # The Reference/Value texts have a menu like the footprint's
+            # texts (plan docs/canvas-menus-plan.md C-M6): a moved
+            # property can be put back without the properties dialog.
+            self.property_context_requested.emit(target[1], event.globalPos())
+        event.accept()
+
+    def _context_target(self, pos):
+        """@brief The menu target under a viewport point: ('pin'|'graphic'|'property', key), or None.
+
+        Same reach as the footprint preview's `_drawing_at` (parity finding
+        D1, 2026-11-09), in three passes: the items exactly under the point;
+        then a vertex handle anywhere within `canvas_menus.CONTEXT_HIT_MARGIN_PX`
+        screen pixels, which opens the menu of the element it belongs to (a
+        wire's 'vertex' or a shape's 'shape_point' handle); then any item
+        within the same margin, so a near miss of a thin stroke still hits it.
+        @param pos Viewport point (QPoint).
+        @return The target tuple, or None on the background.
+        @note The exact pass comes first so that a pin or a text under the
+            pointer is never stolen by a stroke or a handle drawn nearby: a
+            selected wire whose end handle sits on a pin end leaves the pin
+            its own menu (verification review 2026-11-09). A handle wins only
+            where nothing lies exactly under the pointer, which is where the
+            1 px exact test used to miss it (the corners of the square).
+        """
+        m = canvas_menus.CONTEXT_HIT_MARGIN_PX
+        near = self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1))
+        menu_kinds = ('pin', 'graphic', 'property')
+        for item in self.items(pos):
             target = item.data(0)
-            if target is not None and target[0] == 'pin':
-                self.pin_context_requested.emit(target[1], event.globalPos())
-                event.accept()
-                return
-            if target is not None and target[0] == 'graphic':
-                self.graphic_context_requested.emit(target[1], event.globalPos())
-                event.accept()
-                return
-            if target is not None and target[0] == 'property':
-                # The Reference/Value texts have a menu like the footprint's
-                # texts (plan docs/canvas-menus-plan.md C-M6): a moved
-                # property can be put back without the properties dialog.
-                self.property_context_requested.emit(target[1], event.globalPos())
-                event.accept()
-                return
-        event.ignore()
+            if target is not None and target[0] in menu_kinds:
+                return (target[0], target[1])
+        for item in near:
+            target = item.data(0)
+            if target is not None and target[0] in ('vertex', 'shape_point'):
+                return ('graphic', target[1])
+        for item in near:
+            target = item.data(0)
+            if target is not None and target[0] in menu_kinds:
+                return (target[0], target[1])
+        return None
 
     def leaveEvent(self, event):
         """@brief Qt override: report that the pointer left the view (hides the hover handles).
@@ -4761,7 +4792,11 @@ class SymbolTab(QWidget):
             selection (the menu then acts on every selected element, as the
             pin menu does); on any other element that element becomes the
             selection. An unknown index then opens nothing.
+        @note The clicked symbol point is read before the selection redraw:
+            that redraw may refit or scroll the view, and the screen position
+            would then name another point of the symbol.
         """
+        click = self._symbol_point_at_global(global_pos)
         self._select_graphic(index, additive=index in self.selected_graphics())
         graphics = self._graphics()
         if not 0 <= index < len(graphics):
@@ -4770,10 +4805,113 @@ class SymbolTab(QWidget):
         several = len(group) > 1 and index in group
         title = (self.tx('{count} elementi selezionati').format(count=len(group)) if several
                  else self.tx(str(graphics[index].get('label', ''))))
-        menu, keys = canvas_menus.build_element_menu(self, title, self._graphic_menu_entries(graphics[index], several))
+        # The point under the menu decides the vertex entries of a line or polygon
+        # (plan docs/footprint-back-anchor-vertices-zones-plan.md, F3).
+        picked = None if several else self.vertex_pick(index, *click)
+        menu, keys = canvas_menus.build_element_menu(
+            self, title, self._graphic_menu_entries(graphics[index], several, picked))
         chosen = canvas_menus.exec_element_menu(menu, keys, global_pos)
         if chosen is not None:
-            self._run_graphic_menu_key(chosen, index, several)
+            self._run_graphic_menu_key(chosen, index, several, picked)
+
+    def _symbol_point_at_global(self, global_pos):
+        """The symbol point (mm, Y up) under a screen position of the view (`canvas_menus.scene_point_mm`)."""
+        return canvas_menus.scene_point_mm(self.view, global_pos, SCENE_UNITS_PER_MM, -1.0)
+
+    def _vertex_pick_reach_mm(self, stroke_width_mm=0.0):
+        """@brief `canvas_menus.VERTEX_PICK_PX` converted to symbol mm at the current zoom, plus half the stroke.
+
+        @param stroke_width_mm Stroke width of the picked shape, mm (KiCad's
+            0 = default width adds nothing, as in `EDA_SHAPE::hitTest`).
+        @return Reach in mm through the shared `canvas_menus.pick_reach_mm`.
+        """
+        return canvas_menus.pick_reach_mm(self.view.transform().m11(), SCENE_UNITS_PER_MM,
+                                          stroke_width_mm=stroke_width_mm)
+
+    def vertex_pick(self, index, x, y, reach=None):
+        """@brief What a right click at (x, y) hits on a line or polygon element: a vertex, a segment or nothing.
+
+        @param index Element index in the draft graphics.
+        @param x Symbol X of the click, mm.
+        @param y Symbol Y of the click, mm (Y up).
+        @param reach Total pick reach in mm; None converts `canvas_menus.VERTEX_PICK_PX`
+            with the current zoom (the same screen reach as the footprint
+            preview) and adds half the shape's stroke width, as KiCad's
+            `EDA_SHAPE::hitTest` does.
+        @return A `vertex_edit.Pick` (vertex index among the distinct vertices,
+            or segment index with the projected point); None when the element
+            is not a line or polygon shape (`vertex_edit_shape`) or the click
+            is off its outline.
+        """
+        from ..core.vertex_edit import pick
+        from ..generators.symbol_glyphs import vertex_edit_shape
+        graphics = self._graphics()
+        if not 0 <= index < len(graphics):
+            return None
+        shape = vertex_edit_shape(graphics[index])
+        if shape is None:
+            return None
+        vertices, closed = shape
+        if reach is None:
+            primitive = (graphics[index].get('primitives') or [{}])[0]
+            reach = self._vertex_pick_reach_mm(primitive.get('width', 0.0))
+        return pick(vertices, (float(x), float(y)), closed, float(reach))
+
+    def add_vertex(self, index, segment, x, y):
+        """@brief Insert a vertex on a segment of a line or polygon element: one undo step.
+
+        @param index Element index.
+        @param segment Segment index (`vertex_edit.Pick.index` of a segment
+            pick); a polygon's closing side is the last segment.
+        @param x Symbol X of the point on the segment, mm (the projection of
+            the click); snapped to the drawing grid as a handle drag is.
+        @param y Symbol Y, mm (Y up).
+        @return True when the draft was updated; False (with the reason in
+            the status line) when the element is not a line/polygon, the
+            segment is unknown, or the snapped point lands on an end of its
+            segment; always False during a drag.
+        """
+        from ..core.vertex_edit import VertexEditRefused
+        from ..generators.symbol_glyphs import insert_shape_vertex
+        if self._symbol is None or self._gesture_before is not None:
+            return False
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        graphics = self._graphics(rows)
+        if not 0 <= index < len(graphics):
+            return False
+        sx, sy = self._grid_point(float(x), float(y))
+        try:
+            insert_shape_vertex(graphics[index], segment, sx, sy)
+        except VertexEditRefused as refused:
+            self.set_status(self.tx(canvas_menus.vertex_refusal_text(refused.reason)))
+            return False
+        return self._accept_geometry(self._with_graphics(rows, graphics))
+
+    def remove_vertex(self, index, position):
+        """@brief Remove one vertex of a line or polygon element: one undo step.
+
+        @param index Element index.
+        @param position Vertex index among the distinct vertices (a polygon's
+            closing repeat is not a vertex of its own).
+        @return True when the draft was updated; False (with the reason in the
+            status line) when a line would keep fewer than 2 vertices, a
+            polygon fewer than 3 or no area, the element is not a
+            line/polygon or the vertex is unknown; the draft is then unchanged.
+        """
+        from ..core.vertex_edit import VertexEditRefused
+        from ..generators.symbol_glyphs import remove_shape_vertex
+        if self._symbol is None or self._gesture_before is not None:
+            return False
+        rows = self._free_rows(self.draft_rows(), self._symbol)
+        graphics = self._graphics(rows)
+        if not 0 <= index < len(graphics):
+            return False
+        try:
+            remove_shape_vertex(graphics[index], position)
+        except VertexEditRefused as refused:
+            self.set_status(self.tx(canvas_menus.vertex_refusal_text(refused.reason)))
+            return False
+        return self._accept_geometry(self._with_graphics(rows, graphics))
 
     def _property_context_menu(self, key, global_pos):
         """@brief Right-click menu of a property text (Reference/Value): «Posizione predefinita».
@@ -4820,11 +4958,14 @@ class SymbolTab(QWidget):
         chosen = {name: anchors[name] for name in stored if name != key}
         return self._accept_geometry(self._with_properties(rows, chosen))
 
-    def _graphic_menu_entries(self, record, several):
+    def _graphic_menu_entries(self, record, several, picked=None):
         """@brief Entries of the element menu, in display order (title excluded).
 
         @param record The right-clicked element.
         @param several True for the menu of a multi-selection (it stops after «Duplica»).
+        @param picked `vertex_pick` of the click, or None: on a single line or
+            polygon shape the vertex entries follow «Duplica», «Aggiungi vertice»
+            enabled on a segment and «Rimuovi vertice» on a vertex.
         @return List of `canvas_menus.MenuEntry`.
         @note Decision C-M1 (2026-10-18): «Specchia» is greyed out on a single
             element made of one text, whose origin is its anchor: KiCad never
@@ -4847,6 +4988,9 @@ class SymbolTab(QWidget):
                     canvas_menus.copy_entry(tx), canvas_menus.duplicate_entry(tx)]
         if several:
             return entries
+        from ..generators.symbol_glyphs import vertex_edit_shape
+        if vertex_edit_shape(record) is not None:
+            entries += canvas_menus.vertex_entries(tx, picked)
         entries.append(canvas_menus.properties_entry(tx))
         if is_text:
             entries.append(MenuEntry('edit_text', tx('Modifica testo…'), separator_before=True))
@@ -4870,12 +5014,13 @@ class SymbolTab(QWidget):
             entries.append(MenuEntry('fit_body', tx('Adatta il rettangolo del corpo all’elemento')))
         return entries
 
-    def _run_graphic_menu_key(self, key, index, several):
+    def _run_graphic_menu_key(self, key, index, several, picked=None):
         """@brief Run the operation of a chosen element-menu entry.
 
         @param key Key returned by `canvas_menus.exec_element_menu`.
         @param index Index of the right-clicked element.
         @param several True when the menu acted on a multi-selection.
+        @param picked The `vertex_pick` the menu was built with (vertex entries only).
         """
         transforms = {canvas_menus.ROTATE_CCW: ('rotate', 90), canvas_menus.ROTATE_CW: ('rotate', -90),
                       canvas_menus.MIRROR: ('mirror', None), canvas_menus.DELETE: ('delete', None)}
@@ -4891,6 +5036,10 @@ class SymbolTab(QWidget):
             self.duplicate_selected()
         elif key == canvas_menus.PROPERTIES:
             self._edit_element_properties(index)
+        elif key == canvas_menus.ADD_VERTEX and picked is not None:
+            self.add_vertex(index, picked.index, *picked.point)
+        elif key == canvas_menus.REMOVE_VERTEX and picked is not None:
+            self.remove_vertex(index, picked.index)
         elif key == 'edit_text':
             self.edit_text(index)
         elif key.startswith('fill:'):

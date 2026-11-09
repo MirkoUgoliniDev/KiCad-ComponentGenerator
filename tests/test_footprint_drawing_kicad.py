@@ -432,7 +432,9 @@ def test_backspace_removes_a_point_and_the_hint_follows(fp):
 
 def test_clicking_a_layer_name_activates_it_and_shows_a_hidden_layer(fp):
     names, boxes = fp.fp_layer_names, fp.fp_layer_boxes
-    assert set(names) == {"F.SilkS", "F.Fab", "Cmts.User", "Dwgs.User"}
+    # B.SilkS and B.Fab are drawable since 2026-11-09 (plan F1); the zones row is not a drawing layer.
+    assert set(names) == {"F.SilkS", "B.SilkS", "F.Fab", "B.Fab", "Cmts.User", "Dwgs.User"}
+    assert "zones" not in names
     assert "pads" not in names and "F.CrtYd" not in names, "non-drawable rows are not selectable"
     boxes["Cmts.User"].setChecked(False)
     QTest.mouseClick(names["Cmts.User"], Qt.MouseButton.LeftButton)

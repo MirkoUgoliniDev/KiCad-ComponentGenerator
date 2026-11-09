@@ -227,7 +227,10 @@ def test_the_outline_menu_keeps_the_drawing_origin_and_adds_the_body_sizes(body,
     from PyQt6.QtWidgets import QMenu
     window = body
     offered, edited = [], []
-    pick = {"index": 2}
+    # CONTRACT CHANGED 2026-11-09 (review, item 3): the anchor entries sit
+    # between the origin entries and the body sizes, so the first size is
+    # the fifth entry.
+    pick = {"index": 4}
 
     def choose(menu, *_args):
         actions = [a for a in menu.actions() if not a.isSeparator()]
@@ -242,11 +245,44 @@ def test_the_outline_menu_keeps_the_drawing_origin_and_adds_the_body_sizes(body,
     QTest.mousePress(viewport, Qt.MouseButton.RightButton, pos=corner)
     QTest.mouseRelease(viewport, Qt.MouseButton.RightButton, pos=corner)
     assert offered[-1][0].startswith("Imposta origine di disegno:")
-    assert offered[-1][2:] == ["Modifica quota orizzontale…", "Modifica quota verticale…"]
+    assert offered[-1][2:] == ["Sposta ancora qui", "Ripristina ancora del footprint",
+                               "Modifica quota orizzontale…", "Modifica quota verticale…"]
     assert edited == [window.BODY_DIM_X]
     inside = vp(window, 0.0, 3.0)
     QTest.mouseMove(viewport, inside)
     QTest.mousePress(viewport, Qt.MouseButton.RightButton, pos=inside)
     QTest.mouseRelease(viewport, Qt.MouseButton.RightButton, pos=inside)
-    assert len(offered[-1]) == 2 and offered[-1][0].startswith("Imposta origine di disegno:")
+    # CONTRACT CHANGED 2026-11-09 (plan F2): the background menu also offers the anchor entries;
+    # still no body size entry off the outline.
+    assert offered[-1][0].startswith("Imposta origine di disegno:")
+    assert offered[-1][1:] == ["Ripristina origine del footprint", "Sposta ancora qui",
+                               "Ripristina ancora del footprint"]
     assert edited == [window.BODY_DIM_X]
+
+
+def test_the_outline_menu_moves_the_anchor_to_the_corner(body, monkeypatch):
+    """Review 2026-11-09, item 3: «Sposta ancora qui» on the outline, as on the background.
+
+    Positive: chosen on a body corner, the anchor goes to that corner (the
+    snapped click), one draft step. Negative: «Ripristina ancora del
+    footprint» is disabled while the anchor is unmoved.
+    """
+    from PyQt6.QtWidgets import QMenu
+    window = body
+    seen = {}
+
+    def choose(menu, *_args):
+        actions = {a.text(): a for a in menu.actions() if not a.isSeparator()}
+        seen.update({text: action.isEnabled() for text, action in actions.items()})
+        return actions["Sposta ancora qui"]
+
+    monkeypatch.setattr(QMenu, "exec", choose)
+    viewport = window.preview_view.viewport()
+    corner = vp(window, -11.0, 8.0)
+    QTest.mouseMove(viewport, corner)
+    QTest.mousePress(viewport, Qt.MouseButton.RightButton, pos=corner)
+    QTest.mouseRelease(viewport, Qt.MouseButton.RightButton, pos=corner)
+    assert seen["Ripristina ancora del footprint"] is False, "negative: nothing to restore yet"
+    assert "Modifica quota orizzontale…" in seen, "the outline's own menu, not the background's"
+    assert window.footprint_anchor == pytest.approx((-11.0, 8.0))
+    assert window.has_pending_footprint_edits()

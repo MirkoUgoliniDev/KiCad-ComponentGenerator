@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
 from html import escape
 import json
 from functools import partial
@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QEventLoop, QObject, QPointF, QRectF, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen,
-                         QPixmap, QPolygonF, QShortcut, QTextCursor)
+                         QPixmap, QPolygonF, QShortcut, QTextCursor, QTransform)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsScene,
@@ -56,7 +56,8 @@ from ..generators.package import build_package
 from ..generators.package import preview_grid_origin as package_preview_grid_origin
 from ..generators.castellated_module import preview_grid_origin as castellated_preview_grid_origin
 from ..core.footprint import text_grid_origin, user_draw_width
-from ..core.footprint_layers import LAYERS as _FOOTPRINT_LAYER_TABLE, drawable_layers as _drawable_fp_layers
+from ..core.footprint_layers import (COPPER_COLOURS as _ZONE_COPPER_COLOURS, LAYERS as _FOOTPRINT_LAYER_TABLE,
+                                      drawable_layers as _drawable_fp_layers, is_back_layer as _is_back_layer)
 from ..core import object_snap as _object_snap
 from ..core.package_geometry import (DOUBT_BODY_OVER_LANDS, DOUBT_BODY_PADS, PackageGeometry,
                                      package_from_mapping)
@@ -1385,6 +1386,78 @@ def _layer_color(layer: str) -> str:
     return KICAD_LAYER_COLORS.get(layer, KICAD_LAYER_COLORS["F.SilkS"])
 
 
+#: Preview z values of the user drawings (plan F1, KiCad's top view): a
+#: back-layer drawing (B.SilkS, B.Fab) lies UNDER the generated outlines
+#: (0.5) and the pads (1), a back-only keepout zone under them too; front
+#: drawings stay above the copper (6), a front zone just above the pads.
+_FP_BACK_DRAWING_Z = 0.3
+_FP_FRONT_DRAWING_Z = 6.0
+_FP_BACK_ZONE_Z = 0.2
+_FP_FRONT_ZONE_Z = 1.5
+#: «Layer» panel key of the keepout zones (`MainWindow.FP_ZONES_VIEW_KEY`).
+_FP_ZONES_VIEW_KEY = "zones"
+
+
+def _drawing_view_layer(record) -> str:
+    """@brief The «Layer» panel key that shows or hides a drawing record.
+
+    @param record A validated drawing record.
+    @return `MainWindow.FP_ZONES_VIEW_KEY` («zones») for a keepout zone, which
+        has copper `layers` and no drawing `layer`; the record's KiCad layer otherwise.
+    """
+    if record.get("kind") == "zone":
+        return _FP_ZONES_VIEW_KEY
+    return str(record.get("layer", ""))
+
+
+def _drawing_colour(record, copper: str | None = None) -> str:
+    """@brief The colour a drawing record is drawn in: its layer's, or a zone's copper colour.
+
+    @param record A validated drawing record.
+    @param copper For a zone, the copper layer of the item being coloured
+        («F.Cu» / «B.Cu»); None takes the zone's first layer.
+    @return «#rrggbb»: `KICAD_LAYER_COLORS` of the drawing layer, or
+        `core.footprint_layers.COPPER_COLOURS` of the zone's copper layer.
+    """
+    if record.get("kind") == "zone":
+        layers = list(record.get("layers") or ("F.Cu",))
+        return _ZONE_COPPER_COLOURS.get(copper or layers[0], _ZONE_COPPER_COLOURS["F.Cu"])
+    return _layer_color(record.get("layer", ""))
+
+
+def _mirror_scene_item(item, centre, direction) -> None:
+    """@brief Reflect an unparented scene item along `direction` about the line through `centre`.
+
+    @param item The item (any QGraphicsItem without a parent).
+    @param centre (x, y) scene px of a point of the mirror line.
+    @param direction (dx, dy) the reflected direction: the mirror line is
+        perpendicular to it (a text's reading direction for a back text).
+    @note The item's whole scene transform (position, rotation, scale, base
+        transform) is folded into its base transform followed by the
+        reflection, so the result does not depend on the order Qt combines
+        its properties in. Used for the back-layer texts (plan F1): KiCad
+        draws a mirrored text reflected along its own reading direction about
+        its anchor, as kicad-cli 10 `fp export svg` shows (W1-core,
+        `core.footprint.mirrored_justify`).
+    """
+    dx, dy = float(direction[0]), float(direction[1])
+    length = math.hypot(dx, dy)
+    if length <= 0.0:
+        return
+    ux, uy = dx / length, dy / length
+    # Householder reflection I - 2 u u^T (symmetric), about `centre`.
+    m11, m12, m22 = 1.0 - 2.0 * ux * ux, -2.0 * ux * uy, 1.0 - 2.0 * uy * uy
+    cx, cy = float(centre[0]), float(centre[1])
+    reflect = (QTransform.fromTranslate(-cx, -cy) * QTransform(m11, m12, m12, m22, 0.0, 0.0)
+               * QTransform.fromTranslate(cx, cy))
+    whole = item.sceneTransform() * reflect
+    item.setRotation(0.0)
+    item.setScale(1.0)
+    item.setTransformOriginPoint(0.0, 0.0)
+    item.setPos(0.0, 0.0)
+    item.setTransform(whole)
+
+
 def _ghost_pen(color: str = YELLOW) -> QPen:
     """@brief The dashed pen of a shape in progress, as in the symbol editor.
 
@@ -1935,6 +2008,11 @@ class MainWindow(QMainWindow):
         #: place; the drawing selection is valid for one revision only.
         self._fp_drawings_revision = 0
         self.footprint_drawings = []
+        #: Footprint anchor of the draft (plan F2): (x, y) mm in the
+        #: GENERATOR's coordinates (Y down) of the point the written .kicad_mod
+        #: puts at (0, 0). Nothing stored is moved by it: only the writer
+        #: (`Footprint.shift_origin`) and the 3D model offset apply it.
+        self.footprint_anchor: tuple = (0.0, 0.0)
         #: ((first, second), axis) of the orthogonal dimension being drawn: the
         #: axis its preview showed last, kept while the pointer is inside the
         #: box of the two points, as KiCad does (`_fp_ortho_axis_for`).
@@ -8593,6 +8671,9 @@ class MainWindow(QMainWindow):
             "host_mounting": self._mounting_state(),
             "footprint_texts": text_positions_json(applied["texts"]),
             "footprint_drawings": deepcopy(applied["drawings"]),
+            # The APPLIED anchor (plan F2): the one the .kicad_mod is written
+            # with, read back for the 3D model offset of every delivery.
+            "footprint_anchor": [float(v) for v in applied.get("anchor", (0.0, 0.0))],
             # A view setting, saved as soon as it changes (never a draft edit).
             "footprint_drawing_origin": self.footprint_drawing_origin,
             # The picture under the drawing: a view setting too (2026-11-06).
@@ -8892,6 +8973,8 @@ class MainWindow(QMainWindow):
         # where the user sees them (saved with the project's next save).
         self.footprint_drawings = _migrate_drawing_texts(
             validate_footprint_drawings(state.get("footprint_drawings")))
+        # A project saved before the anchor existed has none: the origin is unmoved.
+        self.footprint_anchor = self._valid_footprint_anchor(state.get("footprint_anchor"))
         origin = state.get("footprint_drawing_origin")
         # A key the next drawing cannot resolve falls back to the footprint
         # origin there (`_drawing_origin_mm`); only the type is checked here.
@@ -13629,12 +13712,16 @@ class MainWindow(QMainWindow):
         """
         return self._footprint_signature_of(params)[0]
 
-    def _footprint_signature_of(self, params, drawings=()) -> tuple:
+    def _footprint_signature_of(self, params, drawings=(), anchor=(0.0, 0.0)) -> tuple:
         """@brief Pads and outline extents of the footprint the generators build from `params`.
 
         @param params PinHeaderParams, CastellatedModuleParams or PackageGeometry.
         @param drawings The applied user drawings, added as GenerateWorker
             adds them (they may lie on F.Fab): () for none.
+        @param anchor The applied footprint anchor (plan F2), applied as
+            GenerateWorker applies it (`Footprint.shift_origin`): a file on
+            disk written with another anchor has its pads elsewhere, so the
+            alignment gate tells it apart. (0, 0) builds exactly as before.
         @return (pad records, outline extents), like `footprint_text_signature`
             but with the pads taken from the built objects (exact values).
         @throws ValueError, TypeError, ArithmeticError When the generator
@@ -13650,6 +13737,9 @@ class MainWindow(QMainWindow):
             # A refresh during window construction, before __init__ set it.
             cache = self._pad_records_cache = {}
         drawings_key = repr(drawings) if drawings else ""
+        anchor = (float(anchor[0]), float(anchor[1]))
+        if anchor != (0.0, 0.0):
+            drawings_key += f"|anchor={anchor!r}"
         key = ((type(params).__name__, id(params), drawings_key)
                if isinstance(params, PackageGeometry)
                else (type(params).__name__, _geometry_key(params), drawings_key))
@@ -13661,6 +13751,8 @@ class MainWindow(QMainWindow):
             from ..core.footprint import drawing_graphics
             for item in drawing_graphics(drawings):
                 footprint.add_graphic(item)
+        # A fresh build: moved in place, never a footprint the preview shows.
+        footprint.shift_origin(*anchor)
         rendered = footprint_text_signature(footprint.render())
         signature = (footprint_pad_records(footprint), rendered[1] if rendered else {})
         if len(cache) >= 8:
@@ -13775,7 +13867,7 @@ class MainWindow(QMainWindow):
         try:
             _params, host = self._footprint_inputs_now()
             expected, expected_extents = self._footprint_signature_of(
-                host, self._applied_drawings_now())
+                host, self._applied_drawings_now(), self.applied_footprint_anchor())
         except (ValueError, TypeError, ArithmeticError, KeyError, IndexError) as exc:
             return ("footprint_invalid", self.i18n.text(
                 "Footprint non verificabile: i parametri attuali non sono validi ({error}). "
@@ -13799,6 +13891,101 @@ class MainWindow(QMainWindow):
                 "cambiate, o file di una versione precedente). Rigenera il footprint («Applica "
                 "ai file» o una nuova generazione) prima di provarlo o installarlo.")))
         return None
+
+    def applied_footprint_anchor(self) -> tuple:
+        """@brief The APPLIED footprint anchor: the one the .kicad_mod on disk is written with (plan F2).
+
+        @return (x, y) mm in generator coordinates; (0, 0) when never moved.
+        @note The project file saves the applied anchor beside the applied
+            drawings, and every write of the .kicad_mod uses it
+            (`_applied_footprint_in_memory`). A draft anchor never reaches it:
+            moving the anchor without «Applica» changes neither the file nor
+            this value, so the 3D model offset of the KiCad tab
+            (`_kicad_model_offset`) cannot drift from the file. A file on disk
+            written with another anchor fails the alignment gate (its pads
+            differ from `_footprint_signature_of` built with this anchor), so
+            the KiCad commands are blocked until it is rewritten.
+        """
+        return tuple(self._applied_footprint_state().get("anchor", (0.0, 0.0)))
+
+    def _kicad_model_offset(self) -> tuple:
+        """@brief The 3D model offset of the deliveries: `model_offset_for_anchor` of the applied anchor.
+
+        @return (x, y, z) mm in KiCad's 3D axes (Y up).
+        @throws ValueError When the applied anchor is not two finite numbers.
+        """
+        from ..services.kicad_library import model_offset_for_anchor
+        return model_offset_for_anchor(*self.applied_footprint_anchor())
+
+    @staticmethod
+    def _valid_footprint_anchor(raw, default=(0.0, 0.0)):
+        """@brief A saved footprint anchor, validated: two finite numbers within the drawing area.
+
+        @param raw Whatever the project or recovery file holds.
+        @param default Returned for a missing or invalid value.
+        @return (x, y) mm rounded to 0.1 um; `default` for a missing or
+            invalid value (a bool, a non-finite number, a coordinate beyond
+            `core.footprint.TEXT_POSITION_LIMIT_MM`, the bound of every drawing point).
+        @note The bound is checked BEFORE `math.isfinite` (review 2026-11-09):
+            a huge JSON integer (10**400) overflows the float conversion of
+            `isfinite` and raised OverflowError on project load and on
+            «Recupera bozza»; an int compared with the float bound is exact
+            and never overflows, and a NaN fails `isfinite` after it.
+        """
+        from ..core.footprint import TEXT_POSITION_LIMIT_MM
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            return default
+        values = []
+        for value in raw:
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or abs(value) > TEXT_POSITION_LIMIT_MM or not math.isfinite(value)):
+                return default
+            values.append(round(float(value), 4) + 0.0)
+        return (values[0], values[1])
+
+    def set_footprint_anchor(self, x: float, y: float) -> bool:
+        """@brief «Sposta ancora»: make (x, y) the footprint anchor of the draft, one undo step (plan F2).
+
+        @param x Anchor X, footprint mm in generator coordinates (the snapped click).
+        @param y Anchor Y, mm (Y down).
+        @return True when the draft changed; False for the same anchor or a
+            point the validation refuses (a toast says why).
+        @note Nothing stored moves: drawings, texts and pads keep their
+            coordinates; «Applica» writes the file with this point at (0, 0).
+        """
+        anchor = self._valid_footprint_anchor((x, y), default=None)
+        if anchor is None:
+            # Beyond the drawing area: the same reason a drawing point gets.
+            self._draw_feedback_toast(self.i18n.text("Modifica scartata."), self._degenerate_drawing_text(
+                {"kind": "line", "points": [[x, y], [x, y]]}))
+            return False
+        if anchor == tuple(self.footprint_anchor):
+            return False
+        return self._edit_footprint_draft({"anchor": anchor})
+
+    def reset_footprint_anchor(self) -> bool:
+        """@brief «Ripristina ancora del footprint»: put the anchor back on the generator's origin, one undo step.
+
+        @return True when the draft changed.
+        """
+        return self.set_footprint_anchor(0.0, 0.0)
+
+    def _arm_footprint_anchor_tool(self) -> None:
+        """@brief Arm (or disarm) «Sposta ancora»: one click, snapped like a drawing click, sets the anchor.
+
+        @note The click goes through `tool_snap_ex` (object snap: pads,
+            corners, drawings; then the drawing grid), so the anchor lands on
+            what a drawing point would; Escape cancels through the router.
+        """
+        from .canvas_clicktools import ToolSpec
+        collector = self._fp_click_collector()
+        armed = collector is not None and collector.spec is not None and collector.spec.key == self._ANCHOR_TOOL
+        self._cancel_footprint_drawing()
+        if not armed:
+            self.preview_view.set_draw_mode(True, ToolSpec(self._ANCHOR_TOOL, count=1))
+        button = getattr(self, "btn_fp_anchor", None)
+        if button is not None:
+            button.setChecked(not armed)
 
     def _applied_drawings_now(self) -> list:
         """@brief The APPLIED user drawings of the footprint (what the .kicad_mod holds).
@@ -14407,11 +14594,23 @@ class MainWindow(QMainWindow):
         @note Refused while work runs; the open dialog counts as work in
             progress for the KiCad gate, and a footprint rewrite deferred
             while it was open is retried when it closes.
+        @note CONTRACT CHANGED (review 2026-11-09, L3): refused, with the
+            gate's own reason and remedy, while the .kicad_mod on disk does
+            not match the applied footprint (`_footprint_pending_block`,
+            `_footprint_alignment_block`): the 3D import test places the
+            model with the APPLIED anchor's offset, which only fits a file
+            written with that anchor. A stale symbol or STEP does not refuse
+            the check (the check itself reports them).
         """
         from .component_check_dialog import ComponentCheckDialog
         if self._background_work_running() or self._automatic_generation_active:
             QMessageBox.information(self, self.i18n.text('Verifica componente per KiCad'),
                                     self.i18n.text('Attendi la fine del lavoro in corso.'))
+            return
+        stale = self._footprint_pending_block() or self._footprint_alignment_block()
+        if stale is not None:
+            self._append_log(stale[1])
+            QMessageBox.warning(self, self.i18n.text('Verifica componente per KiCad'), stale[1])
             return
         if not self.symbol_tab.has_pending_edits():
             self._refresh_symbol_tab()
@@ -14421,7 +14620,10 @@ class MainWindow(QMainWindow):
         args = dict(directory=self._project_dir(), name=self._component_name(),
                     rows=deepcopy(self.symbol_tab.rows()), pending=pending,
                     issues=self.symbol_tab.review_issues() if not pending else (),
-                    footprint_pending=self.has_pending_footprint_edits())
+                    footprint_pending=self.has_pending_footprint_edits(),
+                    # The 3D import test places the model as the deliveries
+                    # will: the APPLIED anchor's offset (plan F2).
+                    model_offset=self._kicad_model_offset())
         dialog = ComponentCheckDialog(args, self, tx=self.i18n.text)
         self._component_review_dialog = dialog
         # The open dialog counts as work in progress (`_background_work_running`):
@@ -14624,9 +14826,12 @@ class MainWindow(QMainWindow):
     def _current_kicad_artifacts(self):
         """@brief Return the complete footprint/STEP set or report the problem."""
         try:
+            # The model offset of the APPLIED anchor, the one the .kicad_mod
+            # on disk was written with (plan F2, `applied_footprint_anchor`).
             return discover_component_artifacts(
-                self._project_dir(), self._component_name(), require_3d=True)
-        except (KiCadLibraryError, OSError) as exc:
+                self._project_dir(), self._component_name(), require_3d=True,
+                model_offset=self._kicad_model_offset())
+        except (KiCadLibraryError, OSError, ValueError) as exc:
             QMessageBox.warning(
                 self, self.i18n.text("File KiCad incompleti"),
                 self._kicad_error_text(exc))
@@ -14953,6 +15158,17 @@ class MainWindow(QMainWindow):
             # gave the event loop a chance to rewrite the files.
             if self._refuse_kicad_command():
                 return
+            # Defence in depth (review 2026-11-09, L1): the model offset is
+            # read again together with the gate, after the modal questions,
+            # so an applied anchor changed meanwhile can never pair the file
+            # on disk with the offset captured before the questions.
+            if is_dataclass(artifacts):
+                try:
+                    artifacts = replace(artifacts, model_offset=self._kicad_model_offset())
+                except ValueError as exc:
+                    QMessageBox.warning(self, self.i18n.text("File KiCad incompleti"),
+                                        self._kicad_error_text(exc))
+                    return
             try:
                 result = install_component_library(
                     artifacts, destination, library_name="KiCadGen",
@@ -16051,6 +16267,8 @@ class MainWindow(QMainWindow):
         # whatever KiCad shows in it (user, 2026-10-17).
         self._worker.text_positions = dict(self.footprint_text_positions)
         self._worker.drawings = deepcopy(self.footprint_drawings)
+        # The applied anchor (`_generate` runs inside `_applied_footprint_in_memory`).
+        self._worker.anchor = tuple(self.footprint_anchor)
         # PackageGeometry carries no datasheet: the worker passes it to
         # build_package itself (the other generators read it from params).
         self._worker.datasheet = self._effective_datasheet()
@@ -16677,8 +16895,9 @@ class MainWindow(QMainWindow):
         # Drawing tools as KiCad (plan A7): they arm a tool or open a dialog,
         # never edit the draft by themselves, so no deferred checkpoint.
         from .canvas_tool_hints import PROPERTIES_SHORTCUT, TOOL_SHORTCUTS
+        # Only the tools KiCad gives a hotkey (the keepout zone has none in this table).
         tool_bindings = [(TOOL_SHORTCUTS[key], lambda k=key: self._arm_footprint_tool_shortcut(k))
-                         for key in self.FOOTPRINT_PALETTE_TOOLS + ("dimension", "measure")]
+                         for key in self.FOOTPRINT_PALETTE_TOOLS + ("dimension", "measure") if key in TOOL_SHORTCUTS]
         tool_bindings.append((PROPERTIES_SHORTCUT, self._edit_footprint_target_properties))
         self._fp_shortcuts += bind_shortcuts(self.preview_view, tool_bindings, runner=None,
                                              context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -16700,7 +16919,21 @@ class MainWindow(QMainWindow):
 
     #: Shape tools of the «Disegno» grid after Select, in grid order (plan A2).
     #: The «Quota» drop-down button follows them (`footprint_tool_glyphs`).
-    FOOTPRINT_PALETTE_TOOLS = ("line", "polygon", "rectangle", "circle", "arc", "bezier", "text", "textbox")
+    #: The keepout zone (plan F4) closes the shape tools: it is drawn like a
+    #: polygon but lives on copper, so it comes last.
+    FOOTPRINT_PALETTE_TOOLS = ("line", "polygon", "rectangle", "circle", "arc", "bezier", "text", "textbox", "zone")
+
+    #: Tooltip of the keepout zone tool (Italian source).
+    _ZONE_TOOL_HINT = ("Zona di esclusione: clicca i vertici, chiudi sul primo punto o con il tasto destro, "
+                       "poi scegli rame e divieti; Esc per annullare")
+
+    #: Click tool key of «Sposta ancora» (plan F2): one snapped click sets the
+    #: footprint anchor. Not a drawing tool: it is outside the «Disegno» grid.
+    _ANCHOR_TOOL = "anchor"
+
+    #: Step hint under the canvas while «Sposta ancora» is armed (Italian source).
+    _ANCHOR_TOOL_HINT = ("Clicca il punto che diventa l'origine del footprint nel file (pad, griglia, oggetti); "
+                         "Esc per annullare")
 
     #: Click tool key -> drawing kind it stores, where they differ: the Bezier
     #: tool (named as in the symbol editor and the shortcut table) stores a
@@ -16722,14 +16955,14 @@ class MainWindow(QMainWindow):
     #: text is asked after the second click).
     FOOTPRINT_TOOL_CLICKS = {"line": 0, "polygon": 0, "rectangle": 2, "circle": 2, "arc": 3, "bezier": 4,
                              "text": 1, "textbox": 2, "dimension": 3, "dimension_orthogonal": 3,
-                             "dimension_radial": 2, "dimension_center": 2, "dimension_leader": 2}
+                             "dimension_radial": 2, "dimension_center": 2, "dimension_leader": 2, "zone": 0}
 
     #: Tools whose segment from the previous collected point follows the angle
     #: mode (plan A6), with the index of the collected-point count at which it
     #: applies (None = every point after the first): line and polygon at every
     #: vertex; a linear dimension only for its second measured point (the
     #: placement click is free); a leader for its second point.
-    FOOTPRINT_ANGLE_TOOLS = {"line": None, "polygon": None, "dimension": 1, "dimension_orthogonal": 1,
+    FOOTPRINT_ANGLE_TOOLS = {"line": None, "polygon": None, "zone": None, "dimension": 1, "dimension_orthogonal": 1,
                              "dimension_leader": 1}
 
     #: Labels of the angle modes in the «Disegno» control (Italian sources, as the symbol editor's).
@@ -16779,7 +17012,37 @@ class MainWindow(QMainWindow):
         glyphs.setdefault("bezier", fg.bezier_glyph())
         glyphs["textbox"] = fg.textbox_glyph()
         glyphs.update(fg.dimension_glyphs())
+        glyphs["zone"] = self._zone_tool_glyph()
         return glyphs
+
+    @staticmethod
+    def _zone_tool_glyph():
+        """@brief Palette glyph of the keepout zone tool: a closed outline crossed by hatch strokes.
+
+        @return `symbol_glyphs.Glyph` «Zona di esclusione» (key "zone"), drawn
+            by the shared `glyph_icon` like every palette icon (glyph mm, Y up).
+        """
+        from ..generators.symbol_glyphs import SHAPE_WIDTH_MM, Glyph, Primitive
+
+        def stroke(*points):
+            return Primitive("polyline", tuple(points), 0.0, "none", SHAPE_WIDTH_MM)
+        outline = stroke((0.0, 0.0), (5.08, 0.0), (5.08, 3.81), (0.0, 3.81), (0.0, 0.0))
+        # Hatch strokes leaning as KiCad's rule-area border hatch.
+        hatch = [stroke((0.0, 1.27), (1.27, 0.0)), stroke((0.0, 2.54), (2.54, 0.0)),
+                 stroke((0.0, 3.81), (3.81, 0.0)), stroke((1.27, 3.81), (5.08, 0.0)),
+                 stroke((2.54, 3.81), (5.08, 1.27)), stroke((3.81, 3.81), (5.08, 2.54))]
+        return Glyph("zone", "Zona di esclusione", (outline, *hatch), (), "", group="tool")
+
+    @staticmethod
+    def _fp_tool_icon_colour(key: str, layer_colour: str) -> str:
+        """@brief The tint of a palette icon: the active layer's, the copper colour for the keepout zone.
+
+        @param key Palette key.
+        @param layer_colour Colour of the active drawing layer.
+        @return «#rrggbb»: a keepout zone is drawn on copper whatever the
+            drawing layer, so its icon keeps the F.Cu colour (plan F4).
+        """
+        return _ZONE_COPPER_COLOURS["F.Cu"] if key == "zone" else layer_colour
 
     def _fp_tool_tooltip(self, key: str) -> str:
         """@brief Translated tooltip of a palette tool: its hint, then its KiCad shortcut.
@@ -16790,7 +17053,8 @@ class MainWindow(QMainWindow):
         """
         from .canvas_tool_hints import tooltip
         from .symbol_tab import TOOL_HINTS
-        hints = {"textbox": "Casella di testo: clicca due angoli opposti, poi scrivi il testo; Esc per annullare"}
+        hints = {"textbox": "Casella di testo: clicca due angoli opposti, poi scrivi il testo; Esc per annullare",
+                 "zone": self._ZONE_TOOL_HINT}
         source = TOOL_HINTS.get(key) or hints.get(key) or self.FOOTPRINT_DRAWING_KIND_NAMES.get(key, key)
         return tooltip(self.i18n.text(source), key)
 
@@ -16829,8 +17093,8 @@ class MainWindow(QMainWindow):
         select.setProperty("i18n_skip", True)
         for key in self.FOOTPRINT_PALETTE_TOOLS:
             glyph = glyphs[key]
-            button = grid.add_tool(key, glyph_icon(glyph, 28, stroke=colour), self._fp_tool_tooltip(key),
-                                   tx(glyph.label))
+            button = grid.add_tool(key, glyph_icon(glyph, 28, stroke=self._fp_tool_icon_colour(key, colour)),
+                                   self._fp_tool_tooltip(key), tx(glyph.label))
             # Composed tooltip (hint + shortcut): refreshed by `_retranslate_footprint_palette`.
             button.setProperty("i18n_skip", True)
         variants = [(variant, tx(label), glyph_icon(glyphs[variant], 28, stroke=colour))
@@ -16842,6 +17106,15 @@ class MainWindow(QMainWindow):
         grid.tool_triggered.connect(self._on_fp_tool_triggered)
         self.fp_tool_grid = grid
         column.addWidget(grid)
+        # «Sposta ancora» (plan F2): not a drawing, so a button of its own
+        # under the grid; checked while its one-click tool is armed.
+        self.btn_fp_anchor = QPushButton("Sposta ancora")
+        self.btn_fp_anchor.setCheckable(True)
+        self.btn_fp_anchor.setToolTip(tx(
+            "Sposta l'ancora del footprint: il punto cliccato diventa l'origine (0, 0) nel file .kicad_mod; "
+            "pad e disegni restano dove sono, il modello STEP li segue."))
+        self.btn_fp_anchor.clicked.connect(lambda _checked: self._arm_footprint_anchor_tool())
+        column.addWidget(self.btn_fp_anchor)
         form = QFormLayout()
         form.setContentsMargins(0, 2, 0, 0)
         form.setHorizontalSpacing(4)
@@ -17002,7 +17275,8 @@ class MainWindow(QMainWindow):
         grid = getattr(self, "fp_tool_grid", None)
         if grid is not None:
             grid.set_accent(colour)
-            icons = {key: glyph_icon(glyph, 28, stroke=colour) for key, glyph in self._fp_glyphs.items()}
+            icons = {key: glyph_icon(glyph, 28, stroke=self._fp_tool_icon_colour(key, colour))
+                     for key, glyph in self._fp_glyphs.items()}
             icons[SELECT_KEY] = select_arrow_icon(28, colour)
             grid.set_icons(icons)
         spin = getattr(self, "spin_fp_draw_width", None)
@@ -17171,22 +17445,35 @@ class MainWindow(QMainWindow):
     #: Short labels of the KiCad layers in the «Layer» group (the combo uses
     #: the table's longer ones); colours come from `KICAD_LAYER_COLORS`.
     _FP_VIEW_LAYER_LABELS = {"F.SilkS": "Serigrafia", "F.Fab": "Fabbricazione", "F.CrtYd": "Courtyard",
-                             "Cmts.User": "Commenti", "Dwgs.User": "Disegni utente"}
+                             "Cmts.User": "Commenti", "Dwgs.User": "Disegni utente",
+                             "B.SilkS": "Serigrafia inferiore", "B.Fab": "Fabbricazione inferiore"}
+
+    #: Preview layer key of the keepout zones (plan F4): ONE row of the
+    #: «Layer» group shows or hides every zone, front and back. A zone is a
+    #: rule area on copper, not ink on a drawing layer, so it gets its own
+    #: switch instead of following the pads («Pad (rame)»), which would hide
+    #: the copper the zone is meant to be checked against.
+    FP_ZONES_VIEW_KEY = _FP_ZONES_VIEW_KEY
 
     #: Preview layers of the «Layer» group: (key, label, swatch colour). The
     #: keys are the `LAYER_ROLE` tags the drawers put on their items; the
     #: KiCad layers keep their KiCad names and default colours, in the order
-    #: of the per-layer table (silkscreen, fabrication, comments, user
-    #: drawings) with the courtyard after the fabrication as before.
+    #: of the per-layer table (each back layer after its front twin, plan F1:
+    #: silkscreen, fabrication, comments, user drawings) with the courtyard
+    #: after the fabrication as before, then the keepout zones (swatch: the
+    #: front copper colour).
     FOOTPRINT_VIEW_LAYERS = (
         ("reference", "Immagine di riferimento", SUBTEXT),
         ("pads", "Pad (rame)", BLUE),
         ("holes", "Fori", SURFACE1),
         ("F.SilkS", _FP_VIEW_LAYER_LABELS["F.SilkS"], KICAD_LAYER_COLORS["F.SilkS"]),
+        ("B.SilkS", _FP_VIEW_LAYER_LABELS["B.SilkS"], KICAD_LAYER_COLORS["B.SilkS"]),
         ("F.Fab", _FP_VIEW_LAYER_LABELS["F.Fab"], KICAD_LAYER_COLORS["F.Fab"]),
+        ("B.Fab", _FP_VIEW_LAYER_LABELS["B.Fab"], KICAD_LAYER_COLORS["B.Fab"]),
         ("F.CrtYd", _FP_VIEW_LAYER_LABELS["F.CrtYd"], KICAD_LAYER_COLORS["F.CrtYd"]),
         ("Cmts.User", _FP_VIEW_LAYER_LABELS["Cmts.User"], KICAD_LAYER_COLORS["Cmts.User"]),
         ("Dwgs.User", _FP_VIEW_LAYER_LABELS["Dwgs.User"], KICAD_LAYER_COLORS["Dwgs.User"]),
+        (FP_ZONES_VIEW_KEY, "Zone di esclusione", _ZONE_COPPER_COLOURS["F.Cu"]),
         ("texts", "Testi Reference/Value", TEXT),
         ("numbers", "Numeri e nomi dei pad", TEXT),
         ("dimensions", "Quote", DIMENSION_COLOR),
@@ -18025,8 +18312,9 @@ class MainWindow(QMainWindow):
             the closing click counted).
         """
         from .canvas_clicktools import ToolSpec
-        if key == "polygon":
-            return ToolSpec("polygon", count=0, close_after=4, min_points=3)
+        if key in ("polygon", "zone"):
+            # A keepout zone is clicked and closed exactly as a polygon (plan F4).
+            return ToolSpec(key, count=0, close_after=4, min_points=3)
         return ToolSpec(key, count=self.FOOTPRINT_TOOL_CLICKS[key], close_after=4 if key == "line" else 0)
 
     @staticmethod
@@ -18073,9 +18361,17 @@ class MainWindow(QMainWindow):
             (`_on_fp_tool_triggered`), the shortcuts
             (`_arm_footprint_tool_shortcut`) and `_toggle_footprint_draw_tool`
             all end here.
+        @note Arming the keepout-zone tool ticks the «Zone di esclusione» row
+            when it is off (review 2026-11-09, contract 10 as
+            `_on_fp_draw_layer_chosen`): a zone must not be committed, and
+            selected, invisible.
         """
         tool = self._fp_tool_key(key)
         self._cancel_footprint_drawing()
+        if tool == "zone":
+            box = getattr(self, "fp_layer_boxes", {}).get(self.FP_ZONES_VIEW_KEY)
+            if box is not None and not box.isChecked():
+                box.setChecked(True)
         self.preview_view.set_draw_mode(True, self._fp_tool_spec(tool))
 
     @property
@@ -18190,6 +18486,9 @@ class MainWindow(QMainWindow):
         measure_button = getattr(self, "btn_fp_measure", None)
         if measure_button is not None:
             measure_button.setChecked(False)
+        anchor_button = getattr(self, "btn_fp_anchor", None)
+        if anchor_button is not None:
+            anchor_button.setChecked(False)
         self._refresh_draw_markers()
         self._update_fp_fill_enabled()
         self._refresh_fp_hint()
@@ -18212,7 +18511,11 @@ class MainWindow(QMainWindow):
             label.setText("")
             return
         count = len(collector.points)
-        key = "dimension" if spec.key == "dimension_orthogonal" else spec.key
+        if spec.key == self._ANCHOR_TOOL:
+            label.setText(self.i18n.text(self._ANCHOR_TOOL_HINT))
+            return
+        # A keepout zone is clicked as a polygon: same steps.
+        key = {"dimension_orthogonal": "dimension", "zone": "polygon"}.get(spec.key, spec.key)
         label.setText(self.i18n.text(step_hint(key, count, closable=key == "line" and count >= 3)))
 
     # ── Measuring tool (shared `canvas_measure`, plan docs/canvas-measure-plan.md) ──
@@ -18537,13 +18840,15 @@ class MainWindow(QMainWindow):
                            else osnap.PAD if origin_key.startswith("pad:") else osnap.CENTRE)
             candidates += osnap.points([(ox, oy)], origin_kind, ("origin",))
         for index, record in enumerate(self.footprint_drawings):
-            if record.get("layer") in hidden:
+            if _drawing_view_layer(record) in hidden:
                 continue
             owner = ("drawing", index)
             kind = record["kind"]
             pts = [tuple(map(float, p)) for p in record["points"]]
-            if kind in ("line", "polygon"):
-                closed = kind == "polygon"
+            if kind in ("line", "polygon", "zone"):
+                # A keepout zone is a closed polygon too: its corners, side
+                # midpoints and side intersections are hot points.
+                closed = kind != "line"
                 candidates += osnap.polyline(pts, closed, owner)
                 segments += osnap.polyline_segments(pts, closed, owner)
             elif kind == "rectangle":
@@ -18689,9 +18994,12 @@ class MainWindow(QMainWindow):
             self.btn_fp_measure.setChecked(True)
             return
         if grid is not None:
-            # The reference-image calibration has no palette button either:
-            # shown as a tool outside the grid, as «Misura».
+            # The reference-image calibration and «Sposta ancora» have no grid
+            # button either: shown as a tool outside the grid, as «Misura».
             grid.set_active(self._fp_grid_key(spec.key) if spec.key in self.FOOTPRINT_TOOL_CLICKS else OUTSIDE_KEY)
+        anchor_button = getattr(self, "btn_fp_anchor", None)
+        if anchor_button is not None:
+            anchor_button.setChecked(spec.key == self._ANCHOR_TOOL)
 
     def tool_disarmed(self, spec) -> None:
         """@brief `ClickToolHost`: the tool ended by Escape or a hide; reset the draw state once.
@@ -18746,16 +19054,27 @@ class MainWindow(QMainWindow):
             self._cancel_footprint_drawing()
             self._finish_reference_calibration(list(points))
             return
-        if tool in ("line", "polygon") and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
-            # Closed on its first point (`ToolSpec.close_after`): a polygon,
-            # whose closing side is implied and whose first point is not stored twice.
-            tool, points = "polygon", list(points[:-1])
-        if tool == "polygon" and len(points) < USER_DRAW_MIN_POINTS["polygon"]:
+        if tool == self._ANCHOR_TOOL:
+            # Not a drawing: the snapped click becomes the footprint anchor (plan F2).
+            self._cancel_footprint_drawing()
+            if points:
+                self.set_footprint_anchor(*points[-1])
+            return
+        if tool in ("line", "polygon", "zone") and len(points) >= 4 and tuple(points[-1]) == tuple(points[0]):
+            # Closed on its first point (`ToolSpec.close_after`): a polygon
+            # (or the zone being drawn), whose closing side is implied and
+            # whose first point is not stored twice.
+            tool, points = ("zone" if tool == "zone" else "polygon"), list(points[:-1])
+        if tool in ("polygon", "zone") and len(points) < USER_DRAW_MIN_POINTS[tool]:
             # `ToolSpec.min_points`: the collector never refuses a finish, the host says why.
             self._cancel_footprint_drawing()
             if points:
-                self._draw_feedback_toast(self.i18n.text("Disegno scartato."),
-                                          self.i18n.text("Un poligono richiede almeno tre vertici."))
+                self._draw_feedback_toast(self.i18n.text("Disegno scartato."), self.i18n.text(
+                    "Un poligono richiede almeno tre vertici." if tool == "polygon"
+                    else "Una zona di esclusione richiede almeno tre vertici."))
+            return
+        if tool == "zone":
+            self._finish_footprint_zone(points)
             return
         layer = self._fp_active_layer()
         kind = self.FOOTPRINT_TOOL_KINDS.get(tool, tool)
@@ -18846,6 +19165,29 @@ class MainWindow(QMainWindow):
         new = len(self.footprint_drawings)
         self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
 
+    def _finish_footprint_zone(self, points: list) -> None:
+        """@brief Store a keepout zone after asking its copper side and flags (plan F4).
+
+        @param points The distinct corners, footprint mm (the closing click dropped).
+        @note The dialog (`_ask_zone_settings`) opens with F.Cu and KiCad 10's
+            defaults; Cancel stores nothing. A polygon without area is refused
+            with its reason, as a polygon is. The new zone becomes the selection.
+        """
+        from ..core.footprint import validate_footprint_drawings
+        self._cancel_footprint_drawing()
+        answer = self._ask_zone_settings()
+        if answer is None:
+            return
+        layers, keepout = answer
+        record = {"kind": "zone", "layers": list(layers), "keepout": dict(keepout),
+                  "points": [list(p) for p in points]}
+        valid = validate_footprint_drawings([record])
+        if not valid:
+            self._draw_feedback_toast(self.i18n.text("Disegno scartato."), self._degenerate_drawing_text(record))
+            return
+        new = len(self.footprint_drawings)
+        self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
+
     def _fp_ortho_axis_for(self, first, second, placement) -> str:
         """@brief Axis of the orthogonal dimension being drawn, remembering the preview's last one.
 
@@ -18920,7 +19262,11 @@ class MainWindow(QMainWindow):
             (0, 10] mm; the aligned-arc explanation when the record is an arc
             through three distinct points whose centre KiCad cannot hold
             (collinear, or so nearly collinear that the centre leaves KiCad's
-            coordinate range); otherwise the generic zero-radius/zero-side text.
+            coordinate range); a polygon or zone without area; a keepout zone
+            whose outline crosses or touches itself (`polygon_is_simple`),
+            both judged after repeated consecutive corners are dropped
+            (`collapse_repeated_points`), as the validator judges them;
+            otherwise the generic zero-radius/zero-side text.
         @note The checks mirror `core.footprint.validate_footprint_drawings`,
             so the reason names what the validator refused.
         """
@@ -18941,6 +19287,24 @@ class MainWindow(QMainWindow):
         if not isinstance(width, (int, float)) or not 0 < width <= 10:
             return self.i18n.text(
                 "Spessore del tratto non valido: deve essere maggiore di 0 e al massimo 10 mm.")
+        if record.get("kind") in ("polygon", "zone"):
+            from ..core.footprint import collapse_repeated_points
+            # The validator drops repeated consecutive corners before its area
+            # and crossing rules (`_clean_zone`, `collapse_repeated_points`):
+            # a repeated vertex is not a crossing of the outline.
+            points = collapse_repeated_points(points, closed=True)
+        if record.get("kind") in ("polygon", "zone") and len(points) >= 3:
+            from ..core.draw_constraints import polygon_has_area
+            if not polygon_has_area(points):
+                return self.i18n.text("Il poligono non racchiude un'area: i vertici sono allineati o coincidenti.")
+            if record.get("kind") == "zone":
+                from ..core.footprint import polygon_is_simple
+                # The validator refuses a crossed zone outline (`polygon_is_simple`,
+                # review 2026-11-09): the reason names it, not a degenerate shape.
+                if not polygon_is_simple(points):
+                    return self.i18n.text(
+                        "Il contorno della zona si incrocia o si tocca: "
+                        "sposta i vertici in modo che i lati non si intersechino.")
         if (record.get("kind") == "arc" and len(points) == 3 and len(set(points)) == 3
                 and not arc_centre_representable(*points)):
             return self.i18n.text(
@@ -18982,9 +19346,10 @@ class MainWindow(QMainWindow):
         """@brief The footprint edits the preview shows now (the draft), by reference.
 
         @return {"drawings", "texts", "pad_overrides", "package_pins",
-            "package_body"}; "package_pins" is the list of the package pads
+            "package_body", "anchor"}; "package_pins" is the list of the package pads
             and "package_body" its (length, width) in mm (`_package_body`),
-            both None without a package.
+            both None without a package; "anchor" the footprint anchor
+            (x, y) mm in generator coordinates (plan F2).
         @note Not copied: callers that keep it deep-copy it.
         """
         package = getattr(self, "package_geometry", None)
@@ -18992,7 +19357,8 @@ class MainWindow(QMainWindow):
                 "texts": self.footprint_text_positions,
                 "pad_overrides": self.header_pad_overrides,
                 "package_pins": list(package.pins) if package is not None else None,
-                "package_body": _package_body(package)}
+                "package_body": _package_body(package),
+                "anchor": tuple(getattr(self, "footprint_anchor", (0.0, 0.0)))}
 
     def _sync_footprint_draft_package(self) -> None:
         """@brief Rebase the draft when an analysis replaced the package object.
@@ -19074,6 +19440,8 @@ class MainWindow(QMainWindow):
         self.footprint_drawings = deepcopy(state["drawings"])
         self.footprint_text_positions = deepcopy(state["texts"])
         self.header_pad_overrides = deepcopy(state["pad_overrides"])
+        # A state taken before the anchor existed has none: the origin is unmoved.
+        self.footprint_anchor = tuple(state.get("anchor", (0.0, 0.0)))
         pins = state.get("package_pins")
         package = self.package_geometry
         if (package is not None and pins is not None and list(pins) != list(package.pins)
@@ -19166,6 +19534,8 @@ class MainWindow(QMainWindow):
                 self.footprint_text_positions = value
             elif key == "pad_overrides":
                 self.header_pad_overrides = value
+            elif key == "anchor":
+                self.footprint_anchor = tuple(value)
             elif key == "package_pins" and self.package_geometry is not None and value is not None:
                 self._rebind_package_pins(value)
             elif key == "package_body" and self.package_geometry is not None and value is not None:
@@ -19426,6 +19796,9 @@ class MainWindow(QMainWindow):
         applied = self._fp_applied
         saved = (self.footprint_drawings, self.footprint_text_positions,
                  self.header_pad_overrides, self.package_geometry)
+        saved_anchor = self.footprint_anchor
+        # The anchor the files are written with is the APPLIED one (plan F2).
+        self.footprint_anchor = tuple(applied.get("anchor", (0.0, 0.0)))
         # The drawings are swapped WITHOUT the property (no revision bump):
         # the draft comes back unchanged, so its selection must stay valid.
         self._footprint_drawings = deepcopy(applied["drawings"])
@@ -19449,6 +19822,7 @@ class MainWindow(QMainWindow):
             self._fp_applied_swap_active = False
             (self._footprint_drawings, self.footprint_text_positions,
              self.header_pad_overrides, self.package_geometry) = saved
+            self.footprint_anchor = saved_anchor
             self._fp_draft_package = draft_package
             # `_last_params` must keep naming the draft package, not the
             # applied copy the worker received (the preview draws the
@@ -19506,6 +19880,7 @@ class MainWindow(QMainWindow):
             "package_pins": [asdict(pin) for pin in pins] if pins is not None else None,
             "package_body": (list(state["package_body"]) if state.get("package_body") is not None
                              else None),
+            "anchor": [float(v) for v in state.get("anchor", (0.0, 0.0))],
         }, ensure_ascii=False, allow_nan=False))
 
     def _footprint_state_from_json(self, data: dict) -> dict:
@@ -19549,11 +19924,51 @@ class MainWindow(QMainWindow):
                 candidate = None
             if candidate is not None:
                 body = _package_body(candidate)
+        # A draft written before the anchor existed (or one the recovery file
+        # dropped it from) never moved it: it keeps the APPLIED anchor, the
+        # same rule `footprint_draft.complete_state` follows for its keys.
+        # CONTRACT CHANGED (review 2026-11-09, L2): an INVALID anchor takes
+        # the applied anchor too, as a missing one does; it read as (0, 0)
+        # before, which silently moved an applied anchor back to the origin.
+        applied = tuple(self._applied_footprint_state().get("anchor", (0.0, 0.0)))
+        anchor = self._valid_footprint_anchor(data.get("anchor"), default=applied)
         return {"drawings": validate_footprint_drawings(data.get("drawings")),
                 "texts": self._load_footprint_text_positions(data.get("texts")),
                 "pad_overrides": self._valid_pad_overrides(data.get("pad_overrides")),
                 "package_pins": pins,
-                "package_body": body}
+                "package_body": body,
+                "anchor": anchor}
+
+    @staticmethod
+    def _with_draft_anchor(draft, baseline):
+        """@brief A recovered draft (JSON form) completed with the applied anchor when it has none.
+
+        @param draft A draft read back from a recovery file, or None.
+        @param baseline JSON form of the applied state (`_footprint_state_json`).
+        @return `draft` with ``anchor`` set from `baseline` when missing; None stays None.
+        @note A draft written before the anchor existed never moved it, the
+            rule `footprint_draft.complete_state` applies to its optional keys.
+            The same completion covers a reader that drops the key
+            (`footprint_draft.STATE_KEYS` / `OPTIONAL_STATE_KEYS` must list
+            «anchor» for a moved anchor to survive a crash).
+        """
+        if isinstance(draft, dict) and "anchor" not in draft and isinstance(baseline, dict) \
+                and "anchor" in baseline:
+            draft["anchor"] = baseline["anchor"]
+        return draft
+
+    def _load_kept_footprint_drafts(self, path) -> list:
+        """@brief The kept crash drafts of `path`, completed against the applied state (anchor included).
+
+        @param path Kept-drafts file, or None.
+        @return `footprint_draft.load_kept_drafts` with every draft passed
+            through `_with_draft_anchor`, so drafts compare with the current
+            state the same way whether or not they hold the anchor.
+        @throws OSError When the file exists but cannot be read.
+        """
+        from ..services.footprint_draft import load_kept_drafts
+        baseline = self._applied_footprint_json()
+        return [self._with_draft_anchor(draft, baseline) for draft in load_kept_drafts(path, baseline)]
 
     def _keep_offered_footprint_draft(self, extra: dict | None = None) -> bool:
         """@brief Move the offered crash draft (and `extra`) into the kept-drafts file.
@@ -19577,9 +19992,9 @@ class MainWindow(QMainWindow):
         path = self._footprint_kept_path()
         if path is None:
             return True
-        from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
+        from ..services.footprint_draft import save_kept_drafts
         try:
-            if not save_kept_drafts(path, drafts + load_kept_drafts(path, self._applied_footprint_json())):
+            if not save_kept_drafts(path, drafts + self._load_kept_footprint_drafts(path)):
                 return False
         except (OSError, TypeError, ValueError) as exc:
             self._append_log(self.i18n.text(
@@ -19649,15 +20064,15 @@ class MainWindow(QMainWindow):
         path = self._footprint_recovery_path()
         if path is None:
             return
-        from ..services.footprint_draft import load_footprint_draft, load_kept_drafts
+        from ..services.footprint_draft import load_footprint_draft
         current = self._footprint_state_json(self._footprint_edit_state())
         try:
-            main = load_footprint_draft(
-                path, self._footprint_state_json(self._applied_footprint_state()))
+            baseline = self._footprint_state_json(self._applied_footprint_state())
+            main = self._with_draft_anchor(load_footprint_draft(path, baseline), baseline)
             if main is not None and main != current:
                 self._fp_recoverable, self._fp_recoverable_source = main, "main"
                 return
-            for kept in load_kept_drafts(self._footprint_kept_path(), self._applied_footprint_json()):
+            for kept in self._load_kept_footprint_drafts(self._footprint_kept_path()):
                 if kept != current:
                     self._fp_recoverable, self._fp_recoverable_source = kept, "kept"
                     return
@@ -19688,9 +20103,9 @@ class MainWindow(QMainWindow):
         path = self._footprint_kept_path()
         if path is None:
             return True
-        from ..services.footprint_draft import load_kept_drafts, save_kept_drafts
+        from ..services.footprint_draft import save_kept_drafts
         try:
-            return save_kept_drafts(path, [d for d in load_kept_drafts(path, self._applied_footprint_json())
+            return save_kept_drafts(path, [d for d in self._load_kept_footprint_drafts(path)
                                            if d != draft])
         except (OSError, TypeError, ValueError):
             self._append_log(self.i18n.text(
@@ -20138,7 +20553,7 @@ class MainWindow(QMainWindow):
         for index in range(len(self.footprint_drawings)):
             # A drawing of a hidden layer is not on screen: the band must
             # not select (and Delete must not remove) what cannot be seen.
-            if not self._preview_layer_visible(self.footprint_drawings[index].get("layer", "")):
+            if not self._preview_layer_visible(_drawing_view_layer(self.footprint_drawings[index])):
                 continue
             bounds = self._footprint_drawing_scene_bounds(index)
             if bounds is None:
@@ -20192,6 +20607,17 @@ class MainWindow(QMainWindow):
             box around it, so it stands out whatever its layer colour.
         @param mm_to_px Scene px per mm.
         """
+        if record["kind"] == "zone":
+            # A zone item keeps its copper side (`ZONE_COPPER_ROLE`): its
+            # outline and hatch take that side's colour, or the selection's.
+            from .footprint_view import ZONE_COPPER_ROLE
+            copper = str(item.data(ZONE_COPPER_ROLE) or "F.Cu")
+            colour = QColor(self._fp_selected_colour() if selected else _drawing_colour(record, copper))
+            pen = QPen(colour)
+            pen.setWidthF(2.5 if selected else self._FP_ZONE_OUTLINE_PX)
+            item.setPen(pen)
+            item.setBrush(self._zone_brush(colour, copper))
+            return
         colour = QColor(self._fp_selected_colour() if selected else _layer_color(record["layer"]))
         if record["kind"] == "text":
             item.setBrush(QBrush(colour))
@@ -20542,7 +20968,77 @@ class MainWindow(QMainWindow):
     #: Title line of the drawing menu, by drawing kind (catalogue sources).
     FOOTPRINT_DRAWING_KIND_NAMES = {"line": "Linea", "polygon": "Poligono", "rectangle": "Rettangolo",
                                     "circle": "Cerchio", "arc": "Arco", "text": "Testo", "dimension": "Quota",
-                                    "curve": "Bézier", "bezier": "Bézier", "textbox": "Casella di testo"}
+                                    "curve": "Bézier", "bezier": "Bézier", "textbox": "Casella di testo",
+                                    "zone": "Zona di esclusione"}
+
+    #: Copper sides a keepout zone may name, as the dialog, the menu and the
+    #: «Proprietà» panel offer them: (choice key, Italian source label). The
+    #: key joins the layers of `core.footprint.ZONE_LAYER_CHOICES` with «+».
+    FOOTPRINT_ZONE_LAYER_CHOICES = (("F.Cu", "Rame superiore (F.Cu)"), ("B.Cu", "Rame inferiore (B.Cu)"),
+                                    ("F.Cu+B.Cu", "Entrambi i lati (F.Cu e B.Cu)"))
+
+    #: Labels of the five keepout flags (`core.footprint.ZONE_KEEPOUT_FLAGS`),
+    #: ticked = not allowed, as KiCad's rule-area dialog.
+    FOOTPRINT_ZONE_FLAG_LABELS = {"tracks": "Vieta piste", "vias": "Vieta via", "pads": "Vieta pad",
+                                  "copperpour": "Vieta riempimenti di rame", "footprints": "Vieta footprint"}
+
+    @staticmethod
+    def _zone_layers_key(layers) -> str:
+        """@brief The choice key of a zone's copper layers («F.Cu», «B.Cu» or «F.Cu+B.Cu»).
+
+        @param layers The record's `layers` (a validated one: KiCad's order).
+        @return The layers joined by «+».
+        """
+        return "+".join(layers or ())
+
+    @staticmethod
+    def _zone_layers_from_key(key: str) -> list:
+        """@brief The copper layers of a zone choice key.
+
+        @param key A key of `FOOTPRINT_ZONE_LAYER_CHOICES`.
+        @return The layer list (the validator refuses anything not in `ZONE_LAYER_CHOICES`).
+        """
+        return [name for name in str(key).split("+") if name]
+
+    def _ask_zone_settings(self, layers=("F.Cu",), keepout=None):
+        """@brief Ask the copper side and the five keepout flags of a new keepout zone (plan F4).
+
+        @param layers The layers shown chosen (a new zone: F.Cu).
+        @param keepout The flags shown ticked; None means KiCad 10's defaults
+            of a new rule area (`core.footprint.ZONE_KEEPOUT_DEFAULTS`).
+        @return (layers list, {flag: bool}) on OK, None on Cancel/Escape.
+        @note A separate method so tests answer it without a modal window.
+        """
+        from PyQt6.QtWidgets import QDialogButtonBox
+        from ..core.footprint import ZONE_KEEPOUT_DEFAULTS, ZONE_KEEPOUT_FLAGS
+        tx = self.i18n.text
+        flags = dict(ZONE_KEEPOUT_DEFAULTS if keepout is None else keepout)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tx("Zona di esclusione"))
+        form = QFormLayout(dialog)
+        combo = QComboBox()
+        for key, label in self.FOOTPRINT_ZONE_LAYER_CHOICES:
+            combo.addItem(_layer_swatch(_ZONE_COPPER_COLOURS[key.split("+")[0]]), tx(label), key)
+        combo.setCurrentIndex(max(0, combo.findData(self._zone_layers_key(layers))))
+        form.addRow(tx("Layer"), combo)
+        boxes = {}
+        for flag in ZONE_KEEPOUT_FLAGS:
+            box = QCheckBox(tx(self.FOOTPRINT_ZONE_FLAG_LABELS[flag]))
+            box.setChecked(bool(flags.get(flag, ZONE_KEEPOUT_DEFAULTS[flag])))
+            form.addRow(box)
+            boxes[flag] = box
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tx("Annulla"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return (self._zone_layers_from_key(combo.currentData()),
+                    {flag: box.isChecked() for flag, box in boxes.items()})
+        finally:
+            dialog.deleteLater()
 
     #: Frames a leader's text may have, in the order the properties dialog
     #: offers them: (record value, Italian source label).
@@ -20601,18 +21097,23 @@ class MainWindow(QMainWindow):
         self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
         return True
 
-    def _footprint_drawing_menu_entries(self, record: dict, several: bool = False) -> list:
+    def _footprint_drawing_menu_entries(self, record: dict, several: bool = False, picked=None) -> list:
         """@brief The entries of a drawing's right-click menu, in the order shared with the symbol editor.
 
         @param record The drawing the menu is for.
         @param several True for the menu of a multi-selection: it stops after
             «Duplica», with «Specchia» enabled (it acts on the shapes), as
             the symbol editor's multi-selection menu.
+        @param picked `_footprint_vertex_pick` of the click, or None: on a
+            single line, polygon or zone the vertex entries follow «Duplica»
+            (plan F3, the symbol editor's order), «Aggiungi vertice» enabled
+            on a segment and «Rimuovi vertice» on a vertex.
         @return `canvas_menus.MenuEntry` items: turn ±90, mirror (greyed out
-            for a single text, plan C-M1), delete, copy, duplicate, the «Layer»
-            submenu (colour swatches, current layer checked), properties,
+            for a single text, plan C-M1), delete, copy, duplicate, the vertex
+            entries (line, polygon, zone), the «Layer» submenu (colour
+            swatches, current layer checked; a zone's copper sides), properties,
             then after a separator «Modifica testo…» (text) or «Spessore del
-            tratto…» (shape).
+            tratto…» (shape; not for a zone, which has no stroke).
         """
         from . import canvas_menus as cm
         tx = self.i18n.text
@@ -20620,18 +21121,28 @@ class MainWindow(QMainWindow):
             return cm.rotate_entries(tx) + [cm.mirror_entry(tx), cm.delete_entry(tx, "Elimina disegno"),
                                             cm.copy_entry(tx), cm.duplicate_entry(tx)]
         text = record["kind"] == "text"
-        layers = tuple(cm.MenuEntry("layer:" + layer, tx(label), checkable=True,
-                                    checked=layer == record["layer"],
-                                    icon_object=_layer_swatch(_layer_color(layer)))
-                       for layer, label in self.FOOTPRINT_DRAW_LAYERS)
+        zone = record["kind"] == "zone"
+        if zone:
+            current = self._zone_layers_key(record.get("layers"))
+            layers = tuple(cm.MenuEntry("zone_layers:" + key, tx(label), checkable=True, checked=key == current,
+                                        icon_object=_layer_swatch(_ZONE_COPPER_COLOURS[key.split("+")[0]]))
+                           for key, label in self.FOOTPRINT_ZONE_LAYER_CHOICES)
+        else:
+            layers = tuple(cm.MenuEntry("layer:" + layer, tx(label), checkable=True,
+                                        checked=layer == record["layer"],
+                                        icon_object=_layer_swatch(_layer_color(layer)))
+                           for layer, label in self.FOOTPRINT_DRAW_LAYERS)
         entries = cm.rotate_entries(tx) + [
             cm.mirror_entry(tx, enabled=not text),
             cm.delete_entry(tx, "Elimina disegno"),
             cm.copy_entry(tx),
             cm.duplicate_entry(tx),
-            cm.MenuEntry("", tx("Layer"), children=layers),
-            cm.properties_entry(tx),
         ]
+        if record["kind"] in self._FP_VERTEX_KINDS:
+            entries += cm.vertex_entries(tx, picked)
+        entries += [cm.MenuEntry("", tx("Layer"), children=layers), cm.properties_entry(tx)]
+        if zone:
+            return entries
         if text:
             entries.append(cm.MenuEntry("edit_text", tx("Modifica testo…"), separator_before=True))
         else:
@@ -20645,10 +21156,17 @@ class MainWindow(QMainWindow):
                                             checked=bool(record.get("fill", False))))
         return entries
 
-    def _footprint_drawing_context_menu(self, index: int) -> None:
+    def _footprint_drawing_context_menu(self, index: int, global_pos=None) -> None:
         """@brief Right click on a drawing: the element menu shared with the symbol editor.
 
         @param index Index of the drawing under the pointer.
+        @param global_pos Screen position of the click, carried by the view's
+            `drawing_context_requested` from the press event itself (parity
+            review 2026-11-09, D2); None (a programmatic call only) reads the
+            pointer (`QCursor.pos()`). Read, with
+            the footprint point under it, BEFORE the selection redraws (as the
+            symbol editor's `_graphic_context_menu`): the vertex entries
+            depend on that point (plan F3).
         @note Built and shown by `canvas_menus` (plan docs/canvas-menus-plan.md,
             phase C); every chosen entry is one `_apply_footprint_drawings`
             commit, a dismissed menu or a no-op changes nothing.
@@ -20661,17 +21179,20 @@ class MainWindow(QMainWindow):
         from ..core.footprint import mirror_drawing, turn_drawing
         if not 0 <= index < len(self.footprint_drawings):
             return
+        global_pos = QCursor.pos() if global_pos is None else global_pos
+        click = self._footprint_point_at_global(global_pos)
         record = self.footprint_drawings[index]
         group = self._fp_selected_indices()
         several = len(group) > 1 and index in group
+        picked = None if several else self._footprint_vertex_pick(index, *click)
         if several:
             self._select_footprint_drawing(index, additive=True)
             title = self.i18n.text("{count} elementi selezionati").format(count=len(group))
         else:
             self._select_footprint_drawing(index)
             title = self.i18n.text(self.FOOTPRINT_DRAWING_KIND_NAMES.get(record["kind"], ""))
-        menu, keys = cm.build_element_menu(self, title, self._footprint_drawing_menu_entries(record, several))
-        chosen = cm.exec_element_menu(menu, keys, QCursor.pos())
+        menu, keys = cm.build_element_menu(self, title, self._footprint_drawing_menu_entries(record, several, picked))
+        chosen = cm.exec_element_menu(menu, keys, global_pos)
         if chosen is None:
             return
         if several:
@@ -20699,6 +21220,12 @@ class MainWindow(QMainWindow):
             self._duplicate_drawing(index)
         elif chosen.startswith("layer:"):
             self._set_drawing_field(index, "layer", chosen[len("layer:"):])
+        elif chosen.startswith("zone_layers:"):
+            self._set_drawing_field(index, "layers", self._zone_layers_from_key(chosen[len("zone_layers:"):]))
+        elif chosen == cm.ADD_VERTEX and picked is not None:
+            self.add_footprint_vertex(index, picked.index, *picked.point)
+        elif chosen == cm.REMOVE_VERTEX and picked is not None:
+            self.remove_footprint_vertex(index, picked.index)
         elif chosen == cm.PROPERTIES:
             self._edit_drawing_properties(index)
         elif chosen == "fill":
@@ -20722,6 +21249,175 @@ class MainWindow(QMainWindow):
                 return
             self._set_drawing_field(index, "text", text.strip())
 
+    # ── Add / remove a vertex of a line, polygon or zone (plan F3) ──────────
+
+    #: Drawing kinds whose vertices the menu edits: a line (open), a polygon
+    #: and a keepout zone (closed; stored without repeating the first point).
+    _FP_VERTEX_KINDS = ("line", "polygon", "zone")
+
+    def _footprint_point_at_global(self, global_pos) -> tuple:
+        """@brief The footprint point (mm, Y down) under a screen position of the preview.
+
+        @param global_pos Screen `QPoint`.
+        @return (x, y) footprint mm.
+        """
+        from .canvas_menus import scene_point_mm
+        return scene_point_mm(self.preview_view, global_pos, _FP_PREVIEW_MM_TO_PX, 1.0)
+
+    def _fp_vertex_pick_reach_mm(self, stroke_width_mm: float = 0.0) -> float:
+        """@brief `canvas_menus.VERTEX_PICK_PX` converted to footprint mm at the current zoom, plus half the stroke.
+
+        @param stroke_width_mm Stroke width of the picked drawing, mm (0 for a
+            zone, which has none).
+        @return The reach in mm through the shared `canvas_menus.pick_reach_mm`
+            (the symbol editor's own conversion); 0 when the view has no usable scale.
+        """
+        from .canvas_menus import pick_reach_mm
+        return pick_reach_mm(self.preview_view.transform().m11(), _FP_PREVIEW_MM_TO_PX,
+                             stroke_width_mm=stroke_width_mm)
+
+    def _fp_vertex_outline(self, record: dict):
+        """@brief The editable vertices of a line, polygon or zone and how they close.
+
+        @param record A validated drawing record.
+        @return (distinct vertices, closed, repeat) or None for another kind:
+            a polygon or zone is closed and stored without repeating its first
+            point (repeat False); a LINE whose stored points end on the first
+            one with 3+ distinct vertices before it (`vertex_edit.is_closed_outline`)
+            is closed too, its repeat stripped here and written back after the
+            edit (repeat True); any other line is open.
+        @note User decision A1 (2026-11-09): the symbol editor and the
+            footprint treat a line that ends on its first point as CLOSED, so
+            removing a vertex keeps it closed and fewer than 3 vertices is
+            refused. The line TOOL already stores such a click sequence as a
+            polygon (`_finish_footprint_drawing`); a closed line still arises
+            from a vertex dragged onto the first point or an older file.
+        """
+        from ..core.vertex_edit import is_closed_outline, open_vertices
+        kind = record.get("kind")
+        if kind not in self._FP_VERTEX_KINDS:
+            return None
+        points = [(float(px), float(py)) for px, py in record["points"]]
+        if kind != "line":
+            return points, True, False
+        if is_closed_outline(points):
+            return open_vertices(points), True, True
+        return points, False, False
+
+    def _footprint_vertex_pick(self, index: int, x: float, y: float, reach: float | None = None):
+        """@brief What a right click at (x, y) hits on a line, polygon or zone: a vertex, a segment or nothing.
+
+        @param index Drawing index.
+        @param x Footprint X of the click, mm.
+        @param y Footprint Y of the click, mm (Y down).
+        @param reach Total pick reach in mm; None converts `canvas_menus.VERTEX_PICK_PX`
+            with the current zoom (the symbol editor's screen reach) and adds
+            half the drawing's stroke width, as KiCad's `EDA_SHAPE::hitTest`
+            does (a zone has no width and adds nothing).
+        @return A `core.vertex_edit.Pick` (vertex index among the DISTINCT
+            vertices, `_fp_vertex_outline`), or None for another kind of
+            drawing or a click off its outline.
+        """
+        from ..core.vertex_edit import pick
+        if not 0 <= index < len(self.footprint_drawings):
+            return None
+        record = self.footprint_drawings[index]
+        outline = self._fp_vertex_outline(record)
+        if outline is None:
+            return None
+        vertices, closed, _repeat = outline
+        if reach is None:
+            reach = self._fp_vertex_pick_reach_mm(record.get("width", 0.0))
+        return pick(vertices, (float(x), float(y)), closed, float(reach))
+
+    def _refuse_vertex_edit(self, reason: str) -> None:
+        """@brief Say why a vertex edit was refused, with the symbol editor's words.
+
+        @param reason `vertex_edit.VertexEditRefused.reason`.
+        @note The messages are the shared table of `canvas_menus`
+            (`VERTEX_REFUSED`, `vertex_refusal_text`), the symbol editor's
+            own: one wording in both tabs; the footprint shows them in its
+            drawing toast.
+        """
+        from .canvas_menus import VERTEX_REFUSED, vertex_refusal_text
+        self._draw_feedback_toast(self.i18n.text(VERTEX_REFUSED), self.i18n.text(vertex_refusal_text(reason)))
+
+    def _commit_vertex_edit(self, index: int, points: list) -> bool:
+        """@brief Store new vertices for drawing `index` as ONE undo step, when the record stays valid.
+
+        @param index Drawing index.
+        @param points The new vertex list, footprint mm.
+        @return True when the draft changed; False (with the validator's reason) otherwise.
+        """
+        from ..core.footprint import validate_footprint_drawings
+        record = deepcopy(self.footprint_drawings[index])
+        record["points"] = [[round(float(px), 4) + 0.0, round(float(py), 4) + 0.0] for px, py in points]
+        valid = validate_footprint_drawings([record])
+        if not valid:
+            self._draw_feedback_toast(self.i18n.text("Modifica scartata."), self._degenerate_drawing_text(record))
+            return False
+        updated = deepcopy(self.footprint_drawings)
+        updated[index] = valid[0]
+        # Same list length: the selection made by the right click stays.
+        return self._commit_drawings(updated)
+
+    def add_footprint_vertex(self, index: int, segment: int, x: float, y: float) -> bool:
+        """@brief Insert a vertex on a segment of a line, polygon or zone: one undo step.
+
+        @param index Drawing index.
+        @param segment Segment index (`vertex_edit.Pick.index`); a closed
+            shape's closing side is the last segment (a closed line's too,
+            decision A1).
+        @param x Footprint X of the point on the segment, mm (the projection
+            of the click), snapped to the drawing grid as a vertex drag is.
+        @param y Footprint Y, mm (Y down).
+        @return True when the draft changed; False (with the reason in a
+            toast) for another kind of drawing, an unknown segment or a
+            snapped point on an end of its segment.
+        """
+        from ..core.vertex_edit import VertexEditRefused, insert_vertex
+        if not 0 <= index < len(self.footprint_drawings) or self._fp_handle_active:
+            return False
+        outline = self._fp_vertex_outline(self.footprint_drawings[index])
+        if outline is None:
+            return False
+        vertices, closed, repeat = outline
+        point = self._snapped_draw_point(float(x) * _FP_PREVIEW_MM_TO_PX, float(y) * _FP_PREVIEW_MM_TO_PX)
+        try:
+            points = insert_vertex(vertices, segment, point, closed)
+        except VertexEditRefused as refused:
+            self._refuse_vertex_edit(refused.reason)
+            return False
+        return self._commit_vertex_edit(index, points + [points[0]] if repeat else points)
+
+    def remove_footprint_vertex(self, index: int, position: int) -> bool:
+        """@brief Remove one vertex of a line, polygon or zone: one undo step.
+
+        @param index Drawing index.
+        @param position Vertex index among the distinct vertices.
+        @return True when the draft changed; False (with the reason in a
+            toast) when an open line would keep fewer than 2 vertices, a
+            polygon, zone or closed line (decision A1) fewer than 3 or no
+            area, or the drawing is of another kind.
+        @note A closed line keeps its closing repeat: removing its first
+            vertex closes it on the next one.
+        """
+        from ..core.footprint import USER_DRAW_MIN_POINTS
+        from ..core.vertex_edit import VertexEditRefused, remove_vertex
+        if not 0 <= index < len(self.footprint_drawings) or self._fp_handle_active:
+            return False
+        record = self.footprint_drawings[index]
+        outline = self._fp_vertex_outline(record)
+        if outline is None:
+            return False
+        vertices, closed, repeat = outline
+        try:
+            points = remove_vertex(vertices, position, closed, USER_DRAW_MIN_POINTS[record["kind"]])
+        except VertexEditRefused as refused:
+            self._refuse_vertex_edit(refused.reason)
+            return False
+        return self._commit_vertex_edit(index, points + [points[0]] if repeat else points)
+
     def _drawing_properties_values(self, record: dict) -> dict:
         """@brief The values the «Proprietà elemento…» dialog shows for a drawing.
 
@@ -20736,9 +21432,17 @@ class MainWindow(QMainWindow):
             (radial), "radius" = arm length (centre mark), "text" and "frame"
             (leader).
         """
-        from ..core.footprint import USER_DRAW_FILLABLE, drawing_centre
-        values = {"layer": record["layer"], "width": float(record.get("width", user_draw_width(record.get("layer", ""))))}
+        from ..core.footprint import USER_DRAW_FILLABLE, ZONE_KEEPOUT_DEFAULTS, ZONE_KEEPOUT_FLAGS, drawing_centre
         cx, cy = drawing_centre(record)
+        if record["kind"] == "zone":
+            # A keepout zone: its copper side and its five flags, no drawing layer or stroke (plan F4).
+            values = {"zone_layers": self._zone_layers_key(record.get("layers")),
+                      "x": round(cx, 4) + 0.0, "y": round(cy, 4) + 0.0}
+            keepout = record.get("keepout", {})
+            for flag in ZONE_KEEPOUT_FLAGS:
+                values["keepout_" + flag] = bool(keepout.get(flag, ZONE_KEEPOUT_DEFAULTS[flag]))
+            return values
+        values = {"layer": record["layer"], "width": float(record.get("width", user_draw_width(record.get("layer", ""))))}
         values["x"], values["y"] = round(cx, 4) + 0.0, round(cy, 4) + 0.0
         if record["kind"] in USER_DRAW_FILLABLE:
             values["fill"] = bool(record.get("fill", False))
@@ -20815,6 +21519,14 @@ class MainWindow(QMainWindow):
             return new != old
 
         record = deepcopy(self.footprint_drawings[index])
+        if record["kind"] == "zone":
+            if changed("zone_layers"):
+                record["layers"] = self._zone_layers_from_key(values["zone_layers"])
+            flags = dict(record.get("keepout", {}))
+            for key in current:
+                if key.startswith("keepout_") and changed(key):
+                    flags[key[len("keepout_"):]] = bool(values[key])
+            record["keepout"] = flags
         if changed("layer"):
             record["layer"] = values["layer"]
         if changed("width"):
@@ -20911,9 +21623,13 @@ class MainWindow(QMainWindow):
             return FieldSpec(key, label, "float", shown, minimum=low, maximum=high, step=step,
                              decimals=decimals, suffix=suffix, tooltip=tooltip)
 
-        specs = [FieldSpec("layer", tx("Layer"), "choice", current["layer"],
-                           choices=tuple((layer, tx(label)) for layer, label in self.FOOTPRINT_DRAW_LAYERS))]
-        if record["kind"] != "text":
+        if record["kind"] == "zone":
+            specs = [FieldSpec("zone_layers", tx("Layer"), "choice", current["zone_layers"],
+                               choices=tuple((key, tx(label)) for key, label in self.FOOTPRINT_ZONE_LAYER_CHOICES))]
+        else:
+            specs = [FieldSpec("layer", tx("Layer"), "choice", current["layer"],
+                               choices=tuple((layer, tx(label)) for layer, label in self.FOOTPRINT_DRAW_LAYERS))]
+        if record["kind"] not in ("text", "zone"):
             low, high = self._FP_EDIT_WIDTH_RANGE
             specs.append(number("width", tx("Spessore del tratto in mm"), low, high, 0.01,
                                 decimals=self._FP_EDIT_WIDTH_DECIMALS))
@@ -20948,6 +21664,11 @@ class MainWindow(QMainWindow):
                                    choices=tuple((angle, f"{angle}°") for angle in (0, 90))))
         if "border" in current:
             specs.append(FieldSpec("border", tx("Bordo visibile"), "bool", bool(current["border"])))
+        from ..core.footprint import ZONE_KEEPOUT_FLAGS
+        for flag in ZONE_KEEPOUT_FLAGS:
+            if "keepout_" + flag in current:
+                specs.append(FieldSpec("keepout_" + flag, tx(self.FOOTPRINT_ZONE_FLAG_LABELS[flag]), "bool",
+                                       bool(current["keepout_" + flag])))
         return specs
 
     def _drawing_changes_to_footprint(self, changes: dict) -> dict:
@@ -21012,11 +21733,13 @@ class MainWindow(QMainWindow):
                 for data, label in spec.choices:
                     if spec.key == "layer":
                         combo.addItem(_layer_swatch(_layer_color(data)), label, data)
+                    elif spec.key == "zone_layers":
+                        combo.addItem(_layer_swatch(_ZONE_COPPER_COLOURS[str(data).split("+")[0]]), label, data)
                     else:
                         combo.addItem(label, data)
                 found = combo.findData(spec.value)
                 # A leader frame the list does not hold reads as its first entry («none»).
-                combo.setCurrentIndex(found if spec.key == "layer" else max(0, found))
+                combo.setCurrentIndex(found if spec.key in ("layer", "zone_layers") else max(0, found))
                 form.addRow(spec.label, combo)
                 readers[spec.key] = combo.currentData
             elif spec.kind == "bool":
@@ -21114,10 +21837,26 @@ class MainWindow(QMainWindow):
             def common(key, rounding=None):
                 found = {round(v[key], rounding) if rounding is not None else v[key] for v in values}
                 return (next(iter(found)), False) if len(found) == 1 else (None, True)
-            layer, mixed = common("layer")
-            specs = [FieldSpec("layer", tx("Layer"), "choice", layer, mixed=mixed,
-                               choices=tuple((name, tx(label)) for name, label in self.FOOTPRINT_DRAW_LAYERS))]
-            if all(r["kind"] != "text" for r in records):
+            zones = [r["kind"] == "zone" for r in records]
+            specs = []
+            if not any(zones):
+                layer, mixed = common("layer")
+                specs.append(FieldSpec("layer", tx("Layer"), "choice", layer, mixed=mixed,
+                                       choices=tuple((name, tx(label)) for name, label in self.FOOTPRINT_DRAW_LAYERS)))
+            elif all(zones):
+                # Only keepout zones: their copper side and flags (plan F4).
+                from ..core.footprint import ZONE_KEEPOUT_FLAGS
+                sides, mixed = common("zone_layers")
+                specs.append(FieldSpec("zone_layers", tx("Layer"), "choice", sides, mixed=mixed,
+                                       choices=tuple((key, tx(label))
+                                                     for key, label in self.FOOTPRINT_ZONE_LAYER_CHOICES)))
+                for flag in ZONE_KEEPOUT_FLAGS:
+                    value, mixed = common("keepout_" + flag)
+                    specs.append(FieldSpec("keepout_" + flag, tx(self.FOOTPRINT_ZONE_FLAG_LABELS[flag]), "bool",
+                                           value, mixed=mixed))
+            # A zone has no drawing layer, stroke or fill: a mixed selection
+            # with zones offers only what every member has.
+            if all(r["kind"] not in ("text", "zone") for r in records):
                 width, mixed = common("width", self._FP_EDIT_WIDTH_DECIMALS)
                 low, high = self._FP_EDIT_WIDTH_RANGE
                 specs.append(FieldSpec("width", tx("Spessore del tratto in mm"), "float", width, mixed=mixed,
@@ -21290,13 +22029,16 @@ class MainWindow(QMainWindow):
         @note Selected drawings (`_fp_selected_indices`) are drawn in the
             selection accent with a thicker stroke (`_style_drawing_item`).
         """
-        from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, LAYER_ROLE
         selected = set(self._fp_selected_indices())
         for index, record in enumerate(self.footprint_drawings):
+            kind = record["kind"]
+            if kind == "zone":
+                self._draw_zone_items(index, record, index in selected, mm_to_px)
+                continue
             pen = QPen(QColor(_layer_color(record["layer"])))
             pen.setWidthF(max(1.0, record.get("width", user_draw_width(record.get("layer", ""))) * mm_to_px))
             points = [(x * mm_to_px, y * mm_to_px) for x, y in record["points"]]
-            kind = record["kind"]
+            back = _is_back_layer(record["layer"])
             items = []
             # A filled shape is painted in its layer colour, translucent, so
             # what lies under it (pads, grid) stays visible, as KiCad's
@@ -21347,6 +22089,13 @@ class MainWindow(QMainWindow):
                     bounds = label.sceneBoundingRect()
                     label.setPos(label.pos() + QPointF(lx * mm_to_px - bounds.center().x(),
                                                        ly * mm_to_px - bounds.center().y()))
+                    if back:
+                        # A back dimension's value is mirrored along its
+                        # reading direction and keeps its centre (plan F1,
+                        # kicad-cli 10 svg, `mirrored_justify`).
+                        turn = math.radians(-angle)
+                        _mirror_scene_item(label, (lx * mm_to_px, ly * mm_to_px),
+                                           (math.cos(turn), math.sin(turn)))
                     items.append(label)
             elif kind == "curve":
                 # Sampled as the checks sample it (`bezier_segments`), from the
@@ -21374,22 +22123,95 @@ class MainWindow(QMainWindow):
                 # centred on it, as KiCad draws each (see _drawing_text_item).
                 text_item = _drawing_text_item(record, mm_to_px)
                 self.preview_scene.addItem(text_item)
+                if back:
+                    # A back text reads mirrored from the top view (plan F1):
+                    # reflected along its reading direction about its anchor,
+                    # so a 0-degree text grows LEFT of the anchor and a
+                    # 90-degree one DOWN, as kicad-cli 10 draws it.
+                    ax, ay = (v * mm_to_px for v in record["points"][0])
+                    vertical = record.get("angle", 0) == 90
+                    _mirror_scene_item(text_item, (ax, ay), (0.0, 1.0) if vertical else (1.0, 0.0))
                 items = [text_item]
-            hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
-            for item in items:
-                if index in selected:
-                    # Selected drawings in the theme's selection accent.
-                    self._style_drawing_item(item, record, True, mm_to_px)
-                item.setData(DRAWING_KEY_ROLE, index)
-                # The kind it was drawn as: `_refresh_drawing_selection` restyles only a match.
-                item.setData(DRAWING_KIND_ROLE, kind)
-                # Its own KiCad layer: the «Layer» group hides it with that layer.
-                item.setData(LAYER_ROLE, record["layer"])
-                item.setZValue(6)
-                item.setToolTip(hint)
-                item.setCursor(Qt.CursorShape.SizeAllCursor)
+            self._tag_drawing_items(items, index, record, index in selected, mm_to_px,
+                                    _FP_BACK_DRAWING_Z if back else _FP_FRONT_DRAWING_Z)
         self._refresh_draw_markers()
         self._refresh_drawing_handles()
+
+    def _tag_drawing_items(self, items, index: int, record: dict, selected: bool, mm_to_px: float,
+                           z: float, copper: str | None = None) -> None:
+        """@brief Give the scene items of drawing `index` their roles, z, tooltip and selection style.
+
+        @param items The items just added for the drawing.
+        @param index Drawing index (`DRAWING_KEY_ROLE`).
+        @param record Its record.
+        @param selected True paints them in the selection colour (`_style_drawing_item`).
+        @param mm_to_px Scene px per mm.
+        @param z Stacking: a back-layer drawing below the copper, a front one above (plan F1).
+        @param copper For a zone item, its copper layer («F.Cu» / «B.Cu»),
+            kept in `ZONE_COPPER_ROLE` so a restyle keeps that side's colour.
+        @note The «Layer» panel hides an item by `LAYER_ROLE`: the drawing's
+            KiCad layer, or «zones» for a keepout zone (`_drawing_view_layer`).
+        """
+        from .footprint_view import DRAWING_KEY_ROLE, DRAWING_KIND_ROLE, LAYER_ROLE, ZONE_COPPER_ROLE
+        hint = self.i18n.text("Disegno: tasto destro per eliminarlo o modificarlo.")
+        for item in items:
+            if copper is not None:
+                item.setData(ZONE_COPPER_ROLE, copper)
+            if selected:
+                # Selected drawings in the theme's selection accent.
+                self._style_drawing_item(item, record, True, mm_to_px)
+            item.setData(DRAWING_KEY_ROLE, index)
+            # The kind it was drawn as: `_refresh_drawing_selection` restyles only a match.
+            item.setData(DRAWING_KIND_ROLE, record["kind"])
+            # Its own KiCad layer: the «Layer» group hides it with that layer.
+            item.setData(LAYER_ROLE, _drawing_view_layer(record))
+            item.setZValue(z)
+            item.setToolTip(hint)
+            item.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    #: Scene px of a keepout zone's outline stroke at 20 px/mm (0.05 mm):
+    #: a rule area has no stroke in the file, KiCad draws its border thin.
+    _FP_ZONE_OUTLINE_PX = 1.0
+
+    @staticmethod
+    def _zone_brush(colour: QColor, copper: str) -> QBrush:
+        """@brief The hatch of a keepout zone: KiCad shows a rule area hatched in its copper colour.
+
+        @param colour The copper (or selection) colour.
+        @param copper «F.Cu» or «B.Cu»: the front hatch leans one way, the
+            back the other, so a zone on both layers shows a cross hatch.
+        @return A diagonal pattern brush.
+        """
+        style = Qt.BrushStyle.BDiagPattern if copper == "F.Cu" else Qt.BrushStyle.FDiagPattern
+        return QBrush(colour, style)
+
+    def _draw_zone_items(self, index: int, record: dict, selected: bool, mm_to_px: float) -> None:
+        """@brief Draw a keepout zone: one hatched outline per copper layer it names (plan F4).
+
+        @param index Drawing index.
+        @param record The validated «zone» record.
+        @param selected True draws it in the selection colour.
+        @param mm_to_px Scene px per mm.
+        @note A zone on F.Cu and B.Cu is drawn twice, front hatch over the
+            pads and back hatch under them (`_FP_FRONT_ZONE_Z`,
+            `_FP_BACK_ZONE_Z`), each in KiCad's copper colour
+            (`core.footprint_layers.COPPER_COLOURS`).
+        @note Each item is a `ZoneOutlineItem`: hatched over the area, hit on
+            its outline only, as KiCad selects a rule area (review 2026-11-09),
+            so the pads and the background inside stay reachable.
+        """
+        from .footprint_view import ZoneOutlineItem
+        polygon = QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in record["points"]])
+        for copper in record.get("layers") or ("F.Cu",):
+            colour = QColor(_drawing_colour(record, copper))
+            pen = QPen(colour)
+            pen.setWidthF(self._FP_ZONE_OUTLINE_PX)
+            item = ZoneOutlineItem(polygon)
+            item.setPen(pen)
+            item.setBrush(self._zone_brush(colour, copper))
+            self.preview_scene.addItem(item)
+            self._tag_drawing_items([item], index, record, selected, mm_to_px,
+                                    _FP_FRONT_ZONE_Z if copper == "F.Cu" else _FP_BACK_ZONE_Z, copper=copper)
 
     def _textbox_items(self, record: dict, pen: QPen, mm_to_px: float) -> list:
         """@brief Scene items of a text box: its border (when drawn) and one text item per line.
@@ -21434,6 +22256,11 @@ class MainWindow(QMainWindow):
                                     mm_to_px=mm_to_px, thickness=thickness, justify="left",
                                     vjustify="top", vertical=vertical, colour=_layer_color(record["layer"]))
             self.preview_scene.addItem(item)
+            if _is_back_layer(record["layer"]):
+                # A back text box's text is reflected about the box's centre
+                # line along its reading direction (plan F1, kicad-cli 10 svg).
+                centre = ((left + right) / 2.0 * mm_to_px, (top + bottom) / 2.0 * mm_to_px)
+                _mirror_scene_item(item, centre, (0.0, 1.0) if vertical else (1.0, 0.0))
             items.append(item)
         return items
 
@@ -21495,13 +22322,13 @@ class MainWindow(QMainWindow):
 
         dtype = (record or {}).get("dtype", "") if stored else {
             "dimension_radial": "radial", "dimension_center": "center", "dimension_leader": "leader"}.get(tool, "")
-        if tool in ("line", "polygon", self._REFERENCE_SCALE_TOOL):
+        if tool in ("line", "polygon", "zone", self._REFERENCE_SCALE_TOOL):
             # The calibration of the reference image shows the measured
-            # segment as a line does.
+            # segment as a line does; a keepout zone closes as a polygon.
             path.moveTo(*pts[0])
             for x, y in pts[1:]:
                 path.lineTo(x, y)
-            if tool == "polygon":
+            if tool in ("polygon", "zone"):
                 path.closeSubpath()
         elif dtype in ("radial", "center", "leader"):
             (x1, y1), (x2, y2) = points[:2]
@@ -21587,7 +22414,9 @@ class MainWindow(QMainWindow):
         hx, hy = (v * mm_to_px for v in self._fp_draw_hover)
         path = self._ghost_path(self._fp_draw_clicks + [self._fp_draw_hover])
         if path is not None:
-            ghost = scene.addPath(path, _ghost_pen(_layer_color(self.combo_fp_draw_layer.currentData())))
+            # A keepout zone in progress is not on the drawing layer: it shows in the copper colour.
+            ghost = scene.addPath(path, _ghost_pen(_ZONE_COPPER_COLOURS["F.Cu"] if self._fp_draw_tool == "zone"
+                                                   else _layer_color(self.combo_fp_draw_layer.currentData())))
             ghost.setData(0x44524D, True)
             ghost.setZValue(6)
         _screen_dot(scene, hx, hy, 7, YELLOW, YELLOW, 0x44524D, 8)
@@ -21658,14 +22487,14 @@ class MainWindow(QMainWindow):
                 for member in self._fp_drag_members(index, -1):
                     path = self._moved_drawing_ghost(member, drag[2])
                     if path is not None:
-                        ghost = scene.addPath(path, _ghost_pen(_layer_color(self.footprint_drawings[member]["layer"])))
+                        ghost = scene.addPath(path, _ghost_pen(_drawing_colour(self.footprint_drawings[member])))
                         ghost.setData(0x48474F, True)
                         ghost.setZValue(8)
             else:
                 path = self._ghost_path(points, record["kind"], stored=True, offset_mm=record.get("offset"),
                                         axis=record.get("axis", ""), record=record)
                 if path is not None:
-                    ghost = scene.addPath(path, _ghost_pen(_layer_color(record["layer"])))
+                    ghost = scene.addPath(path, _ghost_pen(_drawing_colour(record)))
                     ghost.setData(0x48474F, True)
                     ghost.setZValue(8)
         # Same handles as the symbol editor: 6 px squares, yellow outline,
@@ -22704,13 +23533,20 @@ class MainWindow(QMainWindow):
                 self._refresh_drawing_handles()
                 return
             record["points"][point_index] = list(point)
-        if not validate_footprint_drawings([record]):
+        valid = validate_footprint_drawings([record])
+        if not valid:
             self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
                                       self._degenerate_drawing_text(record))
             self._refresh_drawing_handles()
             return
         updated = deepcopy(self.footprint_drawings)
-        updated[index] = record
+        # The VALIDATED record (review 2026-11-09): a vertex dropped on its
+        # neighbour is collapsed by the validator (`collapse_repeated_points`),
+        # so memory holds what a save and reload would hold.
+        updated[index] = valid[0]
+        if updated[index] == self.footprint_drawings[index]:
+            self._refresh_drawing_handles()
+            return
         # Same indices after the drop: the selection made by the press stays.
         self._commit_drawings(updated)
         self._refresh_drawing_handles()
@@ -25109,7 +25945,10 @@ class MainWindow(QMainWindow):
             return
         step = 2.54 if self.combo_grid_unit.currentData() == "inch" else 1.0
         origin = spec["origin"]
-        if self._resolved_drawing_origin() != FP_ORIGIN_DEFAULT:
+        if (self._resolved_drawing_origin() != FP_ORIGIN_DEFAULT
+                or tuple(getattr(self, "footprint_anchor", (0.0, 0.0))) != (0.0, 0.0)):
+            # A chosen drawing origin, or a moved anchor (plan F2: the file's
+            # (0, 0)), puts the grid through that point.
             origin = self._drawing_origin_mm()
         self.preview_view.set_grid(step * spec["mm_to_px"],
                                    tuple(value * spec["mm_to_px"] for value in origin),
@@ -25659,6 +26498,10 @@ class MainWindow(QMainWindow):
             i.e. the very points offered as drawing origins: the origin
             entries stay first, as on the background, so the body editor does
             not take them away (regression found by the suite 2026-11-03).
+        @note The anchor entries («Sposta ancora qui», «Ripristina ancora del
+            footprint») follow the origin ones, as on the background (review
+            2026-11-09): a body corner or centre is a natural anchor point, and
+            the outline must not hide them there.
         """
         package = getattr(self, "package_geometry", None)
         if package is None or not self._body_outline_editable(package):
@@ -25667,6 +26510,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         try:
             origin = self._add_origin_actions(menu, scene_point)
+            menu.addSeparator()
+            anchor = self._add_anchor_actions(menu, scene_point)
             menu.addSeparator()
             width = menu.addAction(self.i18n.text("Modifica quota orizzontale…"))
             height = menu.addAction(self.i18n.text("Modifica quota verticale…"))
@@ -25677,6 +26522,7 @@ class MainWindow(QMainWindow):
                 self._edit_body_dimension(self.BODY_DIM_Y)
             else:
                 origin(chosen)
+                anchor(chosen)
         finally:
             # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
             menu.deleteLater()
@@ -26218,8 +27064,12 @@ class MainWindow(QMainWindow):
         corners = [(float(x), float(y)) for x, y in body_corners]
         centre = ((sum(x for x, _ in corners) / len(corners), sum(y for _, y in corners) / len(corners))
                   if corners else (0.0, 0.0))
-        points = {FP_ORIGIN_DEFAULT: (0.0, 0.0)}
-        if math.hypot(*centre) > 1e-9:
+        # «Origine del footprint» is the ANCHOR of the draft (plan F2): the
+        # point the written file puts at (0, 0), so the coordinates the
+        # pointer line and the editors show are the file's own.
+        anchor = tuple(float(v) for v in getattr(self, "footprint_anchor", (0.0, 0.0)))
+        points = {FP_ORIGIN_DEFAULT: anchor}
+        if math.hypot(centre[0] - anchor[0], centre[1] - anchor[1]) > 1e-9:
             points["center"] = centre
         for index, corner in enumerate(corners):
             points[f"corner:{index}"] = corner
@@ -26262,6 +27112,11 @@ class MainWindow(QMainWindow):
         x, y = self._drawing_origin_mm()
         view.set_drawing_origin(QPointF(x * _FP_PREVIEW_MM_TO_PX, y * _FP_PREVIEW_MM_TO_PX)
                                 if self._fp_origin_points else None)
+        # The footprint anchor gets its own marker where the drawing origin
+        # marker is not (plan F2); nothing drawn, no anchor shown.
+        ax, ay = self.footprint_anchor
+        view.set_anchor_marker(QPointF(ax * _FP_PREVIEW_MM_TO_PX, ay * _FP_PREVIEW_MM_TO_PX)
+                               if self._fp_origin_points else None)
         self._apply_preview_grid()
         self._update_footprint_readout()
 
@@ -26366,10 +27221,39 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         try:
             origin = self._add_origin_actions(menu, scene_point)
-            origin(menu.exec(global_pos))
+            menu.addSeparator()
+            anchor = self._add_anchor_actions(menu, scene_point)
+            chosen = menu.exec(global_pos)
+            origin(chosen)
+            anchor(chosen)
         finally:
             # Deferred, so the chosen action is still valid above (review 2026-10-27, B6).
             menu.deleteLater()
+
+    def _add_anchor_actions(self, menu, scene_point):
+        """@brief Add «Sposta ancora qui» and «Ripristina ancora del footprint» to `menu` (plan F2).
+
+        @param menu The QMenu being built.
+        @param scene_point Scene `QPointF` of the click, px: the anchor goes
+            to the point a drawing click there would take (`tool_snap_ex`:
+            object snap, then the drawing grid).
+        @return A callable taking the chosen action (or None) that applies it
+            when it is one of these entries; it does nothing otherwise.
+        """
+        from .canvas_clicktools import ANGLE_FREE, ToolSpec
+        here = self.tool_snap_ex(ToolSpec(self._ANCHOR_TOOL, count=1), scene_point, False, [], ANGLE_FREE)[0]
+        move = menu.addAction(self.i18n.text("Sposta ancora qui"))
+        move.setEnabled(tuple(here) != tuple(self.footprint_anchor))
+        reset = menu.addAction(self.i18n.text("Ripristina ancora del footprint"))
+        reset.setEnabled(tuple(self.footprint_anchor) != (0.0, 0.0))
+
+        def apply(chosen) -> None:
+            # Compared by identity: QMenu.exec returns the action object itself.
+            if chosen is move:
+                self.set_footprint_anchor(*here)
+            elif chosen is reset:
+                self.reset_footprint_anchor()
+        return apply
 
     def _add_origin_actions(self, menu, scene_point):
         """@brief Add «Imposta origine di disegno: …» and «Ripristina origine del footprint» to `menu`.

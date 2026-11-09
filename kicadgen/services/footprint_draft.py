@@ -39,11 +39,14 @@ KEPT_DRAFTS_FILE = '.footprint-draft-kept.json'
 #: Keys of a footprint edit state, in the order they are written.
 STATE_KEYS = ('drawings', 'texts', 'pad_overrides', 'package_pins')
 
-#: Keys added after the first recovery files were written (package_body:
-#: the body size edited from the preview's dimensions, 2026-11-03). A file
-#: without them is still a complete state: the missing key takes the
-#: applied value, so a crash draft written by an earlier version is offered.
-OPTIONAL_STATE_KEYS = ('package_body',)
+#: Keys added after the first recovery files were written, in the ORDER they
+#: were added (package_body: the body size edited from the preview's
+#: dimensions, 2026-11-03; anchor: the footprint anchor moved with «Sposta
+#: ancora» («Move anchor», 2026-11-09)). A file without them is still a
+#: complete state: the missing key takes the applied value, so a crash draft
+#: written by an earlier version is offered. A new key is APPENDED here: the
+#: order is what `_baseline_forms` relies on to tell which version wrote a file.
+OPTIONAL_STATE_KEYS = ('package_body', 'anchor')
 
 #: Size bound of a recovery file read back (same bound as the symbol's).
 MAX_DRAFT_BYTES = 2000000
@@ -93,9 +96,26 @@ def _valid_state(draft):
     return {key: draft[key] for key in STATE_KEYS + OPTIONAL_STATE_KEYS if key in draft}
 
 
-def _without_optional(state):
-    """`state` without the OPTIONAL_STATE_KEYS: the form an earlier version fingerprinted."""
-    return {key: value for key, value in state.items() if key not in OPTIONAL_STATE_KEYS}
+def _baseline_forms(baseline, draft):
+    """Fingerprints the stored baseline may carry for a draft with these keys.
+
+    The writer of every version fingerprints its own full applied state, so a
+    file written by the version that had OPTIONAL_STATE_KEYS[:k] carries the
+    fingerprint of the baseline restricted to STATE_KEYS + those k keys, and
+    its draft lacks exactly the keys added after them (a SUFFIX of
+    OPTIONAL_STATE_KEYS). The accepted forms are therefore: the full baseline
+    (the current version) and the baseline without the optional keys the
+    draft lacks, only when they form a suffix; no version wrote a draft
+    missing an earlier key but holding a later one, so that file is bound to
+    the full form only (review 2026-11-09: a fixed list of two forms refused
+    every draft of the version before the newest key).
+    """
+    forms = [fingerprint(baseline)]
+    if isinstance(baseline, dict) and isinstance(draft, dict):
+        missing = [key for key in OPTIONAL_STATE_KEYS if key not in draft]
+        if missing and tuple(missing) == OPTIONAL_STATE_KEYS[len(OPTIONAL_STATE_KEYS) - len(missing):]:
+            forms.append(fingerprint({key: value for key, value in baseline.items() if key not in missing}))
+    return forms
 
 
 def complete_state(draft, baseline):
@@ -140,15 +160,16 @@ def load_footprint_draft(path, baseline):
         None when the file is missing, too large, malformed (also too deeply
         nested), bound to another applied state, or holds nothing more than
         the applied state.
+    @note A file written by an earlier version (its draft lacks the newest
+        OPTIONAL_STATE_KEYS) is bound to the baseline without those keys
+        (`_baseline_forms`), then completed with their applied values.
     @throws OSError When the file exists but cannot be read.
     """
     data = _read_json(path)
     if not isinstance(data, dict) or data.get('version') != 1:
         return None
-    if data.get('baseline') not in (fingerprint(baseline), fingerprint(_without_optional(baseline))):
-        return None
     draft = _valid_state(data.get('draft'))
-    if draft is None:
+    if draft is None or data.get('baseline') not in _baseline_forms(baseline, draft):
         return None
     complete_state(draft, baseline)
     return None if draft == baseline else draft

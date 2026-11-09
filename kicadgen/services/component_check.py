@@ -97,7 +97,7 @@ def _pad_geometry(pad):
 
 
 def verify_component(directory, name, rows, *, pending=False, issues=(), emit=lambda result: None,
-                     footprint_pending=False):
+                     footprint_pending=False, model_offset=(0.0, 0.0, 0.0)):
     """@brief Use scratch copies only; failed checks do not suppress independent checks.
 
     @param directory Component folder.
@@ -109,6 +109,17 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
     @param footprint_pending True when the footprint preview holds an
         unapplied draft: the footprint checked is the applied one on disk,
         and a warning says the draft is not included.
+    @param model_offset Model offset, mm, KiCad 3D axes (Y up), of the
+        footprint on disk (`kicad_library.model_offset_for_anchor` of the
+        anchor it was written with): the 3D import test places the model as
+        the preview and the installs will, (0, 0, 0) for an unmoved anchor.
+    @pre `model_offset` must be the offset of the anchor the .kicad_mod ON
+        DISK was written with. The file does not record its anchor, so this
+        function cannot detect a stale file (written with another anchor, an
+        «Applica» not yet rewritten to disk): the import test would then
+        place the model off the pads and still report OK. The caller must
+        run it only when the file on disk matches the applied footprint
+        (the KiCad tab's alignment gate), or report the mismatch instead.
     @return The list of Check results.
     @note No exception escapes for a footprint without electrical pads or an
         incomplete STEP file: the ValueError raised internally is caught and
@@ -307,7 +318,7 @@ def verify_component(directory, name, rows, *, pending=False, issues=(), emit=la
                 raise ValueError(tx('STEP incompleto o troncato.'))
             add('OK', tx('Integrità STEP'), str(step))
             if fp.is_file():
-                artifacts = ComponentArtifacts(name, root, fp, step)
+                artifacts = ComponentArtifacts(name, root, fp, step, model_offset=tuple(model_offset))
                 preview = create_preview_project(artifacts, scratch / 'project')
                 output = scratch / 'assembly.step'
                 if run(tx('Importazione 3D in KiCad'), ['pcb', 'export', 'step', '--no-board-body', '-o', output, preview.board_path], output):

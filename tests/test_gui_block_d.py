@@ -76,10 +76,17 @@ class _Footprint:
         self.saved = []
         self.texts = []
         self.graphics = []
+        self.anchors = []
 
     def place_texts(self, positions):
         # The worker places Reference/Value before saving (since b99f835).
         self.texts.append(dict(positions))
+
+    def shift_origin(self, ax, ay):
+        # CONTRACT CHANGED 2026-11-09 («Sposta ancora»): the worker moves the
+        # footprint origin to the applied anchor before saving, (0, 0) included.
+        self.anchors.append((ax, ay))
+        return self
 
     def save(self, path):
         self.saved.append(path)
@@ -98,6 +105,7 @@ def test_a_builder_replaced_on_main_window_reaches_the_worker(monkeypatch, tmp_p
     done = QSignalSpy(worker.done)
     worker.run()  # stessa chiamata del thread, qui sincrona
     assert footprint.saved == [str(tmp_path / "X.pretty" / "X.kicad_mod")]
+    assert footprint.anchors == [(0.0, 0.0)], "the default anchor reaches the writer once"
     assert [row[0] for row in done] == footprint.saved
 
 

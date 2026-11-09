@@ -9,6 +9,7 @@ discarding unrelated entries.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 import re
@@ -98,13 +99,21 @@ def _read_utf8(path: Path) -> str:
 
 @dataclass(frozen=True)
 class ComponentArtifacts:
-    """@brief Describe the generated files required by the KiCad workflow."""
+    """@brief Describe the generated files required by the KiCad workflow.
+
+    @note ``model_offset`` is the ``(offset (xyz x y z))`` of the model node
+        every delivery writes (preview board, project and global install), in
+        mm and in KiCad's 3D axes (Y up). It is (0, 0, 0) unless the footprint
+        anchor was moved; then it comes from `model_offset_for_anchor`, so the
+        STEP model, built in the generator's coordinates, stays on the pads.
+    """
 
     name: str
     component_dir: Path
     footprint_path: Path
     step_path: Path
     wrl_path: Path | None = None
+    model_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -296,18 +305,24 @@ def step_file_is_complete(path: str | os.PathLike[str]) -> bool:
 
 def discover_component_artifacts(
         component_dir: str | os.PathLike[str], name: str | None = None,
-        *, require_3d: bool = True) -> ComponentArtifacts:
+        *, require_3d: bool = True,
+        model_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> ComponentArtifacts:
     """@brief Locate the generated footprint and matching STEP/WRL files.
 
     @param component_dir Working directory of one generated component.
     @param name Expected component name; defaults to the directory name.
     @param require_3d Require a STEP model in addition to the footprint.
+    @param model_offset Model offset, mm, KiCad 3D axes (Y up), carried into
+        the artifacts for every delivery; `model_offset_for_anchor` gives it
+        from the footprint anchor the .kicad_mod was written with.
     @return Validated artifact paths.
     @throws KiCadLibraryError If required files are missing or ambiguous, or
         if the STEP file lacks the ISO 10303-21 trailer (code
         ``step_incomplete``), even when ``require_3d`` is False.
+    @throws ValueError When `model_offset` is not three finite numbers.
     @throws OSError If the STEP file exists but cannot be read.
     """
+    offset = _checked_offset(model_offset)
     root = Path(component_dir).expanduser().resolve()
     component_name = (name or root.name).strip()
     if not component_name or ":" in component_name or any(
@@ -339,7 +354,7 @@ def discover_component_artifacts(
         )
     return ComponentArtifacts(
         component_name, root, footprint, step,
-        wrl if wrl.is_file() else None,
+        wrl if wrl.is_file() else None, offset,
     )
 
 
@@ -458,19 +473,98 @@ def name_footprint(footprint_text: str, name: str) -> str:
     return renamed
 
 
-def attach_3d_model(footprint_text: str, model_reference: str) -> str:
+#: Decimals of a model offset, mm: the precision `core.sexpr.format_number`
+#: writes the pad and graphic coordinates of the .kicad_mod with (1 nm), so
+#: the model moves by exactly the shift the pads moved by after an anchor
+#: move (review 2026-11-09: 4 decimals left the model up to 50 nm off the
+#: pads for an anchor such as 0.33333 mm).
+_OFFSET_DECIMALS = 6
+
+
+def _finite_number(value) -> bool:
+    """True for a non-boolean int or float that converts to a finite float.
+
+    A huge JSON int (hundreds of digits) makes `math.isfinite` raise
+    OverflowError; it is not a finite float, so it is refused here instead.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _checked_offset(offset) -> tuple[float, float, float]:
+    """Three finite, non-boolean numbers in mm, rounded to `_OFFSET_DECIMALS`, without ``-0``.
+
+    @throws ValueError For anything else (an int too large for a float
+        included): an offset is written into every delivered footprint, so a
+        NaN or a wrong arity must never reach a file.
+    """
+    try:
+        values = tuple(offset)
+    except TypeError:
+        raise ValueError(f"model offset must be (x, y, z) in mm, got {offset!r}") from None
+    if len(values) != 3 or not all(_finite_number(v) for v in values):
+        raise ValueError(f"model offset must be three finite numbers in mm, got {offset!r:.200}")
+    # `+ 0.0` turns a rounded -0.0 into 0.0, so the tuple compares and prints clean.
+    return tuple(round(float(v), _OFFSET_DECIMALS) + 0.0 for v in values)  # type: ignore[return-value]
+
+
+def model_offset_for_anchor(anchor_x: float, anchor_y: float) -> tuple[float, float, float]:
+    """@brief Model offset that keeps the STEP body on the pads after an anchor move.
+
+    @details The footprint writer moves every pad and graphic by
+    (-anchor_x, -anchor_y) in footprint coordinates (mm, Y down) so the chosen
+    point becomes the footprint origin; the STEP model, built in the
+    generator's coordinates, must move by the same amount. KiCad's model
+    offset is expressed in its 3D axes, X right and Y UP, so the same shift is
+    ``(offset (xyz -anchor_x anchor_y 0))``.
+    @param anchor_x Anchor X in the generator's coordinates, mm.
+    @param anchor_y Anchor Y in the generator's coordinates, mm, Y down.
+    @return (x, y, z) for `attach_3d_model`, mm, rounded to 1 nm like the
+        pad coordinates (`_OFFSET_DECIMALS`), no ``-0``.
+    @throws ValueError When either coordinate is not a finite number (an int
+        too large for a float included).
+    @note MEASURED with kicad-cli 10.0.8 (2026-11-09), not reasoned: a
+        footprint at (at 130 110) with a pad at (0 0) and one at (0 2), its
+        model with ``(offset (xyz 2 3 0))``, exported by ``kicad-cli pcb
+        export glb --no-board-body --include-pads --user-origin 130x110mm``.
+        In the GLB (metres, glTF Z = board Y down, checked by the pad at
+        (0 2) landing at Z +2 mm) the model's box centre moved from (0, 0) to
+        X +2 mm, Z -3 mm: offset X is board X, offset Y is board -Y. The same
+        holds for a WRL model (hand-written box, same export). The end-to-end
+        check is ``tests/test_kicad_model_offset.py``, which runs whenever
+        kicad-cli is installed.
+    """
+    x, y, _ = _checked_offset((anchor_x, anchor_y, 0.0))
+    return _checked_offset((-x, y, 0.0))
+
+
+def attach_3d_model(footprint_text: str, model_reference: str,
+                    offset: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
     """@brief Replace root model nodes with one normalized STEP reference.
 
     @param footprint_text Text of a .kicad_mod footprint.
     @param model_reference Model path written in the `(model ...)` node, e.g.
         a `${KIPRJMOD}` or absolute STEP reference.
-    @return The footprint text with exactly one model node, with zero offset
-        and rotation and unit scale.
+    @param offset Model offset, mm, in KiCad's 3D axes (X right, Y UP, Z up),
+        written as ``(offset (xyz x y z))``; `model_offset_for_anchor` gives
+        it for a moved footprint anchor. Numbers are written like the pad
+        coordinates (`format_number`: 1 nm, no trailing zeros, no ``-0``),
+        so the model moves by exactly the shift the pads moved by.
+    @return The footprint text with exactly one model node, with the given
+        offset, zero rotation and unit scale.
+    @throws ValueError When `offset` is not three finite numbers.
+    @note The default (0, 0, 0) writes exactly what this function wrote
+        before the offset existed, byte for byte.
     """
+    ox, oy, oz = _checked_offset(offset)
     without_models = _remove_direct_children(footprint_text, "model")
     model = (
         f"\t(model {quote(model_reference)}\n"
-        "\t\t(offset (xyz 0 0 0))\n"
+        f"\t\t(offset (xyz {format_number(ox)} {format_number(oy)} {format_number(oz)}))\n"
         "\t\t(scale (xyz 1 1 1))\n"
         "\t\t(rotate (xyz 0 0 0))\n"
         "\t)"
@@ -478,9 +572,10 @@ def attach_3d_model(footprint_text: str, model_reference: str) -> str:
     return _append_root_child(without_models, model)
 
 
-def _board_footprint(footprint_text: str, model_reference: str) -> str:
+def _board_footprint(footprint_text: str, model_reference: str,
+                     offset: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> str:
     """@brief Convert a library footprint into a positioned board footprint."""
-    result = attach_3d_model(footprint_text, model_reference)
+    result = attach_3d_model(footprint_text, model_reference, offset)
     result = _remove_direct_children(result, "at")
     return _append_root_child(
         result, f"\t(at {_mm(_PREVIEW_ORIGIN[0])} {_mm(_PREVIEW_ORIGIN[1])})")
@@ -662,6 +757,7 @@ def create_preview_project(
     footprint_text = _read_utf8(artifacts.footprint_path)
     footprint = _board_footprint(
         footprint_text, f"${{KIPRJMOD}}/{artifacts.name}.step",
+        artifacts.model_offset,
     )
     x0, y0, x1, y1 = preview_board_outline(footprint_text)
     lock_path = kicad_lock_file(board_path)
@@ -2413,7 +2509,7 @@ def install_component_library(
     )
     rendered = attach_3d_model(
         name_footprint(_read_utf8(artifacts.footprint_path), artifacts.name),
-        model_reference)
+        model_reference, artifacts.model_offset)
 
     # Folders created here are removed again by a failed install when empty.
     created_dirs = [

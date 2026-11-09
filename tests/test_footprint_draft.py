@@ -861,3 +861,72 @@ def test_a_kept_draft_with_its_own_package_body_keeps_it(tmp_path):
     own = dict(_old_state(), package_body=[30.0, 20.0])
     assert save_kept_drafts(path, [own])
     assert load_kept_drafts(path, dict(_old_state(), package_body=[22.5, 16.5])) == [own]
+
+
+# ── Recovery files written by earlier versions (review 2026-11-09) ────────
+
+def _write_draft_file(path, baseline_written, draft_written):
+    """Write a recovery file exactly as a version with that state shape wrote it."""
+    from kicadgen.services.symbol_draft import fingerprint
+    path.write_text(json.dumps({"version": 1, "baseline": fingerprint(baseline_written),
+                                "draft": draft_written}), encoding="utf-8")
+
+
+def _applied_now():
+    """The applied state as the current version builds it: every optional key present."""
+    return dict(_old_state(), drawings=[], package_body=None, anchor=[0.0, 0.0])
+
+
+def test_a_crash_draft_of_the_version_before_the_anchor_is_offered(tmp_path):
+    """Positive: HEAD c26d6b6 / v1.0.7 fingerprinted package_body but had no anchor key."""
+    path = tmp_path / FOOTPRINT_DRAFT_FILE
+    applied = _applied_now()
+    old_baseline = {k: v for k, v in applied.items() if k != "anchor"}
+    old_draft = dict(old_baseline, drawings=[record()])
+    _write_draft_file(path, old_baseline, old_draft)
+    offered = load_footprint_draft(path, applied)
+    # Completed with the applied anchor: the old draft never moved it.
+    assert offered == dict(old_draft, anchor=[0.0, 0.0])
+
+
+def test_a_crash_draft_from_before_the_body_key_is_still_offered(tmp_path):
+    """Positive: a file without package_body nor anchor binds the baseline without both."""
+    path = tmp_path / FOOTPRINT_DRAFT_FILE
+    applied = _applied_now()
+    oldest_baseline = {k: v for k, v in applied.items() if k not in ("package_body", "anchor")}
+    _write_draft_file(path, oldest_baseline, dict(oldest_baseline, drawings=[record()]))
+    offered = load_footprint_draft(path, applied)
+    assert offered is not None and offered["drawings"] == [record()]
+    assert offered["package_body"] is None and offered["anchor"] == [0.0, 0.0]
+
+
+def test_an_old_crash_draft_of_another_applied_state_is_refused(tmp_path):
+    """Negative: same shape as the version before the anchor, but another applied state."""
+    path = tmp_path / FOOTPRINT_DRAFT_FILE
+    applied = _applied_now()
+    other = {k: v for k, v in applied.items() if k != "anchor"}
+    other["package_body"] = [30.0, 20.0]
+    _write_draft_file(path, other, dict(other, drawings=[record()]))
+    assert load_footprint_draft(path, applied) is None
+
+
+def test_a_draft_missing_an_earlier_key_but_holding_a_later_one_binds_only_the_full_form(tmp_path):
+    """Negative: no version wrote anchor without package_body, so the reduced form is not accepted."""
+    path = tmp_path / FOOTPRINT_DRAFT_FILE
+    applied = _applied_now()
+    reduced = {k: v for k, v in applied.items() if k != "package_body"}
+    draft = dict(reduced, drawings=[record()])
+    _write_draft_file(path, reduced, draft)
+    assert load_footprint_draft(path, applied) is None
+    # Bound to the full baseline (a current writer), the same draft is offered.
+    assert save_footprint_draft(path, applied, draft)
+    assert load_footprint_draft(path, applied) == dict(draft, package_body=None)
+
+
+def test_a_current_draft_is_bound_to_the_full_baseline_only(tmp_path):
+    """Negative: a current draft (anchor present) never matches a reduced fingerprint."""
+    path = tmp_path / FOOTPRINT_DRAFT_FILE
+    applied = _applied_now()
+    old_baseline = {k: v for k, v in applied.items() if k != "anchor"}
+    _write_draft_file(path, old_baseline, dict(applied, drawings=[record()]))
+    assert load_footprint_draft(path, applied) is None

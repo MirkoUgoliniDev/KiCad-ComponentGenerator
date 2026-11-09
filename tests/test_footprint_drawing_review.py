@@ -396,7 +396,10 @@ def test_tooltips_take_their_numbers_from_the_constants(fp, monkeypatch):
     fp._set_fp_palette_tooltips()
     assert "10 pixel" in fp.chk_fp_object_snap.toolTip()
     tip = fp.btn_fp_draw_width_reset.toolTip()
-    assert "0.12 mm" in tip and tip.count("0.10 mm") == 3, "silkscreen, fabrication, comments, user drawings"
+    # B.SilkS and B.Fab added 2026-11-09 (plan F1): front and back silkscreen 0.12 mm,
+    # front and back fabrication, comments and user drawings 0.10 mm.
+    counts = (tip.count("0.12 mm"), tip.count("0.10 mm"))
+    assert counts == (2, 4), "silkscreen x2, fabrication x2, comments, user drawings"
     monkeypatch.setattr(object_snap, "SNAP_REACH_PX", 14.0)
     fp._set_fp_palette_tooltips()
     assert "14 pixel" in fp.chk_fp_object_snap.toolTip() and "10 pixel" not in fp.chk_fp_object_snap.toolTip()

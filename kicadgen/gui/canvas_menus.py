@@ -8,12 +8,16 @@ section 3.1):
 - `MenuEntry`: the immutable description of one menu entry (key, label,
   icon, state, submenu).
 - The standard entries (`rotate_entries`, `mirror_entry`, `delete_entry`,
-  `copy_entry`, `duplicate_entry`, `properties_entry`): same words, icons,
-  keys and order in both tabs.
+  `copy_entry`, `duplicate_entry`, `properties_entry`, `add_vertex_entry`,
+  `remove_vertex_entry`): same words, icons, keys and order in both tabs.
 - `build_element_menu` / `exec_element_menu`: the `QMenu` itself, its
   disabled title line and the action -> key map.
 - `ElementClipboard`: copied records and the paste offset that grows by one
   step at every paste, as in KiCad.
+- The vertex editing words and reach: `VERTEX_REFUSED` / `VERTEX_REFUSALS`
+  (the refusal messages by `vertex_edit` reason), `VERTEX_PICK_PX`,
+  `CONTEXT_HIT_MARGIN_PX`, `pick_reach_mm` (with `half_stroke_mm`) and
+  `scene_point_mm`, the screen-to-drawing point of a right click.
 
 The module imports no model and no tab: labels arrive translated through the
 caller's `tx` function, records are opaque and moved by a caller-supplied
@@ -21,6 +25,7 @@ caller's `tx` function, records are opaque and moved by a caller-supplied
 """
 from __future__ import annotations
 
+import math
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +33,9 @@ from typing import Callable, Optional
 
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QMenu, QWidget
+
+from ..core import vertex_edit
+from .canvas_gestures import HANDLE_SIZE_PX
 
 #: Folder of the menu icons (SVG files shipped with the GUI).
 ASSETS = Path(__file__).parent / "assets"
@@ -40,6 +48,107 @@ DELETE = "delete"
 COPY = "copy"
 DUPLICATE = "duplicate"
 PROPERTIES = "properties"
+ADD_VERTEX = "add_vertex"
+REMOVE_VERTEX = "remove_vertex"
+
+#: Reach, in SCREEN pixels at any zoom, of the vertex/segment pick of a right
+#: click on a line or polygon (`kicadgen.core.vertex_edit.pick`): the HALF-DIAGONAL
+#: of a vertex handle square (`canvas_gestures.HANDLE_SIZE_PX` / 2 * sqrt(2), about
+#: 4.24 px), the smallest circle that holds the whole visible square, corners
+#: included; a click that close to an outline picks the segment. Derived from the
+#: handle size, not a tuned number (the former full side, 6 px, let the two vertex
+#: reaches of a short segment hide it: generality finding of 2026-11-09). When a
+#: click is within reach of both, `vertex_edit.pick` decides by its midpoint rule.
+#: A UI reach shared by both tabs; each converts it to mm with `pick_reach_mm`.
+VERTEX_PICK_PX = HANDLE_SIZE_PX / 2.0 * math.sqrt(2.0)
+
+#: Margin, in SCREEN pixels at any zoom, of the right-click hit test of both
+#: tabs: a context click this close to a drawn stroke opens that element's menu,
+#: and anywhere on a vertex handle opens its element's menu. The same value as
+#: `footprint_view.HIT_MARGIN_PX` (a test pins them together); a UI tolerance
+#: (strokes and handles are a few px wide at any zoom), not geometry.
+CONTEXT_HIT_MARGIN_PX = 4
+
+#: Status message of a refused vertex insertion or removal whose reason has no
+#: wording of its own (untranslated Italian source, «Modifica dei vertici rifiutata.»: vertex edit refused).
+VERTEX_REFUSED = 'Modifica dei vertici rifiutata.'
+
+#: Status messages of a refused vertex insertion or removal, keyed by
+#: `vertex_edit.VertexEditRefused.reason` (untranslated Italian sources, shown
+#: through the tab's `tx`); a reason missing here falls back to VERTEX_REFUSED.
+VERTEX_REFUSALS = {
+    vertex_edit.TOO_FEW_POINTS: 'Vertice non rimosso: una linea ne richiede almeno 2, un poligono almeno 3.',
+    vertex_edit.NO_AREA: 'Vertice non rimosso: il poligono resterebbe senza area.',
+    vertex_edit.NO_LENGTH: 'Vertice non rimosso: la linea resterebbe senza lunghezza.',
+    vertex_edit.COINCIDENT: 'Vertice non aggiunto: coinciderebbe con un vertice esistente.',
+    vertex_edit.DUPLICATE: 'Vertice non rimosso: due vertici consecutivi coinciderebbero.',
+}
+
+
+def vertex_refusal_text(reason: str) -> str:
+    """@brief The untranslated status message of a refused vertex edit.
+
+    @param reason `vertex_edit.VertexEditRefused.reason`.
+    @return Its VERTEX_REFUSALS wording, VERTEX_REFUSED for an unknown reason.
+    """
+    return VERTEX_REFUSALS.get(reason, VERTEX_REFUSED)
+
+
+def pick_reach_mm(view_scale: float, scene_units_per_mm: float, px: float = VERTEX_PICK_PX,
+                  stroke_width_mm: float = 0.0) -> float:
+    """@brief A screen reach converted to drawing mm at the current zoom, widened by half the stroke.
+
+    @param view_scale The view transform's horizontal scale (`transform().m11()`;
+        its sign is ignored, a mirrored view has the same reach).
+    @param scene_units_per_mm Scene units per mm of the calling tab.
+    @param px Reach in screen pixels; VERTEX_PICK_PX by default.
+    @param stroke_width_mm Stroke width, mm, of the element picked; 0 (the
+        default, and a zone, which has no stroke) adds nothing, as does a
+        negative or non-finite width.
+    @return `px` / (|view_scale| * scene_units_per_mm) + stroke_width_mm / 2,
+        mm; 0.0 for a degenerate or non-finite scale (nothing is picked
+        rather than everything).
+    @note The half width follows KiCad's own hit test of a drawn shape,
+        `EDA_SHAPE::hitTest` (common/eda_shape.cpp): its reach is the
+        accuracy plus GetWidth() / 2 when the width is positive, so a click
+        on the outer edge of a thick stroke still hits it. Recalled from the
+        KiCad source, not re-read for this change.
+    """
+    try:
+        px_per_mm = abs(float(view_scale)) * float(scene_units_per_mm)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(px_per_mm) or px_per_mm <= 0.0:
+        return 0.0
+    return float(px) / px_per_mm + half_stroke_mm(stroke_width_mm)
+
+
+def half_stroke_mm(stroke_width_mm) -> float:
+    """@brief Half a stroke width, mm, as a pick reach adds it; 0 for no usable width.
+
+    @param stroke_width_mm Stroke width, mm (any value read from a record).
+    @return width / 2 for a finite positive number; 0.0 otherwise (a zone
+        or a KiCad width of 0, which `EDA_SHAPE::hitTest` does not add either).
+    """
+    try:
+        width = float(stroke_width_mm)
+    except (TypeError, ValueError):
+        return 0.0
+    return width / 2.0 if math.isfinite(width) and width > 0.0 else 0.0
+
+
+def scene_point_mm(view, global_pos, scene_units_per_mm: float, y_sign: float) -> tuple:
+    """@brief The drawing point (mm) under a screen position of a canvas view.
+
+    @param view The tab's `QGraphicsView`.
+    @param global_pos Screen `QPoint`.
+    @param scene_units_per_mm Scene units per mm of the calling tab.
+    @param y_sign +1 when the drawing's Y grows downwards like the scene's
+        (footprint), -1 when it grows upwards (symbol).
+    @return (x, y) mm in the tab's own drawing axes.
+    """
+    scene = view.mapToScene(view.viewport().mapFromGlobal(global_pos))
+    return scene.x() / scene_units_per_mm, y_sign * scene.y() / scene_units_per_mm
 
 
 @dataclass(frozen=True)
@@ -127,6 +236,43 @@ def properties_entry(tx: Callable[[str], str]) -> MenuEntry:
     @return The entry.
     """
     return MenuEntry(PROPERTIES, tx("Proprietà elemento…"))
+
+
+def add_vertex_entry(tx: Callable[[str], str], enabled: bool = True,
+                     separator_before: bool = True) -> MenuEntry:
+    """@brief The «Aggiungi vertice» (add vertex) entry of a line or polygon, key `ADD_VERTEX`.
+
+    @param tx Translation function of the calling tab.
+    @param enabled True when the right click picked a segment (`vertex_edit.pick`).
+    @param separator_before True (default) opens the vertex group with a separator.
+    @return The entry.
+    """
+    return MenuEntry(ADD_VERTEX, tx("Aggiungi vertice"), enabled=enabled, separator_before=separator_before)
+
+
+def remove_vertex_entry(tx: Callable[[str], str], enabled: bool = True) -> MenuEntry:
+    """@brief The «Rimuovi vertice» (remove vertex) entry of a line or polygon, key `REMOVE_VERTEX`.
+
+    @param tx Translation function of the calling tab.
+    @param enabled True when the right click picked a vertex (`vertex_edit.pick`).
+    @return The entry.
+    @note Enabled even when the removal will be refused (too few vertices, no
+        area left): choosing it then tells the user why, instead of a grey
+        entry that explains nothing.
+    """
+    return MenuEntry(REMOVE_VERTEX, tx("Rimuovi vertice"), enabled=enabled)
+
+
+def vertex_entries(tx: Callable[[str], str], picked) -> list:
+    """@brief The two vertex entries, enabled by what a right click picked.
+
+    @param tx Translation function of the calling tab.
+    @param picked A `vertex_edit.Pick` or None (the click was off the outline).
+    @return [«Aggiungi vertice» enabled on a segment, «Rimuovi vertice» enabled on a vertex].
+    """
+    kind = getattr(picked, "kind", None)
+    return [add_vertex_entry(tx, enabled=kind == vertex_edit.SEGMENT),
+            remove_vertex_entry(tx, enabled=kind == vertex_edit.VERTEX)]
 
 
 def _icon(entry: MenuEntry) -> Optional[QIcon]:

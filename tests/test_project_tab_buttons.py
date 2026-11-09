@@ -654,6 +654,9 @@ def test_generate_worker_never_shows_freecad_during_the_kicad_matching(monkeypat
         def place_texts(self, positions):
             pass    # the worker places Reference/Value before saving (since b99f835)
 
+        def shift_origin(self, ax, ay):
+            return self    # the worker moves the origin to the applied anchor (since 2026-11-09)
+
         def save(self, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text("(module)", encoding="utf-8")
