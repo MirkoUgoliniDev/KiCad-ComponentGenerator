@@ -261,7 +261,8 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 12666 passed,
+is 12850 passed,
+13 skipped and 19 subtests (2026-11-10, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `d8303a3`, halves 7862/9/19 and 4988/4: unfilled shapes hit on the outline like KiCad through kicadgen/gui/canvas_hit.py, one precedence and one pointer tracker for both canvases, one closing handle, pads the AI did not read block the footprint instead of failing the analysis, see docs/canvas-hit-plan.md and HANDOFF.md 09/11 sera; before that, 12666 passed,
 13 skipped and 19 subtests (2026-11-09 evening, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `e3eff26`, halves 7761/9/19 and 4905/4: back layers B.SilkS/B.Fab with mirrored texts, «Sposta ancora» with the STEP offset measured with kicad-cli, add/remove vertex in both canvases, keepout zones checked like KiCad's DRC, see docs/footprint-back-anchor-vertices-zones-plan.md and HANDOFF.md 09/11; before that, 12366 passed,
 13 skipped and 19 subtests (2026-11-09, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `33cbd08`, halves 7527/9/19 and 4839/4: the orthogonal dimension keeps its preview's axis inside the box as KiCad, SILK_MIN 0.10 mm sourced to KLC F5.1, five low findings of an adversarial review fixed; before that, 12362 passed,
 13 skipped and 19 subtests (2026-11-08, branch `FOOTPRINT-ADVANCE`, commit `8bee44f`, halves 7523/9/19 and 4839/4:

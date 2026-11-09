@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 09/11 sera — FATTO su FOOTPRINT-ADVANCE (base 9a7a2b0), commit in corso (utente: «commita pusha, mergia in main ... e poi crea release»): canvas H1/H2, tracker del puntatore, pad non letti dall'AI; SUITE COMPLETA VERDE (codice fermo): A 7862 passati 9 saltati 19 sottotest, B 4988 passati 4 saltati = 12850 passati, 13 saltati, 19 sottotest. Release v1.0.8 dopo il verde di «Tests» su GitHub.
+## 09/11 sera — FATTO e committato `d8303a3` su FOOTPRINT-ADVANCE (base 9a7a2b0), mergiato in main (utente: «commita pusha, mergia in main ... e poi crea release»): canvas H1/H2, tracker del puntatore, pad non letti dall'AI; SUITE COMPLETA VERDE (codice fermo): A 7862 passati 9 saltati 19 sottotest, B 4988 passati 4 saltati = 12850 passati, 13 saltati, 19 sottotest. Release v1.0.8 dopo il verde di «Tests» su GitHub.
 
 ULTIMO STATO (in testa): codice fermo dopo «CORRETTORE VER4» -> utente STA PROVANDO l'app; suite completa in corso.
 VER5 (verifica del giro PointerTracker): (1)(2)(3) FIXED, (4)(5) PARTIAL (scroll programmatico _scroll_preview_mm non emette
