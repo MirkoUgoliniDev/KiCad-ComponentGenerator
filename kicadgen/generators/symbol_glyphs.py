@@ -1540,6 +1540,12 @@ def shape_handles(instance: dict) -> list[tuple[float, float]]:
         corners, the circle's centre then a point on its rim (to the right
         of the centre), or the text anchor. Index = `position` of
         `set_shape_point`.
+    @note A closed outline (`_shape_closed`: a polygon, or a line that ends
+        where it starts) whose stored points repeat the first one has ONE
+        handle at the closing point, not two overlapping ones; dragging it
+        moves both ends (`set_shape_point`, user decision H2, 2026-11-09).
+        The same predicate decides the vertex edits, so handles, drags and
+        vertex add/remove agree on every record.
     """
     if not is_shape(instance):
         return []
@@ -1550,7 +1556,23 @@ def shape_handles(instance: dict) -> list[tuple[float, float]]:
     if p.kind == "circle":
         (cx, cy), = p.points
         return [(cx, cy), (round(cx + p.radius, 4), cy)]
-    return [tuple(pt) for pt in p.points]
+    handles = [tuple(pt) for pt in p.points]
+    return handles[:-1] if p.kind == "polyline" and _closing_repeat(instance) else handles
+
+
+def _closing_repeat(instance: dict) -> bool:
+    """Whether a closed line/polygon shape (`_shape_closed`) stores its first point again at the end.
+
+    Decided on the STORED (own-frame) points every edit rewrites, so the
+    placement (rotation, mirror) never changes the answer; the closing
+    repeat is then one vertex with the first point (`vertex_edit.has_closing_repeat`)."""
+    from ..core.vertex_edit import has_closing_repeat
+    if _shape_closed(instance) is not True:
+        return False
+    try:
+        return has_closing_repeat([_point_xy(pt) for pt in instance["primitives"][0].get("points") or []], True)
+    except (TypeError, ValueError, IndexError, KeyError, AttributeError):
+        return False
 
 
 def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
@@ -1566,6 +1588,12 @@ def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
     @note The record's origin (its turning centre) is kept: only the point
         moves, so a shape stretched far from its origin turns about the
         old centre until it is redrawn.
+    @note On a closed outline (`_shape_closed`, the vertex edits' own
+        predicate) that stores its closing repeat the closing point is one
+        vertex: position 0 (its only handle) or the last position moves the
+        first AND the last stored point, so the outline stays closed
+        (`vertex_edit.move_handle_point`, user decision H2, 2026-11-09,
+        which revokes the accepted «a handle drag opens it» of plan C12).
     """
     if not is_shape(instance):
         return False
@@ -1595,6 +1623,16 @@ def set_shape_point(instance: dict, position: int, x: float, y: float) -> bool:
         return True
     if not 0 <= position < len(points):
         return False
+    if kind == "polyline":
+        from ..core.vertex_edit import move_handle_point
+        before = [_point_xy(pt) for pt in points]
+        after = move_handle_point(before, position, (lx, ly), closed=_shape_closed(instance) is True)
+        # Only the slots the shared rule moved are rewritten (one, or the
+        # first and last of a closed outline); the others keep their stored form.
+        for slot, (old, new) in enumerate(zip(before, after)):
+            if new is not old:
+                points[slot] = [lx, ly]
+        return True
     candidate = [list(_point_xy(pt)) for pt in points]
     candidate[position] = [lx, ly]
     if kind == "rectangle" and (candidate[0][0] == candidate[1][0] or candidate[0][1] == candidate[1][1]):
@@ -1616,9 +1654,11 @@ VERTEX_EDIT_KEYS = {"shape:line": False, "shape:polygon": True}
 
 
 def _shape_closed(instance: dict) -> Optional[bool]:
-    """Whether a line/polygon shape is edited as a closed outline; None for other records.
+    """Whether a line/polygon shape is a closed outline; None for other records.
 
-    A polygon always is. A line is too when its stored points end on the first
+    The ONE predicate of the vertex edits, the drag handles and the handle
+    drag (`shape_handles`, `set_shape_point`): a polygon always is, even when
+    its stored points lack the closing repeat. A line is too when its stored points end on the first
     one with 3+ distinct vertices (`vertex_edit.is_closed_outline`): user
     decision A1 (2026-11-09, «Come il footprint»: like the footprint), so a
     removed vertex keeps it closed and the polygon rules (3 vertices, area)

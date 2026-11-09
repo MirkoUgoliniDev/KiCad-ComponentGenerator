@@ -3820,6 +3820,19 @@ def _main_pads(pins, factor: float):
     return main, repeated
 
 
+def _unread_main_remark(pins) -> str:
+    """The clause naming the main answer's pads left without positions, or "" (L3).
+
+    Appended to a «not confirmed» reason so the message says the cause the
+    user can act on: the main answer did not read those positions.
+    """
+    unread = _pads_without_positions({"pins": pins})
+    if not unread:
+        return ""
+    return "; " + tx("la risposta principale non ha letto le posizioni dei pad {pads}",
+                     pads=", ".join(unread))
+
+
 def _centred(spans: dict, exchanged: bool) -> bool:
     """Whether a chain reading may be written with the body centre as origin (outline on both axes)."""
     return spans.get("x") is not None and spans.get("y") is not None and not exchanged
@@ -3953,6 +3966,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
             why = tx("nessun pad letto")
         if reading and reading.get("skipped"):
             why = reading["skipped"]
+        why += _unread_main_remark(pins)
         holes = _HoleVerdicts(check_layout, _body_on_page(geometry, factor, False),
                               views={"main": main_view, "chains": main_view},
                               measure=measure_layout)
@@ -3983,7 +3997,7 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                  "({dedicated_view}): {dedicated}", problems="; ".join(problems[:6]),
                  dedicated_view=reading["view"], dedicated=_pad_summary(dedicated) or tx("nessuno"))
         _unconfirmed(data, pins, [("main", main, {}, False)] + own, holes, factor,
-                     progress, why, "")
+                     progress, why + _unread_main_remark(pins), "")
         return
     remarks = []
     if repeated:
@@ -4009,6 +4023,18 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                 and set(main) == set(dedicated))
     if not agreeing and _replace_by_confirmed_reading(data, pins, main, reading, holes, factor,
                                                       progress, remark, views_differ, exchanged):
+        return
+    unread = _pads_without_positions(geometry)
+    if unread:
+        # The main answer did not read every position (L3): it is no second
+        # reading of the pads it left without, so «fewer than two pads in
+        # common» or «pads the main answer lacks» would name the wrong cause.
+        # The dedicated reading stands alone: only a witness confirms it.
+        _unconfirmed(data, pins, readings, holes, factor, progress, tx(
+            "la risposta principale non ha letto le posizioni dei pad {pads}: la lettura dedicata "
+            "({read}) resta l'unica lettura, senza una seconda che la confermi",
+            pads=", ".join(unread), read=", ".join(sorted(dedicated, key=_pad_number_key))
+            or tx("nessuno")), remark)
         return
     if len(common) < 2:
         _unconfirmed(data, pins, readings, holes, factor, progress, tx(
@@ -4953,7 +4979,10 @@ def single_answer_to_data(answer: dict) -> dict:
     @note An unknown view is written as source_view "top" only as a frame:
         _require_declared_view blocks the generation afterwards when that
         guess would mirror the footprint. A grid without pin_map sets
-        `_numbers_by_convention` (its numbers were never read).
+        `_numbers_by_convention` (its numbers were never read); a grid
+        lacking the pitch or row spacing it needs sets `_grid_missing` (the
+        field names): its pads then have no coordinate on that axis, and
+        `_params_from_tool_arguments` drops them naming the missing value.
     """
     if not isinstance(answer, dict):
         raise AnswerShapeError(tx("Risposta AI non strutturata."), raw=answer)
@@ -4990,6 +5019,11 @@ def single_answer_to_data(answer: dict) -> dict:
             # Numbers the drawing never printed: a confirmed reading of the
             # printed numbers may replace them (_replace_by_confirmed_reading).
             data["_numbers_by_convention"] = True
+        missing = _grid_missing_spacings(grid)
+        if missing:
+            # The pads this spacing would place keep no coordinate; the
+            # validation names the missing grid value, not «not read» (L1).
+            data["_grid_missing"] = missing
         data["package_geometry"] = {
             "family": "unknown", "origin": origin,
             "source_view": view if view in ("top", "bottom") else "top",
@@ -5039,8 +5073,9 @@ def _grid_as_pads(grid: dict, answer: dict) -> tuple:
     numbers from the grid's pin_map as read (drawing view) or column by
     column (a convention, said in the note), filtered by populated_pins. The
     pitch is never reused as the row spacing: a missing value needed by the
-    grid leaves the coordinate empty, and the validation downstream reports
-    it. A grid is through-hole only, as the matrix was: a missing drill is
+    grid leaves the coordinate empty (`_grid_missing_spacings` names it), and
+    the validation downstream drops the pads naming that value and blocks
+    the generation. A grid is through-hole only, as the matrix was: a missing drill is
     left missing, never turned into SMD pads. When the body offsets and both
     body sizes are given, the pads are written with the body centre as origin.
 
@@ -5129,7 +5164,9 @@ def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
       `_chain_candidate`, `_pin_map_conflict` blocks the generation, and the
       dedicated reading, if any, settles it (_resolve_chain_candidate).
     A pin with neither coordinates nor a complete chain placement stays
-    without coordinates: the validation downstream reports it.
+    without coordinates: unless a dedicated reading places it, the
+    validation downstream drops the explicit pads with a note and blocks the
+    generation (`_params_from_tool_arguments`, «positions not read»).
     """
     if not isinstance(chains, list) or not chains:
         return
@@ -5164,7 +5201,7 @@ def _place_pins_from_chains(data: dict, chains, midpoints=None) -> None:
     unplaced = sorted(set(numbers) - set(before))
     if unplaced and reasons:
         # The chains cannot fill the coordinates in: the validation
-        # downstream reports the pins left without.
+        # downstream drops the pads and names the pins left without.
         reasons.append(tx("terminali senza coordinate: {numbers}", numbers=", ".join(unplaced)))
     if exchanged:
         note = _exchanged_body_remark(solved)
@@ -5217,7 +5254,11 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
         - "pad_layout": the chosen candidate's pins (mm, page frame) replace
           the x/y of the pads of the same number, with its origin and, when
           it declared one, its view; `needs_review` True, `pin_map_conflict`
-          cleared, a note names the source;
+          cleared, a note names the source. When the pads had been dropped
+          for unread positions (`unread_pad_geometry`), they are filled from
+          the candidate and become `package_geometry` again only if every pad
+          is then placed and the geometry validates (`unread_pads` and
+          `unread_pad_geometry` cleared); otherwise the question stays open;
         - "height_equals_plan": "keep" leaves the height, "clear" removes it
           (a rotated view: the agreed number was a plan size).
         The same semantics apply during an extraction given `answers=`
@@ -5257,21 +5298,43 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             result.body_conflict = None
             notes.append(tx("Altezza del corpo scelta dall'utente fra le quote lette: {value:.2f} mm.",
                             value=height))
-        elif field_name == "pad_layout" and geometry is not None:
+        elif field_name == "pad_layout" and (geometry is not None
+                                             or isinstance(result.unread_pad_geometry, dict)):
             payload = (candidates.get(key) or {}).get(str(value))
             if not isinstance(payload, dict):
                 remaining.append(question)
                 continue
+            # Pads dropped for unread positions (M3) are filled on a copy:
+            # they become the footprint again only when every pad is placed
+            # and the geometry validates.
+            restoring = geometry is None
+            target = copy.deepcopy(result.unread_pad_geometry) if restoring else geometry
             positions = {str(p.get("number")): (p.get("x_mm"), p.get("y_mm"))
                          for p in payload.get("pins") or () if isinstance(p, dict)}
-            for pin in geometry.get("pins") or ():
+            for pin in target.get("pins") or ():
                 number = _pad_number_text(pin.get("number")) if isinstance(pin, dict) else ""
                 if number in positions and None not in positions[number]:
                     pin["x_mm"], pin["y_mm"] = positions[number]
-            geometry["origin"] = payload.get("origin") or "custom"
-            geometry["needs_review"] = True
+            target["origin"] = payload.get("origin") or "custom"
+            target["needs_review"] = True
             if payload.get("view") in ("top", "bottom"):
-                geometry["source_view"] = payload["view"]
+                target["source_view"] = payload["view"]
+            if restoring:
+                if _pads_without_positions(target):
+                    remaining.append(question)
+                    continue
+                restored_notes: list = []
+                try:
+                    mapping, doubts = _validated_explicit_geometry(target, restored_notes)
+                except ExtractionError as exc:
+                    notes.append(tx("Disposizione dei pad scelta non applicabile: {exc}", exc=exc))
+                    remaining.append(question)
+                    continue
+                result.package_geometry = mapping
+                result.geometry_doubts = doubts
+                result.unread_pads = None
+                result.unread_pad_geometry = None
+                notes.extend(restored_notes)
             result.pin_map_conflict = None
             notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); da "
                             "verificare sul disegno.",
@@ -5570,6 +5633,12 @@ class ExtractedParams:
         result is a through-hole grid with rows, cols, pad and drill always
         set, `pitch_mm` set when cols > 1 and `row_spacing_mm` when rows > 1
         (None otherwise: a single column or row has no such distance).
+        Exception: explicit pads whose positions were not read are dropped
+        (see `_params_from_tool_arguments`); the matrix fields then stay
+        informative and may be None, `pin_map_conflict` is always set and
+        `unread_pads` is not None. A consumer must then write NO footprint
+        (neither the explicit pads, which are gone, nor a pin grid from the
+        matrix fields, which never were the footprint).
     @note Keys of each `castellated_sides` dict: edge, count, pitch_mm,
         first_pin, contact_style, and optionally reverse, offset_mm,
         pad_length_mm, pad_width_mm, pin_names, half_hole_diameter_mm (plated
@@ -5664,6 +5733,29 @@ class ExtractedParams:
     #: `reread_pad_positions` (partial re-runs without the main paid call).
     #: None for results built outside `extract_pin_header_params`.
     raw_main: Optional[dict] = None
+    #: Numbers (text) of the explicit pads whose positions were NOT read, when
+    #: those pads were the footprint and were dropped (`package_geometry` is
+    #: then None and `pin_map_conflict` set). Not None means: write no
+    #: footprint at all, from no field (`footprint_pads_dropped`). None when
+    #: nothing was dropped, and for a castellated module (its sides are the
+    #: footprint; dropped optional pads are only noted).
+    unread_pads: Optional[Sequence[str]] = None
+    #: The dropped explicit geometry (canonical mm, view as read), unread
+    #: coordinates still null, every other value validated: what
+    #: `apply_answers` fills with a chosen "pad_layout" candidate to restore
+    #: `package_geometry`. Never a footprint by itself.
+    unread_pad_geometry: Optional[dict] = None
+
+    def footprint_pads_dropped(self) -> bool:
+        """@brief Tell whether the footprint's explicit pads were dropped for unread positions.
+
+        @return True when `unread_pads` is set: the answer declared explicit
+            pads as its footprint but not all their positions, so no footprint
+            may be written (not even a pin grid from the matrix fields) until
+            the positions are confirmed (re-reading, answered question, new
+            analysis).
+        """
+        return bool(self.unread_pads)
 
     def values_to_review(self) -> list[str]:
         """@brief Return the keys of `value_sources` whose value was not read nor derived.
@@ -8963,6 +9055,120 @@ EXTRACTED_PACKAGE_PLACEHOLDER_NAME = "Package"
 LEGACY_EXTRACTED_PAD_SHAPES = {"trapezoid": "rect"}
 
 
+def _pads_without_positions(package_geometry) -> list[str]:
+    """The pads of an explicit geometry whose position was not read, as their number text.
+
+    A pad is unread when `x_mm` or `y_mm` is null or absent: the way a model
+    says it did not read the value (every field is nullable in DeepSeek's
+    strict mode). A value that IS present is not judged here: text, booleans
+    and non-finite numbers stay for `package_from_mapping` to reject, as any
+    malformed pad. Entries that are not objects are left to it too.
+
+    @return The numbers ("?" for a pad without one), in answer order; empty
+        when every pad has both coordinates or there is no pad list.
+    """
+    pins = package_geometry.get("pins") if isinstance(package_geometry, dict) else None
+    if not isinstance(pins, (list, tuple)):
+        return []
+    return [_pad_number_text(pin.get("number")) or "?" for pin in pins
+            if isinstance(pin, dict) and (pin.get("x_mm") is None or pin.get("y_mm") is None)]
+
+
+def _validate_present_pad_values(package_geometry: dict) -> None:
+    """Validate every value an explicit geometry with unread positions DOES carry.
+
+    Run before the geometry is dropped for its unread positions (audit
+    2026-11-09, M1): a null coordinate must not hide a malformed value
+    elsewhere. The package fields and the pads WITH both coordinates are
+    validated together, exactly as a footprint (overlaps among them
+    included); each pad left without a position is validated alone with
+    its missing coordinate(s) set to 0 (number, sizes, pad type, drill,
+    shape and the coordinate it did give). The stand-in zeros never leave
+    this check.
+
+    @throws KeyError, TypeError, ValueError As `package_from_mapping`.
+    """
+    pins = package_geometry.get("pins") or []
+    read, unread = [], []
+    for pin in pins:
+        if isinstance(pin, dict) and (pin.get("x_mm") is None or pin.get("y_mm") is None):
+            unread.append({**pin, "x_mm": 0.0 if pin.get("x_mm") is None else pin["x_mm"],
+                           "y_mm": 0.0 if pin.get("y_mm") is None else pin["y_mm"]})
+        else:
+            read.append(pin)
+    if read:
+        package_from_mapping({**package_geometry, "pins": read})
+    for pin in unread:
+        package_from_mapping({**package_geometry, "pins": [pin]})
+
+
+def _validated_explicit_geometry(package_geometry: dict, notes: list) -> tuple:
+    """Validate an explicit pad geometry as the footprint; return (mapping, doubts).
+
+    @param package_geometry The explicit geometry (canonical mm), every pad
+        with both coordinates.
+    @param notes Receives the label notes and the structural doubts.
+    @return (the mapping as validated, `geometry_doubts` list or None).
+    @throws ExtractionError When the geometry does not validate.
+    """
+    mapping = _package_mapping_for_validation(package_geometry, notes)
+    try:
+        # Validate now, while the source response and its warnings are still
+        # available; the GUI must never receive malformed pad coordinates.
+        geometry = package_from_mapping(mapping)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
+    # Structural contradictions (body over the pads, clockwise numbering,
+    # bottom view also declared mirrored) are exposed, never repaired:
+    # which reading is true is a question for the user (audit 2026-10-15).
+    doubts = [doubt.as_dict() for doubt in package_doubts(geometry)] or None
+    notes.extend(doubt["message"] for doubt in doubts or ())
+    return mapping, doubts
+
+
+def _kept_after_pad_drop(params) -> str:
+    """What of the answer still stands once its explicit pads were dropped, as one phrase.
+
+    Built from the fields the result really carries (audit 2026-11-09, M2):
+    a single-part answer keeps drill, pad size and pitch inside its pads,
+    so those fall with them and are not named.
+    """
+    kept = []
+    if any(getattr(params, key) is not None
+           for key in ("body_length_mm", "body_width_mm", "body_height_mm")):
+        kept.append(tx("corpo"))
+    if params.castellated_sides:
+        kept.append(tx("lati del modulo"))
+    if params.drill_mm is not None:
+        kept.append(tx("foro"))
+    if params.pad_diameter_mm is not None:
+        kept.append(tx("diametro del pad"))
+    if params.pitch_mm is not None:
+        kept.append(tx("passo"))
+    if params.row_spacing_mm is not None:
+        kept.append(tx("interasse fra le file"))
+    if params.pinout:
+        kept.append(tx("pinout"))
+    return ", ".join(kept) if kept else tx("nient'altro")
+
+
+def _grid_missing_spacings(grid: dict) -> list:
+    """The spacing fields a declared grid needs to place its pads and does not give.
+
+    `pitch_mm` is needed with more than one column, `row_spacing_mm` with
+    more than one row (`_grid_as_pads`); the pitch is never reused as the
+    row spacing, so either one missing leaves pads without a coordinate.
+    """
+    rows = _optional_number(grid.get("rows"), positive=True, integer=True)
+    cols = _optional_number(grid.get("cols"), positive=True, integer=True)
+    missing = []
+    if cols and cols > 1 and _optional_number(grid.get("pitch_mm"), positive=True) is None:
+        missing.append("pitch_mm")
+    if rows and rows > 1 and _optional_number(grid.get("row_spacing_mm"), positive=True) is None:
+        missing.append("row_spacing_mm")
+    return missing
+
+
 def _package_mapping_for_validation(package_geometry, notes: list):
     """Copy of an extracted package mapping that cannot discard a paid answer for a label.
 
@@ -9843,6 +10049,28 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         become informative, and a drill of 0 or none means pads without hole.
         Without them, a "matrix" answer is a through-hole pin grid (see
         `_footprint_matrix`); a "castellated" one is its edge sides.
+    @note Explicit pads whose positions were NOT READ -- at least one pad
+        with `x_mm` or `y_mm` null or absent -- are not a footprint: the
+        program never invents a coordinate, and the pads that have one alone
+        would be a footprint missing terminals. The explicit geometry is
+        dropped with a note naming those pads and what of the answer stays
+        (built from the surviving fields: a single-part answer's drill and
+        pad size live in its pads and fall with them), the matrix fields stay
+        informative, and `pin_map_conflict` blocks the generation until the
+        positions are confirmed (user, 2026-11-09, VE12H5-K run: «Sì,
+        correggi così»); `unread_pads` names the pads and
+        `unread_pad_geometry` keeps them for `apply_answers`. The raw answer
+        in `raw_main` keeps the pads, so the dedicated re-reading of the
+        positions can still settle them. Every value that IS present is
+        validated first (unread coordinates replaced by far stand-ins): a
+        malformed coordinate, number, size or pad type (text, boolean,
+        non-finite) is a broken answer, not an unread value, and remains an
+        error even beside a null coordinate. A declared grid lacking its
+        pitch or row spacing is named as such (`_grid_missing`).
+    @note Castellated layout: the edge sides are the footprint, so explicit
+        pads with unread positions are optional data: dropped with a note,
+        no block, `unread_pads` None (before 2026-11-09 the whole answer was
+        rejected).
     @throws ExtractionError For any unusable MANDATORY field (missing,
         boolean, non-finite, non-integral count, non-positive length, drill
         not smaller than the pad, pad without hole and without explicit pads),
@@ -9880,20 +10108,30 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
                             "parametri a matrice o del modulo."))
         package_geometry = None
+    unread_positions = _pads_without_positions(package_geometry)
+    # Explicit pads dropped for their unread positions, kept apart so that a
+    # chosen pad layout can still be written into them (apply_answers).
+    unread_geometry = None
     geometry_doubts = None
-    if package_geometry is not None:
-        package_geometry = _package_mapping_for_validation(package_geometry, notes)
+    if unread_positions:
+        # Everything present is validated first (M1): a malformed
+        # coordinate, number, size or pad type stays an error even beside a
+        # null coordinate.
+        mapping = _package_mapping_for_validation(package_geometry, notes)
         try:
-            # Validate now, while the source response and its warnings are still
-            # available; the GUI must never receive malformed pad coordinates.
-            geometry = package_from_mapping(package_geometry)
+            _validate_present_pad_values(mapping)
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
-        # Structural contradictions (body over the pads, clockwise numbering,
-        # bottom view also declared mirrored) are exposed, never repaired:
-        # which reading is true is a question for the user (audit 2026-10-15).
-        geometry_doubts = [doubt.as_dict() for doubt in package_doubts(geometry)] or None
-        notes.extend(doubt["message"] for doubt in geometry_doubts or ())
+        # Only the pad geometry is dropped, never the paid answer; the
+        # generation waits for a confirmed reading instead of a guessed one.
+        unread_geometry = copy.deepcopy(mapping)
+        package_geometry = None
+    elif package_geometry is not None:
+        package_geometry, geometry_doubts = _validated_explicit_geometry(package_geometry, notes)
+    # Spacing fields a declared grid lacked: the reason its pads have no
+    # coordinate, named instead of «not read» (L1).
+    grid_missing = [key for key in data.get("_grid_missing") or ()
+                    if key in ("pitch_mm", "row_spacing_mm")] if unread_positions else []
 
     if layout == "castellated":
         sides = _castellated_sides(
@@ -9904,7 +10142,10 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         # A castellated module has no matrix: counts or lengths it still sends
         # are informative only and dropped with a note when malformed.
         matrix = _informative_matrix(data, notes)
-    elif package_geometry is not None:
+    elif package_geometry is not None or unread_positions:
+        # Pads with unread positions are still what the answer described (the
+        # schema: explicit pads, when present, ARE the footprint source): a
+        # grid it may also send is not promoted to the footprint in their place.
         sides = None
         matrix = _informative_matrix(data, notes)
     else:
@@ -9934,6 +10175,23 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         # A partial map that no single convention completes: the GUI blocks
         # the automatic generation with this text, the user checks.
         pin_map_conflict = completion if not pin_map_conflict else pin_map_conflict + "\n" + completion
+    # A castellated module's footprint is its edge sides (validated above):
+    # its optional explicit pads, dropped, block nothing (L2). Otherwise the
+    # dropped pads WERE the footprint and the generation must wait.
+    pads_footprint_dropped = bool(unread_positions) and layout != "castellated"
+    if layout == "castellated":
+        unread_geometry = None
+    if pads_footprint_dropped and not pin_map_conflict:
+        # The dedicated pad reading normally blocks unconfirmed positions
+        # already (apply_dedicated_pads); this covers every path that did not
+        # run it, so dropped pads never leave the generation unblocked.
+        pin_map_conflict = (tx(
+            "Griglia dei pad senza {fields}: posizioni dei pad {pads} non calcolabili, nessun "
+            "footprint finche' le posizioni non sono confermate.",
+            fields=", ".join(grid_missing), pads=", ".join(unread_positions))
+            if grid_missing else tx(
+            "Posizioni dei pad NON lette (pad {pads} senza coordinate): nessun footprint "
+            "finche' le posizioni non sono confermate.", pads=", ".join(unread_positions)))
 
     body_length = _opt_float("body_length_mm")
     confidence = data.get("confidence", "low")
@@ -9986,6 +10244,8 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         candidates=copy.deepcopy(data["_candidates"]) if isinstance(data.get("_candidates"), dict)
         else None,
         raw_main=copy.deepcopy(data["_raw_main"]) if isinstance(data.get("_raw_main"), dict) else None,
+        unread_pads=list(unread_positions) if pads_footprint_dropped else None,
+        unread_pad_geometry=unread_geometry,
     )
     if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
         notes.append(data["_numbering_note"])
@@ -10002,6 +10262,21 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         _downgrade_sizes_wider_than_the_pitch(params, notes)
     else:
         _lift_drill_above_the_lead(params, notes)
+    if unread_positions:
+        # Named after the fields that survived (M2), once every adjustment
+        # above has run; the grid case names the spacing it lacked (L1).
+        reason = (tx("griglia senza {fields}", fields=", ".join(grid_missing)) if grid_missing
+                  else tx("coordinate assenti"))
+        if pads_footprint_dropped:
+            notes.append(tx("Geometria dei pad scartata: posizioni non lette per i pad {pads} "
+                            "({reason}). Si tengono: {kept}; le posizioni dei pad sono da "
+                            "rivedere.", pads=", ".join(unread_positions), reason=reason,
+                            kept=_kept_after_pad_drop(params)))
+        else:
+            notes.append(tx("Pad espliciti facoltativi scartati: posizioni non lette per i pad "
+                            "{pads} ({reason}). Il footprint resta quello dei lati del modulo; si "
+                            "tengono: {kept}.", pads=", ".join(unread_positions), reason=reason,
+                            kept=_kept_after_pad_drop(params)))
     notes.extend(_review_notes(sides, params.value_sources))
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()

@@ -160,6 +160,7 @@ from .settings_dialog import LlmSettingsDialog
 from .profile_dialog import ProfilesDialog, icon_button
 from ..services.component_image_match import CROP_GEOMETRY_KEYS as _CROP_GEOMETRY_KEYS
 from .theme import BASE, BLUE, GREEN, RED, SUBTEXT, SURFACE1, SURFACE2, TEXT, YELLOW, APP_QSS
+from .canvas_hit import OutlineEllipseItem, OutlinePathItem, OutlinePolygonItem, OutlineRectItem
 from .canvas_measure import DIMENSION_COLOR
 from .kicad_text_item import REFERENCE_PX as _KICAD_TEXT_REFERENCE_PX, cap_height_px as _kicad_cap_height_px, kicad_text_item as _kicad_text_item, text_baseline_px as _kicad_text_baseline_px
 from .tooltips import install_tooltip_filter
@@ -1941,6 +1942,12 @@ class MainWindow(QMainWindow):
         #: photo was calibrated with and the declared sides live here, not in
         #: the fields, which the user may have retouched in the meantime.
         self._last_extracted: ExtractedParams | None = None
+        #: Pad numbers (text) whose positions the last extraction did not read,
+        #: when those explicit pads were the footprint and were dropped
+        #: (`ExtractedParams.footprint_pads_dropped`). Not None means: no
+        #: footprint from any field (`_unread_pads_block`). Saved with the
+        #: project, so a reopened project keeps refusing.
+        self._unread_pads: list[str] | None = None
         #: Timestamp (same format as the evidence files) of the last
         #: extraction started: the saved proposals are valid only if they
         #: came from that one: the project's photo-cache folder also keeps the
@@ -3915,6 +3922,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(TAB_PREVIEW, self.i18n.tr("tab.preview.name"))
         self.tabs.setTabText(TAB_SYMBOL, self.i18n.tr("tab.symbol.name"))
         self.symbol_tab.retranslate()
+        self._retranslate_symbol_block()
         self._retranslate_footprint_palette()
         self._retranslate_fp_properties()
         self.tabs.setTabText(TAB_MODEL_3D, self.i18n.tr("tab.model3d.name"))
@@ -8728,6 +8736,10 @@ class MainWindow(QMainWindow):
             state["extraction_questions"] = deepcopy(self._extraction_questions)
         if getattr(self, "_step_deferral", None):
             state["step_deferral"] = dict(self._step_deferral)
+        if getattr(self, "_unread_pads", None):
+            # Only when some exist (PADNULL H1): the refusal outlives the
+            # extraction object, which a reopened project no longer has.
+            state["unread_pads"] = list(self._unread_pads)
         main_answer = self._main_answer_for_reread()
         if main_answer is not None:
             # The input of a partial re-read (M16): only when JSON-able, and
@@ -8902,6 +8914,9 @@ class MainWindow(QMainWindow):
              "fields": [f for f in saved_deferral.get("fields") or () if isinstance(f, str)]}
             if isinstance(saved_deferral, dict)
             and saved_deferral.get("code") in self.STEP_DEFERRAL_CODES else None)
+        # Unread pad positions of the last extraction (PADNULL H1): the
+        # footprint stays refused after a reopen until a reading confirms them.
+        self._unread_pads = self._valid_unread_pads(state.get("unread_pads"))
         saved_main = state.get("main_answer")
         self._stored_main_answer = dict(saved_main) if isinstance(saved_main, dict) and saved_main else None
         saved_analysis = state.get("analysis_pin_names")
@@ -9162,6 +9177,8 @@ class MainWindow(QMainWindow):
         self._extraction_questions = []
         self._step_deferral = None
         self._stored_main_answer = None
+        # Back from the open project's file (`_apply_project_state`) only.
+        self._unread_pads = None
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
@@ -11213,6 +11230,14 @@ class MainWindow(QMainWindow):
         # asked FIRST and their answers applied to the result before any
         # field reads it (H7): what follows sees one settled extraction.
         params, questions_held_back = self._review_extraction_questions(params)
+        if not self._relaunch_base_synthesized:
+            # After the answers (a «pad_layout» answer restores the pads and
+            # clears the flag): every real extraction or re-read states its
+            # own unread pads; a base rebuilt from the fields is no reading
+            # and keeps the current state (PADNULL H1).
+            self._unread_pads = self._dropped_footprint_pads(params)
+            if self._unread_pads:
+                self._append_log(self._unread_pads_block())
         validated_package_geometry = None
         if self._selected_family() == "single_smd" and params.package_geometry:
             # Without pad geometry the result is still applied and shown: the
@@ -13869,6 +13894,12 @@ class MainWindow(QMainWindow):
             expected, expected_extents = self._footprint_signature_of(
                 host, self._applied_drawings_now(), self.applied_footprint_anchor())
         except (ValueError, TypeError, ArithmeticError, KeyError, IndexError) as exc:
+            # Unread pad positions: the block already names its own remedies
+            # (partial re-read, question, new analysis); «correct the fields
+            # and regenerate» would contradict it, since no field can fix it.
+            block = self._unread_pads_block()
+            if block:
+                return ("footprint_invalid", block)
             return ("footprint_invalid", self.i18n.text(
                 "Footprint non verificabile: i parametri attuali non sono validi ({error}). "
                 "Correggili e rigenera il footprint prima di provarlo o installarlo.").format(error=exc))
@@ -15516,6 +15547,61 @@ class MainWindow(QMainWindow):
                                     token=token)) from None
         return pins or None
 
+    @staticmethod
+    def _dropped_footprint_pads(params) -> list[str] | None:
+        """@brief The pad numbers an extraction dropped from its footprint, None when none.
+
+        @param params An extraction result (ExtractedParams or a stand-in).
+        @return The text numbers of `params.unread_pads` when
+            `footprint_pads_dropped()` says the explicit pads WERE the
+            footprint (never for a castellated module, whose sides are the
+            footprint); None otherwise, also for a result without the method.
+        """
+        dropped = getattr(params, "footprint_pads_dropped", None)
+        if not callable(dropped) or not dropped():
+            return None
+        pads = [str(pad).strip() for pad in getattr(params, "unread_pads", None) or ()
+                if str(pad).strip()]
+        return pads or None
+
+    @staticmethod
+    def _valid_unread_pads(raw) -> list[str] | None:
+        """@brief The saved `unread_pads` of a project, None when absent or malformed.
+
+        @param raw Value read from the project file.
+        @return Non-empty list of non-empty text pad numbers, else None.
+        @note A malformed value is read as absent: a project saved before the
+            key never had the block, and inventing pad numbers would be worse.
+        """
+        if not isinstance(raw, (list, tuple)):
+            return None
+        pads = [pad.strip() for pad in raw if isinstance(pad, str) and pad.strip()]
+        return pads or None
+
+    def _unread_pads_block(self) -> str:
+        """@brief Why no footprint may be built now, with the remedy; '' when it may.
+
+        @return Translated text naming the pads whose positions the last
+            extraction did not read, and the existing remedies: the partial
+            re-read in the tools menu, the answer to the pad-position question
+            when an analysis asks it, or a new analysis. '' without unread pads.
+        @note Not every `pin_map_conflict`: a grid numbering in disagreement
+            is corrected in the fields and regenerated by hand, so blocking
+            the manual paths there would remove the documented remedy. Unread
+            pad positions have no field the user could correct.
+        """
+        pads = getattr(self, "_unread_pads", None)
+        if not pads:
+            return ""
+        return self.i18n.text(
+            "Nessun footprint: le posizioni dei pad {pads} non sono state lette dai documenti, e "
+            "i campi della matrice non sono il footprint di questo componente.").format(
+            pads=", ".join(pads)) + " " + self.i18n.text(
+            "Usa «{menu} > {action}», rispondi alla domanda sulle posizioni dei pad quando "
+            "l'analisi la propone, oppure ripeti l'analisi con un disegno quotato dei pad.").format(
+            menu=self.i18n.tr("app.tools").replace("&", ""),
+            action=self.i18n.text("Rileggi solo le posizioni dei pad"))
+
     def _current_params(self) -> PinHeaderParams:
         """@brief The pin header parameters from the fields and the footprint draft.
 
@@ -15527,7 +15613,18 @@ class MainWindow(QMainWindow):
             afterwards) is left out with a log line, as for the host
             headers, and kept in the draft; before, it made the whole
             parameter set invalid and the preview disappeared.
+        @throws ValueError With `_unread_pads_block()` when the last
+            extraction declared explicit pads as the footprint but did not
+            read their positions (audit PADNULL H1, 2026-11-09): the matrix
+            fields then hold stale or default values that never were this
+            component's footprint. This is the ONE place a pin header is built
+            from the fields, so every footprint write (manual, automatic, draft
+            rewrite), the 2D and 3D previews, the symbol pad list and the KiCad
+            stale-file check refuse with the same reason and remedy.
         """
+        block = self._unread_pads_block()
+        if block:
+            raise ValueError(block)
         params = PinHeaderParams(
             name=self.field_name.text().strip(),
             description=self.field_description.text().strip(),
@@ -15681,8 +15778,13 @@ class MainWindow(QMainWindow):
             (review 2026-11-04, low findings): the reason names what is
             wrong, the family of the component says where to fix it, and
             neither is repeated.
+        @note With unread pad positions (`_unread_pads_block`) the reason
+            already carries its own remedy: the «Piazzole» remedy would send
+            the user to fields that hold no pad positions (PADNULL H1).
         """
-        if self._selected_family() == "single_tht":
+        if self._unread_pads_block():
+            text = message + "\n\n" + self.i18n.text("Nessun file generato.")
+        elif self._selected_family() == "single_tht":
             text = (message + "\n\n" + self.i18n.text("Nessun file generato.") + " "
                     + self.i18n.text(
                         "Correggi i valori nella sezione Piazzole del componente THT, poi usa "
@@ -15718,6 +15820,12 @@ class MainWindow(QMainWindow):
             unsafe proposal cannot block a generation that never uses it.
         """
         self._validate_output_name(self._component_name())
+        # Explicit pads dropped for unread positions (PADNULL H1): the block
+        # names the pads and the remedy, so it goes before the extractor's
+        # own conflict text, which names neither the remedy nor the fields.
+        block = self._unread_pads_block()
+        if block:
+            raise ValueError(block)
         conflict = getattr(params, "pin_map_conflict", None)
         if conflict:
             # Two readings of the contacts that disagree (numbering of a grid,
@@ -16124,6 +16232,11 @@ class MainWindow(QMainWindow):
             return False
 
         try:
+            # Checked whatever the parameter source (PADNULL H1): the pads the
+            # extraction declared were not read, so nothing is the footprint.
+            block = self._unread_pads_block()
+            if block:
+                raise ValueError(block)
             params = (
                 self.package_geometry if self.package_geometry is not None else
                 self._current_castellated_params() if self._is_castellated()
@@ -16167,6 +16280,13 @@ class MainWindow(QMainWindow):
                 return False
             if automatic:
                 self._automatic_generation_blocked(str(exc))
+            elif not self._fp_rewrite_flushing and self._unread_pads_block():
+                # «Genera» / «Rigenera footprint» pressed by the user with
+                # unread pad positions (PADNULL H1): said in a window, not
+                # only in the log, since no field of the window can fix it.
+                # A deferred draft rewrite stays quiet (it runs from a timer).
+                QMessageBox.warning(self, self.i18n.text("Footprint non generato"),
+                                    self._unread_pads_block())
             return False
 
         project_dir = self._project_dir()
@@ -16830,6 +16950,15 @@ class MainWindow(QMainWindow):
         mounting_layout.addWidget(self.label_preview_mounting_error)
         outer.addWidget(self.preview_mounting_group)
         self._sync_preview_mounting()
+        #: Why the preview draws no footprint when the extraction dropped its
+        #: pads (PADNULL H1): the reason and the remedy, hidden otherwise.
+        #: Set translated by `_draw_preview`, which every language switch reruns.
+        self.label_preview_footprint_block = QLabel()
+        self.label_preview_footprint_block.setObjectName("previewFootprintBlock")
+        self.label_preview_footprint_block.setWordWrap(True)
+        self.label_preview_footprint_block.setProperty("i18n_skip", True)
+        self.label_preview_footprint_block.hide()
+        outer.addWidget(self.label_preview_footprint_block)
         canvas_row = QHBoxLayout()
         canvas_row.setSpacing(4)
         canvas_row.addWidget(self.preview_view, 1)
@@ -17665,6 +17794,25 @@ class MainWindow(QMainWindow):
         self._config["preview_layers"] = layers
         self._save_config_safely()
         self._apply_preview_layer_visibility()
+        if not checked:
+            self._drop_hidden_drawings_from_selection()
+
+    def _drop_hidden_drawings_from_selection(self) -> None:
+        """@brief Deselect every drawing whose layer the «Layer» panel now hides.
+
+        @note Same rule as the rubber band and the pointer fallback of
+            `_fp_targets`: never act through a hidden layer. A drawing
+            selected before its layer was switched off would otherwise stay
+            the target of Delete, R, Ctrl+D, Ctrl+C and the arrows while
+            invisible. Showing the layer again does not reselect it.
+        """
+        hidden = [index for index in self._fp_selected_indices()
+                  if not self._fp_drawing_layer_shown(index)]
+        if not hidden:
+            return
+        for index in hidden:
+            self._fp_selection.toggle(index)
+        self._refresh_drawing_selection()
 
     def _apply_preview_layer_visibility(self) -> None:
         """@brief Show or hide every tagged item of the preview scene by its layer's preference."""
@@ -17688,6 +17836,17 @@ class MainWindow(QMainWindow):
             elif item.isVisible():
                 item.setData(LAYER_HIDDEN_ROLE, True)
                 item.setVisible(False)
+        if (self._fp_hovered_drawing >= 0 and self._fp_handle_drag is None
+                and not self._fp_drawing_layer_shown(self._fp_hovered_drawing)):
+            # The hovered drawing's layer was just hidden: its handles (not
+            # tagged with a layer) go with it, and the view forgets the hover,
+            # so neither the press pick nor the keyboard fallback reaches an
+            # invisible drawing through them (VER5 A, preexisting).
+            self._fp_hovered_drawing = -1
+            view = getattr(self, "preview_view", None)
+            if view is not None:
+                view.reset_hover()
+            self._refresh_drawing_handles()
 
     def _begin_preview_layer(self, tag: str) -> None:
         """@brief Start a block of drawing whose new items belong to the preview layer `tag`.
@@ -18425,6 +18584,12 @@ class MainWindow(QMainWindow):
         @note CONTRACT CHANGED (plan C2): the selection now wins over the
             hovered drawing; before, E opened the hovered drawing's dialog
             even with another drawing selected.
+        @note CONTRACT CHANGED (verification 2026-11-09, D4): "under the
+            pointer" is the drawing a left press there would take
+            (`FootprintView.drawing_under_pointer`, the symbol editor's
+            `_hovered_graphic`), no longer the hovered drawing whose handles
+            show, which stays through its bounding rectangle: with the
+            pointer inside an empty outline E opens nothing.
         """
         if self._fp_selected_indices():
             return self._focus_fp_properties()
@@ -18432,7 +18597,8 @@ class MainWindow(QMainWindow):
         if pads:
             self._edit_package_pad(pads[0])
             return True
-        index = self._fp_hovered_drawing
+        view = getattr(self, "preview_view", None)
+        index = view.drawing_under_pointer() if view is not None else -1
         if 0 <= index < len(self.footprint_drawings):
             self._edit_drawing_properties(index)
             return True
@@ -20410,14 +20576,42 @@ class MainWindow(QMainWindow):
             pads are selected: Delete, R, Ctrl+D and Ctrl+C never fall back
             to a drawing the user did not select (pads are not deleted,
             turned or copied; the arrows move them, `_nudge_footprint_targets`).
+        @note CONTRACT CHANGED (2026-11-09, same class as D4): "under the
+            pointer" is the drawing a plain left press there would take
+            (`FootprintView.drawing_under_pointer`, the E key's target), no
+            longer `_fp_hovered_drawing`, which reveals the handles and stays
+            through the drawing's bounding rectangle plus a hysteresis: with
+            the pointer inside an EMPTY outline (a press there is background,
+            user decision H1) Delete, R, Ctrl+D, Ctrl+C and the arrows act on
+            nothing; inside a filled shape they act on it.
         """
         if self._fp_selected_pads():
             return []
         selected = self._fp_selected_indices()
         if selected:
-            return selected
-        index = self._fp_hovered_drawing
-        return [index] if 0 <= index < len(self.footprint_drawings) else []
+            # Never a drawing on a hidden layer, selected or not (the layer
+            # toggle also deselects them, `_drop_hidden_drawings_from_selection`).
+            return [index for index in selected if self._fp_drawing_layer_shown(index)]
+        view = getattr(self, "preview_view", None)
+        index = view.drawing_under_pointer() if view is not None else -1
+        # Never a drawing on a hidden layer (VER5 A): the pointer fallback acts
+        # on what the user sees under the cursor.
+        return ([index] if 0 <= index < len(self.footprint_drawings) and self._fp_drawing_layer_shown(index)
+                else [])
+
+    def _fp_drawing_layer_shown(self, index: int) -> bool:
+        """@brief Whether the «Layer» panel shows the layer of drawing `index`.
+
+        @param index Index into `footprint_drawings`.
+        @return False for an unknown index or a drawing whose view layer
+            (`_drawing_view_layer`: its KiCad layer, or «zones») is switched off.
+        @note Read from the preference, not from the items' visibility, so it
+            holds in the middle of a redraw too, before
+            `_apply_preview_layer_visibility` hides the new items.
+        """
+        if not 0 <= index < len(self.footprint_drawings):
+            return False
+        return self._preview_layer_visible(_drawing_view_layer(self.footprint_drawings[index]))
 
     def _select_footprint_drawing(self, index: int, additive: bool = False) -> None:
         """@brief Make `index` the primary selected drawing; `additive` keeps the others.
@@ -20777,12 +20971,27 @@ class MainWindow(QMainWindow):
         @note The step is the paste/duplicate step (`_footprint_paste_step`,
             the view's drawing grid); the move goes through
             `_translate_drawings`, the path of a whole-drawing drag drop.
+        @note With nothing selected, the first nudge of the drawing under the
+            pointer (`_fp_targets`' pointer fallback) also SELECTS it, as
+            KiCad acts on the item under the cursor and then keeps it: the
+            next arrows follow the drawing, not the pointer's spot. Before, a
+            held arrow nudged it until it slid out from under the pointer, a
+            number of steps that depended on its shape and fill
+            (verification 2026-11-09). Still one undo step per nudge.
+        @note The pointer's drawing is selected only when the nudge MOVED it:
+            a nudge the validation refuses («Spostamento scartato.») leaves
+            the selection as it was (review 2026-11-09, point 2), so a refused
+            arrow never turns a hover into a selection.
         """
         targets = self._fp_targets()
         if not targets:
             return False
+        from_pointer = not self._fp_selected_indices()
         step_x, step_y = self._footprint_paste_step()
-        return self._translate_drawings(targets, round(dx * step_x, 4), round(dy * step_y, 4))
+        moved = self._translate_drawings(targets, round(dx * step_x, 4), round(dy * step_y, 4))
+        if moved and from_pointer:
+            self._select_footprint_drawing(targets[0])
+        return moved
 
     def _turn_footprint_targets(self, counter_clockwise: bool) -> bool:
         """@brief R / Shift+R: turn the selected drawings (else the hovered one) by a quarter turn.
@@ -22048,11 +22257,17 @@ class MainWindow(QMainWindow):
                 colour = QColor(_layer_color(record["layer"]))
                 colour.setAlpha(96)
                 brush = QBrush(colour)
+            # Rectangles, polygons, circles, arcs and curves are `canvas_hit`
+            # outline items: hit on the stroke, inside only when filled, as
+            # KiCad's EDA_SHAPE::hitTest (H1, 2026-11-09); a line is drawn
+            # as segments, whose Qt shape is already their stroke.
+            filled = bool(record.get("fill"))
             if kind == "line":
                 items = [self.preview_scene.addLine(*a, *b, pen)
                          for a, b in zip(points, points[1:])]
             elif kind == "polygon":
-                items = [self.preview_scene.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]), pen, brush)]
+                items = [self._add_outline_item(OutlinePolygonItem(QPolygonF([QPointF(x, y) for x, y in points])),
+                                                pen, brush, filled)]
             elif kind == "dimension":
                 # The strokes KiCad draws for the dimension's type
                 # (`FpDimension.ink_segments`: extension lines, dimension
@@ -22100,23 +22315,23 @@ class MainWindow(QMainWindow):
             elif kind == "curve":
                 # Sampled as the checks sample it (`bezier_segments`), from the
                 # writer's own curve function (`bezier_points`).
-                items = [self.preview_scene.addPath(_curve_path(record["points"], mm_to_px), pen)]
+                items = [self._add_outline_item(OutlinePathItem(_curve_path(record["points"], mm_to_px)),
+                                                pen, QBrush(), False)]
             elif kind == "textbox":
                 items = self._textbox_items(record, pen, mm_to_px)
             elif kind == "rectangle":
                 (x0, y0), (x1, y1) = points
-                items = [self.preview_scene.addRect(min(x0, x1), min(y0, y1),
-                                                    abs(x1 - x0), abs(y1 - y0), pen, brush)]
+                items = [self._add_outline_item(OutlineRectItem(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)),
+                                                pen, brush, filled)]
             elif kind == "circle":
                 (cx, cy), (rx, ry) = points
                 radius = math.hypot(rx - cx, ry - cy)
-                items = [self.preview_scene.addEllipse(cx - radius, cy - radius,
-                                                       2 * radius, 2 * radius, pen, brush)]
+                items = [self._add_outline_item(OutlineEllipseItem(cx - radius, cy - radius, 2 * radius, 2 * radius),
+                                                pen, brush, filled)]
             elif kind == "arc":
                 path = _arc_path(*points)
                 if path is not None:
-                    item = self.preview_scene.addPath(path, pen)
-                    items = [item]
+                    items = [self._add_outline_item(OutlinePathItem(path), pen, QBrush(), False)]
             elif kind == "text":
                 # Anchored texts grow right and up from their point (its
                 # handle sits on the bottom-left corner); legacy ones are
@@ -22136,6 +22351,23 @@ class MainWindow(QMainWindow):
                                     _FP_BACK_DRAWING_Z if back else _FP_FRONT_DRAWING_Z)
         self._refresh_draw_markers()
         self._refresh_drawing_handles()
+
+    def _add_outline_item(self, item, pen: QPen, brush: QBrush, filled: bool):
+        """@brief Put a `canvas_hit` outline item of a drawing on the preview scene.
+
+        @param item A Python-built `OutlineRectItem`, `OutlineEllipseItem`,
+            `OutlinePolygonItem` or `OutlinePathItem`.
+        @param pen The layer pen.
+        @param brush The fill brush (empty for an unfilled drawing).
+        @param filled The record's fill: True makes the inside part of the
+            hit, as KiCad's filled shapes; False leaves the hit on the outline.
+        @return The item, now on the scene.
+        """
+        item.setPen(pen)
+        item.setBrush(brush)
+        item.set_interior_hit(filled)
+        self.preview_scene.addItem(item)
+        return item
 
     def _tag_drawing_items(self, items, index: int, record: dict, selected: bool, mm_to_px: float,
                            z: float, copper: str | None = None) -> None:
@@ -22459,7 +22691,13 @@ class MainWindow(QMainWindow):
             of the text (user, 2026-10-14), so its square is drawn there.
         @note During a group drag (`_fp_drag_members`) every other selected
             drawing shows its dashed outline at the same delta.
+        @note A line closed on its first point (`vertex_edit.is_closed_outline`)
+            shows ONE square at its closing point, and dragging it moves the
+            first and the last point together (`_fp_move_drawing_point`,
+            user decision H2, 2026-11-09), as the symbol editor's lines and
+            polygons; an open line keeps a square per stored point.
         """
+        from ..core.vertex_edit import handle_points
         from .footprint_view import HANDLE_KEY_ROLE
         scene = getattr(self, "preview_scene", None)
         if scene is None:
@@ -22470,6 +22708,11 @@ class MainWindow(QMainWindow):
         index = self._fp_hovered_drawing
         if not 0 <= index < len(self.footprint_drawings):
             return
+        if not self._fp_drawing_layer_shown(index):
+            # A drawing on a hidden layer shows no handles: a handle is the
+            # first rank of the press pick and would let a press, E or Delete
+            # reach an invisible drawing (VER5 A).
+            return
         record = self.footprint_drawings[index]
         mm_to_px = 20.0
         points = [tuple(p) for p in record["points"]]
@@ -22479,7 +22722,7 @@ class MainWindow(QMainWindow):
                 dx, dy = drag[2]
                 points = [(round(x + dx, 4), round(y + dy, 4)) for x, y in points]
             else:
-                points[drag[1]] = drag[2]
+                points = self._fp_move_drawing_point(record, points, drag[1], drag[2])
             if drag[1] < 0:
                 # A whole drag moves the group (the selection when the
                 # dragged drawing belongs to it): each member shows its
@@ -22502,6 +22745,8 @@ class MainWindow(QMainWindow):
         # centre anchor: the whole drawing moves by its body, as an element
         # of the symbol editor (user, 2026-10-13: «più discreto»).
         hint = self.i18n.text("Punto del disegno: trascinalo sulla griglia.")
+        if record["kind"] in self._FP_POLYLINE_KINDS:
+            points = handle_points(points)
         for point_index, (x_mm, y_mm) in enumerate(points):
             handle = _screen_handle(scene, x_mm * mm_to_px, y_mm * mm_to_px, 6, solid=False)
             handle.setData(HANDLE_KEY_ROLE, f"{index}:{point_index}")
@@ -22635,6 +22880,36 @@ class MainWindow(QMainWindow):
         if target[0] == "body" and len(target) == 2:
             return self._begin_body_drag(str(target[1]), point)
         return None
+
+    def gesture_accepts(self, target: tuple) -> bool:
+        """@brief Whether `gesture_begin` would plan a drag of the footprint target, without planning it.
+
+        @param target A `gesture_begin` target.
+        @return False where `gesture_begin` refuses a pad or a body: a
+            package pad that is unknown or not movable
+            (`_package_pads_movable`), a body that is not editable
+            (`_body_outline_editable`), an unknown target; True for a text
+            and a drawing handle.
+        @note Read by the view's hover (`FootprintView._hover_item`) on every
+            idle mouse move, so the cursor and the tooltip show what a press
+            takes, never a pad whose drag the press refuses (verification
+            2026-11-09, D5). It has no side effect: `gesture_begin` selects
+            and builds ghosts, this does not. A text is asked about only when
+            the view found its drawn item, so the scene is not searched again
+            (`gesture_begin` refuses only an undrawn text).
+        """
+        kind = target[0] if target else None
+        if kind == "text":
+            return len(target) == 2
+        if kind == "handle":
+            return len(target) == 3
+        package = getattr(self, "package_geometry", None)
+        if kind == "pad" and len(target) == 2:
+            return (package is not None and 0 <= int(target[1]) < len(package.pins)
+                    and self._package_pads_movable())
+        if kind == "body" and len(target) == 2:
+            return package is not None and self._body_outline_editable(package)
+        return False
 
     def gesture_step(self, target: tuple, point: QPointF) -> None:
         """@brief GestureHost: one step of a handle or pad drag (every move and the drop point).
@@ -23365,12 +23640,16 @@ class MainWindow(QMainWindow):
         @note The one place for this camera move (second review 2026-11-03:
             the body commit and the pad re-centring each had a copy). The
             scroll bars take whole device pixels.
+        @note Through the shared `Camera.scroll_by`, which emits the camera
+            change: the coordinate line, the hover handles and the reach
+            cursor follow the scene that moved under the still pointer
+            (verification 2026-11-09, VER5 B; before, the bars were set here
+            and both stayed on the old scene point).
         """
         view = self.preview_view
         transform = view.transform()
-        hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
-        hbar.setValue(hbar.value() + round(dx_mm * _FP_PREVIEW_MM_TO_PX * transform.m11()))
-        vbar.setValue(vbar.value() + round(dy_mm * _FP_PREVIEW_MM_TO_PX * transform.m22()))
+        view.camera.scroll_by(round(dx_mm * _FP_PREVIEW_MM_TO_PX * transform.m11()),
+                              round(dy_mm * _FP_PREVIEW_MM_TO_PX * transform.m22()))
 
     def _move_package_pads(self, indices, dx_mm: float, dy_mm: float) -> bool:
         """@brief Move package pads by a displacement seen on the footprint, as ONE undo step of the draft.
@@ -23439,6 +23718,31 @@ class MainWindow(QMainWindow):
                 group.setPos(origin)
             return
         self._on_footprint_text_moved(key, anchor.x(), anchor.y())
+
+    #: Drawing kinds whose points are a polyline: a line closed on its first
+    #: point shows one handle there and drags both ends together (H2). A
+    #: polygon or a zone stores no closing repeat, so it never matches.
+    _FP_POLYLINE_KINDS = ("line", "polygon", "zone")
+
+    def _fp_move_drawing_point(self, record: dict, points, point_index: int, point) -> list:
+        """@brief The points of a drawing with the point under handle `point_index` moved.
+
+        @param record The drawing record (its kind decides the rule).
+        @param points Its points (stored, or as shown).
+        @param point_index Handle index (= stored index).
+        @param point New (x, y) mm.
+        @return A new list: for a polyline kind closed on its first point
+            (`vertex_edit.is_closed_outline`) handle 0 moves the first AND the
+            last point, so the outline stays closed (user decision H2,
+            2026-11-09; the symbol editor's `set_shape_point` uses the same
+            `vertex_edit.move_handle_point`); otherwise that point alone.
+        """
+        from ..core.vertex_edit import move_handle_point
+        if record["kind"] in self._FP_POLYLINE_KINDS:
+            return move_handle_point(points, point_index, point)
+        moved = list(points)
+        moved[point_index] = point
+        return moved
 
     def _on_footprint_handle_pressed(self, index: int, point_index: int, x: float, y: float) -> None:
         """@brief A handle or a drawing body was grabbed: remember the grab node.
@@ -23532,7 +23836,8 @@ class MainWindow(QMainWindow):
             if list(point) == list(record["points"][point_index]):
                 self._refresh_drawing_handles()
                 return
-            record["points"][point_index] = list(point)
+            record["points"] = [list(p) for p in self._fp_move_drawing_point(
+                record, record["points"], point_index, list(point))]
         valid = validate_footprint_drawings([record])
         if not valid:
             self._draw_feedback_toast(self.i18n.text("Spostamento scartato."),
@@ -23650,6 +23955,24 @@ class MainWindow(QMainWindow):
     def _symbol_tab_in_sync(self) -> bool:
         """@brief True when the last `_refresh_symbol_tab` loaded the current pinout and pads."""
         return getattr(self, "_symbol_synced", None) == self._symbol_sync_token()
+
+    def _retranslate_symbol_block(self) -> None:
+        """@brief Rewrite the symbol editor's blocking message in the current language.
+
+        @note The message `_refresh_symbol_tab` hands to `SymbolTab.set_error`
+            is a composed text (the footprint's refusal, e.g. unread pad
+            positions): `SymbolTab.retranslate` cannot translate it, so it is
+            composed again from the same source. Only the error is re-set,
+            never the rows: a full `_refresh_symbol_tab` would also re-run
+            `set_data` and the recovery binding for a language switch. With
+            no refusal nothing is set.
+        """
+        if not hasattr(self, 'symbol_tab'):
+            return
+        try:
+            self._symbol_pad_ids()
+        except (ValueError, TypeError) as exc:
+            self.symbol_tab.set_error(str(exc))
 
     def _refresh_symbol_tab(self, force=False):
         if not hasattr(self, 'symbol_tab'):
@@ -26190,7 +26513,12 @@ class MainWindow(QMainWindow):
             the fields, or a new extraction whose regeneration was declined,
             was not drawn, and the pad editor checked pad > drill against the
             stale drill (`_edited_pad_reference`).
+        @note None while the last extraction left pad positions unread
+            (`_unread_pads_block`, PADNULL H1): the preview never draws a
+            footprint the files may not get.
         """
+        if self._unread_pads_block():
+            return None
         try:
             params = (
                 self.package_geometry if self.package_geometry is not None else
@@ -26214,13 +26542,39 @@ class MainWindow(QMainWindow):
 
         @note Dispatches by parameter kind (package, castellated module, pin
             header); without parameters the scene is cleared.
+        @note The redraw is bracketed by `FootprintView.begin_scene_update` /
+            `end_scene_update`: the auto-fit inside it (`_fit_preview`) runs
+            before `_after_preview_drawn` hides the items of the hidden
+            layers, so the view's camera reaction (readout, hover handles,
+            reach cursor) waits for the complete scene and runs once at the
+            end (VER5 A: a mid-draw hover revealed the handles of a drawing
+            on a hidden layer, and Delete removed it).
         """
         # The parameters are created before the tabs (`_init_parameters`): the
         # component type chosen while the Progetto (project) tab is being built
         # changes them when the preview does not exist yet, and there is nothing to redraw.
         if not hasattr(self, "preview_scene"):
             return
+        view = getattr(self, "preview_view", None)
+        if view is None or not hasattr(view, "begin_scene_update"):
+            self._draw_preview_scene()
+            return
+        view.begin_scene_update()
+        try:
+            self._draw_preview_scene()
+        finally:
+            view.end_scene_update()
+
+    def _draw_preview_scene(self) -> None:
+        """@brief The body of `_draw_preview`: clear and draw the scene for the current parameters."""
         params = self._preview_params()
+        block_label = getattr(self, "label_preview_footprint_block", None)
+        if block_label is not None:
+            # Unread pad positions (PADNULL H1): `_preview_params` drew
+            # nothing, and this says why and what to do.
+            block = self._unread_pads_block() if params is None else ""
+            block_label.setText(block)
+            block_label.setVisible(bool(block))
         if hasattr(self, "preview_pad_hint"):
             self.preview_pad_hint.setVisible(isinstance(params, PackageGeometry))
         if params is None:
@@ -26587,8 +26941,12 @@ class MainWindow(QMainWindow):
             corners = pad_outline(0.0, 0.0, package.body_length_mm, package.body_width_mm,
                                   package.orientation_deg)
             body_corners = corners
-            outline = self.preview_scene.addPolygon(
-                QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in corners]), silk_pen)
+            # Hit on its stroke only (`canvas_hit`, as KiCad's unfilled
+            # shapes): the view's body move is the shared margin query, and a
+            # press, hover or tooltip inside the body reaches what lies there.
+            outline = self._add_outline_item(
+                OutlinePolygonItem(QPolygonF([QPointF(x * mm_to_px, y * mm_to_px) for x, y in corners])),
+                silk_pen, QBrush(), False)
             if self._body_outline_editable(package):
                 self._add_body_handles(outline, corners, mm_to_px)
             body_l = 2 * max(abs(x) for x, _ in corners)
@@ -27181,13 +27539,26 @@ class MainWindow(QMainWindow):
     def _update_footprint_readout(self, point=None) -> None:
         """@brief Refresh the pointer line: on a move (new point), a camera change or a new origin.
 
-        @param point New scene `QPointF` of the pointer, or None to keep the last one
-            (the line keeps the last position when the pointer leaves, as the
-            symbol editor's).
+        @param point New scene `QPointF` of the pointer, or None for a camera
+            change or a new origin: the point under the pointer NOW
+            (`FootprintView.pointer_scene_point`) when the pointer is over an
+            IDLE view, else the last one (the line keeps the last position when
+            the pointer leaves, or while a tool, pan, drag or band owns the
+            pointer: VER5 C, as the symbol editor's).
+        @note Before, a camera change kept the scene point of the last move,
+            which an auto-fit, a scroll or a zoom had moved away from the
+            still cursor (review 2026-11-09, point 4).
         """
         label = getattr(self, "preview_readout", None)
         if label is None:
             return
+        if point is None:
+            view = getattr(self, "preview_view", None)
+            # ONE camera-refresh rule with the symbol editor (VER5 C): the
+            # point follows the pointer only in an idle view; with a tool, a
+            # pan, a drag or a band the next real move updates it, and the
+            # line is only rewritten (scale, origin) with the last point.
+            point = view.pointer_scene_point() if view is not None and view.is_idle() else None
         if point is not None:
             self._fp_cursor_position = QPointF(point)
         label.setText(self._footprint_readout_text(self._fp_cursor_position))

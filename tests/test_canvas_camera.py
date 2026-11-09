@@ -590,3 +590,38 @@ def test_a_normal_begin_end_pair_is_unchanged(cam, view):
     assert QWidget.mouseGrabber() is view.viewport()
     assert cam.pan_end(QPoint(5, 5)) is True
     assert QWidget.mouseGrabber() is not view.viewport() and cam.pan_active is False
+
+
+# ---------------------------------------------------------------- programmatic scroll (VER5 B)
+
+def test_a_programmatic_scroll_moves_the_bars_and_emits_changed(cam, view):
+    """VER5 B: a scroll from code moves the scene under a still pointer, so it is a camera change
+    the views refresh their readout and hover on. `auto_fit` is left to the caller."""
+    changes = Counter(cam.changed)
+    hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
+    before = (hbar.value(), vbar.value())
+    assert cam.auto_fit is True
+    assert cam.scroll_by(30, -20) is True
+    assert (hbar.value(), vbar.value()) == (before[0] + 30, before[1] - 20)
+    assert changes.n == 1 and cam.auto_fit is True
+
+
+def test_a_null_or_blocked_scroll_emits_nothing(cam, view):
+    """Negative twin: nothing moved (a null step, or a step past the bar's bound) is no camera change."""
+    changes = Counter(cam.changed)
+    assert cam.scroll_by(0, 0) is False
+    hbar = view.horizontalScrollBar()
+    hbar.setValue(hbar.maximum())
+    vbar = view.verticalScrollBar()
+    vbar.setValue(vbar.maximum())
+    assert cam.scroll_by(50, 50) is False
+    assert changes.n == 0
+
+
+def test_a_pointer_pan_still_emits_nothing(cam):
+    """The pan keeps its contract: it owns the pointer, whose own moves refresh what follows it."""
+    changes = Counter(cam.changed)
+    cam.pan_begin(Qt.MouseButton.MiddleButton, QPoint(50, 50), grab_mouse=False)
+    cam.pan_move(QPoint(80, 70))
+    cam.pan_end(QPoint(80, 70))
+    assert changes.n == 0

@@ -563,8 +563,12 @@ def test_c8_without_a_target_arrows_and_r_change_nothing(fp):
     window = fp
     _with_drawing(window, "line", ((0, 8), (4, 8)))
     window._clear_footprint_selection()
-    window._fp_hovered_drawing = -1
     view = window.preview_view
+    # CONTRACT CHANGED (2026-11-09, same class as verification D4): the pointer target is
+    # the drawing a press at the REAL pointer takes; the pointer leaves the view instead of
+    # assigning `_fp_hovered_drawing = -1`.
+    view.leaveEvent(QEvent(QEvent.Type.Leave))
+    assert view.drawing_under_pointer() == -1
     view.setFocus()
     QApplication.processEvents()
     for key in (Qt.Key.Key_Left, Qt.Key.Key_Down, Qt.Key.Key_R):

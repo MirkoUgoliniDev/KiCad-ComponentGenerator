@@ -334,15 +334,24 @@ def test_e_focuses_the_panel_with_a_selection(shown, qapp, monkeypatch):
     monkeypatch.setattr(window, "_edit_drawing_properties", lambda index: opened.append(index))
     window._select_footprint_drawing(0)
     window.fp_properties_group.setExpanded(False)
-    window._fp_hovered_drawing = 2
+    # CONTRACT CHANGED (verification 2026-11-09, D4): the REAL pointer rests on drawing 2
+    # (the press target E reads), not an assigned `_fp_hovered_drawing`.
+    from test_footprint_outline_hit import pointer_on_drawing
+    pointer_on_drawing(window, qapp, 2)
+    assert window._fp_selected_indices() == [0], "hovering does not change the selection"
     assert window._edit_footprint_target_properties()
     qapp.processEvents()
     assert window.fp_properties_group.isExpanded()
     assert QApplication.focusWidget() is panel(window).field_widget("layer")
     assert opened == [], "the selection wins over the hovered drawing"
-    # Negative twin: nothing selected, the hovered drawing opens its dialog.
+    # Negative twin: nothing selected, the drawing under the pointer opens its dialog.
+    # CONTRACT CHANGED (verification 2026-11-09, D4): "under the pointer" is the drawing a
+    # press there takes (`FootprintView.drawing_under_pointer`), so the pointer is moved onto
+    # the circle's rim instead of setting the hovered index (which only reveals the handles).
     window._clear_footprint_selection()
-    window._fp_hovered_drawing = 2
+    view = window.preview_view
+    QTest.mouseMove(view.viewport(), view.mapFromScene(QPointF(16 * PX, -10 * PX)))
+    qapp.processEvents()
     assert window._edit_footprint_target_properties()
     assert opened == [2]
 

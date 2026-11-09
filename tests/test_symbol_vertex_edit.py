@@ -407,15 +407,17 @@ def test_a_near_miss_of_a_stroke_within_the_margin_opens_its_menu(tab, qapp, mon
     assert _context_at(tab, QPoint(centre.x(), centre.y() + 12), monkeypatch) is None
 
 
-def test_a_pin_under_a_selected_wire_end_handle_keeps_its_own_menu(tab, qapp):
-    """@brief Negative of D1: a wire-end handle sitting on a pin end does not steal the pin's right click.
+def test_a_selected_wire_end_handle_on_a_pin_end_answers_both_buttons_as_the_handle(tab, qapp):
+    """@brief One precedence for both buttons: a wire-end handle on a pin end takes the press AND the menu.
 
-    The exact pass comes first (verification review 2026-11-09): the pin lies
-    exactly under the pointer, so it answers even though the selected wire
-    shows its end handle there (asserted within the margin, so a handle-first
-    order would have returned the wire). The positive side, a handle opening
-    its element's menu where nothing lies exactly under the pointer, is
-    `test_a_right_click_anywhere_on_a_vertex_handle_opens_its_menu`.
+    CONTRACT CHANGED (coordinator decision, 2026-11-09): handles > pins >
+    texts > strokes in both tabs and for both buttons, the exact pass before
+    the margin pass (`canvas_hit.pick`). The handle and the pin lie exactly
+    under the pointer: the left press drags the wire's vertex, so the right
+    click now opens the WIRE's menu (before, the exact pass skipped handles
+    and the pin kept its menu while the left press took the handle: the two
+    buttons disagreed). Negative twin: with the wire not selected there is no
+    handle, and the pin, ranked above the wire's stroke, keeps its menu.
     """
     tab.select_tool()
     pin_end = g.pin_inner_ends(tab._symbol)['1']
@@ -438,4 +440,9 @@ def test_a_pin_under_a_selected_wire_end_handle_keeps_its_own_menu(tab, qapp):
     assert any((item.data(0) or (None,))[:2] == ('vertex', wire) for item in near), 'the handle is within reach'
     assert any((item.data(0) or (None,))[:2] == ('vertex', wire) for item in tab.view.items(centre)), 'and under it'
     target = tab.view._context_target(centre)
-    assert target is not None and target[0] == 'pin', target
+    assert target == ('graphic', wire), target
+    assert tab.view.press_target(centre)[:2] == ('vertex', wire), 'the left press takes the same handle'
+    tab.clear_selection()
+    _settle(qapp, 2)
+    assert not [item for item in tab.view.scene().items() if (item.data(0) or (None,))[0] == 'vertex']
+    assert tab.view._context_target(centre) == ('pin', '1'), 'negative: no handle, the pin beats the stroke'

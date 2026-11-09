@@ -28,7 +28,9 @@ class Camera(QObject):
         the views expose it as a property delegating to this attribute.
     """
 
-    #: The scale or framing changed: after a zoom or a fit that ran (a pan emits nothing).
+    #: The scale or framing changed: after a zoom, a fit that ran or a
+    #: programmatic scroll (`scroll_by`); a pointer pan emits nothing (the
+    #: pan owns the pointer and its own moves refresh what follows it).
     changed = pyqtSignal()
 
     def __init__(self, view: QGraphicsView, *, limits: tuple[float, float], max_notches: float = 4.0):
@@ -179,6 +181,30 @@ class Camera(QObject):
         # rounding drift that re-centring with centerOn adds at every step.
         hbar.setValue(hbar.value() - delta_px.x())
         vbar.setValue(vbar.value() - delta_px.y())
+
+    def scroll_by(self, dx_px: int, dy_px: int) -> bool:
+        """@brief Scroll the picture by whole device pixels from code (not a pointer pan), then emit `changed`.
+
+        @param dx_px Horizontal scroll-bar step, device pixels (positive: the picture moves left).
+        @param dy_px Vertical scroll-bar step, device pixels (positive: the picture moves up).
+        @return True when a scroll bar moved (`changed` emitted); False when
+            nothing moved (null step, or both bars already at their bound).
+        @note A programmatic scroll moves the scene under a still pointer,
+            as a fit does, so the views' readout and hover must follow it;
+            before, `MainWindow._scroll_preview_mm` set the bars directly and
+            nothing re-read the pointer (verification 2026-11-09, VER5 B).
+            `auto_fit` is left alone: the caller decides (a re-centring that
+            keeps the footprint still on screen is not a user pan).
+        """
+        view = self._view
+        hbar, vbar = view.horizontalScrollBar(), view.verticalScrollBar()
+        before = (hbar.value(), vbar.value())
+        hbar.setValue(hbar.value() + int(dx_px))
+        vbar.setValue(vbar.value() + int(dy_px))
+        if (hbar.value(), vbar.value()) == before:
+            return False
+        self.changed.emit()
+        return True
 
     def pan_end(self, pos: QPoint) -> bool:
         """@brief Finish the pan: a last move at the release point, then release the capture.

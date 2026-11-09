@@ -10,12 +10,14 @@ tools collect their points through `canvas_clicktools` (a `PointCollector`
 driven by a `ClickToolRouter`), the same state machine as the symbol
 editor's wire and shape tools: the window is the `ClickToolHost`.
 """
-from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPainterPath, QPainterPathStroker
-from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsPolygonItem, QGraphicsRectItem,
+from PyQt6.QtCore import QEvent, Qt, QPoint, QPointF, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QPainterPath
+from PyQt6.QtWidgets import (QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsRectItem,
                              QGraphicsView)
 
 from .canvas_camera import Camera
+from .canvas_hit import (RANK_HANDLE, RANK_PIN, RANK_STROKE, RANK_TEXT, OutlinePolygonItem, PointerTracker,
+                         ReachFeedback, items_near, pick)
 from .canvas_clicktools import ClickToolRouter, PointCollector, ToolSpec
 from .canvas_menus import CONTEXT_HIT_MARGIN_PX
 from .canvas_grid import DARK_GRID_DOT_COLOR, ExposedRegion, GridStyle, dots_legible, paint_grid
@@ -83,15 +85,6 @@ BODY_PART_ROLE = 0x424F44
 
 #: Resize parts of the body handles, in drawing order.
 BODY_HANDLE_PARTS = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
-
-
-def _segment_distance(point, a, b) -> float:
-    """Distance (scene units) from `point` to the segment a-b."""
-    dx, dy = b.x() - a.x(), b.y() - a.y()
-    length2 = dx * dx + dy * dy
-    t = 0.0 if length2 <= 0 else max(0.0, min(1.0, ((point.x() - a.x()) * dx + (point.y() - a.y()) * dy) / length2))
-    cx, cy = a.x() + t * dx, a.y() + t * dy
-    return ((point.x() - cx) ** 2 + (point.y() - cy) ** 2) ** 0.5
 
 
 class _HoleCut:
@@ -170,28 +163,25 @@ class HoledPathItem(_HoleCut, QGraphicsPathItem):
     """@brief A rounded or stadium pad whose drill hole shows what lies beneath."""
 
 
-class ZoneOutlineItem(QGraphicsPolygonItem):
+class ZoneOutlineItem(OutlinePolygonItem):
     """@brief A keepout zone's hatched polygon whose hit shape is its OUTLINE only.
 
     @note KiCad selects a rule area by its border (review 2026-11-09): the
         hatch is painted over the whole area, but the shape Qt hit-tests
         (view queries, tooltip, hover cursor) is the closed outline stroked at
         the pen width, so a pad, a body dimension or the background inside
-        the zone stays reachable. The view's `_drawing_at` widens the reach to
-        HIT_MARGIN_PX screen pixels through its query rectangle.
+        the zone stays reachable. The shared `canvas_hit.OutlinePolygonItem`
+        gives that hit to every unfilled drawing; a zone never declares an
+        interior, whatever its hatch. The view's `_drawing_at` widens the
+        reach to HIT_MARGIN_PX screen pixels through its query rectangle.
     """
 
-    def shape(self):
-        """@brief Qt override: the closed outline stroked at the pen width (at least 1e-3 scene px).
+    def set_interior_hit(self, filled: bool) -> None:
+        """@brief Refused: a keepout zone is selected by its border only (the hatch is no fill).
 
-        @return A QPainterPath around the border, without the interior.
+        @param filled Ignored.
         """
-        path = QPainterPath()
-        path.addPolygon(self.polygon())
-        path.closeSubpath()
-        stroker = QPainterPathStroker()
-        stroker.setWidth(max(self.pen().widthF(), 1e-3))
-        return stroker.createStroke(path)
+        self._interior_hit = False
 
 
 def hole_size_pair(size) -> tuple:
@@ -377,9 +367,15 @@ class FootprintView(QGraphicsView):
         self.setSceneRect(-1000000, -1000000, 2000000, 2000000)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        #: Nesting depth of `begin_scene_update` (the window is rebuilding
+        #: the scene): the camera reaction waits for the complete scene.
+        self._scene_updates = 0
+        #: True when a camera change came while the scene was being rebuilt:
+        #: `end_scene_update` runs its reaction once.
+        self._camera_pending = False
         #: Zoom, wheel, pan and fit, shared with the symbol editor.
         self.camera = Camera(self, limits=ZOOM_LIMITS)
-        self.camera.changed.connect(self.camera_changed)
+        self.camera.changed.connect(self._on_camera_changed)
         #: Where `drawBackground` learns which part of the viewport is being painted.
         self._exposed = ExposedRegion(self)
         #: Callable returning the scene rectangle the camera frames (or None):
@@ -429,6 +425,57 @@ class FootprintView(QGraphicsView):
         #: Scene point of the footprint anchor (plan F2), or None when no
         #: footprint is drawn; painted only where no drawing-origin marker is.
         self._anchor_marker = None
+        #: Hover cursor of the item a press would take, out to the press
+        #: margin (shared `canvas_hit.ReachFeedback`, as the symbol editor).
+        self.reach = ReachFeedback(self)
+        #: The pointer at its last move inside the view, None once it left
+        #: (the E key's and the keyboard fallback's target,
+        #: `drawing_under_pointer`; the readout, `pointer_scene_point`).
+        #: Shared `canvas_hit.PointerTracker`, as the symbol editor: a screen
+        #: point mapped through the CURRENT viewport geometry and camera only
+        #: when asked, because the pointer moves with neither.
+        self.pointer = PointerTracker(self)
+
+    def _on_camera_changed(self) -> None:
+        """React to a camera change: the public `camera_changed` (the readout), then the idle hover.
+
+        A camera change moves the scene under a still pointer: the hover
+        (revealed handles, anchor squares, body handles, reach cursor)
+        follows it (review 2026-11-09, point 5). While the window rebuilds
+        the scene (`begin_scene_update`) the reaction waits for
+        `end_scene_update`: the auto-fit runs in the middle of a redraw,
+        BEFORE the window hides the items of the hidden layers, and a hover
+        run there revealed the handles of a drawing on a hidden layer, which
+        Delete with nothing selected then removed (verification 2026-11-09,
+        VER5 A).
+        """
+        if self._scene_updates:
+            self._camera_pending = True
+            return
+        self.camera_changed.emit()
+        self.refresh_hover()
+
+    def begin_scene_update(self) -> None:
+        """@brief The window starts rebuilding the scene: camera reactions wait for `end_scene_update`.
+
+        @note Calls nest; each must be paired with `end_scene_update` (the
+            window brackets its redraw in try/finally).
+        """
+        self._scene_updates += 1
+
+    def end_scene_update(self) -> None:
+        """@brief The scene is complete (layer visibility applied): run a camera reaction that waited, once."""
+        self._scene_updates = max(0, self._scene_updates - 1)
+        if self._scene_updates == 0 and self._camera_pending:
+            self._camera_pending = False
+            self._on_camera_changed()
+
+    def scene_updating(self) -> bool:
+        """@brief Whether the window is rebuilding the scene (between `begin_scene_update` and `end_scene_update`).
+
+        @return True while a redraw runs.
+        """
+        return self._scene_updates > 0
 
     @property
     def auto_fit(self):
@@ -782,10 +829,11 @@ class FootprintView(QGraphicsView):
 
         Uses the view's own hit test, which honours the view transform:
         handles ignore transformations, so a scene-space query would shrink
-        their grab area with the zoom (1 px at usual «fit» zooms).
+        their grab area with the zoom (1 px at usual «fit» zooms). Each
+        item is tested on its Qt shape: an unfilled drawing answers on its
+        outline only (`canvas_hit`, as KiCad), the symbol editor's query.
         """
-        m = HIT_MARGIN_PX
-        return self.items(QRect(pos.x() - m, pos.y() - m, 2 * m + 1, 2 * m + 1))
+        return items_near(self, pos, HIT_MARGIN_PX)
 
     #: Hover-group owner of the body resize handles.
     BODY_OWNER = ('body',)
@@ -815,10 +863,14 @@ class FootprintView(QGraphicsView):
         self._body_outline = None
 
     def refresh_body_hover(self) -> None:
-        """@brief Re-apply the body handles' visibility for the pointer where it is now."""
-        from PyQt6.QtGui import QCursor
-        pos = self.viewport().mapFromGlobal(QCursor.pos())
-        self._report_body_hover(pos if self.viewport().rect().contains(pos) else None)
+        """@brief Re-apply the body handles' visibility for the pointer where it is now.
+
+        @note The pointer is the view's shared `PointerTracker`, as for E,
+            the keyboard fallback and the readout, so one key press or redraw
+            sees ONE pointer (VER5 D); before, this read `QCursor.pos()`
+            directly, which a synthetic move does not set.
+        """
+        self._report_body_hover(self.pointer.viewport_point())
 
     def _body_part_at(self, pos):
         """@brief Part of the editable body under a viewport point: a visible handle, "move" on the outline stroke, else None.
@@ -837,26 +889,14 @@ class FootprintView(QGraphicsView):
         outline = getattr(self, "_body_outline", None)
         if outline is None or not _alive(outline):
             return None
-        return "move" if self._near_polygon_outline(outline, pos) else None
-
-    def _near_polygon_outline(self, item, pos) -> bool:
-        """@brief True when a viewport point lies within HIT_MARGIN_PX screen px of a polygon item's closed outline.
-
-        @param item A QGraphicsPolygonItem (the body outline, a keepout zone).
-        @param pos Viewport position (QPoint).
-        @return True on the stroke (the closing side included), False inside
-            or outside it: the interior is not part of the hit.
-        @note The margin is in screen pixels at any zoom, as `_items_near`.
-        """
-        point = self.mapToScene(pos)
-        scale = max(abs(self.transform().m11()), 1e-9)
-        polygon = item.mapToScene(item.polygon())
-        count = polygon.count()
-        for index in range(count):
-            a, b = polygon.at(index), polygon.at((index + 1) % count)
-            if _segment_distance(point, a, b) * scale <= HIT_MARGIN_PX:
-                return True
-        return False
+        # The window draws the outline as a `canvas_hit.OutlinePolygonItem`
+        # (no interior): its Qt shape is the stroke, so the shared margin
+        # query is the whole test. A plain polygon item (a host that did not
+        # adopt it) would answer inside too, so it is refused rather than
+        # silently taking the body's interior.
+        if not isinstance(outline, OutlinePolygonItem) or outline.interior_hit():
+            return None
+        return "move" if any(item is outline for item in self._items_near(pos)) else None
 
     def _report_body_hover(self, pos) -> None:
         """Show the body handles by the shared ring rule (or while a drag of the body runs); no scene scan."""
@@ -874,74 +914,274 @@ class FootprintView(QGraphicsView):
 
     def _pad_copper_at(self, pos):
         """The PACKAGE pad whose copper contains a viewport point exactly, or None (no hit margin)."""
+        target = self._pad_copper_target(pos)
+        return None if target is None else target[1]
+
+    def _pad_copper_target(self, pos):
+        """The ('pad', index, token) target of the PACKAGE pad whose copper holds a viewport point exactly, or None."""
         for item in self.scene().items(self.mapToScene(pos)):
-            token = item.data(PAD_KEY_ROLE)
-            if token is None:
-                continue
+            found = self._classify(item)
+            if found is not None and found[1][0] == 'pad':
+                return found[1]
+        return None
+
+    #: Target kinds (`_classify`) a plain left press can drag.
+    PRESS_KINDS = frozenset({'handle', 'body', 'pad', 'text', 'drawing'})
+    #: Target kinds a Ctrl+click toggles in the selection (a handle stands for its drawing).
+    TOGGLE_KINDS = frozenset({'handle', 'pad', 'drawing'})
+    #: Target kinds that open a context menu (a pin-header pad too: it has a menu, not a drag).
+    MENU_KINDS = frozenset({'handle', 'body', 'pad', 'header_pad', 'text', 'drawing'})
+
+    @staticmethod
+    def _classify(item):
+        """@brief The (rank, target) of a scene item for `canvas_hit.pick`, or None for an item that is no target.
+
+        @param item A scene item.
+        @return ``(RANK_HANDLE, ('handle', drawing, point))`` for a drawing
+            handle, ``(RANK_HANDLE, ('body', part))`` for a VISIBLE body resize
+            handle, ``(RANK_TEXT, ('text', key))`` for a Reference/Value text
+            (or its anchor square), ``(RANK_PIN, ('pad', index, token))`` for
+            a package pad, ``(RANK_PIN, ('header_pad', None, token))`` for a
+            pin-header pad, ``(RANK_STROKE, ('drawing', index))`` for the item
+            of a drawing; None otherwise (the body outline's stroke, a
+            dimension, a measure, the grid).
+        @note The ranks are the shared precedence of both tabs
+            (`canvas_hit.RANK_*`, coordinator decisions 2026-11-09): handles >
+            texts > pads > strokes, the symbol editor's handles > properties >
+            pins > elements. CONTRACT CHANGED (verification D2): a text over
+            a pad is taken before the pad, which made a Value moved over a
+            large pad impossible to drag or to reset.
+        """
+        key = item.data(HANDLE_KEY_ROLE)
+        if key is not None:
+            drawing, point = str(key).split(":")
+            return RANK_HANDLE, ('handle', int(drawing), int(point))
+        part = item.data(BODY_PART_ROLE)
+        if part and part != "move":
+            return (RANK_HANDLE, ('body', str(part))) if item.isVisible() else None
+        token = item.data(PAD_KEY_ROLE)
+        if token is not None:
             parts = str(token).split(":", 2)
             if parts[0] == "package" and len(parts) == 3:
-                return int(parts[1])
+                return RANK_PIN, ('pad', int(parts[1]), str(token))
+            return RANK_PIN, ('header_pad', None, str(token))
+        key = item.data(TEXT_KEY_ROLE)
+        if key is not None:
+            return RANK_TEXT, ('text', str(key))
+        index = item.data(DRAWING_KEY_ROLE)
+        if index is not None:
+            return RANK_STROKE, ('drawing', int(index))
         return None
+
+    def _pick(self, pos, kinds):
+        """@brief What a press of the given kinds takes at a viewport point (`canvas_hit.pick`), or None.
+
+        @param pos Viewport position (QPoint).
+        @param kinds Target kinds to consider (PRESS_KINDS, TOGGLE_KINDS,
+            MENU_KINDS or a subset).
+        @return A `canvas_hit.Pick` whose target is a `_classify` tuple.
+        @note A body resize handle over a package pad whose COPPER is exactly
+            under the pointer gives the press to the pad (a pad on the outline
+            of a QFN or a castellated edge, user 2026-11-03), for every button.
+        """
+        def classify(item):
+            found = self._classify(item)
+            return found if found is not None and found[1][0] in kinds else None
+        found = pick(self, pos, classify, HIT_MARGIN_PX)
+        if found is not None and found.target[0] == 'body' and 'pad' in kinds:
+            if self._pad_copper_target(pos) is not None:
+                # Pick again without the body handles: the exact pass finds
+                # that pad, or a text or drawing handle laid over it, by the
+                # same ranks.
+                return self._pick(pos, set(kinds) - {'body'})
+        return found
+
+    def press_target(self, pos):
+        """@brief The target a plain left press at a viewport point drags, or None (body stroke, dimension or pan).
+
+        @param pos Viewport position (QPoint).
+        @return A `_classify` target tuple, or None.
+        """
+        found = self._pick(pos, self.PRESS_KINDS)
+        return None if found is None else found.target
+
+    def menu_target(self, pos):
+        """@brief The target whose context menu a right click at a viewport point opens, or None.
+
+        @param pos Viewport position (QPoint).
+        @return A `_classify` target tuple, or None (then the body outline,
+            a dimension or the background answer, in that order).
+        """
+        found = self._pick(pos, self.MENU_KINDS)
+        return None if found is None else found.target
+
+    def _gesture_accepted(self, target) -> bool:
+        """Whether the host would begin the drag of a `_classify` target, without beginning it.
+
+        Asks the host's optional ``gesture_accepts(gesture target)``; a host
+        without it accepts every target (the press finds out by trying).
+        """
+        check = getattr(self._click_host, 'gesture_accepts', None)
+        return True if check is None else bool(check(self._gesture_of(target)))
+
+    def _press_pick(self, pos):
+        """The `canvas_hit.Pick` a plain left press at a viewport point takes, refused kinds skipped, or None.
+
+        The press's own ladder (`mousePressEvent`): the shared precedence,
+        a kind whose drag the host refuses handing the press to the next
+        kind. The body outline's stroke, which comes after, is not included.
+        """
+        kinds = set(self.PRESS_KINDS)
+        while kinds:
+            found = self._pick(pos, kinds)
+            if found is None:
+                return None
+            if self._gesture_accepted(found.target):
+                return found
+            kinds.discard(found.target[0])
+        return None
+
+    def _hover_item(self, pos):
+        """The item whose cursor and tooltip the hover shows: the one a plain left press there takes, or None.
+
+        `_press_pick`, then the body outline's stroke, as the press. So a
+        package pad that cannot move (a part on a pin header) shows the
+        cursor and tooltip of what the press takes instead, never the pad's
+        (verification 2026-11-09, D5).
+        """
+        found = self._press_pick(pos)
+        if found is not None:
+            return found.item
+        if self._body_part_at(pos) == "move" and self._gesture_accepted(('body', 'move')):
+            return self._body_outline
+        return None
+
+    def drawing_under_pointer(self) -> int:
+        """@brief The drawing a plain left press at the pointer would take, for the E key; -1 for none.
+
+        @return The drawing index when the press at the last pointer position
+            inside the view takes a drawing's stroke or one of its handles
+            (`_press_pick`, the shared precedence and margin); -1 when the
+            pointer is outside the view, or the press takes a pad, a text, the
+            body or nothing.
+        @note The symbol editor's rule (`SymbolTab._hovered_graphic`):
+            before, E read the hovered drawing that reveals the handles, kept
+            through the drawing's bounding rectangle plus a hysteresis, so
+            with the pointer inside an EMPTY outline (which a press passes
+            through, H1) E still opened that drawing (verification
+            2026-11-09, D4).
+        @note The pointer is the shared `PointerTracker` (a screen point
+            mapped through the current viewport geometry, so a layout that
+            moves the viewport does not stale it, review 2026-11-09 point 3)
+            and the pick runs against the current camera, so after a camera change without a
+            mouse move (the auto-fit after a delete, a scroll, a fit after a
+            dialog, a programmatic zoom) the answer is what lies under the
+            cursor NOW. Kept in scene units before, a second Delete deleted a
+            drawing the auto-fit had moved away from the cursor
+            (verification 2026-11-09). A wheel zoom anchored under the mouse
+            keeps the same scene point under the same viewport point, so it
+            still answers that drawing.
+        """
+        point = self.pointer.viewport_point()
+        if point is None:
+            return -1
+        found = self._press_pick(point)
+        if found is None or found.target[0] not in ('drawing', 'handle'):
+            return -1
+        index = int(found.target[1])
+        # A drawing whose items are all hidden (its layer switched off in the
+        # «Layer» panel) is never the keyboard's target, even through a
+        # handle left on the scene (VER5 A: Delete removed an invisible
+        # drawing). Qt's own query already skips hidden strokes.
+        return index if self.drawing_shown(index) else -1
+
+    def drawing_shown(self, index: int) -> bool:
+        """@brief Whether a drawing has at least one VISIBLE item on the scene.
+
+        @param index Index into the window's drawings list.
+        @return False when it has no item or every item is hidden (its layer
+            is switched off), True otherwise.
+        """
+        return any(item.data(DRAWING_KEY_ROLE) == index and item.isVisible() for item in self.scene().items())
+
+    def reach_tooltip(self, pos) -> str:
+        """@brief The tooltip the hover shows at a viewport point, out to the press margin ("" lets Qt answer).
+
+        @param pos Viewport position (QPoint).
+        @return The tooltip of the item a press there would take, or "".
+        """
+        item = self._hover_item(pos)
+        return item.toolTip() if item is not None else ""
+
+    def _idle(self) -> bool:
+        """True when no tool, pan, drag or band owns the pointer: the hover feedback may show."""
+        armed = self.click_collector is not None and self.click_collector.armed
+        return not (armed or self._dragging() or self.band.active or self.camera.pan_active)
+
+    def is_idle(self) -> bool:
+        """@brief Whether no tool, pan, drag or band owns the pointer (the shared camera-refresh rule).
+
+        @return True when the hover, the handles, the reach cursor and the
+            readout's point may follow a camera change (VER5 C, as
+            `_SymbolView.is_idle`).
+        """
+        return self._idle()
+
+    def viewportEvent(self, event):
+        """@brief Qt override: a tooltip shows the item a press would take, out to the press margin.
+
+        @param event Any viewport event; only ToolTip is looked at, when idle.
+        @return True when the tooltip was shown here, else the base answer.
+        """
+        if event.type() == QEvent.Type.ToolTip and self._idle():
+            if ReachFeedback.show_tooltip(event, self._hover_item(event.pos())):
+                return True
+        return super().viewportEvent(event)
 
     def _text_item_at(self, pos):
         """The draggable text group under a viewport point, with its key, or (None, None).
 
         The hit may be a child (the text or its anchor square): the drag moves
-        the top-level item, whose position is the anchor.
+        the top-level item, whose position is the anchor. Texts only, by the
+        shared exact-then-margin rule (`_pick`).
         """
-        for item in self._items_near(pos):
-            key = item.data(TEXT_KEY_ROLE)
-            if key is not None:
-                while item.parentItem() is not None:
-                    item = item.parentItem()
-                return item, str(key)
-        return None, None
+        found = self._pick(pos, {'text'})
+        if found is None:
+            return None, None
+        item = found.item
+        while item.parentItem() is not None:
+            item = item.parentItem()
+        return item, found.target[1]
 
     def _handle_at(self, pos):
-        """The (drawing, point) indices of the handle under a viewport point, or None."""
-        for item in self._items_near(pos):
-            key = item.data(HANDLE_KEY_ROLE)
-            if key is not None:
-                drawing, point = str(key).split(":")
-                return int(drawing), int(point)
-        return None
+        """The (drawing, point) indices of the drawing handle under a viewport point, or None (handles only)."""
+        found = self._pick(pos, {'handle'})
+        return None if found is None else found.target[1:]
 
     def _pad_at(self, pos):
-        """The index of the PACKAGE pad under a viewport point, or None.
+        """The index of the PACKAGE pad under a viewport point, or None (pads only).
 
         Pin-header pads ("header:<number>") are not returned: their position
         is computed from pitch and row spacing, so there is nothing to drag.
         """
-        for item in self._items_near(pos):
-            token = item.data(PAD_KEY_ROLE)
-            if token is None:
-                continue
-            parts = str(token).split(":", 2)
-            if parts[0] == "package" and len(parts) == 3:
-                return int(parts[1])
-        return None
+        found = self._pick(pos, {'pad'})
+        return None if found is None else found.target[1]
 
     def _drawing_at(self, pos):
         """The index of the drawing (or of the drawing a handle belongs to) under a point, else -1.
 
-        A keepout zone answers on its OUTLINE only, as KiCad selects a rule
-        area by its border (review 2026-11-09): its hatched item covers the
-        area, and a hit on the interior would take every right click, drag,
-        Ctrl+click and double click meant for a pad, a body dimension or the
-        background inside it. A filled graphic keeps its interior hit, as
-        KiCad's filled shapes do.
+        An unfilled drawing (rectangle, polygon, circle, open line, arc,
+        curve) and a keepout zone answer on their OUTLINE only, a filled
+        drawing also inside, as KiCad's `EDA_SHAPE::hitTest` (H1, 2026-11-09;
+        the zone since review 2026-11-09): their items are `canvas_hit`
+        outline items whose Qt shape is that hit, so the query of
+        `_items_near` already leaves out a point inside an empty outline and
+        the pad, body dimension or background under it gets the right click,
+        drag, Ctrl+click or double click. A handle stands for its drawing;
+        handles and strokes only, by the shared exact-then-margin rule (`_pick`).
         """
-        handle = self._handle_at(pos)
-        if handle is not None:
-            return handle[0]
-        for item in self._items_near(pos):
-            index = item.data(DRAWING_KEY_ROLE)
-            if index is None:
-                continue
-            if item.data(DRAWING_KIND_ROLE) == "zone" and not self._near_polygon_outline(item, pos):
-                continue
-            return int(index)
-        return -1
+        found = self._pick(pos, {'handle', 'drawing'})
+        return -1 if found is None else found.target[1]
 
     def _drawing_bounds(self, index):
         """Scene bounds of all the items of a drawing, or None when it has none."""
@@ -1050,7 +1290,11 @@ class FootprintView(QGraphicsView):
             (`_on_click_tool_arm`) or any other cancel leaves no band growing
             and no pan following the pointer. The armed draw tool itself is
             untouched (the router owns it).
+        @note The hover's move cursor is undone too (`ReachFeedback.release`,
+            verification 2026-11-09, D3, as the symbol editor): an armed tool
+            is not idle and would never undo it.
         """
+        self.reach.release()
         self.band.cancel()
         self.camera.pan_cancel()
         self._background_press = None
@@ -1071,6 +1315,8 @@ class FootprintView(QGraphicsView):
         if self.gestures is None:
             return False
         auto_fit, self.camera.auto_fit = self.camera.auto_fit, False
+        # The hover's cursor goes before the drag sets its own (D3).
+        self.reach.release()
         if self.gestures.press(target, point):
             return True
         self.camera.auto_fit = auto_fit
@@ -1125,30 +1371,28 @@ class FootprintView(QGraphicsView):
                 # a drag in progress; the drop or Escape comes first.
                 event.accept()
                 return
-            item, key = self._text_item_at(event.pos())
-            if item is not None:
-                self.text_context_requested.emit(key)
-                event.accept()
-                return
-            # A handle belongs to its drawing: the handles cover the stroke
-            # (a text's only handle sits on its bottom-left anchor corner,
-            # 2026-10-14) while hovered.
-            drawing_index = self._drawing_at(event.pos())
-            if drawing_index >= 0:
-                self.drawing_context_requested.emit(drawing_index, event.globalPosition().toPoint())
-                event.accept()
-                return
-            for item in self.scene().items(self.mapToScene(event.pos())):
-                pad_index = item.data(PAD_KEY_ROLE)
-                if pad_index is not None:
-                    self.pad_context_requested.emit(str(pad_index))
-                    event.accept()
-                    return
-            if self._body_part_at(event.pos()) is not None:
-                # The editable body outline (or a handle) has its own menu,
-                # after texts, drawings and pads (approved plan 03/11, point 4).
+            # The left press's precedence (`_pick`, coordinator decisions
+            # 2026-11-09): handles > texts > pads > strokes, the items exactly
+            # under the pointer before those within the margin. A handle
+            # belongs to its drawing (a text drawing's only handle sits on its
+            # bottom-left anchor corner, 2026-10-14); a body resize handle
+            # opens the body menu.
+            target = self.menu_target(event.pos())
+            kind = None if target is None else target[0]
+            if kind is None and self._body_part_at(event.pos()) is not None:
+                # The editable body outline's stroke has its own menu, after
+                # texts, drawings and pads (approved plan 03/11, point 4).
+                kind = 'body'
+            if kind == 'text':
+                self.text_context_requested.emit(target[1])
+            elif kind in ('handle', 'drawing'):
+                self.drawing_context_requested.emit(target[1], event.globalPosition().toPoint())
+            elif kind in ('pad', 'header_pad'):
+                self.pad_context_requested.emit(target[2])
+            elif kind == 'body':
                 self.body_context_requested.emit(self.mapToScene(event.pos()),
                                                  event.globalPosition().toPoint())
+            if kind is not None:
                 event.accept()
                 return
             dimension = self._dimension_at(event.pos())
@@ -1176,65 +1420,48 @@ class FootprintView(QGraphicsView):
                 event.accept()
                 return
             if modifiers & Qt.KeyboardModifier.ControlModifier:
-                # Same priority as a plain press: a drawing handle, then a
-                # package pad, then the body of a drawing.
-                pad = self._pad_at(event.pos()) if self._handle_at(event.pos()) is None else None
-                if pad is not None:
-                    # Ctrl+click on a pad, as on a pin of the symbol editor.
-                    self.pad_toggled.emit(pad)
+                # Same precedence as a plain press (`_pick`): a drawing handle
+                # (it toggles its drawing), then a package pad (as a pin of
+                # the symbol editor), then the stroke of a drawing.
+                found = self._pick(event.pos(), self.TOGGLE_KINDS)
+                if found is not None and found.target[0] == 'pad':
+                    self.pad_toggled.emit(found.target[1])
                     event.accept()
                     return
-                index = self._drawing_at(event.pos())
-                if index >= 0:
-                    self.drawing_toggled.emit(index)
+                if found is not None:
+                    self.drawing_toggled.emit(found.target[1])
                     event.accept()
                     return
         if event.button() == Qt.MouseButton.LeftButton:
-            # Priority: a visible handle (the smallest, most deliberate
-            # target), then a text (Reference/Value sit above the drawings:
-            # a label inside a rectangle must stay draggable), then a package
-            # pad (a pad inside a drawn outline must stay draggable), then
-            # the body of a drawing.
-            handle = self._handle_at(event.pos())
-            item, key = (None, None) if handle is not None else self._text_item_at(event.pos())
-            point = self.mapToScene(event.pos())
-            if item is not None and self._press_gesture(('text', key), point):
-                # The dragged text keeps its anchor square wherever the
-                # pointer goes, as a dragged property in the symbol editor.
-                self._report_text_hover(key)
-                event.accept()
-                return
-            # A body gesture never starts with Ctrl (Ctrl+click selects and
-            # never drags, plan canvas-selection), and a pad whose COPPER is
-            # under the pointer wins over a body handle on the same spot (a
-            # pad on the outline of a QFN or a castellated edge).
+            # ONE precedence with the right click and the symbol editor
+            # (`_pick`, coordinator decisions 2026-11-09): a visible handle
+            # (the smallest, most deliberate target: a drawing point, or a
+            # body resize handle unless a pad's copper is exactly under it),
+            # then a text (laid over the pads: a Value moved onto a pad must
+            # stay draggable, verification D2), then a package pad (a pad
+            # inside a drawn outline must stay draggable), then the stroke of a drawing (it moves
+            # the whole drawing, like an element of the symbol editor, user
+            # 2026-10-13); the items exactly under the pointer before those
+            # within the margin. A refused gesture hands the press to the next
+            # kind. A body gesture never starts with Ctrl (Ctrl+click selects
+            # and never drags, plan canvas-selection).
             plain = not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-            body_part = (self._body_part_at(event.pos())
-                         if handle is None and item is None and plain else None)
-            if body_part not in (None, "move") and self._pad_copper_at(event.pos()) is not None:
-                body_part = None
-            if (body_part not in (None, "move")
-                    and self._press_gesture(('body', body_part), point)):
-                # A resize handle of the package body (user, 2026-11-03).
-                event.accept()
-                return
-            pad = self._pad_at(event.pos()) if handle is None and item is None else None
-            if pad is not None and self._press_gesture(('pad', pad), point):
-                # The window moves the pad (or the selected pads) on the
-                # grid, as the symbol editor moves its pins (user, 2026-11-02).
-                event.accept()
-                return
-            if handle is None:
-                # The body of a drawing moves the whole drawing, like an
-                # element of the symbol editor (user, 2026-10-13).
-                index = self._drawing_at(event.pos())
-                handle = (index, -1) if index >= 0 else None
-            if handle is not None and self._press_gesture(('handle', *handle), point):
-                # The window moves the point (or the whole drawing) on the
-                # grid and redraws the shape at every step.
-                event.accept()
-                return
-            if body_part == "move" and self._press_gesture(('body', 'move'), point):
+            point = self.mapToScene(event.pos())
+            kinds = set(self.PRESS_KINDS) if plain else set(self.PRESS_KINDS) - {'body'}
+            while kinds:
+                found = self._pick(event.pos(), kinds)
+                if found is None:
+                    break
+                target = found.target
+                if self._press_gesture(self._gesture_of(target), point):
+                    if target[0] == 'text':
+                        # The dragged text keeps its anchor square wherever the
+                        # pointer goes, as a dragged property in the symbol editor.
+                        self._report_text_hover(target[1])
+                    event.accept()
+                    return
+                kinds.discard(target[0])
+            if plain and self._body_part_at(event.pos()) == "move" and self._press_gesture(('body', 'move'), point):
                 # The outline stroke moves the whole body, last of all.
                 event.accept()
                 return
@@ -1257,6 +1484,20 @@ class FootprintView(QGraphicsView):
         else:
             super().mousePressEvent(event)
 
+    @staticmethod
+    def _gesture_of(target):
+        """The gesture-controller target of a `_classify` target: a drawing's stroke drags the whole drawing."""
+        kind = target[0]
+        if kind == 'text':
+            return ('text', target[1])
+        if kind == 'body':
+            return ('body', target[1])
+        if kind == 'pad':
+            return ('pad', target[1])
+        if kind == 'handle':
+            return ('handle', target[1], target[2])
+        return ('handle', target[1], -1)
+
     def mouseMoveEvent(self, event):
         """@brief Feed a drag, or pan the camera, without changing footprint geometry.
 
@@ -1272,6 +1513,7 @@ class FootprintView(QGraphicsView):
             # An editable dimension shows it answers a double click.
             self._hover_dimension(event.pos())
         # The coordinates follow the pointer in every state (drag, pan, tool).
+        self.pointer.moved(event.pos())
         self.pointer_changed.emit(self.mapToScene(event.pos()))
         if self._dragging():
             self.gestures.move(self.mapToScene(event.pos()))
@@ -1286,21 +1528,74 @@ class FootprintView(QGraphicsView):
         elif self.click_router is not None and self.click_router.move(event):
             event.accept()
         else:
-            # Hovering a drawing reveals its handles (user, 2026-10-13:
-            # «come nell'altro tab», as in the other tab); they stay while the pointer remains near the
-            # drawing (hysteresis, as the symbol editor's reveal area), so a
-            # handle can be reached from the stroke.
-            index = self._drawing_at(event.pos())
-            if index < 0 and self._within_hover_area(event.pos()):
-                index = self._hovered_drawing
-            self._report_hover(index)
-            # A text's anchor square shows while the pointer is near the
-            # text, same margin as the symbol editor's property anchors.
-            self._report_text_hover(self._text_near(event.pos()))
-            self._report_body_hover(event.pos())
+            self._hover_at(event.pos())
+            # The cursor follows the press reach (`ReachFeedback`): three
+            # pixels off a thin stroke the move cursor shows where the press
+            # takes it; beyond the margin the arrow comes back.
+            idle = self._idle()
+            if idle:
+                self.reach.before_move()
             super().mouseMoveEvent(event)
+            if idle:
+                self.reach.after_move(self._hover_item(event.pos()))
             if self.click_router is not None:
                 self.click_router.settle_cursor(event)
+
+    def _hover_at(self, pos) -> None:
+        """Reveal what the idle pointer at a viewport point hovers: a drawing's handles, a text's square, the body's handles."""
+        # Hovering a drawing reveals its handles (user, 2026-10-13:
+        # «come nell'altro tab», as in the other tab); they stay while the pointer remains near the
+        # drawing (hysteresis, as the symbol editor's reveal area), so a
+        # handle can be reached from the stroke.
+        index = self._drawing_at(pos)
+        if (index < 0 and self._within_hover_area(pos) and self._hovered_drawing >= 0
+                and self.drawing_shown(self._hovered_drawing)):
+            # The hysteresis keeps only a drawing still shown: one whose layer
+            # was hidden meanwhile lets its handles go (VER5 A).
+            index = self._hovered_drawing
+        self._report_hover(index)
+        # A text's anchor square shows while the pointer is near the
+        # text, same margin as the symbol editor's property anchors.
+        self._report_text_hover(self._text_near(pos))
+        self._report_body_hover(pos)
+
+    def pointer_scene_point(self):
+        """@brief The scene point under the pointer NOW (current camera and viewport geometry).
+
+        @return QPointF in scene px, or None when the pointer is not over the view.
+        @note The coordinate readout reads it after a camera change, which
+            moves the scene under a still pointer (review 2026-11-09, point 4).
+        """
+        return self.pointer.scene_point()
+
+    def refresh_hover(self) -> None:
+        """@brief Re-run the idle hover at the pointer's current point (after a camera change).
+
+        @note Run on every camera change (review 2026-11-09, point 5): before,
+            the handles revealed for the drawing under the OLD scene point
+            survived an auto-fit, a scroll or a zoom without a mouse move, and
+            a handle is the first rank of the press pick, so E and the
+            keyboard fallback could take a drawing the pointer no longer
+            touched. The reach cursor and an open tooltip are recomputed too
+            (`ReachFeedback.refresh`, VER5 E).
+        @note ONE rule with the symbol editor (coordinator decision, VER5 C,
+            docs/canvas-hit-plan.md): only an IDLE view refreshes; while a
+            tool, a pan, a drag or a band owns the pointer their own next move
+            drives the hover and the tool preview. Nothing is done with the
+            pointer outside the view (the leave already cleared it), nor while
+            the window rebuilds the scene (`begin_scene_update`: the reaction
+            then runs once at `end_scene_update`, on the complete scene).
+        """
+        if self._scene_updates:
+            self._camera_pending = True
+            return
+        if not self._idle():
+            return
+        pos = self.pointer.viewport_point()
+        if pos is None:
+            return
+        self._hover_at(pos)
+        self.reach.refresh(self._hover_item(pos), pos)
 
     def leaveEvent(self, event):
         """@brief Qt override: the snap marker and the hover handles go away with the pointer.
@@ -1318,6 +1613,7 @@ class FootprintView(QGraphicsView):
             self._report_hover(-1)
         if self._text_drag is None:
             self._report_text_hover("")
+        self.pointer.left()
         self.pointer_left.emit()
         super().leaveEvent(event)
 
@@ -1384,9 +1680,7 @@ class FootprintView(QGraphicsView):
             return
         if (event.button() == Qt.MouseButton.LeftButton and not self._dragging()
                 and not self.camera.pan_active and not self.band.active
-                and self._handle_at(event.pos()) is None
-                and self._text_item_at(event.pos())[0] is None
-                and self._pad_at(event.pos()) is None and self._drawing_at(event.pos()) < 0):
+                and self.press_target(event.pos()) is None):
             dimension = self._dimension_at(event.pos())
             if dimension is not None:
                 # The same edit for an editable dimension of the preview, in

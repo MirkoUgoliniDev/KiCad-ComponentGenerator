@@ -610,6 +610,60 @@ def _alive(obj) -> bool:
         return obj is not None
 
 
+class _ToolCursorKeeper(QObject):
+    """Viewport filter: an armed tool keeps its cross over every item, and after `QGraphicsView` restores a cursor.
+
+    Two ways the cross was lost while a tool was armed (H1 review,
+    2026-11-09). (1) `QGraphicsView` saves the viewport cursor when the
+    pointer enters an item with a cursor of its own and restores it when the
+    pointer leaves the item: a cursor saved BEFORE the arming (the arrow)
+    came back when the view replays the last mouse event after a redraw (no
+    Python move handler runs then), so the commit of a persistent shape left
+    the arrow until the next real move. (2) The symbol editor runs the base
+    mouse move with a tool armed, so the move cursor of an element under the
+    pointer replaced the cross, while the footprint preview (whose router
+    consumes the move) kept it: plan C10 wants the cross in both. Any cursor
+    other than the cross is therefore replaced while a tool is armed.
+
+    A camera pan owns the cursor instead: `Camera.pan_begin` shows the closed
+    hand with the pan already active, and the filter keeps it until the pan
+    ends, tool or no tool. Each pan step scrolls the view, which replays the
+    last mouse event; over an item with a cursor of its own (an element's
+    move cursor) `QGraphicsView` then put that cursor, or the one it had
+    saved, back over the hand (found 2026-11-09 with a pan started on a
+    stroke, in both tabs)."""
+
+    def __init__(self, router: "ClickToolRouter"):
+        """@brief Bind the filter to its router (never owned by Qt: the router keeps it).
+
+        @param router The router whose armed state and tool cursor the filter reads.
+        """
+        super().__init__()
+        self._router = router
+
+    def eventFilter(self, watched, event) -> bool:
+        """@brief Qt override: on a cursor change, keep the pan's closed hand, else an armed tool's cross.
+
+        @param watched The viewport.
+        @param event Any event; only `QEvent.Type.CursorChange` is looked at.
+        @return False: the event always goes on.
+        @note CONTRACT CHANGED (2026-11-09, review of H1): an item cursor (the
+            move cursor of an element under the pointer) is replaced too, so
+            both tabs show the cross over a stroke while a tool is armed (plan
+            C10); while a pan runs the closed hand is kept, armed or not.
+        """
+        if event.type() != QEvent.Type.CursorChange or not _alive(watched):
+            return False
+        router = self._router
+        shape = watched.cursor().shape()
+        if router._camera.pan_active:
+            if shape != Qt.CursorShape.ClosedHandCursor:
+                watched.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif router._cursor_set and router._collector.armed and shape != Qt.CursorShape.CrossCursor:
+            watched.setCursor(Qt.CursorShape.CrossCursor)
+        return False
+
+
 class ClickToolRouter:
     """@brief Maps a view's mouse and key events to a `PointCollector`; owns the tool cursor.
 
@@ -652,6 +706,10 @@ class ClickToolRouter:
         #: True after the tool cursor was unset: `QGraphicsView` may still hold it as the
         #: "original" cursor of a hovered item and put it back on leaving that item.
         self._stale_cursor = False
+        #: The converse while a tool is armed: an arrow saved before the arming
+        #: and put back by the view is replaced by the cross (`_ToolCursorKeeper`).
+        self._cursor_keeper = _ToolCursorKeeper(self)
+        view.viewport().installEventFilter(self._cursor_keeper)
 
     # -- helpers ---------------------------------------------------------
 

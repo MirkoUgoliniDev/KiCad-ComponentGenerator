@@ -63,23 +63,40 @@ def choose(monkeypatch, text):
     return titles
 
 
-# ── Parity: nothing selected, the hovered drawing is the target ────────
+# ── Parity: nothing selected, the drawing under the pointer is the target ─
+# CONTRACT CHANGED (2026-11-09, same class as verification D4): "under the
+# pointer" is the drawing a plain press there takes
+# (`FootprintView.drawing_under_pointer`), no longer `_fp_hovered_drawing`
+# (the handle reveal, held through the bounding rectangle). These tests put the
+# REAL pointer on the drawing (`pointer_on_drawing`) or take it out of the view
+# (`pointer_away`) instead of assigning the hovered index; the window is shown
+# (`shown`) so the mouse events reach the viewport. What they assert is unchanged.
 
-def test_parity_delete_key_removes_the_hovered_drawing(preview):
-    window = preview
+def _three_shown(window, qapp):
     three(window)
-    window._fp_hovered_drawing = 1
+    view = window.preview_view
+    view.resetTransform()
+    view.centerOn(0, 0)
+    qapp.processEvents()
+
+
+def test_parity_delete_key_removes_the_hovered_drawing(shown, qapp):
+    from test_footprint_outline_hit import pointer_away, pointer_on_drawing
+    window = shown
+    _three_shown(window, qapp)
+    pointer_on_drawing(window, qapp, 1)
     window._delete_hovered_drawing()
     assert [r["kind"] for r in window.footprint_drawings] == ["line", "text"]
-    window._fp_hovered_drawing = -1
+    pointer_away(window, qapp)
     window._delete_hovered_drawing()
     assert len(window.footprint_drawings) == 2, "nothing hovered: nothing deleted"
 
 
-def test_parity_ctrl_d_duplicates_the_hovered_drawing(preview):
-    window = preview
-    three(window)
-    window._fp_hovered_drawing = 1
+def test_parity_ctrl_d_duplicates_the_hovered_drawing(shown, qapp):
+    from test_footprint_outline_hit import pointer_away, pointer_on_drawing
+    window = shown
+    _three_shown(window, qapp)
+    pointer_on_drawing(window, qapp, 1)
     window._duplicate_hovered_drawing()
     assert [r["kind"] for r in window.footprint_drawings] == ["line", "circle", "text", "circle"]
     # Since phase D the duplicate becomes the selection (flipped: was "no
@@ -87,15 +104,16 @@ def test_parity_ctrl_d_duplicates_the_hovered_drawing(preview):
     # the selection cleared the old rule holds.
     assert window._fp_selected_indices() == [3]
     window._clear_footprint_selection()
-    window._fp_hovered_drawing = -1
+    pointer_away(window, qapp)
     window._duplicate_hovered_drawing()
     assert len(window.footprint_drawings) == 4
 
 
-def test_parity_ctrl_c_copies_the_hovered_drawing(preview):
-    window = preview
-    three(window)
-    window._fp_hovered_drawing = 2
+def test_parity_ctrl_c_copies_the_hovered_drawing(shown, qapp):
+    from test_footprint_outline_hit import pointer_on_drawing
+    window = shown
+    _three_shown(window, qapp)
+    pointer_on_drawing(window, qapp, 2)
     window._copy_hovered_drawing()
     assert window._paste_footprint_drawings()
     assert window.footprint_drawings[-1]["kind"] == "text"
@@ -327,10 +345,14 @@ def select(window, indices):
     window._refresh_drawing_selection()
 
 
-def test_delete_acts_on_the_whole_selection_in_one_undo_step(shown):
+def test_delete_acts_on_the_whole_selection_in_one_undo_step(shown, qapp):
+    from test_footprint_outline_hit import pointer_on_drawing
     window = shown
     select(window, [0, 2])
-    window._fp_hovered_drawing = 1          # the selection wins over the pointer
+    # The selection wins over the pointer. CONTRACT CHANGED (2026-11-09, D4 class): the
+    # REAL pointer rests on drawing 1, the press target `_fp_targets` now reads.
+    pointer_on_drawing(window, qapp, 1)
+    assert window._fp_selected_indices() == [0, 2], "hovering does not change the selection"
     depth = len(window._fp_drawings_undo)
     window._delete_hovered_drawing()
     assert [r["kind"] for r in window.footprint_drawings] == ["rectangle"]

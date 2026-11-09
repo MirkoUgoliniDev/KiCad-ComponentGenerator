@@ -116,8 +116,16 @@ def _background(view):
 
 
 def _shape_pos(view):
-    """Inside the first rectangle (a drawn element)."""
-    pos = _vp(view, -40.64 + 2.54, 22.86)
+    """On the left side of the first rectangle (a drawn element), halfway up.
+
+    CONTRACT CHANGED (H1, 2026-11-09, user «Sì, come KiCad»): an UNFILLED
+    drawn rectangle is hit on its outline only, as KiCad's
+    `EDA_SHAPE::hitTest`; the point inside it this helper used to return is
+    now the background. The tests here are about pressing an element, not
+    its interior, so they press on its stroke; the element must still be
+    exactly under the point.
+    """
+    pos = _vp(view, -40.64, 22.86)
     assert any(item.data(0) == ('graphic', 0) for item in view.items(pos))
     return pos
 

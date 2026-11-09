@@ -380,7 +380,12 @@ def test_a_list_change_during_a_drag_cancels_its_drop(preview, edit):
 
     def change():
         if edit == "delete":
-            window._fp_hovered_drawing = 0
+            # CONTRACT CHANGED (2026-11-09, same class as verification D4): with nothing
+            # selected Delete takes the drawing a press at the pointer would take, and here
+            # the pointer is at the drop point, on no drawing; the assigned hover index the
+            # old rule read no longer counts. The list change under test is made by
+            # selecting drawing 0 first, the selection-first path of the same Delete.
+            window._fp_selection.set_many([0])
             window._delete_hovered_drawing()
         else:
             window._undo_footprint_drawing()

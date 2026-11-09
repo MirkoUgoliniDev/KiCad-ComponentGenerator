@@ -1629,3 +1629,46 @@ def test_shift_space_then_shift_release_shows_the_new_constraint(view, cam):
     h.calls.clear()
     r.key_release(keyrel(Qt.Key.Key_Shift))
     assert [(c[2], c[4]) for c in h.named('snap_ex')] == [(False, ANGLE_90)]
+
+
+def test_an_armed_tool_keeps_its_cross_over_any_cursor_but_the_pan_hand(router, view, cam, qapp):
+    """`QGraphicsView` restores a cursor saved before the arming (the arrow) when the pointer
+    leaves an item, also on its own replay of the last mouse event after a redraw (H1 review,
+    2026-11-09): while a tool is armed the cross comes back.
+    CONTRACT CHANGED (2026-11-09, review of H1, plan C10): an element's own move cursor is
+    replaced by the cross too. The symbol editor runs the base mouse move with a tool armed, so
+    the item cursor used to win there while the footprint preview (whose router consumes the
+    move) kept the cross; the cross in both is the plan's rule. Negative twins: the closed hand
+    of a pan stays while the pan runs (also against an item cursor the view puts back when a pan
+    step replays the last mouse event), and with no tool armed every cursor stays."""
+    cross, arrow, move = Qt.CursorShape.CrossCursor, Qt.CursorShape.ArrowCursor, Qt.CursorShape.SizeAllCursor
+    router.arm(LINE)
+    viewport = view.viewport()
+    assert viewport.cursor().shape() == cross
+    viewport.setCursor(arrow)        # what the view's restore of a stored original cursor does
+    qapp.processEvents()
+    assert viewport.cursor().shape() == cross
+    viewport.setCursor(move)         # an element's own cursor under the pointer
+    qapp.processEvents()
+    assert viewport.cursor().shape() == cross, "an armed tool shows the cross over an element too"
+    cam.pan_begin(Qt.MouseButton.MiddleButton, QPoint(10, 10), grab_mouse=False)
+    qapp.processEvents()
+    assert viewport.cursor().shape() == Qt.CursorShape.ClosedHandCursor, "negative: the pan keeps its hand"
+    viewport.setCursor(move)         # a pan step's replayed mouse event over an element
+    qapp.processEvents()
+    assert viewport.cursor().shape() == Qt.CursorShape.ClosedHandCursor, "the pan keeps its hand over items"
+    cam.pan_end(QPoint(12, 12))
+    qapp.processEvents()
+    assert viewport.cursor().shape() == cross, "the pan over, the cross is back"
+    router.disarm()
+    viewport.setCursor(arrow)
+    qapp.processEvents()
+    assert viewport.cursor().shape() == arrow, "negative: no tool armed, the arrow stays"
+    viewport.setCursor(move)
+    qapp.processEvents()
+    assert viewport.cursor().shape() == move, "negative: no tool armed, the item cursor stays"
+    cam.pan_begin(Qt.MouseButton.MiddleButton, QPoint(10, 10), grab_mouse=False)
+    viewport.setCursor(move)
+    qapp.processEvents()
+    assert viewport.cursor().shape() == Qt.CursorShape.ClosedHandCursor, "a pan keeps its hand, tool or no tool"
+    cam.pan_cancel()

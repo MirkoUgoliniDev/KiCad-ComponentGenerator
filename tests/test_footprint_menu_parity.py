@@ -281,12 +281,21 @@ def test_duplicate_keeps_the_clipboard(preview, monkeypatch):
     assert window.footprint_drawings[-1]["kind"] == "circle", "the clipboard still holds the copied circle"
 
 
-def test_keyboard_copy_and_paste_act_on_the_hovered_drawing(preview):
-    window = preview
+def test_keyboard_copy_and_paste_act_on_the_hovered_drawing(window, qapp, monkeypatch):
+    # CONTRACT CHANGED (2026-11-09, same class as verification D4): "hovered" is the drawing
+    # a press at the REAL pointer takes (`FootprintView.drawing_under_pointer`), no longer the
+    # assigned `_fp_hovered_drawing`; the preview is shown so real mouse moves reach it.
+    from test_footprint_outline_hit import pointer_away, pointer_on_drawing
+    from test_footprint_pad_drag import PINS, _show
+    from kicadgen.core.package_geometry import PackageGeometry
+    _show(window, qapp, monkeypatch,
+          PackageGeometry(family="soic", body_length_mm=15, body_width_mm=10, pins=list(PINS)))
     window.footprint_drawings = validate_footprint_drawings([record(), record("circle", ((0, 0), (1, 0)))])
-    window._fp_hovered_drawing = 1
+    window._draw_preview()
+    qapp.processEvents()
+    pointer_on_drawing(window, qapp, 1)
     window._copy_hovered_drawing()
-    window._fp_hovered_drawing = -1
+    pointer_away(window, qapp)
     window._copy_hovered_drawing()          # nothing hovered: the clipboard keeps the circle
     assert window._paste_footprint_drawings()
     assert window.footprint_drawings[-1]["kind"] == "circle"
@@ -500,14 +509,24 @@ def test_l3_properties_refusal_names_the_reason(preview, monkeypatch):
     assert "rotazione a passi" not in seen["message"], "no longer the generic symbol message"
 
 
-def test_l5_copy_and_paste_report_their_count_in_the_status_bar(preview):
-    window = preview
+def test_l5_copy_and_paste_report_their_count_in_the_status_bar(window, qapp, monkeypatch):
+    # CONTRACT CHANGED (2026-11-09, same class as verification D4): the pointer target is the
+    # drawing a press at the REAL pointer takes, so the pointer leaves the view or rests on the
+    # line's stroke instead of assigning `_fp_hovered_drawing`; the preview is shown for that.
+    from test_footprint_outline_hit import pointer_away, pointer_on_drawing
+    from test_footprint_pad_drag import PINS, _show
+    from kicadgen.core.package_geometry import PackageGeometry
+    _show(window, qapp, monkeypatch,
+          PackageGeometry(family="soic", body_length_mm=15, body_width_mm=10, pins=list(PINS)))
     window.footprint_drawings = validate_footprint_drawings([record()])
+    window._draw_preview()
+    qapp.processEvents()
+    pointer_away(window, qapp)
     window.statusBar().clearMessage()
-    window._fp_hovered_drawing = -1
     window._copy_hovered_drawing()
     assert window.statusBar().currentMessage() == "", "nothing hovered: nothing copied, nothing said"
-    window._fp_hovered_drawing = 0
+    pointer_on_drawing(window, qapp, 0)
+    window.statusBar().clearMessage()
     window._copy_hovered_drawing()
     assert window.statusBar().currentMessage() == "1 elementi copiati."
     assert window._paste_footprint_drawings()

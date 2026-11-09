@@ -228,7 +228,14 @@ def test_a_text_over_a_body_number_keeps_its_menu_and_its_double_click(inside, m
     view.dimension_edit_requested.connect(lambda key: seen.append(("edit", key)))
     view.text_context_requested.disconnect()
     view.text_context_requested.connect(lambda key: seen.append(("text", key)))
-    monkeypatch.setattr(view, "_text_item_at", lambda _pos: (object(), "Value"))
+    # A Value text item over the number: a real scene item with the text role, so the view's
+    # shared precedence (`_pick`, texts above dimensions) is what decides, not a patched helper.
+    from PyQt6.QtCore import QRectF
+    from kicadgen.gui.footprint_view import TEXT_KEY_ROLE
+    centre = view.mapToScene(pos)
+    cover = window.preview_scene.addRect(QRectF(centre.x() - 6, centre.y() - 6, 12, 12))
+    cover.setData(TEXT_KEY_ROLE, "Value")
+    cover.setZValue(1000)
     QTest.mousePress(view.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, pos)
     QTest.mouseRelease(view.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, pos)
     assert seen == [("text", "Value")]

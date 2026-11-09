@@ -393,6 +393,33 @@ def test_a_measure_is_removed_by_its_menu_or_by_delete_when_hovered(glue, monkey
     assert host.tool.remove_hovered() is True and host.tool.overlay.count == 0
 
 
+def test_delete_on_a_measure_reads_the_view_s_shared_pointer(glue, monkeypatch):
+    """VER5 D: in both tabs the view carries the shared `PointerTracker` (`view.pointer`), which E
+    and the keyboard fallback read; Delete on a measure read `QCursor.pos()` instead, so one key
+    press could see two pointers. With the platform cursor parked far away, a tracked pointer on the
+    measure removes it; negative: the tracked pointer gone (left), the platform cursor ON the
+    measure removes nothing."""
+    from PyQt6.QtGui import QCursor
+    from kicadgen.gui.canvas_hit import PointerTracker
+    host, collector, view = glue
+    view.resetTransform()
+    view.show()
+    collector.arm(cm.MEASURE_SPEC)
+    collector.click(QPointF(-45.0, -75.0))
+    collector.click(QPointF(101.0, 61.0))
+    assert host.tool.overlay.count == 1
+    on_line = view.mapFromScene(QPointF(25.0, -10.0))
+    view.pointer = PointerTracker(view)
+    on_screen = view.viewport().mapToGlobal(on_line)
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: QPoint(on_screen)))
+    view.pointer.left()
+    assert host.tool.remove_hovered() is False, "negative: no tracked pointer, the cursor is not read"
+    far = view.viewport().mapToGlobal(QPoint(-500, -500))
+    monkeypatch.setattr(QCursor, "pos", staticmethod(lambda: QPoint(far)))
+    view.pointer.moved(on_line)
+    assert host.tool.remove_hovered() is True and host.tool.overlay.count == 0
+
+
 
 def test_a_point_on_a_large_pad_beats_the_margin_of_a_small_neighbour():
     """Finding 3 (QFN): on the exposed pad, its centre wins over a lead 0.25 mm away."""

@@ -12,6 +12,11 @@ polygon's closing side (last vertex back to the first) is implied by
 storage repeats it (the symbol's polygon polyline) strips it before and
 appends it again after (`open_vertices`).
 
+The drag handles of a stored polyline follow the same definition of closed
+(`is_closed_outline`): `handle_points` gives the closing point ONE handle and
+`move_handle_point` moves the first and the repeated last point together
+(user decision H2, 2026-11-09), in both tabs.
+
 Refusals raise `VertexEditRefused` (a `ValueError`) carrying a `reason` code,
 so the caller can say why in its own words; the input list is never mutated.
 
@@ -170,6 +175,72 @@ def open_vertices(points: Sequence[Point]) -> List[Tuple[float, float]]:
     pts = [(float(p[0]), float(p[1])) for p in points]
     if len(pts) > 1 and same_point(pts[-1], pts[0]):
         pts.pop()
+    return pts
+
+
+def has_closing_repeat(points: Sequence[Point], closed: Optional[bool] = None) -> bool:
+    """@brief Whether stored points end on a closing repeat of the first point that is ONE vertex with it.
+
+    @param points Stored points of a polyline.
+    @param closed Whether the caller's record is a closed outline (a symbol
+        polygon is closed by its key, whatever its points); None decides it
+        on the points alone (`is_closed_outline`).
+    @return True for a closed outline whose last point is the first one
+        again (`same_point`): its handle and its drag treat them as one.
+    @note The one rule behind `handle_points` and `move_handle_point`, and
+        the same closed-ness the vertex edits use (`open_vertices` strips the
+        same repeat), so handles, drags and vertex add/remove agree.
+    """
+    pts = list(points)
+    if closed is None:
+        closed = is_closed_outline(pts)
+    return bool(closed) and len(pts) > 1 and same_point(pts[0], pts[-1])
+
+
+def handle_points(points: Sequence[Point], closed: Optional[bool] = None) -> List[Point]:
+    """@brief The points of a stored polyline that get a drag handle: the closing repeat has none of its own.
+
+    @param points Stored points of a polyline (a symbol line or polygon, a
+        footprint line).
+    @param closed The record's closed-ness when the caller knows it (a
+        symbol polygon), None to decide it on the points (`has_closing_repeat`).
+    @return The points unchanged for an open line; for a closed outline that
+        repeats its first point all but the last, whose position is the first
+        one's: ONE handle at the closing point (user decision H2,
+        2026-11-09, «Sì, una maniglia sola»: yes, a single handle). Handle
+        index i is stored point i, so a caller keeps its point indices.
+    @note An open line whose ends lie apart, or an A-B-A back-and-forth that
+        is not declared closed, keeps a handle per stored point.
+    """
+    pts = list(points)
+    return pts[:-1] if has_closing_repeat(pts, closed) else pts
+
+
+def move_handle_point(points: Sequence[Point], position: int, point: Point,
+                      closed: Optional[bool] = None) -> List[Point]:
+    """@brief A copy of stored polyline points with the point under handle `position` moved.
+
+    @param points Stored points of a polyline.
+    @param position Handle index (`handle_points`) or stored index.
+    @param point The new (x, y) position.
+    @param closed As in `handle_points`.
+    @return A new list. On a closed outline with its closing repeat
+        (`has_closing_repeat`, decided on the points BEFORE the move) the
+        closing point is one vertex: moving index 0 or the last index moves
+        both the first and the last point, so the outline stays closed (user
+        decision H2, 2026-11-09). Any other index, and every index of an open
+        line, moves that point alone.
+    @throws IndexError When `position` is outside the points.
+    """
+    pts = list(points)
+    if not -len(pts) <= position < len(pts):
+        raise IndexError(position)
+    moved = type(pts[position])(point) if isinstance(pts[position], (list, tuple)) else point
+    if has_closing_repeat(pts, closed) and position in (0, len(pts) - 1, -1, -len(pts)):
+        pts[0] = moved
+        pts[-1] = type(moved)(moved) if isinstance(moved, list) else moved
+    else:
+        pts[position] = moved
     return pts
 
 

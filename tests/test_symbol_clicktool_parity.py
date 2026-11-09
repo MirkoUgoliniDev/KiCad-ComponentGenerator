@@ -1184,7 +1184,12 @@ def test_a_tool_ended_over_an_element_leaves_no_cross_cursor_behind(tab, qapp):
     _move(tab, qapp, _vp(tab, 8, 8))
     assert viewport.cursor().shape() == Qt.CursorShape.CrossCursor
     _move(tab, qapp, _vp(tab, 2.54, 0))
-    assert viewport.cursor().shape() == Qt.CursorShape.SizeAllCursor
+    # CONTRACT CHANGED (2026-11-09, plan C10): an armed tool keeps its cross over an element
+    # stroke too, as in the footprint preview (it showed the element's move cursor here). The
+    # view still enters the item and stores the cross as its "original" cursor, which is
+    # what this test is about once the tool has ended.
+    assert viewport.cursor().shape() == Qt.CursorShape.CrossCursor
+    assert [item for item in tab.view.items(_vp(tab, 2.54, 0)) if item.hasCursor()], 'over an item with a cursor'
     QTest.keyClick(tab.view, Qt.Key.Key_Escape)
     qapp.processEvents()
     _move(tab, qapp, _vp(tab, 8, 8))

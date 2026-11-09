@@ -219,12 +219,17 @@ def test_ctrl_click_on_a_pad_next_to_a_line_toggles_the_pad(fp):
     assert window._fp_selected_indices() == [0] and window._fp_selected_pads() == []
 
 
-def test_with_pads_selected_the_keys_never_act_on_the_hovered_drawing(fp):
+def test_with_pads_selected_the_keys_never_act_on_the_hovered_drawing(fp, qapp):
+    # CONTRACT CHANGED (2026-11-09, same class as verification D4): the drawing "under the
+    # pointer" is the one a press at the REAL pointer takes (`drawing_under_pointer`), so the
+    # pointer is moved onto the line's stroke instead of assigning `_fp_hovered_drawing`.
+    from test_footprint_outline_hit import pointer_on_drawing
     window = fp
     _with_line(window)
     lines = [dict(r) for r in window.footprint_drawings]
     click(window, vp(window, -3, -2))
-    window._fp_hovered_drawing = 0                   # pointer left on the line
+    pointer_on_drawing(window, qapp, 0)              # pointer left on the line
+    assert window._fp_selected_pads() == [0]
     for key in (Qt.Key.Key_Delete, Qt.Key.Key_R):
         QTest.keyClick(window.preview_view, key)
     QTest.keyClick(window.preview_view, Qt.Key.Key_D, CTRL)
@@ -232,17 +237,20 @@ def test_with_pads_selected_the_keys_never_act_on_the_hovered_drawing(fp):
     assert top(window)["1"] == (-3.0, -2.0), "Delete and R do not touch pads"
     # Negative: with no pad selected Delete removes the hovered line, as before.
     window._clear_footprint_selection()
-    window._fp_hovered_drawing = 0
+    pointer_on_drawing(window, qapp, 0)
     QTest.keyClick(window.preview_view, Qt.Key.Key_Delete)
     assert window.footprint_drawings == []
 
 
-def test_the_arrows_move_the_selected_pads_by_one_grid_step(fp):
+def test_the_arrows_move_the_selected_pads_by_one_grid_step(fp, qapp):
+    from test_footprint_outline_hit import pointer_on_drawing
     window = fp
     _with_line(window)
     lines = [dict(r) for r in window.footprint_drawings]
     click(window, vp(window, -3, -2))
-    window._fp_hovered_drawing = 0
+    # CONTRACT CHANGED (2026-11-09, D4 class): the REAL pointer rests on the line.
+    pointer_on_drawing(window, qapp, 0)
+    assert window._fp_selected_pads() == [0]
     QTest.keyClick(window.preview_view, Qt.Key.Key_Left)
     QTest.keyClick(window.preview_view, Qt.Key.Key_Up)
     assert top(window)["1"] == (-3.01, -2.01), "grid hidden: one 0.01 mm step per key"

@@ -1711,9 +1711,19 @@ class MeasureTool:
         return index is not None and self.overlay.remove(self._scene(), index)
 
     def _index_under_cursor(self) -> Optional[int]:
-        """The measure under the mouse cursor now (after a zoom or pan the last hover may be stale)."""
+        """The measure under the mouse cursor now (after a zoom or pan the last hover may be stale).
+
+        A view with the shared `canvas_hit.PointerTracker` (`view.pointer`,
+        both tabs) is asked for the pointer, so one key press sees ONE
+        pointer with E and the keyboard fallback (VER5 D); a bare view (unit
+        tests of this module) reads the platform cursor.
+        """
         if self._view is None or sip.isdeleted(self._view) or not self.overlay.count:
             return None
+        tracker = getattr(self._view, "pointer", None)
+        if tracker is not None and hasattr(tracker, "viewport_point"):
+            pos = tracker.viewport_point()
+            return None if pos is None else self.measurement_at_viewport(pos)
         from PyQt6.QtGui import QCursor
         viewport = self._view.viewport()
         pos = viewport.mapFromGlobal(QCursor.pos())

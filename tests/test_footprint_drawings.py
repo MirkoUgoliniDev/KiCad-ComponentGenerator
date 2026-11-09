@@ -693,22 +693,39 @@ def test_undo_and_redo_walk_the_drawing_history_like_the_symbol_editor(preview):
     assert saves == [True], "one save for the whole draft"
 
 
-def test_delete_and_duplicate_act_on_the_hovered_drawing(preview):
+def test_delete_and_duplicate_act_on_the_hovered_drawing(preview, qapp):
+    # CONTRACT CHANGED (2026-11-09, same class as verification D4): with nothing selected
+    # Delete and Ctrl+D take the drawing a press at the REAL pointer would take
+    # (`FootprintView.drawing_under_pointer`), no longer the hovered index that
+    # `_on_footprint_drawing_hovered` sets (it only reveals the handles). The preview is shown
+    # so real mouse moves reach it; the pointer leaves the view or rests on the stroke.
+    from kicadgen.gui import main_window as gui
+    from test_footprint_outline_hit import pointer_away, pointer_on_drawing
     window, _saves, _generations = preview
+    window._acquisition_completed = True
+    window._set_acquisition_tabs_enabled(True)   # a disabled tab's viewport gets no mouse event
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+    window.tabs.setCurrentIndex(gui.TAB_PREVIEW)
+    qapp.processEvents()
     view = window.preview_view
     window.chk_grid.setChecked(True)
     window.combo_grid_unit.setCurrentIndex(window.combo_grid_unit.findData("mm"))
     view.set_grid(20.0, (0.0, 0.0), True)
     window.footprint_drawings = validate_footprint_drawings([record("rectangle", ((0, 0), (3, 2)))])
     window._draw_preview()
+    qapp.processEvents()
+    pointer_away(window, qapp)
     window._delete_hovered_drawing()          # nothing hovered: nothing happens
     assert len(window.footprint_drawings) == 1
-    window._on_footprint_drawing_hovered(0)
+    pointer_on_drawing(window, qapp, 0)
     window._duplicate_hovered_drawing()
     assert len(window.footprint_drawings) == 2
     assert window.footprint_drawings[1]["points"] == [[1.0, 1.0], [4.0, 3.0]], \
         "the copy sits one grid step right and down, as in the symbol editor"
-    window._on_footprint_drawing_hovered(1)
+    window._clear_footprint_selection()       # the duplicate is selected (phase D): pointer rule only
+    pointer_on_drawing(window, qapp, 1)
     window._delete_hovered_drawing()
     assert len(window.footprint_drawings) == 1
     assert window._fp_hovered_drawing == -1, "nothing is hovered after an edit redraws the scene"

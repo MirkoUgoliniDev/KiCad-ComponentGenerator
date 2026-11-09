@@ -1,5 +1,188 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 09/11 sera — FATTO su FOOTPRINT-ADVANCE (base 9a7a2b0), commit in corso (utente: «commita pusha, mergia in main ... e poi crea release»): canvas H1/H2, tracker del puntatore, pad non letti dall'AI; SUITE COMPLETA VERDE (codice fermo): A 7862 passati 9 saltati 19 sottotest, B 4988 passati 4 saltati = 12850 passati, 13 saltati, 19 sottotest. Release v1.0.8 dopo il verde di «Tests» su GitHub.
+
+ULTIMO STATO (in testa): codice fermo dopo «CORRETTORE VER4» -> utente STA PROVANDO l'app; suite completa in corso.
+VER5 (verifica del giro PointerTracker): (1)(2)(3) FIXED, (4)(5) PARTIAL (scroll programmatico _scroll_preview_mm non emette
+camera.changed: readout e maniglie restano indietro; i docs dicono «scroll» coperto). NUOVI: MEDIO refresh_hover collegato a
+camera.changed gira dentro _draw_preview PRIMA di _after_preview_drawn (_apply_preview_layer_visibility): rivela maniglie di
+disegni su layer nascosti e Canc senza selezione cancella un disegno INVISIBILE (riproduzione
+scratchpad/test_ver5_hidden3.py); preesistente: nascondere un layer con maniglie rivelate le lascia visibili. BASSI:
+simbolo aggiorna hover/strumento su camera change anche con strumento armato/pan/drag, footprint solo da fermo (decidere
+una regola: proposta = solo da fermo in entrambe); refresh_body_hover e canvas_measure._index_under_cursor leggono
+QCursor.pos() invece del tracker; cursore/tooltip di ReachFeedback non ricalcolati dopo un camera change; ramo QCursor.pos()
+del tracker senza test; docstring di _hovered_graphic vecchia. SEGNALATO NON AUTORIZZATO (preesistente): il simbolo non ha
+il ripiego «sotto il puntatore» per Canc/R/frecce (solo E), il footprint si'. Da correggere dopo l'agente H1 (main_window).
+CORRETTORE VER5 IN CORSO (09/11 sera, unico agente, non committato): piano A) FootprintView rimanda la reazione al cambio di
+camera (readout + hover) mentre la finestra ridisegna (begin/end_scene_update attorno a _draw_preview, eseguita una volta
+alla fine, dopo la visibilita' dei layer); maniglie mai disegnate per un disegno su layer nascosto, hover azzerato quando il
+suo layer si nasconde, isteresi e drawing_under_pointer solo su disegni visibili; B) Camera.scroll_by emette changed
+(_scroll_preview_mm la usa); C) regola unica: al cambio di camera punto del readout, hover, maniglie, anteprima strumento e
+cursore solo a vista ferma (il testo del readout si riscrive sempre col punto vecchio); D) refresh_body_hover e
+canvas_measure._index_under_cursor leggono view.pointer; E) ReachFeedback.refresh ricalcola cursore/tooltip a vista ferma
+nei due tab; F) test del ramo QCursor del PointerTracker, docstring di _hovered_graphic.
+CORRETTORE VER5 FATTO (09/11 sera, non committato): A-F come da piano. CONTRATTI CAMBIATI: FootprintView.camera_changed
+emesso solo a scena completa (rimandato dentro begin/end_scene_update); Camera.changed anche su scroll_by (il pan resta
+muto); simbolo al cambio di camera aggiorna punto/maniglie/anteprima/cursore solo a vista ferma (prima sempre), footprint
+idem per il punto del readout; nuovi is_idle() nelle due viste, FootprintView.drawing_shown, MainWindow._fp_drawing_layer_shown,
+_draw_preview avvolge _draw_preview_scene. Test nuovi: tests/test_footprint_camera_refresh.py (9),
+tests/test_symbol_camera_refresh.py (2), +3 test_canvas_camera, +6 test_canvas_hit, +1 test_canvas_measure; mutanti
+(vecchio comportamento) uccisi tutti (scratchpad/test_ver5_mutants*.py). Gruppo mirato (symbol_*, footprint_*, canvas_*,
+review_1029_*, gui_review_fixes, unread_pads_gui, vertex_edit, kept_scene_items, documentation): 2757 passati. Suite
+completa NON eseguita. Docs: docs/canvas-hit-plan.md (regola unica, layer nascosti, scroll, un puntatore).
+Controllo read-only su VER4: DA CORREGGERE dopo suite e prova dell'utente (non toccare il codice durante la suite):
+(1) MEDIO simbolo: _hovered_graphic legge un punto di SCENA (_update_readout -> _cursor_position): dopo un auto-fit E apre
+l'elemento sotto il vecchio punto (stessa classe di VER4, parita' rotta); (2) basso: nudge rifiutato lascia il disegno
+selezionato (main_window ~20808: selezionare solo se _translate_drawings riesce); (3) basso: punto del viewport vecchio se
+il layout sposta il viewport (pannello che si espande): usare mapFromGlobal(QCursor.pos()) con underMouse(), fallback al
+punto salvato per eventi sintetici, o ridurre la frase dei docs; (4) basso: riga delle coordinate del footprint ferma al
+punto di scena vecchio dopo camera_changed; (5) basso: maniglie rivelate vecchie dopo un cambio di camera possono vincere
+la scelta (azzerare o ricalcolare l'hover su camera_changed). Poi suite di nuovo, poi commit/push/merge (OK gia' dato).
+PROVA DELL'UTENTE (09/11 17:50): analisi del VE12H5-K (generated/VE12H-K) fallita con «Geometria package non valida: x_mm
+deve essere numerico». CAUSA (preesistente, NON di questo giro): deepseek-flash ha dato package_geometry.pins con
+x_mm/y_mm null (posizioni non lette); il lettore dedicato openai/gpt-5.6-sol ha posizioni NON confermate (quote X 19.14 contro
+corpo 20.50); datasheet_extractor ~9891 rifiuta tutta la risposta. DECISIONE UTENTE: «Sì, correggi così»: pad senza
+coordinate -> si scarta solo la geometria dei pad con una nota, si tiene il resto (corpo, fori, passo, pinout), posizioni
+da rivedere invece dell'errore. Da fare dopo la suite, con skill document-extraction-change, test +/- e revisione.
+AUDIT PADNULL (generality-auditor, read-only): ALTO H1 dopo lo scarto «Rigenera footprint»/«Genera» scrive un pin header
+dai campi a matrice vecchi/predefiniti (pin_map_conflict controllato solo in _validate_automatic_input; il messaggio di
+blocco single_tht manda proprio a «Rigenera footprint», gruppo che non ha posizioni) -> ogni scrittura del footprint di un
+componente singolo rifiuta con pin_map_conflict, o niente ripiego a matrice quando l'estrazione ha dichiarato pad espliciti
+(come single_smd), rimedio che nomini «Rileggi solo le posizioni dei pad»/nuova analisi; verificare anche l'anteprima.
+MEDI: M1 un pad null nasconde valori malformati negli altri (validare i valori presenti prima di scartare); M2 la nota
+dice «si tengono fori e passo» ma per report_single_component stanno nei pad e cadono (nota costruita da cio' che resta);
+M3 domanda pad_layout risolvibile ma non applicabile (tenere i pad scartati in un campo privato perche' apply_answers li
+riempia, o non fare la domanda). BASSI: L1 griglia senza passo -> messaggio «pad senza coordinate» invece di «passo
+mancante», senza test; L2 risposte castellate/scheda con package_geometry opzionale a null ora bloccate senza rimedio;
+L3 messaggi a valle («meno di due pad numerati in comune») con causa sbagliata. Da correggere dopo l'agente canvas
+(main_window e' suo ora).
+PADNULL IN CORSO (agente estrazione, 09/11 sera, solo datasheet_extractor.py + i18n.py + test nuovo, niente GUI): in
+_params_from_tool_arguments, se ANCHE UN SOLO pad di package_geometry ha x_mm/y_mm null o assente (mai inventare coordinate,
+un pad mancante darebbe un footprint sbagliato), la geometria esplicita si scarta con una nota che nomina i pad, la matrice
+diventa informativa e, se nessun blocco e' gia' presente, si imposta pin_map_conflict (generazione bloccata, rimedio
+esistente: «Rileggi posizioni» su raw_main che conserva i pad). Valore presente ma malformato (stringa, bool, NaN) resta
+ERRORE come prima (contratto test_invalid_explicit_pads_are_still_an_error: risposta rotta, non «non letto»).
+PADNULL FATTO (non committato): helper _pads_without_positions + ramo in _params_from_tool_arguments (nota «Geometria dei
+pad scartata: ...», blocco proprio «Posizioni dei pad NON lette ...» solo se nessun altro blocco), docstring di
+ExtractedParams aggiornata, 2 voci nuove in i18n.py (it/en/fr/de), test nuovo tests/test_unread_pad_positions.py (8: +
+tutti null, uno null, chiave assente, end-to-end con lettura dedicata non confermata; - coordinate numeriche; malformate
+"2.54"/True/NaN restano errore). Mirati (estrattore, extraction_*, drawing_holes*, i18n, untranslated, documentation,
+single_component_prompt, pad_dimension_chains, confirmed_reading_replacement + nuovo): 691 passati. LIMITE NOTO (non corretto, raro): se resta una domanda «pad_layout» (catene proprie della
+risposta + lettura dedicata, entrambe complete) e qualche pad era null, la risposta dell'utente non si applica in locale
+(apply_answers vuole package_geometry): resta il blocco, la risposta salvata vale alla prossima analisi/rilettura.
+PADFIX AUDIT IN CORSO (agente estrazione, solo datasheet_extractor.py + i18n.py + test, niente GUI; H1 resta al correttore GUI):
+M1 validare valori presenti (placeholder solo per coordinate null) prima dello scarto; M2 nota costruita da cio' che resta;
+M3 pad scartati tenuti in ExtractedParams.unread_pad_geometry perche' apply_answers li riempia e ripristini package_geometry;
+L1 griglia senza passo/interasse nominata nel messaggio; L2 castellato: scarto con nota senza blocco (i lati sono il
+footprint), matrice: blocco tenuto (lo schema dice che i pad espliciti sono la fonte del footprint); L3 cause a valle.
+PADFIX AUDIT FATTO (non committato): M1-M3, L1-L3 come sopra (LIMITE NOTO qui sopra ora CORRETTO: apply_answers riempie
+unread_pad_geometry e ripristina package_geometry); contratto per H1 (GUI): ExtractedParams.unread_pads (numeri) e
+footprint_pads_dropped() -> True = nessun footprint da nessun campo; test_unread_pad_positions.py 32 test (+24), mirati 636 passati.
+H1 GUI IN CORSO (correttore GUI, 09/11 sera, main_window.py + i18n.py + test nuovo): regola = blocco su
+footprint_pads_dropped() (NON su ogni pin_map_conflict: per una griglia in disaccordo il rimedio documentato e' correggere
+i campi e «Rigenera footprint», bloccarlo toglierebbe il rimedio). Stato MainWindow._unread_pads (numeri) impostato da ogni
+estrazione vera (non da una base sintetizzata), salvato nel progetto («unread_pads»), azzerato al cambio progetto;
+_current_params (unica fonte del pin header dai campi) solleva ValueError col motivo + rimedio -> Genera, Rigenera
+footprint, generazione automatica, riscrittura della bozza, anteprima 2D/3D, pad del simbolo, controllo KiCad rifiutano.
+Rimedio: Strumenti > «Rileggi solo le posizioni dei pad», risposta alla domanda sulle posizioni, nuova analisi.
+H1 GUI FATTO (non committato): come sopra + controllo esplicito in testa a _generate_applied e _preview_params,
+_validate_automatic_input solleva il blocco PRIMA di pin_map_conflict, _automatic_generation_blocked non aggiunge piu' il
+rimedio «Piazzole/Rigenera footprint» quando il blocco c'e', finestra «Footprint non generato» per Genera/Rigenera footprint
+manuali (silenziosa nella riscrittura da timer), etichetta label_preview_footprint_block sopra l'anteprima; simbolo: pinout
+dei documenti senza pin dalla matrice + errore col rimedio; scheda KiCad: «Footprint non verificabile» col motivo. 3 voci
+i18n nuove. Test nuovo tests/test_unread_pads_gui.py (12: + automatica, Genera, Rigenera, anteprima/simbolo, riapertura;
+- matrice numerica, pad tutti letti, castellato con pad facoltativi scartati; risposta pad_layout e rilettura riuscita
+sbloccano, «Torna indietro» e rilettura ancora incompleta no). Mirati (17 file) 394 passati. datasheet_extractor non toccato.
+
+Utente (AskUserQuestion, due domande): «Sì, come KiCad» e «Sì, una maniglia sola». Da fare IN ENTRAMBE LE SCHEDE:
+(H1) rettangoli/poligoni/cerchi NON riempiti e archi/curve/linee aperte colpiti solo sul contorno (EDA_SHAPE::HitTest di
+KiCad: interno solo se riempito); le forme riempite restano cliccabili dentro; zone gia' fatte (ZoneOutlineItem).
+(H2) il punto di chiusura di una linea chiusa (ultimo = primo) e dei poligoni del simbolo (ripetizione di chiusura) ha UNA
+sola maniglia; trascinarla sposta insieme inizio e fine (la forma resta chiusa). Revoca della decisione C12 per il
+trascinamento (era «accettato»), ora la regola utente. Un agente solo (file condivisi), poi revisione avversariale
+(parity + adversarial), suite, commit solo con OK.
+OK UTENTE: «ok procedi» (dopo «ti chiamo col beep solo quando servira' il via al commit»), preso come via a commit, push e
+merge in main COME L'ULTIMA VOLTA, solo a revisione chiusa e suite verde; nessun pacchetto.
+FATTO dall'agente (non committato): kicadgen/gui/canvas_hit.py (OutlineHitMixin, Outline*Item, items_near), H2 con
+vertex_edit.handle_points/move_handle_point, canvas_clicktools._ToolCursorKeeper (cursore a croce ripristinato dopo il
+ridisegno con strumento armato: difetto latente scoperto). REVISIONE (parity + adversarial): MEDIO glifi di libreria NON
+riempiti (29/41: resistor, capacitor, motor_dc...) non piu' selezionabili cliccando dentro -> regressione; MEDIO con uno
+strumento armato il simbolo mostra SizeAll sul tratto, il footprint la croce; cursore/tooltip sulla forma esatta ma la
+pressione prende fino a 4 px; precedenze diverse fra pin (simbolo, esatti) e pad (footprint, margine); bassi: penna
+cosmetica non documentata, QRect inutilizzato, _near_polygon_outline doppione del corpo, _context_target senza
+items_near, _polyline_closed vs _shape_closed in disaccordo, test gemelli non simmetrici, docs.
+DECISIONI DEL COORDINATORE (da confermare all'utente): i GLIFI restano selezionabili dentro come prima (la scelta «come
+KiCad» riguardava le forme disegnate; KiCad seleziona un simbolo dal corpo); cursore e tooltip seguono la portata della
+pressione; precedenza unica nelle due schede: maniglie > pin/pad > testi > tratti, esatto prima del margine 4 px, uguale
+per clic sinistro e destro. Correttore unico in corso.
+CORRETTORE FATTO (2532 test canvas): glifi selezionabili dentro, croce con strumento armato + mano durante il pan,
+ReachFeedback (cursore/tooltip dalla stessa scelta della pressione), canvas_hit.pick con ranghi, docs/canvas-hit-plan.md.
+VERIFICA: tutti i punti FIXED, ma: D1 ALTO tests/test_review_1029_canvas.py 16/33 rossi (premono DENTRO un
+shape:rectangle vuoto: contratto da aggiornare, il file non era nei glob del correttore); D2 MEDIO footprint: REF/Valore
+sopra un pad grande non piu' trascinabile ne' ripristinabile (pad sopra i testi); D3 basso cursore SizeAll bloccato
+durante il posizionamento di un glifo (ReachFeedback.forget mai chiamato); D4 basso tasto E nel footprint apre un disegno
+col puntatore dentro un contorno vuoto (isteresi del bounding rect); D5 basso pad non spostabili: tooltip del pad ma la
+pressione prende altro. DECISIONE DEL COORDINATORE (da confermare): precedenza maniglie > TESTI > pin/pad > tratti in
+entrambe le schede (il testo e' il bersaglio piccolo posato sopra). Effetto gia' noto: la maniglia del capo di un filo
+selezionato su un pin apre il menu del filo (maniglie prima dei pin, come i punti di modifica di KiCad).
+CORRETTORE D1-D5 FATTO (non committato): D1 test_review_1029_canvas._shape_pos preme sul TRATTO (contratto H1);
+D2 RANK_TEXT=1 < RANK_PIN=2 in canvas_hit (simbolo TARGET_RANKS, footprint _classify; il manico del corpo sul rame di un
+pad ora ripete la scelta senza maniglie del corpo); D3 ReachFeedback.release (forget tolto) in cancel_interaction e
+prima di ogni drag, in entrambe le schede; D4 E del footprint = FootprintView.drawing_under_pointer (bersaglio della
+pressione, puntatore in coordinate scena), rivelazione maniglie invariata; D5 hover del footprint segue la scala della
+pressione con MainWindow.gesture_accepts (senza effetti). Docs canvas-hit-plan.md aggiornati. Insieme canvas + file
+collegati: 2988 passati. Stessa classe di D4 ORA CORRETTA (09/11 sera, non committato): MainWindow._fp_targets
+(Delete/R/Ctrl+D/Ctrl+C/frecce senza selezione) usa FootprintView.drawing_under_pointer come E, non piu'
+_fp_hovered_drawing (resta solo per mostrare le maniglie); test che assegnavano _fp_hovered_drawing ora muovono il
+puntatore VERO (helper pointer_on_drawing/pointer_away in tests/test_footprint_outline_hit.py), nuovo test 4 comandi
+x tratto / dentro vuoto / dentro pieno.
+AGENTE H1/H2 FATTO (non committato): nuovo kicadgen/gui/canvas_hit.py (Outline{Rect,Ellipse,Polygon,Path}Item: shape() =
+contorno a meta' spessore, interno solo con set_interior_hit(True); items_near = margine di 4 px) usato da footprint
+(main_window, ZoneOutlineItem ora sottoclasse) e simbolo (symbol_tab, + _SymbolView.press_target: esatto poi margine per i
+'graphic'); vertex_edit.handle_points/move_handle_point usati da symbol_glyphs.shape_handles/set_shape_point e dal
+footprint (_fp_move_drawing_point). Difetto latente emerso: QGraphicsView rimetteva la freccia salvata prima di armare uno
+strumento (replay dell'ultimo evento dopo il ridisegno) -> canvas_clicktools._ToolCursorKeeper. Doc C12 aggiornato.
+CORRETTORE UNICO (09/11 sera, IN CORSO, piano): (1) glifi di libreria con interno colpito (solo shape:* e fili a
+contorno); (2) croce in entrambe le schede con strumento armato (keeper: ogni cursore non-croce tranne il pan;
+contratto del test cambiato); (3) cursore e tooltip dalla stessa scelta della pressione (canvas_hit, margine 4 px);
+(4) precedenza unica maniglie > pin/pad > testi > tratti, esatto prima del margine, sinistro e destro, con un helper in
+canvas_hit; (5) bassi: @note penna non cosmetica, QRect tolto, contorno del corpo come OutlinePolygonItem (via
+_near_polygon_outline), _context_target su items_near, un solo predicato «chiuso» in symbol_glyphs; (6) test gemelli
+simmetrici; (7) sezione H1/H2 nei docs. Solo test mirati, niente suite completa.
+CORRETTORE FATTO (non committato): canvas_hit.pick/RANK_*/ReachFeedback; keeper anche per la mano del pan (anche
+senza strumento: un passo del pan rimetteva il cursore dell'item); docs/canvas-hit-plan.md + riga C10. CONTRATTI
+CAMBIATI: maniglia di un filo selezionato sopra un pin -> menu del FILO (test_symbol_vertex_edit); croce sopra un
+tratto con strumento armato (test_symbol_clicktool_parity, test_canvas_clicktools); test del testo sopra una quota
+(test_footprint_body_dimensions) con un item reale invece del monkeypatch di _text_item_at. Insieme canvas completo
+(symbol_*, footprint_*, canvas_*, vertex_edit, kept_scene_items, documentation): 2532 passati. Suite completa NON eseguita.
+CORRETTORE VER4 FATTO (09/11 sera, non committato): (1) MEDIO FootprintView tiene il puntatore come punto del VIEWPORT
+(`_pointer_viewport`, mappato alla scena solo in drawing_under_pointer): dopo un cambio di camera senza movimento (auto-fit
+dopo Delete, scroll, zoom programmatico) E e _fp_targets rispondono per cio' che sta sotto il cursore ORA (prima un secondo
+Delete cancellava un disegno portato via dall'auto-fit); (2) BASSO senza selezione la prima freccia sul disegno sotto il
+puntatore lo SELEZIONA (_nudge_footprint_drawings), le frecce seguenti lo seguono (prima si fermava quando usciva dal
+punto: 6 passi un rettangolo pieno, 1 un tratto), un passo di undo per pressione; (3) dichiarato in docs/canvas-hit-plan.md
+il compromesso accettato «pad interamente dentro il box di un testo spostato» con i ripieghi (Ctrl+clic, banda, poi E/frecce;
+oppure spostare il testo); (4) test della ri-scelta di _pick con maniglia del corpo sul rame (pad / maniglia fuori rame /
+maniglia di disegno e testo vincono per rango). 8 test nuovi in tests/test_footprint_outline_hit.py.
+CORRETTORE PUNTI (1)-(5) del controllo su VER4 FATTO (09/11 sera, non committato): nuovo canvas_hit.PointerTracker
+(punto dello SCHERMO salvato a ogni movimento, rimappato con la geometria attuale del viewport e la camera attuale;
+QCursor.pos() solo se l'ultimo movimento era reale e underMouse) usato da FootprintView (`view.pointer`, sostituisce
+_pointer_viewport) e _SymbolView (`view.pointer`, pointer_viewport_point/pointer_scene_point); (1) SymbolTab._hovered_graphic
+legge il tracker, non piu' _cursor_position; (2) _nudge_footprint_drawings seleziona solo se _translate_drawings riesce;
+(3) spostamento del viewport dal layout coperto dal punto di schermo; (4) riga coordinate di footprint (pointer_scene_point
+in _update_footprint_readout) e simbolo (SymbolTab._on_camera_changed) ricalcolate su camera_changed; (5)
+FootprintView.refresh_hover sul changed della camera (solo a vista inattiva) e simbolo via _on_camera_changed. Docs
+canvas-hit-plan.md aggiornati. Test nuovi: 3 test_canvas_hit, 3 test_symbol_outline_hit, 4 test_footprint_outline_hit
+(verificati rossi sul comportamento vecchio, tranne i negativi della rotella). Insieme canvas+collegati: 2726 passati.
+TRE BASSI L1-L3 FATTI (09/11 sera, unico agente, solo main_window.py + 2 test nuovi, non committato): L1
+_footprint_alignment_block con pad non letti restituisce il SOLO testo di _unread_pads_block (niente «Correggili e
+rigenera»), il caso ordinario resta com'era; L2 nascondere un layer deseleziona i suoi disegni
+(_drop_hidden_drawings_from_selection in _on_preview_layer_toggled) e _fp_targets filtra anche la selezione per layer
+visibile; L3 _on_language_changed chiama _retranslate_symbol_block (ricompone solo l'errore da _symbol_pad_ids, mai
+set_data). Test: tests/test_unread_pads_messages.py (4), tests/test_footprint_hidden_selection.py (4); gruppo mirato
+(unread_pads_gui, footprint_camera_refresh, footprint_selection, footprint_side_panel, kicad_tab_gate,
+untranslated_texts, documentation + nuovi): 121 passati. Suite completa NON eseguita.
+
 ## 09/11 — FATTO, committato `e3eff26` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «Commit, push, merge in main»): layer B.*, «Sposta ancora», vertici, zone di esclusione
 
 Utente: «ok implementa anche quelle cose nuove, ma poi prima di dire ok rifai sempre controlli avversariali»; disegno
