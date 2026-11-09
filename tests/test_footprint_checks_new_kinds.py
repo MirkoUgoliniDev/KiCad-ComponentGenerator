@@ -2,7 +2,7 @@
 
 The silk clearance and the courtyard enclosure see the Bezier curve, the
 text box border and the radial/centre/leader inks; a silkscreen stroke
-thinner than the fab floor (an unverified convention) is a warning with a remedy.
+thinner than KLC F5.1's lower bound (0.10 mm) is a warning with a remedy.
 """
 
 from kicadgen.core.footprint import (FpCircle, FpCurve, FpDimension, FpLine, FpPoly, FpRect, FpText, FpTextBox,

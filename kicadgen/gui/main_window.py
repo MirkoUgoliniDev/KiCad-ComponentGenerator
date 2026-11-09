@@ -1935,6 +1935,10 @@ class MainWindow(QMainWindow):
         #: place; the drawing selection is valid for one revision only.
         self._fp_drawings_revision = 0
         self.footprint_drawings = []
+        #: ((first, second), axis) of the orthogonal dimension being drawn: the
+        #: axis its preview showed last, kept while the pointer is inside the
+        #: box of the two points, as KiCad does (`_fp_ortho_axis_for`).
+        self._fp_ortho_axis_memory = None
         #: Snapped pointer position while a tool is armed, footprint mm, or None.
         #: The armed tool and its clicked points live in the preview's
         #: `PointCollector` (read through `_fp_draw_tool` / `_fp_draw_clicks`).
@@ -18174,6 +18178,8 @@ class MainWindow(QMainWindow):
             self._fp_skip_disarm = False
         self._fp_draw_dirty = False
         self._fp_draw_hover = None
+        # The orthogonal dimension in progress, if any, is gone with its axis memory.
+        self._fp_ortho_axis_memory = None
         self._fp_draw_hover_kind = None
         self._fp_handle_drag = None
         self._fp_handle_origin = None
@@ -18589,8 +18595,14 @@ class MainWindow(QMainWindow):
             draw yet, `_cancel_footprint_drawing` just cleaned the markers);
             an empty list after Backspace removed the last point redraws, so
             its dot goes away. The step hint follows every change.
+        @note Fewer than two points (Backspace on the second one) end the
+            orthogonal dimension in progress: its axis memory goes too, so
+            the same second point clicked again starts from the longer
+            extent, as a fresh dimension (`_fp_ortho_axis_for`).
         """
         self._refresh_fp_hint()
+        if len(points) < 2:
+            self._fp_ortho_axis_memory = None
         if spec.key == self._MEASURE_KEY:
             self._fp_measure.points_changed(points)
             return
@@ -18759,7 +18771,9 @@ class MainWindow(QMainWindow):
             (x1, y1), (x2, y2), placement = points
             axis = ""
             if tool == "dimension_orthogonal":
-                axis = self._orthogonal_dimension_axis((x1, y1), (x2, y2), placement)
+                axis = self._fp_ortho_axis_for((x1, y1), (x2, y2), placement)
+                # The dimension is done: the next one starts from the longer extent.
+                self._fp_ortho_axis_memory = None
                 extra["axis"] = axis
             extra["offset"] = round(dimension_offset_from_crossbar((x1, y1), (x2, y2), placement, axis), 4) + 0.0
             points = points[:2]
@@ -18832,13 +18846,34 @@ class MainWindow(QMainWindow):
         new = len(self.footprint_drawings)
         self._commit_drawings(self.footprint_drawings + valid, carry=(new, {new}))
 
+    def _fp_ortho_axis_for(self, first, second, placement) -> str:
+        """@brief Axis of the orthogonal dimension being drawn, remembering the preview's last one.
+
+        @param first (x, y) first measured point, mm.
+        @param second (x, y) second measured point, mm.
+        @param placement (x, y) the hovered or clicked third point, mm.
+        @return "x" or "y" (`_orthogonal_dimension_axis` with the remembered axis).
+        @note The memory is keyed on the two measured points, so it belongs to
+            ONE dimension in progress, as the preview state of KiCad's
+            `DRAWING_TOOL::DrawDimension`: a new dimension (other points)
+            starts again from the longer extent. The commit forgets it.
+        """
+        key = (tuple(first), tuple(second))
+        memory = getattr(self, "_fp_ortho_axis_memory", None)
+        previous = memory[1] if memory and memory[0] == key else ""
+        axis = self._orthogonal_dimension_axis(first, second, placement, previous)
+        self._fp_ortho_axis_memory = (key, axis)
+        return axis
+
     @staticmethod
-    def _orthogonal_dimension_axis(first, second, placement) -> str:
+    def _orthogonal_dimension_axis(first, second, placement, previous: str = "") -> str:
         """@brief Which axis an orthogonal dimension measures, from where its line is placed (review M7).
 
         @param first (x, y) first measured point, mm.
         @param second (x, y) second measured point, mm.
         @param placement (x, y) the third click (or the hovered point of the ghost), mm.
+        @param previous The axis the preview of THIS dimension showed last
+            ("x"/"y"), or "" when there is none yet (`_fp_ortho_axis_for`).
         @return "x" (horizontal measure, the dimension line above or below
             the points) or "y" (vertical measure, the line left or right).
         @note KiCad 9's rule (`DRAWING_TOOL::DrawDimension`, step
@@ -18850,17 +18885,18 @@ class MainWindow(QMainWindow):
             bottom (beside it) measures Y; in a diagonal corner region the
             larger offset from the box centre decides (|dy| < |dx| -> "y").
         @note Inside the box (edges included) KiCad keeps the orientation the
-            preview already had, which starts as the longer extent of the box
-            (width < height -> vertical). This one-shot function holds no
-            state: there it returns that starting orientation, the DECLARED
-            fallback (|dX| >= |dY| -> "x", the rule used before this change).
-            The tool and its ghost both call this function, so the ghost
-            shows the axis a click writes.
+            preview already had (`previous`), which starts as the longer
+            extent of the box (width < height -> vertical) when the pointer
+            has not been outside it yet. The tool and its ghost both call this
+            function with the same `previous`, so the ghost shows the axis a
+            click writes.
         """
         (x1, y1), (x2, y2), (px, py) = first, second, placement
         left, right, top, bottom = min(x1, x2), max(x1, x2), min(y1, y2), max(y1, y2)
         width, height = right - left, bottom - top
         if left <= px <= right and top <= py <= bottom:
+            if previous in ("x", "y"):
+                return previous
             return "y" if width < height else "x"
         if width == 0:
             return "y"
@@ -21489,7 +21525,7 @@ class MainWindow(QMainWindow):
                     used_axis = ""
                     if tool == "dimension_orthogonal":
                         # The tool's own rule, so the ghost shows the axis a click writes.
-                        used_axis = self._orthogonal_dimension_axis((x1, y1), (x2, y2), points[2])
+                        used_axis = self._fp_ortho_axis_for((x1, y1), (x2, y2), points[2])
                     offset = dimension_offset_from_crossbar((x1, y1), (x2, y2), points[2], used_axis)
                 add_ink(record_dimension({"kind": "dimension", "layer": self._fp_active_layer(),
                                           "points": [[x1, y1], [x2, y2]], "offset": offset, "axis": used_axis}))

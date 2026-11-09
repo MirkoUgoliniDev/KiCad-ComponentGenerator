@@ -251,6 +251,55 @@ def test_the_orthogonal_tool_and_its_ghost_follow_the_third_click(fp):
     assert _last(fp)["axis"] == "x" and _last(fp)["offset"] == 4.0
 
 
+def test_inside_the_box_the_orthogonal_axis_keeps_the_previous_one():
+    from kicadgen.gui.main_window import MainWindow
+    axis = MainWindow._orthogonal_dimension_axis
+    inside = (2, 0.5)
+    assert axis((0, 0), (5, 1), inside, previous="y") == "y", "inside: the preview's last axis stays"
+    assert axis((0, 0), (5, 1), inside, previous="x") == "x"
+    assert axis((0, 0), (5, 1), inside) == "x", "no previous axis: the longer extent"
+    assert axis((0, 0), (5, 1), (2.5, 4), previous="y") == "x", "outside the box the region decides, not memory"
+
+
+def test_the_orthogonal_ghost_remembers_its_axis_for_one_dimension_only(fp):
+    fp._toggle_footprint_draw_tool("dimension_orthogonal")
+    _click(fp, 0, 0)
+    _click(fp, 5, 1)
+    _move(fp, 8, 0.5)                                      # beside the box: Y
+    _move(fp, 2, 0.5)                                      # back inside: still Y (KiCad)
+    _click(fp, 2, 0.5)
+    assert _last(fp)["axis"] == "y", "the click inside writes the axis the ghost showed"
+    # Negative: the next dimension, placed inside straight away, starts from the longer extent.
+    fp._toggle_footprint_draw_tool("dimension_orthogonal")
+    for point in ((0, 0), (5, 1), (2, 0.5)):
+        _click(fp, *point)
+    assert _last(fp)["axis"] == "x", "the memory belonged to the previous dimension"
+
+
+@pytest.mark.parametrize("how", ["backspace", "escape"])
+def test_the_orthogonal_axis_memory_ends_with_the_dimension(fp, how):
+    fp._toggle_footprint_draw_tool("dimension_orthogonal")
+    _click(fp, 0, 0)
+    _click(fp, 5, 1)
+    _move(fp, 8, 0.5)
+    assert fp._fp_ortho_axis_memory[1] == "y"
+    if how == "backspace":
+        fp._fp_click_collector().undo_last()               # the second point is gone
+    else:
+        fp._cancel_footprint_drawing()
+        fp._toggle_footprint_draw_tool("dimension_orthogonal")
+        _click(fp, 0, 0)
+    assert fp._fp_ortho_axis_memory is None
+    # Same second point again, placed inside straight away: a fresh dimension, longer extent.
+    # Each click is preceded by its move, as with a real mouse: the collector
+    # recomputes the ghost from the last hover, which must not be the old (8, 0.5).
+    _move(fp, 5, 1)
+    _click(fp, 5, 1)
+    _move(fp, 2, 0.5)
+    _click(fp, 2, 0.5)
+    assert _last(fp)["axis"] == "x"
+
+
 # ── M13: dimensions take the layer width ───────────────────────────────
 
 def test_a_dimension_takes_the_active_layer_width_from_both_routes(fp):

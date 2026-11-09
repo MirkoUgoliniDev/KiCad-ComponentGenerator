@@ -1,5 +1,42 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## 09/11 — IN CORSO: chiusura dei residui del giro dell'08/11, poi commit, push, merge in main, push, pacchetto
+
+Utente (09/11): «ok fai tutto , poi committa, pusha , mergi ain main , pusha e rifai il paxxherro se serve ok ? rimuovend
+oquelli vecchi ok ?». INTERPRETAZIONE: «tutto» = la lista «cosa resta da fare» del rapporto:
+1. le 5 decisioni del coordinatore dell'08/11 (E sul primo pad, spessore del layer per le quote, X/Y dall'origine di
+   disegno con Y in alto, aggancio > vincolo d'angolo, poligoni autointersecanti ammessi) = CONFERMATE dall'utente;
+2. residui: (a) SILK_MIN 0.10 senza fonte -> cercare la fonte KLC (F5.1); se non trovata resta dichiarata;
+   (b) quota ortogonale col terzo punto DENTRO il riquadro: tenere l'orientamento precedente dell'anteprima come
+   DRAWING_TOOL::DrawDimension di KiCad (stato legato ai due punti misurati, ripartenza dal lato lungo);
+   (c) ristilatura di item vecchi dopo una sostituzione dei disegni senza ridisegno: il caso «tipo diverso» e' gia'
+   chiuso (B3); resta il caso «stesso tipo, record diverso» -> firma del record sull'item, si ristila solo se uguale;
+3. database dei profili nel commit dopo il controllo segreti;
+4. commit, push FOOTPRINT-ADVANCE, merge in main, push main, pacchetto locale nuovo (build-installer, nessuna
+   release) e rimozione dei vecchi MSI/exe in dist/.
+NON incluso (dubbio): il punto 5 del rapporto (layer B.*, spostare l'ancora, modifica vertici, tabelle/zone) sono
+funzioni nuove «segnalate non autorizzate»: regola «conferma l'intento prima di costruire» -> da chiedere dopo.
+FATTO (09/11): (a) fonte TROVATA e citata: KLC F5.1 (content/footprint/F5/F5.1.adoc di gitlab.com/kicad/libraries/klc,
+klc.kicad.org risponde 403/Cloudflare agli strumenti): «Silkscreen line width is between 0.10mm and 0.15mm», nominale
+0.12, «0.1mm is allowed for high density designs» -> SILK_MIN 0.10 e' il limite inferiore KLC, non piu' «convenzione non
+verificata»; solo commenti/docstring di footprint_checks.py, nessuna soglia cambiata. (b) `_fp_ortho_axis_for` +
+parametro `previous` di `_orthogonal_dimension_axis`: memoria ((p1,p2), asse) in `_fp_ortho_axis_memory`, scritta
+dall'anteprima, letta dal clic, azzerata al commit e all'annullamento; test positivo (fuori di lato poi dentro = Y) e
+negativo (quota nuova dentro subito = lato lungo). (c) CHIUSO SENZA CODICE: il difetto segnalato da W3 (setBrush su una
+linea) era gia' corretto da B3; il caso residuo «stesso tipo, record diverso» richiede di sostituire la lista senza
+ridisegno, cosa che nessun percorso dell'app fa (il test B3 deve scrivere `_footprint_drawings` privato), e al piu'
+colora un item gia' vecchio fino al ridisegno: nessuna correzione speculativa.
+NUOVA REGOLA DELL'UTENTE (09/11): «fai sempre una verifica con agenti in modalita' avversariale» -> ogni giro, anche
+piccolo, chiude con revisori read-only prima del commit (salvata in memoria). VERIFICA di questo giro: 1 adversarial-reviewer,
+nessun alto/medio, 5 bassi TUTTI CORRETTI: L1 Backspace sotto i due punti non azzerava la memoria dell'asse (riprodotto) ->
+azzerata in `tool_points_changed` con <2 punti; L2 il commento citava il range KLC 0.10-0.15 ma controlla solo il minimo ->
+dichiarato esplicitamente (il massimo non e' controllato: un tratto spesso si stampa, il rischio e' quello che non si stampa);
+L3 messaggio e rimedio motivati con «molte fabbriche» -> ora citano la KLC F5.1 (2 chiavi i18n sostituite nelle 4 lingue);
+L4 testi vecchi «convenzione non verificata» allineati (test e handoff 08/11); L5 test con movimenti veri del mouse e
+negativi Backspace/Escape. SUITE COMPLETA VERDE (09/11, codice fermo, dopo le correzioni): A 7527 passati 9 saltati
+19 sottotest, B 4839 passati 4 saltati = 12366 passati, 13 saltati, 19 sottotest. TRAPPOLA: nei test un clic senza `_move` prima lascia al collettore l'ultimo hover vecchio
+come anteprima: un negativo «stessi punti di nuovo» deve muovere prima di ogni clic.
+
 ## 08/11 — FATTO e committato `8bee44f` su FOOTPRINT-ADVANCE (NON pushato, NON mergiato): strumenti di disegno al livello di KiCad 9, revisione e correzioni
 
 Utente: «spremiti un po il cervello e cerca di relaizzare uno s trumento al pari di Kicad ok ?», poi «fai un piano
@@ -107,7 +144,8 @@ fuoco rimasto nel campo). Corretti dal coordinatore: N1 con `PropertiesPanel.set
 modifica non confermata SCARTATA, mai scritta altrove), i due host passano il loro soggetto; textbox appena creata ora tiene
 il rientro della prima riga (rstrip("\n") come il validatore). Test positivo+negativo per entrambi (141 focalizzati verdi).
 PARZIALI RIMASTI, dichiarati: SILK_MIN 0.10 senza fonte verificata (nessun accesso web dagli agenti: dichiarata
-convenzione non verificata, la KLC 0.12 resta il predefinito); `_toggle_footprint_draw_tool` e `_fp_draw_buttons` restano
+convenzione non verificata, la KLC 0.12 resta il predefinito) [CORRETTO 09/11: fonte trovata, e' il limite inferiore
+della KLC F5.1, vedi sezione 09/11]; `_toggle_footprint_draw_tool` e `_fp_draw_buttons` restano
 come API per test/script, documentati; asse della quota ortogonale dentro il riquadro = lato lungo (KiCad tiene
 l'orientamento precedente, qui senza stato).
 SUITE FINALE VERDE (08/11 notte, codice fermo, dopo N1): A 7523 passati 9 saltati 19 sottotest, B 4839 passati 4 saltati = 12362 passati, 13 saltati, 19 sottotest. Commit 8bee44f (utente: «poi se riesci fai il pacchetto nuovo e quand ohai finito spegni il pc», preso come OK al commit; NON pushato, NON mergiato). Poi pacchetto locale (build-installer, nessuna release) e spegnimento del PC chiesto dall'utente. Decisioni del coordinatore ancora DA CONFERMARE dall'utente (elencate sopra). PACCHETTO LOCALE (08/11 23:11): build-windows.ps1 -IncludeYoloModel dal commit 77ed036, dist/KiCadGen-1.0.7.msi 461 MB (483 482 356 byte), --check-runtime OK, modelli con SHA-256 verificato, avvisi soliti (ICE60, ICE03, pyvista.trame, onnx). Numero ancora 1.0.7: cambia solo con una release. Nessuna release, nessun push. Poi il PC e' stato spento su richiesta dell'utente. AL RIAVVIO: confermare con l'utente le 5 decisioni del coordinatore, chiedere push/merge di FOOTPRINT-ADVANCE (2 commit avanti a origin: 8bee44f, 77ed036 + questo).

@@ -4,9 +4,8 @@ The checks read a `core.footprint.Footprint` (pads and graphics) and nothing
 else: no part name, no package family, no file on disk. Each rule yields a
 `GeometryFinding` with the KLC rule it comes from, a severity, a message, a
 remedy and the indices of the pads and graphics concerned, so the preview can
-select them. Every threshold says where it comes from (a published value,
-except `SILK_MIN_WIDTH_MM`, declared an unverified convention); none is
-tuned to a part.
+select them. Every threshold says where it comes from (a published value);
+none is tuned to a part.
 
 Rules:
 - pads_overlap (error): two pads with different numbers whose copper
@@ -20,8 +19,9 @@ Rules:
   rule: said so in the message).
 - pin_one_marker (warning, KLC F5.1/F5.2): the footprint has a pin 1 but no
   marker of it on the silkscreen or fabrication layer.
-- silk_stroke_width (warning, an unverified fab convention, not KLC): a
-  silkscreen stroke thinner than `SILK_MIN_WIDTH_MM`.
+- silk_stroke_width (warning, KLC F5.1): a silkscreen stroke thinner than
+  `SILK_MIN_WIDTH_MM`, the low end of the KLC's allowed range. ONLY the
+  lower bound is checked (see `SILK_MIN_WIDTH_MM`).
 """
 from __future__ import annotations
 
@@ -73,15 +73,17 @@ def _circle_segments(radius: float, sweep: float = 2 * math.pi) -> int:
     return max(2, math.ceil(full * abs(sweep) / (2 * math.pi)))
 
 #: Thinnest silkscreen stroke, mm, the check accepts without a warning.
-#: UNVERIFIED CONVENTION: 0.10 mm is the figure commonly quoted as a PCB
-#: fab's minimum silkscreen line, but no manufacturer's published capability
-#: page was checked when it was set (2026-11-08: no source verified; fabs
-#: quote different minimums, some above 0.10 mm). It is NOT a KLC rule. What
-#: it is: a warning floor below KLC F5.1's 0.12 mm default, which stays the
-#: default width of a silkscreen drawing (`footprint_layers`), so a stroke
-#: between 0.10 and 0.12 mm (below KLC but plausible) passes silently and
-#: only a clearly thinner one is flagged. A stroke of exactly 0.10 mm passes.
-#: A verified, dated fab source would replace this note, not the check.
+#: Source: KLC F5.1 «Silkscreen layer requirements» (KiCad Library
+#: Conventions, content/footprint/F5/F5.1.adoc of gitlab.com/kicad/libraries/
+#: klc, read 2026-11-09): «Silkscreen line width is between 0.10mm and
+#: 0.15mm», nominally 0.12 mm, «0.1mm is allowed for high density designs».
+#: So 0.10 mm is the KLC's own lower bound, not a fab figure: a stroke of
+#: exactly 0.10 mm passes, a thinner one is flagged. 0.12 mm stays the default
+#: width of a silkscreen drawing (`footprint_layers`). ONLY THIS LOWER BOUND
+#: IS CHECKED: F5.1's upper end (0.15 mm) is not, a thicker stroke breaks the
+#: KLC range but still prints, and the risk this warning guards against is a
+#: stroke that does not print. A board house may ask for more than 0.10 mm
+#: (several quote 0.15 mm): that is the user's fab choice.
 SILK_MIN_WIDTH_MM = 0.10
 
 
@@ -123,8 +125,8 @@ GEOMETRY_HINTS = {
                        'della palette, più vicino a lui che a ogni altro pad) oppure dai al pin 1 una forma '
                        'di pad diversa dagli altri: chi monta la scheda deve riconoscerlo.'),
     'silk_stroke_width': ('Apri le proprietà del disegno (tasto destro sul disegno) e porta lo spessore ad '
-                          'almeno 0.10 mm, meglio 0.12 mm come consiglia la KLC: un tratto più sottile molte '
-                          'fabbriche non riescono a stamparlo.'),
+                          'almeno 0.10 mm, meglio 0.12 mm: la KLC F5.1 ammette da 0.10 a 0.15 mm, 0.12 mm '
+                          'è il valore nominale.'),
 }
 
 
@@ -676,7 +678,7 @@ def _stroke_width(graphic) -> Optional[float]:
 
 
 def check_silk_stroke_width(footprint: Footprint, minimum: float = SILK_MIN_WIDTH_MM) -> list:
-    """@brief Silkscreen strokes thinner than `minimum` (an unverified fab convention, not KLC).
+    """@brief Silkscreen strokes thinner than `minimum` (KLC F5.1's lower bound, 0.10 mm).
 
     @param footprint The footprint checked.
     @param minimum Thinnest printable stroke, mm (`SILK_MIN_WIDTH_MM`).
@@ -698,7 +700,7 @@ def check_silk_stroke_width(footprint: Footprint, minimum: float = SILK_MIN_WIDT
         return []
     return [_finding('silk_stroke_width', 'warning', tx(
         'Serigrafia: {count} tratti più sottili di {minimum:.2f} mm (il più sottile è di {width:.2f} mm): '
-        'molte fabbriche non li stampano.', count=len(thin), minimum=minimum,
+        'sotto il minimo della KLC F5.1, rischiano di non essere stampati.', count=len(thin), minimum=minimum,
         width=min(width for _index, width in thin)), graphics=[index for index, _width in thin])]
 
 
