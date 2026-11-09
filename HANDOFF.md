@@ -36,6 +36,11 @@ L4 testi vecchi «convenzione non verificata» allineati (test e handoff 08/11);
 negativi Backspace/Escape. SUITE COMPLETA VERDE (09/11, codice fermo, dopo le correzioni): A 7527 passati 9 saltati
 19 sottotest, B 4839 passati 4 saltati = 12366 passati, 13 saltati, 19 sottotest. TRAPPOLA: nei test un clic senza `_move` prima lascia al collettore l'ultimo hover vecchio
 come anteprima: un negativo «stessi punti di nuovo» deve muovere prima di ogni clic.
+COMMIT 33cbd08 + docs e8dc716, pushati; main fast-forward a e8dc716 e pushato (main = origin/main = FOOTPRINT-ADVANCE).
+PACCHETTO LOCALE (09/11 09:45): vecchi MSI rimossi da dist/ su richiesta dell'utente (1.0.0, 1.0.2-1.0.5 e il 1.0.7
+dell'08/11), poi build-windows.ps1 -IncludeYoloModel da e8dc716: dist/KiCadGen-1.0.7.msi 461 MB (483 482 356 byte),
+--check-runtime OK, 5 modelli con SHA-256 verificato, avvisi soliti (ICE60, ICE03). Nessuna release, numero invariato.
+APERTO, da chiedere all'utente: punto 5 (layer B.*, spostare l'ancora del footprint, modifica dei vertici, tabelle/zone).
 
 ## 08/11 — FATTO e committato `8bee44f` su FOOTPRINT-ADVANCE (NON pushato, NON mergiato): strumenti di disegno al livello di KiCad 9, revisione e correzioni
 
