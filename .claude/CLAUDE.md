@@ -261,7 +261,8 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 12362 passed,
+is 12366 passed,
+13 skipped and 19 subtests (2026-11-09, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `33cbd08`, halves 7527/9/19 and 4839/4: the orthogonal dimension keeps its preview's axis inside the box as KiCad, SILK_MIN 0.10 mm sourced to KLC F5.1, five low findings of an adversarial review fixed; before that, 12362 passed,
 13 skipped and 19 subtests (2026-11-08, branch `FOOTPRINT-ADVANCE`, commit `8bee44f`, halves 7523/9/19 and 4839/4:
 KiCad-grade drawing tools in both canvases — ToolGrid with Select, live Properties panel, object snap with typed
 markers, free/90/45 line modes on Shift+Space, KLC per-layer widths, polygon, Bezier, text box, radial/centre/leader

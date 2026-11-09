@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 09/11 — IN CORSO: chiusura dei residui del giro dell'08/11, poi commit, push, merge in main, push, pacchetto
+## 09/11 — FATTO, committato `33cbd08` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «fai tutto, poi committa, pusha, mergia in main, pusha e rifai il pacchetto»): residui del giro dell'08/11; pacchetto: vedi in fondo alla sezione
 
 Utente (09/11): «ok fai tutto , poi committa, pusha , mergi ain main , pusha e rifai il paxxherro se serve ok ? rimuovend
 oquelli vecchi ok ?». INTERPRETAZIONE: «tutto» = la lista «cosa resta da fare» del rapporto:
