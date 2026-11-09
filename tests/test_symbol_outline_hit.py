@@ -242,11 +242,16 @@ def _glyph_point(tab, index, kind):
 
 
 @pytest.mark.parametrize('key, kind', [('resistor', 'rectangle'), ('motor_dc', 'circle')])
-def test_a_library_glyph_is_selected_and_dragged_by_a_press_inside_its_unfilled_body(tab, qapp, key, kind):
+def test_a_library_glyph_is_selected_and_dragged_by_a_press_inside_its_unfilled_body(glyph_library, tab, qapp,
+                                                                                     key, kind):
     """Positive: a placed glyph keeps the hit it always had, its body inside too (KiCad selects a
     symbol by its body); negative twin: a user-drawn unfilled rectangle around the same point
     lets the press through. The split is structural (a glyph record vs a `shape:*` record), not
-    a size or a name."""
+    a size or a name.
+
+    The glyphs come from the suite's own symbol library (`glyph_library`), not
+    from an installed KiCad: the GitHub runner has none, and «motor_dc» was not
+    placed there (run 42684630650, 2026-11-09)."""
     from kicadgen.gui import canvas_menus
     from kicadgen.gui.canvas_hit import items_near
     tab.place_glyph(key, 25.4, 25.4)

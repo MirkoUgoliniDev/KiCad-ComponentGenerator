@@ -176,8 +176,9 @@ def machine_independent_glyph_catalogue():
 #: The hand-written symbol library of the suite (KiCad 10 format, not a copy
 #: of KiCad's CC-BY-SA libraries): a resistor «R» with its pins 3.81 mm from
 #: the origin, a three-terminal «R_Potentiometer», a two-terminal «Crystal»,
-#: «C», «L», «D», «LED» and a «Relay_SPST-NO» whose background-filled body
-#: rectangle gives the glyph a `body_hint`.
+#: «C», «L», «D», «LED», a «Relay_SPST-NO» whose background-filled body
+#: rectangle gives the glyph a `body_hint`, and a «Motor_DC» whose body is an
+#: UNFILLED circle (the outline-hit glyph test, 2026-11-09).
 GLYPH_FIXTURE_LIBRARY = _TESTS_DIR / "data" / "glyph_fixture.kicad_sym"
 
 
