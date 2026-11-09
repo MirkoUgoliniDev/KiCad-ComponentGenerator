@@ -1,6 +1,6 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
-## 09/11 — IN CORSO su FOOTPRINT-ADVANCE (base c26d6b6 = main): layer B.*, «Sposta ancora», vertici, zone di esclusione
+## 09/11 — FATTO, committato `e3eff26` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «Commit, push, merge in main»): layer B.*, «Sposta ancora», vertici, zone di esclusione
 
 Utente: «ok implementa anche quelle cose nuove, ma poi prima di dire ok rifai sempre controlli avversariali»; disegno
 confermato in chat (AskUserQuestion): «Sì, tabelle fuori». PIANO: docs/footprint-back-anchor-vertices-zones-plan.md
@@ -111,7 +111,7 @@ SUITE COMPLETA (1a corsa, codice fermo): A 7759 passati 2 falliti, B 4904 passat
 `shift_origin`, che GenerateWorker ora chiama sempre (CONTRATTO CAMBIATO: aggiunto ai finti, piu' l'asserzione che
 l'ancora (0,0) arrivi una volta allo scrittore). 67 test dei due file verdi.
 SUITE COMPLETA VERDE (2a corsa, 09/11, codice fermo): A 7761 passati 9 saltati 19 sottotest, B 4905 passati 4 saltati
-= 12666 passati, 13 saltati, 19 sottotest. NON committato: in attesa dell'OK dell'utente. Piano corretto (sezione 4).
+= 12666 passati, 13 saltati, 19 sottotest. COMMIT e3eff26. APERTO da chiedere: i due difetti preesistenti segnalati sopra. Piano corretto (sezione 4).
 
 ## 09/11 — FATTO, committato `33cbd08` su FOOTPRINT-ADVANCE, pushato e mergiato in main (utente: «fai tutto, poi committa, pusha, mergia in main, pusha e rifai il pacchetto»): residui del giro dell'08/11; pacchetto: vedi in fondo alla sezione
 
