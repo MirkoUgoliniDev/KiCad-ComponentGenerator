@@ -231,7 +231,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 13117 passed,
-13 skipped and 19 subtests (2026-11-11, branch `FOOTPRINT-ADVANCE`, NOT merged into `main`, halves 8057/9/19 and
+13 skipped and 19 subtests (2026-11-11, branch `FOOTPRINT-ADVANCE`, commit `1ca72ba`, NOT merged into `main`, halves 8057/9/19 and
 5060/4: the eleven high findings of the 2026-11-10 adversarial review of document extraction and their own review —
 per-pad terminal, printed hole and provenance with holes and lands derived by the program (kicadgen/core/tht_estimates.py),
 estimated pads marked in tooltip, checks and description with «Valori verificati sul disegno», drawn-hole witness that

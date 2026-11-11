@@ -3,8 +3,8 @@
 ## STATO 11/11/2026 — A1-A11 e la loro revisione COMMITTATI su FOOTPRINT-ADVANCE, NON mergiati, NON pushati
 
 Utente 11/11: «Ok ma non mergiare in main ancora». Suite completa VERDE a codice fermo: A 8057 passati 9 saltati 19
-sottotest, B 5060 passati 4 saltati = 13117 passati, 13 saltati, 19 sottotest. Hash del commit: vedi `git log -1` (riga
-aggiornata dal commit successivo di sola documentazione). data/analysis_profiles.sqlite3 sincronizzato (prompt single
+sottotest, B 5060 passati 4 saltati = 13117 passati, 13 saltati, 19 sottotest. Commit `1ca72ba` (base `03a1a60`);
+`main` e `origin` sono ancora a `03a1a60`. data/analysis_profiles.sqlite3 sincronizzato (prompt single
 nuovo + catalogo) e controllato: nessun segreto.
 NON FATTO: nessuna analisi reale a pagamento coi prompt nuovi; nessuna revisione indipendente dopo l'ultimo giro di
 correzioni (X1, X2, coordinatore); difetti delle aree non coperte (sotto, «REVISIONE AREE NON COPERTE») solo elencati.
