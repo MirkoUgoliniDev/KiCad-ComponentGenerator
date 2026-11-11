@@ -198,9 +198,12 @@ def _single(number):
                       "pad_length_mm": 1.8, "pad_width_mm": 1.8}]}
 
 
-def test_a_null_pad_number_becomes_the_empty_number():
-    numbers = [pin["number"] for pin in single_answer_to_data(_single(None))["package_geometry"]["pins"]]
-    assert numbers == ["", "2"]
+def test_a_null_pad_number_is_a_broken_shape():
+    """Contract changed 2026-11-10: the empty number it used to become is now refused by
+    `package_from_mapping` (an unreadable error after the paid calls), so a pad without its
+    printed number is a broken SHAPE that earns the one corrective retry, never the pad «None»."""
+    with pytest.raises(ext.AnswerShapeError, match="elementi 1"):
+        single_answer_to_data(_single(None))
 
 
 def test_a_real_pad_number_is_kept():

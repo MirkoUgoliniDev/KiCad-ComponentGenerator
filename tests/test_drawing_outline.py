@@ -165,9 +165,19 @@ def test_dots_farther_apart_than_three_line_widths_are_not_a_side(tmp_path):
 
 def test_dashed_outline_now_takes_part_in_the_body_check(tmp_path):
     path = _page(tmp_path / "dashed.png", box="dashed")
-    assert check_pad_layout([path], PART, (16.0, 12.0)).status == "confirmed"
-    result = check_pad_layout([path], PART, (19.0, 12.0))
+    agrees = check_pad_layout([path], PART, (16.0, 12.0))
+    assert (agrees.status, agrees.body_check, agrees.scale_verified) == ("confirmed", "agrees", True)
+    # The body drawn at another scale than the pads (both quotes x 1.25, the
+    # outline's own proportions): the outline is the body and contradicts it.
+    result = check_pad_layout([path], PART, (20.0, 15.0))
     assert (result.status, result.reason) == ("not_confirmed", "body_scale")
+    assert result.body_check == "contradicted"
+    # One quote alone off (review 2026-11-10, A9): other proportions than the
+    # rectangle, which may be a frame, a cell or another view -- nothing in
+    # the page says it is the body, so the pads stay confirmed by their shape
+    # only and the body is left to its own second reading.
+    result = check_pad_layout([path], PART, (19.0, 12.0))
+    assert (result.status, result.body_check, result.scale_verified) == ("confirmed", "unverifiable", False)
 
 
 def test_body_disagreeing_with_the_outline_gives_no_outline(tmp_path):
@@ -256,9 +266,15 @@ def test_real_t7n_dashed_outline_on_the_crop():
     path = _real("tests/data/drawings/t7n_drawing_crop.png")
     outline = measured_outline([path], T7N_CROP, T7N_BODY)
     _assert_box(outline, T7N_BOX)
-    assert check_pad_layout([path], T7N_CROP, T7N_BODY).status == "confirmed"
+    agrees = check_pad_layout([path], T7N_CROP, T7N_BODY)
+    assert (agrees.status, agrees.body_check) == ("confirmed", "agrees")
+    # The body quotes scaled together (x 1.2): the dashed outline contradicts them.
+    scaled = tuple(1.2 * size for size in T7N_BODY)
+    result = check_pad_layout([path], T7N_CROP, scaled)
+    assert (result.status, result.reason, result.body_check) == ("not_confirmed", "body_scale", "contradicted")
+    # One quote alone off: other proportions, not identified as the body (A9).
     result = check_pad_layout([path], T7N_CROP, (25.0, 16.5))
-    assert (result.status, result.reason) == ("not_confirmed", "body_scale")
+    assert (result.status, result.body_check) == ("confirmed", "unverifiable")
 
 
 def test_real_t7n_dashed_outline_on_the_full_page():
@@ -280,9 +296,9 @@ def test_real_relay_solid_outline_is_unchanged():
     relay = {4: (0.0, 0.0), 1: (2.54, -7.62), 5: (5.08, -2.54), 3: (17.78, 0.0), 2: (17.78, -7.62)}
     outline = measured_outline([path], relay, (20.5, 10.5))
     assert outline is not None
-    allowed = 2 * outline.tolerance_mm + drawing_holes.BODY_ALLOWANCE_MM
-    assert abs(outline.width_mm - 20.5) <= allowed
-    assert abs(outline.height_mm - 10.5) <= allowed
+    # The allowance is proportional to each size (review 2026-11-10, A10).
+    assert abs(outline.width_mm - 20.5) <= drawing_holes.body_allowance_mm(20.5, outline.tolerance_mm)
+    assert abs(outline.height_mm - 10.5) <= drawing_holes.body_allowance_mm(10.5, outline.tolerance_mm)
 
 
 # -- one hole pattern drawn twice on the page (generality audit M3, 2026-10-31) ----------

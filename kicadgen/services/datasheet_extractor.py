@@ -29,10 +29,19 @@ from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
 from ..core.package_geometry import package_doubts, package_from_mapping
+# The one rule for holes and pads not printed in the drawing, and its three
+# constants (formerly copied here): one definition with the footprint checks.
+from ..core.tht_estimates import (HOLE_TO_PAD_ANNULUS_MM, LEAD_TO_HOLE_CLEARANCE_MM,  # noqa: F401
+                                  MIN_ANNULAR_RING_MM, estimated_hole, estimated_pad_diameter,
+                                  estimated_round_pad, lead_passes, normalised_lead,
+                                  unverified_values)
 from ..core.validation import finite_number
 from ..generators.castellated_module import (
     CONTACT_STYLES, EDGE_LABELS, EDGES,
 )
+# Free copper a derived land keeps from its neighbours (review G1): the
+# minimum of the pin header generator, one value for both.
+from ..generators.pin_header import MIN_PAD_GAP_MM
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api_key, call_tool,
                          check_credit, reset_usage, usage_totals)
@@ -237,6 +246,60 @@ def _value_sources_schema(keys, where: str) -> dict:
         "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)} for key in keys},
     }
 
+
+#: Per-pad values whose provenance a pad entry declares in its own
+#: `value_sources` (the keys of `core.tht_estimates.SOURCE_KEYS`): the hole,
+#: the pad size, the pad shape and the terminal section.
+PAD_SOURCE_KEYS = ("drill_mm", "pad_size", "shape", "lead")
+
+#: Schema fragment shared by the explicit pads of the main answer
+#: (`package_geometry.pins`) and of the single-part answer (`pads`), 2026-11-10
+#: (user: «ok procedi», contract A1-A3 of HANDOFF 10/11): the terminal of each
+#: pad, the printed hole callout and the per-pad provenance. The model
+#: TRANSCRIBES what is printed; the hole and the land that are not printed
+#: are derived by the program from the terminal (`_resolve_pad_terminals`,
+#: `core.tht_estimates`). Every field is optional and of a plain type, so the
+#: DeepSeek strict conversion (`openrouter.strict_tool`) stays lossless.
+_PAD_TERMINAL_PROPERTIES = {
+    "lead": {
+        "type": "object",
+        "description": (
+            "Sezione del TERMINALE (reoforo, pin, lamella) che entra in questo foro, come quotata "
+            "nel disegno, nell'unita' di drawing_unit: shape \"round\" con diameter_mm per un "
+            "terminale tondo, shape \"flat\" con width_mm e thickness_mm per una lamella. NON e' "
+            "il foro. Dichiarane la provenienza in value_sources.lead."),
+        "properties": {
+            "shape": {"type": "string", "enum": ["round", "flat"]},
+            "diameter_mm": {"type": "number", "exclusiveMinimum": 0},
+            "width_mm": {"type": "number", "exclusiveMinimum": 0},
+            "thickness_mm": {"type": "number", "exclusiveMinimum": 0},
+        },
+    },
+    "hole_callout": {
+        "type": "string",
+        "description": (
+            "Il richiamo del FORO di questo pad come e' STAMPATO sul disegno del layout PCB o "
+            "della foratura (es. \"3-Ø1.2\", \"Ø1.3+0.1\"). Ometti se il disegno non stampa il "
+            "foro: allora non stimarlo, dai il terminale in lead."),
+    },
+    "drill_length_mm": {
+        "type": "number", "exclusiveMinimum": 0,
+        "description": (
+            "Solo per un'ASOLA stampata nel disegno: il suo secondo lato (lungo la larghezza del "
+            "pad), nell'unita' di drawing_unit. Mai stimato."),
+    },
+    "value_sources": {
+        "type": "object",
+        "description": (
+            "Provenienza dei valori di QUESTO pad: drill_mm \"read\" solo se il foro e' "
+            "stampato (hole_callout); pad_size \"read\" solo se la piazzola e' stampata (land "
+            "pattern); shape per la forma della piazzola; lead per il terminale. \"estimated\" "
+            "per tutto cio' che non e' stampato: i valori non stampati li ricava il programma."),
+        "properties": {key: {"type": "string", "enum": list(VALUE_SOURCES)}
+                       for key in PAD_SOURCE_KEYS},
+    },
+}
+
 #: Closed electrical roles a pinout entry may declare in ``function`` (the
 #: relay roles the symbol composer reads, `generators.symbol_relay`): the
 #: program never derives them from the free-text ``name``.
@@ -391,7 +454,12 @@ _EXTRACTION_TOOL = {
                         "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
                         "rotation_deg": {"type": "number",
                                          "description": "Angolo del pad in gradi ANTIORARI come appare sulla pagina."},
-                        "drill_mm": {"type": "number", "exclusiveMinimum": 0},
+                        "drill_mm": {"type": "number", "exclusiveMinimum": 0,
+                                     "description": ("Foro, solo per un pad con foro: il "
+                                                     "diametro STAMPATO (hole_callout); "
+                                                     "se non e' stampato ometti e dai lead.")},
+                        # Terminal, printed hole and per-pad provenance (2026-11-10).
+                        **_PAD_TERMINAL_PROPERTIES,
                     }, "required": ["number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm"]}},
                 },
                 "required": ["family", "source_view", "pins"],
@@ -1235,8 +1303,10 @@ DEFAULT_PAD_POSITIONS_PROMPT = (
     "resta fuori da quell'asse. Dichiara in drawing_unit l'unita' delle "
     "quote e in contacts_view se il disegno e' una vista dal basso (BOTTOM VIEW, lato "
     "saldature) o dall'alto. Non specchiare e non ruotare nulla. Se un foro non ha un numero e "
-    "non si riconosce dalla vista del pinout, non includerlo. Rispondi SOLO chiamando lo "
-    "strumento."
+    "non si riconosce dalla vista del pinout, non includerlo. FORI STAMPATI: se il disegno "
+    "stampa il diametro dei fori (richiamo come \"3-Ø1.2\" o \"Ø1.3+0.1\"), riportalo in "
+    "printed_holes coi numeri dei fori a cui si riferisce e il testo com'e' stampato; un foro "
+    "il cui diametro non e' stampato non va stimato. Rispondi SOLO chiamando lo strumento."
 )
 
 #: Default model of the dedicated pad-position reading (profile field
@@ -1340,6 +1410,22 @@ _PAD_POSITIONS_TOOL = {
                                                   "contorno all'inizio dell'asse (sinistra o alto), "
                                                   "high per quello opposto.")},
                 }, "required": ["axis", "pad", "between"]},
+            },
+            "printed_holes": {
+                "type": "array",
+                "description": ("Richiami dei FORI STAMPATI sul disegno (es. \"3-Ø1.2\" accanto ai "
+                                "fori del layout PCB): uno per richiamo, coi numeri dei fori a cui "
+                                "si riferisce. Solo cio' che e' stampato: nessun foro stimato."),
+                "items": {"type": "object", "properties": {
+                    "pads": {"type": "string",
+                             "description": "Numeri dei fori del richiamo, separati da virgola."},
+                    "diameter": {"type": "number", "exclusiveMinimum": 0,
+                                 "description": ("Diametro stampato del foro (per un'asola: la "
+                                                 "sua larghezza), nell'unita' di drawing_unit.")},
+                    "slot_length": {"type": "number", "exclusiveMinimum": 0,
+                                    "description": "Solo per un'asola stampata: la sua lunghezza."},
+                    "text": {"type": "string", "description": "Il richiamo com'e' stampato."},
+                }, "required": ["pads", "diameter"]},
             },
             "notes": {"type": "string"},
         },
@@ -2196,7 +2282,53 @@ def read_pad_positions(documents, *, model, call, prompt=None, progress=None,
         return {"view": view, "pads": {}, "notes": "", "discarded": reason}
     solved = pads_from_chains(data.get("chains"), factor, data.get("midpoints"), pad_sizes)
     notes = data.get("notes")
-    return dict(solved, view=view, notes=notes if isinstance(notes, str) else "")
+    return dict(solved, view=view, notes=notes if isinstance(notes, str) else "",
+                holes=printed_holes(data.get("printed_holes"), factor))
+
+
+def printed_holes(entries, factor: float) -> dict:
+    """@brief The printed hole callouts of a dedicated pad reading, per pad, in mm.
+
+    @param entries `printed_holes` of the report_pad_positions answer: per
+        callout the pad numbers it names ("pads", comma-separated), the printed
+        diameter (the slot's width for a slot), an optional printed slot length
+        and the text as printed.
+    @param factor Drawing unit to millimetres.
+    @return {pad number: {"drill_mm": d, "drill_length_mm": l or None, "text": t,
+        "rounding_mm": r}}, r the rounding of the transcription (`_printed_hole_value`).
+        A malformed callout (no pad, a diameter that is not a finite number > 0)
+        is left out; a pad named by two callouts with different values keeps
+        neither, with "conflict": True -- the reading contradicts itself, and
+        a choice between its two values would be a guess.
+    @note Transcriptions only: nothing here is estimated or derived.
+    """
+    holes = {}
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        diameter = _optional_number(entry.get("diameter"), positive=True)
+        if diameter is None:
+            continue
+        length = _optional_number(entry.get("slot_length"), positive=True)
+        text = str(entry.get("text") or "").strip()
+        # Each size checked against the printed text: its rounding in mm,
+        # and a value given as nominal plus tolerance brought to the nominal
+        # (`_printed_hole_value`, review G6).
+        drill_mm, rounding = _printed_hole_value(text, diameter, factor)
+        if length is not None:
+            length_mm, length_rounding = _printed_hole_value(text, length, factor)
+            rounding = max(rounding, length_rounding)
+        value = {"drill_mm": round(drill_mm, 6),
+                 "drill_length_mm": None if length is None else round(length_mm, 6),
+                 "text": text, "rounding_mm": rounding}
+        for number in _chain_stop_names(entry.get("pads") or ""):
+            previous = holes.get(number)
+            if previous is None:
+                holes[number] = value
+            elif (previous.get("drill_mm"), previous.get("drill_length_mm")) != (
+                    value["drill_mm"], value["drill_length_mm"]):
+                holes[number] = {"conflict": True}
+    return holes
 
 
 def _pad_sizes_mm(pins, factor: Optional[float]) -> dict:
@@ -2260,8 +2392,167 @@ def question_key(field: str, values) -> str:
     return field + ":" + "|".join(sorted(str(value) for value in values))
 
 
+def _answer_identity(field: str, value) -> str:
+    """What a chosen option stands for, comparable across questions of one field.
+
+    A "pad_layout" option is "<sources>:<layout digest>": the layout is the
+    digest, whichever reading brought it. Any other value is its own text.
+    """
+    text = str(value)
+    return text.rsplit(":", 1)[-1] if field == "pad_layout" else text
+
+
+#: Separator, in a "contacts_view" question key, of the digests of the
+#: layout's mirror images (`_mirror_suffix`): «<numbers and digest>~mirror:<a>,<b>».
+#: A key saved before 2026-11-11 has none.
+_MIRROR_MARK = "~mirror:"
+
+
+def _mirror_suffix(pads: dict) -> str:
+    """The key suffix naming the digests of a layout mirrored left-right and top-bottom (`_layout_digest`).
+
+    A drawing seen from the other side of the board is the mirror image of
+    this one about a vertical or a horizontal page axis (the two differ by a
+    half turn, which the digest does not forget), so both are recorded.
+    """
+    def zero(value):
+        # -0.0 + 0.0 is 0.0: a mirrored 0 must spell like the original.
+        return value + 0.0
+
+    across = {number: (zero(-x), zero(y)) for number, (x, y) in pads.items()}
+    down = {number: (zero(x), zero(-y)) for number, (x, y) in pads.items()}
+    return _MIRROR_MARK + ",".join(sorted({_layout_digest(across), _layout_digest(down)}))
+
+
+def _contacts_view_key_parts(body: str) -> tuple:
+    """(numbers-and-digest list body, set of mirror digests or None) of a "contacts_view" key body."""
+    head, mark, tail = body.rpartition(_MIRROR_MARK)
+    if not mark:
+        return body, None
+    return head, set(tail.split(","))
+
+
+def _layout_digest_of(body: str, other: str):
+    """The layout digest of key body `body` against `other` (same pads): the one entry `body` has and `other` lacks."""
+    from collections import Counter
+    extra = Counter(body.split("|")) - Counter(other.split("|"))
+    return next(iter(extra)) if sum(extra.values()) == 1 else None
+
+
+def _same_pads_other_layout(first: str, second: str) -> bool:
+    """Whether two "contacts_view" key bodies name the same pad numbers with another layout digest.
+
+    The key of that question is the sorted pad numbers AND the layout digest
+    in one "|" list (`_require_declared_view`), so the digest sits somewhere
+    among the numbers. Two such lists that differ by exactly one entry on
+    each side differ by the digest alone: the digest covers the numbers, so
+    one digest can never belong to two different number sets. No pattern is
+    matched on the entries themselves.
+    """
+    from collections import Counter
+    a, b = Counter(first.split("|")), Counter(second.split("|"))
+    return sum((a - b).values()) == 1 and sum((b - a).values()) == 1
+
+
+def answers_contradict(key: str, value, other_key: str, other_value) -> bool:
+    """@brief Whether two saved answers, under two different question keys, cannot both be true.
+
+    @param key Key of one answered question (`question_key`).
+    @param value The option value chosen for it.
+    @param other_key Key of another answered question.
+    @param other_value The option value chosen for that one.
+    @return True when the two answers are about the same thing and disagree:
+        - "contacts_view": the same pad numbers (the keys differ only by the
+          layout digest). When one layout is the MIRROR image of the other
+          (the key of a question asked since 2026-11-11 carries its mirror
+          digests, `_mirror_suffix`), the two readings are the two faces of
+          one drawing: the answers agree when they name OPPOSITE sides
+          («top» for one, «bottom» for its mirror image, review E6) and
+          contradict when they name the same side. Otherwise -- layouts that
+          are not mirror images, or an older key without mirror digests,
+          which cannot say -- two different sides contradict: one part has
+          one side from which its drawing is seen, so the question is asked
+          again rather than one answer reused;
+        - "pad_layout", "body_height_mm": two different candidates were
+          chosen and the candidate of one question was ALSO on offer in the
+          other, where it was not chosen (the layout or the printed number
+          the user called right in one question, wrong in the other).
+        False for different fields, for one same key and for any other field.
+    @note The saved answers carry no date (user, 2026-11-10: a project held
+        «top» and «bottom» for the same five pads under two layout digests,
+        and the analysis applied the older one against the newer). So the
+        program cannot tell which of two contradicting answers is the newer:
+        neither is applied by itself (`contradicting_answers`), the question
+        is asked again, and storing the new answer drops the others
+        (`remember_answer`).
+    """
+    field, _sep, body = str(key).partition(":")
+    other_field, _sep, other_body = str(other_key).partition(":")
+    if field != other_field or key == other_key:
+        return False
+    if field == "contacts_view":
+        body, mirrors = _contacts_view_key_parts(body)
+        other_body, other_mirrors = _contacts_view_key_parts(other_body)
+        if not _same_pads_other_layout(body, other_body):
+            return False
+        digest, other_digest = _layout_digest_of(body, other_body), _layout_digest_of(other_body, body)
+        mirrored = ((mirrors is not None and other_digest in mirrors)
+                    or (other_mirrors is not None and digest in other_mirrors))
+        if mirrored:
+            return str(value) == str(other_value)
+        return str(value) != str(other_value)
+    if field in ("pad_layout", "body_height_mm"):
+        chosen, other_chosen = _answer_identity(field, value), _answer_identity(field, other_value)
+        offered = {_answer_identity(field, option) for option in body.split("|")}
+        other_offered = {_answer_identity(field, option) for option in other_body.split("|")}
+        return chosen != other_chosen and (chosen in other_offered or other_chosen in offered)
+    return False
+
+
+def contradicting_answers(answers, key: str, value=None) -> list:
+    """@brief The keys of the saved answers that contradict the answer to `key`.
+
+    @param answers {question key: chosen value} saved with the project; any
+        other type counts as empty.
+    @param key Key of the question at hand.
+    @param value The answer to test; None (default) tests the answer saved
+        under `key`, and without one nothing contradicts.
+    @return Sorted keys, other than `key`, whose answers `answers_contradict`
+        that one. Not empty means: the saved answer must NOT be applied by
+        itself, the question is asked again.
+    """
+    if not isinstance(answers, dict):
+        return []
+    if value is None:
+        if key not in answers:
+            return []
+        value = answers[key]
+    return sorted(other for other, other_value in answers.items()
+                  if isinstance(other, str) and answers_contradict(key, value, other, other_value))
+
+
+def remember_answer(answers, key: str, value) -> dict:
+    """@brief The saved answers with a new one stored and the ones it supersedes dropped.
+
+    @param answers {question key: chosen value} saved so far (not modified);
+        any other type counts as empty.
+    @param key Key of the question just answered.
+    @param value The option value the user chose now.
+    @return A new dict holding `value` under `key`, without the answers that
+        contradict it (`contradicting_answers`): the answer given now is the
+        newest, so an older one never wins over it in a later analysis.
+        Answers to other questions, and to other layouts or candidates that
+        do not contradict it, are kept.
+    """
+    kept = dict(answers) if isinstance(answers, dict) else {}
+    for other in contradicting_answers(kept, key, value):
+        kept.pop(other, None)
+    kept[key] = value
+    return kept
+
+
 def _ask(data: dict, field: str, text: str, options: list, evidence=None, candidates=None,
-         key_values=None):
+         key_values=None, key_suffix: str = ""):
     """Record a structured question in the answer, or return the answer already known for it.
 
     `options` is [{"label": str, "value": JSON-able}]; `candidates`, when
@@ -2270,17 +2561,27 @@ def _ask(data: dict, field: str, text: str, options: list, evidence=None, candid
     `evidence` is {"document": file name, "crop": [x0, y0, x1, y1] px or
     None} or None. The key is `question_key` of the option values, or of
     `key_values` when the options are generic words (keep/clear) and the
-    doubt is about a number. When data["_answers"] (the answers saved by
+    doubt is about a number; `key_suffix` is appended to the key as given
+    (`_MIRROR_MARK` of the "contacts_view" question). When data["_answers"] (the answers saved by
     an earlier analysis, `extract_pin_header_params(answers=...)`) holds
     the key, no question is recorded and that value is returned so the
-    caller applies it at once; otherwise None.
+    caller applies it at once; otherwise None. A saved answer that another
+    saved answer contradicts (`contradicting_answers`) is not applied: the
+    answers carry no date, so the question is asked again and says why.
     """
     key = question_key(field, key_values if key_values is not None
-                       else [option["value"] for option in options])
+                       else [option["value"] for option in options]) + key_suffix
     answers = data.get("_answers") if isinstance(data.get("_answers"), dict) else {}
     allowed = {str(option["value"]): option["value"] for option in options}
-    if key in answers and str(answers[key]) in allowed:
-        return allowed[str(answers[key])]
+    # An answer saved under the same key without the suffix (a project saved
+    # before the suffix existed) answers the same question.
+    saved = key if key in answers or not key_suffix else key[:-len(key_suffix)]
+    if saved in answers and str(answers[saved]) in allowed:
+        if not contradicting_answers(answers, saved):
+            return allowed[str(answers[saved])]
+        # Two saved answers that cannot both be true: neither decides.
+        text = text + " " + tx("(Domanda riproposta: le risposte salvate per questo progetto si "
+                               "contraddicono, vale quella data ora.)")
     questions = data.setdefault("_questions", [])
     if not any(question["key"] == key for question in questions):
         questions.append({"key": key, "field": field, "text": text, "options": list(options),
@@ -2417,6 +2718,31 @@ def _printed_text(quotes) -> str:
     return ", ".join(f"{value:.2f} ({role})" for value, role in printed_quotes(quotes)) or "-"
 
 
+def _dedicated_pair_fits_crossed(main_mm, main_read, own_mm, tolerance: float) -> bool:
+    """Whether the dedicated plan pair matches the main pair better with its two sizes exchanged.
+
+    @param main_mm [along X, along Y] of the main answer, mm.
+    @param main_read [bool, bool]: True for a size the main answer declares
+        read or derived, False for an estimate (or an undeclared provenance).
+    @param own_mm [along X, along Y] of the dedicated reading, mm.
+    @param tolerance Reading tolerance, mm.
+    @return True only when the exchanged pairing is STRICTLY better: first by
+        the number of main sizes that are readings and find their value in
+        the dedicated pair, then by the number of sizes that find it at all.
+        A reading counts before an estimate because an estimate says nothing
+        about which printed number lies on its axis: letting it keep the
+        printed value of the OTHER axis is how one printed number ended up
+        on both (review 2026-11-10, A6). Equal scores keep the order as
+        declared, so two pairs that agree as given are never turned round
+        and two that agree neither way are compared as before.
+    """
+    def score(pairing):
+        agree = [abs(main_mm[i] - own_mm[j]) <= tolerance for i, j in pairing]
+        return (sum(1 for hit, (i, _j) in zip(agree, pairing) if hit and main_read[i]), sum(agree))
+
+    return score(((0, 1), (1, 0))) > score(((0, 0), (1, 1)))
+
+
 def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie_break=None,
                          same_model: bool = False) -> None:
     """@brief Confront the dedicated body-quote reading with the body quotes of the main answer.
@@ -2476,6 +2802,17 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
         images) is said to be unverified, so an invented height never
         passes in silence. A main answer whose unit is undeclared cannot be
         compared: nothing is written, the note says why (L11).
+    @note The two PLAN quotes are compared as a pair (review 2026-11-10,
+        A6). Their order is a fact only when the drawn outline measured it
+        (`_align_body_axes`: an exchange, or a confirmation whose drawn
+        outline agrees with the order as given only) or an edge-to-edge span of the
+        plan prints it (`_plan_prints_body_axes`): the dedicated pair is then
+        compared in that order. Otherwise both orders are the readers'
+        inferences and the dedicated pair is turned round when it fits the
+        main pair better that way, a size the main answer READ counting
+        before an estimate (`_dedicated_pair_fits_crossed`): one printed
+        number is never written on both axes, and the note says the
+        orientation is unverified. The rules above then apply per quote.
     @note VERTICAL quotes with TWO printed lists (user, 2026-11-03,
         «sgraviamo»: the main model computed 18.9/19.3 for a printed 16.9 and
         labelled them "read"; the dedicated transcription read 16.9). Both
@@ -2496,6 +2833,13 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
         (F1-F3): a reading checked only against its own list is a
         self-witness, so a single list never decides alone.
     """
+    # Set by the pad confrontation when the drawn outline measured which plan
+    # size runs along X (`_exchange_body_sizes`, or a confirmation as given
+    # in `_align_body_axes`); consumed here, whatever follows.
+    measured_axes = bool(data.pop("_body_axes_measured", False))
+    # Set when a printed edge-to-edge span of the plan equals the size the
+    # answer gives on its axis (`_plan_prints_body_axes`).
+    printed_axes = bool(data.pop("_body_axes_printed", False))
     if not reading or not isinstance(reading, dict):
         return
     if reading.get("failed") or reading.get("discarded"):
@@ -2505,6 +2849,7 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
         if progress:
             progress(tx("Lettura dedicata delle quote del corpo: nessuna quota stampata trovata."))
         return
+    axes_note = None
     factor = _declared_unit_factor(data)
     if factor is None:
         note = tx("Lettura dedicata delle quote del corpo non confrontabile: la risposta "
@@ -2516,6 +2861,42 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
     tolerance = _reading_tolerance(factor)
     geometry = data.get("package_geometry") if isinstance(data.get("package_geometry"), dict) else None
     sources = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else None
+    # The two plan sizes are a PAIR. Both readers name them «along X» and
+    # «along Y» from the views they looked at, and neither order is a fact
+    # unless the plan prints it or the witness measured it (user, 2026-11-10;
+    # review A6: 16 read x 12 estimated against a dedicated 12 x 16 gave a
+    # 16 x 16 body, the printed 16 used for both axes). So the dedicated pair
+    # is turned round before the comparison when:
+    # - the order of the main pair is fixed (measured on the drawn outline,
+    #   `_align_body_axes`, or printed by an edge-to-edge span of the plan,
+    #   `_plan_prints_body_axes`) and the dedicated pair has the larger size
+    #   on the other axis (D2);
+    # - nothing fixes the order and the pair fits the main one better the
+    #   other way round (`_dedicated_pair_fits_crossed`): the order kept is
+    #   then the main answer's, said to be unverified.
+    main_pair = [_optional_number(data.get(key), positive=True)
+                 for key in ("body_length_mm", "body_width_mm")]
+    own_pair = [values.get("body_length"), values.get("body_width")]
+    if None not in main_pair and None not in own_pair:
+        order = (main_pair[0] - main_pair[1]) * (own_pair[0] - own_pair[1])
+        if (measured_axes or printed_axes) and order != 0:
+            if order < 0:
+                values = dict(values, body_length=own_pair[1], body_width=own_pair[0])
+                axes_note = (tx("Le due quote in pianta della lettura dedicata sono confrontate "
+                                "nell'orientamento del corpo misurato sul contorno disegnato.")
+                             if measured_axes else
+                             tx("Le due quote in pianta della lettura dedicata sono confrontate "
+                                "nell'orientamento del corpo fissato dalle quote da bordo a bordo "
+                                "della pianta."))
+        elif _dedicated_pair_fits_crossed(
+                [size * factor for size in main_pair],
+                [(sources or {}).get(key) in ("read", "derived")
+                 for key in ("body_length_mm", "body_width_mm")], own_pair, tolerance):
+            values = dict(values, body_length=own_pair[1], body_width=own_pair[0])
+            axes_note = tx("Le due quote in pianta della lettura dedicata tornano con quelle della "
+                           "risposta principale solo nell'ordine opposto: confrontate come coppia. "
+                           "Nessuna quota della pianta fissa quale delle due corre lungo X: "
+                           "orientamento del corpo da verificare sul disegno.")
     confirmed, adopted, warnings = [], [], []
     dedicated_list = printed_quotes(reading.get("printed"))
     main_list = printed_quotes(data.pop("printed_vertical_quotes", None), factor)
@@ -2739,7 +3120,7 @@ def apply_dedicated_body(data: dict, reading: Optional[dict], progress=None, tie
                 "Le due letture di {label} non coincidono ({main:.2f} mm contro {dedicated:.2f} mm): "
                 "resta il valore della risposta principale; da verificare sul disegno.",
                 label=tx(label), main=main * factor, dedicated=value_mm))
-    lines = []
+    lines = [axes_note] if axes_note else []
     if confirmed:
         lines.append(tx("Quote del corpo confermate dalla lettura dedicata: {labels}.",
                         labels=", ".join(confirmed)))
@@ -2942,14 +3323,45 @@ class _HoleVerdicts:
     positions. It also carries what a choice by the holes must respect: the
     view each reading declares, whether two declared views differ, and the
     readings already discarded that still state a scale (_settle_by_holes).
+
+    Which of the two plan sizes of the body runs along page X is a printed
+    fact only when a quote of the plan view says so (an edge-to-edge chain,
+    `body_axes_known`). Otherwise it is the main answer's inference from the
+    elevation views, and one reading's inference must not judge another
+    reading (user, 2026-11-10: a main answer with the two sizes exchanged
+    made the witness refuse the correct dedicated reading as «body_scale»,
+    and the generation was blocked). So, with the axes not known and two
+    sizes the fit can tell apart (`_axes_distinguishable`), a layout whose
+    pads fit the holes (confirmed, or refused only as «body_scale») is
+    checked with BOTH orders, and the drawn outline decides by its
+    `body_check` (drawing_holes, round two of 2026-11-10: sizes given the
+    other way round are «unverifiable», not a refusal):
+    - only the exchanged order AGREES: the confirmation is returned as
+      `_ExchangedBodyVerdict`, the MEASURE of the body's orientation
+      (`_align_body_axes` exchanges the sizes);
+    - only the given order agrees: «measured as given»
+      (`measures_as_given`);
+    - both or neither: nothing is measured, the verdict as given stands.
+    Structural, not tuned: a drawn rectangle cannot agree with both orders
+    of two distinguishable sizes at the fitted scale. A witness without
+    `body_check` (an older one, a test double) is read the old way: its
+    confirmation is the agreement and «body_scale» its refusal.
     """
 
     def __init__(self, check, body, *, views=None, views_differ=False, discarded=(),
-                 measure=None):
+                 measure=None, body_axes_known: bool = True, body_bound: bool = False):
         """@brief Keep the check, the body outline and the context; nothing is checked yet.
 
         @param check The `check_layout` callable, or None.
         @param body Body outline (page X, page Y) in mm, or None.
+        @param body_bound True when the body sizes are printed as a maximum
+            or a minimum (`body_quote_kind`): the drawn outline may then only
+            bound the body, never contradict it -- a layout refused for the
+            body alone is checked again on its pads (review G2).
+        @param body_axes_known False when no quote of the plan view fixes
+            which body size runs along page X (see the class note): the
+            witness may then confirm with the two sizes exchanged. True (the
+            default) keeps `body` as an ordered pair.
         @param views {reading key: declared view} ("top", "bottom", "unknown").
         @param views_differ True when two readings declare different views.
         @param discarded Pad layouts of readings left out of the choice (e.g.
@@ -2960,6 +3372,15 @@ class _HoleVerdicts:
         """
         self.measure = measure
         self.check, self.body, self.cache = check, body, {}
+        #: Whether the drawn outline agreed with the sizes as given and not
+        #: exchanged (`measures_as_given`), keyed like `cache`; set by `__call__`.
+        self.probes = {}
+        self.body_axes_known = bool(body_axes_known)
+        #: Body sizes printed as bounds («max»/«min»), not nominal (G2).
+        self.body_bound = bool(body_bound)
+        #: True once the exchanged sizes were written into the answer
+        #: (`_align_body_axes`): the exchange is applied once.
+        self.axes_adopted = False
         self.views = dict(views or {})
         self.views_differ = views_differ
         self.discarded = list(discarded)
@@ -2991,19 +3412,228 @@ class _HoleVerdicts:
         points = self.references.get(self._key(pads))
         return {"references": points} if points else {}
 
+    def bodies(self) -> list:
+        """The body outlines a witness may be given: `body`, then the two sizes exchanged when the axes are not known."""
+        if self.body is None or self.body_axes_known or self.body[0] == self.body[1]:
+            return [self.body]
+        return [self.body, (self.body[1], self.body[0])]
+
+    def _axes_distinguishable(self, verdict) -> bool:
+        """Whether the outline of this fit can tell the two body sizes apart (generality audit 2026-11-10, D1).
+
+        A nearly square body refused as given by a hair and accepted the
+        other way round by a hair is no measure of its orientation: below
+        the check's own separation (drawing_holes.body_axes_distinguishable,
+        from the tolerance of this very fit) the refusal stands.
+        """
+        if len(self.bodies()) < 2:
+            return False
+        from .drawing_holes import body_axes_distinguishable
+        return body_axes_distinguishable(self.body, getattr(verdict, "tolerance_mm", None))
+
+    def measures_as_given(self, pads: dict) -> bool:
+        """@brief Whether the drawn outline measured the body as given: it agrees that way and not exchanged.
+
+        @param pads The layout that is kept, in the frame the witness checked.
+        @return True when the confirmation is a MEASURE of which plan size
+            runs along page X, exactly as an exchange is: the axes are not
+            fixed by the plan, the two sizes can be told apart by this fit
+            (`_axes_distinguishable`), the confirmation comes from the drawn
+            holes (a library footprint compares pads, not the body), the
+            outline AGREES with the sizes as given (`_body_agrees`) and does
+            not agree with them exchanged. A page whose outline was not found,
+            or that agrees with neither order, measured nothing.
+        @note The other order is checked when the layout is (`__call__`),
+            once and memoised; nothing is deferred.
+        """
+        verdict = self(pads)
+        if (not _holes_confirm(verdict) or getattr(verdict, "body_exchanged", False)
+                or getattr(verdict, "source", None) == "library"
+                or isinstance(verdict, _WitnessConflict)):
+            return False
+        return bool(self.probes.get(self._key(pads)))
+
     def __call__(self, pads: dict):
         key = self._key(pads)
         if key not in self.cache:
             verdict = None
             if self.check is not None:
+                context = self.context(pads)
                 try:
-                    verdict = _call_witness(self.check, dict(pads), self.body, self.context(pads))
+                    verdict = _call_witness(self.check, dict(pads), self.body, context)
                 except Exception as exc:  # noqa: BLE001 - a local check never loses a paid answer
                     # A local check that cannot run (OpenCV included) confirms
                     # nothing; it never stops the analysis.
                     verdict = _HoleFailure(type(exc).__name__)
+                if ((_holes_confirm(verdict) or getattr(verdict, "reason", None) == "body_scale")
+                        and self._axes_distinguishable(verdict)):
+                    # The pads fit the holes undistorted (confirmed, or
+                    # refused for the body scale alone): the order of the
+                    # two plan sizes, when the plan does not fix it, is
+                    # decided by which order the drawn outline AGREES with.
+                    # The probe has its own guard (review E7): when it
+                    # cannot run, the verdict as given stands, measuring
+                    # nothing.
+                    try:
+                        exchanged = _call_witness(self.check, dict(pads), self.bodies()[1], context)
+                    except Exception:  # noqa: BLE001 - a failed probe keeps the first verdict
+                        exchanged = None
+                    if exchanged is not None:
+                        given, other = _body_agrees(verdict), _body_agrees(exchanged)
+                        if other and not given:
+                            verdict = _ExchangedBodyVerdict(exchanged)
+                        self.probes[key] = given and not other
+                if self.body_bound and _body_contradicted(verdict):
+                    # Body quotes printed as «max»/«min» only BOUND the body:
+                    # a drawn outline of other size contradicts nothing
+                    # (review G2). The layout is judged on its pads alone.
+                    try:
+                        verdict = _call_witness(self.check, dict(pads), None, context)
+                    except Exception as exc:  # noqa: BLE001 - a local check never loses a paid answer
+                        verdict = _HoleFailure(type(exc).__name__)
             self.cache[key] = verdict
         return self.cache[key]
+
+    def forget(self) -> None:
+        """@brief Drop every memoised verdict and probe: the body they were checked with changed (review E9)."""
+        self.cache.clear()
+        self.probes.clear()
+
+
+def _body_contradicted(verdict) -> bool:
+    """Whether a witness verdict refuses a layout for the body alone: outline «contradicted», or refusal «body_scale»."""
+    if getattr(verdict, "body_check", None) == "contradicted":
+        return True
+    return not _holes_confirm(verdict) and getattr(verdict, "reason", None) == "body_scale"
+
+
+def _body_agrees(verdict) -> bool:
+    """Whether a witness verdict ties the reading to the declared body: confirmed with the outline agreeing.
+
+    drawing_holes (2026-11-10) says it in `body_check`: only "agrees" counts
+    -- "unverifiable" (no rectangle identified as the body, e.g. the sizes
+    given the other way round) and "contradicted" do not. A verdict without
+    `body_check` (an older witness, a test double) confirmed only when the
+    body fitted, so its confirmation is the agreement.
+    """
+    if not _holes_confirm(verdict):
+        return False
+    check = getattr(verdict, "body_check", None)
+    return check == "agrees" if isinstance(check, str) else True
+
+
+class _ExchangedBodyVerdict:
+    """A witness confirmation obtained with the two plan sizes of the body exchanged.
+
+    Every attribute is the confirming verdict's; `body_exchanged` marks that
+    the drawn outline measured the body's orientation on the page the other
+    way round than the answer declares it (`_HoleVerdicts`, `_align_body_axes`).
+    """
+
+    body_exchanged = True
+
+    def __init__(self, verdict):
+        """@brief Wrap the confirming verdict.
+
+        @param verdict The verdict of the check run with the exchanged sizes.
+        """
+        self._verdict = verdict
+
+    def __getattr__(self, name):
+        """@brief Delegate every other attribute to the wrapped verdict.
+
+        @param name Attribute name.
+        @return The wrapped verdict's attribute.
+        @throws AttributeError When the wrapped verdict lacks it, and for
+            private or special names: `copy` and `pickle` look those up on an
+            instance whose `__init__` has not run, where delegating would
+            recurse for ever.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._verdict, name)
+
+
+def _plan_fixes_body_axes(*readings) -> bool:
+    """Whether a chain reading closes on the body outline on some axis of the plan view.
+
+    Such an edge-to-edge span is a printed quote of the plan: compared with
+    the body sizes (`_chain_contradictions`), it fixes which size runs along
+    that axis. Without one, the assignment is the main answer's inference.
+    """
+    return any((reading.get("spans") or {}).get(axis) is not None
+               for reading in readings if isinstance(reading, dict) for axis in ("x", "y"))
+
+
+def _align_body_axes(data: dict, holes, pads: dict, progress=None) -> None:
+    """Write the body sizes the way the drawn outline measured them for the layout about to be kept.
+
+    When the witness confirmed `pads` only with the two plan sizes exchanged
+    (`_ExchangedBodyVerdict`), `body_length_mm` (along X) and `body_width_mm`
+    (along Y) of the answer and of its `package_geometry` are exchanged, with
+    their provenance, BEFORE the pads are written: the body is then placed
+    from the edge quotes with the size that really lies on each axis
+    (`_write_chain_pads`). Applied once per confrontation; the note says the
+    orientation is measured on the drawing, not printed.
+
+    A confirmation whose drawn outline AGREES with the sizes AS GIVEN and
+    not with them exchanged (`_HoleVerdicts.measures_as_given`) measures the
+    orientation just as much (review 2026-11-10, A6: only an exchange used
+    to count). Nothing is exchanged; `data["_body_axes_measured"]` is set
+    for `apply_dedicated_body`, exactly as after an exchange. The witness
+    answered both orders when the layout was checked (round two,
+    2026-11-10: `body_check` says it directly), so no callable is left in
+    the answer, which stays JSON-able.
+
+    @param holes The `_HoleVerdicts` of the confrontation (anything else: no-op).
+    @param pads The layout that is kept, in the frame the witness checked.
+    """
+    if getattr(holes, "axes_adopted", True):
+        return
+    if not getattr(holes(pads), "body_exchanged", False):
+        if holes.measures_as_given(pads):
+            holes.body_axes_known = holes.axes_adopted = True
+            data["_body_axes_measured"] = True
+        return
+    evidence = _hole_text(holes(pads))
+    holes.body = (holes.body[1], holes.body[0])
+    holes.body_axes_known = holes.axes_adopted = True
+    # Verdicts memoised with the old order describe a body that is no longer
+    # the answer's: later notes and checks ask the witness again (E9).
+    holes.forget()
+    _exchange_body_sizes(data, holes.body, evidence, progress)
+
+
+def _exchange_body_sizes(data: dict, measured, evidence: str, progress=None) -> None:
+    """Exchange `body_length_mm` and `body_width_mm` of an answer, with their provenance and the note.
+
+    @param data Answer in drawing units: the sizes are exchanged in the
+        answer, in its `package_geometry` and in `value_sources` (a value
+        keeps its own provenance on the axis it moves to).
+    @param measured (along X, along Y) in mm AFTER the exchange, for the note.
+    @param evidence What the witness said, for the note.
+    @note `_body_axes_measured` is left for `apply_dedicated_body`, which
+        runs afterwards: the dedicated body reading states its two plan
+        sizes without an axis the plan fixes either, so it is compared in
+        the measured order and never undoes the exchange (generality audit
+        2026-11-10, D2).
+    """
+    containers = [c for c in (data.get("package_geometry"), data, data.get("value_sources"))
+                  if isinstance(c, dict)]
+    for container in containers:
+        length, width = container.pop("body_length_mm", None), container.pop("body_width_mm", None)
+        if width is not None:
+            container["body_length_mm"] = width
+        if length is not None:
+            container["body_width_mm"] = length
+    data["_body_axes_measured"] = True
+    note = tx("Lunghezza e larghezza del corpo scambiate rispetto alla risposta principale: il "
+              "contorno disegnato attorno ai fori misura {x:.2f} mm lungo X e {y:.2f} mm lungo Y "
+              "({holes}). Nessuna quota in pianta fissa l'orientamento del corpo: da verificare "
+              "sul disegno.", x=measured[0], y=measured[1], holes=evidence)
+    data["notes"] = (str(data.get("notes") or "") + "\n" + note).strip()
+    if progress:
+        progress(note)
 
 
 def _call_witness(witness, pads: dict, body, context: dict):
@@ -3064,9 +3694,24 @@ def _hole_text(verdict) -> str:
     image = verdict.image or "?"
     reason = verdict.reason
     if verdict.status == "confirmed":
-        return tx("i fori disegnati in {image} coincidono (scarto massimo stimato {error:.2f} "
+        text = tx("i fori disegnati in {image} coincidono (scarto massimo stimato {error:.2f} "
                   "mm, tolleranza {tolerance:.2f} mm)", image=image,
                   error=verdict.max_error_mm or 0.0, tolerance=verdict.tolerance_mm or 0.0)
+        if getattr(verdict, "body_exchanged", False):
+            # Said wherever the verdict is quoted (a question, a block): the
+            # confirmation holds with the body the other way round (D3).
+            text += " " + tx("con lunghezza e larghezza del corpo scambiate")
+        # What the confirmation covers (drawing_holes, 2026-11-10): the
+        # proportions always, the absolute size only when the drawn body
+        # outline agreed with the declared body. A witness that does not say
+        # (an older one, a library footprint) adds nothing.
+        verified = getattr(verdict, "scale_verified", None)
+        if verified is True:
+            text += "; " + tx("scala verificata dal contorno del corpo disegnato")
+        elif verified is False:
+            text += "; " + tx("conferma della sola forma: la scala non e' verificata dal contorno "
+                              "del corpo")
+        return text
     if reason == "distorted":
         return tx("i fori disegnati in {image} coincidono solo deformando il disegno", image=image)
     if reason == "body_scale":
@@ -3084,6 +3729,14 @@ def _hole_text(verdict) -> str:
                   "distingue una lettura sbagliata da una pagina non in scala", image=image)
     if reason == "too_few_circles":
         return tx("nel disegno non si trovano abbastanza fori circolari da controllare")
+    # Two "cannot tell" reasons of drawing_holes (2026-11-10): never a
+    # contradiction of the reading, each with what would settle it.
+    if reason == "page_skewed":
+        return tx("i fori disegnati in {image} coincidono solo con la pagina ruotata oltre il "
+                  "limite del controllo: raddrizzare la pagina e ripetere", image=image)
+    if reason == "unanchored":
+        return tx("i fori disegnati in {image} coincidono con cerchi non tutti disegnati come fori: "
+                  "puo' essere una coincidenza, non una conferma", image=image)
     if reason == "too_many_pads":
         return tx("troppi pad per il controllo dei fori disegnati")
     if reason == "too_few_pads":
@@ -3348,26 +4001,84 @@ def _layout_digest(pads: dict) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
 
 
-def _candidate_payload(key: str, pads: dict, spans: dict, centred: bool, view) -> dict:
-    """What `apply_answers` writes for one pad-layout candidate: mm, page frame, JSON-able.
+def _candidate_payload(data: dict, keys, pads: dict, spans: dict, centred: bool, view,
+                       factor: float, exchange: Optional[dict] = None) -> dict:
+    """What a chosen pad-layout candidate writes: the placement the automatic paths would write.
 
-    A chain reading closed on the body outline on both axes is shifted so
-    the body centre is its origin (`origin` "body_center"); any other
-    layout keeps its own frame and the body is centred on the pads
-    (`origin` "custom", PackageGeometry.body_frame_offset).
+    One writer for every path (review 2026-11-10, A4: a layout chosen by the
+    user landed elsewhere than the same layout chosen by the holes, by an
+    agreeing reading or by a saved answer). The placement is computed HERE,
+    while the body sizes, the edge quotes and the outline measurer of the
+    extraction are at hand, by the writers the automatic paths use, and the
+    payload carries the result; `_write_candidate` (a saved answer, during
+    the extraction) and `apply_answers` (a fresh answer, afterwards) only
+    copy it:
+    - the main answer's coordinates (alone, or with a twin chain reading
+      when the answer declares its body-centre frame, which an agreeing
+      reading keeps too): the pins and the declared `origin` stay as they
+      are, as `_settle_by_holes` leaves a main reading it chose;
+    - a chain reading: `_write_chain_pads` on a scratch copy of the
+      geometry, so the body is placed axis by axis from its edge quotes,
+      the drawn outline or, declared, the pad field -- with the two body
+      sizes exchanged first when the witness confirmed the layout only that
+      way (`exchange`), as `_align_body_axes` does before the same writer.
+
+    @param keys Reading keys that describe this one layout (twins).
+    @param pads The layout, mm, in its reading's own frame.
+    @param spans,centred The reading's outline spans (`_write_chain_pads`).
+    @param view The view a reading of `keys` declares, or None.
+    @param exchange The "exchange_body" entry of the candidate, or None.
+    @return {"source", "pins" (mm, the frame of `origin`), "origin", "view",
+        "notes" (the lines the writer added: estimated axes, drawn outline)}
+        plus "exchange_body" when given; JSON-able.
     """
-    shift = (spans["x"] / 2, spans["y"] / 2) if centred else (0.0, 0.0)
-    return {"source": key,
-            "pins": [{"number": number, "x_mm": round(x - shift[0], 4),
-                      "y_mm": round(y - shift[1], 4)}
-                     for number, (x, y) in sorted(pads.items(), key=lambda item: item[0])],
-            "origin": "body_center" if centred else "custom",
-            "view": view if view in ("top", "bottom") else None}
+    geometry = data["package_geometry"]
+    chains = [key for key in keys if key != "main"]
+    keeps_main = "main" in keys and (not chains or geometry.get("origin") == "body_center")
+    notes = []
+    if keeps_main:
+        source, placed, origin = "main", dict(pads), geometry.get("origin") or "custom"
+    else:
+        source = chains[0]
+        # A scratch answer: only what the writer reads (body sizes, measurer).
+        scratch_geometry = {key: value for key, value in geometry.items() if key != "pins"}
+        if exchange:
+            length = scratch_geometry.pop("body_length_mm", None)
+            width = scratch_geometry.pop("body_width_mm", None)
+            if width is not None:
+                scratch_geometry["body_length_mm"] = width
+            if length is not None:
+                scratch_geometry["body_width_mm"] = length
+        scratch = {"package_geometry": scratch_geometry, "notes": "",
+                   "_outline_measurer": data.get("_outline_measurer")}
+        scratch_pins = [{"number": number} for number in pads]
+        _write_chain_pads(scratch, scratch_pins, {"pads": pads, "spans": spans or {},
+                                                  "centred": bool(centred)}, factor)
+        placed = {pin["number"]: (pin["x_mm"] * factor, pin["y_mm"] * factor)
+                  for pin in scratch_pins}
+        origin = scratch_geometry["origin"]
+        notes = [line for line in scratch["notes"].splitlines() if line.strip()]
+    payload = {"source": source,
+               "pins": [{"number": number, "x_mm": round(x, 4), "y_mm": round(y, 4)}
+                        for number, (x, y) in sorted(placed.items(), key=lambda item: item[0])],
+               "origin": origin, "view": view if view in ("top", "bottom") else None,
+               "notes": notes}
+    if exchange:
+        payload["exchange_body"] = exchange
+    return payload
 
 
 def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> None:
-    """Write a chosen pad-layout candidate into the answer's pins (drawing units)."""
+    """Write a chosen pad-layout candidate into the answer's pins (drawing units).
+
+    The placement is the payload's (`_candidate_payload`): pins, origin and
+    the writer's notes are copied, the body sizes exchanged when the
+    candidate says so and nothing exchanged them yet.
+    """
     geometry = data["package_geometry"]
+    exchange = payload.get("exchange_body")
+    if isinstance(exchange, dict) and not data.get("_body_axes_measured"):
+        _exchange_body_sizes(data, exchange["measured_mm"], exchange["evidence"])
     positions = {p["number"]: (p["x_mm"], p["y_mm"]) for p in payload["pins"]}
     for pin in pins:
         if pin.get("number") in positions:
@@ -3375,6 +4086,8 @@ def _write_candidate(data: dict, pins: list, payload: dict, factor: float) -> No
             pin["x_mm"], pin["y_mm"] = round(x / factor, 4), round(y / factor, 4)
     geometry["origin"] = payload.get("origin") or "custom"
     geometry["needs_review"] = True
+    for line in payload.get("notes") or ():
+        data["notes"] = (str(data.get("notes") or "") + "\n" + str(line)).strip()
     if payload.get("view") in ("top", "bottom"):
         _adopt_view(data, payload["view"], tx("scelta dell'utente"))
 
@@ -3433,12 +4146,29 @@ def _block_or_ask(data: dict, pins: list, readings: list, holes, factor: float, 
                     None)
         options.append({"label": tx("{sources}: {pads}", sources=", ".join(_reading_source(k) for k in keys),
                                     pads=_pad_summary(pads)), "value": value})
-        candidates[value] = _candidate_payload(keys[0], pads, spans, centred, view)
+        exchange = None
+        if (getattr(holes(pads), "body_exchanged", False)
+                and not getattr(holes, "axes_adopted", True)):
+            # The witness confirms this layout only with the body the other
+            # way round: whoever writes the candidate (here, or apply_answers
+            # after the user's choice) exchanges the sizes with it (D3), and
+            # the body is placed with the sizes so exchanged.
+            exchange = {"measured_mm": [holes.body[1], holes.body[0]],
+                        "evidence": _hole_text(holes(pads))}
+        candidates[value] = _candidate_payload(data, keys, pads, spans, centred, view, factor,
+                                               exchange)
     chosen = _ask(data, "pad_layout", tx(
         "Posizioni dei pad: {message} Quale disposizione corrisponde al disegno?",
         message=message), options, _question_evidence(data), candidates)
     if chosen is not None:
         _write_candidate(data, pins, candidates[chosen], factor)
+        if "exchange_body" not in candidates[chosen]:
+            # A saved answer keeps this layout during the extraction: a body
+            # reading follows, and a confirmation as given may be a measure
+            # of the body's orientation, as on every other path (A6).
+            kept = next(pads for keys, pads, _spans, _centred in distinct
+                        if "+".join(keys) + ":" + _layout_digest(pads) == chosen)
+            _align_body_axes(data, holes, kept)
         _settle(data, tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); da "
                          "verificare sul disegno.",
                          source=_reading_source(candidates[chosen]["source"])) + remark, progress)
@@ -3509,6 +4239,7 @@ def _settle_by_holes(data: dict, pins: list, readings: list, holes, factor: floa
                             source=_reading_source(key), ratio=ratio) + remark, progress)
             return "blocked"
     spans, centred = next((s, c) for k, _p, s, c in readings if k == key)
+    _align_body_axes(data, holes, pads, progress)
     if key != "main":
         _write_chain_pads(data, pins, {"pads": pads, "spans": spans, "centred": centred}, factor)
     view = holes.views.get(key) or "unknown"
@@ -3577,9 +4308,17 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
     for key, pads, spans, centred in readings:
         if set(pads) != numbers:
             continue
+        result = None
         try:
             context = holes.context(pads) if hasattr(holes, "context") else {}
-            result = _call_witness(holes.measure, dict(pads), holes.body, context)
+            # The measure is bounded by the body like the check: with the
+            # axes not fixed by the plan it is tried with either assignment
+            # (_HoleVerdicts); the completed layout must still pass
+            # _pick_by_holes below, which says which assignment fitted.
+            for body in (holes.bodies() if hasattr(holes, "bodies") else [holes.body]):
+                result = _call_witness(holes.measure, dict(pads), body, context)
+                if result is not None:
+                    break
         except Exception:  # noqa: BLE001 - a local measure never loses a paid answer
             result = None
         if result is not None:
@@ -3616,6 +4355,7 @@ def _settle_by_measure(data: dict, pins: list, readings: list, holes, factor: fl
            for k, other, _s, _c in readings if k != key) or any(
             _scale_ratio(positions, other) is not None for other in holes.discarded):
         return None
+    _align_body_axes(data, holes, positions, progress)
     if key == "main":
         # The main answer's own frame and origin: only the coordinates change.
         for pin in pins:
@@ -3758,6 +4498,7 @@ def _resolve_chain_candidate(data: dict, pins: list, main: dict, reading: dict,
         readings.append(("dedicated", dedicated, spans, _centred(spans, exchanged)))
     tolerance = _reading_tolerance(factor)
     if complete and not _offset_disagreements(candidate["pads"], dedicated, numbers, tolerance):
+        _align_body_axes(data, holes, candidate["pads"], progress)
         _write_chain_pads(data, pins, candidate, factor)
         note = tx("Posizioni dei pad prese dalle catene di quote della risposta principale: la "
                   "lettura dedicata concorda con esse (scostamenti entro {tolerance} mm) e non "
@@ -3838,6 +4579,27 @@ def _centred(spans: dict, exchanged: bool) -> bool:
     return spans.get("x") is not None and spans.get("y") is not None and not exchanged
 
 
+def _withdraw_dedicated_holes(data: dict) -> None:
+    """Drop the printed holes of a dedicated reading the drawing contradicts, saying so when it had some (review E8).
+
+    A reading whose chains do not add up misread at least one quote: its
+    hole callouts are no independent transcription either, so
+    `_resolve_pad_terminals` must not take a hole from it, nor count it as
+    the second reading of a printed hole.
+    """
+    holes = data.pop("_dedicated_holes", None)
+    if holes:
+        data["notes"] = (str(data.get("notes") or "") + "\n" + tx(
+            "Fori stampati trascritti dalla lettura dedicata non usati: le sue quote non tornano "
+            "con il disegno.")).strip()
+
+
+def _body_quotes_bound(geometry: dict) -> bool:
+    """Whether the plan sizes of the body are printed as a maximum or a minimum (`body_quote_kind`), not nominal."""
+    kind = geometry.get("body_quote_kind") if isinstance(geometry, dict) else None
+    return kind in BODY_QUOTE_KINDS and kind != BODY_QUOTE_KINDS[0]
+
+
 def _body_on_page(geometry: dict, factor: float, exchanged: bool):
     """Body outline (along page X, along page Y) in mm for the hole check, or None."""
     sizes = [_optional_number(geometry.get(key), positive=True)
@@ -3902,6 +4664,16 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
         on the drawn holes decides, else the question or the block. A
         «distorted» or «body_scale» verdict is no refutation (the page may
         not be to scale): the readings stand with a warning.
+    @note Body axes (user, 2026-11-10): the witness is given the body as
+        (body_length_mm along X, body_width_mm along Y) of the MAIN answer.
+        That order is a printed fact only when an edge-to-edge chain of the
+        plan view fixes it (`_plan_fixes_body_axes`, `exchanged`); otherwise
+        a layout refused only as «body_scale» is checked with the two sizes
+        exchanged (`_HoleVerdicts`), so one reading's inference never
+        refutes another reading. The layout that is kept then takes the
+        sizes as the drawn outline measured them (`_align_body_axes`), with
+        a note; a size pair that fits the outline neither way stays
+        «body_scale».
     @note Dimension chains (user, 2026-10-30): the dedicated reading is added
         up by the program from the printed chains (pads_from_chains), so it
         can be checked against the drawing itself. Chains that contradict
@@ -3933,6 +4705,13 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
     # that sends 1 instead of "1" must not raise a KeyError and lose the paid
     # main answer and the paid pad reading (review S1, 2026-11-03).
     _normalise_pin_numbers(pins)
+    if isinstance(reading, dict) and not reading.get("failed") and not reading.get("discarded"):
+        # The hole callouts the dedicated reading transcribed (mm), for the
+        # per-pad rule `_resolve_pad_terminals`: a printed hole read twice is
+        # a reading, read once it is named with its reader. The key exists
+        # only when the dedicated reading ran, so «it saw no callout» and
+        # «it did not run» stay apart.
+        data["_dedicated_holes"] = dict(reading.get("holes") or {})
     factor = _declared_unit_factor(data)
     if factor is None:
         # The main answer's coordinates have no declared unit: nothing can
@@ -3962,14 +4741,23 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
             # Chains too broken to place any pad: say why, not just «none read».
             why = "; ".join((list(reading.get("problems") or [])
                              + list(reading.get("malformed") or []))[:6])
+            if reading.get("problems"):
+                # Chains that contradict themselves: the reading misread the
+                # drawing, its hole callouts are not taken either (E8).
+                _withdraw_dedicated_holes(data)
         else:
             why = tx("nessun pad letto")
         if reading and reading.get("skipped"):
             why = reading["skipped"]
         why += _unread_main_remark(pins)
+        if _plan_prints_body_axes(geometry, factor, candidate):
+            # The main answer's own chains print the order of the plan sizes.
+            data["_body_axes_printed"] = True
         holes = _HoleVerdicts(check_layout, _body_on_page(geometry, factor, False),
                               views={"main": main_view, "chains": main_view},
-                              measure=measure_layout)
+                              measure=measure_layout,
+                              body_axes_known=_plan_fixes_body_axes(candidate),
+                              body_bound=_body_quotes_bound(geometry))
         _unconfirmed(data, pins, [("main", main, {}, False)] + own, holes, factor,
                      progress, tx("lettura dedicata delle posizioni: {why}", why=why), "")
         return
@@ -3985,14 +4773,31 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
                           views={"main": main_view, "chains": main_view,
                                  "dedicated": reading["view"]},
                           views_differ=views_differ, discarded=[dedicated] if problems else [],
-                          measure=measure_layout)
+                          measure=measure_layout,
+                          # An edge-to-edge chain of the plan view fixes which
+                          # body size lies on which axis (as given, or
+                          # `exchanged`); without one the witness measures it.
+                          body_axes_known=exchanged or _plan_fixes_body_axes(reading, candidate),
+                          # Plan sizes printed «max»/«min» only bound the
+                          # drawn outline (review G2).
+                          body_bound=_body_quotes_bound(geometry))
     # The datums and mounting holes the chain reading placed are in ITS
     # frame: the witness must not match a pad of that layout to them.
     holes.attach(dedicated, reading.get("references"))
+    # A printed span of the plan that equals the size the answer gives on its
+    # axis proves the ORDER of the two plan sizes: the body reading that
+    # follows is compared in it (`apply_dedicated_body`). A reading whose
+    # chains contradict the drawing proves nothing; the main answer's own
+    # chains were checked when they became the candidate.
+    if _plan_prints_body_axes(geometry, factor, None if problems or exchanged else reading,
+                              candidate):
+        data["_body_axes_printed"] = True
     if problems:
         # The drawing contradicts the transcribed chains: at least one quote
         # was read or attributed wrongly, so the dedicated reading is out;
-        # only the drawn holes can still confirm the main answer.
+        # only the drawn holes can still confirm the main answer. Its hole
+        # callouts go with it (review E8).
+        _withdraw_dedicated_holes(data)
         why = tx("le quote del disegno non tornano: {problems}. Lettura per catene di quote "
                  "({dedicated_view}): {dedicated}", problems="; ".join(problems[:6]),
                  dedicated_view=reading["view"], dedicated=_pad_summary(dedicated) or tx("nessuno"))
@@ -4081,6 +4886,13 @@ def apply_dedicated_pads(data: dict, reading: Optional[dict], progress=None,
             if verdict is not None and verdict.status == "not_confirmed":
                 note += " " + tx("Attenzione: {holes}; controllare il disegno.",
                                  holes=_hole_text(verdict))
+            # The two readings agree and the drawn outline measured the body
+            # the other way round: the sizes follow the drawing before the
+            # body is placed from the edge quotes. Done BEFORE the frame
+            # check below, which needs the size that really lies on each
+            # axis; when that check blocks, the pads (the layout the witness
+            # confirmed) stay and so does the measured orientation (D4).
+            _align_body_axes(data, holes, main, progress)
             if main_view not in ("top", "bottom") and reading["view"] in ("top", "bottom"):
                 # Same positions, and only the dedicated reading says from
                 # which side: its view is the one the pads are seen from,
@@ -4142,8 +4954,17 @@ def _unconfirmed(data, pins, readings, holes, factor, progress, why, remark) -> 
 
 
 #: Per-pad attributes a replaced pad list inherits from the main answer, only
-#: when every pad of the main answer has the same value.
-_UNIFORM_PAD_FIELDS = ("pad_type", "drill_mm", "pad_length_mm", "pad_width_mm", "shape")
+#: when every pad of the main answer has the same value; a difference blocks
+#: (which pad gets which value is unknown). The terminal and a printed slot
+#: side are geometry like the hole (review E4, 2026-11-11: they were lost).
+_UNIFORM_PAD_FIELDS = ("pad_type", "drill_mm", "drill_length_mm", "pad_length_mm", "pad_width_mm",
+                       "shape", "lead")
+
+#: Per-pad attributes inherited only when the same on every pad, whose
+#: difference blocks nothing: the printed hole text (one hole may be spelt
+#: two ways). The pad's own `value_sources` are merged word by word instead
+#: (`_uniform_pad_fields`).
+_UNIFORM_PAD_TEXT_FIELDS = ("hole_callout",)
 
 
 def _pad_number_text(value) -> str:
@@ -4178,21 +4999,40 @@ def _pad_number_key(number: str):
 def _uniform_pad_fields(pins) -> tuple:
     """The attributes of _UNIFORM_PAD_FIELDS shared by every pin, and the names that differ.
 
-    @return ({field: value} for the uniform fields that have a value,
-        [field] whose values differ between pins).
+    @return ({field: value} for the uniform fields that have a value, plus
+        the _UNIFORM_PAD_TEXT_FIELDS that are the same on every pin and a
+        `value_sources` merged word by word -- the word every pin declares
+        for a key, "estimated" when the pins disagree or some declare none
+        (the replaced pads cannot say which pad the stronger word belonged
+        to, review E4); [field of _UNIFORM_PAD_FIELDS] whose values differ).
     """
+    import json
+
+    def identity(value):
+        """A hashable stand-in of a value: numbers to 1e-6, mappings by their sorted JSON."""
+        if isinstance(value, dict):
+            return json.dumps(value, sort_keys=True, default=str)
+        number = _optional_number(value)
+        return round(number, 6) if number is not None and not isinstance(value, str) else value
+
+    pin_dicts = [pin if isinstance(pin, dict) else {} for pin in pins]
     uniform, differing = {}, []
-    for field in _UNIFORM_PAD_FIELDS:
-        values = set()
-        for pin in pins:
-            value = pin.get(field) if isinstance(pin, dict) else None
-            number = _optional_number(value)
-            values.add(round(number, 6) if number is not None and not isinstance(value, str)
-                       else value)
+    for field in _UNIFORM_PAD_FIELDS + _UNIFORM_PAD_TEXT_FIELDS:
+        values = {identity(pin.get(field)): pin.get(field) for pin in pin_dicts}
         if len(values) > 1:
-            differing.append(field)
-        elif values and next(iter(values)) is not None:
-            uniform[field] = next(iter(values))
+            if field in _UNIFORM_PAD_FIELDS:
+                differing.append(field)
+        elif values and next(iter(values.values())) is not None:
+            uniform[field] = copy.deepcopy(next(iter(values.values())))
+    declared = [pin.get("value_sources") if isinstance(pin.get("value_sources"), dict) else {}
+                for pin in pin_dicts]
+    keys = sorted({key for words in declared for key in words if key in PAD_SOURCE_KEYS})
+    if keys:
+        merged = {}
+        for key in keys:
+            words = {words.get(key) for words in declared}
+            merged[key] = next(iter(words)) if len(words) == 1 and None not in words else "estimated"
+        uniform["value_sources"] = merged
     return uniform, differing
 
 
@@ -4294,9 +5134,13 @@ def _replace_by_confirmed_reading(data, pins, main, reading, holes, factor, prog
     # have are dropped.
     names = {_pad_number_text(pin.get("number")): pin.get("name") for pin in pins
              if isinstance(pin, dict) and pin.get("name")}
-    replaced = [dict(uniform, number=number, **({"name": names[number]} if number in names else {}))
+    # A deep copy per pad: the unit conversion scales each pad's `lead` in
+    # place, so a mapping shared by the pads would be scaled once per pad.
+    replaced = [dict(copy.deepcopy(uniform), number=number,
+                     **({"name": names[number]} if number in names else {}))
                 for number in sorted(dedicated, key=_pad_number_key)]
     spans = reading.get("spans") or {}
+    _align_body_axes(data, holes, dedicated, progress)
     _write_chain_pads(data, replaced, {"pads": dedicated, "spans": spans,
                                        "centred": _centred(spans, exchanged)}, factor)
     geometry["pins"] = replaced
@@ -4416,7 +5260,10 @@ def _require_declared_view(data: dict, progress=None) -> None:
         # ask again, not reuse a side answered for a different layout
         # (generality audit 2026-11-05, M7).
         _question_evidence(data), key_values=[number for number, _xy in pads]
-        + [_layout_digest(dict(pads))])
+        + [_layout_digest(dict(pads))],
+        # The digests of the layout's two mirror images, so that two saved
+        # answers for mirror-image readings can be told consistent (E6).
+        key_suffix=_mirror_suffix(dict(pads)))
     if chosen is not None:
         _adopt_view(data, chosen, tx("scelta dell'utente"))
         return
@@ -4583,6 +5430,52 @@ def _exchanged_body_remark(reading: dict) -> str:
               sx=spans.get("x") or 0.0, sy=spans.get("y") or 0.0)
 
 
+def _span_tolerance(reading: dict, axis: str, factor: float) -> float:
+    """Allowed difference, mm, between an edge-to-edge span of `reading` along `axis` and a body size.
+
+    The same rule as _Rounding.tolerance: a printed text tightens the unit's
+    rounding, never loosens it (generality audit 2026-11-05, M4); the body
+    quote's own rounding is added in both cases.
+    """
+    quotes = int((reading.get("span_quotes") or {}).get(axis) or 0)
+    declared = (reading.get("span_rounding") or {}).get(axis)
+    if declared is None:
+        return _sum_tolerance(quotes + 1, factor)
+    unit = CHAIN_QUOTE_ROUNDING_MM.get(factor, CHAIN_QUOTE_ROUNDING_MM[1.0])
+    return _Rounding(declared, True, quotes).tolerance(factor) + unit
+
+
+def _plan_prints_body_axes(geometry: dict, factor: float, *readings) -> bool:
+    """Whether a printed edge-to-edge span of the plan EQUALS the body size the answer gives on that axis, and not the other.
+
+    The printed proof that the two plan sizes are in the right order: a
+    nominal body size, a span closed on the body outline along X (or Y)
+    within the rounding of its quotes, and the other size too far from that
+    span to be meant by it. A size quoted as a maximum or a minimum only
+    bounds the span and proves no order; neither does a span that fits both
+    sizes (a square body) or none.
+    """
+    kind = geometry.get("body_quote_kind")
+    if kind in BODY_QUOTE_KINDS and kind != BODY_QUOTE_KINDS[0]:
+        return False
+    sizes = {axis: _optional_number(geometry.get(key), positive=True)
+             for axis, key in (("x", "body_length_mm"), ("y", "body_width_mm"))}
+    if None in sizes.values():
+        return False
+    for reading in readings:
+        if not isinstance(reading, dict):
+            continue
+        for axis, other in (("x", "y"), ("y", "x")):
+            span = (reading.get("spans") or {}).get(axis)
+            if span is None:
+                continue
+            tolerance = _span_tolerance(reading, axis, factor)
+            if (abs(span - sizes[axis] * factor) <= tolerance
+                    and abs(span - sizes[other] * factor) > tolerance):
+                return True
+    return False
+
+
 def _chain_contradictions(geometry: dict, reading: dict, factor: float) -> tuple:
     """Contradictions of the chain reading with itself and with the body, as messages.
 
@@ -4605,23 +5498,13 @@ def _chain_contradictions(geometry: dict, reading: dict, factor: float) -> tuple
     """
     problems = list(reading.get("problems") or [])
     spans = reading.get("spans") or {}
-    counts = reading.get("span_quotes") or {}
-    roundings = reading.get("span_rounding") or {}
     sizes = {axis: _optional_number(geometry.get(key), positive=True)
              for axis, key in (("x", "body_length_mm"), ("y", "body_width_mm"))}
     kind = geometry.get("body_quote_kind")
     kind = kind if kind in BODY_QUOTE_KINDS else BODY_QUOTE_KINDS[0]
 
     def tolerance(axis):
-        # The same rule as _Rounding.tolerance: a printed text tightens the
-        # unit's rounding, never loosens it (generality audit 2026-11-05, M4);
-        # the body quote's own rounding is added in both cases.
-        quotes = int(counts.get(axis) or 0)
-        declared = roundings.get(axis)
-        if declared is None:
-            return _sum_tolerance(quotes + 1, factor)
-        unit = CHAIN_QUOTE_ROUNDING_MM.get(factor, CHAIN_QUOTE_ROUNDING_MM[1.0])
-        return _Rounding(declared, True, quotes).tolerance(factor) + unit
+        return _span_tolerance(reading, axis, factor)
 
     def off(axis, size, how=kind):
         span = spans.get(axis)
@@ -4804,9 +5687,16 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "occupate. Distanze fra terminali che non sono multipli di un passo unico significano "
     "che la griglia NON esiste: usa pads. NUMERAZIONE: solo i numeri stampati accanto ai "
     "terminali; non estenderla per convenzione (pin header, DIP) e non inventare numeri per "
-    "posizioni senza numero. FORI: se il disegno quota solo il diametro del terminale, "
-    "riportalo in lead_diameter_mm e stima il foro come terminale piu' il gioco e la "
-    "piazzola come foro piu' la corona, dichiarando entrambi \"estimated\". In lead_exit di' "
+    "posizioni senza numero. FORI E TERMINALI, pad per pad: trascrivi solo cio' che e' "
+    "STAMPATO. Se il disegno stampa il foro (richiamo come \"3-Ø1.2\" sul layout PCB) "
+    "riportalo in drill_mm, ricopia il richiamo in hole_callout e dichiara drill_mm \"read\" "
+    "nel value_sources del pad; un'asola solo se stampata, col secondo lato in "
+    "drill_length_mm. Se il foro NON e' stampato non stimarlo: ometti drill_mm e descrivi in "
+    "lead il terminale che ci entra (round con diameter_mm, oppure flat con width_mm e "
+    "thickness_mm), dichiarandone la provenienza in value_sources.lead; foro e piazzola li "
+    "ricava il programma. La piazzola e' \"read\" solo se il disegno stampa il land pattern. "
+    "Se tutti i terminali sono uguali puoi riportarne il diametro anche in "
+    "lead_diameter_mm. In lead_exit di' "
     "da quale faccia escono i terminali (bottom: dritti dal fondo; side: dai fianchi e "
     "piegati; unknown). CORPO: body_length_mm e body_width_mm sono le due quote in pianta "
     "(dalla vista dall'alto o dal basso); se il disegno le qualifica come massimo o minimo "
@@ -4872,6 +5762,12 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # (pinout[].function) so the program composes the relay symbol from
     # declared roles, never from the part name or the free-text pin names.
     "4702f97841dd1cf611b58004043f0a1d525599a0c7c13b53090c22a2b698e567",
+    # 2026-11-10 (user: «ok procedi», contract A1-A3): the model ESTIMATED the
+    # hole and the land from the lead diameter, differently at each run, and
+    # the estimate lost its mark on explicit pads. Now it transcribes the
+    # printed hole callout and the terminal per pad; the program derives the
+    # rest (`_resolve_pad_terminals`).
+    "ed685f00b13bfc7e7e6702815de750fbc54117b2202bb28fc560202175a062e3",
 })
 #: Digests of former pin-numbering defaults (none yet: first version).
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
@@ -4899,12 +5795,18 @@ def _single_component_tool() -> dict:
                                                       "pad_chains."},
             "pad_type": {"type": "string", "enum": ["thru_hole", "smd"]},
             "drill_mm": {"type": "number", "exclusiveMinimum": 0,
-                         "description": "Foro, solo per thru_hole."},
+                         "description": ("Foro, solo per thru_hole: il diametro STAMPATO sul "
+                                         "disegno (hole_callout). Se il foro non e' stampato "
+                                         "ometti questo campo e dai il terminale in lead.")},
             "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
-                              "description": "Piazzola lungo X; diametro per una piazzola circolare."},
+                              "description": ("Piazzola lungo X; diametro per una piazzola "
+                                              "circolare. Stampata (land pattern) oppure "
+                                              "dichiarata estimated in value_sources.pad_size.")},
             "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
                              "description": "Piazzola lungo Y; diametro per una piazzola circolare."},
             "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
+            # Terminal, printed hole and per-pad provenance (2026-11-10).
+            **_PAD_TERMINAL_PROPERTIES,
         },
         # x_mm/y_mm are optional since 2026-11-04 (review M6): with the chains
         # transcribed the program places the pads; requiring the coordinates
@@ -5032,6 +5934,16 @@ def single_answer_to_data(answer: dict) -> dict:
             if answer.get(key) is not None:
                 data["package_geometry"][key] = answer[key]
         return data
+    unnumbered = [index for index, entry in enumerate(pads, 1)
+                  if isinstance(entry, dict) and not _pad_number_text(entry.get("number"))]
+    if unnumbered:
+        # A pad without its printed number cannot be written (PinSpec refuses
+        # the empty number) and must not be numbered by the program: the
+        # schema requires the number, so this is a broken shape that earns
+        # the one corrective retry, never a validation error after the call.
+        raise AnswerShapeError(tx(
+            "Pad senza numero stampato nella risposta (elementi {indices} di pads): ogni pad "
+            "deve avere il suo numero.", indices=", ".join(str(i) for i in unnumbered)), raw=answer)
     pins = []
     for entry in pads:
         if not isinstance(entry, dict):
@@ -5045,6 +5957,12 @@ def single_answer_to_data(answer: dict) -> dict:
         if entry.get("drill_mm") is not None:
             pin["drill_mm"] = entry["drill_mm"]
         pin["shape"] = entry.get("shape") or ("circle" if pin["pad_type"] == "thru_hole" else "roundrect")
+        # The terminal, the printed hole callout, a printed slot side and the
+        # pad's own provenance travel raw (drawing units) to the program's
+        # rule, `_resolve_pad_terminals`, which converts and judges them.
+        for key in ("lead", "hole_callout", "drill_length_mm", "value_sources"):
+            if entry.get(key) is not None:
+                pin[key] = entry[key]
         pins.append(pin)
     data["package_geometry"] = {
         "family": "unknown",
@@ -5319,8 +6237,20 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             target["needs_review"] = True
             if payload.get("view") in ("top", "bottom"):
                 target["source_view"] = payload["view"]
+            exchange = payload.get("exchange_body")
+            exchange = exchange if isinstance(exchange, dict) else None
+            if exchange:
+                # The witness confirmed the chosen layout only with the body
+                # the other way round (`_block_or_ask`): the sizes go with it.
+                length, width = target.pop("body_length_mm", None), target.pop("body_width_mm", None)
+                if width is not None:
+                    target["body_length_mm"] = width
+                if length is not None:
+                    target["body_width_mm"] = length
             if restoring:
-                if _pads_without_positions(target):
+                # A chosen layout gives positions, never a hole (E1): pads
+                # dropped for an unread hole stay dropped.
+                if _pads_without_positions(target) or _pads_without_holes(target):
                     remaining.append(question)
                     continue
                 restored_notes: list = []
@@ -5335,7 +6265,25 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 result.unread_pads = None
                 result.unread_pad_geometry = None
                 notes.extend(restored_notes)
+            if exchange:
+                result.body_length_mm, result.body_width_mm = (result.body_width_mm,
+                                                               result.body_length_mm)
+                sources = dict(result.value_sources or {})
+                length, width = sources.pop("body_length_mm", None), sources.pop("body_width_mm", None)
+                if width is not None:
+                    sources["body_length_mm"] = width
+                if length is not None:
+                    sources["body_width_mm"] = length
+                result.value_sources = sources
+                measured = exchange.get("measured_mm") or (0.0, 0.0)
+                notes.append(tx(
+                    "Lunghezza e larghezza del corpo scambiate rispetto alla risposta principale: il "
+                    "contorno disegnato attorno ai fori misura {x:.2f} mm lungo X e {y:.2f} mm lungo Y "
+                    "({holes}). Nessuna quota in pianta fissa l'orientamento del corpo: da verificare "
+                    "sul disegno.", x=measured[0], y=measured[1], holes=exchange.get("evidence") or ""))
             result.pin_map_conflict = None
+            # What the one writer said while placing the body (`_candidate_payload`).
+            notes.extend(str(line) for line in payload.get("notes") or ())
             notes.append(tx("Posizioni dei pad scelte dall'utente fra le letture ({source}); da "
                             "verificare sul disegno.",
                             source=_reading_source(payload.get("source") or "main")))
@@ -5408,6 +6356,13 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
         tie-break: the GUI runs this when the user asks a re-reading of the
         height alone), everything else as stored. Its `questions` may hold a
         "body_height_mm" or "height_equals_plan" question.
+    @note The result is PARTIAL (`partial_reread`, scope "body_height_mm" of
+        REREAD_SCOPES): only the vertical quotes were confronted. Everything
+        else is the raw main answer -- pads no reading confirmed, plan sizes
+        as the model gave them, no view question -- and must not replace
+        what the analysis settled: the caller passes it to `merge_reread`
+        with the settled result. Alone it never unblocks the pads: explicit
+        pads carry a `pin_map_conflict` saying they were not confronted.
     @throws ExtractionError When the stored answer is not usable, or the
         drawings cannot be read.
     @throws ExtractionCancelled When the user cancels during the call.
@@ -5423,9 +6378,24 @@ def reread_body_height(stored: dict, documents, *, model: str, call, progress=No
         progress(tx("Rilettura delle quote del corpo su {names} con {model}.",
                     names=", ".join(path.name for path in images), model=model))
     reading = read_body_dimensions(images, model=model, call=call, progress=progress)
+    before = _note_lines(data.get("notes"))
     apply_dedicated_body(data, reading, progress, tie_break=None, same_model=same_model)
+    # The notes of this scope are the ones the body confrontation wrote (E5).
+    scope_notes = [line for line in _note_lines(data.get("notes")) if line not in before]
+    if _has_explicit_pads(data) and not data.get("_pin_map_conflict"):
+        # The pads of the stored answer were NOT confronted by this re-read:
+        # alone, this result must not pass them as settled (review
+        # 2026-11-10, A5). `merge_reread` keeps the settled layout instead.
+        data["_pin_map_conflict"] = tx(
+            "Rilettura delle sole quote verticali del corpo: le posizioni dei pad di questo "
+            "risultato sono quelle della risposta principale, non riconfrontate. Valgono le "
+            "posizioni gia' stabilite dall'analisi.")
+        data["_numbering_note"] = data["_pin_map_conflict"]
     _canonicalize_answer(data)
-    return _params_from_tool_arguments(data)
+    params = _params_from_tool_arguments(data)
+    params.partial_reread = {"field": "body_height_mm", "body_axes_measured": False,
+                             "notes": scope_notes}
+    return params
 
 
 def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=None,
@@ -5451,6 +6421,11 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
         with the drawn holes as witness, the side asked by
         `_require_declared_view` when still unknown, everything else as
         stored. `questions` may hold "pad_layout" or "contacts_view".
+    @note The result is PARTIAL (`partial_reread`, scope "pad_layout" of
+        REREAD_SCOPES): the body quotes are the raw main answer's, never
+        confronted with a body reading, so the caller passes it to
+        `merge_reread` with the settled result. Alone, a height it carries
+        is held back by a `body_conflict` saying it was not confronted.
     @throws ExtractionError When the stored answer has no explicit pads or
         is not usable.
     @throws ExtractionCancelled When the user cancels during the call.
@@ -5476,6 +6451,8 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
         return view if view in ("top", "bottom") else (reading or {}).get("view")
 
     data["_outline_measurer"] = _outline_measurer(images)
+    # The stored answer's own notes are outside the scope of this re-read (E5).
+    before = _note_lines(data.get("notes"))
     try:
         apply_dedicated_pads(data, reading, progress,
                              check_layout=_layout_checker(images, library, view_of,
@@ -5483,9 +6460,141 @@ def reread_pad_positions(stored: dict, documents, *, model: str, call, progress=
                              measure_layout=_layout_measurer(images), same_model=same_model)
     finally:
         data.pop("_outline_measurer", None)
+        # No body reading follows a partial re-read: the marks left for it
+        # (`_align_body_axes`, `_plan_prints_body_axes`) end here.
+        axes_measured = bool(data.pop("_body_axes_measured", False))
+        data.pop("_body_axes_printed", None)
+    # `axes_measured`: whether the drawn outline measured the order of the two
+    # plan sizes this result carries, exchanged or as given (`_align_body_axes`):
+    # `merge_reread` orders the settled pair by it.
     _require_declared_view(data, progress)
+    if _optional_number(data.get("body_height_mm"), positive=True) is not None:
+        # The body quotes of the stored answer were NOT confronted by this
+        # re-read (no dedicated body reading, no vote of the printed lists):
+        # alone, this result must not pass its height as settled (A5).
+        # `merge_reread` keeps the settled body quotes instead.
+        data["_body_conflict"] = tx(
+            "Rilettura delle sole posizioni dei pad: le quote del corpo di questo risultato sono "
+            "quelle della risposta principale, non riconfrontate. Valgono le quote gia' stabilite "
+            "dall'analisi.")
     _canonicalize_answer(data)
-    return _params_from_tool_arguments(data)
+    params = _params_from_tool_arguments(data)
+    # The notes of this scope: everything this re-read and the pad rules
+    # wrote, not what the stored answer already said (E5).
+    params.partial_reread = {"field": "pad_layout", "body_axes_measured": axes_measured,
+                             "notes": [line for line in _note_lines(params.notes)
+                                       if line not in before]}
+    return params
+
+
+#: What each partial re-read confronts again, by its field: the attributes of
+#: ExtractedParams it owns, the `value_sources` keys that go with them, and
+#: the question fields it may ask. Everything outside the scope stays as the
+#: analysis settled it (`merge_reread`).
+REREAD_SCOPES = {
+    "body_height_mm": {"attributes": ("body_height_mm", "pin_length_3d_mm", "body_conflict"),
+                       "sources": ("body_height_mm", "pin_length_3d_mm"),
+                       "questions": ("body_height_mm", "height_equals_plan")},
+    "pad_layout": {"attributes": ("package_geometry", "pin_map_conflict", "geometry_doubts",
+                                  "unread_pads", "unread_pad_geometry", "candidates"),
+                   "sources": (),
+                   "questions": ("pad_layout", "contacts_view")},
+}
+
+#: Body quotes a package mapping repeats beside the result's own attributes.
+_GEOMETRY_BODY_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
+
+
+def _note_lines(text) -> list:
+    """The non-empty stripped lines of a notes text."""
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def merge_reread(settled: Optional[ExtractedParams], reread: ExtractedParams) -> ExtractedParams:
+    """@brief Write what a partial re-read confronted again into the result the analysis settled.
+
+    @param settled The extraction as the analysis and the user's answers
+        left it (the result the fields were filled from), or None when the
+        session has none.
+    @param reread The result of `reread_body_height` or `reread_pad_positions`.
+    @return A deep copy of `settled` in which ONLY the scope of the re-read
+        (REREAD_SCOPES) comes from `reread`:
+        - the scope's attributes and the provenance of its values;
+        - the questions of the scope's fields (the settled questions of
+          other fields stay open, the scope's old ones are replaced);
+        - the lines of the re-read's SCOPE notes (`partial_reread["notes"]`:
+          what its own confrontation wrote, never the stored answer's notes
+          nor a mark about what it did not confront, review E5) the settled
+          notes do not have; a partial result without that list (an older
+          caller) contributes every line of its notes, as before;
+        - the body quotes inside `package_geometry`, kept aligned: a re-read
+          height is written into the settled mapping, a re-read mapping
+          takes the settled body quotes.
+        The pad layout, the view, the conflicts and the plan sizes outside
+        the scope are the settled ones, whatever the raw main answer said
+        (review 2026-11-10, A5: a height re-read returned the main answer's
+        unconfirmed pads, unexchanged body, no conflict and no question).
+        `partial_reread` is None in the result. `reread` itself is returned
+        when it is not a partial result, or when `settled` is None: its own
+        marks then block what it did not confront.
+    @note A pad re-read whose witness measured the body's orientation on
+        the drawn outline (`partial_reread["body_axes_measured"]`) and found
+        the larger plan size on the other axis than the settled result has
+        it exchanges the settled pair, with its provenance and a note: the
+        measure belongs to the layout that is written.
+    """
+    scope = REREAD_SCOPES.get((getattr(reread, "partial_reread", None) or {}).get("field"))
+    if scope is None or settled is None:
+        return reread
+    result = copy.deepcopy(settled)
+    for name in scope["attributes"]:
+        setattr(result, name, copy.deepcopy(getattr(reread, name)))
+    sources = dict(result.value_sources or {})
+    for key in scope["sources"]:
+        sources.pop(key, None)
+        if key in (reread.value_sources or {}):
+            sources[key] = reread.value_sources[key]
+    notes = []
+    if "package_geometry" in scope["attributes"]:
+        measured = [reread.body_length_mm, reread.body_width_mm]
+        own = [result.body_length_mm, result.body_width_mm]
+        if (reread.partial_reread.get("body_axes_measured") and None not in measured + own
+                and (measured[0] - measured[1]) * (own[0] - own[1]) < 0):
+            result.body_length_mm, result.body_width_mm = own[1], own[0]
+            length, width = sources.pop("body_length_mm", None), sources.pop("body_width_mm", None)
+            if width is not None:
+                sources["body_length_mm"] = width
+            if length is not None:
+                sources["body_width_mm"] = length
+            notes.append(tx("Lunghezza e larghezza del corpo scambiate: la rilettura dei pad ha "
+                            "misurato l'orientamento del corpo sul contorno disegnato."))
+        if isinstance(result.package_geometry, dict):
+            # The re-read mapping repeats the raw main answer's body quotes.
+            for key in _GEOMETRY_BODY_KEYS:
+                value = getattr(result, key)
+                if value is None:
+                    result.package_geometry.pop(key, None)
+                else:
+                    result.package_geometry[key] = value
+    elif isinstance(result.package_geometry, dict):
+        if result.body_height_mm is None:
+            result.package_geometry.pop("body_height_mm", None)
+        else:
+            result.package_geometry["body_height_mm"] = result.body_height_mm
+    result.value_sources = sources
+    result.questions = ([question for question in settled.questions or ()
+                         if question.get("field") not in scope["questions"]]
+                        + [dict(question) for question in reread.questions or ()
+                           if question.get("field") in scope["questions"]])
+    known = {line.strip() for line in str(settled.notes or "").splitlines()}
+    scope_notes = reread.partial_reread.get("notes")
+    lines = (scope_notes if isinstance(scope_notes, list)
+             else str(reread.notes or "").splitlines())
+    notes += [str(line) for line in lines if str(line).strip() and str(line).strip() not in known]
+    if notes:
+        result.notes = (str(result.notes or "") + "\n" + "\n".join(notes)).strip()
+    result.partial_reread = None
+    return result
 
 
 def _openai_tool() -> dict:
@@ -5733,6 +6842,15 @@ class ExtractedParams:
     #: `reread_pad_positions` (partial re-runs without the main paid call).
     #: None for results built outside `extract_pin_header_params`.
     raw_main: Optional[dict] = None
+    #: Not None only for the result of a partial re-read (`reread_body_height`,
+    #: `reread_pad_positions`): {"field": key of REREAD_SCOPES,
+    #: "body_axes_measured": bool, "notes": [the note lines of its scope]}.
+    #: Such a result is NOT a settled extraction:
+    #: only the attributes of its scope were confronted again, everything else
+    #: is the raw main answer. It is meant for `merge_reread`, which writes
+    #: the scope into the settled result; alone, it blocks what it did not
+    #: confront.
+    partial_reread: Optional[dict] = None
     #: Numbers (text) of the explicit pads whose positions were NOT read, when
     #: those pads were the footprint and were dropped (`package_geometry` is
     #: then None and `pin_map_conflict` set). Not None means: write no
@@ -5845,7 +6963,8 @@ _SHAPE_CORRECTION = (
     "CORREZIONE: la risposta precedente non rispettava lo schema dello strumento. Richiama "
     "lo strumento con TUTTI i campi: pads e' una LISTA con un oggetto per ciascun terminale "
     "(number, x_mm, y_mm, pad_type, pad_length_mm, pad_width_mm, drill_mm se passante), mai i "
-    "campi di un singolo pad al primo livello; grid solo se i terminali stanno su una griglia "
+    "campi di un singolo pad al primo livello; ogni pad con il suo number STAMPATO (un foro "
+    "senza numero stampato non va incluso); grid solo se i terminali stanno su una griglia "
     "a passo costante, e mai insieme a pads.")
 
 
@@ -6774,7 +7893,10 @@ def _undeclared_unit_reason() -> str:
     return tx("unita' non dichiarata")
 
 _PACKAGE_LENGTH_KEYS = ("body_length_mm", "body_width_mm", "body_height_mm")
-_PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm")
+_PACKAGE_PIN_LENGTH_KEYS = ("x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm",
+                            "drill_length_mm")
+#: Length fields of a pad's declared terminal section (`lead` of a pad).
+_LEAD_LENGTH_KEYS = ("diameter_mm", "width_mm", "thickness_mm")
 _COMPONENT_LENGTH_KEYS = ("x_mm", "y_mm", "length_mm", "width_mm", "height_mm")
 _FILLET_LENGTH_KEYS = ("radius_mm",)
 
@@ -6821,6 +7943,9 @@ def _convert_units(data: dict, factor: float) -> None:
         if isinstance(geometry.get("pins"), (list, tuple)):
             for pin in geometry["pins"]:
                 _scale_lengths(pin, _PACKAGE_PIN_LENGTH_KEYS, factor)
+                if isinstance(pin, dict):
+                    # The terminal is quoted in the drawing's unit like the pad.
+                    _scale_lengths(pin.get("lead"), _LEAD_LENGTH_KEYS, factor)
     for key, keys in (("components_3d", _COMPONENT_LENGTH_KEYS),
                       ("edge_fillets", _FILLET_LENGTH_KEYS)):
         if isinstance(data.get(key), (list, tuple)):
@@ -6965,6 +8090,9 @@ def _canonicalize_answer(data: dict) -> None:
                         "millimetri, da verificare.", unit=unit))
         data["_unit_undeclared"] = True
         unit = "mm"
+    # The precision of each transcribed pad hole is known only in the
+    # drawing's own unit and digits: recorded before the conversion (G6).
+    _record_pad_hole_precision(data, _UNIT_TO_MM[unit], notes)
     if unit != "mm":
         _convert_units(data, _UNIT_TO_MM[unit])
         notes.append(tx("Quote lette in {unit} e convertite in millimetri (x {factor:g}).",
@@ -8721,6 +9849,9 @@ def _validate_main_response(data, content_blocks, diagnostic_call, model, system
             check_layout=_layout_checker([], numbering.get("library"),
                                          lambda: data.get("contacts_view"),
                                          _reading_tolerance(_declared_unit_factor(data))))
+        # No body reading follows on this path: its marks end here.
+        for mark in ("_body_axes_measured", "_body_axes_printed"):
+            data.pop(mark, None)
     if (numbering and _has_explicit_pads(data)
             and numbering.get("component_family") in SINGLE_COMPONENT_FAMILIES):
         # After the readings, which may have adopted a view: an unknown view
@@ -9074,6 +10205,54 @@ def _pads_without_positions(package_geometry) -> list[str]:
             if isinstance(pin, dict) and (pin.get("x_mm") is None or pin.get("y_mm") is None)]
 
 
+def _pads_without_holes(package_geometry) -> list[str]:
+    """The holed pads of an explicit geometry left without a hole, as their number text.
+
+    After `_resolve_pad_terminals` a through-hole (or NPTH) pad has no
+    `drill_mm` only when the drawing printed no hole and no terminal was
+    declared, neither by the pad nor for the part (review E1): an unread
+    value, never invented, so the pads are UNREAD geometry exactly like
+    pads without a position.
+
+    @return The numbers ("?" for a pad without one), in answer order.
+    """
+    pins = package_geometry.get("pins") if isinstance(package_geometry, dict) else None
+    if not isinstance(pins, (list, tuple)):
+        return []
+    return [_pad_number_text(pin.get("number")) or "?" for pin in pins
+            if isinstance(pin, dict) and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+            and pin.get("drill_mm") is None]
+
+
+#: Pad sizes an answer may carry: each one present must be a positive length.
+_PAD_SIZE_KEYS = ("pad_length_mm", "pad_width_mm", "drill_mm", "drill_length_mm")
+
+
+def _reject_malformed_pad_sizes(package_geometry) -> None:
+    """Refuse an answer whose pads carry a malformed size, before any size is derived.
+
+    The program's one rule (`_resolve_pad_terminals`) may replace a land or a
+    hole the model gave with one derived from the terminal; a value present
+    but malformed (text, boolean, not finite, zero or negative) would then
+    vanish without a trace. Absent (None) values are not checked: a missing
+    size is what the rule exists to fill.
+
+    @param package_geometry The explicit geometry as answered, or None.
+    @throws ExtractionError «Geometria package non valida» naming the pad and
+        the field, the same error the footprint validation gives.
+    """
+    for pin in (package_geometry or {}).get("pins") or ():
+        if not isinstance(pin, dict):
+            continue
+        for key in _PAD_SIZE_KEYS:
+            value = pin.get(key)
+            if value is not None and _optional_number(value, positive=True) is None:
+                raise ExtractionError(tx(
+                    "Geometria package non valida: {exc}",
+                    exc=tx("pin {number}: {name} deve essere un numero maggiore di zero",
+                           number=pin.get("number", "?"), name=key)))
+
+
 def _validate_present_pad_values(package_geometry: dict) -> None:
     """Validate every value an explicit geometry with unread positions DOES carry.
 
@@ -9083,12 +10262,21 @@ def _validate_present_pad_values(package_geometry: dict) -> None:
     validated together, exactly as a footprint (overlaps among them
     included); each pad left without a position is validated alone with
     its missing coordinate(s) set to 0 (number, sizes, pad type, drill,
-    shape and the coordinate it did give). The stand-in zeros never leave
-    this check.
+    shape and the coordinate it did give). A holed pad left without a hole
+    (`_pads_without_holes`) is checked with a stand-in hole of half its
+    smaller side, so the missing value is not mistaken for a malformed one.
+    The stand-ins never leave this check.
 
     @throws KeyError, TypeError, ValueError As `package_from_mapping`.
     """
-    pins = package_geometry.get("pins") or []
+    pins = []
+    for pin in package_geometry.get("pins") or []:
+        sizes = ([_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+                 if isinstance(pin, dict) else [None])
+        if (isinstance(pin, dict) and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+                and pin.get("drill_mm") is None and None not in sizes):
+            pin = {**pin, "drill_mm": min(sizes) / 2}
+        pins.append(pin)
     read, unread = [], []
     for pin in pins:
         if isinstance(pin, dict) and (pin.get("x_mm") is None or pin.get("y_mm") is None):
@@ -9512,14 +10700,18 @@ def _value_sources(data: dict, params: "ExtractedParams", sides, notes: list) ->
     return sources
 
 
-def _review_notes(sides, value_sources) -> list[str]:
+def _review_notes(sides, value_sources, pins=None) -> list[str]:
     """@brief Lines telling what the user must decide or check before using a result.
 
     @param sides Normalized castellated sides, or None.
     @param value_sources Provenance map (ExtractedParams.value_sources), or None.
+    @param pins Pin dicts of the explicit geometry (with their per-pad
+        `sources`), or None.
     @return Italian log lines: sides whose contact style was not observed,
         values estimated by the model and values whose provenance it did not
-        declare. Empty when there is nothing to review.
+        declare, and the explicit pads whose hole, size or shape was not read
+        from the drawing (pad by pad, 2026-11-10: the «estimated» of explicit
+        pads used to be dropped). Empty when there is nothing to review.
     """
     lines = []
     notice = _unobserved_contact_style_notice(sides) if sides else None
@@ -9534,6 +10726,18 @@ def _review_notes(sides, value_sources) -> list[str]:
     if undeclared:
         lines.append(tx("Valori senza provenienza dichiarata dal modello, trattati come stime "
                         "da verificare: {fields}.", fields=", ".join(undeclared)))
+    names = {"drill_mm": tx("foro"), "pad_size": tx("dimensione"), "shape": tx("forma")}
+    unverified = []
+    for pin in pins or ():
+        if not isinstance(pin, dict) or not isinstance(pin.get("sources"), dict):
+            continue
+        keys = unverified_values(pin["sources"])
+        if keys:
+            unverified.append(f"{_pad_number_text(pin.get('number')) or '?'} "
+                              f"({', '.join(names[key] for key in keys)})")
+    if unverified:
+        lines.append(tx("Valori STIMATI o ricavati dal programma nei pad, non letti dal disegno: "
+                        "{pads}. Verificarli prima dell'uso.", pads="; ".join(unverified)))
     return lines
 
 
@@ -10108,12 +11312,25 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
                             "parametri a matrice o del modulo."))
         package_geometry = None
+    # A size the answer DOES carry is checked before the program's rule may
+    # replace it with a derived land (review 2026-11-11, regression of M1):
+    # a malformed value is an error of the answer, never hidden by an estimate.
+    _reject_malformed_pad_sizes(package_geometry)
+    # Holes, lands and their per-pad provenance settled by the program's one
+    # rule before anything is validated (a new geometry: `data` is untouched).
+    package_geometry = _resolve_pad_terminals(package_geometry, data, notes)
     unread_positions = _pads_without_positions(package_geometry)
-    # Explicit pads dropped for their unread positions, kept apart so that a
-    # chosen pad layout can still be written into them (apply_answers).
+    # Holed pads left without a hole: no printed hole and no terminal, so no
+    # value the program may derive (review E1). Unread geometry like an
+    # unread position: dropped and blocked, never an error after paid calls.
+    unread_holes = [number for number in _pads_without_holes(package_geometry)
+                    if number not in unread_positions]
+    unread = unread_positions + unread_holes
+    # Explicit pads dropped for their unread positions or holes, kept apart
+    # so that a chosen pad layout can still be written into them (apply_answers).
     unread_geometry = None
     geometry_doubts = None
-    if unread_positions:
+    if unread:
         # Everything present is validated first (M1): a malformed
         # coordinate, number, size or pad type stays an error even beside a
         # null coordinate.
@@ -10142,7 +11359,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         # A castellated module has no matrix: counts or lengths it still sends
         # are informative only and dropped with a note when malformed.
         matrix = _informative_matrix(data, notes)
-    elif package_geometry is not None or unread_positions:
+    elif package_geometry is not None or unread:
         # Pads with unread positions are still what the answer described (the
         # schema: explicit pads, when present, ARE the footprint source): a
         # grid it may also send is not promoted to the footprint in their place.
@@ -10178,9 +11395,16 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
     # A castellated module's footprint is its edge sides (validated above):
     # its optional explicit pads, dropped, block nothing (L2). Otherwise the
     # dropped pads WERE the footprint and the generation must wait.
-    pads_footprint_dropped = bool(unread_positions) and layout != "castellated"
+    pads_footprint_dropped = bool(unread) and layout != "castellated"
     if layout == "castellated":
         unread_geometry = None
+    if pads_footprint_dropped and unread_holes:
+        # No reading of the positions can supply a hole: the block names it,
+        # beside any block of the positions (review E1).
+        hole_block = tx("Foro dei pad {pads} non stampato e terminale non dichiarato: nessun "
+                        "footprint finche' il foro non e' letto dal disegno.",
+                        pads=", ".join(unread_holes))
+        pin_map_conflict = hole_block if not pin_map_conflict else pin_map_conflict + "\n" + hole_block
     if pads_footprint_dropped and not pin_map_conflict:
         # The dedicated pad reading normally blocks unconfirmed positions
         # already (apply_dedicated_pads); this covers every path that did not
@@ -10244,7 +11468,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         candidates=copy.deepcopy(data["_candidates"]) if isinstance(data.get("_candidates"), dict)
         else None,
         raw_main=copy.deepcopy(data["_raw_main"]) if isinstance(data.get("_raw_main"), dict) else None,
-        unread_pads=list(unread_positions) if pads_footprint_dropped else None,
+        unread_pads=list(unread) if pads_footprint_dropped else None,
         unread_pad_geometry=unread_geometry,
     )
     if isinstance(data.get("_numbering_note"), str) and data["_numbering_note"]:
@@ -10262,6 +11486,12 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         _downgrade_sizes_wider_than_the_pitch(params, notes)
     else:
         _lift_drill_above_the_lead(params, notes)
+    if unread_holes:
+        # Said apart from the positions: here the hole is what was not read.
+        notes.append(tx("Geometria dei pad scartata: per i pad {pads} il disegno non stampa il "
+                        "foro e nessun terminale e' dichiarato, ne' per il pad ne' per il "
+                        "componente. Si tengono: {kept}; il foro e' da leggere sul disegno.",
+                        pads=", ".join(unread_holes), kept=_kept_after_pad_drop(params)))
     if unread_positions:
         # Named after the fields that survived (M2), once every adjustment
         # above has run; the grid case names the spacing it lacked (L1).
@@ -10277,7 +11507,8 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
                             "{pads} ({reason}). Il footprint resta quello dei lati del modulo; si "
                             "tengono: {kept}.", pads=", ".join(unread_positions), reason=reason,
                             kept=_kept_after_pad_drop(params)))
-    notes.extend(_review_notes(sides, params.value_sources))
+    notes.extend(_review_notes(sides, params.value_sources,
+                               (params.package_geometry or params.unread_pad_geometry or {}).get("pins")))
     if notes:
         params.notes = (params.notes + "\n" + "\n".join(notes)).strip()
     return params
@@ -10382,23 +11613,664 @@ def _validated_lead_exit(raw, notes: list) -> Optional[str]:
     return None
 
 
-#: Clearance, in mm, between a lead and the hole it goes through when the
-#: hole has to be estimated from the lead: the usual 0.2-0.3 mm of the
-#: project rules for through-hole parts (middle of the range, declared).
-LEAD_TO_HOLE_CLEARANCE_MM = 0.25
-#: Copper, in mm, added to an estimated hole DIAMETER for an estimated pad:
-#: a 0.4 mm ring per side. DECLARED HEURISTIC (review G8, 2026-11-03): no
-#: standard is cited for it -- it is a common through-hole design-rule
-#: choice, comfortably above the IPC-7251 minimum ring of MIN_ANNULAR_RING_MM
-#: and the usual fabrication allowance, chosen so an estimated pad stays
-#: solderable. It is only ever applied to values already marked ESTIMATED
-#: (a lifted drill, a pad that no longer clears it); a pad diameter read from
-#: the drawing or the manufacturer's land pattern makes it superfluous.
-HOLE_TO_PAD_ANNULUS_MM = 0.8
-#: Smallest copper ring per side, in mm, a through-hole pad must keep around
-#: a lifted hole for the pad to be solderable: a declared manufacturing
-#: minimum (IPC-7251 level B order of magnitude), not a value tuned to a part.
-MIN_ANNULAR_RING_MM = 0.15
+#: Floor, in mm, of the agreement between two transcriptions of ONE printed
+#: hole: the program's own conversion noise (values are kept to 1e-6 mm). Two
+#: transcriptions agree when they differ by less than half a unit of the last
+#: printed digit of the coarser one (`_printed_hole_value`, review G6
+#: 2026-11-11): «Ø1.02» and «.040» (in) are one hole, 1.2 and 1.3 are two.
+_PRINTED_HOLE_TOLERANCE_MM = 1e-4
+
+#: Pad types that have a hole (`PinSpec`): only they carry `drill_mm`.
+_HOLED_PAD_TYPES = ("thru_hole", "np_thru_hole")
+
+#: A number as printed in a callout: integer part and optional decimals.
+_PRINTED_NUMBER_RE = re.compile(r"(\d+)(?:[.,](\d+))?")
+#: A printed nominal followed by its tolerance («1.3+0.1», «1.3 ±0.05», «1.3+/-0.1»).
+_PRINTED_TOLERANCE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\+/-|±|\+|-)\s*(\d+(?:[.,]\d+)?)")
+
+
+def _transcribed_decimals(value: float) -> int:
+    """Digits after the decimal point of a number as the model transcribed it (shortest repr)."""
+    import decimal
+    exponent = decimal.Decimal(repr(float(value))).normalize().as_tuple().exponent
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
+def _printed_hole_value(text, value, factor: float) -> tuple:
+    """@brief One transcribed hole size as (value, rounding), both in mm, checked against its printed text.
+
+    @param text The callout as printed (`hole_callout`, or the dedicated
+        reading's `text`), any type.
+    @param value The number the reading sent for it, in the drawing unit.
+    @param factor The drawing unit to millimetres.
+    @return (value_mm, rounding_mm):
+        - a number of the text that equals `value` within its own last
+          digit: `value`, rounded by half a unit of that printed digit (the
+          finest such number when several do);
+        - else a printed nominal with a tolerance («Ø1.3+0.1») whose range
+          holds `value` (a reading that added the tolerance): the NOMINAL,
+          rounded by its own last digit -- the hole is the nominal;
+        - else (no text, or a text that does not state the value): `value`,
+          rounded by half a unit of its own last transcribed digit, never
+          coarser than the unit's usual printed precision
+          (CHAIN_QUOTE_ROUNDING_MM): «1.0» transcribed as 1 must not pass for
+          a quote rounded to the millimetre.
+    @note Derived from the transcriptions, not tuned: the agreement margin of
+        two readings (`_same_printed_hole`) is the coarser of their roundings.
+        The tolerance pattern may also match «2-0.8» (a count before a size):
+        it is used only when no printed number equals the value, so a
+        callout whose value is printed is always read as printed.
+    """
+    number = float(value)
+    if isinstance(text, str):
+        # The finest printed number that states the value: in «2-0.8x2.0»
+        # the size 2.0 is «2.0» (a tenth), not the count «2».
+        roundings = []
+        for match in _PRINTED_NUMBER_RE.finditer(text):
+            decimals = len(match.group(2) or "")
+            printed = float(match.group(1) + ("." + match.group(2) if match.group(2) else ""))
+            rounding = 0.5 * 10 ** (-decimals)
+            if abs(printed - number) <= rounding + 1e-9:
+                roundings.append(rounding)
+        if roundings:
+            return number * factor, min(roundings) * factor
+        for match in _PRINTED_TOLERANCE_RE.finditer(text):
+            nominal_text, tolerance_text = (group.replace(",", ".") for group in match.groups())
+            nominal, tolerance = float(nominal_text), float(tolerance_text)
+            if (abs(number - nominal) > 1e-9
+                    and nominal - tolerance - 1e-9 <= number <= nominal + tolerance + 1e-9):
+                decimals = len(nominal_text.partition(".")[2])
+                return nominal * factor, 0.5 * 10 ** (-decimals) * factor
+    fallback = CHAIN_QUOTE_ROUNDING_MM.get(factor, CHAIN_QUOTE_ROUNDING_MM[1.0])
+    return number * factor, min(0.5 * 10 ** (-_transcribed_decimals(number)) * factor, fallback)
+
+
+def _record_pad_hole_precision(data: dict, factor: float, notes: list) -> None:
+    """Record, before the unit conversion, the rounding of every explicit pad's transcribed hole.
+
+    Each pad with a `drill_mm` gets `_hole_rounding_mm` (mm, from
+    `_printed_hole_value` with its own `hole_callout`); a drill transcribed
+    as nominal plus tolerance is brought to the printed nominal, and `notes`
+    (the canonical notes) says so. `_resolve_one_pad` consumes the mark; it
+    never reaches the validated geometry.
+    """
+    geometry = data.get("package_geometry")
+    pins = geometry.get("pins") if isinstance(geometry, dict) else None
+    nominal = []
+    for pin in pins if isinstance(pins, list) else ():
+        if not isinstance(pin, dict):
+            continue
+        drill = _optional_number(pin.get("drill_mm"), positive=True)
+        if drill is None:
+            continue
+        value_mm, rounding_mm = _printed_hole_value(pin.get("hole_callout"), drill, factor)
+        pin["_hole_rounding_mm"] = rounding_mm
+        if abs(value_mm / factor - drill) > 1e-9:
+            # Still in the drawing unit: the conversion follows.
+            pin["drill_mm"] = value_mm / factor
+            nominal.append(f"{_pad_number_text(pin.get('number')) or '?'} "
+                           f"(«{str(pin.get('hole_callout')).strip()}»)")
+    if nominal:
+        notes.append(tx(
+            "Fori stampati con tolleranza presi al valore nominale: pad {pads}.",
+            pads=", ".join(nominal)))
+
+
+def _slot_along_pad(pin: dict, first: float, second: float):
+    """Orient a slot read without axes (width and length) to its pad, or None when the pad cannot say.
+
+    Contract of `PinSpec` and `core.tht_estimates.lead_passes`: `drill_mm`
+    runs along the pad's LENGTH (`pad_length_mm`), `drill_length_mm` along
+    its WIDTH. The slot's longer side goes on the pad's longer side: a slot
+    across an elongated pad cannot hold a ring on its short sides. A pad
+    with two equal sides (round or square), or without both sizes, gives no
+    orientation; neither does a pad the oriented slot does not fit inside.
+
+    @return (drill_mm, drill_length_mm) along the pad's axes, or None.
+    """
+    length = _optional_number(pin.get("pad_length_mm"), positive=True)
+    width = _optional_number(pin.get("pad_width_mm"), positive=True)
+    if length is None or width is None or abs(length - width) <= _PRINTED_HOLE_TOLERANCE_MM:
+        return None
+    long_side, short_side = max(first, second), min(first, second)
+    along, across = (long_side, short_side) if length > width else (short_side, long_side)
+    if along >= length or across >= width:
+        return None
+    return along, across
+
+
+def _round_hole_loose_on_blade(lead, drill: float) -> bool:
+    """Whether an estimated ROUND hole leaves a flat lead more free hole across its thickness than the land has copper.
+
+    Criterion (declared, derived from the estimate's own rule, review G5
+    2026-11-11): a round hole clears a blade's DIAGONAL, so across the
+    blade's thickness the gap on each side is (hole - thickness) / 2. The
+    estimated land gives the joint HOLE_TO_PAD_ANNULUS_MM / 2 of copper per
+    side to wet. When the air the solder must bridge across the thickness is
+    wider than that copper, the round hole is the wrong shape for the blade
+    and a printed slot is needed. A round lead never trips it (its gap is
+    LEAD_TO_HOLE_CLEARANCE_MM / 2). It depends on HOLE_TO_PAD_ANNULUS_MM, a
+    declared heuristic itself; a printed slot or land makes it moot.
+    """
+    if not isinstance(lead, dict) or lead.get("shape") != "flat":
+        return False
+    thickness = _optional_number(lead.get("thickness_mm"), positive=True)
+    width = _optional_number(lead.get("width_mm"), positive=True)
+    if thickness is None or width is None:
+        return False
+    return (drill - min(thickness, width)) / 2 > HOLE_TO_PAD_ANNULUS_MM / 2 + 1e-9
+
+
+def _pad_word(raw, key: str) -> Optional[str]:
+    """The provenance a pad entry's own `value_sources` declares for `key`, or None."""
+    word = raw.get(key) if isinstance(raw, dict) else None
+    return word if isinstance(word, str) and word in VALUE_SOURCES else None
+
+
+def _dedicated_hole(dedicated, number: str):
+    """The dedicated reading's printed hole of pad `number`: exact name, else the one name equal ignoring case."""
+    if not isinstance(dedicated, dict) or not number:
+        return None
+    if number in dedicated:
+        return dedicated[number]
+    matches = [key for key in dedicated if str(key).lower() == number.lower()]
+    return dedicated[matches[0]] if len(matches) == 1 else None
+
+
+def _same_printed_hole(drill, length, other: dict, rounding_mm: float = 0.0) -> bool:
+    """Whether a hole (drill, slot side or None) is the printed hole `other` of the other reading.
+
+    A round hole compares its diameter; a slot compares its two sides as an
+    unordered pair (the dedicated reading gives width and length, the pad
+    gives the sides along its own axes). Two transcriptions agree when they
+    differ by less than the coarser of their two roundings -- `rounding_mm`
+    of this one, `other["rounding_mm"]` of the other: half a unit of the last
+    printed digit in each reading's own unit (`_printed_hole_value`, review
+    G6) -- or by the conversion noise alone (_PRINTED_HOLE_TOLERANCE_MM).
+    """
+    first = sorted(v for v in (drill, length) if v is not None)
+    second = sorted(v for v in (other.get("drill_mm"), other.get("drill_length_mm")) if v is not None)
+    if len(first) == 2 and first[0] == first[1]:
+        first = first[:1]
+    if len(second) == 2 and second[0] == second[1]:
+        second = second[:1]
+    margin = max(float(rounding_mm or 0.0), float(other.get("rounding_mm") or 0.0))
+    return len(first) == len(second) and all(
+        abs(a - b) <= _PRINTED_HOLE_TOLERANCE_MM or abs(a - b) < margin
+        for a, b in zip(first, second))
+
+
+def _hole_text_mm(drill, length) -> str:
+    """A hole for the notes: «1.20 mm» or «1.20 x 2.00 mm» for a slot."""
+    if drill is None:
+        return "?"
+    if length is None or abs(length - drill) <= _PRINTED_HOLE_TOLERANCE_MM:
+        return f"{drill:.2f} mm"
+    return f"{drill:.2f} x {length:.2f} mm"
+
+
+def _part_lead(data: dict):
+    """The part-level terminal of an answer as a round lead and its provenance word, or None.
+
+    `lead_diameter_mm` (mm once the answer is canonical) is the one lead the
+    answer declares for the whole part; its provenance is the answer-level
+    `value_sources.lead_diameter_mm`, "estimated" when undeclared.
+    """
+    diameter = _optional_number(data.get("lead_diameter_mm"), positive=True)
+    if diameter is None:
+        return None
+    top = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
+    return {"shape": "round", "diameter_mm": diameter}, _pad_word(top, "lead_diameter_mm") or "estimated"
+
+
+def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
+    """Settle the hole, the land and their provenance of every explicit pad: printed values kept, the rest derived.
+
+    The ONE rule of the program for the values a drawing does not print
+    (user, 2026-11-10, «ok procedi», contract A1-A3 of the handoff): the
+    model transcribes, the program derives. Per pad with a hole:
+    - hole PRINTED (the pad's `value_sources.drill_mm` is "read", or, for a
+      pad that declares nothing, the answer-level `value_sources.drill_mm`
+      -- extended only when every holed pad has the same drill, or when the
+      pad's drill is one the dedicated reading transcribed: with mixed holes
+      one printed callout must not make the invented ones «read», review
+      G3): kept, source "read". The dedicated pad reading transcribes the
+      printed callouts too (`printed_holes`): the same value in both (within
+      the coarser rounding of the two, `_same_printed_hole`) is "read"; two
+      different values are flagged for review -- the main value stays, its
+      source is "estimated" and the note names both, never an average and
+      never silently one of them; a value only one reading saw is kept as
+      "read" with a note naming that reading. A slot only the dedicated
+      reading saw has no axes: it is oriented to the pad
+      (`_slot_along_pad`), or left out with a note when the pad cannot say.
+      A land not printed around a printed ROUND hole becomes the pad
+      `estimated_pad_diameter(hole)`, source "derived"; its shape stays the
+      declared one when the pad says its shape was read (review E3).
+    - hole not printed, terminal declared by the pad (`lead`), or else the
+      part-level `lead_diameter_mm` as a round lead (review E1; applied to a
+      pad that carries a model drill only when every holed pad has one
+      drill, as `_lift_pad_drills_above_the_lead` does): hole and ROUND pad
+      from `core.tht_estimates.estimated_round_pad`, sources "derived" when
+      the terminal was read (or derived) and "estimated" otherwise; a
+      printed land (`value_sources.pad_size` "read") is kept with its shape.
+      An estimated round hole too loose across a flat lead is named
+      (`_round_hole_loose_on_blade`, review G5).
+    - no terminal, a model drill: the model's values stay, marked
+      "estimated", and the note says so.
+    - no terminal and no drill at all: nothing is invented; the pad keeps no
+      hole and `_params_from_tool_arguments` drops the pad geometry as
+      UNREAD (`_pads_without_holes`), the generation blocked with its remedy.
+    A derived land never makes copper overlap (`_keep_derived_lands_apart`,
+    review G1). A slot is used only when printed. A pad without a hole
+    carrying a drill (an SMD pad with `drill_mm`, which `PinSpec` refuses)
+    loses the drill with a note naming it: the type or the hole is wrong,
+    and which one is for the user to check. Pads without a hole keep only
+    the provenance they declare.
+
+    @param package_geometry The explicit geometry, canonical (millimetres).
+    @param data The canonical answer: its `value_sources` (answer level),
+        `lead_diameter_mm` and `_dedicated_holes` (the printed holes of the
+        dedicated reading, set by apply_dedicated_pads only when that
+        reading ran and the drawing did not contradict it).
+    @param notes Receives one line per kind of outcome.
+    @return A NEW geometry whose pins carry `lead` (mm, validated) and
+        `sources` (`core.tht_estimates` contract); the model's raw `lead`,
+        `hole_callout`, `value_sources` and `sources` are not passed on.
+        Anything that is not a geometry with a pin list is returned as is.
+    @note Not tuned: every value comes from the declared provenance and
+        from the published rule of `core.tht_estimates` (clearance and
+        annulus are declared there with their sources and limits).
+    """
+    if not isinstance(package_geometry, dict) or not isinstance(package_geometry.get("pins"), list):
+        return package_geometry
+    geometry = copy.deepcopy(package_geometry)
+    top = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
+    dedicated = data.get("_dedicated_holes") if isinstance(data.get("_dedicated_holes"), dict) else None
+    pins = [pin for pin in geometry["pins"] if isinstance(pin, dict)]
+    # One drill on every holed pad: the answer-level words and the one
+    # part-level lead may stand for all of them. Different drills mean
+    # different terminals, which one answer-level word cannot describe.
+    drills = {round(drill, 6) for pin in pins if pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+              and (drill := _optional_number(pin.get("drill_mm"), positive=True)) is not None}
+    uniform = len(drills) <= 1
+    printed = [hole for hole in (dedicated or {}).values()
+               if isinstance(hole, dict) and hole.get("drill_mm") is not None]
+    part_lead = _part_lead(data)
+    found = {name: [] for name in ("smd_drill", "lead_dropped", "slot_dropped", "only_main",
+                                   "only_dedicated", "disagree", "unfounded", "withheld",
+                                   "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
+                                   "land_capped", "land_model")}
+    derived = []
+    for pin in pins:
+        drill_word = _pad_word(top, "drill_mm")
+        if (drill_word == "read" and not uniform and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
+                and _pad_word(pin.get("value_sources"), "drill_mm") is None):
+            drill = _optional_number(pin.get("drill_mm"), positive=True)
+            length = _optional_number(pin.get("drill_length_mm"), positive=True)
+            rounding = _optional_number(pin.get("_hole_rounding_mm"), positive=True) or 0.0
+            if drill is not None and not any(_same_printed_hole(drill, length, hole, rounding)
+                                             for hole in printed):
+                drill_word = None
+                found["withheld"].append(_pad_number_text(pin.get("number")) or "?")
+        fallback = {"drill_mm": drill_word, "pad_size": _pad_word(top, "pad_diameter_mm")}
+        _resolve_one_pad(pin, fallback, dedicated, found, part_lead, uniform, derived)
+    _keep_derived_lands_apart(pins, derived, found)
+    if found["smd_drill"]:
+        notes.append(tx("Pad {pads}: dichiarati senza foro ma con un foro nella risposta: foro "
+                        "scartato, tipo del pad da verificare sul disegno.",
+                        pads=", ".join(found["smd_drill"])))
+    if found["lead_dropped"]:
+        notes.append(tx("Pad {pads}: terminale dichiarato non valido, ignorato.",
+                        pads=", ".join(found["lead_dropped"])))
+    if found["slot_dropped"]:
+        notes.append(tx("Pad {pads}: asola non stampata sul disegno, ignorata: un'asola si usa "
+                        "solo se stampata.", pads=", ".join(found["slot_dropped"])))
+    if found["withheld"]:
+        notes.append(tx("Pad {pads}: la provenienza «read» del foro dichiarata per tutta la "
+                        "risposta non vale per loro: i pad hanno fori diversi e il loro foro non "
+                        "e' fra quelli trascritti dalla lettura dedicata.",
+                        pads=", ".join(found["withheld"])))
+    if found["disagree"]:
+        notes.append(tx("ATTENZIONE foro stampato letto diversamente dalle due letture: {details}. "
+                        "Nessuno dei due valori e' adottato come letto: resta quello della "
+                        "risposta principale, segnato come stimato, da verificare sul disegno.",
+                        details="; ".join(found["disagree"])))
+    if found["only_main"]:
+        notes.append(tx("Pad {pads}: foro stampato letto solo dalla risposta principale (la "
+                        "lettura dedicata non lo riporta).", pads=", ".join(found["only_main"])))
+    if found["only_dedicated"]:
+        notes.append(tx("Pad {pads}: foro stampato letto solo dalla lettura dedicata, usato.",
+                        pads=", ".join(found["only_dedicated"])))
+    if found["slot_unoriented"]:
+        notes.append(tx("Pad {pads}: asola stampata letta solo dalla lettura dedicata, senza assi: "
+                        "il pad non ne indica l'orientamento (lati uguali, o asola piu' grande del "
+                        "pad). Asola non usata, da verificare sul disegno.",
+                        pads=", ".join(found["slot_unoriented"])))
+    if found["part_lead"]:
+        lead, word = part_lead
+        notes.append(tx("Pad {pads}: foro non stampato e terminale del pad non dichiarato: foro e "
+                        "piazzola ricavati dal terminale dichiarato per il componente (Ø{lead:.2f} "
+                        "mm, provenienza {source}).", pads=", ".join(found["part_lead"]),
+                        lead=lead["diameter_mm"], source=word))
+    if found["lead_withheld"]:
+        notes.append(tx("Pad {pads}: foro non stampato e terminale del pad non dichiarato; il "
+                        "terminale del componente (Ø{lead:.2f} mm) non e' applicato perche' i pad "
+                        "hanno fori diversi: foro e piazzola sono quelli del modello, STIMATI.",
+                        pads=", ".join(found["lead_withheld"]),
+                        lead=part_lead[0]["diameter_mm"]))
+    if found["unfounded"]:
+        notes.append(tx("Pad {pads}: ne' foro stampato ne' terminale dichiarato: foro e piazzola "
+                        "sono quelli del modello, STIMATI.", pads=", ".join(found["unfounded"])))
+    if found["loose_blade"]:
+        notes.append(_loose_blade_note(found["loose_blade"]))
+    if found["land_capped"]:
+        notes.append(tx("Pad {pads}: piazzola ricavata dal foro ridotta per lasciare {gap:.2f} mm "
+                        "di rame libero dal pad vicino: valore STIMATO, da verificare.",
+                        pads=", ".join(found["land_capped"]), gap=MIN_PAD_GAP_MM))
+    if found["land_model"]:
+        notes.append(tx("Pad {pads}: la piazzola ricavata dal foro toccherebbe il pad vicino: "
+                        "tenuta quella della risposta, STIMATA, da verificare.",
+                        pads=", ".join(found["land_model"])))
+    return geometry
+
+
+def _loose_blade_note(numbers) -> str:
+    """The note naming pads whose estimated round hole is too loose on their flat lead (`_round_hole_loose_on_blade`)."""
+    return tx("Pad {pads}: foro TONDO stimato per un terminale piatto: attraverso lo spessore "
+              "resta piu' foro libero che rame di piazzola. Serve un'asola stampata sul disegno o "
+              "una verifica.", pads=", ".join(numbers))
+
+
+def _write_derived_land(pin: dict, diameter: float, declared_shape) -> None:
+    """Write a land the program derived: both sides `diameter`; the shape too unless the pad's shape was read (E3)."""
+    pin["pad_length_mm"] = pin["pad_width_mm"] = diameter
+    if declared_shape != "read":
+        pin["shape"] = "circle"
+
+
+def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lead=None,
+                     lead_on_model_drill: bool = True, derived: Optional[list] = None) -> None:
+    """Apply `_resolve_pad_terminals` to one pin dict, in place; `found` collects the pads per outcome.
+
+    `part_lead` is `_part_lead(data)`; `lead_on_model_drill` False keeps it
+    off a pad that carries a model drill (mixed drills); `derived` receives
+    (pin, the model's land, hole) for every land the program derived.
+    """
+    number = _pad_number_text(pin.get("number"))
+    raw = pin.pop("value_sources", None)
+    raw = raw if isinstance(raw, dict) else {}
+    pin.pop("hole_callout", None)
+    rounding = _optional_number(pin.pop("_hole_rounding_mm", None), positive=True) or 0.0
+    raw_lead = pin.pop("lead", None)
+    # Provenance is the program's verdict, never copied from the model.
+    pin.pop("sources", None)
+    # Same default as `package_from_mapping`: a pin without a type is SMD.
+    pad_type = pin.get("pad_type", "smd")
+    if pad_type not in _HOLED_PAD_TYPES:
+        if pin.get("drill_mm") is not None or pin.get("drill_length_mm") is not None:
+            pin.pop("drill_mm", None)
+            pin.pop("drill_length_mm", None)
+            found["smd_drill"].append(f"{number or '?'} ({pad_type})")
+        own = {key: word for key in ("pad_size", "shape") if (word := _pad_word(raw, key))}
+        if own:
+            pin["sources"] = own
+        return
+    derived = derived if derived is not None else []
+    lead = None
+    if raw_lead is not None and pad_type == "thru_hole":
+        try:
+            lead = normalised_lead(raw_lead, number)
+        except ValueError:
+            found["lead_dropped"].append(number or "?")
+    lead_word = (_pad_word(raw, "lead") or "estimated") if lead else None
+    # A land is printed when the pad says so, or, for a pad that says
+    # nothing, when the answer says its pad size was read.
+    size_word = _pad_word(raw, "pad_size") or fallback["pad_size"] or "estimated"
+    declared_shape = _pad_word(raw, "shape")
+    shape_word = declared_shape or ("read" if size_word == "read" else "estimated")
+    drill = _optional_number(pin.get("drill_mm"), positive=True)
+    length = _optional_number(pin.get("drill_length_mm"), positive=True)
+    drill_word = _pad_word(raw, "drill_mm") or fallback["drill_mm"]
+    main_printed = drill is not None and drill_word == "read"
+    other = _dedicated_hole(dedicated, number)
+    other_printed = isinstance(other, dict) and other.get("drill_mm") is not None
+    model_land = {key: pin.get(key) for key in ("pad_length_mm", "pad_width_mm", "shape")}
+    sources = {}
+    if main_printed and (other_printed or (isinstance(other, dict) and other.get("conflict"))):
+        if other_printed and _same_printed_hole(drill, length, other, rounding):
+            sources["drill_mm"] = "read"
+        else:
+            sources["drill_mm"] = "estimated"
+            seen = (_hole_text_mm(other["drill_mm"], other.get("drill_length_mm"))
+                    if other_printed else tx("due valori diversi"))
+            found["disagree"].append(tx("pad {pad}: risposta principale {main}, lettura dedicata "
+                                        "{dedicated}", pad=number, main=_hole_text_mm(drill, length),
+                                        dedicated=seen))
+    elif main_printed:
+        sources["drill_mm"] = "read"
+        if dedicated is not None:
+            found["only_main"].append(number)
+    else:
+        printed_hole = None
+        if other_printed:
+            first, second = other["drill_mm"], other.get("drill_length_mm")
+            if second is None or abs(second - first) <= _PRINTED_HOLE_TOLERANCE_MM:
+                printed_hole = (first, None)
+            else:
+                # The dedicated reading gives a slot's width and length, not
+                # its axes on the pad (review E2): oriented to the pad, or
+                # left out when the pad cannot say.
+                printed_hole = _slot_along_pad(pin, first, second)
+                if printed_hole is None:
+                    found["slot_unoriented"].append(f"{number} ({_hole_text_mm(first, second)})")
+        if printed_hole is not None:
+            drill, length = printed_hole
+            pin["drill_mm"] = drill
+            if length is None:
+                pin.pop("drill_length_mm", None)
+            else:
+                pin["drill_length_mm"] = length
+            sources["drill_mm"] = "read"
+            found["only_dedicated"].append(number)
+        else:
+            if pin.get("drill_length_mm") is not None:
+                # A slot is never an estimate (contract: only when printed).
+                pin.pop("drill_length_mm", None)
+                length = None
+                found["slot_dropped"].append(number)
+            terminal, terminal_word = lead, lead_word
+            if (terminal is None and part_lead is not None and pad_type == "thru_hole"
+                    and (drill is None or lead_on_model_drill)):
+                # The part-level lead stands for a pad that declares none of
+                # its own (review E1): the same rule, its own provenance.
+                terminal, terminal_word = part_lead
+                lead, lead_word = terminal, terminal_word
+                found["part_lead"].append(number)
+            if terminal is not None:
+                estimate = estimated_round_pad(terminal)
+                word = "derived" if terminal_word in ("read", "derived") else "estimated"
+                pin["drill_mm"] = drill = estimate.drill_mm
+                sources["drill_mm"] = word
+                if size_word != "read":
+                    _write_derived_land(pin, estimate.pad_diameter_mm, declared_shape)
+                    size_word = word
+                    shape_word = "read" if declared_shape == "read" else word
+                    derived.append((pin, model_land, drill))
+                if _round_hole_loose_on_blade(terminal, drill):
+                    found["loose_blade"].append(number)
+            elif drill is not None:
+                sources["drill_mm"] = "estimated"
+                found["lead_withheld" if part_lead is not None and pad_type == "thru_hole"
+                      else "unfounded"].append(number)
+            # Neither a hole nor a terminal: nothing is invented, the pad
+            # stays without a hole (`_pads_without_holes`).
+    if (sources.get("drill_mm") == "read" and size_word != "read" and pad_type == "thru_hole"
+            and drill is not None and (length is None or abs(length - drill) <= _PRINTED_HOLE_TOLERANCE_MM)):
+        # A printed round hole without a printed land: the land follows the
+        # hole by the one rule, instead of the model's guess; a shape the
+        # pad says was read stays (review E3).
+        _write_derived_land(pin, estimated_pad_diameter(drill), declared_shape)
+        size_word = "derived"
+        shape_word = "read" if declared_shape == "read" else "derived"
+        derived.append((pin, model_land, drill))
+    sources["pad_size"] = size_word
+    sources["shape"] = shape_word
+    if lead is not None:
+        pin["lead"] = lead
+        sources["lead"] = lead_word
+    pin["sources"] = sources
+
+
+def _land_holds_hole(land: dict, drill: float) -> bool:
+    """Whether a land (sizes and shape) is a valid pad keeping MIN_ANNULAR_RING_MM around a round `drill`."""
+    sizes = [_optional_number(land.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+    return None not in sizes and min(sizes) >= drill + 2 * MIN_ANNULAR_RING_MM - 1e-9
+
+
+def _keep_derived_lands_apart(pins: list, derived: list, found: dict) -> None:
+    """Make sure no land the program derived makes copper overlap or crowd a neighbour (review G1).
+
+    A derived land (hole + HOLE_TO_PAD_ANNULUS_MM) ignores the pitch: Ø0.65
+    at 1.27 mm gives 1.45 mm pads that overlap. Each derived land must keep
+    MIN_PAD_GAP_MM of free copper from every other pad (the pin header's
+    minimum: KiCad's default clearance, above the usual fabrication minimum;
+    measured on the copper as KiCad draws it, `package_geometry.copper_separation`).
+    A land that does not:
+    1. takes the model's own land back when that keeps MIN_ANNULAR_RING_MM
+       around the hole and clears every neighbour (neighbours in the same
+       case tried with their model land too);
+    2. else is reduced, both sides by one amount, to the largest size that
+       clears its neighbours, two derived lands sharing the room between
+       them equally (each counted at most at the other's size);
+    3. else (the hole itself leaves no room) the model's land comes back
+       as it was, the case before the derived lands existed.
+    Every land changed here is marked "estimated" and named in the notes.
+    Pads without both coordinates or sizes are not measured.
+    """
+    from types import SimpleNamespace
+
+    from ..core.package_geometry import copper_separation, pad_copper_shape
+
+    gap = MIN_PAD_GAP_MM
+
+    def land_of(pin):
+        return {key: pin.get(key) for key in ("pad_length_mm", "pad_width_mm", "shape")}
+
+    def copper(pin, land):
+        """The copper (core, radius) of `pin` with `land`, or None when a value is missing."""
+        values = [_optional_number(pin.get("x_mm")), _optional_number(pin.get("y_mm")),
+                  _optional_number(land.get("pad_length_mm"), positive=True),
+                  _optional_number(land.get("pad_width_mm"), positive=True)]
+        if None in values:
+            return None
+        rotation = _optional_number(pin.get("rotation_deg")) or 0.0
+        return pad_copper_shape(SimpleNamespace(
+            x_mm=values[0], y_mm=values[1], pad_length_mm=values[2], pad_width_mm=values[3],
+            shape=str(land.get("shape") or "circle"), rotation_deg=rotation))
+
+    placed = [pin for pin in pins if copper(pin, land_of(pin)) is not None]
+    lands = {id(pin): land_of(pin) for pin in placed}
+
+    def clears(pin, land, now) -> bool:
+        own = copper(pin, land)
+        number = _pad_number_text(pin.get("number"))
+        for other in placed:
+            # Pads sharing a number are one pin: their copper may touch.
+            if other is pin or (number and _pad_number_text(other.get("number")) == number):
+                continue
+            shape = copper(other, now[id(other)])
+            if shape is not None and copper_separation(own, shape) < gap - 1e-9:
+                return False
+        return True
+
+    failing = [entry for entry in derived if id(entry[0]) in lands
+               and not clears(entry[0], lands[id(entry[0])], lands)]
+    if not failing:
+        return
+    trial = dict(lands)
+    for pin, model, drill in failing:
+        if _land_holds_hole(model, drill) and copper(pin, model) is not None:
+            trial[id(pin)] = model
+    # A model land that crowds a neighbour goes back to the derived land; the
+    # lands only grow, so this settles.
+    changed = True
+    while changed:
+        changed = False
+        for pin, model, _drill in failing:
+            if trial[id(pin)] is model and not clears(pin, model, trial):
+                trial[id(pin)] = lands[id(pin)]
+                changed = True
+    capping = [entry for entry in failing if trial[id(entry[0])] is not entry[1]]
+    for pin, model, _drill in failing:
+        if trial[id(pin)] is model:
+            pin.update({key: value for key, value in model.items() if value is not None})
+            _mark_pad_estimated(pin, "pad_size", "shape")
+            found["land_model"].append(_pad_number_text(pin.get("number")) or "?")
+    tops = {id(pin): float(lands[id(pin)]["pad_length_mm"]) for pin, _model, _drill in capping}
+
+    def fits(pin, size) -> bool:
+        now = dict(trial)
+        for other, _model, _drill in capping:
+            if other is not pin:
+                share = min(tops[id(other)], size)
+                now[id(other)] = {**trial[id(other)], "pad_length_mm": share, "pad_width_mm": share}
+        return clears(pin, {**trial[id(pin)], "pad_length_mm": size, "pad_width_mm": size}, now)
+
+    caps = {}
+    for pin, _model, drill in capping:
+        low, high = drill, tops[id(pin)]
+        if not fits(pin, low + 1e-6):
+            caps[id(pin)] = None
+            continue
+        for _step in range(40):
+            middle = (low + high) / 2
+            if fits(pin, middle):
+                low = middle
+            else:
+                high = middle
+        # Down to KiCad's 1 nm so the clearance is kept, never rounded away.
+        caps[id(pin)] = math.floor(low * 1e6) / 1e6
+    for pin, model, _drill in capping:
+        number = _pad_number_text(pin.get("number")) or "?"
+        size = caps[id(pin)]
+        if size is None:
+            pin.update({key: value for key, value in model.items() if value is not None})
+            _mark_pad_estimated(pin, "pad_size", "shape")
+            found["land_model"].append(number)
+            continue
+        pin["pad_length_mm"] = pin["pad_width_mm"] = size
+        _mark_pad_estimated(pin, "pad_size")
+        found["land_capped"].append(f"{number} ({size:.2f} mm)")
+
+
+def _widen_pad_around(pin: dict, drill: float) -> bool:
+    """Grow a pad on both axes by ONE amount until its smaller side keeps the ring around `drill`.
+
+    The pad keeps its orientation and its elongation (an oval stays oval, its
+    long axis where it was): only when the smaller side leaves less than
+    MIN_ANNULAR_RING_MM per side, both sides grow by the amount that brings
+    the smaller one to the estimated pad of that hole
+    (`estimated_pad_diameter`, the one rule of `core.tht_estimates`, review
+    G4). Returns True when the pad was widened.
+    """
+    sizes = [_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+    if None in sizes:
+        return False
+    smaller = min(sizes)
+    if smaller >= drill + 2 * MIN_ANNULAR_RING_MM:
+        return False
+    grow = estimated_pad_diameter(drill) - smaller
+    pin["pad_length_mm"] = round(sizes[0] + grow, 3)
+    pin["pad_width_mm"] = round(sizes[1] + grow, 3)
+    return True
+
+
+def _mark_pad_estimated(pin: dict, *keys) -> None:
+    """Mark `keys` of a pin's `sources` "estimated" (a pin without `sources` gains them)."""
+    sources = dict(pin.get("sources") or {})
+    for key in keys:
+        sources[key] = "estimated"
+    pin["sources"] = sources
 
 
 def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
@@ -10408,15 +12280,23 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     own diameter or smaller, whatever the part. When the drawing quotes the
     lead (`lead_diameter_mm`) and the matrix drill is not larger (TEL8 run of
     2026-10-10, 11:38: lead Ø0.5 and drill 0.5 «estimated»), the drill
-    becomes lead + LEAD_TO_HOLE_CLEARANCE_MM, marked «estimated» in
-    `value_sources` whatever the model declared -- a «read» hole smaller
-    than the lead was read wrong, and the note says so. A pad that no longer
-    clears the lifted drill is lifted too (drill + HOLE_TO_PAD_ANNULUS_MM)
-    and marked «estimated». Nothing happens without a lead diameter.
+    becomes the hole the one rule estimates for that lead
+    (`core.tht_estimates.estimated_hole`: lead + LEAD_TO_HOLE_CLEARANCE_MM
+    rounded up to its step, review G4), marked «estimated» in
+    `value_sources` -- a «read» hole smaller than a READ lead was read wrong,
+    and the note says so. A pad that no longer clears the lifted drill is
+    lifted too (`estimated_pad_diameter`) and marked «estimated».
+    Nothing happens without a lead diameter.
+
+    Provenance before value (2026-11-10): a lead that is itself an estimate
+    (or undeclared) never overrules a hole read from the drawing; the
+    conflict is only named. The explicit pads are judged pad by pad
+    (`_check_pad_leads`, `_lift_pad_drills_above_the_lead`).
 
     @param params Result under construction; drill, pad and sources updated.
     @param notes Notes of the result.
     """
+    _check_pad_leads(params, notes)
     lead, drill = params.lead_diameter_mm, params.drill_mm
     if isinstance(lead, (int, float)):
         _lift_pad_drills_above_the_lead(params, lead, notes)
@@ -10425,7 +12305,18 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     if drill > lead:
         return
     sources = dict(params.value_sources or {})
-    lifted = round(lead + LEAD_TO_HOLE_CLEARANCE_MM, 3)
+    if sources.get("drill_mm") == "read" and sources.get("lead_diameter_mm") not in ("read", "derived"):
+        # The two values cannot both be true and nothing tells which one is
+        # wrong: the unread lead does not move the hole, but a hole the lead
+        # cannot pass is no longer reported as a measure (review 2026-11-11):
+        # it joins the values to verify instead of passing as read.
+        notes.append(tx("ATTENZIONE foro letto {drill:.2f} mm non maggiore del terminale {lead:.2f} "
+                        "mm, che non e' letto dal disegno: foro non modificato, da verificare.",
+                        drill=drill, lead=lead))
+        sources["drill_mm"] = "estimated"
+        params.value_sources = sources
+        return
+    lifted = estimated_hole({"shape": "round", "diameter_mm": lead})
     notes.append(tx(
         "ATTENZIONE foro {drill:.2f} mm non maggiore del terminale {lead:.2f} mm "
         "(provenienza dichiarata: {source}): un terminale non passa in un foro del suo "
@@ -10437,7 +12328,7 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     sources["drill_mm"] = "estimated"
     pad = params.pad_diameter_mm
     if isinstance(pad, (int, float)) and pad < lifted + 2 * MIN_ANNULAR_RING_MM:
-        params.pad_diameter_mm = round(lifted + HOLE_TO_PAD_ANNULUS_MM, 3)
+        params.pad_diameter_mm = estimated_pad_diameter(lifted)
         sources["pad_diameter_mm"] = "estimated"
         notes.append(tx("Piazzola {pad:.2f} mm non piu' larga del foro corretto: portata a "
                         "{new:.2f} mm, valore STIMATO da verificare.",
@@ -10445,55 +12336,129 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
     params.value_sources = sources
 
 
-def _lift_pad_drills_above_the_lead(params: "ExtractedParams", lead: float, notes: list) -> None:
-    """The same structural rule on the explicit through-hole pads of `params.package_geometry`.
-
-    Only when every through-hole pad has the same hole (one lead for all);
-    with different holes a note names the narrow ones and nothing changes.
-    Each hole not wider than the lead becomes lead + LEAD_TO_HOLE_CLEARANCE_MM
-    and a pad that no longer keeps MIN_ANNULAR_RING_MM around it becomes
-    hole + HOLE_TO_PAD_ANNULUS_MM; one note names the pads and says the new
-    values are estimates. Pads of one size stay round (both sizes lifted).
-    """
+def _thru_hole_pins(params: "ExtractedParams") -> list:
+    """The through-hole pin dicts of the explicit geometry of `params` (empty without one)."""
     geometry = params.package_geometry
     pins = geometry.get("pins") if isinstance(geometry, dict) else None
-    lifted = round(lead + LEAD_TO_HOLE_CLEARANCE_MM, 3)
-    drills = {pin.get("drill_mm") for pin in pins or ()
-              if isinstance(pin, dict) and pin.get("pad_type") == "thru_hole"
-              and isinstance(pin.get("drill_mm"), (int, float))}
+    return [pin for pin in pins or () if isinstance(pin, dict) and pin.get("pad_type") == "thru_hole"]
+
+
+def _check_pad_leads(params: "ExtractedParams", notes: list) -> None:
+    """Judge every pad that declares its own terminal against ITS hole (`lead_passes`).
+
+    A per-pad terminal supersedes the part-level `lead_diameter_mm` for its
+    pad. A hole the terminal does not pass through:
+    - read from the drawing: never changed by the program (provenance before
+      value); the note names the pads, the footprint check reports them;
+    - not read: replaced by the hole estimated from that terminal
+      (`estimated_round_pad`), the pad widened on both axes by one amount
+      when it no longer keeps its ring, both marked "estimated".
+    """
+    contradicted, lifted, widened, loose = [], [], [], []
+    for pin in _thru_hole_pins(params):
+        lead = pin.get("lead")
+        drill = _optional_number(pin.get("drill_mm"), positive=True)
+        if not isinstance(lead, dict) or drill is None:
+            continue
+        length = _optional_number(pin.get("drill_length_mm"), positive=True)
+        try:
+            if lead_passes(lead, drill, length):
+                continue
+        except ValueError:
+            continue
+        number = str(pin.get("number", "?"))
+        if (pin.get("sources") or {}).get("drill_mm") == "read":
+            contradicted.append(number)
+            continue
+        pin["drill_mm"] = estimated_round_pad(lead).drill_mm
+        pin.pop("drill_length_mm", None)
+        lifted.append(number)
+        if _round_hole_loose_on_blade(lead, pin["drill_mm"]):
+            loose.append(number)
+        _mark_pad_estimated(pin, "drill_mm")
+        if _widen_pad_around(pin, pin["drill_mm"]):
+            widened.append(number)
+            _mark_pad_estimated(pin, "pad_size")
+    if contradicted:
+        notes.append(tx("ATTENZIONE pad {numbers}: il terminale dichiarato non passa nel foro letto "
+                        "dal disegno. Foro non modificato: terminale o foro letti male, da "
+                        "verificare sul disegno.", numbers=", ".join(contradicted)))
+    if lifted:
+        notes.append(tx("ATTENZIONE pad {numbers}: il foro non lasciava passare il terminale "
+                        "dichiarato dal pad: foro ricavato dal terminale, valore STIMATO da "
+                        "verificare.", numbers=", ".join(lifted)))
+    if widened:
+        notes.append(tx("Piazzole dei pad {numbers} allargate attorno al foro ricavato, "
+                        "conservandone l'orientamento: valori STIMATI da verificare.",
+                        numbers=", ".join(widened)))
+    if loose:
+        notes.append(_loose_blade_note(loose))
+
+
+def _lift_pad_drills_above_the_lead(params: "ExtractedParams", lead: float, notes: list) -> None:
+    """The part-level lead rule on the explicit through-hole pads that declare NO terminal of their own.
+
+    Only when every such pad has the same hole (one lead for all); with
+    different holes a note names the narrow ones and nothing changes. Each
+    hole not wider than the lead becomes the estimated hole of that lead
+    (`core.tht_estimates.estimated_hole`, the one rule, review G4) and
+    a pad that no longer keeps MIN_ANNULAR_RING_MM around it grows on both
+    axes by one amount (`_widen_pad_around`, its orientation kept); one note
+    names the pads, says «widened» only when a pad was, and marks the new
+    values estimated. A hole read from the drawing is left alone when the
+    part-level lead is not itself read (provenance before value): the note
+    names it.
+    """
+    pins = [pin for pin in _thru_hole_pins(params) if not isinstance(pin.get("lead"), dict)]
+    lead_word = (params.value_sources or {}).get("lead_diameter_mm")
+    lifted = estimated_hole({"shape": "round", "diameter_mm": lead})
+    drills = {pin.get("drill_mm") for pin in pins if isinstance(pin.get("drill_mm"), (int, float))}
     if len(drills) > 1:
         # Pads with different holes have different leads: the one lead
         # diameter of the answer may belong to some of them only, so nothing
         # is changed; a hole it would not pass is only named (audit D-D).
         narrow = sorted(str(pin.get("number", "?")) for pin in pins
-                        if isinstance(pin, dict) and pin.get("pad_type") == "thru_hole"
-                        and isinstance(pin.get("drill_mm"), (int, float))
-                        and pin["drill_mm"] <= lead)
+                        if isinstance(pin.get("drill_mm"), (int, float)) and pin["drill_mm"] <= lead)
         if narrow:
             notes.append(tx("ATTENZIONE fori dei pad {numbers} non maggiori del terminale "
                             "{lead:.2f} mm dichiarato; i pad hanno fori diversi, quindi il "
                             "terminale puo' riguardarne solo alcuni: fori non modificati, da "
                             "verificare.", numbers=", ".join(narrow), lead=lead))
         return
-    changed = []
-    for pin in pins or ():
-        if not isinstance(pin, dict) or pin.get("pad_type") != "thru_hole":
-            continue
+    changed, widened, protected = [], [], []
+    for pin in pins:
         drill = pin.get("drill_mm")
         if not isinstance(drill, (int, float)) or drill > lead:
             continue
+        number = str(pin.get("number", "?"))
+        if (pin.get("sources") or {}).get("drill_mm") == "read" and lead_word not in ("read", "derived"):
+            protected.append(number)
+            continue
         pin["drill_mm"] = lifted
-        for key in ("pad_length_mm", "pad_width_mm"):
-            size = pin.get(key)
-            if isinstance(size, (int, float)) and size < lifted + 2 * MIN_ANNULAR_RING_MM:
-                pin[key] = round(lifted + HOLE_TO_PAD_ANNULUS_MM, 3)
-        changed.append(str(pin.get("number", "?")))
-    if changed:
+        changed.append(number)
+        if isinstance(pin.get("sources"), dict):
+            _mark_pad_estimated(pin, "drill_mm")
+        if _widen_pad_around(pin, lifted):
+            widened.append(number)
+            if isinstance(pin.get("sources"), dict):
+                _mark_pad_estimated(pin, "pad_size")
+    if protected:
+        notes.append(tx("ATTENZIONE fori letti dei pad {numbers} non maggiori del terminale "
+                        "{lead:.2f} mm, che non e' letto dal disegno: fori non modificati, da "
+                        "verificare.", numbers=", ".join(protected), lead=lead))
+    if changed and widened:
         notes.append(tx(
             "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
             "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
             "(terminale + {clearance:.2f} mm), piazzole troppo strette allargate: valori STIMATI "
             "da verificare.", numbers=", ".join(changed), lead=lead, lifted=lifted,
+            clearance=LEAD_TO_HOLE_CLEARANCE_MM))
+    elif changed:
+        notes.append(tx(
+            "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
+            "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
+            "(terminale + {clearance:.2f} mm): valori STIMATI da verificare.",
+            numbers=", ".join(changed), lead=lead, lifted=lifted,
             clearance=LEAD_TO_HOLE_CLEARANCE_MM))
 
 

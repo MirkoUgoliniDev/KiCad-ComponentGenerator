@@ -1219,7 +1219,8 @@ class RereadWorker(QThread):
     def __init__(self, stored: dict, doc_paths: list[Path], document_roles: dict | None,
                  *, field: str, model: str | None = None, pad_model: str | None = None,
                  component_family: str | None = None, system_prompt: str | None = None,
-                 extra_instructions: str | None = None, part_number: str | None = None):
+                 extra_instructions: str | None = None, part_number: str | None = None,
+                 answers: dict | None = None):
         """@brief Snapshot the stored answer and the settings before leaving the GUI thread.
 
         @param stored Main answer of the extraction as kept with the project
@@ -1241,9 +1242,14 @@ class RereadWorker(QThread):
             when the re-read function accepts it.
         @param extra_instructions Optional user notes, forwarded likewise.
         @param part_number Part number (field «Sigla»), forwarded likewise.
+        @param answers The project's saved answers to structured questions
+            ({question key: value}), copied; forwarded as `answers=` when the
+            re-read function accepts it, as ExtractWorker does (review
+            2026-11-11, K4: a re-read used to ask again what was answered).
         """
         super().__init__()
         self.stored = deepcopy(stored) if isinstance(stored, dict) else {}
+        self.answers = dict(answers) if isinstance(answers, dict) and answers else None
         self.doc_paths = list(doc_paths or [])
         self.document_roles = ({name: (list(roles) if isinstance(roles, (list, tuple)) else roles)
                                 for name, roles in document_roles.items()}
@@ -1344,7 +1350,9 @@ class RereadWorker(QThread):
                                   system_prompt=self.system_prompt,
                                   extra_instructions=self.extra_instructions,
                                   part_number=self.part_number,
-                                  cancel=self.cancel_event),
+                                  cancel=self.cancel_event,
+                                  # None when the project has no answer.
+                                  **({"answers": dict(self.answers)} if self.answers else {})),
                 **phase_kwargs(reread, self._forward_phase))
             self.done.emit(params)
         except CallCancelled as exc:

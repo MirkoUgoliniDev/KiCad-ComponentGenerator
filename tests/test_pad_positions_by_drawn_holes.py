@@ -45,7 +45,11 @@ class FakeHoles:
     def __call__(self, pads, body):
         self.calls += 1
         #: Every point set checked, to prove the memo asks each one once.
-        self.seen.append(tuple(sorted((k, round(x, 4), round(y, 4)) for k, (x, y) in pads.items())))
+        # The body is part of the question (review 2026-11-10: the same pads
+        # are asked with the body in both orientations to measure which way
+        # it lies), so a «repeated» check is the same pads AND the same body.
+        self.seen.append((tuple(sorted((k, round(x, 4), round(y, 4)) for k, (x, y) in pads.items())),
+                          None if body is None else tuple(round(float(size), 4) for size in body)))
 
         def shape(points):
             points = list(points)
@@ -330,7 +334,7 @@ def test_the_hole_check_runs_once_per_layout():
 
 
 def test_both_mirror_images_are_tried_but_a_repeated_layout_is_not_rechecked():
-    """Negative: whatever the layouts offered, no point set is ever sent to the witness twice."""
+    """Negative: whatever the layouts offered, no point set is ever sent to the witness twice with the same body."""
     square = {"1": (0.0, 0.0), "2": (4.0, 0.0), "3": (4.0, 4.0), "4": (0.0, 4.0)}
     drawn = {"1": (0.0, 0.0), "2": (4.0, 0.0), "3": (4.0, 4.0), "4": (0.0, 4.0)}
     holes = FakeHoles(drawn)

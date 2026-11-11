@@ -1,6 +1,622 @@
 # STATO ATTUALE (aggiornare a ogni commit)
 
+## STATO 11/11/2026 — A1-A11 e la loro revisione COMMITTATI su FOOTPRINT-ADVANCE, NON mergiati, NON pushati
+
+Utente 11/11: «Ok ma non mergiare in main ancora». Suite completa VERDE a codice fermo: A 8057 passati 9 saltati 19
+sottotest, B 5060 passati 4 saltati = 13117 passati, 13 saltati, 19 sottotest. Hash del commit: vedi `git log -1` (riga
+aggiornata dal commit successivo di sola documentazione). data/analysis_profiles.sqlite3 sincronizzato (prompt single
+nuovo + catalogo) e controllato: nessun segreto.
+NON FATTO: nessuna analisi reale a pagamento coi prompt nuovi; nessuna revisione indipendente dopo l'ultimo giro di
+correzioni (X1, X2, coordinatore); difetti delle aree non coperte (sotto, «REVISIONE AREE NON COPERTE») solo elencati.
+La sezione «RIPRESA RAPIDA» qui sotto e' STORICA (stato delle 22:50 del 10/11): valgono ancora il ragionamento, le
+domande aperte per l'utente e le trappole; i «prossimi passi» 1-7 sono FATTI.
+
+## RIPRESA RAPIDA — 10/11/2026 ~22:50 (sessione vicina al limite: LEGGERE QUESTO PER PRIMO)
+
+Branch `FOOTPRINT-ADVANCE`, ultimo commit `03a1a60` (= main = origin, release v1.0.8). NIENTE committato dopo.
+Ultima suite completa VERDE: 12869 passati, 13 saltati, 19 sottotest (21:50), MA sul codice di PRIMA dei tre correttori:
+dopo il loro lavoro la suite va rifatta a codice fermo. Regola: commit solo con OK esplicito dell'utente.
+
+IN VOLO alle 22:50 — tre correttori (agenti) che stanno MODIFICANDO file; se la sessione muore il loro lavoro puo' essere
+a meta': prima di tutto `git status`, `git diff --stat`, poi i test mirati dei loro file.
+ FH drawing_holes.py + tests/test_drawing_holes.py + tests/test_drawing_holes_generality.py  -> A7 A8 A9 A10
+ FE datasheet_extractor.py + i18n.py + tests/test_extraction_settle_paths.py (+ test_extraction_body_axes.py) -> A4 A5 A6 A11
+ FP core/package_geometry.py, core/footprint.py, core/tht_estimates.py (nuovo), generators/package.py,
+    services/footprint_checks.py + tests/test_tht_estimates.py, test_pad_provenance.py,
+    test_footprint_checks_provenance.py -> meta' «modello e controlli» di A1 A2 A3
+ File gia' modificati sul disco alle 22:50: tutti quelli sopra + data/analysis_profiles.sqlite3 (catalogo i18n).
+ I loro rapporti finali NON sono ancora arrivati: nessun risultato va dato per fatto finche' non si rieseguono i test.
+
+FE HA FINITO (10/11 ~23:10, rapporto ricevuto, NON ancora ricontrollato dal coordinatore): A4 un solo scrittore
+ (_candidate_payload calcola il posizionamento con _write_chain_pads; _write_candidate/apply_answers copiano); A5
+ contratto: la rilettura da' un risultato PARZIALE (ExtractedParams.partial_reread, REREAD_SCOPES) e il chiamante lo
+ fonde con `datasheet_extractor.merge_reread(settled, reread)`; senza fusione la rilettura dell'altezza mette un
+ pin_map_conflict sui pad non riconfrontati; A6 coppia non ordinata (_dedicated_pair_fits_crossed,
+ _plan_prints_body_axes, _HoleVerdicts.measures_as_given, sonda pigra _body_axes_probe); A11 `answers_contradict`,
+ `contradicting_answers(answers, key)`, `remember_answer(answers, key, answer)`; 6 voci i18n. Test: 696 mirati verdi
+ col testimone dei fori di HEAD (plugin scratchpad fe/fe_shim.py); sull'albero ATTUALE 9 test di
+ tests/test_extraction_body_axes.py FALLISCONO perche' drawing_holes di FH ora da' confirmed/body_check=unverifiable
+ dove dava not_confirmed/body_scale e ha tolto BODY_ALLOWANCE_MM (ora body_allowance_mm(size, tol)): e' il GIRO 2, non
+ una regressione. Un test ha cambiato contratto a ragione: test_without_a_measure_the_two_body_readings_are_compared_as_
+ ordered -> ..._two_read_pairs_in_opposite_order_are_one_unordered_pair. Replay: HLK, SRD, VE12H identici salvo SRD che
+ ora CHIEDE la vista (A11, voluto).
+ GIRO 2 deve: scambio quando «come dato» non e' agrees e lo scambiato si'; measures_as_given = body_check agrees con
+ quote distinguibili; portare il test dell'allowance a body_allowance_mm.
+ COLLEGAMENTO GUI da fare (coordinatore, main_window.py): _on_reread_done ~10897: se params.partial_reread e
+ _last_extracted non e' None -> params = merge_reread(_last_extracted, params); progetto riaperto (_last_extracted
+ None): applicare solo l'ambito (altezza come _resolve_stored_body_height_question 10756-10763; pad: rifiutare o base
+ come _relaunch_base ~7291). Riga 10533: `key in answers and not contradicting_answers(answers, key)`; righe 10543 e
+ 10751: `self._extraction_answers = remember_answer(self._extraction_answers, key, answer)`. workers.py:1335
+ RereadWorker non passa answers=.
+ APERTO lasciato da FE (non nei 4 difetti): r2 B (M1) e C (M2); pad non ri-posizionati se il corpo cambia dopo; note
+ vecchie dei pad dopo una rilettura fusa; _body_axes_probe e' un callable nel dict della risposta (non JSON-abile).
+
+FP HA FINITO (10/11 ~23:15, rapporto ricevuto, NON ricontrollato dal coordinatore; test mirati verdi a suo dire: 1268
+ package/footprint + 71 nuovi): kicadgen/core/tht_estimates.py con LEAD_TO_HOLE_CLEARANCE_MM 0.25,
+ HOLE_TO_PAD_ANNULUS_MM 0.8, MIN_ANNULAR_RING_MM 0.15 (UNA fonte: guida KiCad «Getting Started»; la dicitura IPC-7251
+ dell'estrattore ritirata perche' non verificabile), ESTIMATED_DRILL_STEP_MM 0.05 (foro stimato arrotondato in su,
+ euristica dichiarata). API: normalised_lead, normalised_sources, unverified_values(sources), lead_circumscribed_
+ diameter, estimated_hole, estimated_pad_diameter, estimated_round_pad(lead) -> (drill_mm, pad_diameter_mm),
+ lead_passes(lead, drill_mm, drill_length_mm=None) (asola trattata come stadio). Esempi: Ø0.6 -> foro 0.85 pad 1.65;
+ lamella 1x0.4 -> foro 1.35 pad 2.15. ASSI: drill_mm corre lungo la LUNGHEZZA del pad, drill_length_mm lungo la
+ LARGHEZZA. PinSpec.lead / PinSpec.sources (validati), Pad.lead / Pad.sources (non scritti nel .kicad_mod),
+ package_geometry.mark_user_edited(before, after). build_package aggiunge ESTIMATED_PADS_NOTE alla descrizione del
+ footprint se un pad ha valori stimati/derivati (DA DIRE all'utente: cambia `descr`). Controlli nuovi in
+ footprint_checks: check_hole_vs_lead (errore), check_estimated_pads (avviso), annular_rings per asse. Difetti chiusi:
+ drill_mm su pad senza foro RIFIUTATO (prima perso in silenzio), number null rifiutato, circle/oval a 1 nm.
+ DA FARE per FP (altri file): (1) main_window._apply_package_pad_dialog ~27897: dopo `updated = replace(pin, **fields)`
+ chiamare `updated = mark_user_edited(pin, updated)`; (2) estrattore: importare le 3 costanti da core.tht_estimates,
+ produrre lead/sources per pin, e GESTIRE il cambio di comportamento: single_answer_to_data (~5579) copia drill_mm
+ qualunque sia pad_type -> ora package_from_mapping solleva ValueError per «smd» + drill_mm; controllare
+ _pad_number_text(None); (3) i18n.py: ~15 stringhe nuove di FP SENZA voce di catalogo (messaggi di validazione in
+ package_geometry.py/tht_estimates.py, i due messaggi «anello di rame ... lungo la larghezza/lunghezza», «il terminale
+ dichiarato ... non passa nel foro», «Pad con valori stimati o derivati...», «dimensione», «forma», i due hint
+ hole_vs_lead ed estimated_pad in GEOMETRY_HINTS): le traduzioni EN/FR/DE erano nel rapporto dell'agente (perso se la
+ sessione cade: rifarle dai testi italiani nei file). APERTO dichiarato da FP: orientamento della lamella non nel
+ contratto; pad stimati sempre tondi; PinSpec.__hash__ esclude lead/sources.
+
+COORDINATORE 10/11 ~23:30 — COLLEGAMENTI GUI FATTI (main_window.py, non committati): A11 in
+ _review_extraction_questions (risposta salvata applicata solo se contradicting_answers e' vuoto; remember_answer al
+ salvataggio) e in _resolve_stored_body_height_question (remember_answer); A5 in _on_reread_done (merge_reread con
+ _last_extracted; progetto riaperto + rilettura altezza -> nuovo _apply_reread_height_alone: solo l'altezza, pad come
+ salvati); FP in _apply_package_pad_dialog (mark_user_edited). Test nuovo tests/test_extraction_answers_reread_gui.py
+ (6 test, positivi/negativi) + test_extraction_questions_gui.py + test_unread_pads_gui.py: 38 passati. NON fatto: voci
+ i18n delle 4 stringhe nuove di _apply_reread_height_alone («Rilettura dell'altezza: le quote lette non coincidono...»,
+ «...nessuna quota letta...», «Rilettura dell'altezza applicata al solo corpo...»); workers.py RereadWorker answers=;
+ tooltip dei pad stimati.
+INTERRUZIONE 10/11 ~23:40: limite d'uso di 5 ore. FERMATI A META' (lavoro salvato, riprendibili con SendMessage
+ dopo le 00:20): FH (drawing_holes, ultimo messaggio «Now the outline rectangle functions») e FE2 (giro 2
+ dell'estrattore, nessun rapporto). Il codice di drawing_holes.py e datasheet_extractor.py puo' essere A META':
+ verificare con i test mirati prima di qualunque altra cosa. Ripresa alle 06:22 dell'11/11.
+ STATO 11/11 06:25: tutto si importa; test mirati 139 passati, 14 FALLITI = 5 in test_drawing_holes_generality.py
+ (FH a meta') + 9 in test_extraction_body_axes.py (attesi: l'estrattore non consuma ancora il contratto nuovo).
+ RIPRESI con SendMessage: FH (finire drawing_holes) e FE2 con ORDINE CAMBIATO: prima parte 3 (i18n, comprese le 3
+ stringhe nuove di _apply_reread_height_alone) e parte 2 (terminale/foro stampato/provenienza per pad), POI parte 1
+ (contratto body_check) solo quando il coordinatore gli dice che drawing_holes e' definitivo.
+
+FH HA FINITO (11/11 ~06:45; i suoi file verdi: test_drawing_holes.py, test_drawing_holes_generality.py 47 test,
+ documentation; script e confronti in scratchpad/fh/): CONTRATTO DEFINITIVO di drawing_holes.py: LayoutCheck/
+ MeasuredLayout.body_check in agrees|contradicted|unverifiable|none, scale_verified (solo con agrees); motivi nuovi
+ «unverifiable»: page_skewed, unanchored (anche in MeasureOutcome); tolto BODY_ALLOWANCE_MM, aggiunti
+ body_allowance_mm(size, tol) = 2*tol + 0.05*size, PAGE_STRETCH_RATIO 0.02, MAX_SKEW_DEG 45, MIN_WITNESS_PADS 2,
+ BODY_SCALE_RATIO 0.05, OUTLINE_EDGE_PX 1 (euristiche DICHIARATE). A8: conferme a 3 pad per caso su 1000 letture
+ sbagliate: 29 -> 0. A9: smentita solo con una scala uniforme che porta entrambe le quote sul rettangolo; cornice,
+ cella, corpo smussato, UNA quota letta male, quote SCAMBIATE -> confirmed/unverifiable (PERDITA DA DIRE ALL'UTENTE:
+ una sola quota del corpo letta male non e' piu' smentita dal contorno; resta la seconda lettura del corpo). A10:
+ pagina inclinata -> page_skewed (cerca fino a 45 gradi), stiramento come rapporto; 6% su un pezzo piccolo a 10 px/mm
+ passa (limite dichiarato). Pagine vere HLK, SRD, T7NS, VE12H: confermate come prima, ora «agrees»; TEL no_match come
+ prima. LIMITI dichiarati: cornice interna nella tolleranza di un corpo scalato male -> falso agrees; cornice con le
+ stesse proporzioni del corpo presa per il corpo; la miglior prova (posizione del corpo rispetto ai pad) non e' passata
+ al modulo. DA FARE: 3 test di tests/test_drawing_outline.py (contratto cambiato: una quota sbagliata -> unverifiable;
+ BODY_ALLOWANCE_MM -> body_allowance_mm) — FATTI dal coordinatore 11/11 ~06:55 con gemello positivo (corpo scalato
+ uniformemente -> contradicted) e negativo (una quota sola -> unverifiable): drawing_outline + drawing_holes* = 117
+ passati; FE2 avvisato che drawing_holes e' definitivo (fa la parte 1 dopo le parti 3 e 2); estrattore: provare i due ordini e scambiare se uno
+ solo da' agrees, messaggi per page_skewed e unanchored, scale_verified nelle note.
+
+FE2 HA FINITO (11/11 ~07:30): parti 3, 2, 1 fatte; mirati 868 passati (piu' 72 dopo ritocchi ai commenti); suite
+ completa NON eseguita. i18n: 18 voci per le stringhe di FP e del coordinatore + 21 sue. Parte 2: schema per pad
+ `_PAD_TERMINAL_PROPERTIES` (lead, hole_callout, drill_length_mm solo stampato, value_sources per pad) in entrambi gli
+ schemi; `printed_holes` nella lettura dedicata; regola unica `_resolve_pad_terminals`/`_resolve_one_pad` con
+ tht_estimates; `_check_pad_leads` (foro letto mai cambiato); costanti importate da core/tht_estimates; note «Valori
+ STIMATI o ricavati dal programma nei pad…». Pad senza foro + drill_mm -> foro tolto con nota; numero nullo ->
+ AnswerShapeError (un retry correttivo). Prompt single cambiato: vecchio digest in SUPERSEDED_SINGLE_PROMPT_DIGESTS,
+ NESSUN bump di SCHEMA_VERSION; data/analysis_profiles.sqlite3 cambiera' al prossimo avvio (da committare). Parte 1:
+ _HoleVerdicts prova entrambi gli ordini e decide con body_check (_body_agrees); sonda pigra rimossa (risposta
+ JSON-abile); note «scala verificata» / «conferma della sola forma»; messaggi per page_skewed e unanchored. Test nuovi:
+ tests/test_extraction_pad_terminals.py (20) + aggiunte in test_extraction_body_axes.py; test cambiati di contratto:
+ test_extraction_pin_labels_and_units.py::test_a_null_pad_number... (numero nullo ora rifiutato), 4 in body_axes.
+ Replay 37 corse: 36 identiche, SRD chiede la vista (A11 voluto); SRD 19.1 x 15.5 con pad giusti in tutte; l'analisi col
+ corpo scambiato non blocca. APERTI: un «read» del modello per un foro inventato viene creduto; confronto dei fori
+ stampati esatto (1e-4); D5; descr del .kicad_mod cambia per quasi ogni THT nuovo (ESTIMATED_PADS_NOTE) DA DIRE.
+TOOLTIP FATTO (11/11 ~07:45): _pad_tooltip(number, sources=None) aggiunge «Stimato dal programma, da verificare sul
+ disegno: foro, dimensione» (voce i18n nuova); chiamata nel disegno del package con pin.sources; 2 test in
+ tests/test_preview_pad_tooltips.py (+/-). 69 passati con i18n, untranslated, documentation.
+REVISIONE DEL DIFF IN CORSO (11/11 ~07:50, sola lettura): R1 generality-auditor su tutte le regole nuove; R2
+ adversarial-reviewer su datasheet_extractor.py (diff); R3 adversarial-reviewer su drawing_holes.py + core/ +
+ footprint_checks + package.py + main_window (diff).
+R1 GENERALITY-AUDITOR FINITO (11/11 ~08:10): nessuna regola su nomi, nessun valore tarato sul rele' (la stima da'
+ 0.85/1.35 contro i fori stampati 0.9/1.3). DIFETTI NEL CODICE NUOVO (da correggere, sono parte del lavoro autorizzato):
+ G1 ALTO confermato: foro stampato senza piazzola stampata -> piazzola tonda foro + 0.8 SOVRASCRIVE quella del modello
+  senza guardare il passo: Ø0.65 a passo 1.27 -> pad 1.45, rame sovrapposto (_resolve_one_pad ~11544-11558).
+ G2 MEDIO-ALTO: il testimone tratta ogni quota del corpo come nominale: corpo «max» quadrato disegnato al nominale ->
+  contradicted/body_scale su lettura giusta (_body_on_page ~4476 non guarda body_quote_kind; fix: con max/min il
+  contorno puo' solo limitare, mai smentire). Esisteva anche prima.
+ G3 MEDIO sospetto: value_sources.drill_mm «read» a livello di risposta si estende a OGNI pad che non dichiara nulla
+  (~11438, 11505): con fori misti uno stampato rende «letti» anche quelli inventati. Test senza gemello negativo.
+ G4 BASSO-MEDIO: due regole per la stessa stima (_lift_* usano round(lead+0.25,3), il percorso per pad arrotonda a 0.05).
+ G5 MEDIO dichiarato: lamella larga (faston 6.3x0.8) -> foro tondo 6.6 e pad 7.4: assurdo, nessun avviso.
+ G6 BASSO: fori stampati confrontati a 1e-4: «Ø1.02 [.040]» o «Ø1.3+0.1» danno disaccordo (lato prudente).
+ DA DIRE ALL'UTENTE: PAGE_STRETCH_RATIO 2% contro 1.6% peggiore pagina vista; parti a 2-3 pad disegnate con cerchi
+  semplici (TO-92, TO-220) ora «unanchored», mai confermate; cornice quadrata attorno a corpo quadrato presa per il corpo.
+R3 REVISORE CORE+GUI FINITO (11/11 ~08:20; script scratchpad/r3/s1.py, s2.py). DIFETTI NEL CODICE NUOVO:
+ K1 ALTO CONFERMATO: progetti salvati con v1.0.8 che hanno un pad SMD con foro (l'estrattore di HEAD copiava drill_mm
+  qualunque fosse pad_type; pad_type mancante = smd) NON SI APRONO PIU': package_geometry.py:195-198 rifiuta, via
+  project_state.py:111/257 -> ProjectConfigError; nelle bozze di recupero (main_window ~20131) i pad cadono in silenzio.
+  Fix: SOLO nel caricamento (migrazione accanto a _migrated_pad_shapes) togliere drill_mm/drill_length_mm dai pad senza
+  foro con nota nel log; il rifiuto resta per i dati nuovi.
+ K2 MEDIO-ALTO: rilettura dei PAD in un progetto riaperto (_last_extracted None) va a _on_extracted col risultato
+  parziale grezzo (quote del corpo della risposta grezza, body_conflict nuovo). Fix: rifiutarla o costruire la base dal
+  progetto salvato come _relaunch_base.
+ K3 MEDIO: _apply_reread_height_alone sostituisce TUTTA _extraction_questions (perde pad_layout/contacts_view salvate).
+ K4 MEDIO: domanda «height_equals_plan» della rilettura scartata, altezza dubbia applicata come dichiarata; RereadWorker
+  senza answers=. Fix: passare tutte le domande dell'ambito dalla revisione normale.
+ K5 MEDIO: una stima che l'utente controlla e trova GIUSTA non si toglie mai (mark_user_edited: valore ridigitato
+  uguale resta stimato), mentre il suggerimento dice il contrario. Fix: OK del dialogo pad con dimensioni = lettura
+  dell'utente, o comando esplicito «valori verificati».
+ K6 BASSO-MEDIO: spin box a 3 decimali tolgono il segno «stimato» senza che l'utente tocchi le misure (1.5875 -> 1.588).
+ K7 BASSO: nota nel descr con elenco pad illimitato e voci vuote per pad senza numero.
+ K8 BASSO: il suggerimento hole_vs_lead chiede di correggere il terminale ma nessuna UI lo modifica.
+ K9 BASSO sospetto: percorso «solo altezza» lascia _extraction_applied_revision None, senza _autosave_suspended, e
+  azzera anche un rinvio STEP «missing» non legato all'altezza.
+ K10 BASSO sospetto: nello stesso giro di domande una risposta salvata gia' messa in `answers` puo' essere contraddetta
+  da una data dopo (togliere da answers le chiavi tolte da remember_answer).
+ PULITO: formato .kicad_mod identico per i progetti vecchi; PinSpec hash/uguaglianza/round trip; i18n segnaposto 0
+  difformita'; drawing_holes ha come unico chiamante l'estrattore.
+K1 CORRETTO dal coordinatore (11/11 ~08:35): project_state.without_stray_holes + HOLED_PAD_TYPES; saved_package_
+ geometry(..., stray_holes=) lo applica al caricamento con nota nel log (voce i18n nuova); stessa pulizia nella bozza di
+ recupero (_footprint_state_from_json). Test tests/test_project_stray_holes.py (3, +/-); 62 passati con project_state,
+ package_project_gui, documentation, i18n.
+R2 REVISORE ESTRATTORE FINITO (11/11 ~08:40; script scratchpad/r2/s1-s4.py, diff salvato r2/fe.diff):
+ E1 ALTO CONFERMATO: pad THT senza foro stampato e senza lead per pad -> «il pin 1 richiede drill_mm», ExtractionError
+  DOPO le chiamate pagate; ignorato lead_diameter_mm di parte (che il prompt stesso permette); risposta «grid» senza
+  drill idem; nota falsa «ne' foro ne' terminale» quando il terminale di parte c'e'. Fix: lead_diameter_mm come lead
+  tondo di ripiego; senza foro ne' terminale -> geometria non letta (blocco con rimedio), mai eccezione.
+ E2 ALTO CONFERMATO: asola letta solo dalla lettura dedicata scritta con gli assi invertiti rispetto al pad -> validazione
+  fallisce, analisi persa. Fix: lato lungo dell'asola sull'asse lungo del pad; pad quadrato -> chiedere.
+ E3 MEDIO: foro stampato forza la forma «circle» anche con shape «read» (si perde il pad quadrato del pin 1).
+ E4 MEDIO: _replace_by_confirmed_reading/_UNIFORM_PAD_FIELDS perde lead, value_sources, drill_length_mm.
+ E5 MEDIO: merge_reread porta nel risultato fuso la nota falsa «pad non riconfrontati» e altre note fuori ambito.
+ E6 MEDIO sospetto: answers_contradict su contacts_view tratta come contraddizione due viste speculari legittime
+  (digest diversi): con documenti che hanno entrambe le viste le risposte non si stabilizzano.
+ E7 BASSO: eccezione della sonda «scambiato» butta la conferma «come dato»; E8 BASSO: fori stampati presi da una lettura
+  dedicata smentita dal disegno; E9 BASSO: cache dei verdetti non svuotata dopo lo scambio (solo testo).
+PIANO CORREZIONI GIRO 3 (11/11 ~08:45, sono difetti del codice NUOVO = lavoro gia' autorizzato):
+ X1 (fixer) datasheet_extractor.py + test: G1, G2, G3, G4, G5 (avviso), G6, E1-E9.
+ X2 (fixer) main_window.py, workers.py, generators/package.py, footprint_checks.py + test: K2, K3, K4, K6, K7, K8, K9,
+  K10. K5 (stima verificata dall'utente e trovata giusta) = comportamento nuovo: CHIESTO all'utente.
+ DECISIONE UTENTE 11/11 ~09:00 («ok»): casella «Valori verificati sul disegno» nel dialogo del pad; spuntata -> foro,
+ dimensione e forma di quel pad diventano «read»; spostare o ruotare il pad NON toglie il segno. Affidata a X2 (che puo'
+ toccare anche core/package_geometry.py per una funzione accanto a mark_user_edited).
+X1 HA FINITO (11/11 ~09:30; script scratchpad/x1/, confronto replay x1/cmp2.txt): E1-E9 e G1-G6 corretti; test nuovo
+ tests/test_extraction_review_round3.py (40); contratto cambiato: test_extraction_settle_paths::test_a_height_reread_
+ alone_never_passes... (partial_reread porta anche «notes»). Mirati 470 + 262 passati. Replay: posizioni, corpi, viste e
+ conflitti IDENTICI in tutte le 37 corse; cambiano fori/piazzole/provenienza: HLK (terminale Ø0.8 letto -> foro 1.05
+ pad 1.85 «derived» al posto di 1.1/1.8 del modello), SRD a6/a7 (1.3 uniforme -> 0.85/1.65 derived), VE12H (fori 1.2/
+ 1.0 ora «estimated» perche' la lettura dedicata delle vecchie risposte non trascriveva fori stampati: valori invariati;
+ il disegno li STAMPA «3-Ø1.2» «2-Ø1.0», una nuova analisi li rileggera'). Chiave contacts_view con suffisso
+ «~mirror:d1,d2» (viste speculari non contraddittorie). G1 usa pin_header.MIN_PAD_GAP_MM 0.2 mm. G5 euristica
+ dichiarata, al limite sulle lamelle piccole (1x0.4: 0.475 contro 0.4). APERTI: _unread_pads_block nella GUI dice
+ sempre «posizioni non lette» anche quando manca il foro (passato a X2); le note dicono ancora «terminale + 0.25 mm»
+ ma il foro e' arrotondato a 0.05; G1 non ottimizzato globalmente.
+X2 HA FINITO (11/11 ~10:00): K2 (SCELTA: rilettura dei PAD rifiutata se la sessione non ha un risultato d'analisi —
+ voce disabilitata con il motivo, nessuna chiamata pagata; risultato tardivo scartato), K3/K4 (solo domande
+ dell'ambito altezza, passano dalla revisione normale; RereadWorker riceve answers=), K9, K10, K6 (PAD_DIALOG_DECIMALS 3,
+ _pad_dialog_value: valore entro mezza unita' = non toccato; FRAGILE: un valore ridigitato uguale all'arrotondato resta
+ l'originale), K7 (elenco compresso, 8 voci, poi conteggio; file identico senza provenienza), K8, K5
+ (mark_user_verified + casella «Valori verificati sul disegno»), blocco «fori non letti» distinto da «posizioni non
+ lette» (_unread_pad_holes salvato). Test nuovo tests/test_review_round3_gui.py (27) + aggiunte in test_pad_provenance e
+ test_footprint_checks_provenance; nessun test esistente cambiato. 1339 + 168 passati, 2 ROSSI in
+ tests/test_unread_pad_positions.py (test_a_malformed_value_beside_a_null_coordinate_is_still_an_error[pad_length_mm
+ --1.0] e [number-None]) attribuiti alle modifiche di X1 all'estrattore: DA ANALIZZARE (coordinatore).
+ DA DIRE: in un progetto riaperto «Rileggi solo le posizioni dei pad» ora e' disabilitata (motivo nel tooltip).
+2 ROSSI ANALIZZATI E CHIUSI (coordinatore 11/11 ~10:15): [number-None] = contratto cambiato a ragione (pad senza
+ numero -> AnswerShapeError «Pad senza numero stampato», un retry correttivo): test aggiornato col motivo;
+ [pad_length_mm--1.0] = REGRESSIONE VERA: la piazzola ricavata (regola unica) sovrascriveva un valore malformato del
+ modello, errore nascosto. Fix: _reject_malformed_pad_sizes (datasheet_extractor, prima di _resolve_pad_terminals);
+ test nuovo +/- test_a_malformed_size_is_reported_even_where_the_program_would_derive_the_land. 114 passati.
+SUITE COMPLETA 11/11 ~10:20 (claude-test-full-r3): ROSSA, 3 falliti: A 8055 passati 2 falliti 9 saltati 19 sottotest,
+ B 5059 passati 1 fallito 4 saltati. Cause e correzioni (coordinatore ~11:20):
+ - test_fixD_extractor::test_a_read_drill_smaller_than_the_lead...: con il terminale NON letto il foro letto 0.4 restava
+   «read» pur impossibile (terminale 0.5). FIX in _lift_drill_above_the_lead: valore invariato ma drill_mm -> «estimated»
+   (va fra i valori da verificare); test riscritto con gemello: terminale letto -> foro alzato a 0.75 / pad 1.55.
+ - test_pad_positions_by_drawn_holes::test_both_mirror_images...: ora i pad sono chiesti col corpo nei due versi
+   (misura dell'orientamento): FakeHoles.seen registra pad + corpo; il contratto e' «mai la stessa domanda due volte».
+ - test_single_component_prompt::test_explicit_pad_holes...: solo il testo della nota (ora «Pad 1, 2, 5: foro non
+   stampato ...»); valori 1.55 / 2.35 invariati.
+ 235 passati su quei file + i collegati. SUITE RILANCIATA 11/11 ~11:25: basetemp .venv/claude-test-full-r4, log
+ scratchpad/suite-r4.log.
+ SUITE COMPLETA VERDE 11/11 (claude-test-full-r4, codice fermo, exit 0): A 8057 passati 9 saltati 19 sottotest,
+ B 5060 passati 4 saltati = 13117 passati, 13 saltati, 19 sottotest. Albero: 33 voci in git status, 20 file tracciati
+ modificati (+4321 / -422) piu' i file nuovi. NIENTE committato: in attesa dell'OK dell'utente. Al commit: skill
+ pre-commit-check, data/analysis_profiles.sqlite3 (cambia all'avvio per prompt e catalogo), riallineare la baseline in
+ .claude/CLAUDE.md e i numeri in testa a questo file.
+ CORREZIONE: gli orari annotati dopo «06:22 dell'11/11» sono stime sbagliate in eccesso (alle 08:49 reali la suite r4
+ era al 50% della meta' A, lanciata verso le 08:35); l'ORDINE degli eventi e' giusto.
+PROSSIMO (coordinatore, 11/11 ~07:30): tooltip dei pad stimati in main_window; poi generality-auditor +
+ adversarial-reviewer sull'intero diff (sola lettura); poi suite completa a codice fermo.
+
+RAGIONAMENTO DA NON PERDERE (decisioni del coordinatore, alcune DA DIRE/CONFERMARE all'utente)
+1. Filo comune trovato dalla revisione: nessuna regola su nomi o marche nel codice (pulito ovunque), ma (a) il
+   testimone dei fori disegnati ha soglie tarate sulle stesse 2-3 pagine (rele', DC/DC); (b) il modello AI inventa
+   fori/piazzole/forma a ogni corsa e nulla li segna come stime; (c) percorsi diversi (fori / lettura concorde /
+   domanda / rilettura) scrivono lo stesso dato in modi diversi. La cura generale e': UN solo scrittore per percorso,
+   provenienza per singolo dato, il PROGRAMMA (non il modello) fa le stime con una regola unica.
+2. Fori del rele' (R1 dell'utente): anteprima = file = KiCad 10 (verificato da un agente con kicad-cli). Il programma
+   disegna fedelmente una stima: pad 2/3/4 ovali 2.1x1.7 foro 1.3 scelti dal modello. Il T7NS5D4-12 ha lo STESSO
+   schema di fori e il suo disegno stampa Ø1,3+0,1 per tutti e cinque (footprint salvato 1.5: sbagliato). L'utente
+   non ha mai detto che cosa esattamente «non corrisponde»: ipotesi A1+A2+A3, possibile anche A11 (vista).
+3. Contratto body_check / scale_verified (drawing_holes -> estrattore): un rettangolo attorno ai fori SMENTISCE il
+   corpo solo se ha le proporzioni del corpo dichiarato (criterio senza scala); altrimenti «unverifiable» e la
+   conferma e' di sola forma. CONSEGUENZA DA GESTIRE NEL GIRO 2: lo scambio degli assi fatto stasera scatta oggi su
+   reason «body_scale»; col nuovo contratto l'estrattore deve provare le due assegnazioni quando gli assi non sono noti
+   e scambiare se UNA SOLA da' body_check «agrees». Finche' non e' fatto, il replay del rele' puo' cambiare.
+   Conferma di sola forma: i fori possono scegliere fra due letture che differiscono nella FORMA; se differiscono solo
+   per scala uniforme non devono scegliere (entrambe tornano) -> domanda all'utente; nota «scala non verificata».
+4. Contratto dati A1-A3 (confermato dall'utente «ok procedi»): pin di package_geometry con `lead` {shape: round,
+   diameter_mm} | {shape: flat, width_mm, thickness_mm} e `sources` {drill_mm, pad_size, shape, lead: read|derived|
+   estimated}. Assenti = progetto vecchio, comportamento e file identici byte per byte. Foro non stampato -> il
+   programma lo ricava: diametro circoscritto del terminale + LEAD_TO_HOLE_CLEARANCE_MM (0.25), piazzola TONDA = foro
+   + HOLE_TO_PAD_ANNULUS_MM (0.8); asola solo se stampata. Un pad modificato a mano smette di essere «stimato».
+5. A11: extraction_answers del rele' ha «top» (05/11) e «bottom» (10/11 19:28) sotto due chiavi con hash del layout;
+   l'ultima corsa ha ripreso «top». Regola generale chiesta a FE: risposte salvate contraddittorie alla stessa domanda
+   sugli stessi pad -> ridomandare, mai riusare la vecchia in silenzio. All'utente va chiesto quale vista vale per il
+   rele' (cambia 2/3 = NC/NO e i pin bobina).
+6. Punto (c) del 10/11 (pad smentiti dai fori disegnati comunque in anteprima): MAI deciso dall'utente. Proposta:
+   lasciarli visibili e segnarli «non confermati/smentiti», non nasconderli.
+
+PROSSIMI PASSI, IN ORDINE
+ 1. Leggere i rapporti di FH, FE, FP (o, se persi, ricostruire da git diff) e rieseguire i loro test mirati.
+ 2. Aggiungere al catalogo i18n le stringhe nuove di FP (IT/EN/FR/DE) — FP non poteva toccare i18n.py.
+ 3. GIRO 2 sull'estrattore (un solo agente sul file): consumare body_check/scale_verified; schema e prompt per pad
+    (terminale, foro stampato, provenienza); usare core/tht_estimates; lettura dedicata che rilegge i fori stampati;
+    spostare le tre costanti in tht_estimates. Cambiano i prompt -> SCHEMA_VERSION/migrazione profili se serve,
+    data/analysis_profiles.sqlite3 nel commit.
+ 4. Coordinatore in main_window.py (nessun agente lo ha toccato): tooltip e segno dei pad stimati; il dialogo pad
+    deve conservare `lead`/`sources` e togliere «estimated» su modifica manuale; collegamento A5 (_on_reread_done
+    ~10897: la rilettura dell'altezza tocca solo il corpo) e A11 (~10517-10760). Poi STEP: sezione del terminale per
+    pad in step_generator (C1) solo se autorizzato.
+ 5. generality-auditor + adversarial-reviewer sull'intero diff; replay offline HLK-5M05B, SRD-05VDC-SL-C, VE12H-K
+    (scratchpad/replay/replay_project.py: lo scratchpad e' della sessione e puo' sparire; gli script si rifanno dal
+    log, righe AI_CALL_RESULT di analisi-ai.log) = stessi pad di prima salvo dove una correzione li cambia a ragione.
+ 6. Suite completa a codice fermo: `.venv/Scripts/python.exe tools/run_test_halves.py both -- --basetemp=.venv/<nuova>`.
+ 7. Riallineare i numeri in CLAUDE.md e qui; pre-commit-check; chiedere l'OK al commit.
+
+DA CHIEDERE ALL'UTENTE (una domanda per volta)
+ a. Quali difetti delle AREE NON COPERTE correggere (elenco piu' sotto, «REVISIONE AREE NON COPERTE»): alti = C1, C2
+    (STEP), P1, P2, P3 (foto), G1-1, G1-2 (finestra principale). NESSUNO e' autorizzato, nessuno verificato dal
+    coordinatore.
+ b. Vista del rele': top o bottom (A11).
+ c. Punto (c): pad smentiti segnati invece che nascosti.
+ d. Parallasse foto (P3): chiedere la distanza della fotocamera o allargare l'incertezza dei corpi alti.
+ e. Maniglie dei canvas (CV2): una regola unica per le due schede.
+ f. T7NS5D4-12, TEL 87-2411WI, RS485, ESP32: non rielaborabili offline (log senza risposte); serve una nuova analisi a
+    pagamento, solo con OK.
+
+TRAPPOLE
+ - Suite completa non valida se si edita o gira un altro pytest; due meta' separate (crash nativo Qt/VTK).
+ - Heredoc del tool Bash: collassano le barre rovesciate; script sempre con Write.
+ - I test dei correttori usano basetemp .venv/claude-test-fh-*, -fe-*, -fp-*.
+ - Il medio/basso della revisione estrazione (M1-M13 e bassi) NON e' autorizzato: non correggerlo «gia' che ci sono».
+
 ## 09/11 sera — FATTO e committato `d8303a3` su FOOTPRINT-ADVANCE (base 9a7a2b0), mergiato in main (utente: «commita pusha, mergia in main ... e poi crea release»): canvas H1/H2, tracker del puntatore, pad non letti dall'AI; SUITE COMPLETA VERDE (codice fermo): A 7862 passati 9 saltati 19 sottotest, B 4988 passati 4 saltati = 12850 passati, 13 saltati, 19 sottotest. Release v1.0.8 dopo il verde di «Tests» su GitHub. CORSA GITHUB 42684630650 ROSSA (1 test): test_symbol_outline_hit[motor_dc-circle] cadeva sul runner senza KiCad (il glifo motor_dc viene dalla libreria di KiCad, non posato) -> il test usa ora `glyph_library` e la libreria di prova scritta a mano ha un «Motor_DC» con corpo a cerchio NON riempito (167 test dei 5 file della libreria di prova verdi), commit f47be08; corsa GitHub 42689543395 VERDE. RELEASE v1.0.8 PUBBLICATA (10/11): publish-release.ps1 -> commit f436404 «release: v1.0.8», tag v1.0.8, release.yml 42694219277 verde, https://github.com/MirkoUgoliniDev/KiCad-ComponentGenerator/releases/tag/v1.0.8 con KiCadGen-1.0.8.msi (486 086 916 byte). FOOTPRINT-ADVANCE = main = origin. APERTO (segnalato, non autorizzato): il simbolo non ha il ripiego «sotto il puntatore» per Canc/R/frecce (solo E); conferme chieste all'utente: precedenza maniglie > testi > pin/pad > tratti, glifi selezionabili dentro, cursore che segue la portata della pressione.
+
+## 10/11 sera — DIAGNOSI, NIENTE CODICE TOCCATO (in attesa dell'OK dell'utente): rele' generated/SRD-05VDC-SL-C, STEP non generato e footprint sbagliato
+
+Prova dell'utente 10/11 19:25-19:28 (analisi-ai.log): «Automatic generation not started: The two readings of the pad
+positions disagree». Il 05/11 lo stesso disegno era confermato (le due letture coincidevano). Catena di cause, verificata
+sul disegno docs/pinout.jpeg e riprodotta offline (nessuna chiamata AI):
+1. La risposta principale (openai/gpt-5.5) oggi ha letto male TRE cose: quota fra le righe 10 invece di 12±0.05; pin 4
+   messo 2 mm DOPO la colonna 1/5 invece che prima (catena «edge -> 1,5» invece di «edge -> 4 -> 1,5 -> 2,3»); corpo con
+   gli assi scambiati (15.5 lungo X pagina, 19.1 lungo Y; il disegno ha 19.1 lungo X). La lettura dedicata
+   (openai/gpt-5.6-sol) e' giusta su tutto (identica al 05/11).
+2. DIFETTO DEL PROGRAMMA: il testimone dei fori disegnati giudica OGNI lettura con il corpo `_body_on_page(geometry, ...)`,
+   cioe' con l'assegnazione degli assi della SOLA risposta principale. Riproduzione con check_pad_layout: lettura dedicata
+   + corpo (15.5, 19.1) -> not_confirmed/body_scale; + corpo (19.1, 15.5) o senza corpo -> confirmed (errore 0.093 mm,
+   tolleranza 0.15); risposta principale -> no_match (1.55 mm) con qualunque corpo. Quindi l'errore di una lettura ha
+   impedito ai fori di confermare l'altra: _pick_by_holes non ha scelto nulla, nessuna domanda possibile, blocco.
+   `exchanged` (_chain_contradictions) scatta solo con una catena da bordo a bordo: qui la catena parte da un solo bordo.
+3. DIFETTO DEL PROGRAMMA: dopo il blocco l'anteprima del footprint disegna comunque i pad della risposta principale, che
+   il messaggio stesso dichiara smentiti dai fori (righe a 10 mm, pin 4 dal lato sbagliato, corpo ruotato): e' la
+   schermata «anche questo e' errato» dell'utente. I file su disco (.kicad_mod, .step) sono ancora quelli del 05/11.
+4. Le due letture del corpo hanno la STESSA coppia di quote scambiata (15.5/19.1): oggi «resta il valore della risposta
+   principale»; il contorno disegnato attorno ai fori puo' dire quale quota corre lungo X.
+PROPOSTA (generale, da confermare; nessuna soglia nuova, nessun nome): (a) le due quote in pianta del corpo sono una
+coppia NON ordinata finche' la pianta stessa non le assegna: il testimone confronta il contorno disegnato con entrambe
+le assegnazioni e, se una sola torna, quella e' la MISURA dell'orientamento (un contorno non quadrato non puo' tornare con
+entrambe alla stessa scala, quindi il controllo di scala non si indebolisce); corpo quadrato = nessuna informazione;
+(b) l'orientamento misurato corregge body_length/body_width con nota di provenienza; (c) un layout smentito dai fori
+(no_match osservabile) non viene disegnato in anteprima come se fosse valido. Test +/-: disegno con assi scambiati in
+una lettura (deve confermare l'altra), disegno fuori scala (deve restare body_scale), corpo quadrato. Regola dell'utente
+ribadita il 10/11: nessuna regola per il singolo progetto, codice flessibile.
+ALTRA RICHIESTA 10/11: cosa aggiungere in .claude oltre a skills e agents -> utente: «ok fai rules».
+RULES IN CORSO (10/11 sera, solo file .md sotto .claude/, nessun codice): creare `.claude/rules/` con regole per area
+legate ai percorsi (intestazione `paths:`), ricavate da CLAUDE.md e dalle skill esistenti, senza inventare contenuti:
+photo-pipeline (obiettivo + «Strategia implementata», SPOSTATI da CLAUDE.md), python-documentation («Documentation
+standard» + commenti in inglese, SPOSTATI), document-extraction, cad3d, canvas, kicad-packaging, ui-text, tests. In
+CLAUDE.md restano le regole vincolanti sempre valide (invarianti, handoff, generalizzare, baseline) e, al posto delle
+sezioni spostate, un rimando col vecchio titolo: skill, agenti, test e commenti nel codice citano quei titoli («Strategia
+implementata» punto 4, «Documentation standard») e devono continuare a trovarli. INTERPRETAZIONE MIA: «fai rules» = creare
+la cartella e spostare cio' che e' di area; NON accorcio la frase della baseline ne' tolgo le sezioni storiche
+(«Agenti usati...», «Verifiche e limiti alla consegna» del commit 7e49a79): segnalato, non autorizzato. Hook,
+settings.json e commands: proposti, non autorizzati. Niente commit senza OK.
+RULES FATTE (10/11 sera, non committate): .claude/rules/ con 8 file (photo-pipeline, python-documentation,
+document-extraction, cad3d, canvas, kicad-packaging, ui-text, tests); in CLAUDE.md le sezioni «Documentation standard»,
+«Obiettivo» e «Strategia implementata» sono rimandi col titolo invariato + elenco «Rules by area».
+CORREZIONE RELE' AUTORIZZATA (utente 10/11: «si per il resto procedi alla correzione proposta ... non voglio una pezza
+per questo progetto»): IN CORSO i punti (a)(b)(c) della PROPOSTA qui sopra, skill document-extraction-change, test
+positivo/negativo strutturali, generality-auditor + revisione avversariale prima di proporre il commit.
+CORREZIONE (a)+(b) FATTA, NON COMMITTATA (10/11 sera) — solo kicadgen/services/datasheet_extractor.py + i18n.py (1 voce) +
+tests/test_extraction_body_axes.py (12 test), drawing_holes.py NON toccato:
+- `_HoleVerdicts(..., body_axes_known=)` (default True = comportamento di prima): con assi NON noti, un layout rifiutato
+  SOLO come «body_scale» viene ricontrollato con le due quote del corpo scambiate; la conferma torna come
+  `_ExchangedBodyVerdict` (body_exchanged). L'assegnazione come data e' provata per prima e vince se torna.
+- Assi «noti» = una catena da bordo a bordo della pianta su almeno un asse (`_plan_fixes_body_axes`) o `exchanged` di
+  _chain_contradictions; altrimenti l'ordine e' un'inferenza della risposta principale.
+- `_align_body_axes`: prima di scrivere il layout tenuto scambia body_length_mm/body_width_mm (geometria, risposta,
+  value_sources), una volta, con nota tradotta. Chiamata in _settle_by_holes, _settle_by_measure,
+  _resolve_chain_candidate, ramo «letture concordi» di apply_dedicated_pads, _replace_by_confirmed_reading.
+- _settle_by_measure prova la misura con ciascuna di `holes.bodies()`.
+VERIFICHE: replay offline delle risposte del 10/11 dal log (scratchpad/replay_relay.py, nessuna chiamata AI): nessun
+blocco, corpo 19.1 x 15.5, pad 1(-6.15,-6) 2(6.05,-6) 3(6.05,6) 4(-8.15,0) 5(-6.15,6) = IDENTICI al replay del 05/11.
+Mutanti (assi sempre noti / mai noti / niente allineamento) uccisi. Mirati: 532 passati (extraction_*, drawing_*,
+datasheet_extractor, geometry_witnesses, i18n, untranslated_texts, documentation) + 12 nuovi. SUITE COMPLETA NON ESEGUITA.
+Revisori read-only in corso: generality-auditor e adversarial-reviewer sul diff.
+AUDIT DI GENERALITA' (generality-auditor, 10/11 sera) sul diff — CORRETTI, non committati:
+- D1 ALTO corpi quasi quadrati: «come dato» bocciato di un soffio e «scambiato» accettato di un soffio scambiava le quote.
+  Ora lo scambio e' provato solo se le due quote distano piu' di due volte la tolleranza del controllo stesso
+  (drawing_holes.body_axes_distinguishable, NUOVA funzione pubblica: 2 x (2 x tolleranza del fit + BODY_ALLOWANCE_MM));
+  sotto, resta «body_scale». Derivata dal controllo, non tarata.
+- D2 ALTO apply_dedicated_body gira dopo e poteva disfare lo scambio (19.1 x 19.1 con una stima, o due falsi «non
+  coincidono»): `_exchange_body_sizes` lascia data["_body_axes_measured"], consumato in testa ad apply_dedicated_body,
+  che confronta la coppia in pianta della lettura dedicata nell'orientamento misurato (la maggiore con la maggiore).
+- D3 MEDIO percorso domanda/risposta dell'utente: il candidato confermato solo con lo scambio porta
+  payload["exchange_body"]; lo scrivono `_write_candidate` e `apply_answers`; `_hole_text` dice «con lunghezza e larghezza
+  del corpo scambiate».
+- D4 MEDIO scambio prima di _edge_frame_clash che poi blocca: lasciato e DICHIARATO nel commento (il controllo del
+  centro ha bisogno delle quote giuste; i pad confermati restano).
+- D5 MEDIO NON CORRETTO, e' il punto (3) qui sotto: con UNA catena da bordo a bordo che torna con l'altra quota la
+  lettura dedicata resta scartata come contraddizione. La classe e' risolta solo per i disegni senza catena da bordo a
+  bordo: LIMITE DA DIRE ALL'UTENTE, estensione da autorizzare.
+Test: tests/test_extraction_body_axes.py ora 17 (quasi quadrato +/-, lettura del corpo dopo lo scambio con provenienza
+letta e stimata, gemello senza misura, percorso domanda con e senza scambio); 2 voci i18n in piu'. Replay 10/11 invariato.
+REVISIONE AVVERSARIALE (adversarial-reviewer, 10/11 sera): conferma D2 e D3 (gia' corretti), ritrova D5 (APERTO, vedi
+sopra), e due bassi CORRETTI: `_ExchangedBodyVerdict.__getattr__` ricorreva con copy/pickle (ora AttributeError sui nomi
+privati); `_body_axes_measured` sopravviveva a reread_pad_positions (ora tolto nel finally). Pulito: crash, cache,
+chiamanti col default, unita', i18n, documentazione. Lacune di test segnalate e NON coperte: percorso misura con due
+corpi, ramo key == "main", _replace_by_confirmed_reading, risposta in pollici.
+Test: tests/test_extraction_body_axes.py 19 (+ gemello negativo di D2, copia del verdetto). SUITE COMPLETA IN CORSO
+(10/11 sera, codice fermo, basetemp .venv/claude-test-full-axes): riportare qui l'esito.
+SESSIONE INTERROTTA durante quella corsa (ultima scrittura 20:25, nessun esito registrato, nessun pytest rimasto vivo):
+la corsa NON vale. RILANCIATA il 10/11 alle 20:52 con basetemp .venv/claude-test-full-axes2, codice invariato.
+NUOVE RICHIESTE DELL'UTENTE (10/11 ore 21, dopo aver rifatto l'analisi del rele' col codice non committato: nessun
+blocco, corpo 19.1 x 15.5, pad nelle posizioni giuste): (R1) «i pad hanno buchi che non corrispondono alla realta'»,
+frecce sui pad 2, 3, 4; (R2) «prima completa quello che stavi facendo», poi test approfonditi, «scatena agenti
+esperti», provare a elaborare i progetti gia' definiti in generated/; ribadito: nessuna pezza per singolo progetto,
+adattabilita' intelligente al progetto corrente.
+DIAGNOSI R1 (sola lettura, niente codice toccato, suite in corso): il .kicad_mod delle 20:53 ha pad 1 e 5 tondi 1.7 con
+foro 0.9, pad 2/3/4 OVALI 2.1 x 1.7 con foro TONDO 1.3 (drill_length_mm null: nessuna asola). L'anteprima
+(main_window ~26975-27008) disegna cio' che sta nei dati. Il disegno docs/pinout.jpeg NON quota fori ne' piazzole del
+PCB: da' solo i terminali (2-Ø0.6 bobina, 2-1*0.4 lamelle, 1.1 pin 4); fori e piazzole sono STIME del modello
+(value_sources drill_mm = estimated; nota: «piazzole ovali stimate per terminali piatti»). Corona sul lato corto dei
+pad ovali = (1.7 - 1.3) / 2 = 0.2 mm, mentre il prompt chiede piazzola = foro + 0.7..0.9. NON ancora verificato a
+pixel se il foro in anteprima e' tondo come nel file. DA CHIARIRE con l'utente che cosa non corrisponde (forma ovale
+della piazzola, diametro del foro, o foro disegnato ovale).
+ORDINE DI LAVORO: 1) esito della suite; 2) chiarire R1; 3) revisione avversariale + replay offline dei progetti in
+generated/ (replay dalla cache/log = nessun costo; chiamate AI reali solo con OK esplicito).
+CORREZIONE alla diagnosi R1: la corona 0.2 mm NON viola una regola del programma (minimo MIN_ANNULAR_RING_MM /
+ANNULAR_RING_MIN_MM = 0.15); «foro + 0.7..0.9» e' solo l'indicazione del prompt al modello. I fori 0.9 / 1.3 sono
+coerenti coi terminali quotati (Ø0.6; lamella 1 x 0.4, diagonale 1.08; 1.1 x 0.3). L'utente non ha risposto alla
+domanda su che cosa non corrisponde: ha detto «procedi in modo chirurgico». R1 resta DA CHIARIRE, nessun codice.
+SUITE 10/11 (rilancio 20:52): meta' A VERDE 7881 passati, 9 saltati, 19 sottotest; meta' B in corso alle 21:30.
+REVISIONE AVVERSARIALE PARZIALE IN CORSO (10/11 ~21:35, skill adversarial-review, FASE 1 = SOLO RAPPORTO, base 03a1a60
++ albero non committato). Lente: adattabilita' a qualunque progetto, nessuna pezza per singolo pezzo. Ambiti disgiunti,
+tutti read-only, niente pytest (suite in corso), nessuna chiamata AI/rete:
+ S1 adversarial-reviewer: datasheet_extractor.py righe 1-5500 (schemi, prompt, chiamate).
+ S2 adversarial-reviewer: datasheet_extractor.py righe 5501-fine (validazione, catene, fori, letture dedicate).
+ S3 generality-auditor: drawing_holes.py + geometry_witnesses.py (file interi, non solo il diff).
+ S4 adversarial-reviewer (lente generators): generators/package.py, pin_header.py, core/package_geometry.py,
+    core/footprint.py, services/footprint_checks.py — pad THT, fori, piazzole stimate.
+ S5 general-purpose: REPLAY OFFLINE dei 7 progetti in generated/ (ESP32-S3-DEVKIT-NXRX, HLK-5M05B, RS485,
+    SRD-05VDC-SL-C, T7NS5D4-12, TEL 87-2411WI, VE12H-K) dalle risposte salvate in analisi-ai.log, col codice corrente,
+    confronto col project_config.json salvato; scrive solo nello scratchpad, mai in generated/.
+SUITE COMPLETA VERDE 10/11 21:50 (codice fermo, albero non committato con correzione assi + rules): A 7881 passati 9
+saltati 19 sottotest, B 4988 passati 4 saltati = 12869 passati, 13 saltati, 19 sottotest (+19 = test_extraction_body_axes).
+REVISIONE AVVERSARIALE 10/11 — FASE 1 CHIUSA, ELENCO CONSOLIDATO (nessun codice toccato; correzioni NON autorizzate,
+in attesa della scelta dell'utente). «RIPRODOTTO» = rieseguito dal coordinatore con gli script degli agenti in
+scratchpad (s1/t1-t4, s2/r1-r5, s3/a1-a5, s4/probe, replay/); «agente» = riprodotto solo dall'agente; «lettura» = non
+riprodotto.
+ALTI
+ A1 RIPRODOTTO (4 fonti: S1#1, S2#6, S4#1, replay) stime di foro/piazzola/forma dei pad espliciti senza segno: il
+    value_sources dichiarato dal modello («drill_mm: estimated») e' scartato perche' con pad espliciti non c'e' drill_mm
+    in testa; nessuna provenienza per pad ne' per la forma; forma omessa = circle; controlli e tooltip muti.
+ A2 RIPRODOTTO (replay + disegno) un foro STAMPATO sul disegno non e' protetto: T7NS5D4-12 ha Ø1,3+0,1 stampato e il
+    footprint salvato ha 1.5; VE12H-K in 2 corse su 4 da' fori diversi dagli stampati 3-Ø1.2/2-Ø1.0. Stesso disegno SRD,
+    5 corse, 5 insiemi diversi di piazzole. Nessun testimone guarda il diametro.
+ A3 agente+lettura (S4#2/3, S1#4, S2#9) il terminale non e' nel modello: un solo lead_diameter_mm per tutto il pezzo
+    (relè: Ø0.6 e lamelle 1x0.4), nessuna sezione per pad, nessuna asola (drill_length_mm) ne' rotazione ne' foro NPTH
+    nello schema; la regola «foro > terminale» si spegne se i fori differiscono e con fori uguali allarga tutti.
+ A4 RIPRODOTTO (S1#2 = S2#5, t2.py) percorso DOMANDA «pad_layout»: il candidato scelto dall'utente e' scritto con
+    origin custom e senza quote dal bordo -> corpo spostato (5.5 mm nell'esempio) rispetto allo stesso layout scelto
+    dai fori.
+ A5 RIPRODOTTO a livello di servizio (S2#1, r4.py F) reread_body_height riparte dalla risposta principale grezza: pad
+    non confermati, corpo non scambiato, nessun blocco. NON verificato fino in fondo _on_extracted (GUI).
+ A6 RIPRODOTTO (S2#2, r2.py A/A2) coppia in pianta confrontata come ordinata: 16(letto) x 12(stimato) + lettura
+    dedicata 12 x 16 -> corpo 16 x 16; succede anche quando i fori confermano il corpo «come dato» (il segno
+    _body_axes_measured nasce solo con lo scambio). La correzione D2 di stasera copre solo il caso scambiato.
+ A7 RIPRODOTTO (S3#2, a4.py) il testimone dei fori conferma le PROPORZIONI, non la scala: fila 1x8 letta con passo 2.0
+    o come 1x4 passo 5.08 = confirmed; mils presi per mm = confirmed (tolleranza 11.8 mm); tutto raddoppiato = confirmed.
+ A8 RIPRODOTTO (S3#3, a3.py) letture a 3 pad confermate per caso sulle pagine vere: SRD 6/60, VE12H 2/60, HLK 1/60;
+    con 5 pad 0/60 ovunque.
+ A9 RIPRODOTTO (S3#1, a2/a3.py) «contorno del corpo» = qualunque rettangolo attorno ai fori: cornice di pagina, cella di
+    tabella, corpo con smussi 2 mm o non disegnato -> body_scale su lettura GIUSTA. body_axes_distinguishable eredita.
+ A10 RIPRODOTTO (S3#4/5/6) tolleranze assolute per errori proporzionali: 3 px (anisotropia 0.8% boccia un pezzo da
+    480 px; i campioni scansionati arrivano a 1.6%), inclinazione > 3 gradi = «distorted» (nessun raddrizzamento),
+    BODY_ALLOWANCE 0.5 mm (64x48 al 97% bocciato, 16x12 al 95% passa; i due commenti sul T7NS si contraddicono 0.4/0.6).
+ A11 RIPRODOTTO sul file (replay #4) SRD: extraction_answers ha contacts_view «top» (05/11) e «bottom» (10/11 19:28)
+    sotto due chiavi (la chiave contiene l'hash del layout candidato); l'ultima corsa ha ripreso «top»: footprint
+    costruito contro l'ultima risposta dell'utente (scambia 2/3 e i pin bobina). DA CHIEDERE all'utente quale vale.
+MEDI (riprodotti dagli agenti, non dal coordinatore salvo dove detto)
+ M1 RIPRODOTTO (S2#3, r2 B) orientamento provato da due quote bordo-bordo: pad scritti, body_length/width NON scambiati.
+ M2 RIPRODOTTO (S2#4, r2 C max) corpo quotato MAX/MIN + una quota bordo-bordo = assi «noti», scambio non provato, blocco.
+    Con «nominal» e' il D5 gia' noto.
+ M3 (S1#3, S2#13) pad senza numero o voce null in pins: KeyError/AttributeError dopo le letture pagate.
+ M4 (S1#5) «pad dentro il corpo» applicato su un solo ramo e nota falsa «nessuna quota dal bordo»; ignora lead_exit.
+ M5 (S1#6) catena con il bordo del corpo fra i pad (SOIC/SOT, uscita laterale) non scrivibile.
+ M6 (S2#7/8) allargando un foro la piazzola ovale ruota di 90 gradi; piazzole allargate non rivalidate, sovrapposte.
+ M7 (S2#9b, r4 H RIPRODOTTO) un terminale «estimated» scavalca un foro «read».
+ M8 (S1#7 = S2#11, lettura) pad aggiunto dalla lettura dedicata eredita foro e piazzola mai letti per lui.
+ M9 (S4#4/5) nessuna regola di distanza rame-rame sul percorso package (il pin header la rifiuta), fori ignorati da
+    sovrapposizioni, silk e courtyard; nessuna distanza foro-foro.
+ M10 (S4#6) corona non riportata per asse; nessuna coerenza fra pad dello stesso tipo di terminale.
+ M11 (S4#7) pin con foro ma senza pad_type diventa SMD col foro perso in silenzio.
+ M12 (S3#7/8/9/10) fori: livello d'inchiostro a percentile (corpo grigio = nessun foro), quadrati presi per fori tondi,
+    hole_kinds mai passato in produzione (solo nei test), pagine ridotte a 2000 px perdono fori piccoli. Lato sicuro.
+ M13 (replay) T7NS: nomi pin salvati 11=NC, 14=Common, 12=NO, mentre nello schema l'11 e' il comune. NON verificato dal
+    coordinatore oltre la lettura del disegno (11 alimenta il contatto mobile).
+BASSI: S1#8-12 (quote ordinate col riferimento in mezzo, griglia senza tetto 3000x3000, attributo non hashabile, nome
+ stile PinHeader per ogni pezzo, veto dell'altezza in pollici), S2#10/12 (corona quasi nulla, exchanged non portato al
+ testimone), S4#8-14 (corona positiva qualunque, soglia 0.15 con due fonti, circle->oval per rumore float, marcatore pin 1,
+ messaggio col diametro sbagliato, TypeError/numero null, trapezio), S3#11-15 (soglie foto/disegno, evidenza solo con assi
+ H/V, euristiche tarate sulle stesse 2-3 pagine, lacune di test), nota «Lungo Y» doppia (gia' nota).
+PULITO: nessuna regola su nomi/marche; numeri pin come testo; unita' non dichiarata blocca; i18n; commenti in inglese;
+ anteprima = file = KiCad 10 per foro tondo in pad ovale, asola, asola ruotata (kicad-cli fp export svg).
+REPLAY OFFLINE: HLK-5M05B, SRD-05VDC-SL-C, VE12H-K rielaborati dalle risposte nel log = risultato salvato identico,
+ posizioni giuste secondo i disegni. T7NS5D4-12, TEL 87-2411WI, RS485, ESP32-S3-DEVKIT-NXRX NON rielaborabili: i log
+ prima del 04/11 non contengono le risposte (AI_CALL_RESULT) e la risposta principale dei moduli da foto non e' in cache.
+ Per provarli serve una NUOVA analisi a pagamento: solo con OK esplicito.
+R1 (fori del rele'): l'ipotesi piu' forte e' A1+A2+A3 (il T7NS, stesso schema di fori, stampa Ø1,3 per tutti e cinque);
+ resta possibile A11 (vista top/bottom). DA CHIARIRE.
+DECISIONE DELL'UTENTE (10/11 ~22:00): «tutti, poi passa a quelli non coperti» = correggere TUTTI gli alti A1-A11, poi
+revisione delle aree non coperte (GUI, pipeline foto, cad3d/STEP, consegna KiCad). Medi e bassi: NON autorizzati.
+PIANO DELLE CORREZIONI (scritto PRIMA di toccare il codice; niente commit senza OK):
+ GIRO 1, in parallelo su file disgiunti:
+  FH (fixer) kicadgen/services/drawing_holes.py + tests/test_drawing_holes*.py: A7, A8, A9, A10. Contratto deciso dal
+     coordinatore (INTERPRETAZIONE MIA, da dire all'utente): LayoutCheck/MeasuredLayout ricevono `body_check`
+     («agrees» | «contradicted» | «unverifiable» | «none») e `scale_verified` (True solo con «agrees»). Un rettangolo
+     attorno ai fori CONTRADDICE il corpo (body_scale) solo se ha le PROPORZIONI del corpo dichiarato (criterio senza
+     scala: e' il corpo disegnato a un'altra scala); se le proporzioni sono altre e' un altro rettangolo (cornice,
+     cella, corpo smussato) -> «unverifiable», la conferma resta di sola forma. Tolleranze: errore proporzionale
+     limitato come rapporto, rumore del centro in pixel; rotazione rigida della pagina non e' un errore della lettura.
+     3 pad: conferma solo se univoca o ancorata a fori «disegnati come fori». Le 5 pagine vere devono dare gli stessi
+     verdetti sulle letture giuste salvate (replay).
+  FE (fixer) kicadgen/services/datasheet_extractor.py + test nuovi: A4 (candidato scelto dalla domanda scritto come
+     quello scelto dai fori), A5 (rilettura altezza: solo campi del corpo), A6 (coppia in pianta non ordinata anche
+     senza scambio; segno di misura anche su conferma «come dato»), A11 lato servizio (risposte salvate contraddittorie
+     alla stessa domanda sugli stessi pad: non riusare la vecchia in silenzio). NON tocca main_window.py.
+  In parallelo, SOLO LETTURA, revisione delle aree non coperte: main_window.py in due meta', resto della GUI, canvas
+  (canvas-parity-reviewer), photo_*.py (generality-auditor), cad3d, consegna KiCad (kicad-workflow-reviewer).
+ GIRO 2 (dopo il giro 1): FE adegua l'estrattore al contratto body_check/scale_verified (lo scambio degli assi di
+  stasera oggi scatta su «body_scale»); coordinatore collega A11/A5 in main_window.py; poi A1-A3.
+ A1-A3 (fori e piazzole): comportamento NUOVO, da confermare con l'utente prima di costruire (regola «conferma
+  l'intento»): il modello dichiara per ogni pad il terminale (tondo Ø, piatto larghezza x spessore) e il foro STAMPATO
+  se c'e', ciascuno con provenienza; il PROGRAMMA, non il modello, ricava foro e piazzola quando non sono stampati
+  (stessa regola per ogni corsa), li segna «stimati» pad per pad, e la lettura dedicata rilegge i fori stampati.
+ Poi: generality-auditor + adversarial-reviewer sul diff, suite completa a codice fermo.
+A1-A3 CONFERMATI DALL'UTENTE (10/11 ~22:15, «ok procedi») col comportamento descritto: terminale e foro stampato
+dichiarati per pad; il PROGRAMMA ricava foro e piazzola quando il foro non e' stampato (lamella piatta: foro tondo
+sulla diagonale + gioco, piazzola tonda; asola solo se stampata); ogni valore ricavato segnato «stimato» per pad in
+tooltip e controlli; la lettura dedicata rilegge i fori stampati. Cambiano i prompt: l'effetto reale si vede solo con
+una nuova analisi a pagamento (non lanciata).
+IN CORSO (10/11 ~22:15) 8 agenti: FH (drawing_holes), FE (datasheet_extractor + i18n), revisori read-only G1/G2
+(main_window), canvas, foto, cad3d, consegna KiCad. LANCIATO ORA FP (fixer, file disgiunti): core/package_geometry.py,
+core/footprint.py, core/tht_estimates.py (NUOVO), generators/package.py, services/footprint_checks.py + test.
+CONTRATTO DATI A1-A3 (coordinatore): ogni pin di package_geometry puo' portare `lead` = {shape: round, diameter_mm} |
+{shape: flat, width_mm, thickness_mm} e `sources` = {drill_mm, pad_size, shape, lead: read|derived|estimated};
+assenti = progetto vecchio, comportamento di prima. core/tht_estimates.py: una sola funzione che dal terminale da'
+foro e piazzola (costanti LEAD_TO_HOLE_CLEARANCE_MM, HOLE_TO_PAD_ANNULUS_MM, MIN_ANNULAR_RING_MM spostate li', oggi
+nell'estrattore). Controlli nuovi: pad stimati (informativo, seleziona i pad), foro contro sezione del terminale.
+DOPO: FE giro 2 (schema e prompt per pad, lettura dedicata dei fori stampati, uso di tht_estimates, contratto
+body_check/scale_verified); coordinatore: voci i18n di FP, tooltip e collegamenti A5/A11 in main_window.py.
+REVISIONE AREE NON COPERTE — RAPPORTI (fase 1, NON verificati dal coordinatore, NON autorizzati):
+ cad3d (kicad_models.py e freecad_parts.py solo scorsi): C1 ALTO un solo diametro tondo per ogni terminale, lamelle
+ non rappresentabili (step_generator.py:1384-1464, freecad_build_body.py:1371; rele': 3 lamelle disegnate come pin
+ Ø0.6) = stessa classe di A3, lato STEP; C2 ALTO single_part_lead_diameter scarta il diametro quotato per TUTTI se non
+ entra nel foro piu' piccolo; C3 MEDIO diametro del terminale perso riaprendo il progetto (_last_extracted None,
+ main_window 15707); C4 MEDIO l'impronta di «STEP allineato» ignora il diametro usato e usa field_drill; C5 MEDIO
+ diametro e lunghezza dei terminali stimati senza nota (0.65 x foro, tetto 0.8; lunghezza 3.0); C6 MEDIO percorso
+ matrice/THT singolo disegna i terminali al diametro del FORO; C7 lead_exit mai usato nello STEP; C8 BASSO STEP vecchio
+ bloccato resta mentre wrl/preview vengono cancellati. Pulito: rotazioni, specchio, unita', staging, processo figlio.
+ main_window.py 14201-fine (G2; NON lette: strumenti di disegno 17129-19495 e 20508-22980, colla simbolo 23859-24317,
+ scheda 3D e tabella foto 24317-25198 e 25623-26280, _install_kicad_library 15025-15530): nessun alto. G2-1 MEDIO
+ anteprima disegna un contorno F.SilkS inventato quando il corpo non e' dichiarato, il file non lo contiene
+ (26954-26963); G2-2 MEDIO «Foro non metallizzato» nel dialogo pad lascia la corona di rame (np_thru_hole 2.0 con foro
+ 1.0); BASSI: OK senza modifiche crea una bozza (angolo -90 -> 270), dialoghi pad applicati per indice a un package
+ cambiato nel frattempo, except piu' stretti in generazione che in anteprima, splitlines()[0] su testo vuoto, ripresa
+ dopo correzione fori perde body_override, dialogo pad header chiude sull'errore, package che non si costruisce
+ disegnato come valido.
+ pipeline foto (generality-auditor; script scratchpad/ph/t1.py, t2.py; photo_review_dialog, photo_terminals/leads/
+ markings solo scorsi): P1 ALTO riprodotto dall'agente: scheda chiara su tavolo chiaro con un corpo scuro di
+ proporzioni simili -> il CORPO e' preso per la scheda, scala sbagliata in silenzio (photo_refine.py:381-394, 452,
+ 550, 704-712: la maschera scura ha la precedenza e la fascia esterna e' misurata contro meta' del contrasto del
+ candidato); P2 ALTO riprodotto: parti che sporgono dal bordo (header a 90 gradi, morsetti, SMA, jack) entrano nel
+ riquadro della scheda, errore di scala fino al 12% senza avviso (MAX_BOARD_ASPECT_ERROR); P3 ALTO per ragionamento:
+ nessun modello di parallasse, corpi alti misurati come sul piano della scheda con incertezza 2 px (rele' 15 mm a 200
+ mm: +8%); P4 MEDIO schede tonde, foto ritagliate strette, basso contrasto, ombre: «scheda non trovata» (rifiuto
+ onesto); P5 MEDIO nuclei morfologici in pixel assoluti; P6 MEDIO tessere YOLO in pixel della foto, non in mm; P7/P8
+ MEDI dichiarati fragili (regola contenitore tarata su 2 schede, MIN_ROW_LANDS = 5); BASSI: nome package da tabella
+ chiusa, condensatore lattina/chip, evidenza del rilevatore abbinata per orario senza hash, costanti «set on the sample
+ boards». Pulito: nessuna regola su nomi, chiavi di cache per contenuto, altezze sempre segnate stime.
+ main_window.py 1-14200 (G1; solo scorse 1-1900, 4096-4780, 12554-13690, 13926-14200; script scratchpad/g1/):
+ G1-1 ALTO riprodotto a livello di metodo: una nuova analisi/rilancio/rilettura scarta il layout del simbolo fatto a
+ mano (chiavi symbol_*) se nessun nome pin e' in conflitto (_settle_pinout_rows 11104-11109: _keep_symbol_layout solo
+ nel ramo «tieni i miei nomi»); G1-2 ALTO per lettura: «Rilancia inventario» e riletture parziali ri-applicano
+ l'estrazione originale sopra le modifiche fatte dopo (pad spostati e applicati, testi di faccia, raccordi, offset
+ corpo, descrizione, keywords) perche' passano da _apply_extracted_result con _last_extracted; G1-3 MEDIO-ALTO
+ un'analisi fallita o interrotta cancella lo stato della precedente (_last_extracted, _step_deferral,
+ _extraction_questions) e lo salva; G1-4 MEDIO dopo «Rinomina progetto» un progetto a pad espliciti genera file col
+ nome vecchio (package_geometry.name); G1-5 MEDIO riprodotto: tre forme di project_config.json danneggiato fanno
+ uscire il programma all'apertura (8914, 10494, 1871); BASSI: package_geometry residuo vince su un cambio di
+ tipologia; «Simbolo funzionale» fallito cambia il default globale. Pulito: risultati tardivi, cambio progetto,
+ salvataggi, rinomina/rollback, i18n, nessuna regola su nomi.
+ NOTA: G1-2 e A5 toccano la stessa funzione (_on_reread_done): da correggere insieme nel collegamento GUI.
+ canvas (canvas-parity-reviewer; lato footprint letto, non eseguito; probe scratchpad/cv/s1.py): nessun difetto nei
+ componenti condivisi. CV1 MEDIO riprodotto: le frecce non spostano un elemento SELEZIONATO nel simbolo
+ (symbol_tab.py:6073-6080, _nudge_selected esce senza pin selezionato), nel footprint si'; CV2 MEDIO da decidere con
+ l'utente: maniglie visibili solo sull'elemento selezionato (simbolo) contro al passaggio (footprint), e la
+ giustificazione in docs/canvas-gestures-plan.md («no selection model») e' superata; CV3 BASSO-MEDIO menu col tasto
+ destro: simbolo da contextMenuEvent, footprint da mousePressEvent (tasto Menu/Shift+F10 senza effetto nel footprint);
+ CV4 BASSO Ctrl+pressione su una maniglia di ridimensionamento avvia il ridimensionamento nel simbolo; CV5 BASSO
+ pulsante «Selezione multipla» solo nel simbolo; CV6 BASSO in entrambe: la pressione non alimenta il PointerTracker.
+ Mancano test di parita' per CV1, CV3, CV4, CV5.
+ consegna KiCad (kicad-workflow-reviewer, kicad-cli 10, prove in scratchpad/kw/): invarianti TUTTI verificati
+ (anteprima non tocca fp-lib-table, ${KIPRJMOD}, percorsi assoluti globali, conferma di sovrascrittura, righe estranee
+ byte per byte, tabelle rotte rifiutate prima di scrivere, rollback sulle scritture rifiutate, nomi coerenti, 4 lingue).
+ K1 MEDIO riprodotto: la verifica del componente confronta il .kicad_sym con un simbolo riserializzato SENZA metadati
+ ne' grafica (component_check.py:290-309), quindi «riesportarlo» scatta su ogni componente installabile e non si
+ puo' togliere: verdetto degradato a «UTILIZZABILE CON RISERVE»; K2 MEDIO per lettura: dimensioni stimate arrivano a
+ installazione e verdetto «PRONTO PER LE PROVE» senza avviso; K3 MEDIO-BASSO riprodotto: un'installazione uccisa a
+ meta' lascia .kicadgen-rollback-<hex>/ mai ripulita e forse una libreria mista; K4 BASSO-MEDIO riprodotto: ${...} nel
+ nome del componente o nella destinazione globale rompe il modello mentre l'installazione dice riuscita; BASSI: nome
+ che inizia con «-» da' un falso «NON USARE», piano e installazione in disaccordo su «stesso posto», tre regole
+ diverse sui nomi (NUL passa), KiCad aperto non rilevato per l'installazione globale.
+VERIFICA DEL COORDINATORE (10/11 ~23:00, rieseguiti gli script degli agenti): G1-1 RIPRODOTTO (probe2.py: layout del
+ simbolo tenuto solo se un nome pin e' in conflitto); P1 RIPRODOTTO (ph/t1.py, t2.py: scheda bianca/crema su tavolo
+ chiaro/legno con corpo nero -> 10 o 6 px/mm al posto di 20; con la maschera scura disattivata il criterio di contrasto
+ trova la scheda vera); P2 RIPRODOTTO (header a 90 gradi sul bordo: sy 21.25; morsetto sporgente 5 mm: sx 21.67, errore
+ 0.083, nessun avviso). Su foto SINTETICHE. Gli altri alti (C1, C2, P3, G1-2) restano non verificati dal coordinatore.
+TUTTI E 6 I RAPPORTI DELLE AREE NON COPERTE SONO ARRIVATI (10/11 ~22:40). Restano NON riviste: meta' di main_window
+ 14201-fine (strumenti di disegno, colla simbolo, scheda 3D, _install_kicad_library), kicad_models.py, freecad_parts.py,
+ photo_review_dialog.py, resto di kicadgen/gui/ (dialoghi, workers, overlay), packaging/CI.
+PUNTO (c) NON COSTRUITO, DA DECIDERE CON L'UTENTE: nascondere dall'anteprima un layout smentito dai fori contraddice
+una scelta gia' presa (main_window._apply_extracted_result: «the user must see and correct the extracted THT pad
+values»; rimedio «Piazzole del componente THT» + «Rigenera footprint»): se i pad spariscono l'utente perde la base da
+correggere a mano. Alternativa proposta: lasciarli e segnarli in anteprima come NON confermati/smentiti.
+SEGNALATO, NON AUTORIZZATO (preesistente): (1) la nota «Lungo Y nessuna quota dal bordo...» compare due volte quando i
+pad vengono scritti due volte (catene proprie della risposta principale, poi lettura scelta); (2)
+drawing_holes.measured_outline da' None sul disegno del rele' anche col corpo giusto, mentre check_pad_layout il
+contorno lo trova: il corpo lungo Y resta centrato sui pad come STIMA (qui giusto per simmetria); (3) con UNA sola catena
+da bordo a bordo che torna con la quota scambiata, _chain_contradictions la da' come contraddizione invece che come
+corpo scambiato (richiede entrambi gli assi).
 
 ULTIMO STATO (in testa): codice fermo dopo «CORRETTORE VER4» -> utente STA PROVANDO l'app; suite completa in corso.
 VER5 (verifica del giro PointerTracker): (1)(2)(3) FIXED, (4)(5) PARTIAL (scroll programmatico _scroll_preview_mm non emette

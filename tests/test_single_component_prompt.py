@@ -117,7 +117,9 @@ def test_explicit_pad_holes_not_wider_than_the_lead_are_lifted():
     pins = {p["number"]: p for p in params.package_geometry["pins"]}
     assert all(p["drill_mm"] == pytest.approx(1.55) for p in pins.values())
     assert pins["1"]["pad_length_mm"] == pins["1"]["pad_width_mm"] == pytest.approx(2.35)
-    assert "fori dei pad 1, 2, 5 " in params.notes
+    # Since review 2026-11-10 the holes are derived by the one rule from the
+    # part's declared lead (E1): the note names the pads and says so.
+    assert "Pad 1, 2, 5: foro non stampato" in params.notes
 
 
 def test_pads_with_different_holes_are_only_flagged_against_the_one_lead():

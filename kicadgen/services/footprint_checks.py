@@ -26,8 +26,16 @@ Rules:
   decision): the front courtyard is the wrong outline to measure a back
   body against, and no check of the back body exists.
 - annular_ring (warning): a plated hole whose copper ring is thinner than
-  `ANNULAR_RING_MIN_MM` (the KiCad getting-started guide's advice, not a KLC
-  rule: said so in the message).
+  `MIN_ANNULAR_RING_MM` (the KiCad getting-started guide's advice, not a KLC
+  rule: said so in the message). A pad whose ring differs on its two axes is
+  reported with both values and the axis of each.
+- hole_vs_lead (error): a pad whose hole does not let its DECLARED terminal
+  pass (`core.tht_estimates.lead_passes`): a structural impossibility, not a
+  threshold. Only pads carrying a lead (`Pad.lead`) are judged.
+- estimated_pad (warning): the pads whose hole, size or shape is derived or
+  estimated by the program (`Pad.sources`), with which of the three: to be
+  verified on the drawing or the manufacturer's land pattern. A pad without
+  provenance (a project saved before it existed) is never listed.
 - pin_one_marker (warning, KLC F5.1/F5.2): the footprint has a pin 1 but no
   marker of it on the silkscreen or fabrication layer.
 - silk_stroke_width (warning, KLC F5.1): a silkscreen stroke, on either
@@ -58,6 +66,7 @@ from ..core.footprint import (DIMENSION_TEXT_THICKNESS_MM, FpArc, FpCircle, FpCu
 from ..core.kicad_text import KICAD_PEN_CLAMP_RATIO
 from ..core.package_geometry import _rotate_kicad, overlapping_pad_pairs, pad_copper_shape
 from ..core.silk import SILK_PAD_CLEARANCE_MM, pin_one
+from ..core.tht_estimates import MIN_ANNULAR_RING_MM, lead_passes, unverified_values
 from .klc_checks import Finding
 from .messages import tx
 
@@ -67,11 +76,11 @@ from .messages import tx
 #: holds every footprint to the generic minimum only.
 COURTYARD_MIN_CLEARANCE_MM = 0.25
 
-#: Minimum copper ring around a plated hole, mm. The KiCad getting-started
-#: guide (docs/reference/kicad9-getting-started-notes.md) advises a ring of at
-#: least 0.15 mm, preferably more; the KLC publishes no number for it, so the
-#: finding is a warning that names the guide, never an error.
-ANNULAR_RING_MIN_MM = 0.15
+#: Minimum copper ring around a plated hole, mm: the ONE constant
+#: `core.tht_estimates.MIN_ANNULAR_RING_MM`, shared with the extraction; its
+#: source (the KiCad getting-started guide's advice, not a KLC rule) is
+#: stated there, once. The old name is kept for its callers.
+ANNULAR_RING_MIN_MM = MIN_ANNULAR_RING_MM
 
 #: Largest gap, mm, allowed between a sampled chord and the true circle or
 #: arc it stands for (the sagitta): the segment count follows from the
@@ -145,6 +154,16 @@ GEOMETRY_HINTS = {
                             'un commento.'),
     'annular_ring': ('Nel dialog del pad allarga il pad o riduci il foro: con un anello sottile la '
                      'metallizzazione può staccarsi in saldatura.'),
+    'hole_vs_lead': ('Nel dialog del pad allarga il foro (e il pad con lui) finché supera il terminale: per '
+                     'un terminale piatto il foro tondo deve superare la sua diagonale, oppure usa '
+                     "un'asola più grande del terminale su entrambi gli assi. Se è il terminale a essere "
+                     'stato letto male, nessun dialog lo modifica: lo rilegge solo una nuova analisi dei '
+                     'documenti (la rilettura delle posizioni dei pad riparte dalla stessa risposta e non '
+                     'lo cambia).'),
+    'estimated_pad': ('Confronta questi pad con il disegno quotato o con il land pattern del costruttore: nel '
+                      'dialog del pad scrivi i valori letti se sono diversi, oppure spunta «Valori '
+                      'verificati sul disegno» se sono giusti. In entrambi i casi il pad non è più '
+                      'segnalato come stimato.'),
     'pin_one_marker': ('Disegna un cerchio sulla serigrafia accanto al pad del pin 1 (strumento cerchio '
                        'della palette, più vicino a lui che a ogni altro pad) oppure dai al pin 1 una forma '
                        'di pad diversa dagli altri: chi monta la scheda deve riconoscerlo.'),
@@ -603,10 +622,25 @@ def annular_ring(pad: Pad) -> Optional[float]:
     """@brief The thinnest copper ring around a plated pad's hole, mm; None for an unplated or holeless pad.
 
     @param pad A `core.footprint.Pad`.
-    @return Per axis of the pad, half the pad side minus half the hole side
-        minus the hole's offset from the copper centre along that axis (a
-        castellated pad's `drill_offset`, pad-local like the hole); the
-        smaller of the two. A round hole has equal hole sides.
+    @return The smaller of the two values of `annular_rings`.
+    """
+    rings = annular_rings(pad)
+    return None if rings is None else min(rings)
+
+
+def annular_rings(pad: Pad) -> Optional[tuple]:
+    """@brief The copper ring around a plated pad's hole on each pad axis, mm; None for an unplated or holeless pad.
+
+    @param pad A `core.footprint.Pad`.
+    @return (ring along the pad's length, ring along its width): the pad's
+        own axes, `size[0]` and `size[1]`, which turn with its rotation. Per
+        axis, half the pad side minus half the hole side minus the hole's
+        offset from the copper centre along that axis (a castellated pad's
+        `drill_offset`, pad-local like the hole). A round hole has equal
+        hole sides, so the two rings differ exactly when the pad's sides do
+        (an oval 2.1 x 1.7 mm pad with a 1.3 mm hole: 0.4 and 0.2 mm).
+    @note The ring is measured along the axes, where a rectangle, an oval
+        and a circle are thinnest; a rounded corner is never nearer the hole.
     """
     if pad.pad_type != 'thru_hole':
         return None
@@ -620,25 +654,131 @@ def annular_ring(pad: Pad) -> Optional[float]:
     # `drill_offset` moves the COPPER away from the hole at `at`: the ring on
     # the far side grows, the one on the near side shrinks by the same amount.
     ox, oy = (abs(float(v)) for v in (getattr(pad, 'drill_offset', None) or (0.0, 0.0)))
-    return min(size_x / 2 - ox - hole_x / 2, size_y / 2 - oy - hole_y / 2)
+    return (size_x / 2 - ox - hole_x / 2, size_y / 2 - oy - hole_y / 2)
 
 
 def check_annular_ring(footprint: Footprint, minimum: float = ANNULAR_RING_MIN_MM) -> list:
     """@brief Plated holes whose copper ring is thinner than `minimum`.
 
     @param footprint The footprint checked.
-    @param minimum Thinnest acceptable ring, mm (the KiCad guide's advice).
-    @return One warning per pad below the minimum.
+    @param minimum Thinnest acceptable ring, mm (the KiCad guide's advice,
+        `core.tht_estimates.MIN_ANNULAR_RING_MM`).
+    @return One warning per pad below the minimum. When the ring is the same
+        on both pad axes (a round pad and hole) the message gives that one
+        value; otherwise it gives BOTH rings, each with the pad axis it lies
+        along («lunghezza» is `size[0]`, «larghezza» is `size[1]`) and that
+        pad side, thinnest first: the user sees which side of the pad to widen.
     """
     findings = []
     for index, pad in enumerate(footprint.pads):
-        ring = annular_ring(pad)
-        if ring is not None and ring < minimum - _EPS:
-            findings.append(_finding('annular_ring', 'warning', tx(
+        rings = annular_rings(pad)
+        if rings is None or min(rings) >= minimum - _EPS:
+            continue
+        along_length, along_width = (max(ring, 0.0) for ring in rings)
+        length, width = (float(v) for v in pad.size)
+        number = pad.number or '«»'
+        if abs(rings[0] - rings[1]) <= _EPS:
+            message = tx(
                 'Pad {number}: anello di rame di {ring:.2f} mm attorno al foro (la guida KiCad consiglia '
-                'almeno {minimum:.2f} mm).', number=pad.number or '«»', ring=max(ring, 0.0), minimum=minimum),
-                pads=(index,)))
+                'almeno {minimum:.2f} mm).', number=number, ring=along_length, minimum=minimum)
+        elif rings[1] < rings[0]:
+            message = tx(
+                'Pad {number}: anello di rame di {ring:.2f} mm lungo la larghezza del pad ({side:.2f} mm) e di '
+                '{other:.2f} mm lungo la lunghezza ({other_side:.2f} mm) (la guida KiCad consiglia almeno '
+                '{minimum:.2f} mm).', number=number, ring=along_width, side=width, other=along_length,
+                other_side=length, minimum=minimum)
+        else:
+            message = tx(
+                'Pad {number}: anello di rame di {ring:.2f} mm lungo la lunghezza del pad ({side:.2f} mm) e di '
+                '{other:.2f} mm lungo la larghezza ({other_side:.2f} mm) (la guida KiCad consiglia almeno '
+                '{minimum:.2f} mm).', number=number, ring=along_length, side=length, other=along_width,
+                other_side=width, minimum=minimum)
+        findings.append(_finding('annular_ring', 'warning', message, pads=(index,)))
     return findings
+
+
+def _hole_sides(pad: Pad) -> Optional[tuple]:
+    """The hole of a pad as (side along the pad length, side along the pad width), mm; None without a hole."""
+    if pad.drill_slot is not None:
+        return tuple(float(v) for v in pad.drill_slot)
+    if pad.drill is not None:
+        return (float(pad.drill), float(pad.drill))
+    return None
+
+
+def _lead_text(lead: dict) -> str:
+    """A declared lead section as the user reads it on a drawing: «Ø0.6 mm» or «1 x 0.4 mm»."""
+    if lead.get('shape') == 'round':
+        return 'Ø{:g} mm'.format(lead['diameter_mm'])
+    return '{:g} x {:g} mm'.format(lead['width_mm'], lead['thickness_mm'])
+
+
+def check_hole_vs_lead(footprint: Footprint) -> list:
+    """@brief Pads whose hole does not let their declared terminal pass.
+
+    @param footprint The footprint checked.
+    @return One error per holed pad (plated or not) that carries a lead
+        (`Pad.lead`) and whose hole fails `core.tht_estimates.lead_passes`:
+        a round hole not larger than the lead's circumscribed diameter (the
+        diagonal of a flat blade), or a slot the lead does not fit in. A pad
+        without a lead, or without a hole, is never judged: nothing says
+        what should pass through it.
+    @note An error, not a warning: no threshold is involved, the part
+        cannot be inserted. The lead itself may be the wrong reading; the
+        remedy says so. A lead out of contract (a hand-built `Pad`) is
+        skipped: validation belongs to `PinSpec.validate`.
+    """
+    findings = []
+    for index, pad in enumerate(footprint.pads):
+        lead = getattr(pad, 'lead', None)
+        hole = _hole_sides(pad)
+        if not lead or hole is None:
+            continue
+        try:
+            if lead_passes(lead, hole[0], hole[1]):
+                continue
+        except ValueError:
+            continue
+        if hole[0] == hole[1]:
+            hole_text = 'Ø{:g} mm'.format(hole[0])
+        else:
+            hole_text = '{:g} x {:g} mm'.format(*hole)
+        findings.append(_finding('hole_vs_lead', 'error', tx(
+            'Pad {number}: il terminale dichiarato ({lead}) non passa nel foro ({hole}).',
+            number=pad.number or '«»', lead=_lead_text(lead), hole=hole_text), pads=(index,)))
+    return findings
+
+
+def check_estimated_pads(footprint: Footprint) -> list:
+    """@brief The pads whose hole, size or shape is derived or estimated, not read.
+
+    @param footprint The footprint checked.
+    @return At most one warning selecting every pad whose `Pad.sources`
+        marks "drill_mm", "pad_size" or "shape" as "derived" or "estimated"
+        (`core.tht_estimates.unverified_values`), naming for each pad which
+        of the three. Nothing when no pad carries such a mark: a pad
+        without provenance is not an estimate the program knows of.
+    @note A warning: the values may well be right, but nobody read them;
+        they are checked against the drawing or the manufacturer's land
+        pattern before the footprint is trusted.
+    """
+    # Visible names of the three values, in the order of `unverified_values`.
+    names = {'drill_mm': tx('foro'), 'pad_size': tx('dimensione'), 'shape': tx('forma')}
+    marked = []
+    for index, pad in enumerate(footprint.pads):
+        try:
+            values = unverified_values(getattr(pad, 'sources', None))
+        except AttributeError:
+            # Not a mapping (a hand-built pad out of contract): states nothing.
+            values = ()
+        if values:
+            marked.append((index, '{} ({})'.format(pad.number or '«»', ', '.join(names[key] for key in values))))
+    if not marked:
+        return []
+    return [_finding('estimated_pad', 'warning', tx(
+        'Pad con valori stimati o derivati dal programma, non letti dal disegno: {pads}. Da verificare sul '
+        'disegno quotato o sul land pattern del costruttore.', pads='; '.join(text for _index, text in marked)),
+        pads=[index for index, _text in marked])]
 
 
 def _point_copper_distance(point, copper: tuple) -> float:
@@ -1177,8 +1317,8 @@ def check_footprint_geometry(footprint: Footprint) -> list:
         within each severity.
     """
     findings = []
-    for check in (check_pads_overlap, check_silk_clearance, check_courtyard_enclosure,
-                  check_annular_ring, check_pin_one_marker, check_silk_stroke_width,
+    for check in (check_pads_overlap, check_hole_vs_lead, check_silk_clearance, check_courtyard_enclosure,
+                  check_annular_ring, check_estimated_pads, check_pin_one_marker, check_silk_stroke_width,
                   check_silk_text_size, check_pad_in_keepout):
         findings.extend(check(footprint))
     return sorted(findings, key=lambda f: 0 if f.severity == 'error' else 1)

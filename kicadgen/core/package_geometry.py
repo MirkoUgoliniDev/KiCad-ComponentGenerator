@@ -7,11 +7,12 @@ seen from the top, i.e. in the same system KiCad uses.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Optional, Sequence
-from .footprint import require_kicad_reach, validate_pad_number
+from .footprint import require_kicad_reach, same_kicad_length, validate_pad_number
 from .output_names import validate_output_name
+from .tht_estimates import normalised_lead, normalised_sources
 from ..services.messages import tx
 
 
@@ -79,8 +80,47 @@ class PinSpec:
     #: length axis. None, or equal to `drill_mm`, is a round hole. The hole
     #: turns with the pad (`rotation_deg`), as KiCad's `(drill oval w h)`.
     drill_length_mm: Optional[float] = None
+    #: Declared section of the terminal that goes through the hole, mm:
+    #: {"shape": "round", "diameter_mm": d} or {"shape": "flat", "width_mm": w,
+    #: "thickness_mm": t} (`core.tht_estimates`). None when the drawing does
+    #: not quote it, and for every project saved before 2026-11-10. Each pin
+    #: has its own: one part may mix round pins and flat blades.
+    lead: Optional[dict] = None
+    #: Provenance of this pad's values: any of the keys "drill_mm",
+    #: "pad_size", "shape", "lead", each "read", "derived" or "estimated"
+    #: (`core.tht_estimates.SOURCE_WORDS`). None states nothing: no mark and
+    #: no finding, as before the provenance existed. Never written to the
+    #: .kicad_mod; the footprint checks read it from the `Pad`.
+    sources: Optional[dict] = None
 
     def __post_init__(self) -> None:
+        """@brief Normalise the shape and take private copies of `lead` and `sources`.
+
+        @note `lead` and `sources` are replaced by validated copies
+            (`core.tht_estimates.normalised_lead`, `normalised_sources`; an
+            empty `sources` becomes None), so the frozen pin does not share a
+            dict with its caller. Values out of contract are left as given
+            for `validate`, which refuses them: construction never raises.
+        """
+        for name, normalise in (("lead", normalised_lead), ("sources", normalised_sources)):
+            try:
+                object.__setattr__(self, name, normalise(getattr(self, name), str(self.number)))
+            except ValueError:
+                pass
+        self._circle_with_two_sides_is_an_oval()
+
+    def __hash__(self) -> int:
+        """@brief Hash of the pad's identity and geometry, so a pin stays usable in sets and as a key.
+
+        @return A hash of the scalar fields. `lead` and `sources` are dicts
+            and stay out of it: pins equal by `==` still hash alike, which is
+            all a hash must guarantee.
+        """
+        return hash((self.number, self.x_mm, self.y_mm, self.pad_length_mm, self.pad_width_mm, self.side,
+                     self.name, self.pad_type, self.shape, self.rotation_deg, self.drill_mm,
+                     self.drill_length_mm))
+
+    def _circle_with_two_sides_is_an_oval(self) -> None:
         """@brief Turn a "circle" with two different sides into the "oval" KiCad would need.
 
         @note KiCad draws a circle pad of diameter equal to its FIRST size
@@ -92,6 +132,10 @@ class PinSpec:
             stadium of those sides), which keeps both measures and is what
             KiCad then draws. Sides that are not finite numbers are left to
             `validate`, which refuses them.
+        @note «Different» means written as two different numbers at KiCad's
+            1 nm resolution (`core.footprint.same_kicad_length`): 1.7 and
+            1.7000000000000002, the float noise of a unit conversion, are
+            one diameter and the pad stays the circle that was declared.
         """
         if self.shape != "circle":
             return
@@ -99,7 +143,7 @@ class PinSpec:
             length, width = float(self.pad_length_mm), float(self.pad_width_mm)
         except (TypeError, ValueError, OverflowError):
             return
-        if math.isfinite(length) and math.isfinite(width) and length != width:
+        if math.isfinite(length) and math.isfinite(width) and not same_kicad_length(length, width):
             object.__setattr__(self, "shape", "oval")
 
     def validate(self) -> None:
@@ -118,7 +162,17 @@ class PinSpec:
             (`core.footprint.validate_pad_number`), the rule the symbol
             applies to its pin numbers: a pad « 1» and a symbol pin «1»
             would no longer match.
+        @note A missing number (None) is refused: turned into text it would
+            name the pad «None». A hole size on a pad type that has no hole
+            ("smd", "connect") is refused like `drill_length_mm`: the pad
+            would be written as SMD and the hole lost in silence; whoever
+            builds the pin states the type or drops the hole.
+        @note `lead` and `sources` must follow the contract of
+            `core.tht_estimates` (known shape and words, finite positive
+            sizes, no unknown key).
         """
+        if self.number is None:
+            raise ValueError(tx("il numero del pin non puo' essere vuoto"))
         if not str(self.number).strip() and self.pad_type != "np_thru_hole":
             raise ValueError(tx("il numero del pin non puo' essere vuoto"))
         validate_pad_number(self.number)
@@ -153,8 +207,16 @@ class PinSpec:
                     # side runs along the pad length, the second along the width.
                     raise ValueError(tx("Ogni lato dell'asola del pin {number} deve essere minore del lato "
                                         "del pad sullo stesso asse.", number=self.number))
+        elif self.drill_mm is not None:
+            # An SMD or edge-connector pad carrying a hole: writing it would
+            # drop the hole without a word. The type is never guessed from it.
+            raise ValueError(tx("il pin {number} non ha foro: drill_mm non ammesso", number=self.number))
         elif self.drill_length_mm is not None:
             raise ValueError(tx("il pin {number} non ha foro: drill_length_mm non ammesso", number=self.number))
+        # Raise on a lead or a provenance out of contract (`__post_init__`
+        # left such a value as it was given).
+        normalised_lead(self.lead, str(self.number))
+        normalised_sources(self.sources, str(self.number))
 
     def hole_sizes(self) -> Optional[tuple]:
         """@brief The hole as (size along the pad length, size along the pad width), mm, or None.
@@ -350,6 +412,9 @@ class PackageGeometry:
                 side=pin.side, name=pin.name, pad_type=pin.pad_type,
                 shape=pin.shape, rotation_deg=_normal_angle(pad_angle + self.orientation_deg),
                 drill_mm=pin.drill_mm, drill_length_mm=pin.drill_length_mm,
+                # The terminal and the provenance belong to the pad, whatever
+                # the view it is seen from.
+                lead=pin.lead, sources=pin.sources,
             ))
         return result
 
@@ -612,22 +677,103 @@ def polygon_separation(first: Sequence, second: Sequence) -> float:
     return best
 
 
+def mark_user_edited(before: PinSpec, after: PinSpec) -> PinSpec:
+    """@brief Provenance of a pad after the user edited it by hand: what was typed is no longer an estimate.
+
+    @param before The pad before the edit.
+    @param after The pad the editor built from it (e.g. `dataclasses.replace`).
+    @return `after` with its `sources` updated: "drill_mm" becomes "read"
+        when either hole side changed, "pad_size" when either pad side
+        changed, "shape" when the shape changed; the "drill_mm" entry is
+        dropped when the pad no longer has a hole. `after` itself when it
+        carries no `sources` (a project without provenance gains none) or
+        nothing of the three changed.
+    @note «read» is the contract's word for a value that is not the
+        program's guess: a value the user typed is the user's own reading.
+        A move or a rotation changes no provenance. Sizes are compared as
+        KiCad writes them (1 nm), so a value re-typed unchanged stays marked.
+    """
+    if not after.sources:
+        return after
+
+    def changed(*names: str) -> bool:
+        """Whether one of the named sizes differs between the two pads."""
+        for name in names:
+            old, new = getattr(before, name), getattr(after, name)
+            if (old is None) != (new is None):
+                return True
+            if old is not None and not same_kicad_length(old, new):
+                return True
+        return False
+
+    sources = dict(after.sources)
+    if after.hole_sizes() is None:
+        sources.pop("drill_mm", None)
+    elif "drill_mm" in sources and changed("drill_mm", "drill_length_mm"):
+        sources["drill_mm"] = "read"
+    if "pad_size" in sources and changed("pad_length_mm", "pad_width_mm"):
+        sources["pad_size"] = "read"
+    if "shape" in sources and before.shape != after.shape:
+        sources["shape"] = "read"
+    if sources == after.sources:
+        return after
+    return replace(after, sources=sources or None)
+
+
+def mark_user_verified(pin: PinSpec) -> PinSpec:
+    """@brief Provenance of a pad whose values the user checked on the drawing and declared right.
+
+    @param pin The pad as it stands (after any edit of the same dialog).
+    @return `pin` with every pad value its `sources` marks as derived or
+        estimated ("drill_mm", "pad_size", "shape":
+        `tht_estimates.unverified_values`) turned into "read"; "lead" and
+        the values already read are kept. `pin` itself when nothing is
+        marked unverified (a pad without provenance gains none).
+    @note The explicit counterpart of `mark_user_edited` (review 2026-11-11,
+        K5, user decision): a value the user verified and found right is
+        not re-typed, so no edit can tell it apart from an untouched one;
+        the pad dialog's «Valori verificati sul disegno» states it instead.
+        A "drill_mm" entry of a pad that has no hole is not a value and is
+        dropped, as `mark_user_edited` does.
+    """
+    from .tht_estimates import unverified_values
+    pending = unverified_values(pin.sources)
+    if not pending:
+        return pin
+    sources = dict(pin.sources)
+    for key in pending:
+        sources[key] = "read"
+    if pin.hole_sizes() is None:
+        sources.pop("drill_mm", None)
+    return replace(pin, sources=sources or None)
+
+
 def package_from_mapping(data: dict) -> PackageGeometry:
     """@brief Build and validate a PackageGeometry from the AI tool JSON; raise ValueError when invalid.
 
     @param data The decoded JSON object returned by the AI tool: package
         fields plus a `pins` list of pad dicts (number, x_mm, y_mm,
         pad_length_mm, pad_width_mm and the optional side, name, pad_type,
-        shape, rotation_deg, drill_mm). A null `mirrored` means «not
-        mirrored», a null `lead_form` means «not observed».
+        shape, rotation_deg, drill_mm, drill_length_mm, lead, sources). A
+        null `mirrored` means «not mirrored», a null `lead_form` means «not
+        observed»; a missing or null `lead` or `sources` means «not
+        declared» (every project saved before 2026-11-10).
     @return The validated PackageGeometry.
-    @throws ValueError When `data` is not an object or the resulting geometry
-        does not validate (see `PackageGeometry.validate`).
+    @throws ValueError When `data` is not an object, a pin's `number` is
+        null, or the resulting geometry does not validate (see
+        `PackageGeometry.validate`).
+    @note The inverse is `dataclasses.asdict(geometry)`: it writes `lead`
+        and `sources` back (null when absent), so a geometry survives a
+        save and a reload with its terminals and its provenance.
     @throws KeyError When a pin dict lacks one of its required fields.
     """
     if not isinstance(data, dict):
         raise ValueError(tx("geometria package non strutturata"))
     raw_pins = data.get("pins") or []
+    for p in raw_pins:
+        # str(None) is "None": a null number would become a pad of that name.
+        if isinstance(p, dict) and "number" in p and p["number"] is None:
+            raise ValueError(tx("il numero del pin non puo' essere vuoto"))
     pins = [PinSpec(
         # Surrounding blanks are dropped at the boundary, as the symbol drops
         # them from a pin number; inner blanks stay and `validate` refuses them.
@@ -638,6 +784,9 @@ def package_from_mapping(data: dict) -> PackageGeometry:
         rotation_deg=p.get("rotation_deg", 0), drill_mm=p.get("drill_mm"),
         # Optional (2026-11-06): absent or null is a round hole, as before.
         drill_length_mm=p.get("drill_length_mm"),
+        # Optional (2026-11-10): the terminal's section and the provenance
+        # of the pad's values; absent or null states nothing.
+        lead=p.get("lead"), sources=p.get("sources"),
     ) for p in raw_pins]
     geometry = PackageGeometry(
         name=str(data.get("name") or "Package"),

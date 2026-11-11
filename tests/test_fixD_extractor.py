@@ -409,13 +409,25 @@ def test_a_drill_not_wider_than_the_lead_is_lifted_and_marked_estimated():
 
 
 def test_a_read_drill_smaller_than_the_lead_is_not_a_measurement_either():
-    """Negative of «a measure is never touched»: an impossible measure is not one."""
-    params = _params_from_tool_arguments(matrix(
+    """Negative of «a measure is never touched»: an impossible measure is not one.
+
+    Review 2026-11-11 (provenance before value): only a lead READ from the
+    drawing moves the hole; a lead not read leaves the value alone, but the
+    hole it cannot pass is no longer reported as read -- one of the two is
+    wrong and the data cannot tell which, so it joins the values to verify.
+    """
+    read_lead = _params_from_tool_arguments(matrix(
+        drill_mm=0.4, pad_diameter_mm=0.7, lead_diameter_mm=0.5,
+        value_sources={"drill_mm": "read", "pad_diameter_mm": "read", "lead_diameter_mm": "read"}))
+    assert read_lead.drill_mm == 0.75 and read_lead.pad_diameter_mm == 1.55
+    assert read_lead.value_sources["drill_mm"] == "estimated"
+    assert read_lead.value_sources["pad_diameter_mm"] == "estimated"
+    unread_lead = _params_from_tool_arguments(matrix(
         drill_mm=0.4, pad_diameter_mm=0.7, lead_diameter_mm=0.5,
         value_sources={"drill_mm": "read", "pad_diameter_mm": "read"}))
-    assert params.drill_mm == 0.75 and params.pad_diameter_mm == 1.55
-    assert params.value_sources["drill_mm"] == "estimated"
-    assert params.value_sources["pad_diameter_mm"] == "estimated"
+    assert unread_lead.drill_mm == 0.4 and unread_lead.pad_diameter_mm == 0.7
+    assert unread_lead.value_sources["drill_mm"] == "estimated"
+    assert "foro non modificato, da verificare" in unread_lead.notes
 
 
 def test_a_drill_wider_than_the_lead_is_left_alone():

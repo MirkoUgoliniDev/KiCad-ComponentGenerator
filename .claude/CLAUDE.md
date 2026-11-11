@@ -84,28 +84,25 @@ render/export checks when KiCad is installed.
 
 ## Documentation standard — mandatory Doxygen-compatible comments
 
-All production Python code and maintained examples must use Doxygen-compatible
-documentation. Every module, public class, public function, public method and
-Qt override must have a docstring beginning with `@brief`. Document parameters
-with `@param`, return values with `@return`, raised exceptions with `@throws`,
-and important invariants with `@note` where applicable. Private helpers may use
-short explanatory docstrings when their behavior is non-obvious.
+Moved to `.claude/rules/python-documentation.md` (loaded for every `*.py`):
+Doxygen `@brief` docstrings on every module, public class, function, method
+and Qt override; every `#` and `#:` comment in English (binding user rule,
+2026-10-16). `tests/test_documentation.py` enforces both.
 
-Comments must explain intent, contracts, safety boundaries or engineering
-assumptions; do not restate the implementation line by line. Keep documentation
-in English in source code, use precise units for geometry, and update the
-docstring whenever behavior, inputs, outputs or side effects change. New public
-APIs without Doxygen-compatible documentation are not complete and must not be
-merged. Run the documentation test together with the relevant functional tests.
+## Rules by area
 
-**Comments in English — user rule, binding (2026-10-16).** Every `#` and `#:`
-comment in production code, tools, examples and `main.py` is written in
-English, exactly like the docstrings. Verbatim user quotes, UI labels and
-literal program output stay in Italian inside «…» on ONE line, with an English
-gloss next to them. `tests/test_documentation.py`
-(`test_comments_are_written_in_english`) enforces it: an Italian comment fails
-the suite. Write new comments in English from the start; never translate a
-quote or reword English only to satisfy the checker.
+`.claude/rules/` holds the rules of one area each, loaded when files of that
+area are worked on (`paths:` in the file's header). What is binding
+everywhere stays in this file; a rule lives in ONE place.
+
+- `python-documentation.md` — docstrings and English comments (`**/*.py`).
+- `photo-pipeline.md` — goal and «Strategia implementata» of the photo pipeline.
+- `document-extraction.md` — datasheet and drawing readings, witnesses, costs.
+- `cad3d.md` — FreeCAD child process, staging, STEP geometry.
+- `canvas.md` — symbol editor and footprint preview, shared components.
+- `kicad-packaging.md` — generators, KiCad tab, installation, rollback.
+- `ui-text.md` — visible strings and their four translations.
+- `tests.md` — positive/negative cases, contracts, how the suite is valid.
 
 Use the project skills in `.claude/skills/` for generation and verification workflows;
 `generate-kicad-component` routes each area to its skill (`document-extraction-change`,
@@ -121,41 +118,13 @@ the `adversarial-review` skill) for full reviews. KiCad 9 guide notes:
 
 ## Obiettivo concordato con l'utente
 
-Ricostruire da fotografie gli **ingombri meccanici** di un modulo PCB per KiCad.
-Non fare reverse engineering: nomi esatti, valori elettrici e marcature dei
-componenti non sono prioritari. Il percorso standard genera volumi generici
-senza scritte. Conservare invece geometria, posizione, orientamento e pinout
-del modulo. Le altezze da una sola foto superiore sono stime, non misure.
+Ricostruire da fotografie gli **ingombri meccanici** di un modulo PCB per KiCad,
+senza reverse engineering. Testo completo in `.claude/rules/photo-pipeline.md`.
 
 ## Strategia implementata
 
-1. Usare una sola foto superiore come riferimento geometrico. Le altre viste
-   aiutano quote e pinout, ma non aggiungono copie degli stessi componenti.
-2. Rilevare e ritagliare la PCB, calibrandola con dimensioni note e valide.
-   Rifiutare inclinazioni significative: non è implementata una rettifica
-   prospettica. Origine al centro, X a destra, Y in basso.
-3. Localizzare corpi visibili con una vista completa e tre strisce sovrapposte.
-   Usare la vista completa per i grandi corpi e zone di competenza per i piccoli.
-4. Associare i rilevamenti geometricamente, uno-a-uno sull'intera vista, senza
-   dipendere dall'ordine di risposta. Non assorbire piccoli passivi in grandi IC.
-5. Verificare la presenza dei corpi, non la loro identità elettronica. Non
-   inventare coordinate durante la verifica; mantenere come dubbi i risultati
-   non verificabili. Escludere pad vuoti, vie e serigrafie.
-6. Convertire deterministicamente pixel in mm; campionare i colori dalla foto.
-   Anche il fallback globale deve restare generico, senza marcature e con
-   provenienza/incertezza delle altezze esplicita.
-7. Esporre log dei passi e confronto fotografico modificabile: sposta, modifica
-   quote, aggiungi, elimina, Applica/Annulla. I nuovi allegati sono spuntati
-   per default. Applica e nuova estrazione invalidano la vecchia anteprima;
-   risultati CAD tardivi non devono ripristinarla.
-8. Validare semanticamente risposte e cache: numeri finiti non booleani,
-   rettangoli validi, ID attesi completi e univoci. Non memorizzare risposte
-   incomplete come successi. Conservare gli elementi validi di risposte parziali.
-
-OpenCV serve alla preparazione/calibrazione, non è un rilevatore universale di
-componenti. Le prove di aggancio ai bordi e classificazione dettagliata hanno
-mostrato regressioni: mantenerle fuori dal percorso standard finché non validate.
-Non ottimizzare il semplice conteggio dei componenti a scapito della geometria.
+Spostata in `.claude/rules/photo-pipeline.md` (punti 1-8, numerazione
+invariata: i commenti nel codice citano «strategy point 4»).
 
 ## Mappa del codice
 
@@ -261,7 +230,14 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 12850 passed,
+is 13117 passed,
+13 skipped and 19 subtests (2026-11-11, branch `FOOTPRINT-ADVANCE`, NOT merged into `main`, halves 8057/9/19 and
+5060/4: the eleven high findings of the 2026-11-10 adversarial review of document extraction and their own review —
+per-pad terminal, printed hole and provenance with holes and lands derived by the program (kicadgen/core/tht_estimates.py),
+estimated pads marked in tooltip, checks and description with «Valori verificati sul disegno», drawn-hole witness that
+says whether it verified the scale (body_check, scale_verified), body plan sizes as an unordered pair, one writer for
+every pad-layout path, partial re-reads merged by scope, contradicting saved answers asked again, rules by area in
+`.claude/rules/`; see HANDOFF.md «RIPRESA RAPIDA» and «10/11 sera»; before that, 12850 passed,
 13 skipped and 19 subtests (2026-11-10, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `d8303a3`, halves 7862/9/19 and 4988/4: unfilled shapes hit on the outline like KiCad through kicadgen/gui/canvas_hit.py, one precedence and one pointer tracker for both canvases, one closing handle, pads the AI did not read block the footprint instead of failing the analysis, see docs/canvas-hit-plan.md and HANDOFF.md 09/11 sera; before that, 12666 passed,
 13 skipped and 19 subtests (2026-11-09 evening, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `e3eff26`, halves 7761/9/19 and 4905/4: back layers B.SilkS/B.Fab with mirrored texts, «Sposta ancora» with the STEP offset measured with kicad-cli, add/remove vertex in both canvases, keepout zones checked like KiCad's DRC, see docs/footprint-back-anchor-vertices-zones-plan.md and HANDOFF.md 09/11; before that, 12366 passed,
 13 skipped and 19 subtests (2026-11-09, branch `FOOTPRINT-ADVANCE` merged into `main`, commit `33cbd08`, halves 7527/9/19 and 4839/4: the orthogonal dimension keeps its preview's axis inside the box as KiCad, SILK_MIN 0.10 mm sourced to KLC F5.1, five low findings of an adversarial review fixed; before that, 12362 passed,

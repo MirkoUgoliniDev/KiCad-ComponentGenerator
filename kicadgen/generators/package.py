@@ -18,7 +18,83 @@ from ..core.footprint import (COURTYARD_WIDTH_MM, FAB_WIDTH_MM, SILK_OUTSIDE_FAB
 from ..core.package_geometry import ROUNDRECT_RRATIO, PackageGeometry, pad_outline
 from ..core.silk import (PIN_ONE_UNMARKED_NOTE, clip_segment, keepout_box, marker_ink_box, pin_one,
                          pin_one_marker, silk_rectangle)
+from ..core.tht_estimates import unverified_values
 from ..services.messages import tx
+
+#: Note recorded in the footprint description (fixed file language, see
+#: `core.footprint.FOOTPRINT_TEXT_LANGUAGE`) when the hole, size or shape of
+#: some pads is not a reading of the drawing but derived or estimated by the
+#: program (`PinSpec.sources`): an estimate, never a measure. `{numbers}` is
+#: the list of those pads as `estimated_pad_list` writes it.
+ESTIMATED_PADS_NOTE = "foro o piazzola stimati sui pad {numbers}: da verificare sul disegno"
+
+#: Most entries (single numbers or ranges) the note lists by name; beyond
+#: them it gives a count (review 2026-11-11, K7: a large part with every pad
+#: estimated wrote hundreds of numbers into the one-line `descr`). A
+#: presentation bound, not a geometric threshold: the full list is in the
+#: footprint preview's tooltips and in the checks.
+ESTIMATED_PADS_LISTED = 8
+
+#: Tail of the note when entries were left out (fixed file language).
+ESTIMATED_PADS_MORE = "e altri {count}"
+
+#: Count of estimated pads that have no number (mechanical holes): they
+#: cannot be named, but the note must not hide them (fixed file language).
+ESTIMATED_PADS_UNNAMED = "{count} senza numero"
+
+
+def estimated_pad_list(numbers) -> str:
+    """@brief The pad numbers of ESTIMATED_PADS_NOTE: unique, ranges compressed, bounded.
+
+    @param numbers Pad numbers in footprint order (text; several pads may
+        share one number).
+    @return "" when no pad is given; otherwise the comma-separated
+        entries: blank numbers are not listed as empty entries (a mechanical
+        hole without a number has no name to cite) but counted at the end
+        (ESTIMATED_PADS_UNNAMED), repeated numbers once, runs of three or more
+        consecutive integers written «first-last» (pads 1, 2, 3, 4 -> «1-4»),
+        textual numbers («A1», «EP») as they are. At most
+        ESTIMATED_PADS_LISTED entries are written; the remaining pads are
+        counted (ESTIMATED_PADS_MORE).
+    @note Only integer numbers form ranges: «A1»-«A3» is not a well-defined
+        run (grid numbering skips letters), so text stays listed.
+    """
+    seen, unique, unnamed = set(), [], 0
+    for number in numbers:
+        text = str(number).strip()
+        if not text:
+            unnamed += 1
+        elif text not in seen:
+            seen.add(text)
+            unique.append(text)
+    # Each entry is (text, number of pads it names).
+    entries: list[tuple[str, int]] = []
+    index = 0
+    while index < len(unique):
+        text = unique[index]
+        if not text.isdigit():
+            entries.append((text, 1))
+            index += 1
+            continue
+        end = index
+        while (end + 1 < len(unique) and unique[end + 1].isdigit()
+               and int(unique[end + 1]) == int(unique[end]) + 1):
+            end += 1
+        run = end - index + 1
+        if run >= 3:
+            entries.append((f"{text}-{unique[end]}", run))
+        else:
+            entries.extend((unique[i], 1) for i in range(index, end + 1))
+        index = end + 1
+    listed = entries[:ESTIMATED_PADS_LISTED]
+    words = ", ".join(text for text, _count in listed)
+    left = sum(count for _text, count in entries[ESTIMATED_PADS_LISTED:])
+    if left:
+        words += " " + ESTIMATED_PADS_MORE.format(count=left)
+    if unnamed:
+        tail = ESTIMATED_PADS_UNNAMED.format(count=unnamed)
+        words = f"{words}, {tail}" if words else tail
+    return words
 
 #: Courtyard clearance around body and pads, mm (KiCad Library Convention
 #: F5.3 default for ordinary SMD/THT parts).
@@ -87,7 +163,9 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         when unknown.
     @param description The project's own description for `descr` and the
         "Description" property; "" keeps the generic family text. The note
-        about an estimated body centre is appended in both cases.
+        about an estimated body centre is appended in both cases, and so is
+        ESTIMATED_PADS_NOTE naming the pads whose hole, size or shape is
+        derived or estimated (`PinSpec.sources`).
     @param tags The project's keywords for the footprint `tags`; "" (or
         blanks) keeps the package family, as before the keywords were passed
         (review 2026-10-15, R2-M2: the project keywords never reached the
@@ -105,7 +183,9 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
         centre, see PackageGeometry.body_frame_offset. A ``${REFERENCE}``
         text on F.Fab marks the body centre (core.footprint.fab_reference_text);
         Reference/Value anchored bottom-left at the KiCad corner of
-        core.footprint.default_text_positions (place_default_texts).
+        core.footprint.default_text_positions (place_default_texts). Each
+        pad carries its pin's `lead` and `sources` as metadata that the
+        .kicad_mod does not hold.
     @throws ValueError When the geometry does not validate, the courtyard
         margin is not a finite number >= 0, or the pin-1 marker cannot be
         placed off the copper.
@@ -136,6 +216,14 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
     if first is None and any(str(pin.number).strip() for pin in electrical):
         # No pad is pin 1: no marker is guessed, and the file says why.
         description += "; " + PIN_ONE_UNMARKED_NOTE
+    # Blank numbers dropped, repeats once, ranges and a bound (K7).
+    unverified = estimated_pad_list(pin.number for pin in pins if unverified_values(pin.sources))
+    if unverified:
+        # Recorded in the library itself like the estimated body centre
+        # (fixed file language): a hole, pad size or pad shape the program
+        # derived or estimated is never passed for a measure. Absent for a
+        # geometry without provenance, whose file stays byte-identical.
+        description += "; " + ESTIMATED_PADS_NOTE.format(numbers=unverified)
     # The project's keywords when given, like the pin-header and castellated
     # generators; otherwise the family, so a project without keywords keeps a
     # byte-identical file.
@@ -239,6 +327,9 @@ def build_package(geometry: PackageGeometry, name: str | None = None, *,
             layers=PAD_LAYERS[pin.pad_type], rotation=pin.rotation_deg,
             drill=None if slot is not None else pin.drill_mm, drill_slot=slot,
             roundrect_rratio=ROUNDRECT_RRATIO if pin.shape == "roundrect" else None,
+            # Metadata for the checks and the preview, not written to the
+            # file: the declared terminal and the provenance of the values.
+            lead=pin.lead, sources=pin.sources,
         ))
     # Decision D1 (user, 2026-10-14): Reference above and Value below the
     # envelope; a user-chosen position is applied afterwards (place_texts).

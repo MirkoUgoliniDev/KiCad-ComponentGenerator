@@ -152,8 +152,25 @@ def test_a_malformed_value_beside_a_null_coordinate_is_still_an_error(field, bad
     pads = _pads(unread=("5",))
     target = pads[4] if field == "number" else pads[1]
     target[field] = bad
-    with pytest.raises(ExtractionError, match="Geometria package"):
+    # A pad without its number is a broken answer SHAPE since review
+    # 2026-11-10 (an empty number is refused by the pad contract): the error
+    # names it and earns the one corrective retry; any other malformed value
+    # stays an invalid geometry.
+    expected = "Pad senza numero stampato" if field == "number" else "Geometria package"
+    with pytest.raises(ExtractionError, match=expected):
         _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+
+
+def test_a_malformed_size_is_reported_even_where_the_program_would_derive_the_land():
+    """Review 2026-11-11: the derived land must not hide a malformed size the answer gave."""
+    pads = _pads()
+    pads[1]["pad_width_mm"] = 0.0
+    with pytest.raises(ExtractionError, match="pad_width_mm"):
+        _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
+    # Negative twin: the size simply absent is the rule's to derive, not an error.
+    pads = _pads()
+    del pads[1]["pad_width_mm"]
+    _params_from_tool_arguments(single_answer_to_data(_answer(pads)))
 
 
 def test_an_unread_pad_with_a_malformed_present_coordinate_is_an_error():
