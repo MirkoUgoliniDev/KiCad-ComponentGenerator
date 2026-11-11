@@ -231,7 +231,7 @@ checkbox, one review window in two stages with the detector's reading kept besid
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
 is 13605 passed,
-13 skipped and 19 subtests (2026-11-11 night, branch `FOOTPRINT-ADVANCE`, NOT merged into `main`, halves 8287/9/19 and
+13 skipped and 19 subtests (2026-11-11 night, branch `FOOTPRINT-ADVANCE`, commit `a482721`, NOT merged into `main`, halves 8287/9/19 and
 5318/4: a drawn-hole contradiction of two agreeing pad readings always becomes the pad-layout question (never a block,
 never a silent confirmation), a terminal read once is an estimate, every prompt sent to a model lives in the analysis
 profile with its status, diff and restore (kicadgen/services/prompt_catalog.py, profile schema 9), footprint writes

@@ -3,7 +3,7 @@
 ## STATO 11/11/2026 notte — giri 6, 6b, 7, 7b e prompt nel profilo (P1, P2) COMMITTATI su FOOTPRINT-ADVANCE (utente: «ok»), NON mergiati, NON pushati
 
 Suite completa VERDE a codice fermo: A 8287 passati 9 saltati 19 sottotest, B 5318 passati 4 saltati = 13605 passati,
-13 saltati, 19 sottotest. Commit: vedi la riga aggiornata dal commit di sola documentazione che segue (base `1266fb7`).
+13 saltati, 19 sottotest. Commit `a482721` (base `1266fb7`).
 `main` e `origin` fermi a `03a1a60` (v1.0.8). data/analysis_profiles.sqlite3 aperto a schema 9 e committato.
 CONTENUTO: (a) i fori disegnati che smentiscono due letture concordi producono SEMPRE la domanda pad_layout (con il
 layout dei fori se esiste), mai un blocco ne' una conferma silenziosa; (b) un terminale letto una volta e' «stimato»;
