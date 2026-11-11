@@ -31,8 +31,86 @@ actually drawn in the image, without any AI and without any network access:
    body size of the reading (:func:`_body_check`): one with the body's
    proportions is the body, and ties the reading to an absolute size
    (``scale_verified``) or contradicts it ("body_scale"); rectangles of
-   other proportions say nothing. Without that, a confirmation covers the
+   other proportions say nothing. All of them are judged, by the decision
+   table below. Without an agreement, a confirmation covers the
    reading's proportions only (see :class:`LayoutCheck`).
+
+Body check: the decision table (2026-11-11, review finding V1-1). Every
+rectangle drawn around the matched holes is asked two independent
+questions (:func:`_judge_outline`). PROPORTIONS, scale-free: are its two
+sides the body's two sizes at ONE scale -- within its own measurement
+uncertainty ("identified": OUTLINE_EDGE_PX per edge), or only within the
+drafting allowance ("loose": BODY_SCALE_RATIO per side)? SIZE: are its
+sides the body's AT THE PADS' SCALE, within the allowance ("here"), or
+not ("elsewhere")? Either way the rectangle is a CANDIDATE for the body:
+it could be the declared body, drawn as loosely as the allowance admits,
+at the pads' scale or at another. A rectangle of other proportions and
+other sizes is no candidate, says nothing and is left out. Then, by
+which candidates the page holds::
+
+    row  here (identified   elsewhere,   elsewhere,   verdict
+         or loose)          identified   loose
+    1    yes                no           no           agrees
+    2    yes                at least one of the two   unverifiable
+    3    no                 yes          any          contradicted
+    4    no                 no           any          unverifiable
+
+Why each row, and what it rests on:
+
+- Row 1 (derived, with one declared limit). Every candidate for the body
+  on the page is at the pads' scale. The limit is the page whose only
+  candidate is not the body: see the residue below.
+- Row 2 (derived: it is an ambiguity, not a rule). The page holds a
+  candidate at the pads' scale and one at another scale, and two
+  different pages produce this SAME evidence. A correct reading of a body
+  with a step or a shield can inside it: the outer rectangle is the body,
+  here, and the inner one is a candidate elsewhere. And a wrongly scaled
+  reading of a body with a clearance frame outside it: the inner
+  rectangle is the body, elsewhere, and the frame falls inside the
+  allowance of the wrong scale (V1-1 was found on a 19.1 x 15.5 mm
+  body). No structural fact tells them apart: "the innermost is the
+  body" fails on the step; "the body encloses its pads" holds for every
+  rectangle found (:func:`_outline_rects`) and is not true of every part
+  anyway (gull-wing leads reach outside the body); "a step keeps one
+  margin on its four sides" is as true of the frame. Nor does "exact
+  proportions outrank loose ones": real outlines are drawn up to 1.5 %
+  out of proportion (the sample pages), a frame around a nearly square
+  body keeps the proportions within a pixel, and :func:`_outline_rects`
+  also closes rectangles out of the sides of two nested outlines, some
+  of which have the body's proportions by geometry (measured on
+  synthetic pages: 45 wrong scales certified in 2100 by that ranking).
+  Resolving the row towards the smallest rectangle refused correct
+  readings (F7-1, until 2026-11-10); resolving it towards the agreeing
+  one certified wrong scales (V1-1, the morning of 2026-11-11). The pads
+  stay confirmed by their shape; the scale is not verified.
+- Row 3 (derived, on a declared identification). Nothing is drawn at the
+  reading's scale and the body's exact proportions are drawn at another:
+  the reading is scaled wrongly ("body_scale"). Only EXACT proportions
+  refuse: a loose candidate elsewhere may be a frame, or a body with one
+  size misread, and a mistake of the body reading must not judge the
+  pads (audit A9).
+- Row 4 (derived). No candidate at the pads' scale and none identified:
+  the page does not say where the body is.
+
+Cost of row 2, accepted: a correct reading loses ``scale_verified`` (it
+is still confirmed) whenever a second rectangle near the outline could
+be the body within the allowance -- a step or a frame whose margin
+changes the proportions by less than about 10 %.
+
+Residue of false verdicts, pinned by tests in
+``tests/test_drawing_holes_generality.py``:
+
+- row 1, a wrong scale certified: the page does NOT draw the body, only
+  a frame around it (or draws the two so close that they are one line),
+  and the reading's error brings that frame inside the allowance. A
+  single candidate cannot be told from a loosely drawn body (the SRD
+  sample page draws 19.06 x 15.25 mm for 19.1 x 15.5 mm), and a tighter
+  proportion bound would be a number chosen on the sample pages;
+- row 3, a correct reading refused: the page does not draw the body
+  outline and its only candidate is a step or a frame that keeps the
+  body's exact proportions (a square or nearly square body);
+- errors of the reading within the allowance itself (5 % plus two
+  tolerances): below the check's resolution.
 
 A third entry point, :func:`measured_outline`, returns that drawn outline
 in the reading's own mm frame through the inverse of the confirmed fit.
@@ -489,13 +567,18 @@ class LayoutCheck:
         A point set fits at any size, so the absolute scale -- the pitch,
         the unit -- is covered only when a drawn body outline ties it to
         the declared body size: ``body_check`` is "agrees" (a rectangle
-        drawn around the holes has the declared sizes at the pads' scale),
-        "contradicted" (the rectangle has the declared body's proportions
-        at ANOTHER scale: status "not_confirmed", reason "body_scale"),
-        "unverifiable" (a body was given, but no rectangle around the holes
-        is identified as it: none drawn, or only rectangles of other
+        drawn around the holes has the declared sizes at the pads' scale,
+        and no other rectangle could be the body at another scale),
+        "contradicted" (no rectangle has the declared sizes at the pads'
+        scale and one has the declared body's exact proportions at ANOTHER
+        scale: status "not_confirmed", reason "body_scale"),
+        "unverifiable" (a body was given, but the page does not say which
+        rectangle is it: none drawn, or only rectangles of other
         proportions -- a page frame, a table cell, the frame around a
-        chamfered body -- or the fit never reached the body check) or
+        chamfered body -- or one rectangle has the declared sizes while
+        another could be the body at another scale (a step, a frame), or
+        the fit never reached the body check; the whole decision table is
+        in the module docstring) or
         "none" (no body was given). ``scale_verified`` is True only for
         "agrees". A confirmed reading with ``scale_verified`` False may
         have every value multiplied by one factor (a 2.0 pitch read for
@@ -620,7 +703,11 @@ def check_pad_layout(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         compared with it at the fitted scale (:func:`_body_check`): the
         answer is ``body_check`` of the result. Only a rectangle with the
         body's own proportions at another scale contradicts the reading
-        ("body_scale"); a rectangle of other proportions is not the body
+        ("body_scale"), and only when no rectangle has the declared sizes
+        at the pads' scale; with one that has, the page shows two
+        candidates and verifies nothing (see :func:`_body_check` and the
+        decision table of the module docstring). A rectangle of other
+        proportions is not the body
         and leaves the status as it is, with ``scale_verified`` False.
     @param hole_kinds Optional pad number -> "terminal" | "mounting" | "slot",
         what the reading DECLARED each pad's hole to be (the extractor
@@ -1780,63 +1867,140 @@ def _outline_rects(mask: np.ndarray, circles: Sequence[_Circle]):
             yield centre(l), centre(t), centre(r), centre(b)
 
 
+def _within_allowance(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
+                      tolerance_px: float) -> bool:
+    """True when both sizes of a rectangle (width, height px) are the body's (mm) AT THE PADS' SCALE.
+
+    Each within two per-hole tolerances (the two edges of a side against a
+    scale that the pads fix no better than that) plus the proportional
+    drafting allowance BODY_SCALE_RATIO (:func:`body_allowance_mm`, in
+    pixels).
+
+    @note NECESSARY for an agreement, never sufficient (review finding
+        V1-1, 2026-11-11). The allowance is several percent of each size,
+        taken side by side: a clearance frame one margin outside the body
+        falls inside it for a whole range of wrongly scaled readings. Alone
+        it says "nothing excludes this size", not "this is the body"; what
+        else is drawn around the holes decides (:func:`_body_check`).
+    """
+    return all(abs(drawn - size * scale) <= 2 * tolerance_px + BODY_SCALE_RATIO * size * scale
+               for drawn, size in zip(outline_px, body))
+
+
+def _has_body_proportions(outline_px: tuple[float, float], body: tuple[float, float],
+                          drafting_ratio: float = 0.0) -> bool:
+    """True when ONE scale maps both body sizes (mm) onto a rectangle (width, height px).
+
+    Scale-free: nothing of the pads enters the test, so it holds or fails
+    whatever scale the reading was taken at.
+
+    - ``drafting_ratio`` 0 (the default): within the rectangle's own
+      measurement uncertainty alone (two edges of OUTLINE_EDGE_PX per
+      side). The rectangle has the declared proportions as exactly as it
+      can be measured: it is IDENTIFIED as the body.
+    - ``drafting_ratio`` BODY_SCALE_RATIO: each side may also be off its
+      quote by the drafting allowance, at that one scale. The rectangle
+      COULD be the body, drawn as loosely as the allowance admits; so could
+      a frame a small margin from it.
+    """
+    own = 2 * OUTLINE_EDGE_PX
+    # Scales (px per mm) at which each body size alone could be the drawn
+    # one: the proportions are the body's when the two ranges meet.
+    lowest = max((drawn - own) / (size * (1 + drafting_ratio)) for drawn, size in zip(outline_px, body))
+    highest = min((drawn + own) / (size * (1 - drafting_ratio)) for drawn, size in zip(outline_px, body))
+    return lowest <= highest
+
+
+# What ONE rectangle says about a declared body (:func:`_judge_outline`).
+# "Identified": the body's proportions within the measurement uncertainty.
+# "Loose": only within the drafting allowance. "Here": its sizes are the
+# body's at the pads' scale. "Elsewhere": they are not.
+_IDENTIFIED_HERE = "identified_here"
+_IDENTIFIED_ELSEWHERE = "identified_elsewhere"
+_LOOSE_HERE = "loose_here"
+_LOOSE_ELSEWHERE = "loose_elsewhere"
+
+
 def _judge_outline(outline_px: tuple[float, float], body: tuple[float, float], scale: float,
                    tolerance_px: float) -> str | None:
-    """What ONE drawn rectangle (width, height px) says about a body size (mm): BODY_AGREES, BODY_CONTRADICTED or None.
+    """What ONE drawn rectangle (width, height px) says about a body size (mm), or None when nothing.
 
-    - BODY_AGREES: both sizes are those of the body at the pads' scale,
-      within two per-hole tolerances (the two edges of a side against a
-      scale that the pads fix no better than that) plus the proportional
-      drafting allowance BODY_SCALE_RATIO.
-    - BODY_CONTRADICTED: not so, but ONE other scale maps both body sizes
-      onto the rectangle within the rectangle's own measurement
-      uncertainty (two edges of OUTLINE_EDGE_PX per side), i.e. the
-      rectangle has the declared body's proportions, in the order given.
-      That scale-free property is what identifies it as the body: the body
-      is drawn at another scale than the pads were read at.
-    - None: a rectangle of other proportions. It is some other rectangle
-      (a page frame, a table cell, a keep-out area, the frame around a
-      chamfered body) and says nothing about the reading (audit A9). A
-      body with ONE size misread falls here too: that is a mistake of the
-      body reading, which must not judge the pads.
+    Two independent questions: does it have the body's PROPORTIONS
+    (:func:`_has_body_proportions`, scale-free, asked exactly and then
+    within the drafting allowance), and are its sizes the body's AT THE
+    PADS' SCALE (:func:`_within_allowance`)?
+
+    - _IDENTIFIED_HERE: exact proportions, sizes at the pads' scale.
+    - _IDENTIFIED_ELSEWHERE: exact proportions, at another scale than the
+      pads were read at.
+    - _LOOSE_HERE: sizes at the pads' scale, proportions off by more than
+      the measurement uncertainty. A body drawn loosely (the sample pages
+      draw bodies up to 1.5 % out of proportion) -- or a frame that happens
+      to fall inside the allowance of a wrongly scaled reading (V1-1).
+    - _LOOSE_ELSEWHERE: proportions within the drafting allowance only,
+      sizes not at the pads' scale. A loosely drawn body at another scale,
+      or a step or a frame a small margin from the body.
+    - None: other proportions altogether (a page frame, a table cell, a
+      keep-out area, the frame around a chamfered body; audit A9). A body
+      with ONE size misread falls here too: that is a mistake of the body
+      reading, which must not judge the pads.
 
     @note Limits of the identification, declared. A rectangle that merely
         shares the body's proportions is taken for the body: a square
         frame around a square body that is not drawn as a rectangle, or a
         frame a constant margin outside a nearly square body. The fewer
         pixels the rectangle spans, the wider "the same proportions" is.
-        And a body drawn at another scale with proportions a little off
-        its quotes is not identified (the answer is then "unverifiable",
-        the cautious side). The body's POSITION against the pads would
-        identify it far better; the reading does not carry it to this
-        module.
+        The body's POSITION against the pads would identify it far better;
+        the reading does not carry it to this module.
     """
-    if all(abs(drawn - size * scale) <= 2 * tolerance_px + BODY_SCALE_RATIO * size * scale
-           for drawn, size in zip(outline_px, body)):
-        return BODY_AGREES
-    # Scales (px per mm) at which each body size alone could be the drawn
-    # one: the rectangle has the body's proportions when the two ranges meet.
-    own = 2 * OUTLINE_EDGE_PX
-    lowest = max((drawn - own) / size for drawn, size in zip(outline_px, body))
-    highest = min((drawn + own) / size for drawn, size in zip(outline_px, body))
-    return BODY_CONTRADICTED if lowest <= highest else None
+    here = _within_allowance(outline_px, body, scale, tolerance_px)
+    if _has_body_proportions(outline_px, body):
+        return _IDENTIFIED_HERE if here else _IDENTIFIED_ELSEWHERE
+    if here:
+        return _LOOSE_HERE
+    return _LOOSE_ELSEWHERE if _has_body_proportions(outline_px, body, BODY_SCALE_RATIO) else None
 
 
 def _body_check(mask: np.ndarray, holes: Sequence[_Circle], body: tuple[float, float], scale: float,
                 tolerance_px: float) -> tuple[str, tuple[float, float, float, float] | None]:
     """Compare a declared body with the rectangles drawn around the matched holes.
 
-    The rectangles are judged from the smallest outwards
-    (:func:`_judge_outline`) and the first that is identified as the body
-    decides: BODY_AGREES or BODY_CONTRADICTED, with that rectangle. A
-    rectangle of other proportions is passed over, so an inner frame does
-    not hide the body outline drawn around it. BODY_UNVERIFIABLE (and no
-    rectangle) when none is identified as the body, or none is drawn.
+    EVERY rectangle is judged (:func:`_judge_outline`) before anything is
+    decided, because the order they come in (smallest first) says nothing
+    about which one is the body. The decision table, with its reasons, is
+    in the module docstring ("Body check: the decision table"):
+
+    1. something at the pads' scale (identified or loose) and nothing
+       elsewhere: BODY_AGREES, with the rectangle at the pads' scale
+       nearest the declared sizes;
+    2. something at the pads' scale AND something elsewhere (identified or
+       loose): BODY_UNVERIFIABLE, no rectangle -- two candidates for the
+       body at two scales;
+    3. nothing at the pads' scale, one identified elsewhere:
+       BODY_CONTRADICTED, with the smallest such rectangle;
+    4. nothing at the pads' scale and none identified elsewhere (loose
+       elsewhere only, other proportions only, nothing drawn):
+       BODY_UNVERIFIABLE, no rectangle.
     """
+    found: dict[str, list[tuple[float, float, float, float]]] = {
+        _IDENTIFIED_HERE: [], _IDENTIFIED_ELSEWHERE: [], _LOOSE_HERE: [], _LOOSE_ELSEWHERE: []}
     for rect in _outline_rects(mask, holes):
         verdict = _judge_outline((rect[2] - rect[0], rect[3] - rect[1]), body, scale, tolerance_px)
         if verdict is not None:
-            return verdict, rect
+            found[verdict].append(rect)
+
+    def distance(rect: tuple[float, float, float, float]) -> float:
+        """Largest relative gap between a rectangle's sizes and the declared ones at the pads' scale."""
+        return max(abs(drawn - size * scale) / (size * scale)
+                   for drawn, size in zip((rect[2] - rect[0], rect[3] - rect[1]), body))
+
+    here = found[_IDENTIFIED_HERE] + found[_LOOSE_HERE]
+    if here:
+        if found[_IDENTIFIED_ELSEWHERE] or found[_LOOSE_ELSEWHERE]:
+            return BODY_UNVERIFIABLE, None
+        return BODY_AGREES, min(here, key=distance)
+    if found[_IDENTIFIED_ELSEWHERE]:
+        return BODY_CONTRADICTED, found[_IDENTIFIED_ELSEWHERE][0]
     return BODY_UNVERIFIABLE, None
 
 
@@ -2154,8 +2318,9 @@ def _fit_assignment(points: np.ndarray, circles: Sequence[_Circle], assign: np.n
        too few witness pads (only with ``anchoring``), and those of a fit
        on a stretched page.
     6. With a body, the rectangles drawn around the holes
-       (:func:`_body_check`): "body_scale" when one contradicts it; the
-       answer is carried in ``body_check`` either way.
+       (:func:`_body_check`): "body_scale" when one has the body's
+       proportions at another scale and none has its sizes at this one;
+       the answer is carried in ``body_check`` either way.
 
     ``anchoring`` False skips the witness rule: for the anchored subset of
     a move, which must show the page's scale and therefore holds at least
@@ -2218,7 +2383,7 @@ def body_allowance_mm(size_mm: float, tolerance_mm: float) -> float:
     @return Two tolerances (the two drawn edges of the side) plus
         BODY_SCALE_RATIO of the size (the drafting allowance, proportional).
     @note The one definition of the allowance of the body check
-        (:func:`_judge_outline` applies it in pixels), for callers and
+        (:func:`_within_allowance` applies it in pixels), for callers and
         tests that need to reason about it.
     """
     return 2 * float(tolerance_mm) + BODY_SCALE_RATIO * float(size_mm)
@@ -2237,7 +2402,9 @@ def body_axes_distinguishable(body_mm: Sequence[float], tolerance_mm: float | No
         of their allowances can both agree with the same drawn side and
         the outline says nothing about their order. A caller that tests
         the body the other way round must not read an agreement as a
-        measure below this separation.
+        measure below this separation. The allowance is necessary for an
+        agreement, not sufficient (:func:`_body_check`), so above this
+        separation two orders still cannot both agree.
     """
     if tolerance_mm is None:
         return False
@@ -3092,14 +3259,18 @@ def measured_outline(images: Sequence[Path], pads_mm: Mapping[object, Sequence[f
         when given, the outline returned is the rectangle the body check
         of :func:`check_pad_layout` identifies as that body and finds
         agreeing with it (:func:`_body_check`: within two fit tolerances
-        plus BODY_SCALE_RATIO of each size); rectangles of other
+        plus BODY_SCALE_RATIO of each size; of several agreeing ones, the
+        nearest to the declared sizes); rectangles of other
         proportions around the holes are passed over.
     @return A :class:`MeasuredOutline`, or None when fewer than MIN_PADS or
         more than MAX_PADS pads are given, no image confirms the reading,
         the confirmed image has no closed rectangle around the matched
-        holes (with ``body_mm``: none identified as the body), a rectangle
-        of any image contradicts ``body_mm`` (the body's proportions at
-        another scale), or two images give outlines whose edges differ by
+        holes (with ``body_mm``: the body check is "unverifiable" -- none
+        taken for the body, or two candidates at two scales, e.g. a nearly
+        square body with a step inside), the rectangles
+        of any image contradict ``body_mm`` (the body's proportions at
+        another scale and none with its sizes at this one), or two images
+        give outlines whose edges differ by
         more than their larger tolerance.
     @throws ValueError When a pad coordinate or a body size is not a finite
         number (a positive one for the body).

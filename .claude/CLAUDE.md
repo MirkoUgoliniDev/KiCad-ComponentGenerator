@@ -230,7 +230,14 @@ contradicts the measure; point 150, `FIX` only: profile field «Modello lettura 
 checkbox, one review window in two stages with the detector's reading kept beside the AI's,
 three-section «Parametri» modal, phantom sides excluded by the photo, pulsing running mark,
 unread row spacing ignored, pad width at the pitch downgraded, lands measured on the photo)
-is 13117 passed,
+is 13393 passed,
+13 skipped and 19 subtests (2026-11-11 afternoon, branch `FOOTPRINT-ADVANCE`, NOT merged into `main`, halves 8255/9/19
+and 5138/4: fixes of the regressions and defects that a full ten-agent review found in `1ca72ba`, and of what an
+independent verification found in those fixes — one invariant for explicit pads (a valid footprint or unread geometry
+with a conflict naming pads, values and remedy, never a paid answer lost to the program's own derivation), the body
+check of the drawn-hole witness re-derived as a decision table, a third wording for pads the rules cannot settle, a
+conflict-only height re-read that removes nothing; see HANDOFF.md «REVISIONE COMPLETA DEL CODICE — 11/11/2026», where
+the findings NOT fixed are listed; before that, 13117 passed,
 13 skipped and 19 subtests (2026-11-11, branch `FOOTPRINT-ADVANCE`, commit `1ca72ba`, NOT merged into `main`, halves 8057/9/19 and
 5060/4: the eleven high findings of the 2026-11-10 adversarial review of document extraction and their own review —
 per-pad terminal, printed hole and provenance with holes and lands derived by the program (kicadgen/core/tht_estimates.py),

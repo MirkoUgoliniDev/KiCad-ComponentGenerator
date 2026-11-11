@@ -178,7 +178,13 @@ def relay_plan(rows) -> tuple[Optional[RelayPlan], tuple]:
             return None, ("common_without_contact", {"pin": group["common"]})
 
     def label_order(label: str):
-        return (0, int(label), "") if label.isdigit() else (1, 0, label)
+        """Sort key of a contact label: ASCII integers by value, then every other text.
+
+        `isascii()` first: `str.isdigit()` is also true for «²» or «①»,
+        which `int()` refuses (review 2026-11-11, F9-3); the same guard as
+        `pin_header._pin_order`.
+        """
+        return (0, int(label), "") if label.isascii() and label.isdigit() else (1, 0, label)
 
     ordered = [groups[label] for label in sorted(groups, key=label_order)]
     return RelayPlan((coil[0], coil[1]),

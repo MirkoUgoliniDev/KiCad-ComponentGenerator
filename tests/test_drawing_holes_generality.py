@@ -313,12 +313,7 @@ def test_the_two_sizes_exchanged_are_other_proportions(tmp_path):
 
 
 def test_an_inner_frame_does_not_hide_the_body_outline(tmp_path):
-    """The smallest rectangle around the holes is a 14 x 8 mm frame; the body is the next one out.
-
-    @note Declared limit: an inner frame whose sizes fall within the
-        allowance of a WRONGLY scaled body (a 12 x 10 mm frame against a
-        reading 25 % too large) is taken for that body and "agrees".
-    """
+    """The smallest rectangle around the holes is a 14 x 8 mm frame; the body is the next one out."""
     inner = (-2.0, -1.0, 12.0, 7.0)  # 14 x 8 mm: other proportions than the 16 x 12 body
     # Centre lines: the inner frame passes within a diameter of the holes,
     # so they are drawn like holes by their lines, not by isolation.
@@ -333,6 +328,289 @@ def test_an_inner_frame_does_not_hide_the_body_outline(tmp_path):
     # Negative twin: on the same page a reading 25 % too large is caught by the body outline.
     result = check_pad_layout([path], _scaled(PART, 1.25), BODY)
     assert _verdict(result) == ("not_confirmed", "body_scale", "contradicted", False)
+
+
+# ---------------------------------------------------------------------------
+# The decision table of the body check (module docstring of drawing_holes,
+# review finding V1-1, 2026-11-11). One block per row; the twins of a row
+# differ in WHAT IS DRAWN or in which reading is given, never in a number
+# brought near a threshold.
+# ---------------------------------------------------------------------------
+
+#: Outline of a nearly square 15 x 16 mm body around PART: left, top, right, bottom mm.
+NEAR_SQUARE_BOX = (-2.5, -5.0, 12.5, 11.0)
+NEAR_SQUARE_BODY = (15.0, 16.0)
+
+#: The 16 x 12 mm body drawn loosely, 11.6 mm along Y (3 % out of proportion,
+#: inside the drafting allowance): what the sample pages do with their bodies.
+LOOSE_BOX = (-3.0, -2.8, 13.0, 8.8)
+
+#: A reading of PART with every value 20 % too small, and a frame 1.75 mm
+#: outside the 16 x 12 mm outline: 19.5 x 15.5 mm, which that reading takes
+#: for 15.6 x 12.4 mm -- inside the allowance of the body, out of proportion.
+SMALL = 0.8
+FRAME = (-4.75, -4.75, 14.75, 10.75)
+
+AGREES = ("confirmed", "confirmed", "agrees", True)
+UNVERIFIED = ("confirmed", "confirmed", "unverifiable", False)
+REFUSED = ("not_confirmed", "body_scale", "contradicted", False)
+
+
+def _inset(box, margin_mm: float):
+    """A rectangle (left, top, right, bottom mm) moved inwards by one margin on its four sides."""
+    return box[0] + margin_mm, box[1] + margin_mm, box[2] - margin_mm, box[3] - margin_mm
+
+
+@pytest.mark.parametrize("outline_px, scale, expected", [
+    ((160.0, 120.0), 10.0, "identified_here"),         # the body as quoted
+    ((160.0, 120.0), 12.5, "identified_elsewhere"),    # the same rectangle, the pads read 20 % too small
+    ((160.0, 116.0), 10.0, "loose_here"),              # drawn 3 % short along Y
+    ((195.0, 155.0), 12.5, "loose_here"),              # a frame 1.75 mm outside, at the wrong scale (V1-1)
+    ((160.0, 116.0), 12.5, "loose_elsewhere"),         # the loose body, at the wrong scale
+    ((195.0, 155.0), 10.0, "loose_elsewhere"),         # the frame, at the right scale
+    ((140.0, 80.0), 10.0, None),                       # other proportions altogether
+    ((120.0, 160.0), 10.0, None),                      # the two sizes exchanged
+])
+def test_what_one_rectangle_says_about_the_body(outline_px, scale, expected):
+    """The two questions asked of a rectangle, on a 16 x 12 mm body and a 3 px tolerance."""
+    assert drawing_holes._judge_outline(outline_px, BODY, scale, 3.0) == expected
+
+
+def test_the_proportion_test_knows_nothing_of_the_pads_scale():
+    """Scale-free: a rectangle keeps or lacks the body's proportions at any size, the allowance does not."""
+    for factor in (0.3, 1.0, 4.0):
+        exact = (160.0 * factor, 120.0 * factor)
+        assert drawing_holes._has_body_proportions(exact, BODY)
+        assert not drawing_holes._has_body_proportions((exact[0], exact[1] * 0.9), BODY)
+        assert drawing_holes._has_body_proportions((exact[0], exact[1] * 0.95), BODY, drawing_holes.BODY_SCALE_RATIO)
+        assert not drawing_holes._has_body_proportions((exact[0], exact[1] * 0.8), BODY,
+                                                       drawing_holes.BODY_SCALE_RATIO)
+        assert drawing_holes._within_allowance(exact, BODY, 10.0, 3.0) is (factor == 1.0)
+
+
+# Row 1 -- a candidate at the pads' scale and none elsewhere: agrees.
+# (The plain case, the outline alone, is asserted all over this file.)
+
+def test_row_1_a_body_drawn_loosely_and_alone_agrees(tmp_path):
+    """A body drawn 3 % out of proportion, the only rectangle around the holes, is still the body.
+
+    Negative twin, same page: a reading 20 % too small finds no rectangle
+    at its scale and none with the EXACT proportions elsewhere (row 4):
+    confirmed by its shape, scale not verified, and NOT refused -- only
+    exact proportions identify a body at another scale.
+    """
+    path = _page(tmp_path / "loose.png", boxes=(LOOSE_BOX,))
+    assert _verdict(check_pad_layout([path], PART, BODY)) == AGREES
+    outline = measured_outline([path], PART, BODY)
+    assert outline is not None and abs(outline.height_mm - 11.6) <= outline.tolerance_mm
+    assert _verdict(check_pad_layout([path], _scaled(PART, SMALL), BODY)) == UNVERIFIED
+
+
+def test_row_1_a_rectangle_that_could_not_be_the_body_is_no_rival(tmp_path):
+    """A 28 x 24 mm frame around the 16 x 12 mm outline: no scale makes it the body, the outline agrees.
+
+    Like the 14 x 8 mm inner frame of the test above. Negative twin, what
+    is drawn: the frame 1.75 mm outside the outline COULD be the body
+    within the drafting allowance and takes the agreement away (row 2,
+    test_row_2_a_frame_inside_the_allowance...).
+    """
+    path = _page(tmp_path / "frame.png", boxes=(BOX, _inset(BOX, -6.0)))
+    assert _verdict(check_pad_layout([path], PART, BODY)) == AGREES
+    outline = measured_outline([path], PART, BODY)
+    assert outline is not None and abs(outline.width_mm - BODY[0]) <= outline.tolerance_mm
+
+
+def test_limit_a_frame_alone_inside_the_allowance_agrees_with_a_wrong_scale(tmp_path):
+    """Declared limit of row 1, pinned so that a change of it is noticed.
+
+    The page draws NO body outline, only the frame 1.75 mm outside it, and
+    the reading is 20 % too small: the frame is the single candidate,
+    within the allowance exactly like a loosely drawn body, and it agrees.
+    Drawing the real outline as well (row 2, below) removes the agreement;
+    nothing on this page can.
+    """
+    path = _page(tmp_path / "frame.png", boxes=(FRAME,))
+    assert _verdict(check_pad_layout([path], _scaled(PART, SMALL), BODY)) == AGREES
+    # The right reading on the same page: the frame is a loose candidate elsewhere, alone (row 4).
+    assert _verdict(check_pad_layout([path], PART, BODY)) == UNVERIFIED
+
+
+# Row 2 -- a candidate at the pads' scale AND one elsewhere: unverifiable.
+
+def test_row_2_a_frame_inside_the_allowance_does_not_certify_a_wrong_scale(tmp_path):
+    """Review finding V1-1: a clearly non-square body, its outline, and a frame 1.75 mm outside it.
+
+    A reading 20 % too small takes the frame for the body within the
+    allowance, while the real outline has the body's exact proportions at
+    another scale: certified until this fix, now confirmed with the scale
+    not verified. The right reading meets the same two rectangles the
+    other way round and is not verified either -- the price of not
+    certifying the wrong one. The twins differ in what is DRAWN: with the
+    outline alone the right reading agrees and the wrong one is refused.
+    """
+    path = _page(tmp_path / "frame.png", boxes=(BOX, FRAME))
+    assert _verdict(check_pad_layout([path], _scaled(PART, SMALL), BODY)) == UNVERIFIED
+    assert measured_outline([path], _scaled(PART, SMALL), BODY) is None
+    assert _verdict(check_pad_layout([path], PART, BODY)) == UNVERIFIED
+    assert measured_outline([path], PART, BODY) is None
+    alone = _page(tmp_path / "alone.png")
+    assert _verdict(check_pad_layout([alone], PART, BODY)) == AGREES
+    assert _verdict(check_pad_layout([alone], _scaled(PART, SMALL), BODY)) == REFUSED
+
+
+def test_row_2_a_step_inside_a_nearly_square_body_leaves_the_scale_unverified(tmp_path):
+    """F7-1 and V1-1 together: a step 1.5 mm inside a nearly square body keeps the body's proportions.
+
+    The correct reading is CONFIRMED (never refused, F7-1) and its scale is
+    NOT verified: this page is, rectangle for rectangle, the page of a
+    reading 12/15 too small whose body is the inner rectangle and whose
+    outer one is a frame (see the next test). The twins differ in what is
+    DRAWN: the outline alone agrees, the step alone is the body at another
+    scale.
+    """
+    step = _inset(NEAR_SQUARE_BOX, 1.5)
+    both = _page(tmp_path / "step.png", boxes=(NEAR_SQUARE_BOX, step), marks="centre")
+    assert _verdict(check_pad_layout([both], PART, NEAR_SQUARE_BODY)) == UNVERIFIED
+    assert measured_outline([both], PART, NEAR_SQUARE_BODY) is None
+    outline = _page(tmp_path / "outline.png", boxes=(NEAR_SQUARE_BOX,), marks="centre")
+    assert _verdict(check_pad_layout([outline], PART, NEAR_SQUARE_BODY)) == AGREES
+    alone = _page(tmp_path / "alone.png", boxes=(step,), marks="centre")
+    assert _verdict(check_pad_layout([alone], PART, NEAR_SQUARE_BODY)) == REFUSED
+    assert measured_outline([alone], PART, NEAR_SQUARE_BODY) is None
+
+
+def test_row_2_a_frame_outside_a_nearly_square_body_does_not_certify_a_wrong_scale(tmp_path):
+    """The mirror page: a 17 x 18 mm frame 1 mm outside the 15 x 16 mm body, a reading 15/17 too small.
+
+    The frame has the declared sizes at that wrong scale and the real
+    outline the body's proportions at another: until 2026-11-11 this was a
+    declared limit that "agreed"; it is the ambiguity of the test above
+    seen from the other side, and is now answered the same way.
+    """
+    path = _page(tmp_path / "frame.png", boxes=(NEAR_SQUARE_BOX, _inset(NEAR_SQUARE_BOX, -1.0)))
+    assert _verdict(check_pad_layout([path], _scaled(PART, 15 / 17), NEAR_SQUARE_BODY)) == UNVERIFIED
+    # The right reading on the same page: the same two rectangles, the other way round.
+    assert _verdict(check_pad_layout([path], PART, NEAR_SQUARE_BODY)) == UNVERIFIED
+
+
+@pytest.mark.parametrize("factor", [1.0, 1 / 1.5])
+def test_row_2_the_body_drawn_at_two_scales_is_unverifiable(tmp_path, factor):
+    """A 16 x 12 mm outline and a 24 x 18 mm one: the same proportions at two scales.
+
+    Whichever of the two the reading agrees with (factor 1: the inner;
+    1/1.5: the outer), the other contradicts it and the answer is
+    "unverifiable", never a refusal and never a verified scale.
+    """
+    outer = (-7.0, -6.0, 17.0, 12.0)
+    path = _page(tmp_path / "two.png", boxes=(BOX, outer))
+    reading = _scaled(PART, factor)
+    assert _verdict(check_pad_layout([path], reading, BODY)) == UNVERIFIED
+    assert measured_outline([path], reading, BODY) is None
+
+
+def test_row_2_a_loose_body_and_a_frame_are_two_candidates(tmp_path):
+    """The loosely drawn body with the frame 1.75 mm outside it: neither rectangle has the exact proportions.
+
+    The reading 20 % too small takes the frame for the body, the right one
+    takes the outline; each has the other as a candidate elsewhere, so
+    neither scale is verified and neither reading is refused. Twin:
+    without the frame the right reading agrees (row 1, above).
+    """
+    path = _page(tmp_path / "pair.png", boxes=(LOOSE_BOX, FRAME))
+    assert _verdict(check_pad_layout([path], _scaled(PART, SMALL), BODY)) == UNVERIFIED
+    assert _verdict(check_pad_layout([path], PART, BODY)) == UNVERIFIED
+    assert measured_outline([path], PART, BODY) is None
+
+
+# Row 3 -- nothing at the pads' scale, the exact proportions elsewhere: contradicted.
+# (test_the_body_drawn_at_another_scale_than_the_pads_still_contradicts is
+# its plain case, with the right reading on the same page as the twin.)
+
+def test_row_3_a_wrong_reading_is_contradicted_when_the_body_has_a_step(tmp_path):
+    """Two rectangles with the body's proportions, neither at the pads' scale: both contradict."""
+    path = _page(tmp_path / "step.png", boxes=(NEAR_SQUARE_BOX, _inset(NEAR_SQUARE_BOX, 1.5)), marks="centre")
+    result = check_pad_layout([path], _scaled(PART, 1.4), NEAR_SQUARE_BODY)
+    assert _verdict(result) == REFUSED
+    assert measured_outline([path], _scaled(PART, 1.4), NEAR_SQUARE_BODY) is None
+
+
+def test_row_3_a_loose_rectangle_elsewhere_does_not_soften_the_contradiction(tmp_path):
+    """The outline says "another scale"; a frame that is not at the reading's scale either changes nothing."""
+    path = _page(tmp_path / "far.png", boxes=(BOX, FRAME))
+    assert _verdict(check_pad_layout([path], _scaled(PART, 1.25), BODY)) == REFUSED
+
+
+def test_limit_the_only_rectangle_of_a_nearly_square_body_is_taken_for_the_body(tmp_path):
+    """Declared limit of row 3, pinned: a step drawn alone inside a nearly square body refuses a right reading.
+
+    The body outline is not drawn; its step keeps the body's proportions
+    and is "the body at another scale". Unchanged since audit A9.
+    """
+    alone = _page(tmp_path / "alone.png", boxes=(_inset(NEAR_SQUARE_BOX, 1.5),), marks="centre")
+    assert _verdict(check_pad_layout([alone], PART, NEAR_SQUARE_BODY)) == REFUSED
+
+
+# Row 4 -- nothing at the pads' scale, no exact proportions elsewhere: unverifiable.
+# (test_one_misread_body_size_does_not_judge_the_pads, the page-frame and
+# chamfer tests above, and the second halves of the two row 1 tests: a
+# loose candidate elsewhere, alone, never refuses.)
+
+
+def _outline_mask(rects_px, size=(700, 1300)) -> np.ndarray:
+    """An ink mask holding only rectangles (left, top, right, bottom px), 2 px lines."""
+    mask = np.zeros(size, np.uint8)
+    for left, top, right, bottom in rects_px:
+        cv2.rectangle(mask, (int(round(left)), int(round(top))), (int(round(right)), int(round(bottom))), 255, 2)
+    return mask
+
+
+@pytest.mark.parametrize("aspect", [1.0, 1.05, 1.23, 1.6, 2.0, 3.0])
+def test_sweep_no_wrong_scale_is_certified_and_no_right_reading_refused_beside_the_outline(aspect):
+    """Property of the table, swept: body 20 mm wide, lengths 20-60 mm, at 10 px/mm, a 3 px tolerance.
+
+    The body outline is drawn exactly, with one frame 0.6-10 mm outside or
+    a step 0.6-3.5 mm inside it. For every reading factor beyond the
+    allowance the verdict is never "agrees" (rows 2 and 3). For the right
+    reading it is never "contradicted" (rows 1 and 2); the outline alone
+    agrees; so it does beside a frame 10 mm outside a clearly non-square
+    body (20 mm more on both sides: no scale makes that the body); and
+    beside any second square the square body is unverifiable (one margin
+    keeps a square's proportions) unless that square is itself inside the
+    allowance (a doubled outline: row 1).
+    """
+    ppmm, tolerance_px = 10.0, 3.0
+    body = (20.0 * aspect, 20.0)
+    centre = (650.0, 350.0)
+    holes = [drawing_holes._Circle(centre[0] + dx, centre[1] + dy, 6.0, 1.0)
+             for dx, dy in ((-50, -30), (50, -30), (50, 30), (-25, 30), (0, 0))]
+
+    def rect(margin_mm: float):
+        """The outline moved out (in when negative) by one margin, px."""
+        half = (body[0] / 2 + margin_mm) * ppmm, (body[1] / 2 + margin_mm) * ppmm
+        return centre[0] - half[0], centre[1] - half[1], centre[0] + half[0], centre[1] + half[1]
+
+    for margin in (None, 0.6, 1.0, 2.0, 2.5, 5.0, 8.5, 10.0, -0.6, -1.0, -2.0, -3.5):
+        mask = _outline_mask([rect(0.0)] + ([] if margin is None else [rect(margin)]))
+        assert len(list(drawing_holes._outline_rects(mask, holes))) >= (1 if margin is None else 2), (aspect, margin)
+        for factor in (0.5, 0.7, 2.0 / 2.54, 1 / 1.1, 1.1, 1.27, 2.0):
+            scale = ppmm / factor
+            # Beyond the check's resolution: the real outline itself is outside the allowance.
+            assert not drawing_holes._within_allowance((body[0] * ppmm, body[1] * ppmm), body, scale, tolerance_px)
+            verdict, _ = drawing_holes._body_check(mask, holes, body, scale, tolerance_px)
+            assert verdict != "agrees", (aspect, margin, factor)
+        verdict, chosen = drawing_holes._body_check(mask, holes, body, ppmm, tolerance_px)
+        assert verdict != "contradicted", (aspect, margin)
+        if margin is None or (margin == 10.0 and aspect >= 1.6):
+            assert verdict == "agrees", (aspect, margin)
+            # The rectangle handed back is the outline, not the frame.
+            assert abs((chosen[2] - chosen[0]) - body[0] * ppmm) <= 2, (aspect, margin)
+            assert abs((chosen[3] - chosen[1]) - body[1] * ppmm) <= 2, (aspect, margin)
+        elif aspect == 1.0:
+            moved = rect(margin)
+            doubled = drawing_holes._within_allowance(
+                (moved[2] - moved[0], moved[3] - moved[1]), body, ppmm, tolerance_px)
+            assert verdict == ("agrees" if doubled else "unverifiable"), (aspect, margin)
+            assert doubled or chosen is None, (aspect, margin)
 
 
 # ---------------------------------------------------------------------------
@@ -474,14 +752,16 @@ def test_body_axes_are_distinguishable_exactly_when_the_allowances_do_not_overla
         assert body_axes_distinguishable(far, tolerance)
         assert body_axes_distinguishable(far[::-1], tolerance)
         # Coherence with the check itself: a square outline whose side lies
-        # between the two sizes (in proportion to their allowances) agrees
-        # with the body in BOTH orders exactly below the separation.
+        # between the two sizes (in proportion to their allowances) is inside
+        # the allowance of the body in BOTH orders exactly below the separation.
         for body, both in ((near, True), (far, False)):
             first, second = (body_allowance_mm(size, tolerance) for size in body)
             side = (body[0] + (body[1] - body[0]) * first / (first + second)) * scale
-            orders = [drawing_holes._judge_outline((side, side), sizes, scale, tolerance * scale)
+            # The allowance alone (necessary for an agreement, no longer
+            # sufficient since V1-1: a square is not this body's shape).
+            orders = [drawing_holes._within_allowance((side, side), sizes, scale, tolerance * scale)
                       for sizes in (body, body[::-1])]
-            assert (orders == ["agrees", "agrees"]) is both, (body, orders)
+            assert (orders == [True, True]) is both, (body, orders)
     assert not body_axes_distinguishable((12.0, 40.0), None)  # no fit, no measure
 
 

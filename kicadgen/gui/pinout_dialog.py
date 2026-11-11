@@ -40,7 +40,9 @@ def pin_sort_key(entry: dict) -> tuple:
     if not text:
         return (1, ())
     parts = re.split(r"(\d+)", text)
-    return (0, tuple((0, int(part), "") if part.isdigit() else (1, 0, part.casefold())
+    # `isascii()` first: `str.isdigit()` is also true for «²» or «①», which
+    # `\d` does not split off and `int()` refuses (review 2026-11-11, F9-3).
+    return (0, tuple((0, int(part), "") if part.isascii() and part.isdigit() else (1, 0, part.casefold())
                      for part in parts if part != ""))
 
 

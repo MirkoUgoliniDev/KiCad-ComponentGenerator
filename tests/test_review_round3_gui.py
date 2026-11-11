@@ -290,14 +290,24 @@ def test_a_saved_answer_contradicted_later_in_the_pass_is_not_applied(window, mo
     received = []
     monkeypatch.setattr(datasheet_extractor, "apply_answers",
                         lambda params, answers: received.append(dict(answers)) or params, raising=False)
-    monkeypatch.setattr(gui.MainWindow, "_ask_extraction_question", lambda self, q: "bottom")
+    asked = []
+    monkeypatch.setattr(gui.MainWindow, "_ask_extraction_question",
+                        lambda self, q: asked.append(q["key"]) or "bottom")
     # VIEW_A is saved alone (applied silently); VIEW_B, asked now, contradicts it.
     window._extraction_answers = {VIEW_A: "top"}
     params = header_extraction()
     params.questions = [_view(VIEW_A), _view(VIEW_B)]
     run_extraction(window, params)
-    assert received == [{VIEW_B: "bottom"}]
-    assert window._extraction_answers == {VIEW_B: "bottom"}
+    # CONTRACT CHANGED 2026-11-11 (review F2-4). Before: `received ==
+    # [{VIEW_B: "bottom"}]` and only VIEW_B saved -- the dropped VIEW_A was
+    # neither answered nor open, and nothing held the generation back. Now
+    # the question whose saved answer was dropped is asked in the same pass:
+    # the saved «top» is still never applied (the point of K10), and VIEW_A
+    # ends answered by the user («bottom», which agrees with VIEW_B).
+    assert asked == [VIEW_B, VIEW_A]
+    assert received == [{VIEW_B: "bottom", VIEW_A: "bottom"}]
+    assert window._extraction_answers == {VIEW_B: "bottom", VIEW_A: "bottom"}
+    assert window._extraction_questions == []
 
 
 def test_saved_answers_not_contradicted_in_the_pass_are_all_applied(window, monkeypatch, tmp_path):  # noqa: F811
@@ -387,14 +397,25 @@ def test_a_size_the_user_types_becomes_read(window, monkeypatch, tmp_path):  # n
     assert after.sources["shape"] == "estimated"
 
 
-def test_the_kept_value_rule_compares_at_the_boxes_decimals():
+def test_the_kept_value_rule_compares_with_what_the_box_showed():
+    """CONTRACT CHANGED 2026-11-11 (review F3-4); was `..._compares_at_the_boxes_decimals`.
+
+    Before, the rule took (original, value) and kept the original for ANY
+    value within half a unit of the box's last decimal: `keep(1.5875, 1.588)
+    == keep(1.5875, 1.587) == 1.5875`. That asserted the defect: the box shows
+    1.587 (Qt) and a user who types 1.588 was ignored. The rule now takes
+    what the box showed when it was filled, the one fact that tells an edit
+    from a rounding: equal to it is untouched, anything else is typed.
+    """
     keep = gui.MainWindow._pad_dialog_value
-    # A tie rounds either way (Qt and Python differ): both are the original shown.
-    assert keep(1.5875, 1.588) == keep(1.5875, 1.587) == 1.5875
-    assert keep(1.5875, 1.586) == 1.586           # a number the box could not show: typed
-    assert keep(1.5875, 1.589) == 1.589
-    assert keep(None, 0.9) == 0.9 and keep(0.8, None) is None
-    assert keep(1.2, 1.2) == 1.2
+    # Untouched, whichever way the box rounded the tie.
+    assert keep(1.5875, 1.587, 1.587) == 1.5875 and keep(1.5875, 1.588, 1.588) == 1.5875
+    # Typed: the neighbouring number the box can show, however close to the original.
+    assert keep(1.5875, 1.587, 1.588) == 1.588 and keep(1.5875, 1.588, 1.587) == 1.587
+    assert keep(1.5875, 1.587, 1.9) == 1.9
+    # A box filled with «no value» (0) and then typed, or emptied.
+    assert keep(None, 0.0, 0.9) == 0.9 and keep(None, 0.0, 0.0) is None
+    assert keep(0.8, 0.8, None) is None
 
 
 # ── K5: «Valori verificati sul disegno» ───────────────────────────────────

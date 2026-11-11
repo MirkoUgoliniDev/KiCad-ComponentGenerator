@@ -207,20 +207,42 @@ def test_a_read_hole_is_never_changed_by_a_terminal_that_does_not_pass():
     assert "non passa nel foro letto" in params.notes
 
 
-def test_an_estimated_hole_that_the_terminal_does_not_pass_is_lifted_keeping_the_pad_orientation():
-    """The two printed readings disagree (hole estimated) and the pad's terminal does not pass it."""
+def _lifted_oval(pad_size_source):
+    """Pad 1: two printed readings of the hole disagree (hole estimated), its Ø1.5 terminal does not pass it."""
     big = {"shape": "round", "diameter_mm": 1.5}
     pads = _answer(_pad("1", 0.0, drill_mm=1.3, lead=big, pad_length_mm=2.4, pad_width_mm=1.6,
-                        shape="oval", value_sources={"drill_mm": "read", "pad_size": "read",
+                        shape="oval", value_sources={"drill_mm": "read", "pad_size": pad_size_source,
                                                      "lead": "read"}),
                    _pad("2", 5.0, drill_mm=1.3, value_sources={"drill_mm": "read"}))
-    params = _params(pads, {"1": dict(PRINTED, drill_mm=1.2), "2": PRINTED})
+    return big, _params(pads, {"1": dict(PRINTED, drill_mm=1.2), "2": PRINTED})
+
+
+def test_an_estimated_hole_that_the_terminal_does_not_pass_is_lifted_keeping_the_pad_orientation():
+    """The model's own (estimated) land follows the lifted hole, widened on both axes by one amount.
+
+    Contract changed on 2026-11-11 (review round 4, F6-1/F7-2): this test
+    used to declare the land «read» and expect it widened. A land read from
+    the drawing is never changed by the program: that case is now the
+    negative one below.
+    """
+    big, params = _lifted_oval("estimated")
     pin = _pins(params)["1"]
     assert pin["drill_mm"] == tht_estimates.estimated_hole(big)
     # Widened on both axes by the same amount: the oval keeps its long axis.
     assert pin["pad_length_mm"] - pin["pad_width_mm"] == pytest.approx(0.8)
     assert pin["sources"]["drill_mm"] == "estimated" and pin["sources"]["pad_size"] == "estimated"
     assert "allargate attorno al foro ricavato" in params.notes
+
+
+def test_a_read_land_that_cannot_hold_the_lifted_hole_is_a_conflict_not_a_widened_land():
+    """Same pad, land READ (1.6 mm wide) against a READ Ø1.5 terminal: two readings that cannot both be true."""
+    _big, params = _lifted_oval("read")
+    assert params.package_geometry is None and params.unread_pads == ["1"]
+    land = next(pin for pin in params.unread_pad_geometry["pins"] if pin["number"] == "1")
+    # The read land is kept as read, never widened.
+    assert (land["pad_length_mm"], land["pad_width_mm"]) == (2.4, 1.6)
+    assert "2.40 x 1.60 mm" in params.pin_map_conflict and "1.75 mm" in params.pin_map_conflict
+    assert "allargate attorno al foro ricavato" not in params.notes
 
 
 @pytest.mark.parametrize("lead_source, lifted", [("estimated", False), ("read", True)])

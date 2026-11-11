@@ -986,7 +986,10 @@ def _numbering_area(leads: list) -> Optional[float]:
     numbered = []
     for pin, _axis in leads:
         text = str(pin.number).strip()
-        if not text.isdigit():
+        # `isascii()` first: `str.isdigit()` is also true for «²» or «①»,
+        # which `int()` refuses (review 2026-11-11, F9-3); such a number is
+        # text, so the turning sense is undefined.
+        if not (text.isascii() and text.isdigit()):
             return None
         numbered.append((int(text), float(pin.x_mm), float(pin.y_mm)))
     if len(numbered) < 3:

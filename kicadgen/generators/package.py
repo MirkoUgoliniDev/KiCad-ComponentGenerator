@@ -67,17 +67,26 @@ def estimated_pad_list(numbers) -> str:
         elif text not in seen:
             seen.add(text)
             unique.append(text)
+    def is_integer(text: str) -> bool:
+        """Whether `text` is an ASCII integer `int()` reads.
+
+        `str.isdigit()` alone is also true for «²» or «①», which `int()`
+        refuses (review 2026-11-11, F9-3): the same guard as
+        `pin_header._pin_order`. Such a number is text, listed as it is.
+        """
+        return text.isascii() and text.isdigit()
+
     # Each entry is (text, number of pads it names).
     entries: list[tuple[str, int]] = []
     index = 0
     while index < len(unique):
         text = unique[index]
-        if not text.isdigit():
+        if not is_integer(text):
             entries.append((text, 1))
             index += 1
             continue
         end = index
-        while (end + 1 < len(unique) and unique[end + 1].isdigit()
+        while (end + 1 < len(unique) and is_integer(unique[end + 1])
                and int(unique[end + 1]) == int(unique[end]) + 1):
             end += 1
         run = end - index + 1

@@ -1952,6 +1952,16 @@ class MainWindow(QMainWindow):
         #: was not (no printed hole, no terminal to derive it from): the
         #: block names the missing value truthfully. Saved with the project.
         self._unread_pad_holes: list[str] | None = None
+        #: The pads of `_unread_pads` whose position and hole WERE read but
+        #: whose values cannot all be true (a land that cannot hold its hole,
+        #: a hole with no room at the pitch, overlapping copper): the third
+        #: wording of the block. Saved with the project.
+        self._unread_pad_unfit: list[str] | None = None
+        #: The extractor's own already-translated account of those pads
+        #: (`pin_map_conflict` of the extraction that dropped them), shown
+        #: under the third wording. Session only: never saved, because it is
+        #: text in the language of the moment, not data.
+        self._unread_pad_unfit_detail: str | None = None
         #: Timestamp (same format as the evidence files) of the last
         #: extraction started: the saved proposals are valid only if they
         #: came from that one: the project's photo-cache folder also keeps the
@@ -8746,6 +8756,9 @@ class MainWindow(QMainWindow):
             state["unread_pads"] = list(self._unread_pads)
             if getattr(self, "_unread_pad_holes", None):
                 state["unread_pad_holes"] = list(self._unread_pad_holes)
+            if getattr(self, "_unread_pad_unfit", None):
+                # The third reason, saved exactly as the holes are.
+                state["unread_pad_unfit"] = list(self._unread_pad_unfit)
         main_answer = self._main_answer_for_reread()
         if main_answer is not None:
             # The input of a partial re-read (M16): only when JSON-able, and
@@ -8933,6 +8946,13 @@ class MainWindow(QMainWindow):
         # cannot name others); absent in a project saved before the key.
         holes = self._valid_unread_pads(state.get("unread_pad_holes")) or ()
         self._unread_pad_holes = [pad for pad in holes if pad in (self._unread_pads or ())] or None
+        # Same rule for the pads whose values cannot all be true; a pad the
+        # file names for both reasons keeps the hole, as the extractor ranks
+        # them. The extractor's account is session text and is not restored.
+        unfit = self._valid_unread_pads(state.get("unread_pad_unfit")) or ()
+        self._unread_pad_unfit = [pad for pad in unfit if pad in (self._unread_pads or ())
+                                  and pad not in (self._unread_pad_holes or ())] or None
+        self._unread_pad_unfit_detail = None
         saved_main = state.get("main_answer")
         self._stored_main_answer = dict(saved_main) if isinstance(saved_main, dict) and saved_main else None
         saved_analysis = state.get("analysis_pin_names")
@@ -9196,6 +9216,8 @@ class MainWindow(QMainWindow):
         # Back from the open project's file (`_apply_project_state`) only.
         self._unread_pads = None
         self._unread_pad_holes = None
+        self._unread_pad_unfit = None
+        self._unread_pad_unfit_detail = None
         self._photo_png = None
         self._photo_body_fields = None
         self._photo_overlay_png = None
@@ -10502,8 +10524,17 @@ class MainWindow(QMainWindow):
             at least one option carrying a `label` and a `value`; malformed
             entries are left out (an older or partial extractor never breaks
             the apply). `evidence` is kept only as {"document", "crop"}.
+        @note One question per key: of several entries with the same key
+            only the first well-formed one is returned (review 2026-11-11,
+            V2-3). The key IS the identity of a question -- the saved
+            answers, the «asked once» rule and the open list are all keyed
+            on it -- so a second entry is the same question listed twice,
+            whatever its text. Left in, «Torna indietro» (back) on the first
+            asked the second, which could end both applied and open.
         """
         questions = []
+        # Keys already taken by an earlier well-formed entry.
+        seen_keys: set = set()
         for entry in raw if isinstance(raw, (list, tuple)) else ():
             if not isinstance(entry, dict):
                 continue
@@ -10514,6 +10545,9 @@ class MainWindow(QMainWindow):
             if (not isinstance(key, str) or not key or field not in cls.EXTRACTION_QUESTION_FIELDS
                     or not isinstance(text, str) or not options):
                 continue
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             evidence = entry.get("evidence")
             crop = evidence.get("crop") if isinstance(evidence, dict) else None
             evidence = ({"document": str(evidence.get("document") or ""),
@@ -10539,6 +10573,18 @@ class MainWindow(QMainWindow):
             nothing, so the question comes back next time. The questions
             left open are kept (`_extraction_questions`) so «Rigenera
             modello STEP» can ask a height question later.
+        @note Every question of the pass ends either answered or open
+            (review 2026-11-11, F2-4). An answer given now drops the saved
+            answers it contradicts; when one of those had already settled a
+            question of this same pass, that question is put back in the
+            queue and asked. A question the user ALREADY answered in this
+            pass and whose answer a later one of the same pass dropped is
+            not asked a second time: the two answers the user gave
+            contradict each other, so it stays open and the generation is
+            held back.
+        @note The queue holds one question per key
+            (`_valid_extraction_questions`, V2-3): the same key listed twice
+            is asked once, also after «Torna indietro» (back) on it.
         """
         questions = self._valid_extraction_questions(getattr(params, "questions", None))
         self._extraction_questions = []
@@ -10546,8 +10592,21 @@ class MainWindow(QMainWindow):
             return params, False
         from ..services import datasheet_extractor
         answers, held_back, open_questions = {}, False, []
-        for question in questions:
+        # Keys whose question the user answered in this pass: asked once.
+        asked_now: set = set()
+        queue = list(questions)
+        while queue:
+            question = queue.pop(0)
             key = question["key"]
+            if key in asked_now and key not in self._extraction_answers:
+                # Answered in this pass, then dropped by a later answer of
+                # the same pass: the user's own answers disagree, and the
+                # program does not choose between them.
+                held_back = True
+                open_questions.append(question)
+                self._append_log(tx("Le risposte date ora si contraddicono; la domanda resta aperta: "
+                                    "{text}", text=question["text"]))
+                continue
             # A saved answer is applied by itself only when no other saved
             # answer contradicts it (same question about the same pads,
             # answered the other way for another reading of the layout):
@@ -10564,6 +10623,7 @@ class MainWindow(QMainWindow):
                 held_back = True
                 open_questions.append(question)
                 continue
+            asked_now.add(key)
             # The answer given now is the newest: the saved ones it
             # contradicts are dropped with it, so an older one never wins
             # over it in a later analysis.
@@ -10573,8 +10633,20 @@ class MainWindow(QMainWindow):
             # A saved answer already taken into this pass and now dropped
             # leaves the pass too: `apply_answers` never receives two
             # answers that contradict each other (review 2026-11-11, K10).
-            for dropped in before - set(self._extraction_answers):
+            # Its question is no longer settled, so it returns to the
+            # queue, in the order of the extraction (F2-4: it used to end
+            # neither answered nor open, and nothing held the generation).
+            dropped_keys = before - set(self._extraction_answers)
+            for dropped in dropped_keys:
                 answers.pop(dropped, None)
+            for other in questions:
+                # Not the ones still waiting in the queue, nor the ones
+                # the user already left open with «Torna indietro» (back).
+                if (other["key"] in dropped_keys and other not in queue
+                        and other not in open_questions):
+                    queue.append(other)
+                    self._append_log(tx("Risposta salvata superata da quella data ora; la domanda "
+                                        "viene riproposta: {text}", text=other["text"]))
             answers[key] = answer
             label = next((o["label"] for o in question["options"] if o["value"] == answer), str(answer))
             self._append_log(tx("Risposta dell'utente: {text} -> {label}",
@@ -10851,11 +10923,17 @@ class MainWindow(QMainWindow):
             return None
         return settled
 
-    def _reread_block_reason(self, field: str | None = None) -> str:
+    def _reread_block_reason(self, field: str | None = None, *, while_idle: bool = False) -> str:
         """@brief Why a partial re-read cannot start now, '' when it can.
 
         @param field The field to re-read (REREAD_FIELDS), or None for the
             conditions common to every re-read.
+        @param while_idle True to leave out the one passing condition (work
+            already running): the reason then says whether the entry is
+            available in this STATE of the project once the window is idle.
+            A message that names the entry as a remedy asks it this way
+            (`_unread_pads_block`): it is written while the analysis that
+            found the problem is still closing.
         @return Translated reason: no worker, not a single-component
             project, no saved main answer, work already running, or -- for
             the pads -- no settled extraction in this session.
@@ -10878,7 +10956,7 @@ class MainWindow(QMainWindow):
             return self.i18n.text("La rilettura parziale vale solo per un componente singolo.")
         if self._main_answer_for_reread() is None:
             return self.i18n.text("Nessuna risposta principale salvata: analizza prima i documenti.")
-        if self._background_work_running() or self._automatic_generation_active:
+        if not while_idle and (self._background_work_running() or self._automatic_generation_active):
             return self.i18n.text("Operazione in corso: attendi la fine.")
         if field == "pad_layout" and self._settled_extraction() is None:
             return self.i18n.text("La rilettura dei pad si fonde con il risultato dell'analisi di questa "
@@ -10982,6 +11060,12 @@ class MainWindow(QMainWindow):
             further re-read starts from the same answer; from here on it is
             `_on_extracted`: questions, answers, fields and -- when allowed --
             the automatic generation.
+        @note A height re-read replaces the height scope (height, conflict,
+            height questions) only with something that can stand in its
+            place: a height or a scope question. One that read nothing
+            changes nothing (F2-5); one that brought only a conflict keeps
+            the height in force and the open questions and records the
+            conflict beside them (V2-1), with or without a settled result.
         """
         if not self._analysis_result_is_current():
             self._append_log(tx("Risultato di una rilettura interrotta dall'utente: scartato, i "
@@ -10996,6 +11080,30 @@ class MainWindow(QMainWindow):
             # settled (review 2026-11-10, A5). Only its scope is taken.
             from ..services import datasheet_extractor
             settled = self._settled_extraction()
+            if (settled is not None and partial.get("field") == "body_height_mm"
+                    and self._reread_height_read_nothing(params)):
+                # `merge_reread` writes the whole scope: a re-read that
+                # brought no height, no question and no conflict would put «no
+                # height» and «no question» in place of the settled height
+                # and of its open question (review 2026-11-11, F2-5). The
+                # settled result stays as it is, as in a reopened project.
+                self._log_reread_height_read_nothing(params)
+                return
+            if (settled is not None and partial.get("field") == "body_height_mm"
+                    and self._reread_height_conflict_only(params)):
+                # Two quotes that disagree and nothing to choose from: the
+                # re-read has no height and no question to put in place of
+                # the settled ones (review 2026-11-11, V2-1). Merged, it
+                # wrote «no height» over a declared height and dropped the
+                # open height question, the user's only free way to choose.
+                # The settled result and the fields stay; the conflict is
+                # recorded beside them. This guard holds whatever
+                # `merge_reread` does with such a result; once `merge_reread`
+                # itself keeps the settled height and scope questions for a
+                # conflict-only re-read, the guard only saves a re-apply of
+                # an unchanged result through `_on_extracted`.
+                self._keep_reread_height_conflict(params)
+                return
             if settled is not None:
                 params = datasheet_extractor.merge_reread(settled, params)
             elif partial.get("field") == "body_height_mm":
@@ -11046,14 +11154,33 @@ class MainWindow(QMainWindow):
         """
         from ..services import datasheet_extractor
         scope = datasheet_extractor.REREAD_SCOPES["body_height_mm"]["questions"]
+        stored = [q for q in getattr(self, "_extraction_questions", None) or () if isinstance(q, dict)]
         # The project's open questions of other fields stay as restored.
-        kept = [q for q in getattr(self, "_extraction_questions", None) or ()
-                if isinstance(q, dict) and q.get("field") not in scope]
+        kept = [q for q in stored if q.get("field") not in scope]
         # Only the scope's questions are reviewed: the rest of a partial
         # result is the raw main answer, not something to ask about.
         params.questions = [q for q in getattr(params, "questions", None) or ()
                             if isinstance(q, dict) and q.get("field") in scope]
         read_height = _is_positive_length(getattr(params, "body_height_mm", None))
+        if self._reread_height_read_nothing(params):
+            # The re-read has nothing to put in place of the scope's stored
+            # questions, so they stay open with the others (review
+            # 2026-11-11, F2-5: the stored height question, the only record
+            # of the printed candidates, was thrown away and «Rigenera
+            # modello STEP» no longer asked it).
+            self._extraction_questions = stored
+            self._log_reread_height_read_nothing(params)
+            return
+        if self._reread_height_conflict_only(params):
+            # A conflict with no height and no question of the scope has
+            # nothing to put in place of the stored questions either
+            # (review 2026-11-11, V2-1): they stay open, so «Rigenera modello
+            # STEP» still asks the stored height question with its printed
+            # candidates, and a declared height stays in force. The
+            # conflict is recorded beside them.
+            self._extraction_questions = stored
+            self._keep_reread_height_conflict(params)
+            return
         params, _held_back = self._review_extraction_questions(params)
         left_open = list(self._extraction_questions)
         self._extraction_questions = kept + left_open
@@ -11063,9 +11190,21 @@ class MainWindow(QMainWindow):
                                 "resta com'è."))
             return
         height = getattr(params, "body_height_mm", None)
-        if getattr(params, "body_conflict", None) is not None:
+        conflict = getattr(params, "body_conflict", None)
+        if conflict is not None:
             self._append_log(tx("Rilettura dell'altezza: le quote lette non coincidono e non c'è "
                                 "una scelta da proporre; l'altezza resta com'è."))
+            # Reached only when the re-read ALSO brought questions of the
+            # scope (a conflict alone returned above, V2-1) and their
+            # answers left the conflict open. The conflict is what the
+            # re-read found (review round 4b): it is recorded so that a
+            # missing height defers the STEP model for two quotes that
+            # disagree and not for a quote that is absent. The scope's
+            # stored questions were replaced above by the re-read's own,
+            # as `merge_reread` replaces them.
+            self._record_reread_height_conflict(conflict)
+            self._save_project_config()
+            self._refresh_regen_3d_availability()
             return
         if not _is_positive_length(height):
             if read_height:
@@ -11085,6 +11224,112 @@ class MainWindow(QMainWindow):
         self._refresh_regen_3d_availability()
         self._append_log(tx("Rilettura dell'altezza applicata al solo corpo: {height} mm; i pad "
                             "restano quelli salvati.", height=f"{float(height):g}"))
+
+    def _record_reread_height_conflict(self, conflict) -> None:
+        """@brief Keep the height conflict of a re-read that is not merged into a settled result.
+
+        @param conflict The extractor's conflict sentence (`body_conflict`).
+        @note In a reopened project there is no extraction object to carry
+            the conflict, and a conflict-only re-read is not written into
+            the settled one (V2-1), so it goes where `_step_deferral_reason`
+            reads it in both cases: the saved deferral. Only while the height is
+            among the missing body quotes -- a declared height stays as it
+            is and defers nothing, exactly as `_step_deferral_reason`
+            reports a conflict only for a body that cannot be built.
+        """
+        if not isinstance(conflict, str) or not conflict.strip():
+            return
+        missing = self._missing_body_quotes()
+        if "body_height_mm" not in missing:
+            return
+        self._step_deferral = {"code": "conflict", "conflict": conflict.strip(), "fields": missing}
+
+    def _reread_height_conflict_only(self, params) -> bool:
+        """@brief Whether a height re-read brought a conflict and nothing to choose from.
+
+        @param params Partial result of `reread_body_height`.
+        @return True when the result holds a `body_conflict` sentence, no
+            positive `body_height_mm` and no well-formed question of the
+            height scope (`REREAD_SCOPES["body_height_mm"]["questions"]`).
+        @note Structural (review 2026-11-11, V2-1): the scope of a re-read is
+            REPLACED only by something that can stand in its place -- a
+            height, or a question the user can answer. A conflict alone is
+            neither: it is reported beside what the project already holds
+            (`_keep_reread_height_conflict`). It is not «nothing read»
+            either (`_reread_height_read_nothing`): that result says no
+            quote was found, this one that two were and they disagree.
+        """
+        from ..services import datasheet_extractor
+        scope = datasheet_extractor.REREAD_SCOPES["body_height_mm"]["questions"]
+        conflict = getattr(params, "body_conflict", None)
+        if not isinstance(conflict, str) or not conflict.strip():
+            return False
+        if _is_positive_length(getattr(params, "body_height_mm", None)):
+            return False
+        return not any(question["field"] in scope for question in
+                       self._valid_extraction_questions(getattr(params, "questions", None)))
+
+    def _keep_reread_height_conflict(self, params) -> None:
+        """@brief Record the conflict of a conflict-only height re-read beside what the project holds.
+
+        @param params Partial result for which `_reread_height_conflict_only` is True.
+        @note Nothing is removed: the height in force, the settled
+            extraction and every open question stay as they are (V2-1). The
+            conflict goes to the log, sentence included, and -- only while
+            the height is among the missing body quotes -- to the saved STEP
+            deferral (`_record_reread_height_conflict`), so that the STEP tab
+            says «two quotes disagree» instead of «the quote is missing».
+        @note The deferral is recorded also when a height question is still
+            open: it only words the reason. The way to choose is untouched
+            in every case -- «Rigenera modello STEP» asks the stored height
+            question whenever there is one (`_regenerate_3d_applied`) and
+            its answer clears the deferral (`_clear_height_step_deferral`);
+            without a stored question the height field is the way, as for
+            any missing quote.
+        """
+        conflict = params.body_conflict.strip()
+        self._append_log(tx("Rilettura dell'altezza: le quote lette non coincidono e non c'è "
+                            "una scelta da proporre; l'altezza resta com'è."))
+        # The extractor's sentence, already translated, names the quotes.
+        self._append_log(conflict)
+        self._record_reread_height_conflict(conflict)
+        self._save_project_config()
+        self._refresh_regen_3d_availability()
+
+    def _reread_height_read_nothing(self, params) -> bool:
+        """@brief Whether a height re-read brought no height, no question and no conflict.
+
+        @param params Partial result of `reread_body_height`.
+        @return True when the result holds no positive `body_height_mm`, no
+            well-formed question of the height scope
+            (`REREAD_SCOPES["body_height_mm"]["questions"]`) and no
+            `body_conflict`: the reading found no vertical quote. Such a
+            result has nothing to replace the stored height or the stored
+            height questions with.
+        @note Structural, not a threshold: a result is «something» exactly
+            when the window could apply it (a height), ask it (a question)
+            or must report it (two quotes that disagree: the conflict defers
+            the STEP model like any other height conflict, review round 4b;
+            before, a conflict alone counted as nothing and was lost).
+        """
+        from ..services import datasheet_extractor
+        scope = datasheet_extractor.REREAD_SCOPES["body_height_mm"]["questions"]
+        if _is_positive_length(getattr(params, "body_height_mm", None)):
+            return False
+        conflict = getattr(params, "body_conflict", None)
+        if isinstance(conflict, str) and conflict.strip():
+            return False
+        return not any(question["field"] in scope for question in
+                       self._valid_extraction_questions(getattr(params, "questions", None)))
+
+    def _log_reread_height_read_nothing(self, params) -> None:
+        """@brief Say in the log why a height re-read that read nothing changes nothing.
+
+        @param params The partial result (`_reread_height_read_nothing` is True for it).
+        @note Such a result carries no conflict (a conflict is something
+            read), so there is one sentence to say.
+        """
+        self._append_log(tx("Rilettura dell'altezza: nessuna quota letta; l'altezza resta com'è."))
 
     def _clear_height_step_deferral(self) -> None:
         """@brief Drop the part of the recorded STEP deferral a declared height resolves.
@@ -11422,6 +11667,9 @@ class MainWindow(QMainWindow):
         # asked FIRST and their answers applied to the result before any
         # field reads it (H7): what follows sees one settled extraction.
         params, questions_held_back = self._review_extraction_questions(params)
+        # Whether THIS result states unread pads to write in the log, once
+        # the result is in place (see below, V2-2).
+        log_unread_pads = False
         if not self._relaunch_base_synthesized:
             # After the answers (a «pad_layout» answer restores the pads and
             # clears the flag): every real extraction or re-read states its
@@ -11429,8 +11677,14 @@ class MainWindow(QMainWindow):
             # and keeps the current state (PADNULL H1).
             self._unread_pads = self._dropped_footprint_pads(params)
             self._unread_pad_holes = self._pads_with_unread_holes(params, self._unread_pads)
-            if self._unread_pads:
-                self._append_log(self._unread_pads_block())
+            self._unread_pad_unfit = self._pads_with_unfit_values(params, self._unread_pads)
+            # The extractor's account of THIS result, kept beside the pads it
+            # is about, so that the block never reads it from an extraction
+            # object that may be the previous one.
+            detail = getattr(params, "pin_map_conflict", None)
+            self._unread_pad_unfit_detail = (detail.strip() if self._unread_pad_unfit
+                                             and isinstance(detail, str) and detail.strip() else None)
+            log_unread_pads = bool(self._unread_pads)
         validated_package_geometry = None
         if self._selected_family() == "single_smd" and params.package_geometry:
             # Without pad geometry the result is still applied and shown: the
@@ -11480,6 +11734,15 @@ class MainWindow(QMainWindow):
         self._photo_source = params.photo_source
         self._refresh_component_review_button()
         self._last_extracted = params
+        if log_unread_pads:
+            # Written only now (review 2026-11-11, V2-2): the block names
+            # the remedies ENABLED in the current state, and the pad re-read
+            # is enabled by the result being applied (its main answer, its
+            # settled extraction). Logged before `_last_extracted` was this
+            # result, the first analysis of a session judged the remedy
+            # against an empty session and the log did not name the re-read
+            # that the box shown moments later names. One state, one sentence.
+            self._append_log(self._unread_pads_block())
         # The name is decided by whoever works, not by the extraction: the proposal
         # goes only into the log, and is adopted with File > Rinomina progetto
         # (rename project), which is also the moment the documents follow it.
@@ -15791,6 +16054,60 @@ class MainWindow(QMainWindow):
         return holes or None
 
     @staticmethod
+    def _pads_with_unfit_values(params, unread) -> list[str] | None:
+        """@brief The unread pads that were read in full but whose values cannot all be true.
+
+        @param params The extraction result whose `unread_pad_geometry`
+            holds the dropped pads as the extractor kept them.
+        @param unread The pads the extraction dropped (`_dropped_footprint_pads`).
+        @return The numbers, among `unread`, of the pads that carry both
+            coordinates and are not holed pads without a hole: the extractor
+            drops a pad for exactly three reasons (no position, no hole,
+            values the pad rules cannot settle), so a dropped pad that lacks
+            neither a position nor a hole was dropped for the third. None
+            when there is none.
+        @note Structural, read from the dropped geometry and never from the
+            prose of `pin_map_conflict`. The extractor's `unsettled_pads` (a
+            land that cannot hold its hole, no room at the pitch) is a
+            subset: it does not list the pads dropped for overlapping
+            copper, which this rule also finds. A pad named there is taken
+            even when its entry in `pins` is missing or malformed, unless
+            it is already an unread position or an unread hole, which rank
+            first as in the extractor.
+        """
+        geometry = getattr(params, "unread_pad_geometry", None)
+        pins = geometry.get("pins") if isinstance(geometry, dict) else None
+        if not unread or not isinstance(pins, (list, tuple)):
+            return None
+        wanted = set(unread)
+        complete, lacking = [], set()
+        for pin in pins:
+            if not isinstance(pin, dict):
+                continue
+            number = str(pin.get("number") if pin.get("number") is not None else "").strip() or "?"
+            if number not in wanted:
+                continue
+            placed = pin.get("x_mm") is not None and pin.get("y_mm") is not None
+            holeless = (pin.get("drill_mm") is None
+                        and pin.get("pad_type", "smd") in ("thru_hole", "np_thru_hole"))
+            if placed and not holeless:
+                complete.append(number)
+            else:
+                # Any entry of the number that lacks a value makes the pad
+                # an unread position or hole, whatever a duplicate says.
+                lacking.add(number)
+        declared = geometry.get("unsettled_pads")
+        declared = [str(pad).strip() for pad in declared
+                    if isinstance(pad, (str, int)) and not isinstance(pad, bool)
+                    ] if isinstance(declared, (list, tuple)) else []
+        unfit = []
+        for number in complete + declared:
+            if number in wanted and number not in lacking and number not in unfit:
+                unfit.append(number)
+        # In the order the extraction named them.
+        return [pad for pad in unread if pad in unfit] or None
+
+    @staticmethod
     def _valid_unread_pads(raw) -> list[str] | None:
         """@brief The saved `unread_pads` of a project, None when absent or malformed.
 
@@ -15808,9 +16125,16 @@ class MainWindow(QMainWindow):
         """@brief Why no footprint may be built now, with the remedy; '' when it may.
 
         @return Translated text naming the pads whose positions the last
-            extraction did not read, and the existing remedies: the partial
-            re-read in the tools menu, the answer to the pad-position question
-            when an analysis asks it, or a new analysis. '' without unread pads.
+            extraction did not read, and the remedies ENABLED in the current
+            state: the partial re-read in the tools menu only when it can
+            start once the window is idle (`_reread_block_reason`: not in a
+            reopened project), the answer to the pad-position question when
+            an analysis asks it, or a new analysis. For pads whose HOLE was
+            not read, only a new analysis with a document that dimensions
+            the holes or the terminals. For pads read in full whose values
+            cannot all be true (`_unread_pad_unfit`), a third sentence that
+            says so, what to verify, and -- while this session holds it --
+            the extractor's own account. '' without unread pads.
         @note Not every `pin_map_conflict`: a grid numbering in disagreement
             is corrected in the fields and regenerated by hand, so blocking
             the manual paths there would remove the documented remedy. Unread
@@ -15823,7 +16147,12 @@ class MainWindow(QMainWindow):
         # position was not read, and a holed pad whose hole was not read
         # (`_unread_pad_holes`); each is named for what it lacks.
         holes = [pad for pad in getattr(self, "_unread_pad_holes", None) or () if pad in pads]
-        positions = [pad for pad in pads if pad not in holes]
+        # A third case (review round 4b): pads read in full whose values the
+        # pad rules cannot settle (`_unread_pad_unfit`). Calling them «not
+        # read» sent the user to read again what had been read.
+        unfit = [pad for pad in getattr(self, "_unread_pad_unfit", None) or ()
+                 if pad in pads and pad not in holes]
+        positions = [pad for pad in pads if pad not in holes and pad not in unfit]
         parts = []
         if positions:
             parts.append(self.i18n.text(
@@ -15835,18 +16164,54 @@ class MainWindow(QMainWindow):
                 "Nessun footprint: i fori dei pad {pads} non sono stati letti dai documenti (nessun "
                 "foro stampato e nessun terminale da cui ricavarli), e i campi della matrice non sono "
                 "il footprint di questo componente.").format(pads=", ".join(holes)))
-        menu = self.i18n.tr("app.tools").replace("&", "")
-        action = self.i18n.text("Rileggi solo le posizioni dei pad")
         if positions:
-            parts.append(self.i18n.text(
-                "Usa «{menu} > {action}», rispondi alla domanda sulle posizioni dei pad quando "
-                "l'analisi la propone, oppure ripeti l'analisi con un disegno quotato dei pad.").format(
-                menu=menu, action=action))
+            # A block names only a remedy that is enabled in this state
+            # (review 2026-11-11, F2-3): the pad re-read is refused, for
+            # one, in a reopened project (`_reread_block_reason`, K2), and
+            # the sentence used to send the user to a greyed-out entry.
+            # Asked «while idle»: this text is also written while the
+            # analysis that found the unread pads is still closing.
+            if self._reread_block_reason("pad_layout", while_idle=True):
+                parts.append(self.i18n.text(
+                    "Ripeti l'analisi con un disegno quotato dei pad, e rispondi alla domanda sulle "
+                    "posizioni dei pad quando l'analisi la propone."))
+            else:
+                parts.append(self.i18n.text(
+                    "Usa «{menu} > {action}», rispondi alla domanda sulle posizioni dei pad quando "
+                    "l'analisi la propone, oppure ripeti l'analisi con un disegno quotato dei pad.").format(
+                    menu=self.i18n.tr("app.tools").replace("&", ""),
+                    action=self.i18n.text("Rileggi solo le posizioni dei pad")))
         if holes:
+            # No re-read is offered for a hole (F2-3): these pads have no
+            # printed hole and no terminal to derive one from, so reading
+            # the same drawing again cannot find it. What helps is a
+            # document that dimensions the holes or the terminals. Typing
+            # the hole in the pad dialog is not offered either: the pads
+            # were dropped, so no pad is drawn to open the dialog on.
             parts.append(self.i18n.text(
-                "Per i fori ripeti l'analisi con un disegno che quoti i fori o i terminali dei pad, "
-                "oppure usa «{menu} > {action}»: la lettura dedicata dei pad trascrive anche i fori "
-                "stampati.").format(menu=menu, action=action))
+                "Per i fori ripeti l'analisi aggiungendo un documento che quoti i fori o i terminali "
+                "dei pad: il disegno letto non li riporta, quindi rileggerlo non li troverebbe."))
+        if unfit:
+            # After the remedies of the other two cases, so that their
+            # sentences stay exactly as they were. No re-read is named: the
+            # positions alone do not settle a land that cannot hold its hole
+            # (`apply_answers` refuses it), and the entry is disabled in a
+            # reopened project. What helps is what the pad was drawn for:
+            # the PCB land pattern, or the documents corrected and read anew.
+            parts.append(self.i18n.text(
+                "Nessun footprint: i valori letti per i pad {pads} non possono essere tutti veri "
+                "(una piazzola che non tiene il suo foro, un foro che al passo non ha posto, oppure "
+                "rame di pad vicini che si sovrappone), e i campi della matrice non sono il footprint "
+                "di questo componente.").format(pads=", ".join(unfit)))
+            parts.append(self.i18n.text(
+                "Per i pad incompatibili verifica sul disegno foro, terminale, piazzola e posizioni, "
+                "poi ripeti l'analisi, meglio se aggiungendo un documento che riporti il land pattern "
+                "PCB consigliato."))
+            detail = getattr(self, "_unread_pad_unfit_detail", None)
+            if detail:
+                # The extractor names each pad with the values in conflict;
+                # its text is already translated and is shown as it is.
+                parts.append(self.i18n.text("Dettaglio dell'analisi: {detail}").format(detail=detail))
         return " ".join(parts)
 
     def _current_params(self) -> PinHeaderParams:
@@ -26549,14 +26914,29 @@ class MainWindow(QMainWindow):
                 if name:
                     text = tx("Pin {number}: {name}", number=key, name=name)
                     break
+        return text + self._pad_estimate_line(sources)
+
+    def _pad_estimate_line(self, sources) -> str:
+        """@brief The tooltip line naming what the program estimated on a pad, '' when nothing.
+
+        @param sources The pad's provenance (`PinSpec.sources`), or None.
+        @return A line break and «Stimato dal programma, da verificare sul
+            disegno: …» (estimated by the program, to be verified on the
+            drawing) with the hole, size or shape marked derived or estimated
+            (`tht_estimates.unverified_values`); '' without any.
+        @note One builder for every pad tooltip of the preview (review
+            2026-11-11, F3-7): the tooltip of a non-plated hole is written
+            apart and used to lose the line, although its hole and size are
+            estimated like those of a plated pad.
+        """
         from ..core.tht_estimates import unverified_values
         # The three values of a pad the provenance can mark, as the catalog words.
         labels = {"drill_mm": "foro", "pad_size": "dimensione", "shape": "forma"}
         unverified = [self.i18n.text(labels[value]) for value in unverified_values(sources)]
-        if unverified:
-            text += "\n" + tx("Stimato dal programma, da verificare sul disegno: {values}",
-                              values=", ".join(unverified))
-        return text
+        if not unverified:
+            return ""
+        return "\n" + tx("Stimato dal programma, da verificare sul disegno: {values}",
+                         values=", ".join(unverified))
 
     def _add_preview_pin_function(self, number, side, bounds, fallback="", max_length=None):
         """Draw the documented function inward, separate from the pad number.
@@ -27293,9 +27673,11 @@ class MainWindow(QMainWindow):
             if mechanical:
                 # Written without a number (no net): shown as KiCad shows it,
                 # with the model's number kept in the tooltip so the pad can
-                # be told apart and made plated again.
+                # be told apart and made plated again. Its estimated hole
+                # or size is named as on every other pad (F3-7).
                 item.setToolTip(tx("Foro non metallizzato (pad {number}, senza numero nel file)",
-                                   number=pin.number))
+                                   number=pin.number)
+                                + self._pad_estimate_line(getattr(pin, "sources", None)))
             number = self.preview_scene.addSimpleText("" if mechanical else str(pin.number))
             number.setToolTip(item.toolTip())
             number.setBrush(QBrush(QColor(TEXT if drilled else BASE)))
@@ -27975,6 +28357,42 @@ class MainWindow(QMainWindow):
         height = size_control(pin.pad_width_mm)
         form.addRow(self.i18n.text("Larghezza:"), width)
         form.addRow(self.i18n.text("Altezza:"), height)
+
+        def follow_shape(_value=None):
+            # A circle and a square have ONE free dimension (review
+            # 2026-11-11, F3-3): the second box follows the first and is
+            # not editable, so the shape chosen is the shape written. Two
+            # free boxes let one side of a «Cerchio» (circle) be changed,
+            # and `PinSpec` then turned the pad into an oval the user
+            # never chose, marked as a shape that was «read».
+            linked = shape.currentData() in self.PAD_ONE_SIZE_SHAPES
+            if linked and not free_height["linked"]:
+                # The shape stops having two sizes: what the height box
+                # holds now is the last FREE height (review 2026-11-11,
+                # V2-4). It is given back when a two-size shape returns;
+                # before, the box kept the width's shown rounding and an
+                # oval looked at as a circle and back lost its height.
+                free_height["value"] = height.value()
+            elif not linked and free_height["linked"] and height.value() != free_height["value"]:
+                # Back to the very number the box held, so that a height
+                # the user never typed still compares equal to what the box
+                # was filled with and stands for the pad's exact value
+                # (`_pad_dialog_value`).
+                height.setValue(free_height["value"])
+            free_height["linked"] = linked
+            height.setEnabled(not linked)
+            if linked and height.value() != width.value():
+                height.setValue(width.value())
+
+        # The height box's value while the shape last had two free sizes,
+        # and whether the box is currently following the width.
+        free_height = {"value": height.value(), "linked": False}
+        shape.currentIndexChanged.connect(follow_shape)
+        width.valueChanged.connect(follow_shape)
+        follow_shape()
+        # What each box shows right after it was filled: a box still at
+        # that value was not edited (see `_pad_dialog_value`).
+        shown_width, shown_height = width.value(), height.value()
         rotation = QDoubleSpinBox(dialog)
         rotation.setRange(-360.0, 360.0)
         rotation.setDecimals(1)
@@ -27984,6 +28402,7 @@ class MainWindow(QMainWindow):
         # Shown as seen from the top, like the positions below: the angle
         # KiCad will write, whatever the source view and orientation.
         rotation.setValue(float(package.pins_seen_from_top()[pad_index].rotation_deg))
+        shown_rotation = rotation.value()
         form.addRow(self.i18n.text("Rotazione:"), rotation)
         # The hole fields are always built and enabled only for a holed
         # type, so the type can be changed here. CONTRACT CHANGED 2026-11-06
@@ -28011,6 +28430,7 @@ class MainWindow(QMainWindow):
         slot.setToolTip(self.i18n.text(
             "Secondo lato dell'asola, lungo l'altezza del pad: lasciare «tondo» per un foro circolare."))
         form.addRow(self.i18n.text("Asola, secondo lato:"), slot)
+        shown_drill, shown_slot = drill.value(), slot.value()
         npth_note = QLabel(self.i18n.text(
             "Un foro non metallizzato non ha numero nel file: il pad {number} viene scritto senza "
             "numero e non compare nel simbolo.").format(number=pin.number))
@@ -28100,12 +28520,31 @@ class MainWindow(QMainWindow):
         move_x = pos_x.value() - rel_x if pos_x.isEnabled() and pos_x.value() != shown_x else 0.0
         move_y = pos_y.value() - rel_y if pos_y.isEnabled() and pos_y.value() != shown_y else 0.0
         holed = chosen_type in ("thru_hole", "np_thru_hole")
-        drill_mm = drill.value() if holed else None
+        # Each box stands for the pad's exact value while it still shows
+        # what it was filled with, for its own number otherwise (the rule
+        # of the position boxes above, review 2026-11-11, F3-4 and F3-6).
+        keep = self._pad_dialog_value
+        pad_width = keep(pin.pad_length_mm, shown_width, width.value())
+        pad_height = keep(pin.pad_width_mm, shown_height, height.value())
+        drill_mm = keep(None if hole is None else hole[0], shown_drill, drill.value()) if holed else None
         # «tondo» (0) and a second side equal to the first are a round hole.
-        drill_length_mm = slot.value() if holed and slot.value() > 0.0 and slot.value() != drill.value() else None
+        # Equal as the boxes show them once either was edited: the user
+        # compares what is on screen. Two untouched boxes say nothing, so
+        # a slot finer than the decimals shown stays the slot it was.
+        hole_edited = drill.value() != shown_drill or slot.value() != shown_slot
+        if not holed or slot.value() <= 0.0 or (hole_edited and slot.value() == drill.value()):
+            drill_length_mm = None
+        else:
+            drill_length_mm = keep(hole[1] if pin.is_slot() else None, shown_slot, slot.value())
+            if drill_length_mm == drill_mm:
+                drill_length_mm = None
         self._apply_package_pad_dialog(
-            pad_index, shape.currentData(), width.value(), height.value(), drill_mm, (move_x, move_y),
-            pad_type=chosen_type, rotation_deg=rotation.value(), drill_length_mm=drill_length_mm,
+            pad_index, shape.currentData(), pad_width, pad_height, drill_mm, (move_x, move_y),
+            pad_type=chosen_type,
+            # An untouched angle is kept exactly (None), not replaced by
+            # its one-decimal picture: 37.25 would come back 37.3.
+            rotation_deg=None if rotation.value() == shown_rotation else rotation.value(),
+            drill_length_mm=drill_length_mm,
             verified=verified is not None and verified.isChecked())
         if wants_origin != was_origin:
             self._set_footprint_drawing_origin(origin_key if wants_origin else FP_ORIGIN_DEFAULT)
@@ -28113,33 +28552,36 @@ class MainWindow(QMainWindow):
     #: Decimals of the size, hole and position boxes of the pad dialog (mm).
     PAD_DIALOG_DECIMALS = 3
 
-    @classmethod
-    def _pad_dialog_value(cls, original, shown):
-        """@brief The value a pad-dialog size box stands for: the original one when the box was not edited.
+    #: Pad shapes of the pad dialog that have ONE free dimension: the
+    #: «Altezza» (height) box follows «Larghezza» (width) and both sides
+    #: are written equal. Structural: a circle is one diameter, a square
+    #: one side (`PinSpec` keeps a circle only with equal sides).
+    PAD_ONE_SIZE_SHAPES = ("circle", "square")
 
-        @param original The pad's value before the dialog (mm), or None.
-        @param shown The box's value as returned (mm, PAD_DIALOG_DECIMALS
-            decimals), or None.
-        @return `original` when `shown` is a rounding of the original to the
-            box's decimals, i.e. within half a unit of the last decimal (the
-            box cannot show more, so it says nothing about a change; Qt and
-            Python round a tie such as 1.5875 differently, so no single
-            rounding is assumed); `shown` otherwise -- a typed number, a
-            value the original did not have, or None.
-        @note A number re-typed equal to the rounded original is
-            indistinguishable from an untouched box and keeps the original
-            too: the box only knows its own decimals.
+    @staticmethod
+    def _pad_dialog_value(original, shown, value):
+        """@brief The value a pad-dialog box stands for: the pad's own one while the box was not edited.
+
+        @param original The pad's exact value the box was filled from (mm
+            or degrees), or None when the pad had none.
+        @param shown The box's own `value()` right after it was filled:
+            `original` as the box can show it (its decimals, its rounding).
+        @param value The box's value when the dialog was accepted, or None
+            for «no value» (a slot box left at «tondo», round).
+        @return `original` while `value` still equals `shown` -- the box was
+            not edited, and what it shows is only a picture of the exact
+            value; `value` otherwise, whatever its distance from the
+            original: a number the user typed is the user's number.
+        @note CONTRACT CHANGED 2026-11-11 (review F3-4). Before, «untouched»
+            was inferred from the ORIGINAL value: anything within half a
+            unit of the box's last decimal was taken for a rounding. A pad
+            of 1.5875 mm is shown 1.587 (Qt) and the user typing 1.588 was
+            ignored. The box's own initial value is the only fact that
+            tells an edit from a rounding, as for the position boxes.
+        @note A number re-typed equal to what the box showed is
+            indistinguishable from an untouched box and keeps the original.
         """
-        if original is None or shown is None:
-            return shown
-        try:
-            gap = abs(float(shown) - float(original))
-        except (TypeError, ValueError):
-            return shown
-        # Half a unit of the last decimal, plus float noise.
-        if gap <= 0.5 * 10.0 ** -cls.PAD_DIALOG_DECIMALS + 1e-9:
-            return original
-        return shown
+        return original if value == shown else value
 
     def _apply_package_pad_dialog(self, pad_index: int, selected_shape: str, pad_width: float,
                                   pad_height: float, drill_mm, move_mm: tuple, *,
@@ -28151,7 +28593,9 @@ class MainWindow(QMainWindow):
         @param selected_shape Shape key chosen in the dialog ("square" is a
             rectangle with equal sides).
         @param pad_width Pad width, mm.
-        @param pad_height Pad height, mm (ignored for "square").
+        @param pad_height Pad height, mm (ignored for the shapes of
+            PAD_ONE_SIZE_SHAPES, "circle" and "square": both sides are
+            `pad_width`).
         @param drill_mm Drill diameter, mm (the first side of a slot), or
             None for a pad without a hole.
         @param move_mm (dx, dy) change of the position fields, mm, X right and
@@ -28187,17 +28631,18 @@ class MainWindow(QMainWindow):
         if package is None or not 0 <= pad_index < len(package.pins):
             return False
         pin = package.pins[pad_index]
-        # A size box shows the pad's value rounded to its decimals: a field the
-        # user did not touch gives back that rounded number, which is not an
-        # edit (review 2026-11-11, K6: 1.5875 came back 1.588, the pad was
-        # resized by 0.5 um and lost its «stimato» (estimated) mark).
-        pad_width = self._pad_dialog_value(pin.pad_length_mm, pad_width)
-        pad_height = self._pad_dialog_value(pin.pad_width_mm, pad_height)
-        drill_mm = self._pad_dialog_value(pin.drill_mm, drill_mm)
-        drill_length_mm = self._pad_dialog_value(pin.drill_length_mm, drill_length_mm)
+        # The values arrive exact: the dialog gives back the pad's own value
+        # for a box the user did not touch (`_pad_dialog_value`; review
+        # 2026-11-11, K6: 1.5875 came back 1.588, the pad was resized by
+        # 0.5 um and lost its «stimato» (estimated) mark), so nothing is
+        # guessed here from how close a number is to the original (F3-4).
+        if selected_shape in self.PAD_ONE_SIZE_SHAPES:
+            # One free dimension (F3-3): both sides are the width, whatever
+            # the caller passed as height. A circle with two different
+            # sides would be turned into an oval by `PinSpec`.
+            pad_height = pad_width
         if selected_shape == "square":
             selected_shape = "rect"
-            pad_height = pad_width
         new_type = pin.pad_type if pad_type is None else pad_type
         fields = {"shape": selected_shape, "pad_length_mm": pad_width, "pad_width_mm": pad_height,
                   "pad_type": new_type}

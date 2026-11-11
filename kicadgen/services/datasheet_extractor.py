@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ..cad3d.annotations import EDGE_NAMES
-from ..core.package_geometry import package_doubts, package_from_mapping
+from ..core.footprint import KICAD_COORD_LIMIT_MM
+from ..core.package_geometry import PAD_SHAPES, PinSpec, package_doubts, package_from_mapping
 # The one rule for holes and pads not printed in the drawing, and its three
 # constants (formerly copied here): one definition with the footprint checks.
 from ..core.tht_estimates import (HOLE_TO_PAD_ANNULUS_MM, LEAD_TO_HOLE_CLEARANCE_MM,  # noqa: F401
@@ -41,6 +42,7 @@ from ..generators.castellated_module import (
 )
 # Free copper a derived land keeps from its neighbours (review G1): the
 # minimum of the pin header generator, one value for both.
+from ..generators.package import ESTIMATED_PADS_LISTED, ESTIMATED_PADS_MORE, estimated_pad_list
 from ..generators.pin_header import MIN_PAD_GAP_MM
 from .ai_diagnostics import CallCancelled
 from .openrouter import (DEFAULT_MODEL, OpenRouterError, ToolArgumentsError, api_key, call_tool,
@@ -285,8 +287,10 @@ _PAD_TERMINAL_PROPERTIES = {
     "drill_length_mm": {
         "type": "number", "exclusiveMinimum": 0,
         "description": (
-            "Solo per un'ASOLA stampata nel disegno: il suo secondo lato (lungo la larghezza del "
-            "pad), nell'unita' di drawing_unit. Mai stimato."),
+            "Solo per un'ASOLA stampata nel disegno: il lato dell'asola lungo Y (l'asse di "
+            "pad_width_mm), nell'unita' di drawing_unit; drill_mm e' allora il suo lato lungo X "
+            "(l'asse di pad_length_mm). Un'asola orizzontale ha drill_mm maggiore di "
+            "drill_length_mm, una verticale il contrario. Mai stimato."),
     },
     "value_sources": {
         "type": "object",
@@ -4993,7 +4997,9 @@ def _normalise_pin_numbers(pins) -> None:
 def _pad_number_key(number: str):
     """Natural order of pad numbers: 1, 2, 10, then A1, A2 ('1' < '10', digits first)."""
     parts = re.findall(r"\d+|\D+", number)
-    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in parts]
+    # `isascii()` first: `str.isdigit()` is also true for «²» or «①», which
+    # `\d` does not match and `int()` refuses (review 2026-11-11, F9-3).
+    return [(0, int(part), "") if part.isascii() and part.isdigit() else (1, 0, part) for part in parts]
 
 
 def _uniform_pad_fields(pins) -> tuple:
@@ -5010,7 +5016,10 @@ def _uniform_pad_fields(pins) -> tuple:
 
     def identity(value):
         """A hashable stand-in of a value: numbers to 1e-6, mappings by their sorted JSON."""
-        if isinstance(value, dict):
+        if isinstance(value, (dict, list, tuple, set)):
+            # Containers are unhashable: a list in a scalar field (a broken
+            # answer, refused later with a readable error, review F6-8)
+            # must not raise TypeError here.
             return json.dumps(value, sort_keys=True, default=str)
         number = _optional_number(value)
         return round(number, 6) if number is not None and not isinstance(value, str) else value
@@ -5664,8 +5673,8 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "disegno (mm, inch o mil) e in contacts_view da che lato e' vista la disposizione dei "
     "terminali (top, bottom o unknown); conversione e specchiatura le fa il programma. "
     "TERMINALI: descrivili uno per uno in pads, con il numero STAMPATO nel disegno, il "
-    "tipo (thru_hole con drill_mm, oppure smd), e la piazzola consigliata (pad_length_mm e "
-    "pad_width_mm; per un foro circolare i due valori coincidono). Se le posizioni dei "
+    "tipo (thru_hole oppure smd) e la piazzola (pad_length_mm lungo X e pad_width_mm lungo Y; "
+    "per una piazzola circolare i due valori coincidono). Se le posizioni dei "
     "terminali sono quotate con catene di quote, trascrivile in pad_chains COSI' COME "
     "SONO STAMPATE, senza calcolare: asse x verso destra o y verso il basso, fermate in ordine "
     "crescente sulla pagina (numeri dei terminali sulla stessa linea di quota separati da "
@@ -5690,13 +5699,19 @@ DEFAULT_SINGLE_SYSTEM_PROMPT = (
     "posizioni senza numero. FORI E TERMINALI, pad per pad: trascrivi solo cio' che e' "
     "STAMPATO. Se il disegno stampa il foro (richiamo come \"3-Ø1.2\" sul layout PCB) "
     "riportalo in drill_mm, ricopia il richiamo in hole_callout e dichiara drill_mm \"read\" "
-    "nel value_sources del pad; un'asola solo se stampata, col secondo lato in "
-    "drill_length_mm. Se il foro NON e' stampato non stimarlo: ometti drill_mm e descrivi in "
+    "nel value_sources del pad; un'asola solo se stampata: drill_mm e' il suo lato lungo X e "
+    "drill_length_mm il suo lato lungo Y (un'asola orizzontale ha drill_mm maggiore di "
+    "drill_length_mm). Se il foro NON e' stampato non stimarlo: ometti drill_mm e descrivi in "
     "lead il terminale che ci entra (round con diameter_mm, oppure flat con width_mm e "
     "thickness_mm), dichiarandone la provenienza in value_sources.lead; foro e piazzola li "
-    "ricava il programma. La piazzola e' \"read\" solo se il disegno stampa il land pattern. "
+    "ricava il programma. PIAZZOLA: pad_length_mm e pad_width_mm vanno sempre compilati; se "
+    "il disegno stampa il land pattern trascrivili e dichiara pad_size \"read\", altrimenti "
+    "scrivi una tua stima dichiarata \"estimated\": per un terminale con foro il programma la "
+    "sostituisce con la piazzola che ricava dal foro o dal terminale. "
     "Se tutti i terminali sono uguali puoi riportarne il diametro anche in "
-    "lead_diameter_mm. In lead_exit di' "
+    "lead_diameter_mm. In grid vale la stessa regola: grid.drill_mm solo se il foro e' "
+    "stampato, altrimenti omettilo e da' il terminale in lead_diameter_mm; "
+    "grid.pad_diameter_mm stampato oppure stimato e dichiarato tale. In lead_exit di' "
     "da quale faccia escono i terminali (bottom: dritti dal fondo; side: dai fianchi e "
     "piegati; unknown). CORPO: body_length_mm e body_width_mm sono le due quote in pianta "
     "(dalla vista dall'alto o dal basso); se il disegno le qualifica come massimo o minimo "
@@ -5768,6 +5783,12 @@ SUPERSEDED_SINGLE_PROMPT_DIGESTS = frozenset({
     # printed hole callout and the terminal per pad; the program derives the
     # rest (`_resolve_pad_terminals`).
     "ed685f00b13bfc7e7e6702815de750fbc54117b2202bb28fc560202175a062e3",
+    # 2026-11-11 (review round 4, F6-4): the text of 2026-11-10 asked the
+    # type as «thru_hole con drill_mm» and then to omit drill_mm, called the
+    # land «consigliata» while the program derives it, left a grid no way to
+    # omit an unprinted hole (grid.drill_mm was required) and gave a slot no
+    # axis. Now one rule for holes, lands and slots, pads and grid alike.
+    "a8ec8c4c0e846a73fa8f74f93eb2ac111d0eebb093c5d5d91484013d19a9f5ef",
 })
 #: Digests of former pin-numbering defaults (none yet: first version).
 SUPERSEDED_NUMBERING_PROMPT_DIGESTS = frozenset()
@@ -5796,12 +5817,16 @@ def _single_component_tool() -> dict:
             "pad_type": {"type": "string", "enum": ["thru_hole", "smd"]},
             "drill_mm": {"type": "number", "exclusiveMinimum": 0,
                          "description": ("Foro, solo per thru_hole: il diametro STAMPATO sul "
-                                         "disegno (hole_callout). Se il foro non e' stampato "
-                                         "ometti questo campo e dai il terminale in lead.")},
+                                         "disegno (hole_callout); per un'asola stampata il suo "
+                                         "lato lungo X. Se il foro non e' stampato ometti "
+                                         "questo campo e dai il terminale in lead.")},
             "pad_length_mm": {"type": "number", "exclusiveMinimum": 0,
                               "description": ("Piazzola lungo X; diametro per una piazzola "
-                                              "circolare. Stampata (land pattern) oppure "
-                                              "dichiarata estimated in value_sources.pad_size.")},
+                                              "circolare. Stampata (land pattern, pad_size "
+                                              "\"read\") oppure una stima dichiarata estimated "
+                                              "in value_sources.pad_size, che per un terminale "
+                                              "con foro il programma sostituisce con quella "
+                                              "ricavata dal foro o dal terminale.")},
             "pad_width_mm": {"type": "number", "exclusiveMinimum": 0,
                              "description": "Piazzola lungo Y; diametro per una piazzola circolare."},
             "shape": {"type": "string", "enum": ["circle", "rect", "oval", "roundrect"]},
@@ -5822,12 +5847,20 @@ def _single_component_tool() -> dict:
         "properties": {
             "rows": main["rows"], "cols": main["cols"], "pitch_mm": main["pitch_mm"],
             "row_spacing_mm": main["row_spacing_mm"], "pad_diameter_mm": main["pad_diameter_mm"],
-            "drill_mm": main["drill_mm"], "populated_pins": main["populated_pins"],
+            # The grid follows the pads' rule (review F6-4): a hole is given
+            # only when printed, so the field is optional here; without it
+            # the program derives hole and land from `lead_diameter_mm`.
+            "drill_mm": {"type": "number", "exclusiveMinimum": 0,
+                         "description": ("Foro dei terminali della griglia, SOLO se stampato sul "
+                                         "disegno (dichiaralo \"read\" in value_sources.drill_mm). "
+                                         "Se non e' stampato ometti questo campo e da' il "
+                                         "terminale in lead_diameter_mm.")},
+            "populated_pins": main["populated_pins"],
             "pin_map": main["pin_map"],
             "body_offset_x_mm": main["body_offset_x_mm"],
             "body_offset_y_mm": main["body_offset_y_mm"],
         },
-        "required": ["rows", "cols", "pad_diameter_mm", "drill_mm"],
+        "required": ["rows", "cols", "pad_diameter_mm"],
     }
     properties = {
         "name": main["name"], "description": main["description"], "tags": main["tags"],
@@ -6175,8 +6208,14 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
           cleared, a note names the source. When the pads had been dropped
           for unread positions (`unread_pad_geometry`), they are filled from
           the candidate and become `package_geometry` again only if every pad
-          is then placed and the geometry validates (`unread_pads` and
-          `unread_pad_geometry` cleared); otherwise the question stays open;
+          is then placed, the lands the program wrote clear their
+          neighbours at the chosen positions and every land holds its hole
+          (steps 3 and 4 of `_resolve_pad_terminals`, run again: review
+          round 5, V1-4) and the geometry validates (`unread_pads` and
+          `unread_pad_geometry` cleared). Otherwise nothing is written, the
+          question stays open, and a note and `pin_map_conflict` say why the
+          chosen layout could not be applied. A layout that would put the
+          pads of a valid footprint on each other is refused the same way;
         - "height_equals_plan": "keep" leaves the height, "clear" removes it
           (a rotated view: the agreed number was a plan size).
         The same semantics apply during an extraction given `answers=`
@@ -6225,8 +6264,21 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
             # Pads dropped for unread positions (M3) are filled on a copy:
             # they become the footprint again only when every pad is placed
             # and the geometry validates.
+            # Both cases work on a copy: a layout that cannot be applied
+            # leaves the result as it was, with the question open.
             restoring = geometry is None
-            target = copy.deepcopy(result.unread_pad_geometry) if restoring else geometry
+            target = copy.deepcopy(result.unread_pad_geometry if restoring else geometry)
+
+            def not_applicable(reasons) -> None:
+                """Say why the chosen layout was not applied, in the notes and in the block (V1-4)."""
+                line = tx("Disposizione dei pad scelta non applicabile: {exc}", exc="; ".join(reasons))
+                notes.append(line)
+                # The block stays, and now tells the truth about this
+                # choice too: positions alone do not settle these pads.
+                if line not in (result.pin_map_conflict or ""):
+                    result.pin_map_conflict = (line if not result.pin_map_conflict
+                                               else result.pin_map_conflict + "\n" + line)
+
             positions = {str(p.get("number")): (p.get("x_mm"), p.get("y_mm"))
                          for p in payload.get("pins") or () if isinstance(p, dict)}
             for pin in target.get("pins") or ():
@@ -6253,11 +6305,40 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 if _pads_without_positions(target) or _pads_without_holes(target):
                     remaining.append(question)
                     continue
-                restored_notes: list = []
+                # The pad rules ran while some pads had no position: the
+                # lands the program wrote were never kept apart from them.
+                # Steps 3 and 4 of `_resolve_pad_terminals` run again on the
+                # placed pads, BEFORE the validation (review round 5, V1-4:
+                # a restored footprint with a 0.075 mm gap, or a layout that
+                # could never be applied). The invariant holds here too.
+                record = target.pop(_DERIVED_LANDS_KEY, None)
+                unsettled = target.pop("unsettled_pads", None)
+                pins = [pin for pin in target.get("pins") or () if isinstance(pin, dict)]
+                if not isinstance(record, list) and unsettled:
+                    # A dropped geometry without the record (an older
+                    # result): what could not be settled then still cannot.
+                    remaining.append(question)
+                    continue
+                derived = {}
+                for entry in record if isinstance(record, list) else ():
+                    index = entry.get("index") if isinstance(entry, dict) else None
+                    all_pins = target.get("pins") or ()
+                    if (isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(all_pins)
+                            and isinstance(all_pins[index], dict) and isinstance(entry.get("land"), dict)):
+                        derived[id(all_pins[index])] = (all_pins[index], entry["land"])
+                found = {"land_capped": [], "land_model": [], "thin_ring": []}
+                unfit = _settle_lands_and_fit(pins, derived, found)
+                if unfit:
+                    not_applicable(_grouped_pad_reasons(
+                        [(_pad_number_text(pin.get("number")) or "?", unfit[id(pin)])
+                         for pin in pins if id(pin) in unfit]))
+                    remaining.append(question)
+                    continue
+                restored_notes: list = _land_notes(found)
                 try:
                     mapping, doubts = _validated_explicit_geometry(target, restored_notes)
                 except ExtractionError as exc:
-                    notes.append(tx("Disposizione dei pad scelta non applicabile: {exc}", exc=exc))
+                    not_applicable([str(exc)])
                     remaining.append(question)
                     continue
                 result.package_geometry = mapping
@@ -6265,6 +6346,16 @@ def apply_answers(params: ExtractedParams, answers: dict) -> ExtractedParams:
                 result.unread_pads = None
                 result.unread_pad_geometry = None
                 notes.extend(restored_notes)
+            else:
+                # A footprint that validated with the positions it had must
+                # validate with the chosen ones too: pads the layout puts on
+                # each other are not written (the invariant, V1-4).
+                clash = _cross_pad_problem(target)
+                if clash:
+                    not_applicable([clash])
+                    remaining.append(question)
+                    continue
+                result.package_geometry = geometry = target
             if exchange:
                 result.body_length_mm, result.body_width_mm = (result.body_width_mm,
                                                                result.body_length_mm)
@@ -6542,11 +6633,57 @@ def merge_reread(settled: Optional[ExtractedParams], reread: ExtractedParams) ->
         the larger plan size on the other axis than the settled result has
         it exchanges the settled pair, with its provenance and a note: the
         measure belongs to the layout that is written.
+    @note Scope "body_height_mm" (review round 5, V2-1): the scope is
+        replaced only by a re-read that DECIDED something about it -- a
+        positive height, or a question of the scope's fields. A re-read
+        that returns only a `body_conflict` keeps the settled height, its
+        provenance and the settled questions of the scope, and records the
+        conflict beside them (`body_conflict` and the notes); one that
+        returns nothing of the three changes nothing. A `pin_length_3d_mm`
+        the re-read carries is taken in both cases.
     """
     scope = REREAD_SCOPES.get((getattr(reread, "partial_reread", None) or {}).get("field"))
     if scope is None or settled is None:
         return reread
     result = copy.deepcopy(settled)
+    if scope is REREAD_SCOPES["body_height_mm"]:
+        read_height = reread.body_height_mm is not None
+        asks = any(isinstance(question, dict) and question.get("field") in scope["questions"]
+                   for question in reread.questions or ())
+        if not read_height and not asks:
+            # The re-read brought neither a height nor a question of its
+            # scope (review round 5, V2-1). It decided nothing, so it takes
+            # nothing away: the settled height, its provenance and the
+            # settled questions of the scope stay -- the free choice of a
+            # height survives a paid call that read none.
+            result.partial_reread = None
+            if reread.pin_length_3d_mm is not None:
+                # The other value of the scope, when the re-read does carry
+                # it, is still the re-read's, with its provenance.
+                result.pin_length_3d_mm = reread.pin_length_3d_mm
+                kept = dict(result.value_sources or {})
+                kept.pop("pin_length_3d_mm", None)
+                if "pin_length_3d_mm" in (reread.value_sources or {}):
+                    kept["pin_length_3d_mm"] = reread.value_sources["pin_length_3d_mm"]
+                result.value_sources = kept
+            conflict = reread.body_conflict if isinstance(reread.body_conflict, str) else None
+            # What the re-read's own confrontation wrote is still recorded
+            # (its scope notes only, review E5): a note decides nothing.
+            scope_notes = reread.partial_reread.get("notes")
+            lines = [str(line) for line in (scope_notes if isinstance(scope_notes, list)
+                                            else str(reread.notes or "").splitlines())]
+            if conflict and conflict.strip():
+                # ONLY a conflict: recorded beside what was settled, in the
+                # result's `body_conflict` and in its notes. Without one,
+                # no value, provenance, question or conflict changes.
+                result.body_conflict = conflict
+                lines += conflict.splitlines()
+            known = {line.strip() for line in str(settled.notes or "").splitlines()}
+            added = [line for line in dict.fromkeys(line.strip() for line in lines)
+                     if line and line not in known]
+            if added:
+                result.notes = (str(result.notes or "") + "\n" + "\n".join(added)).strip()
+            return result
     for name in scope["attributes"]:
         setattr(result, name, copy.deepcopy(getattr(reread, name)))
     sources = dict(result.value_sources or {})
@@ -6851,9 +6988,13 @@ class ExtractedParams:
     #: the scope into the settled result; alone, it blocks what it did not
     #: confront.
     partial_reread: Optional[dict] = None
-    #: Numbers (text) of the explicit pads whose positions were NOT read, when
+    #: Numbers (text) of the explicit pads that are not a footprint, when
     #: those pads were the footprint and were dropped (`package_geometry` is
-    #: then None and `pin_map_conflict` set). Not None means: write no
+    #: then None and `pin_map_conflict` set, naming each reason): pads whose
+    #: position was not read, holed pads whose hole was not read, and (round
+    #: 4, 2026-11-11) pads whose values are well formed but cannot all be
+    #: true -- a land that cannot hold its hole, no room at the pitch,
+    #: overlapping copper. Not None means: write no
     #: footprint at all, from no field (`footprint_pads_dropped`). None when
     #: nothing was dropped, and for a castellated module (its sides are the
     #: footprint; dropped optional pads are only noted).
@@ -6861,7 +7002,13 @@ class ExtractedParams:
     #: The dropped explicit geometry (canonical mm, view as read), unread
     #: coordinates still null, every other value validated: what
     #: `apply_answers` fills with a chosen "pad_layout" candidate to restore
-    #: `package_geometry`. Never a footprint by itself.
+    #: `package_geometry`. Never a footprint by itself. Its key
+    #: `unsettled_pads` (numbers) is present when a land cannot hold its hole
+    #: or a hole has no room at the positions read. Its key `derived_lands`
+    #: records the lands the program wrote ({"index": pad index, "land": the
+    #: land replaced}): `apply_answers` keeps them apart again once a chosen
+    #: layout has placed every pad, and restores the footprint only when
+    #: every land then holds its hole and clears its neighbours (V1-4).
     unread_pad_geometry: Optional[dict] = None
 
     def footprint_pads_dropped(self) -> bool:
@@ -8085,7 +8232,9 @@ def _canonicalize_answer(data: dict) -> None:
                         "millimetri, da verificare."))
         data["_unit_undeclared"] = True
         unit = "mm"
-    elif unit not in _UNIT_TO_MM:
+    elif not isinstance(unit, str) or unit not in _UNIT_TO_MM:
+        # A unit that is not text (a list, an object: unhashable, V1-10) is
+        # an unknown unit like any other, never a TypeError.
         notes.append(tx("DUBBIO unita' di misura {unit!r} non riconosciuta: quote trattate come "
                         "millimetri, da verificare.", unit=unit))
         data["_unit_undeclared"] = True
@@ -10227,67 +10376,259 @@ def _pads_without_holes(package_geometry) -> list[str]:
 #: Pad sizes an answer may carry: each one present must be a positive length.
 _PAD_SIZE_KEYS = ("pad_length_mm", "pad_width_mm", "drill_mm", "drill_length_mm")
 
+#: Pad fields that ARE objects by contract (judged by their own rule).
+_PAD_OBJECT_KEYS = ("lead", "value_sources", "sources")
+
+#: The SCALAR pad fields the pad rules and the footprint read: position,
+#: sizes, hole, slot, number, shape, type and rotation. A list or an object
+#: in one of them is a malformed value the rules would have to read: an
+#: error of the answer. Every other pad field is outside this contract
+#: (`_pads_with_the_fields_read`).
+_PAD_READ_SCALAR_KEYS = ("number", "x_mm", "y_mm", "pad_length_mm", "pad_width_mm", "drill_mm",
+                         "drill_length_mm", "shape", "pad_type", "rotation_deg")
+
+#: The fields of the geometry itself that `package_from_mapping` reads and
+#: validates (a malformed value there is an error of the answer).
+_GEOMETRY_READ_KEYS = ("name", "family", "body_length_mm", "body_width_mm", "body_height_mm",
+                       "origin", "source_view", "orientation_deg", "mirrored", "confidence",
+                       "needs_review", "pins", "lead_form")
+
+#: Informative pad fields: text the footprint only carries along (`name`,
+#: `side`) or the program consumes as text (`hole_callout`). Never geometry.
+_PAD_TEXT_KEYS = ("name", "side", "hole_callout")
+
+#: Largest length, mm, a terminal section may have: KiCad's own coordinate
+#: range (`core.footprint.KICAD_COORD_LIMIT_MM`, the bound the footprint
+#: applies to every pad). Not a threshold on parts: a lead wider than what
+#: KiCad can represent describes no pad, and its estimate overflows a float.
+_MAX_LEAD_MM = KICAD_COORD_LIMIT_MM
+
+#: Shape of a pad whose answer gives none: the default of the footprint
+#: itself (`PinSpec.shape`, the one `package_from_mapping` applies), read
+#: from there so that the clearance rules and the footprint never assume
+#: two different pads (review round 5, V1-7).
+_DEFAULT_PAD_SHAPE = PinSpec.__dataclass_fields__["shape"].default
+
+
+def _malformed_geometry(reason: str) -> "ExtractionError":
+    """The readable «Geometria package non valida» error of a malformed explicit geometry."""
+    return ExtractionError(tx("Geometria package non valida: {exc}", exc=reason))
+
+
+def _json_safe(value) -> bool:
+    """Whether a value survives `json.dumps(allow_nan=False)`: text, booleans, finite numbers, lists and str-keyed objects of them."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, (list, tuple)):
+        return all(_json_safe(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _json_safe(item) for key, item in value.items())
+    return False
+
+
+def _pad_text(value) -> Optional[str]:
+    """An informative pad field as text, or None when it carries none.
+
+    Text stays; a finite number becomes its text; a list of such values
+    (a model that wraps one name in a list) becomes them joined by «, ».
+    An object, a boolean, a non-finite number or a nested list is no text.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return str(value) if math.isfinite(value) else None
+    if isinstance(value, (list, tuple)) and value:
+        parts = [_pad_text(item) for item in value]
+        if all(isinstance(item, (str, int, float)) and not isinstance(item, bool) for item in value) \
+                and None not in parts:
+            return ", ".join(parts)
+    return None
+
+
+def _pads_with_the_fields_read(package_geometry, notes: list):
+    """A copy of an explicit geometry whose pads carry nothing the rules do not read in a shape that could harm (V1-2).
+
+    A paid answer is never lost to a field the pad rules do not read
+    (review round 5, V1-2: «layers», «nets», an unknown key holding a list
+    used to refuse the whole answer). Per pad:
+    - the fields of `_PAD_READ_SCALAR_KEYS` and `_PAD_OBJECT_KEYS` are left
+      exactly as answered (`_reject_malformed_pad_sizes` judged them);
+    - an informative field (`_PAD_TEXT_KEYS`) that is not text is brought
+      to text (`_pad_text`) or dropped;
+    - any other field stays only when it is a plain scalar a project file
+      can store (text, boolean, finite number): a list, an object or a
+      non-finite number there is dropped.
+    The same holds for the fields of the geometry itself that are not read
+    by `package_from_mapping`. ONE note names what was dropped or rewritten.
+
+    @param package_geometry The explicit geometry (already through
+        `_reject_malformed_pad_sizes`), or None.
+    @param notes Receives the one note.
+    @return A new geometry; `package_geometry` itself when it is not one.
+    """
+    if not isinstance(package_geometry, dict) or not isinstance(package_geometry.get("pins"), (list, tuple)):
+        return package_geometry
+    geometry = dict(package_geometry)
+    changed: list = []
+    for key in [key for key in geometry if key not in _GEOMETRY_READ_KEYS]:
+        value = geometry[key]
+        if isinstance(value, (list, tuple, dict)) or not _json_safe(value):
+            del geometry[key]
+            changed.append(str(key))
+    pins = []
+    for pin in geometry["pins"]:
+        if not isinstance(pin, dict):
+            pins.append(pin)
+            continue
+        clean = {}
+        for key, value in pin.items():
+            if key in _PAD_READ_SCALAR_KEYS or key in _PAD_OBJECT_KEYS or key == "_hole_rounding_mm":
+                clean[key] = value
+            elif key in _PAD_TEXT_KEYS:
+                text = value if value is None else _pad_text(value)
+                if text is not None or value is None:
+                    clean[key] = text
+                if text is not value:
+                    changed.append(str(key))
+            elif isinstance(value, (list, tuple, dict)) or not _json_safe(value):
+                changed.append(str(key))
+            else:
+                clean[key] = value
+        pins.append(clean)
+    geometry["pins"] = pins
+    if changed:
+        notes.append(tx("Campi dei pad fuori contratto ignorati o ridotti a testo ({fields}): non "
+                        "sono fra i valori che il programma legge.",
+                        fields=", ".join(dict.fromkeys(changed))))
+    return geometry
+
 
 def _reject_malformed_pad_sizes(package_geometry) -> None:
-    """Refuse an answer whose pads carry a malformed size, before any size is derived.
+    """Refuse an explicit geometry of a malformed SHAPE or with a malformed size, before any size is derived.
 
-    The program's one rule (`_resolve_pad_terminals`) may replace a land or a
-    hole the model gave with one derived from the terminal; a value present
-    but malformed (text, boolean, not finite, zero or negative) would then
-    vanish without a trace. Absent (None) values are not checked: a missing
-    size is what the rule exists to fill.
+    The program's one rule (`_resolve_pad_terminals`) walks the pads and may
+    replace a land or a hole the model gave with one derived from the
+    terminal. Checked here, first, so that neither a malformed container
+    reaches that walk as an AttributeError/TypeError (review F7-5, F6-8) nor
+    a malformed value vanishes behind an estimate:
+    - `package_geometry` must be an object and its `pins` a list of objects;
+    - no scalar field the rules READ (`_PAD_READ_SCALAR_KEYS`) may hold a
+      list or an object; the terminal and the provenance maps
+      (`_PAD_OBJECT_KEYS`) are judged by their own rule, and every OTHER
+      field is not judged at all (review round 5, V1-2: a list in «layers»
+      or in an unknown key refused a paid answer) --
+      `_pads_with_the_fields_read` drops or rewrites it afterwards;
+    - a pad `number` is text or a finite number, never a boolean or a
+      non-finite number (it would name the pad «nan»);
+    - every size present must be a finite number > 0. Absent (None) values
+      are not checked: a missing size is what the rule exists to fill. A
+      `drill_mm` or `drill_length_mm` of 0 is how an answer says «no hole»
+      or «no slot» (review F7-3, V1-6), on any pad type: it is absent, and
+      `_resolve_one_pad` drops it. A negative, non-finite, boolean or text
+      value anywhere stays an error.
 
     @param package_geometry The explicit geometry as answered, or None.
     @throws ExtractionError «Geometria package non valida» naming the pad and
         the field, the same error the footprint validation gives.
     """
-    for pin in (package_geometry or {}).get("pins") or ():
+    if package_geometry is None:
+        return
+    if not isinstance(package_geometry, dict):
+        raise _malformed_geometry(tx("package_geometry deve essere un oggetto, non {kind}",
+                                     kind=type(package_geometry).__name__))
+    pins = package_geometry.get("pins")
+    if not isinstance(pins, (list, tuple)):
+        raise _malformed_geometry(tx("pins deve essere una lista di pad, non {kind}",
+                                     kind=type(pins).__name__))
+    for index, pin in enumerate(pins, 1):
         if not isinstance(pin, dict):
-            continue
+            raise _malformed_geometry(tx("l'elemento {index} di pins non e' un oggetto", index=index))
+        raw_number = pin.get("number")
+        number = "?" if isinstance(raw_number, (list, tuple, dict, set)) or raw_number is None else raw_number
+        for key in _PAD_READ_SCALAR_KEYS:
+            if isinstance(pin.get(key), (list, tuple, dict, set)):
+                raise _malformed_geometry(tx(
+                    "pin {number}: {name} deve essere un valore semplice, non una lista o un oggetto",
+                    number=number, name=key))
+        if isinstance(raw_number, bool) or (isinstance(raw_number, float) and not math.isfinite(raw_number)):
+            raise _malformed_geometry(tx("pin {number}: {name} deve essere un testo o un numero finito",
+                                         number="?", name="number"))
+        shape = pin.get("shape")
+        if shape is not None and shape not in PAD_SHAPES and shape not in LEGACY_EXTRACTED_PAD_SHAPES:
+            # The rule may replace the shape of a land it derives: an unknown
+            # shape is refused here, with the footprint's own message.
+            raise _malformed_geometry(tx("shape non valida: {shape}", shape=shape))
         for key in _PAD_SIZE_KEYS:
             value = pin.get(key)
-            if value is not None and _optional_number(value, positive=True) is None:
-                raise ExtractionError(tx(
-                    "Geometria package non valida: {exc}",
-                    exc=tx("pin {number}: {name} deve essere un numero maggiore di zero",
-                           number=pin.get("number", "?"), name=key)))
+            if value is None or (key.startswith("drill") and _is_zero(value)):
+                continue
+            if _optional_number(value, positive=True) is None:
+                raise _malformed_geometry(tx("pin {number}: {name} deve essere un numero maggiore di zero",
+                                             number=number, name=key))
 
 
-def _validate_present_pad_values(package_geometry: dict) -> None:
-    """Validate every value an explicit geometry with unread positions DOES carry.
+def _validate_pads_alone(package_geometry: dict, unsettled=()) -> None:
+    """Validate every value an explicit geometry carries, pad by pad, apart from what is merely UNREAD.
 
-    Run before the geometry is dropped for its unread positions (audit
-    2026-11-09, M1): a null coordinate must not hide a malformed value
-    elsewhere. The package fields and the pads WITH both coordinates are
-    validated together, exactly as a footprint (overlaps among them
-    included); each pad left without a position is validated alone with
-    its missing coordinate(s) set to 0 (number, sizes, pad type, drill,
-    shape and the coordinate it did give). A holed pad left without a hole
-    (`_pads_without_holes`) is checked with a stand-in hole of half its
-    smaller side, so the missing value is not mistaken for a malformed one.
-    The stand-ins never leave this check.
+    The well-formedness half of the final validation (audit 2026-11-09, M1;
+    review round 4): a malformed number, coordinate, size, pad type, shape,
+    terminal or package field is an error of the answer whatever else the
+    geometry lacks. Each pad is validated alone, as a footprint of one pad,
+    with stand-ins for what is unread and never for what is malformed: a
+    missing coordinate is 0; a holed pad left without a hole
+    (`_pads_without_holes`), or whose land cannot hold its hole
+    (`unsettled`, the problems of `_resolve_pad_terminals`), is checked
+    with a hole of half its smaller side. The stand-ins never leave this
+    check. What pads do to EACH OTHER (overlaps) is not judged here.
 
+    @param package_geometry The mapping (`_package_mapping_for_validation`).
+    @param unsettled Numbers of the pads whose hole does not fit their land.
     @throws KeyError, TypeError, ValueError As `package_from_mapping`.
     """
-    pins = []
     for pin in package_geometry.get("pins") or []:
-        sizes = ([_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
-                 if isinstance(pin, dict) else [None])
-        if (isinstance(pin, dict) and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
-                and pin.get("drill_mm") is None and None not in sizes):
-            pin = {**pin, "drill_mm": min(sizes) / 2}
-        pins.append(pin)
-    read, unread = [], []
-    for pin in pins:
-        if isinstance(pin, dict) and (pin.get("x_mm") is None or pin.get("y_mm") is None):
-            unread.append({**pin, "x_mm": 0.0 if pin.get("x_mm") is None else pin["x_mm"],
-                           "y_mm": 0.0 if pin.get("y_mm") is None else pin["y_mm"]})
-        else:
-            read.append(pin)
-    if read:
-        package_from_mapping({**package_geometry, "pins": read})
-    for pin in unread:
+        if isinstance(pin, dict):
+            pin = dict(pin)
+            for key in ("x_mm", "y_mm"):
+                if pin.get(key) is None:
+                    pin[key] = 0.0
+            sizes = [_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+            if (pin.get("pad_type", "smd") in _HOLED_PAD_TYPES and None not in sizes
+                    and (pin.get("drill_mm") is None
+                         or (_pad_number_text(pin.get("number")) or "?") in unsettled)):
+                pin["drill_mm"] = min(sizes) / 2
+                pin.pop("drill_length_mm", None)
         package_from_mapping({**package_geometry, "pins": [pin]})
+
+
+def _cross_pad_problem(package_geometry: dict, skip=()) -> Optional[str]:
+    """What the placed, settled pads of a geometry do to each other that a footprint refuses, or None.
+
+    The consistency half of the final validation: the pads with both
+    coordinates and a hole that fits (numbers not in `skip`), each already
+    valid alone (`_validate_pads_alone`), validated TOGETHER as the footprint
+    (`package_from_mapping`: overlapping copper, pads of one number with
+    different names). Such a geometry is made of well-formed values that
+    cannot all be true: it is returned as a reason, for the caller to drop
+    the pads as unread geometry with a block, never as an exception that
+    would lose the paid answer.
+
+    @return The validator's message, or None when the pads validate.
+    """
+    pins = [pin for pin in package_geometry.get("pins") or []
+            if isinstance(pin, dict) and pin.get("x_mm") is not None and pin.get("y_mm") is not None
+            and not (pin.get("pad_type", "smd") in _HOLED_PAD_TYPES and pin.get("drill_mm") is None)
+            and (_pad_number_text(pin.get("number")) or "?") not in skip]
+    if not pins:
+        return None
+    try:
+        package_from_mapping({**package_geometry, "pins": pins})
+    except (KeyError, TypeError, ValueError) as exc:
+        return str(exc)
+    return None
 
 
 def _validated_explicit_geometry(package_geometry: dict, notes: list) -> tuple:
@@ -11271,6 +11612,16 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         non-finite) is a broken answer, not an unread value, and remains an
         error even beside a null coordinate. A declared grid lacking its
         pitch or row spacing is named as such (`_grid_missing`).
+    @note INVARIANT of the explicit pads (review round 4, 2026-11-11): once
+        `_resolve_pad_terminals` has run, nothing changes a pad; the geometry
+        is validated pad by pad (`_validate_pads_alone`: a malformed value
+        is an error) and then as a whole (`_cross_pad_problem`). It either
+        validates as a footprint or is returned as UNREAD geometry -- pads
+        without a position, holed pads without a hole, pads whose land
+        cannot hold the hole or has no room at the pitch, pads whose copper
+        overlaps -- with a `pin_map_conflict` naming the pads, the values
+        in conflict and what to verify. No exception is raised for values
+        that are well formed and only cannot all be true.
     @note Castellated layout: the edge sides are the footprint, so explicit
         pads with unread positions are optional data: dropped with a note,
         no block, `unread_pads` None (before 2026-11-09 the whole answer was
@@ -11301,50 +11652,97 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         return value
 
     package_geometry = data.get("package_geometry")
-    if isinstance(package_geometry, dict) and not package_geometry.get("pins"):
-        # Optional field that came back empty ({} or «pins»: []): no explicit
-        # pad, hence no package geometry. It is not an error of the answer
-        # -- the schema imposes no minimum of pins -- and rejecting it would
-        # throw away a paid extraction with valid matrix or module data.
+    if not package_geometry or (isinstance(package_geometry, dict) and not package_geometry.get("pins")):
+        # Optional field that came back empty (null, {} or «pins»: []): no
+        # explicit pad, hence no package geometry. It is not an error of the
+        # answer -- the schema imposes no minimum of pins -- and rejecting it
+        # would throw away a paid extraction with valid matrix or module data.
         # The rule «senza pad non c'e' footprint» (no pads, no footprint)
         # stays in PackageGeometry.validate, where it is generated.
         if package_geometry:
             notes.append(tx("Geometria package senza pad espliciti ignorata: si usano i "
                             "parametri a matrice o del modulo."))
         package_geometry = None
-    # A size the answer DOES carry is checked before the program's rule may
-    # replace it with a derived land (review 2026-11-11, regression of M1):
-    # a malformed value is an error of the answer, never hidden by an estimate.
+    # The shape of the geometry and every size the answer DOES carry are
+    # checked before the program's rule walks the pads and may replace a
+    # value with a derived one (review 2026-11-11, F7-3, F7-5, F6-8): a
+    # malformed value is an error of the answer, never hidden by an estimate
+    # and never an AttributeError.
     _reject_malformed_pad_sizes(package_geometry)
+    # Fields the rules do not read never fail the answer, on any layout
+    # (review round 5, V1-2): dropped or brought to text, with one note (a
+    # new geometry: `data` is untouched).
+    package_geometry = _pads_with_the_fields_read(package_geometry, notes)
     # Holes, lands and their per-pad provenance settled by the program's one
     # rule before anything is validated (a new geometry: `data` is untouched).
-    package_geometry = _resolve_pad_terminals(package_geometry, data, notes)
+    # NOTHING changes a pad after this call (invariant of round 4).
+    package_geometry, pad_problems = _resolve_pad_terminals(
+        package_geometry, data, notes, lift=layout != "castellated")
     unread_positions = _pads_without_positions(package_geometry)
     # Holed pads left without a hole: no printed hole and no terminal, so no
     # value the program may derive (review E1). Unread geometry like an
     # unread position: dropped and blocked, never an error after paid calls.
     unread_holes = [number for number in _pads_without_holes(package_geometry)
                     if number not in unread_positions]
-    unread = unread_positions + unread_holes
-    # Explicit pads dropped for their unread positions or holes, kept apart
-    # so that a chosen pad layout can still be written into them (apply_answers).
+    # Pads whose values are well formed but cannot all be true: a land that
+    # cannot hold its hole, no room at the pitch (`pad_problems`), copper of
+    # two pads overlapping (`_cross_pad_problem`). Unread geometry too.
+    # The reasons name the pads that share one reason and one pair of values
+    # together, bounded (V1-9).
+    unfit_pads = [number for number, _reason in pad_problems]
+    unfit_reasons = _grouped_pad_reasons(pad_problems)
+    # Explicit pads dropped for their unread positions, holes or fit, kept
+    # apart so that a chosen pad layout can still be written into them
+    # (apply_answers).
     unread_geometry = None
     geometry_doubts = None
-    if unread:
-        # Everything present is validated first (M1): a malformed
-        # coordinate, number, size or pad type stays an error even beside a
-        # null coordinate.
+    mapping = None
+    if package_geometry is not None:
         mapping = _package_mapping_for_validation(package_geometry, notes)
         try:
-            _validate_present_pad_values(mapping)
+            # Everything present is validated first (M1): a malformed
+            # coordinate, number, size or pad type stays an error even
+            # beside an unread value.
+            _validate_pads_alone(mapping, unfit_pads)
         except (KeyError, TypeError, ValueError) as exc:
             raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
+        clash = _cross_pad_problem(mapping, unfit_pads)
+        if clash:
+            unfit_reasons.append(clash)
+            unfit_pads += [number for pin in mapping.get("pins") or () if isinstance(pin, dict)
+                           and pin.get("x_mm") is not None and pin.get("y_mm") is not None
+                           and (number := _pad_number_text(pin.get("number")) or "?") not in unfit_pads]
+    unread_fit = [number for number in dict.fromkeys(unfit_pads)
+                  if number not in unread_positions and number not in unread_holes]
+    unread = unread_positions + unread_holes + unread_fit
+    if unread:
         # Only the pad geometry is dropped, never the paid answer; the
         # generation waits for a confirmed reading instead of a guessed one.
         unread_geometry = copy.deepcopy(mapping)
+        if pad_problems:
+            # Pads no choice of positions can settle (a land that cannot
+            # hold its hole, no room at the pitch): `apply_answers` must not
+            # turn them back into a footprint.
+            unread_geometry["unsettled_pads"] = [number for number, _reason in pad_problems]
         package_geometry = None
-    elif package_geometry is not None:
-        package_geometry, geometry_doubts = _validated_explicit_geometry(package_geometry, notes)
+    elif mapping is not None:
+        # The LAST validation: the pads are valid alone and together (the
+        # two checks above), so this only builds the object for the doubts;
+        # an error here would be a defect of those checks, reported as the
+        # answer's like any other.
+        try:
+            validated = package_from_mapping(mapping)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExtractionError(tx("Geometria package non valida: {exc}", exc=exc)) from exc
+        # The record of the lands the program wrote serves only a dropped
+        # geometry (`apply_answers`): a footprint does not carry it.
+        mapping.pop(_DERIVED_LANDS_KEY, None)
+        package_geometry = mapping
+        # Structural contradictions (body over the pads, clockwise numbering,
+        # bottom view also declared mirrored) are exposed, never repaired:
+        # which reading is true is a question for the user (audit 2026-10-15).
+        geometry_doubts = [doubt.as_dict() for doubt in package_doubts(validated)] or None
+        notes.extend(doubt["message"] for doubt in geometry_doubts or ())
     # Spacing fields a declared grid lacked: the reason its pads have no
     # coordinate, named instead of «not read» (L1).
     grid_missing = [key for key in data.get("_grid_missing") or ()
@@ -11405,7 +11803,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
                         "footprint finche' il foro non e' letto dal disegno.",
                         pads=", ".join(unread_holes))
         pin_map_conflict = hole_block if not pin_map_conflict else pin_map_conflict + "\n" + hole_block
-    if pads_footprint_dropped and not pin_map_conflict:
+    if pads_footprint_dropped and unread_positions and not pin_map_conflict:
         # The dedicated pad reading normally blocks unconfirmed positions
         # already (apply_dedicated_pads); this covers every path that did not
         # run it, so dropped pads never leave the generation unblocked.
@@ -11416,8 +11814,23 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
             if grid_missing else tx(
             "Posizioni dei pad NON lette (pad {pads} senza coordinate): nessun footprint "
             "finche' le posizioni non sono confermate.", pads=", ".join(unread_positions)))
+    if pads_footprint_dropped and unfit_reasons:
+        # Values that cannot all be true (review round 4): the block names
+        # each pad with the values in conflict and what to verify; no reading
+        # of the positions alone settles a land that cannot hold its hole.
+        # Added after the block of the positions, so that one never hides
+        # the other.
+        fit_block = _fit_block(unfit_reasons)
+        pin_map_conflict = fit_block if not pin_map_conflict else pin_map_conflict + "\n" + fit_block
 
     body_length = _opt_float("body_length_mm")
+    lead_diameter = _opt_float("lead_diameter_mm")
+    if lead_diameter is not None and lead_diameter > _MAX_LEAD_MM:
+        # The same bound the pad rules applied (`_part_lead`): a terminal
+        # KiCad cannot represent is dropped, said, never an overflow (V1-10).
+        notes.append(tx("{key} scartato: valore non valido ({value!r}).", key="lead_diameter_mm",
+                        value=lead_diameter))
+        lead_diameter = None
     confidence = data.get("confidence", "low")
     if confidence not in ("high", "medium", "low"):
         confidence = "low"
@@ -11458,7 +11871,7 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
         body_color_hex=data.get("body_color_hex") or None,
         text_color_hex=data.get("text_color_hex") or None,
         package_geometry=package_geometry,
-        lead_diameter_mm=_opt_float("lead_diameter_mm"),
+        lead_diameter_mm=lead_diameter,
         lead_exit=_validated_lead_exit(data.get("lead_exit"), notes),
         pin_map_conflict=pin_map_conflict,
         body_conflict=data.get("_body_conflict") if isinstance(data.get("_body_conflict"), str) else None,
@@ -11492,6 +11905,12 @@ def _params_from_tool_arguments(data: dict, *, trusted_components: bool = False)
                         "foro e nessun terminale e' dichiarato, ne' per il pad ne' per il "
                         "componente. Si tengono: {kept}; il foro e' da leggere sul disegno.",
                         pads=", ".join(unread_holes), kept=_kept_after_pad_drop(params)))
+    if unfit_reasons:
+        # Said apart again: these pads have every value, but values that
+        # cannot all be true (review round 4).
+        notes.append(tx("Geometria dei pad scartata: {reasons}. Si tengono: {kept}; foro, "
+                        "terminale, piazzola e posizioni dei pad sono da verificare sul disegno.",
+                        reasons="; ".join(unfit_reasons), kept=_kept_after_pad_drop(params)))
     if unread_positions:
         # Named after the fields that survived (M2), once every adjustment
         # above has run; the grid case names the spacing it lacked (L1).
@@ -11623,10 +12042,21 @@ _PRINTED_HOLE_TOLERANCE_MM = 1e-4
 #: Pad types that have a hole (`PinSpec`): only they carry `drill_mm`.
 _HOLED_PAD_TYPES = ("thru_hole", "np_thru_hole")
 
-#: A number as printed in a callout: integer part and optional decimals.
-_PRINTED_NUMBER_RE = re.compile(r"(\d+)(?:[.,](\d+))?")
-#: A printed nominal followed by its tolerance («1.3+0.1», «1.3 ±0.05», «1.3+/-0.1»).
-_PRINTED_TOLERANCE_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\+/-|±|\+|-)\s*(\d+(?:[.,]\d+)?)")
+#: A number as printed in a callout: integer part and optional decimals, or
+#: a decimal written without its leading zero («.040», the inch habit).
+_PRINTED_NUMBER_RE = re.compile(r"(?<![\d.,])(?:(\d+)(?:[.,](\d+))?|[.,](\d+))")
+#: A printed nominal followed by its tolerance («1.3+0.1», «1.3 ±0.05»,
+#: «1.3+/-0.1», «.040 ±.003»): nominal, sign, tolerance.
+_PRINTED_TOLERANCE_RE = re.compile(
+    r"(?<![\d.,])(\d+(?:[.,]\d+)?|[.,]\d+)\s*(\+/-|±|\+|-)\s*(\d+(?:[.,]\d+)?|[.,]\d+)")
+#: What follows a COUNT of holes in a callout: a hyphen or a times sign and
+#: then the hole symbol («2-Ø1.6», «4 x Ø1.0»), or a times sign that no
+#: number follows («2x», «(5x)», «4X PLCS»).
+_COUNT_BEFORE_SYMBOL_RE = re.compile(r"\s*[-xX×*]\s*[Øø⌀Φφ]")
+_COUNT_TIMES_RE = re.compile(r"\s*[xX×](?!\s*[\d.,Øø⌀Φφ])")
+#: A hyphen and then a number: after the FIRST integer of a callout this is
+#: the count idiom too («4-1.0», «2-0.8x2.0»).
+_COUNT_HYPHEN_RE = re.compile(r"\s*-\s*[\d.,]")
 
 
 def _transcribed_decimals(value: float) -> int:
@@ -11634,6 +12064,29 @@ def _transcribed_decimals(value: float) -> int:
     import decimal
     exponent = decimal.Decimal(repr(float(value))).normalize().as_tuple().exponent
     return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
+def _printed_numbers(text: str) -> list:
+    """The numbers of a hole callout as (value, decimals, is_count), in print order.
+
+    A COUNT of holes is not a size (review F6-3, F7-8): an integer followed
+    by a hyphen or a times sign and the hole symbol, an integer followed by
+    a times sign with no number after it, or the first integer of the
+    callout followed by a hyphen and a number. DECLARED HEURISTIC, built on
+    how callouts are written, not on a part: «3 x 1.5» stays ambiguous (three
+    holes of 1.5, or a 3 x 1.5 slot) and is NOT taken for a count; a count
+    written in words («4 holes») is not recognised.
+    """
+    found = []
+    for index, match in enumerate(_PRINTED_NUMBER_RE.finditer(text)):
+        whole, decimals = match.group(1), match.group(2) or match.group(3) or ""
+        value = float((whole or "0") + ("." + decimals if decimals else ""))
+        rest = text[match.end():]
+        count = not decimals and bool(
+            _COUNT_BEFORE_SYMBOL_RE.match(rest) or _COUNT_TIMES_RE.match(rest)
+            or (index == 0 and _COUNT_HYPHEN_RE.match(rest)))
+        found.append((value, len(decimals), count))
+    return found
 
 
 def _printed_hole_value(text, value, factor: float) -> tuple:
@@ -11644,45 +12097,58 @@ def _printed_hole_value(text, value, factor: float) -> tuple:
     @param value The number the reading sent for it, in the drawing unit.
     @param factor The drawing unit to millimetres.
     @return (value_mm, rounding_mm):
-        - a number of the text that equals `value` within its own last
-          digit: `value`, rounded by half a unit of that printed digit (the
-          finest such number when several do);
-        - else a printed nominal with a tolerance («Ø1.3+0.1») whose range
-          holds `value` (a reading that added the tolerance): the NOMINAL,
-          rounded by its own last digit -- the hole is the nominal;
+        - a SIZE of the text (never a count of holes, `_printed_numbers`)
+          that equals `value` within its own last digit: `value`, rounded
+          by half a unit of that printed digit (the finest such number when
+          several do);
+        - else a printed nominal with a tolerance whose range holds `value`
+          (a reading that added the tolerance): the NOMINAL, rounded by its
+          own last digit -- the hole is the nominal. The range follows the
+          printed sign: «+t» is [nominal, nominal + t], «-t» is
+          [nominal - t, nominal], «±t» both;
         - else (no text, or a text that does not state the value): `value`,
-          rounded by half a unit of its own last transcribed digit, never
-          coarser than the unit's usual printed precision
-          (CHAIN_QUOTE_ROUNDING_MM): «1.0» transcribed as 1 must not pass for
-          a quote rounded to the millimetre.
+          rounded by half a unit of its own last transcribed digit.
+        The rounding is never coarser than the unit's usual printed
+        precision (CHAIN_QUOTE_ROUNDING_MM), in every case.
+    @note Why the cap (review F6-3, F7-8): a drill callout printed without
+        decimals («Ø1») names a drill size, it is not a quote rounded to the
+        millimetre; half a unit of that digit (0.5 mm) made «Ø1» agree with
+        a second reading of 1.4. The cap is the precision already assumed
+        for a quote whose text is unknown, not a value tuned to a part.
+    @note «a-b» is a tolerance only when b is smaller than a («1.3-0.1»);
+        «1.0-1.2» is a RANGE between two sizes and names no nominal, and a
+        count before a size («2-0.8») is neither: both fall to the value as
+        transcribed (review F6-6).
     @note Derived from the transcriptions, not tuned: the agreement margin of
         two readings (`_same_printed_hole`) is the coarser of their roundings.
-        The tolerance pattern may also match «2-0.8» (a count before a size):
-        it is used only when no printed number equals the value, so a
-        callout whose value is printed is always read as printed.
     """
     number = float(value)
+    cap = CHAIN_QUOTE_ROUNDING_MM.get(factor, CHAIN_QUOTE_ROUNDING_MM[1.0])
     if isinstance(text, str):
-        # The finest printed number that states the value: in «2-0.8x2.0»
-        # the size 2.0 is «2.0» (a tenth), not the count «2».
+        # The finest printed SIZE that states the value: in «2-0.8x2.0» the
+        # size 2.0 is «2.0» (a tenth), never the count «2».
         roundings = []
-        for match in _PRINTED_NUMBER_RE.finditer(text):
-            decimals = len(match.group(2) or "")
-            printed = float(match.group(1) + ("." + match.group(2) if match.group(2) else ""))
-            rounding = 0.5 * 10 ** (-decimals)
-            if abs(printed - number) <= rounding + 1e-9:
+        for printed, decimals, count in _printed_numbers(text):
+            rounding = min(0.5 * 10 ** (-decimals) * factor, cap)
+            if not count and abs(printed - number) * factor <= rounding + 1e-9:
                 roundings.append(rounding)
         if roundings:
-            return number * factor, min(roundings) * factor
+            return number * factor, min(roundings)
+        counts = {match.start(): is_count for match, (_v, _d, is_count)
+                  in zip(_PRINTED_NUMBER_RE.finditer(text), _printed_numbers(text))}
         for match in _PRINTED_TOLERANCE_RE.finditer(text):
-            nominal_text, tolerance_text = (group.replace(",", ".") for group in match.groups())
-            nominal, tolerance = float(nominal_text), float(tolerance_text)
-            if (abs(number - nominal) > 1e-9
-                    and nominal - tolerance - 1e-9 <= number <= nominal + tolerance + 1e-9):
+            nominal_text, sign, tolerance_text = (group.replace(",", ".") for group in match.groups())
+            nominal, tolerance = float("0" + nominal_text if nominal_text.startswith(".") else nominal_text), \
+                float("0" + tolerance_text if tolerance_text.startswith(".") else tolerance_text)
+            if counts.get(match.start()) or (sign == "-" and tolerance >= nominal):
+                # A count before a size, or a range between two sizes.
+                continue
+            low = nominal - tolerance if sign in ("-", "±", "+/-") else nominal
+            high = nominal + tolerance if sign in ("+", "±", "+/-") else nominal
+            if abs(number - nominal) > 1e-9 and low - 1e-9 <= number <= high + 1e-9:
                 decimals = len(nominal_text.partition(".")[2])
-                return nominal * factor, 0.5 * 10 ** (-decimals) * factor
-    fallback = CHAIN_QUOTE_ROUNDING_MM.get(factor, CHAIN_QUOTE_ROUNDING_MM[1.0])
-    return number * factor, min(0.5 * 10 ** (-_transcribed_decimals(number)) * factor, fallback)
+                return nominal * factor, min(0.5 * 10 ** (-decimals) * factor, cap)
+    return number * factor, min(0.5 * 10 ** (-_transcribed_decimals(number)) * factor, cap)
 
 
 def _record_pad_hole_precision(data: dict, factor: float, notes: list) -> None:
@@ -11795,6 +12261,10 @@ def _same_printed_hole(drill, length, other: dict, rounding_mm: float = 0.0) -> 
     if len(second) == 2 and second[0] == second[1]:
         second = second[:1]
     margin = max(float(rounding_mm or 0.0), float(other.get("rounding_mm") or 0.0))
+    # Never wider than the coarsest printed precision of any unit: a
+    # rounding that did not come from `_printed_hole_value` (a stored or
+    # foreign value) must not make two different holes agree (review F7-8).
+    margin = min(margin, max(CHAIN_QUOTE_ROUNDING_MM.values()))
     return len(first) == len(second) and all(
         abs(a - b) <= _PRINTED_HOLE_TOLERANCE_MM or abs(a - b) < margin
         for a, b in zip(first, second))
@@ -11817,14 +12287,33 @@ def _part_lead(data: dict):
     `value_sources.lead_diameter_mm`, "estimated" when undeclared.
     """
     diameter = _optional_number(data.get("lead_diameter_mm"), positive=True)
-    if diameter is None:
+    if diameter is None or diameter > _MAX_LEAD_MM:
+        # Beyond KiCad's range it is no terminal (V1-10): the result drops
+        # the field with a note (`_params_from_tool_arguments`).
         return None
     top = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
     return {"shape": "round", "diameter_mm": diameter}, _pad_word(top, "lead_diameter_mm") or "estimated"
 
 
-def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
-    """Settle the hole, the land and their provenance of every explicit pad: printed values kept, the rest derived.
+def _resolve_pad_terminals(package_geometry, data: dict, notes: list, *, lift: bool = True) -> tuple:
+    """Settle the hole, the land and their provenance of every explicit pad, in ONE place, before any validation.
+
+    INVARIANT (review round 4, 2026-11-11): every change the program makes
+    to a pad's hole or land happens here, in this order, and nothing changes
+    a pad afterwards:
+    1. per pad, the hole and its provenance, then the land that follows it
+       (`_resolve_one_pad`);
+    2. the holes judged against the terminals, per pad and part level
+       (`_judge_holes_against_leads`; `lift` False for a castellated module);
+    3. the lands the program wrote kept apart from every neighbour
+       (`_keep_derived_lands_apart`);
+    4. every through-hole pad checked: its land must hold its hole
+       (`_pad_unfit_reason`).
+    A pad the rules cannot settle -- a READ land that cannot hold the hole,
+    no room at the pitch for the hole with its ring -- is returned as a
+    problem, never repaired with an invented value and never left to raise:
+    `_params_from_tool_arguments` returns the pads as UNREAD geometry with
+    a `pin_map_conflict` naming them.
 
     The ONE rule of the program for the values a drawing does not print
     (user, 2026-11-10, «ok procedi», contract A1-A3 of the handoff): the
@@ -11843,29 +12332,38 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
       "read" with a note naming that reading. A slot only the dedicated
       reading saw has no axes: it is oriented to the pad
       (`_slot_along_pad`), or left out with a note when the pad cannot say.
-      A land not printed around a printed ROUND hole becomes the pad
-      `estimated_pad_diameter(hole)`, source "derived"; its shape stays the
-      declared one when the pad says its shape was read (review E3).
+      A land not printed around a printed hole is derived from the hole,
+      source "derived": the round pad `estimated_pad_diameter(hole)` for a
+      round hole, the slot plus HOLE_TO_PAD_ANNULUS_MM on both axes for a
+      slot (`_write_slot_land`); its shape stays the declared one when the
+      pad says its shape was read (review E3). A printed land is never
+      changed: when it cannot hold the hole the pad is a problem.
     - hole not printed, terminal declared by the pad (`lead`), or else the
       part-level `lead_diameter_mm` as a round lead (review E1; applied to a
       pad that carries a model drill only when every holed pad has one
-      drill, as `_lift_pad_drills_above_the_lead` does): hole and ROUND pad
-      from `core.tht_estimates.estimated_round_pad`, sources "derived" when
-      the terminal was read (or derived) and "estimated" otherwise; a
-      printed land (`value_sources.pad_size` "read") is kept with its shape.
-      An estimated round hole too loose across a flat lead is named
-      (`_round_hole_loose_on_blade`, review G5).
+      drill): hole and ROUND pad from `core.tht_estimates.estimated_round_pad`,
+      sources "derived" when the terminal was read (or derived) and
+      "estimated" otherwise; a printed land (`value_sources.pad_size`
+      "read") is kept with its shape. An estimated round hole too loose
+      across a flat lead is named (`_round_hole_loose_on_blade`, review G5).
     - no terminal, a model drill: the model's values stay, marked
       "estimated", and the note says so.
     - no terminal and no drill at all: nothing is invented; the pad keeps no
       hole and `_params_from_tool_arguments` drops the pad geometry as
       UNREAD (`_pads_without_holes`), the generation blocked with its remedy.
-    A derived land never makes copper overlap (`_keep_derived_lands_apart`,
-    review G1). A slot is used only when printed. A pad without a hole
-    carrying a drill (an SMD pad with `drill_mm`, which `PinSpec` refuses)
-    loses the drill with a note naming it: the type or the hole is wrong,
-    and which one is for the user to check. Pads without a hole keep only
-    the provenance they declare.
+    A slot is used only when printed. A pad without a hole carrying a drill
+    (an SMD pad with `drill_mm`, which `PinSpec` refuses) loses the drill
+    with a note naming it: the type or the hole is wrong, and which one is
+    for the user to check; a drill of 0 there is the usual way to say «no
+    hole» and is dropped without a word (review F7-3). Pads without a hole
+    keep only the provenance they declare. On a pad WITH a hole a zero
+    `drill_length_mm` is «no slot» and a zero `drill_mm` is «hole not
+    printed» (review round 5, V1-6): both absent, the hole then derived
+    from the terminal or, without one, unread; a note names the pads. A
+    printed slot keeps its transcribed axes; only a READ land that holds it
+    no other way turns it, and the hole is then "derived"
+    (`_slot_on_pad_axes`, V1-3). A pad without a `shape` gets the
+    footprint's default written, never marked "read" (V1-7).
 
     @param package_geometry The explicit geometry, canonical (millimetres).
     @param data The canonical answer: its `value_sources` (answer level),
@@ -11873,16 +12371,24 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
         dedicated reading, set by apply_dedicated_pads only when that
         reading ran and the drawing did not contradict it).
     @param notes Receives one line per kind of outcome.
-    @return A NEW geometry whose pins carry `lead` (mm, validated) and
-        `sources` (`core.tht_estimates` contract); the model's raw `lead`,
-        `hole_callout`, `value_sources` and `sources` are not passed on.
-        Anything that is not a geometry with a pin list is returned as is.
+    @param lift False keeps step 2 off (a castellated module: its explicit
+        pads are optional data and were never judged against the lead).
+    @return (geometry, problems). `geometry` is a NEW geometry whose pins
+        carry `lead` (mm, validated) and `sources` (`core.tht_estimates`
+        contract); the model's raw `lead`, `hole_callout`, `value_sources`
+        and `sources` are not passed on. `problems` lists (pad number,
+        translated reason, which does not name the pad:
+        `_grouped_pad_reasons` does) for every pad the rules could not
+        settle, in pad order; empty when the pads are settled. The geometry
+        carries `_DERIVED_LANDS_KEY` when the program wrote lands (for
+        `apply_answers`; dropped from a validated footprint). Anything that is not a
+        geometry with a pin list is returned as is, with no problem.
     @note Not tuned: every value comes from the declared provenance and
         from the published rule of `core.tht_estimates` (clearance and
         annulus are declared there with their sources and limits).
     """
     if not isinstance(package_geometry, dict) or not isinstance(package_geometry.get("pins"), list):
-        return package_geometry
+        return package_geometry, []
     geometry = copy.deepcopy(package_geometry)
     top = data.get("value_sources") if isinstance(data.get("value_sources"), dict) else {}
     dedicated = data.get("_dedicated_holes") if isinstance(data.get("_dedicated_holes"), dict) else None
@@ -11896,11 +12402,15 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
     printed = [hole for hole in (dedicated or {}).values()
                if isinstance(hole, dict) and hole.get("drill_mm") is not None]
     part_lead = _part_lead(data)
-    found = {name: [] for name in ("smd_drill", "lead_dropped", "slot_dropped", "only_main",
-                                   "only_dedicated", "disagree", "unfounded", "withheld",
-                                   "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
-                                   "land_capped", "land_model")}
-    derived = []
+    found = {name: [] for name in (
+        "smd_drill", "lead_dropped", "slot_dropped", "only_main", "only_dedicated", "disagree",
+        "unfounded", "withheld", "part_lead", "lead_withheld", "slot_unoriented", "loose_blade",
+        "land_capped", "land_model", "slot_turned", "thin_ring", "lead_contradicted",
+        "lead_lifted", "widened", "part_narrow", "part_protected", "part_lifted", "part_widened",
+        "zero_hole")}
+    # The lands the program wrote, {id(pin): (pin, the land it replaced)}:
+    # the only ones `_keep_derived_lands_apart` may take back or reduce.
+    derived: dict = {}
     for pin in pins:
         drill_word = _pad_word(top, "drill_mm")
         if (drill_word == "read" and not uniform and pin.get("pad_type", "smd") in _HOLED_PAD_TYPES
@@ -11914,7 +12424,14 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
                 found["withheld"].append(_pad_number_text(pin.get("number")) or "?")
         fallback = {"drill_mm": drill_word, "pad_size": _pad_word(top, "pad_diameter_mm")}
         _resolve_one_pad(pin, fallback, dedicated, found, part_lead, uniform, derived)
-    _keep_derived_lands_apart(pins, derived, found)
+    if lift:
+        _judge_holes_against_leads(pins, part_lead, _part_lead_word(data, part_lead), found, derived)
+    # {id(pin): reason} of the pads no rule could settle (steps 3 and 4).
+    unfit = _settle_lands_and_fit(pins, derived, found)
+    if found["zero_hole"]:
+        notes.append(tx("Pad {pads}: foro 0 nella risposta inteso come «foro non stampato»: "
+                        "ricavato dal terminale quando e' dichiarato, altrimenti non letto.",
+                        pads=_bounded_pad_list(found["zero_hole"])))
     if found["smd_drill"]:
         notes.append(tx("Pad {pads}: dichiarati senza foro ma con un foro nella risposta: foro "
                         "scartato, tipo del pad da verificare sul disegno.",
@@ -11946,6 +12463,10 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
                         "il pad non ne indica l'orientamento (lati uguali, o asola piu' grande del "
                         "pad). Asola non usata, da verificare sul disegno.",
                         pads=", ".join(found["slot_unoriented"])))
+    if found["slot_turned"]:
+        notes.append(tx("Pad {pads}: asola stampata messa col lato lungo sul lato lungo della "
+                        "piazzola: orientamento da verificare sul disegno.",
+                        pads=", ".join(found["slot_turned"])))
     if found["part_lead"]:
         lead, word = part_lead
         notes.append(tx("Pad {pads}: foro non stampato e terminale del pad non dichiarato: foro e "
@@ -11961,17 +12482,158 @@ def _resolve_pad_terminals(package_geometry, data: dict, notes: list):
     if found["unfounded"]:
         notes.append(tx("Pad {pads}: ne' foro stampato ne' terminale dichiarato: foro e piazzola "
                         "sono quelli del modello, STIMATI.", pads=", ".join(found["unfounded"])))
+    if found["lead_contradicted"]:
+        notes.append(tx("ATTENZIONE pad {numbers}: il terminale dichiarato non passa nel foro letto "
+                        "dal disegno. Foro non modificato: terminale o foro letti male, da "
+                        "verificare sul disegno.", numbers=", ".join(found["lead_contradicted"])))
+    if found["lead_lifted"]:
+        notes.append(tx("ATTENZIONE pad {numbers}: il foro non lasciava passare il terminale "
+                        "dichiarato dal pad: foro ricavato dal terminale, valore STIMATO da "
+                        "verificare.", numbers=", ".join(found["lead_lifted"])))
+    if found["widened"]:
+        notes.append(tx("Piazzole dei pad {numbers} allargate attorno al foro ricavato, "
+                        "conservandone l'orientamento: valori STIMATI da verificare.",
+                        numbers=", ".join(found["widened"])))
+    if part_lead is not None and (found["part_narrow"] or found["part_protected"] or found["part_lifted"]):
+        lead = part_lead[0]["diameter_mm"]
+        lifted = estimated_hole(part_lead[0])
+        if found["part_narrow"]:
+            notes.append(tx("ATTENZIONE fori dei pad {numbers} non maggiori del terminale "
+                            "{lead:.2f} mm dichiarato; i pad hanno fori diversi, quindi il "
+                            "terminale puo' riguardarne solo alcuni: fori non modificati, da "
+                            "verificare.", numbers=", ".join(found["part_narrow"]), lead=lead))
+        if found["part_protected"]:
+            notes.append(tx("ATTENZIONE fori letti dei pad {numbers} non maggiori del terminale "
+                            "{lead:.2f} mm, che non e' letto dal disegno: fori non modificati, da "
+                            "verificare.", numbers=", ".join(found["part_protected"]), lead=lead))
+        if found["part_lifted"] and found["part_widened"]:
+            notes.append(tx(
+                "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
+                "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
+                "(terminale + {clearance:.2f} mm), piazzole troppo strette allargate: valori STIMATI "
+                "da verificare.", numbers=", ".join(found["part_lifted"]), lead=lead, lifted=lifted,
+                clearance=LEAD_TO_HOLE_CLEARANCE_MM))
+        elif found["part_lifted"]:
+            notes.append(tx(
+                "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
+                "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
+                "(terminale + {clearance:.2f} mm): valori STIMATI da verificare.",
+                numbers=", ".join(found["part_lifted"]), lead=lead, lifted=lifted,
+                clearance=LEAD_TO_HOLE_CLEARANCE_MM))
     if found["loose_blade"]:
         notes.append(_loose_blade_note(found["loose_blade"]))
-    if found["land_capped"]:
+    notes.extend(_land_notes(found))
+    problems = [(_pad_number_text(pin.get("number")) or "?", unfit[id(pin)])
+                for pin in pins if id(pin) in unfit]
+    if derived:
+        # Kept for `apply_answers` (review round 5, V1-4): the lands the
+        # program wrote, by pad index, each with the land it replaced, so
+        # that steps 3 and 4 can run again once a chosen layout has placed
+        # the pads. Dropped from a geometry that becomes the footprint.
+        geometry[_DERIVED_LANDS_KEY] = [
+            {"index": index, "land": derived[id(pin)][1]}
+            for index, pin in enumerate(geometry["pins"]) if isinstance(pin, dict) and id(pin) in derived]
+    return geometry, problems
+
+
+#: Key of an explicit geometry under which `_resolve_pad_terminals` records
+#: the lands the program wrote (`apply_answers` reads it; it never reaches a
+#: validated footprint).
+_DERIVED_LANDS_KEY = "derived_lands"
+
+
+def _settle_lands_and_fit(pins: list, derived: dict, found: dict) -> dict:
+    """Steps 3 and 4 of `_resolve_pad_terminals`: lands kept apart, then every land checked against its hole.
+
+    @param pins The pin dicts of the geometry (changed in place by step 3).
+    @param derived {id(pin): (pin, the land the program replaced)}.
+    @param found Outcome lists (`land_capped`, `land_model`, `thin_ring`).
+    @return {id(pin): reason} of the pads no rule could settle; the reason
+        does not name the pad (`_grouped_pad_reasons` does).
+    """
+    unfit: dict = {}
+    _keep_derived_lands_apart(pins, derived, found, unfit)
+    for pin in pins:
+        if id(pin) not in unfit:
+            reason = _pad_unfit_reason(pin, found)
+            if reason:
+                unfit[id(pin)] = reason
+    return unfit
+
+
+def _land_notes(found: dict) -> list:
+    """The notes of what steps 3 and 4 did to the lands (`_settle_lands_and_fit`), one per kind of outcome."""
+    notes = []
+    if found.get("land_capped"):
         notes.append(tx("Pad {pads}: piazzola ricavata dal foro ridotta per lasciare {gap:.2f} mm "
                         "di rame libero dal pad vicino: valore STIMATO, da verificare.",
                         pads=", ".join(found["land_capped"]), gap=MIN_PAD_GAP_MM))
-    if found["land_model"]:
+    if found.get("land_model"):
         notes.append(tx("Pad {pads}: la piazzola ricavata dal foro toccherebbe il pad vicino: "
                         "tenuta quella della risposta, STIMATA, da verificare.",
                         pads=", ".join(found["land_model"])))
-    return geometry
+    if found.get("thin_ring"):
+        notes.append(tx("ATTENZIONE pad {pads}: la piazzola letta dal disegno lascia meno di "
+                        "{ring:.2f} mm di corona attorno al foro che il programma ha ricavato: "
+                        "piazzola non modificata, foro e piazzola da verificare.",
+                        pads=", ".join(found["thin_ring"]), ring=MIN_ANNULAR_RING_MM))
+    return notes
+
+
+#: How many groups of pads (one reason, one pair of values each) a block
+#: names before it counts the rest. A presentation bound like
+#: `generators.package.ESTIMATED_PADS_LISTED`, which it reuses, not a
+#: geometric threshold: every pad stays in `unread_pads` and in the preview.
+_PAD_REASON_GROUPS_LISTED = ESTIMATED_PADS_LISTED
+
+#: The tail `estimated_pad_list` writes when it leaves pads out (fixed file
+#: language there), recognised to be said in the interface language here.
+_PAD_LIST_MORE_RE = re.compile(
+    r"\s*" + re.escape(ESTIMATED_PADS_MORE).replace(r"\{count\}", r"(\d+)") + r"$")
+
+
+def _bounded_pad_list(numbers) -> str:
+    """Pad numbers for a message: unique, runs compressed, bounded (`generators.package.estimated_pad_list`).
+
+    The list a block or a note prints must not grow with the pad count
+    (review round 5, V1-9). The compression and the bound are the
+    footprint note's own; only its Italian tail is said through the catalog.
+    """
+    text = estimated_pad_list(numbers)
+    match = _PAD_LIST_MORE_RE.search(text)
+    if match:
+        text = text[:match.start()] + " " + tx("e altri {count}", count=int(match.group(1)))
+    return text
+
+
+def _grouped_pad_reasons(problems) -> list:
+    """The reasons of unsettled pads as bounded text: one entry per (reason, values), naming its pads.
+
+    @param problems (pad number, reason without the pad) pairs, in pad order.
+    @return Entries «pad 1-3, 7: reason», in order of first appearance: pads
+        that share one reason and one pair of values share one entry, so a
+        part with 200 identical pads writes one line, not 200 (review round
+        5, V1-9: a 24,000-character block). At most
+        `_PAD_REASON_GROUPS_LISTED` entries; the pads of the others are
+        counted in a last entry.
+    """
+    groups: dict = {}
+    for number, reason in problems:
+        groups.setdefault(reason, []).append(number)
+    entries = [tx("pad {pads}: {reason}", pads=_bounded_pad_list(numbers), reason=reason)
+               for reason, numbers in list(groups.items())[:_PAD_REASON_GROUPS_LISTED]]
+    left = sum(len(numbers) for numbers in list(groups.values())[_PAD_REASON_GROUPS_LISTED:])
+    if left:
+        entries.append(tx("e altri {count} pad", count=left))
+    return entries
+
+
+def _fit_block(reasons) -> str:
+    """The block of pads whose values cannot all be true, naming them with the values and what to verify."""
+    return tx("Fori, piazzole o posizioni dei pad incompatibili fra loro ({reasons}): "
+              "nessun footprint finche' foro, terminale, piazzola e posizioni di quei pad "
+              "non sono verificati sul disegno; poi ripetere l'analisi o correggere i "
+              "documenti.", reasons="; ".join(reasons))
 
 
 def _loose_blade_note(numbers) -> str:
@@ -11988,13 +12650,67 @@ def _write_derived_land(pin: dict, diameter: float, declared_shape) -> None:
         pin["shape"] = "circle"
 
 
+def _write_slot_land(pin: dict, drill: float, length: float, declared_shape) -> None:
+    """Write the land the program derives around a PRINTED slot (review F6-1).
+
+    The slot's two sides lie along the pad's own axes (`PinSpec`: `drill`
+    along the pad length, `length` along the pad width); the land exceeds
+    the slot by HOLE_TO_PAD_ANNULUS_MM on BOTH axes -- the same ring per
+    side a round hole gets from `estimated_pad_diameter` -- so its long
+    side is the slot's long side. The shape becomes "oval" (a stadium, the
+    slot's own outline grown by the ring) unless the pad says its shape was
+    read and that shape can have two sides.
+    """
+    pin["pad_length_mm"] = round(drill + HOLE_TO_PAD_ANNULUS_MM, 6)
+    pin["pad_width_mm"] = round(length + HOLE_TO_PAD_ANNULUS_MM, 6)
+    if declared_shape != "read" or pin.get("shape") not in ("rect", "roundrect", "oval"):
+        pin["shape"] = "oval"
+
+
+def _slot_on_pad_axes(pin: dict, drill: float, length: float, land_read: bool) -> tuple:
+    """A printed slot's two sides on the pad's axes; turned only when a READ land holds it no other way.
+
+    The answer gives the slot along the pad's own axes: the schema and the
+    prompt define them (`drill_mm` along X, the pad length; `drill_length_mm`
+    along Y, the pad width).
+    - A land that was NOT read is only the model's guess of the pad: it
+      decides nothing (review round 5, V1-3: a printed horizontal slot was
+      turned by 90 degrees on the strength of an estimated land, and still
+      called «read»). The slot stays as transcribed and the land is derived
+      around it.
+    - A READ land keeps the slot as transcribed whenever that fits; the slot
+      is turned only when it does not fit as transcribed and fits turned:
+      two readings that agree once the axes are exchanged. The caller names
+      the pad and no longer calls the hole «read» (the program changed it).
+    A round or square pad says nothing: the slot stays as transcribed.
+    DECLARED HEURISTIC: the turn assumes the axes were exchanged in the
+    transcription rather than the land or the slot misread; the pads are
+    named in a note to verify. A slot angle declared in the schema would
+    make it superfluous.
+
+    @return (drill_mm, drill_length_mm) along the pad's length and width.
+    """
+    sizes = [_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+    if not land_read or None in sizes:
+        return drill, length
+    fits_as_read = drill < sizes[0] and length < sizes[1]
+    fits_turned = length < sizes[0] and drill < sizes[1]
+    return (length, drill) if fits_turned and not fits_as_read else (drill, length)
+
+
+def _is_zero(value) -> bool:
+    """Whether a value is the NUMBER zero (0 or 0.0): how an answer says «no hole»; never True for a boolean."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+
+
 def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lead=None,
-                     lead_on_model_drill: bool = True, derived: Optional[list] = None) -> None:
-    """Apply `_resolve_pad_terminals` to one pin dict, in place; `found` collects the pads per outcome.
+                     lead_on_model_drill: bool = True, derived: Optional[dict] = None) -> None:
+    """Apply step 1 of `_resolve_pad_terminals` to one pin dict, in place; `found` collects the pads per outcome.
 
     `part_lead` is `_part_lead(data)`; `lead_on_model_drill` False keeps it
     off a pad that carries a model drill (mixed drills); `derived` receives
-    (pin, the model's land, hole) for every land the program derived.
+    {id(pin): (pin, the land the program replaced)} for every land the
+    program wrote.
     """
     number = _pad_number_text(pin.get("number"))
     raw = pin.pop("value_sources", None)
@@ -12002,32 +12718,55 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
     pin.pop("hole_callout", None)
     rounding = _optional_number(pin.pop("_hole_rounding_mm", None), positive=True) or 0.0
     raw_lead = pin.pop("lead", None)
+    if isinstance(raw_lead, dict) and all(value is None for value in raw_lead.values()):
+        # An empty lead, or one with every field null (how a strict-mode
+        # answer leaves an optional object out): absent, not invalid (F6-7).
+        raw_lead = None
     # Provenance is the program's verdict, never copied from the model.
     pin.pop("sources", None)
     # Same default as `package_from_mapping`: a pin without a type is SMD.
     pad_type = pin.get("pad_type", "smd")
     if pad_type not in _HOLED_PAD_TYPES:
-        if pin.get("drill_mm") is not None or pin.get("drill_length_mm") is not None:
-            pin.pop("drill_mm", None)
-            pin.pop("drill_length_mm", None)
+        hole = [pin.pop(key, None) for key in ("drill_mm", "drill_length_mm")]
+        if any(value is not None and not _is_zero(value) for value in hole):
+            # A real hole on a pad without one is named; a zero is «no
+            # hole» said with a number and goes without a word (F7-3).
             found["smd_drill"].append(f"{number or '?'} ({pad_type})")
         own = {key: word for key in ("pad_size", "shape") if (word := _pad_word(raw, key))}
+        if pin.get("shape") is None:
+            # A word about a shape the answer does not give states nothing (V1-7).
+            own.pop("shape", None)
         if own:
             pin["sources"] = own
         return
-    derived = derived if derived is not None else []
+    derived = derived if derived is not None else {}
+    zero = [key for key in ("drill_mm", "drill_length_mm") if _is_zero(pin.get(key))]
+    for key in zero:
+        # A zero is «not printed» said with a number (review round 5, V1-6):
+        # a zero slot side is no slot, a zero hole is a hole to derive from
+        # the terminal -- or, without one, an unread hole. Never an error.
+        del pin[key]
+    if "drill_mm" in zero:
+        found["zero_hole"].append(number or "?")
     lead = None
     if raw_lead is not None and pad_type == "thru_hole":
         try:
             lead = normalised_lead(raw_lead, number)
-        except ValueError:
+            if max(value for key, value in lead.items() if key != "shape") > _MAX_LEAD_MM:
+                # Beyond what KiCad can represent: no terminal (V1-10).
+                raise ValueError("lead")
+        except (ValueError, OverflowError):
+            lead = None
             found["lead_dropped"].append(number or "?")
     lead_word = (_pad_word(raw, "lead") or "estimated") if lead else None
     # A land is printed when the pad says so, or, for a pad that says
     # nothing, when the answer says its pad size was read.
     size_word = _pad_word(raw, "pad_size") or fallback["pad_size"] or "estimated"
-    declared_shape = _pad_word(raw, "shape")
-    shape_word = declared_shape or ("read" if size_word == "read" else "estimated")
+    # A word about a shape the answer does not give states nothing (review
+    # round 5, V1-7): an absent shape is never «read».
+    shapeless = pin.get("shape") is None
+    declared_shape = None if shapeless else _pad_word(raw, "shape")
+    shape_word = declared_shape or ("read" if size_word == "read" and not shapeless else "estimated")
     drill = _optional_number(pin.get("drill_mm"), positive=True)
     length = _optional_number(pin.get("drill_length_mm"), positive=True)
     drill_word = _pad_word(raw, "drill_mm") or fallback["drill_mm"]
@@ -12095,7 +12834,7 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
                     _write_derived_land(pin, estimate.pad_diameter_mm, declared_shape)
                     size_word = word
                     shape_word = "read" if declared_shape == "read" else word
-                    derived.append((pin, model_land, drill))
+                    derived.setdefault(id(pin), (pin, model_land))
                 if _round_hole_loose_on_blade(terminal, drill):
                     found["loose_blade"].append(number)
             elif drill is not None:
@@ -12104,15 +12843,37 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
                       else "unfounded"].append(number)
             # Neither a hole nor a terminal: nothing is invented, the pad
             # stays without a hole (`_pads_without_holes`).
-    if (sources.get("drill_mm") == "read" and size_word != "read" and pad_type == "thru_hole"
-            and drill is not None and (length is None or abs(length - drill) <= _PRINTED_HOLE_TOLERANCE_MM)):
-        # A printed round hole without a printed land: the land follows the
-        # hole by the one rule, instead of the model's guess; a shape the
-        # pad says was read stays (review E3).
-        _write_derived_land(pin, estimated_pad_diameter(drill), declared_shape)
-        size_word = "derived"
-        shape_word = "read" if declared_shape == "read" else "derived"
-        derived.append((pin, model_land, drill))
+    if sources.get("drill_mm") == "read" and pad_type == "thru_hole" and drill is not None:
+        slot = length is not None and abs(length - drill) > _PRINTED_HOLE_TOLERANCE_MM
+        if slot:
+            # A printed slot keeps its transcribed axes (review F6-1, V1-3);
+            # only a READ land it fits no other way turns it.
+            turned = _slot_on_pad_axes(pin, drill, length, size_word == "read")
+            if turned != (drill, length):
+                drill, length = turned
+                pin["drill_mm"], pin["drill_length_mm"] = drill, length
+                # The two sides were read, their axes are the program's: a
+                # value the program changed is never «read».
+                sources["drill_mm"] = "derived"
+                found["slot_turned"].append(number)
+        if size_word != "read":
+            # A printed hole without a printed land: the land follows the
+            # hole by the one rule, instead of the model's guess -- a round
+            # pad for a round hole, the slot plus the ring for a slot; a
+            # shape the pad says was read stays (review E3).
+            if slot:
+                _write_slot_land(pin, drill, length, declared_shape)
+            else:
+                _write_derived_land(pin, estimated_pad_diameter(drill), declared_shape)
+            size_word = "derived"
+            shape_word = "read" if declared_shape == "read" else "derived"
+            derived.setdefault(id(pin), (pin, model_land))
+    if pin.get("shape") is None:
+        # The shape the footprint would assume is written, so that every
+        # rule after this one (clearance, fit, the footprint) sees the same
+        # pad; it is the program's choice, never «read» (V1-7).
+        pin["shape"] = _DEFAULT_PAD_SHAPE
+        shape_word = "estimated"
     sources["pad_size"] = size_word
     sources["shape"] = shape_word
     if lead is not None:
@@ -12121,37 +12882,236 @@ def _resolve_one_pad(pin: dict, fallback: dict, dedicated, found: dict, part_lea
     pin["sources"] = sources
 
 
-def _land_holds_hole(land: dict, drill: float) -> bool:
-    """Whether a land (sizes and shape) is a valid pad keeping MIN_ANNULAR_RING_MM around a round `drill`."""
+def _part_lead_word(data: dict, part_lead) -> Optional[str]:
+    """The provenance of the part-level lead as the RESULT states it, or None without one.
+
+    The program's own provenance for `lead_diameter_mm` (`_program_sources`:
+    a user's choice, a measure) ranks over the model's declaration, exactly
+    as `_value_sources` does; only "read" and "derived" may overrule a hole
+    read from the drawing (`_judge_holes_against_leads`).
+    """
+    if part_lead is None:
+        return None
+    program = data.get("_program_sources") if isinstance(data.get("_program_sources"), dict) else {}
+    word = program.get("lead_diameter_mm")
+    return word if isinstance(word, str) and word else part_lead[1]
+
+
+def _lift_pad_hole(pin: dict, hole: float, derived: dict) -> bool:
+    """Replace a pad's hole by the ROUND hole estimated from its terminal and bring the land along.
+
+    The hole becomes "estimated". The land follows by provenance:
+    - a READ land is never changed (`_pad_unfit_reason` then judges whether
+      it holds the new hole: a contradiction of two readings is a problem
+      of the pad, not something the program repairs);
+    - a land the program had derived from the old hole is derived again
+      from the new one (`estimated_pad_diameter`);
+    - the model's own land is widened on both axes by one amount when it no
+      longer keeps the ring (`_widen_pad_around`, review G4: an oval stays
+      an oval), and from then on it is a land the program wrote.
+
+    @return True when the land was changed.
+    """
+    pin["drill_mm"] = hole
+    pin.pop("drill_length_mm", None)
+    _mark_pad_estimated(pin, "drill_mm")
+    sources = pin.get("sources") or {}
+    if sources.get("pad_size") == "read":
+        return False
+    if id(pin) in derived:
+        _write_derived_land(pin, estimated_pad_diameter(hole), sources.get("shape"))
+        _mark_pad_estimated(pin, "pad_size")
+        return True
+    before = {key: pin.get(key) for key in ("pad_length_mm", "pad_width_mm", "shape")}
+    if _widen_pad_around(pin, hole):
+        _mark_pad_estimated(pin, "pad_size")
+        derived[id(pin)] = (pin, before)
+        return True
+    return False
+
+
+def _judge_holes_against_leads(pins: list, part_lead, part_word, found: dict, derived: dict) -> None:
+    """Step 2 of `_resolve_pad_terminals`: every through-hole pad's hole judged against the terminal it must take.
+
+    Structural, not a threshold: a lead cannot pass through a hole of its
+    own section or smaller (`core.tht_estimates.lead_passes`).
+
+    A pad that declares its OWN terminal is judged against it (it supersedes
+    the part-level lead for that pad). A hole the terminal does not pass:
+    - read from the drawing: never changed by the program (provenance
+      before value), but a hole its terminal cannot pass is not a measure
+      either: its source becomes "estimated" and the note names the pad
+      (review F7-7: the same rule the matrix drill has);
+    - not read: replaced by the hole estimated from that terminal
+      (`_lift_pad_hole`).
+
+    The pads WITHOUT a terminal of their own are judged against the
+    part-level lead, only when all of them have one hole (one lead for
+    all); with different holes a note names the narrow ones and nothing
+    changes (audit D-D). A hole not wider than the lead becomes the
+    estimated hole of that lead -- unless the hole was read and the lead
+    was not (`part_word` neither "read" nor "derived"): then the hole keeps
+    its value, loses its "read" (F7-7) and is named.
+
+    @param pins The pin dicts of the geometry, already through `_resolve_one_pad`.
+    @param part_lead `_part_lead(data)`, or None.
+    @param part_word `_part_lead_word(data, part_lead)`.
+    @param found Outcome lists of `_resolve_pad_terminals`.
+    @param derived The lands the program wrote, updated when a land follows a lifted hole.
+    """
+    thru = [pin for pin in pins if pin.get("pad_type") == "thru_hole"]
+    for pin in thru:
+        lead = pin.get("lead")
+        drill = _optional_number(pin.get("drill_mm"), positive=True)
+        if not isinstance(lead, dict) or drill is None:
+            continue
+        length = _optional_number(pin.get("drill_length_mm"), positive=True)
+        try:
+            if lead_passes(lead, drill, length):
+                continue
+        except ValueError:
+            continue
+        number = _pad_number_text(pin.get("number")) or "?"
+        if (pin.get("sources") or {}).get("drill_mm") == "read":
+            found["lead_contradicted"].append(number)
+            _mark_pad_estimated(pin, "drill_mm")
+            continue
+        hole = estimated_round_pad(lead).drill_mm
+        found["lead_lifted"].append(number)
+        if _lift_pad_hole(pin, hole, derived):
+            found["widened"].append(number)
+        if _round_hole_loose_on_blade(lead, hole):
+            found["loose_blade"].append(number)
+    if part_lead is None:
+        return
+    lead = part_lead[0]["diameter_mm"]
+    rest = [(pin, drill) for pin in thru if not isinstance(pin.get("lead"), dict)
+            and (drill := _optional_number(pin.get("drill_mm"), positive=True)) is not None]
+    if len({round(drill, 6) for _pin, drill in rest}) > 1:
+        # Pads with different holes have different leads: the one lead
+        # diameter of the answer may belong to some of them only.
+        found["part_narrow"].extend(sorted(_pad_number_text(pin.get("number")) or "?"
+                                           for pin, drill in rest if drill <= lead))
+        return
+    lifted = estimated_hole(part_lead[0])
+    for pin, drill in rest:
+        if drill > lead:
+            continue
+        number = _pad_number_text(pin.get("number")) or "?"
+        if (pin.get("sources") or {}).get("drill_mm") == "read" and part_word not in ("read", "derived"):
+            found["part_protected"].append(number)
+            _mark_pad_estimated(pin, "drill_mm")
+            continue
+        found["part_lifted"].append(number)
+        if _lift_pad_hole(pin, lifted, derived):
+            found["part_widened"].append(number)
+
+
+def _hole_sides(pin: dict):
+    """A pad's hole as (side along the pad length, side along the pad width), mm, or None without a hole."""
+    drill = _optional_number(pin.get("drill_mm"), positive=True)
+    if drill is None:
+        return None
+    length = _optional_number(pin.get("drill_length_mm"), positive=True)
+    return drill, drill if length is None else length
+
+
+def _land_text_mm(land: dict) -> str:
+    """A land for the notes: «1.60 mm» when its two sides are equal, else «2.40 x 1.60 mm»."""
     sizes = [_optional_number(land.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
-    return None not in sizes and min(sizes) >= drill + 2 * MIN_ANNULAR_RING_MM - 1e-9
+    if None in sizes:
+        return "?"
+    if abs(sizes[0] - sizes[1]) <= _PRINTED_HOLE_TOLERANCE_MM:
+        return f"{sizes[0]:.2f} mm"
+    return f"{sizes[0]:.2f} x {sizes[1]:.2f} mm"
 
 
-def _keep_derived_lands_apart(pins: list, derived: list, found: dict) -> None:
-    """Make sure no land the program derived makes copper overlap or crowd a neighbour (review G1).
+def _land_holds_hole(land: dict, sides) -> bool:
+    """Whether a land (sizes) keeps MIN_ANNULAR_RING_MM around a hole given by its two `sides` (`_hole_sides`)."""
+    sizes = [_optional_number(land.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+    return (None not in sizes and sides is not None
+            and all(size >= side + 2 * MIN_ANNULAR_RING_MM - 1e-9 for size, side in zip(sizes, sides)))
+
+
+def _pad_unfit_reason(pin: dict, found: dict) -> Optional[str]:
+    """Step 4 of `_resolve_pad_terminals`: why a through-hole pad's land cannot hold its hole, or None when it does.
+
+    «Holds» is the footprint's own rule (`PinSpec.validate`): a round hole
+    smaller than both pad sides, a slot smaller than the pad on each axis.
+    A pad that fails it would make `package_from_mapping` refuse the whole
+    geometry; here it is named with both values instead, and the caller
+    returns the pads as unread geometry. A pad without a hole or without
+    its sizes is not judged (other rules name it). A READ land that holds a
+    hole the program derived or estimated with less than MIN_ANNULAR_RING_MM
+    of ring is kept (provenance before value) and named in `found`.
+
+    @return The reason with both values and WITHOUT the pad's number: pads
+        that share it are named together by `_grouped_pad_reasons` (V1-9).
+    """
+    if pin.get("pad_type") != "thru_hole":
+        return None
+    sides = _hole_sides(pin)
+    sizes = [_optional_number(pin.get(key), positive=True) for key in ("pad_length_mm", "pad_width_mm")]
+    if sides is None or None in sizes:
+        return None
+    number = _pad_number_text(pin.get("number")) or "?"
+    sources = pin.get("sources") or {}
+    round_hole = abs(sides[0] - sides[1]) <= _PRINTED_HOLE_TOLERANCE_MM
+    holds = sides[0] < min(sizes) if round_hole else (sides[0] < sizes[0] and sides[1] < sizes[1])
+    if holds:
+        if (sources.get("pad_size") == "read" and sources.get("drill_mm") != "read"
+                and not _land_holds_hole(pin, sides)):
+            found["thin_ring"].append(number)
+        return None
+    hole = _hole_text_mm(sides[0], None if round_hole else sides[1])
+    if sources.get("pad_size") == "read":
+        # Two readings that cannot both be true: which one is wrong is on
+        # the drawing, not in the program.
+        return tx("la piazzola letta dal disegno ({land}) non contiene il foro {hole} "
+                  "(provenienza del foro: {source})", land=_land_text_mm(pin), hole=hole,
+                  source=sources.get("drill_mm") or "estimated")
+    return tx("la piazzola {land} non contiene il foro {hole}", land=_land_text_mm(pin), hole=hole)
+
+
+def _keep_derived_lands_apart(pins: list, derived: dict, found: dict, unfit: dict) -> None:
+    """Step 3 of `_resolve_pad_terminals`: no land the program wrote may overlap or crowd a neighbour (review G1).
 
     A derived land (hole + HOLE_TO_PAD_ANNULUS_MM) ignores the pitch: Ø0.65
-    at 1.27 mm gives 1.45 mm pads that overlap. Each derived land must keep
-    MIN_PAD_GAP_MM of free copper from every other pad (the pin header's
-    minimum: KiCad's default clearance, above the usual fabrication minimum;
-    measured on the copper as KiCad draws it, `package_geometry.copper_separation`).
-    A land that does not:
+    at 1.27 mm gives 1.45 mm pads that overlap. Each land the program wrote
+    must keep MIN_PAD_GAP_MM of free copper from every other pad (the pin
+    header's minimum: KiCad's default clearance, above the usual fabrication
+    minimum; measured on the copper as KiCad draws it,
+    `package_geometry.copper_separation`). A land that does not:
     1. takes the model's own land back when that keeps MIN_ANNULAR_RING_MM
        around the hole and clears every neighbour (neighbours in the same
        case tried with their model land too);
-    2. else is reduced, both sides by one amount, to the largest size that
-       clears its neighbours, two derived lands sharing the room between
-       them equally (each counted at most at the other's size);
-    3. else (the hole itself leaves no room) the model's land comes back
-       as it was, the case before the derived lands existed.
-    Every land changed here is marked "estimated" and named in the notes.
-    Pads without both coordinates or sizes are not measured.
+    2. else is reduced, both sides by one amount, never below the hole plus
+       MIN_ANNULAR_RING_MM per side (review F7-6: a 0.025 mm ring used to
+       pass). The room is shared by the RING: every land reduced here is
+       tried with the same ring as its reduced neighbours, so two pads with
+       different holes end with the same copper around each hole, whichever
+       is judged first (symmetric by construction);
+    3. else there is no room at this pitch for the hole with its minimum
+       ring: the pad is a problem (`unfit`), never a thinner ring and never
+       the model's land put back although it cannot hold the hole (F7-4).
+    Every land changed here is marked "estimated" and named in the notes; a
+    reduction below KiCad's 1 nm is not a change and is not named. Pads
+    without both coordinates or sizes are not measured.
+
+    @param pins The pin dicts of the geometry.
+    @param derived {id(pin): (pin, the land the program replaced)}.
+    @param found Outcome lists of `_resolve_pad_terminals`.
+    @param unfit Receives {id(pin): reason} for the pads of case 3; the
+        reason does not name the pad (`_grouped_pad_reasons` does).
+    @note A land without a `shape` is measured with the footprint's own
+        default (`_DEFAULT_PAD_SHAPE`), the shape it will be written with.
     """
     from types import SimpleNamespace
 
     from ..core.package_geometry import copper_separation, pad_copper_shape
 
     gap = MIN_PAD_GAP_MM
+    floor = 2 * MIN_ANNULAR_RING_MM
 
     def land_of(pin):
         return {key: pin.get(key) for key in ("pad_length_mm", "pad_width_mm", "shape")}
@@ -12166,7 +13126,9 @@ def _keep_derived_lands_apart(pins: list, derived: list, found: dict) -> None:
         rotation = _optional_number(pin.get("rotation_deg")) or 0.0
         return pad_copper_shape(SimpleNamespace(
             x_mm=values[0], y_mm=values[1], pad_length_mm=values[2], pad_width_mm=values[3],
-            shape=str(land.get("shape") or "circle"), rotation_deg=rotation))
+            # An absent shape is the footprint's own default, never another
+            # one (V1-7: a circle assumed here, a roundrect written).
+            shape=str(land.get("shape") or _DEFAULT_PAD_SHAPE), rotation_deg=rotation))
 
     placed = [pin for pin in pins if copper(pin, land_of(pin)) is not None]
     lands = {id(pin): land_of(pin) for pin in placed}
@@ -12183,64 +13145,85 @@ def _keep_derived_lands_apart(pins: list, derived: list, found: dict) -> None:
                 return False
         return True
 
-    failing = [entry for entry in derived if id(entry[0]) in lands
-               and not clears(entry[0], lands[id(entry[0])], lands)]
+    entries = [(pin, model) for pin, model in derived.values()
+               if id(pin) in lands and _hole_sides(pin) is not None]
+    failing = [entry for entry in entries if not clears(entry[0], lands[id(entry[0])], lands)]
     if not failing:
         return
     trial = dict(lands)
-    for pin, model, drill in failing:
-        if _land_holds_hole(model, drill) and copper(pin, model) is not None:
+    for pin, model in failing:
+        if _land_holds_hole(model, _hole_sides(pin)) and copper(pin, model) is not None:
             trial[id(pin)] = model
     # A model land that crowds a neighbour goes back to the derived land; the
     # lands only grow, so this settles.
     changed = True
     while changed:
         changed = False
-        for pin, model, _drill in failing:
+        for pin, model in failing:
             if trial[id(pin)] is model and not clears(pin, model, trial):
                 trial[id(pin)] = lands[id(pin)]
                 changed = True
-    capping = [entry for entry in failing if trial[id(entry[0])] is not entry[1]]
-    for pin, model, _drill in failing:
+    capping = [pin for pin, model in failing if trial[id(pin)] is not model]
+    for pin, model in failing:
         if trial[id(pin)] is model:
             pin.update({key: value for key, value in model.items() if value is not None})
+            # The model's land comes back with the shape it was tried with:
+            # its own, or the footprint's default when it gave none (V1-7).
+            pin["shape"] = model.get("shape") or _DEFAULT_PAD_SHAPE
             _mark_pad_estimated(pin, "pad_size", "shape")
             found["land_model"].append(_pad_number_text(pin.get("number")) or "?")
-    tops = {id(pin): float(lands[id(pin)]["pad_length_mm"]) for pin, _model, _drill in capping}
+    # The ring each land may give up: its smaller excess over the hole,
+    # 0.8 mm for a land derived by the one rule.
+    slack = {}
+    for pin in capping:
+        sides = _hole_sides(pin)
+        land = lands[id(pin)]
+        slack[id(pin)] = min(float(land["pad_length_mm"]) - sides[0], float(land["pad_width_mm"]) - sides[1])
 
-    def fits(pin, size) -> bool:
+    def at(pin, margin):
+        """The land of `pin` reduced on both sides until its smaller excess over the hole is `margin`."""
+        cut = slack[id(pin)] - min(slack[id(pin)], margin)
+        land = lands[id(pin)]
+        return {**land, "pad_length_mm": float(land["pad_length_mm"]) - cut,
+                "pad_width_mm": float(land["pad_width_mm"]) - cut}
+
+    def fits(pin, margin) -> bool:
         now = dict(trial)
-        for other, _model, _drill in capping:
+        for other in capping:
             if other is not pin:
-                share = min(tops[id(other)], size)
-                now[id(other)] = {**trial[id(other)], "pad_length_mm": share, "pad_width_mm": share}
-        return clears(pin, {**trial[id(pin)], "pad_length_mm": size, "pad_width_mm": size}, now)
+                now[id(other)] = at(other, margin)
+        return clears(pin, at(pin, margin), now)
 
-    caps = {}
-    for pin, _model, drill in capping:
-        low, high = drill, tops[id(pin)]
-        if not fits(pin, low + 1e-6):
-            caps[id(pin)] = None
+    for pin in capping:
+        number = _pad_number_text(pin.get("number")) or "?"
+        top = slack[id(pin)]
+        if top < floor - 1e-9 or not fits(pin, floor):
+            sides = _hole_sides(pin)
+            hole = _hole_text_mm(sides[0], None if abs(sides[0] - sides[1]) <= _PRINTED_HOLE_TOLERANCE_MM
+                                 else sides[1])
+            unfit[id(pin)] = tx(
+                "a questo passo non c'e' posto per il foro {hole} con {ring:.2f} mm di "
+                "corona e {gap:.2f} mm di rame libero dal pad vicino", hole=hole,
+                ring=MIN_ANNULAR_RING_MM, gap=gap)
             continue
+        low, high = floor, top
         for _step in range(40):
             middle = (low + high) / 2
             if fits(pin, middle):
                 low = middle
             else:
                 high = middle
-        # Down to KiCad's 1 nm so the clearance is kept, never rounded away.
-        caps[id(pin)] = math.floor(low * 1e6) / 1e6
-    for pin, model, _drill in capping:
-        number = _pad_number_text(pin.get("number")) or "?"
-        size = caps[id(pin)]
-        if size is None:
-            pin.update({key: value for key, value in model.items() if value is not None})
-            _mark_pad_estimated(pin, "pad_size", "shape")
-            found["land_model"].append(number)
+        # Down to KiCad's 1 nm so the clearance is kept, never rounded away;
+        # never below the ring that `fits` has just accepted.
+        margin = max(floor, math.floor(low * 1e6) / 1e6)
+        if top - margin < 1e-6:
+            # Not a reduction KiCad could write: the land is as derived.
             continue
-        pin["pad_length_mm"] = pin["pad_width_mm"] = size
+        land = at(pin, margin)
+        pin["pad_length_mm"] = round(land["pad_length_mm"], 6)
+        pin["pad_width_mm"] = round(land["pad_width_mm"], 6)
         _mark_pad_estimated(pin, "pad_size")
-        found["land_capped"].append(f"{number} ({size:.2f} mm)")
+        found["land_capped"].append(f"{number} ({_land_text_mm(pin)})")
 
 
 def _widen_pad_around(pin: dict, drill: float) -> bool:
@@ -12274,7 +13257,7 @@ def _mark_pad_estimated(pin: dict, *keys) -> None:
 
 
 def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
-    """A hole not wider than the lead is not a measurement: it becomes an estimate that fits.
+    """A MATRIX hole not wider than the lead is not a measurement: it becomes an estimate that fits.
 
     Structural, not a threshold: a lead cannot pass through a hole of its
     own diameter or smaller, whatever the part. When the drawing quotes the
@@ -12290,16 +13273,18 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
 
     Provenance before value (2026-11-10): a lead that is itself an estimate
     (or undeclared) never overrules a hole read from the drawing; the
-    conflict is only named. The explicit pads are judged pad by pad
-    (`_check_pad_leads`, `_lift_pad_drills_above_the_lead`).
+    conflict is only named.
 
-    @param params Result under construction; drill, pad and sources updated.
+    @param params Result under construction; the matrix drill, pad diameter
+        and their sources are updated.
     @param notes Notes of the result.
+    @note Only the matrix fields: the explicit pads are judged pad by pad
+        BEFORE they are validated (`_judge_holes_against_leads`, step 2 of
+        `_resolve_pad_terminals`), and nothing changes a pad after its
+        validation (review F7-2: holes lifted and lands widened here used to
+        leave overlapping copper in the result).
     """
-    _check_pad_leads(params, notes)
     lead, drill = params.lead_diameter_mm, params.drill_mm
-    if isinstance(lead, (int, float)):
-        _lift_pad_drills_above_the_lead(params, lead, notes)
     if not (isinstance(lead, (int, float)) and isinstance(drill, (int, float))):
         return
     if drill > lead:
@@ -12334,132 +13319,6 @@ def _lift_drill_above_the_lead(params: "ExtractedParams", notes: list) -> None:
                         "{new:.2f} mm, valore STIMATO da verificare.",
                         pad=pad, new=params.pad_diameter_mm))
     params.value_sources = sources
-
-
-def _thru_hole_pins(params: "ExtractedParams") -> list:
-    """The through-hole pin dicts of the explicit geometry of `params` (empty without one)."""
-    geometry = params.package_geometry
-    pins = geometry.get("pins") if isinstance(geometry, dict) else None
-    return [pin for pin in pins or () if isinstance(pin, dict) and pin.get("pad_type") == "thru_hole"]
-
-
-def _check_pad_leads(params: "ExtractedParams", notes: list) -> None:
-    """Judge every pad that declares its own terminal against ITS hole (`lead_passes`).
-
-    A per-pad terminal supersedes the part-level `lead_diameter_mm` for its
-    pad. A hole the terminal does not pass through:
-    - read from the drawing: never changed by the program (provenance before
-      value); the note names the pads, the footprint check reports them;
-    - not read: replaced by the hole estimated from that terminal
-      (`estimated_round_pad`), the pad widened on both axes by one amount
-      when it no longer keeps its ring, both marked "estimated".
-    """
-    contradicted, lifted, widened, loose = [], [], [], []
-    for pin in _thru_hole_pins(params):
-        lead = pin.get("lead")
-        drill = _optional_number(pin.get("drill_mm"), positive=True)
-        if not isinstance(lead, dict) or drill is None:
-            continue
-        length = _optional_number(pin.get("drill_length_mm"), positive=True)
-        try:
-            if lead_passes(lead, drill, length):
-                continue
-        except ValueError:
-            continue
-        number = str(pin.get("number", "?"))
-        if (pin.get("sources") or {}).get("drill_mm") == "read":
-            contradicted.append(number)
-            continue
-        pin["drill_mm"] = estimated_round_pad(lead).drill_mm
-        pin.pop("drill_length_mm", None)
-        lifted.append(number)
-        if _round_hole_loose_on_blade(lead, pin["drill_mm"]):
-            loose.append(number)
-        _mark_pad_estimated(pin, "drill_mm")
-        if _widen_pad_around(pin, pin["drill_mm"]):
-            widened.append(number)
-            _mark_pad_estimated(pin, "pad_size")
-    if contradicted:
-        notes.append(tx("ATTENZIONE pad {numbers}: il terminale dichiarato non passa nel foro letto "
-                        "dal disegno. Foro non modificato: terminale o foro letti male, da "
-                        "verificare sul disegno.", numbers=", ".join(contradicted)))
-    if lifted:
-        notes.append(tx("ATTENZIONE pad {numbers}: il foro non lasciava passare il terminale "
-                        "dichiarato dal pad: foro ricavato dal terminale, valore STIMATO da "
-                        "verificare.", numbers=", ".join(lifted)))
-    if widened:
-        notes.append(tx("Piazzole dei pad {numbers} allargate attorno al foro ricavato, "
-                        "conservandone l'orientamento: valori STIMATI da verificare.",
-                        numbers=", ".join(widened)))
-    if loose:
-        notes.append(_loose_blade_note(loose))
-
-
-def _lift_pad_drills_above_the_lead(params: "ExtractedParams", lead: float, notes: list) -> None:
-    """The part-level lead rule on the explicit through-hole pads that declare NO terminal of their own.
-
-    Only when every such pad has the same hole (one lead for all); with
-    different holes a note names the narrow ones and nothing changes. Each
-    hole not wider than the lead becomes the estimated hole of that lead
-    (`core.tht_estimates.estimated_hole`, the one rule, review G4) and
-    a pad that no longer keeps MIN_ANNULAR_RING_MM around it grows on both
-    axes by one amount (`_widen_pad_around`, its orientation kept); one note
-    names the pads, says «widened» only when a pad was, and marks the new
-    values estimated. A hole read from the drawing is left alone when the
-    part-level lead is not itself read (provenance before value): the note
-    names it.
-    """
-    pins = [pin for pin in _thru_hole_pins(params) if not isinstance(pin.get("lead"), dict)]
-    lead_word = (params.value_sources or {}).get("lead_diameter_mm")
-    lifted = estimated_hole({"shape": "round", "diameter_mm": lead})
-    drills = {pin.get("drill_mm") for pin in pins if isinstance(pin.get("drill_mm"), (int, float))}
-    if len(drills) > 1:
-        # Pads with different holes have different leads: the one lead
-        # diameter of the answer may belong to some of them only, so nothing
-        # is changed; a hole it would not pass is only named (audit D-D).
-        narrow = sorted(str(pin.get("number", "?")) for pin in pins
-                        if isinstance(pin.get("drill_mm"), (int, float)) and pin["drill_mm"] <= lead)
-        if narrow:
-            notes.append(tx("ATTENZIONE fori dei pad {numbers} non maggiori del terminale "
-                            "{lead:.2f} mm dichiarato; i pad hanno fori diversi, quindi il "
-                            "terminale puo' riguardarne solo alcuni: fori non modificati, da "
-                            "verificare.", numbers=", ".join(narrow), lead=lead))
-        return
-    changed, widened, protected = [], [], []
-    for pin in pins:
-        drill = pin.get("drill_mm")
-        if not isinstance(drill, (int, float)) or drill > lead:
-            continue
-        number = str(pin.get("number", "?"))
-        if (pin.get("sources") or {}).get("drill_mm") == "read" and lead_word not in ("read", "derived"):
-            protected.append(number)
-            continue
-        pin["drill_mm"] = lifted
-        changed.append(number)
-        if isinstance(pin.get("sources"), dict):
-            _mark_pad_estimated(pin, "drill_mm")
-        if _widen_pad_around(pin, lifted):
-            widened.append(number)
-            if isinstance(pin.get("sources"), dict):
-                _mark_pad_estimated(pin, "pad_size")
-    if protected:
-        notes.append(tx("ATTENZIONE fori letti dei pad {numbers} non maggiori del terminale "
-                        "{lead:.2f} mm, che non e' letto dal disegno: fori non modificati, da "
-                        "verificare.", numbers=", ".join(protected), lead=lead))
-    if changed and widened:
-        notes.append(tx(
-            "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
-            "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
-            "(terminale + {clearance:.2f} mm), piazzole troppo strette allargate: valori STIMATI "
-            "da verificare.", numbers=", ".join(changed), lead=lead, lifted=lifted,
-            clearance=LEAD_TO_HOLE_CLEARANCE_MM))
-    elif changed:
-        notes.append(tx(
-            "ATTENZIONE fori dei pad {numbers} non maggiori del terminale {lead:.2f} mm: un "
-            "terminale non passa in un foro del suo diametro. Fori portati a {lifted:.2f} mm "
-            "(terminale + {clearance:.2f} mm): valori STIMATI da verificare.",
-            numbers=", ".join(changed), lead=lead, lifted=lifted,
-            clearance=LEAD_TO_HOLE_CLEARANCE_MM))
 
 
 def _drop_unread_row_spacing(params: "ExtractedParams", notes: list) -> None:

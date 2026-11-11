@@ -43,11 +43,16 @@ def _dropped(unread=("5",)):
     """A real extraction result whose explicit pads were dropped for unread positions."""
     params = _params_from_tool_arguments(single_answer_to_data(_answer(_pads(unread=unread))))
     assert params.footprint_pads_dropped() and params.package_geometry is None
+    # What every real analysis keeps (`ExtractedParams.raw_main`): the main
+    # answer a partial re-read starts from. Without it the re-read entry is
+    # disabled and, since review F2-3 (2026-11-11), no longer named as remedy.
+    params.raw_main = {"name": "RLY", "_candidates": {}}
     return params
 
 
-def _assert_blocked(text, pads="5"):
-    assert f"pad {pads} " in text and REMEDY in text
+def _assert_blocked(text, pads="5", remedy=True):
+    """The block names the pads; `remedy` tells whether the re-read entry is enabled, hence named."""
+    assert f"pad {pads} " in text and (REMEDY in text) is remedy
 
 
 # -- positive: every footprint path refuses ---------------------------------------------
@@ -105,7 +110,13 @@ def test_the_refusal_survives_a_project_reopen(window, monkeypatch, tmp_path):  
     warnings.clear()
     assert window._generate() is False
     assert not _footprint(window, "RLY").exists()
-    _assert_blocked(warnings[-1][1])
+    # CONTRACT CHANGED 2026-11-11 (review F2-3): the reopened project still
+    # refuses and names the pads, but no longer sends the user to «Rileggi
+    # solo le posizioni dei pad» -- that entry is disabled without the
+    # result of an analysis of this session (K2). It names a new analysis.
+    assert window._reread_block_reason("pad_layout")
+    _assert_blocked(warnings[-1][1], remedy=False)
+    assert "Ripeti l'analisi" in warnings[-1][1]
 
 
 def test_a_malformed_saved_value_is_no_block(window):

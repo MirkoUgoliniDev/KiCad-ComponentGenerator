@@ -145,9 +145,22 @@ def header_footprint_params(params, pad_diameter=1.7, drill=1.0, shape="circle",
             size = float(override.get("size", pad_diameter))
             # Header pins are round: a slot of the module's own pad (a
             # connector tab) must not reach the host land.
+            # The host land is a NEW pad: its hole takes a header pin, not
+            # the module's terminal, and hole, size and shape are the
+            # values the user chose for the headers. So it carries neither
+            # the module pad's `lead` (the hole-versus-lead check would
+            # judge the header hole against a terminal that never enters
+            # it) nor its `sources` (review 2026-11-11, F9-1: the host
+            # footprint was reported as «estimated pads»). None, not
+            # «read»: «read» means printed in a document or verified on
+            # the drawing, and no drawing was read for these values; None
+            # states nothing, exactly as the lands the castellated path
+            # builds below. A mechanical hole above is copied unchanged
+            # and keeps its own provenance: it is the same hole.
             result_pins.append(replace(
                 pin, pad_length_mm=size, pad_width_mm=size,
-                shape=override.get("shape", shape), drill_mm=drill, drill_length_mm=None))
+                shape=override.get("shape", shape), drill_mm=drill, drill_length_mm=None,
+                lead=None, sources=None))
         _validate_header_clearance([pin for pin in result_pins if pin.pad_type != "np_thru_hole"])
         result = _host_lands(params, pins=result_pins)
         result.validate()
