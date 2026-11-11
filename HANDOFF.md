@@ -3,7 +3,7 @@
 ## STATO 11/11/2026 pomeriggio — giri 4 e 5 COMMITTATI su FOOTPRINT-ADVANCE (utente: «Ok committa»), NON mergiati, NON pushati
 
 Suite completa VERDE a codice fermo: A 8255 passati 9 saltati 19 sottotest, B 5138 passati 4 saltati = 13393 passati,
-13 saltati, 19 sottotest. Hash: vedi la riga aggiornata dal commit di sola documentazione che segue. `main` e `origin`
+13 saltati, 19 sottotest. Commit `677aa87` (base `ed6d6cc`). `main` e `origin`
 fermi a `03a1a60` (v1.0.8).
 CONTENUTO: correzioni delle regressioni e dei difetti di `1ca72ba` trovati dalla revisione completa (giro 4: Y1, Y2,
 Y3, Z1) e di cio' che la verifica indipendente V1/V2 ha trovato in quelle correzioni (giro 5: W1, W2, W3). Dettaglio
